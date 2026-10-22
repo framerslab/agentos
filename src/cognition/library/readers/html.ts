@@ -23,9 +23,10 @@ import { DIVIDER, escapeStart, writeCodeBlock, writeInline, writeTable, type Mar
 export interface ReadHtmlOptions {
   /**
    * The most characters of Markdown. The text is cut at the last whole block that fits; past it, a paragraph keeps
-   * its words up to a space that fits, a code block the lines that fit with its closing fence, a list or a quote the
-   * lines that fit, and a table its header and the rows that fit. 0, any positive number or `Infinity`; a bound below
-   * 0, `NaN` or no number at all is refused with a `RangeError`.
+   * its words up to a space that fits, a code block the lines that fit with its closing fence, a list the lines that
+   * fit, a table its header and the rows that fit, and a quote the blocks that fit with the next one cut by its own
+   * rule. 0, any positive number or `Infinity`; a bound below 0, `NaN` or no number at all is refused with a
+   * `RangeError`.
    * @default Infinity
    */
   maxCharacters?: number;
@@ -41,7 +42,10 @@ export interface HtmlRead {
   title: string | null;
   /** The body as Markdown, its blocks apart by one empty line; `''` for a page with no words. */
   markdown: string;
-  /** The images left out of the body, `img` elements outside the parts of the page that are not read. */
+  /**
+   * The images left out of the body: the `img` elements outside the parts of the page that are not read, those in
+   * rows or text a bound left out among them.
+   */
   images: number;
   /** True when anything was left out to keep within the bounds: characters, or a table's rows or columns. */
   cut: boolean;
@@ -438,8 +442,9 @@ function itemOf(node: HtmlNodeLike, ordered: boolean, marks: Marks, reading: Rea
 }
 
 /**
- * A list's items, `null` for a list with none. A list written straight inside a list goes under the item before it;
- * an item with no words and no list under it is left out.
+ * A list's items, `null` for a list with no words. A list written straight inside a list goes under the item before
+ * it, or under an empty item when it opens the list. A numbered list keeps an item with no words, so the numbers after
+ * it stay the page's, but not one at its end; a bulleted list keeps one only for its checkbox or the lists under it.
  */
 function listOf(node: HtmlNodeLike, ordered: boolean, marks: Marks, reading: Reading): List | null {
   const items: Item[] = [];
@@ -459,12 +464,14 @@ function listOf(node: HtmlNodeLike, ordered: boolean, marks: Marks, reading: Rea
       if (nested === null) continue;
       const previous = items[items.length - 1];
       if (previous !== undefined) previous.lists.push(nested);
-      else items.push(...nested.items);
+      else items.push({ runs: [], checked: null, lists: [nested] });
       continue;
     }
     items.push(itemOf(child, ordered, marks, reading));
   }
-  const kept = items.filter((item) => item.runs.length > 0 || item.lists.length > 0);
+  const holds = (item: Item): boolean => item.runs.length > 0 || item.checked !== null || item.lists.length > 0;
+  const kept = ordered ? items.slice() : items.filter(holds);
+  while (kept.length > 0 && !holds(kept[kept.length - 1] as Item)) kept.pop();
   return kept.length > 0 ? { ordered, start: ordered ? startOf(node) : 1, items: kept } : null;
 }
 
@@ -494,19 +501,29 @@ function childElements(node: HtmlNodeLike, names: ReadonlySet<string>): HtmlNode
   });
 }
 
-/** A table's rows in reading order: its head's, then its bodies' and its own, then its foot's. */
-function rowsOf(table: HtmlNodeLike): HtmlNodeLike[] {
-  const head: HtmlNodeLike[] = [];
-  const body: HtmlNodeLike[] = [];
-  const foot: HtmlNodeLike[] = [];
+/**
+ * A table's row groups in reading order, each its rows: its head, then its bodies and each run of rows written straight
+ * in the table, then its foot. A cell spans rows within its group alone.
+ */
+function rowGroupsOf(table: HtmlNodeLike): HtmlNodeLike[][] {
+  const head: HtmlNodeLike[][] = [];
+  const body: HtmlNodeLike[][] = [];
+  const foot: HtmlNodeLike[][] = [];
+  let loose: HtmlNodeLike[] | null = null;
   for (const child of childrenOf(table)) {
     if (child.nodeType !== ELEMENT_NODE) continue;
     const name = nameOf(child);
     if (skipped(child, name)) continue;
-    if (name === 'tr') body.push(child);
-    else if (name === 'thead') head.push(...childElements(child, ROW));
-    else if (name === 'tbody') body.push(...childElements(child, ROW));
-    else if (name === 'tfoot') foot.push(...childElements(child, ROW));
+    if (name === 'tr') {
+      if (loose === null) {
+        loose = [];
+        body.push(loose);
+      }
+      loose.push(child);
+    } else if (name === 'thead' || name === 'tbody' || name === 'tfoot') {
+      loose = null;
+      (name === 'thead' ? head : name === 'tfoot' ? foot : body).push(childElements(child, ROW));
+    }
   }
   return [...head, ...body, ...foot];
 }
@@ -543,9 +560,9 @@ function readTable(table: HtmlNodeLike, flow: Flow, marks: Marks, reading: Readi
     for (const child of childrenOf(caption)) readInto(child, flow, marks, reading);
     flow.flush();
   }
-  const cells = rowsOf(table).map((row) => childElements(row, CELL));
+  const groups = rowGroupsOf(table).map((group) => group.map((row) => childElements(row, CELL)));
   const role = (table.getAttribute?.('role') ?? '').trim().toLowerCase();
-  const all = cells.flat();
+  const all = groups.flat(2);
   if (role === 'presentation' || role === 'none' || all.length === 1 || all.some(holdsLayout)) {
     for (const cell of all) {
       flow.flush();
@@ -556,36 +573,40 @@ function readTable(table: HtmlNodeLike, flow: Flow, marks: Marks, reading: Readi
   }
 
   const rows: MarkedRun[][][] = [];
-  const pending: number[] = [];
-  for (const rowCells of cells) {
-    const occupied = pending.map((left) => left > 0);
-    pending.forEach((left, column) => {
-      if (left > 0) pending[column] = left - 1;
-    });
-    const row: MarkedRun[][] = [];
-    let column = 0;
-    for (const cell of rowCells) {
-      while (occupied[column] === true) column += 1;
-      const across = spanOf(cell, 'colspan');
-      const down = spanOf(cell, 'rowspan');
-      const runs = lineOf(cell, marks, reading);
-      for (const run of runs) run.text = run.text.replace(/\|/g, '/');
-      if (column >= reading.maxTableColumns) {
-        if (runs.length > 0) reading.cut = true;
-      } else {
-        row[column] = runs;
+  for (const group of groups) {
+    // how many rows below each column's cell still covers, within the group
+    const pending: number[] = [];
+    for (const rowCells of group) {
+      const occupied = pending.map((left) => left > 0);
+      pending.forEach((left, column) => {
+        if (left > 0) pending[column] = left - 1;
+      });
+      const row: MarkedRun[][] = [];
+      let column = 0;
+      for (const cell of rowCells) {
+        while (occupied[column] === true) column += 1;
+        const across = spanOf(cell, 'colspan');
+        const down = spanOf(cell, 'rowspan');
+        const runs = lineOf(cell, marks, reading);
+        for (const run of runs) run.text = run.text.replace(/\|/g, '/');
+        if (column >= reading.maxTableColumns) {
+          if (runs.length > 0) reading.cut = true;
+        } else {
+          row[column] = runs;
+        }
+        for (let place = column; place < Math.min(column + across, reading.maxTableColumns); place += 1) {
+          pending[place] = Math.max(pending[place] ?? 0, down - 1);
+        }
+        column += across;
       }
-      for (let place = column; place < Math.min(column + across, reading.maxTableColumns); place += 1) {
-        pending[place] = Math.max(pending[place] ?? 0, down - 1);
+      if (!row.some((runs) => runs !== undefined && runs.length > 0)) continue;
+      // a row past the bound is still read, so the images in it are counted as every image left out is
+      if (rows.length >= reading.maxTableRows) {
+        reading.cut = true;
+        continue;
       }
-      column += across;
+      rows.push(row);
     }
-    if (!row.some((runs) => runs !== undefined && runs.length > 0)) continue;
-    if (rows.length >= reading.maxTableRows) {
-      reading.cut = true;
-      break;
-    }
-    rows.push(row);
   }
 
   let columns = 0;
@@ -731,8 +752,33 @@ function writeBlock(block: Block): string[] {
   }
 }
 
-/** The lines that fit in so many characters, one line feed between two, with any empty or bare quote line at the end left out. */
-function linesThatFit(lines: readonly string[], room: number): string[] {
+/** The fewest characters a list's lines can take: its items' words, which escapes and markers only add to. */
+function listFloor(list: List): number {
+  return list.items.reduce((sum, item) => sum + plainOf(item.runs).length + item.lists.reduce((under, inner) => under + listFloor(inner), 0), 0);
+}
+
+/** The fewest characters a block's lines can take: its words, which escapes, marks and markers only add to. */
+function floorOf(block: Block): number {
+  switch (block.kind) {
+    case 'paragraph':
+      return block.lines.reduce((sum, line) => sum + plainOf(line).length, 0) + block.lines.length - 1;
+    case 'heading':
+      return block.omitted ? 0 : block.words.length;
+    case 'list':
+      return listFloor(block.list);
+    case 'quote':
+      return block.blocks.reduce((sum, inner) => sum + floorOf(inner), 0);
+    case 'code':
+      return block.lines.reduce((sum, line) => sum + line.length, 0);
+    case 'rule':
+      return 3;
+    default:
+      return block.rows.reduce((sum, row) => sum + row.reduce((cells, runs) => cells + plainOf(runs).length, 0), 0);
+  }
+}
+
+/** The lines that fit in so many characters, one line feed between two; `''` when fewer than `least` fit. */
+function linesPart(lines: readonly string[], room: number, least: number): string {
   const kept: string[] = [];
   let used = 0;
   for (const line of lines) {
@@ -741,16 +787,23 @@ function linesThatFit(lines: readonly string[], room: number): string[] {
     kept.push(line);
     used += gap + line.length;
   }
-  while (kept.length > 0 && (kept[kept.length - 1] === '' || kept[kept.length - 1] === '>')) kept.pop();
-  return kept;
+  while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop();
+  return kept.length >= least ? kept.join('\n') : '';
 }
 
-/** A line's words up to the last space between words at which the written line fits; `''` when no such space fits. */
+/**
+ * A line's words up to the last space between words at which the written line fits; `''` when no such space fits. A
+ * written line is never shorter than its words, so only the spaces within `room` are tried, and a long line is never
+ * written whole.
+ */
 function wordsThatFit(runs: readonly MarkedRun[], room: number): string {
   const places: number[] = [];
   let offset = 0;
   for (const run of runs) {
-    if (!run.code) for (let at = run.text.indexOf(' '); at >= 0; at = run.text.indexOf(' ', at + 1)) places.push(offset + at);
+    if (offset > room) break;
+    if (!run.code) {
+      for (let at = run.text.indexOf(' '); at >= 0 && offset + at <= room; at = run.text.indexOf(' ', at + 1)) places.push(offset + at);
+    }
     offset += run.text.length;
   }
   const before = (end: number): MarkedRun[] => {
@@ -780,66 +833,138 @@ function wordsThatFit(runs: readonly MarkedRun[], room: number): string {
   return best;
 }
 
-/** What of a block fits in so many characters, as its lines joined; `''` when nothing of it fits. */
-function partOf(block: Block, lines: readonly string[], room: number): string {
-  switch (block.kind) {
-    case 'paragraph': {
-      const kept: string[] = [];
-      let used = 0;
-      for (let at = 0; at < lines.length; at += 1) {
-        const line = lines[at] ?? '';
-        const gap = kept.length > 0 ? 1 : 0;
-        if (used + gap + line.length <= room) {
-          kept.push(line);
-          used += gap + line.length;
-          continue;
-        }
-        const words = wordsThatFit(block.lines[at] ?? [], room - used - gap);
-        if (words !== '') kept.push(words);
-        break;
-      }
-      while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop();
-      return kept.join('\n');
-    }
-    case 'code': {
-      const open = lines[0] ?? '';
-      const close = lines[lines.length - 1] ?? '';
-      let used = open.length + 1 + close.length;
-      const kept = [open];
-      for (const line of lines.slice(1, -1)) {
-        if (used + line.length + 1 > room) break;
+/** What of a paragraph's lines fits: the whole lines that fit, then the next one's words up to a space. */
+function paragraphPart(lines: readonly MarkedRun[][], room: number): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (const runs of lines) {
+    const gap = kept.length > 0 ? 1 : 0;
+    const left = room - used - gap;
+    if (left < 0) break;
+    if (plainOf(runs).length <= left) {
+      const line = paragraphLine(runs);
+      if (line.length <= left) {
         kept.push(line);
-        used += line.length + 1;
+        used += gap + line.length;
+        continue;
       }
-      return kept.length > 1 ? [...kept, close].join('\n') : '';
     }
-    case 'table': {
-      const kept = linesThatFit(lines, room);
-      return kept.length >= 2 ? kept.join('\n') : '';
+    const words = runs.length > 0 ? wordsThatFit(runs, left) : '';
+    if (words !== '') kept.push(words);
+    break;
+  }
+  while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop();
+  return kept.join('\n');
+}
+
+/** What of a code block's lines fits: its fence, the code lines that fit, and its closing fence; `''` for no code line. */
+function codePart(lines: readonly string[], room: number): string {
+  const open = lines[0] ?? '';
+  const close = lines[lines.length - 1] ?? '';
+  let used = open.length + 1 + close.length;
+  const kept = [open];
+  for (const line of lines.slice(1, -1)) {
+    if (used + line.length + 1 > room) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  return kept.length > 1 ? [...kept, close].join('\n') : '';
+}
+
+/** Lines written inside a quote. */
+function quoted(lines: readonly string[]): string[] {
+  return lines.map((line) => (line === '' ? '>' : `> ${line}`));
+}
+
+/** The most of a block whose lines, written inside a quote, fit in so many characters. */
+function quotedPartOf(block: Block, room: number): string {
+  let best = '';
+  let low = 0;
+  let high = room;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const part = partOf(block, middle);
+    const written = part === '' ? '' : quoted(part.split('\n')).join('\n');
+    if (written.length <= room) {
+      if (written.length > best.length) best = written;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
     }
+  }
+  return best;
+}
+
+/**
+ * What of a quote's blocks fits, each cut by its own rule: the whole blocks that fit, then the most of the next one, so
+ * a table inside keeps its header and separator together and a code block its closing fence.
+ */
+function quotePart(blocks: readonly Block[], room: number): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (const block of blocks) {
+    if (block.kind === 'heading' && block.omitted) continue;
+    // an empty quote line stands between two blocks: a line feed, the quote's mark, a line feed
+    const gap = kept.length > 0 ? 3 : 0;
+    const left = room - used - gap;
+    if (left <= 0) break;
+    if (floorOf(block) <= left) {
+      const whole = quoted(writeBlock(block)).join('\n');
+      if (whole.length <= left) {
+        if (gap > 0) kept.push('>');
+        kept.push(whole);
+        used += gap + whole.length;
+        continue;
+      }
+    }
+    const part = quotedPartOf(block, left);
+    if (part !== '') {
+      if (gap > 0) kept.push('>');
+      kept.push(part);
+    }
+    break;
+  }
+  return kept.join('\n');
+}
+
+/** What of a block fits in so many characters, cut by the block's own rule, as its lines joined; `''` when nothing fits. */
+function partOf(block: Block, room: number): string {
+  switch (block.kind) {
+    case 'paragraph':
+      return paragraphPart(block.lines, room);
+    case 'code':
+      return codePart(writeBlock(block), room);
+    case 'table':
+      return linesPart(writeBlock(block), room, 2);
     case 'list':
+      return linesPart(writeBlock(block), room, 1);
     case 'quote':
-      return linesThatFit(lines, room).join('\n');
+      return quotePart(block.blocks, room);
     default:
       return '';
   }
 }
 
-/** The blocks written within so many characters, cut as `ReadHtmlOptions.maxCharacters` says, and whether any was cut. */
+/**
+ * The blocks written within so many characters, cut as `ReadHtmlOptions.maxCharacters` says, and whether any was cut. A
+ * block whose words alone pass the room is cut without being written whole.
+ */
 function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdown: string; cut: boolean } {
   const parts: string[] = [];
   let used = 0;
   for (const block of blocks) {
-    const lines = writeBlock(block);
-    if (lines.length === 0) continue;
-    const text = lines.join('\n');
+    if (block.kind === 'heading' && block.omitted) continue;
     const gap = parts.length > 0 ? 2 : 0;
-    if (used + gap + text.length <= maxCharacters) {
-      parts.push(text);
-      used += gap + text.length;
-      continue;
+    const room = maxCharacters - used - gap;
+    if (floorOf(block) <= room) {
+      const text = writeBlock(block).join('\n');
+      if (text.length <= room) {
+        parts.push(text);
+        used += gap + text.length;
+        continue;
+      }
     }
-    const part = partOf(block, lines, maxCharacters - used - gap);
+    const part = room > 0 ? partOf(block, room) : '';
     if (part !== '') parts.push(part);
     return { markdown: parts.join('\n\n'), cut: true };
   }

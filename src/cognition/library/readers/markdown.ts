@@ -42,6 +42,9 @@ const BULLET = /^( *)([-*+])(?: (.*))?$/;
 /** A numbered item: its indentation, its number, its full stop or bracket, then its words or nothing. */
 const ORDERED = /^( *)(\d{1,9})([.)])(?: (.*))?$/;
 
+/** A line of equals signs, which CommonMark reads as the underline of a heading after a paragraph's line. */
+const SETEXT = /^ {0,3}=+[ \t]*$/;
+
 /** A table's separator line: cells of dashes, a colon at either end allowed, between bars. */
 const TABLE_SEPARATOR = /^ {0,3}\|?(?:[ \t]*:?-+:?[ \t]*\|)*[ \t]*:?-+:?[ \t]*\|?[ \t]*$/;
 
@@ -57,6 +60,15 @@ const WORD = /[\p{L}\p{N}]/u;
 /** A Unicode punctuation or symbol character, which the rules for a mark's delimiters read. */
 const PUNCTUATION = /[\p{P}\p{S}]/u;
 
+/** The characters `escapeText` decides on; every other character is written as it is. */
+const SPECIAL = /[`\\*_~[<&]/g;
+
+/** An entity or a numeric character reference at a text's start, which CommonMark reads as the character it names. */
+const ENTITY = /^&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});/;
+
+/** What can follow `<` to open an HTML tag, a comment, a declaration or an autolink in CommonMark. */
+const TAG_START = /[A-Za-z/!?]/;
+
 /** The three marks a run can carry beside code. */
 type RunMark = 'bold' | 'italic' | 'strike';
 
@@ -69,9 +81,31 @@ const DELIMITER = { bold: '**', italic: '*', strike: '~~' } as const;
 /** The most characters a table pads a column to; a longer cell runs past its column. */
 const PAD_LIMIT = 40;
 
-/** True for a character a delimiter can stand beside on its far side: one neither white space nor punctuation. */
-function wordChar(cell: MarkedRun | undefined): boolean {
-  return cell !== undefined && !cell.code && !SPACE.test(cell.text) && !PUNCTUATION.test(cell.text);
+/** The character, a whole code point, that ends just before a place in a text; `undefined` at its start. */
+function charBefore(text: string, at: number): string | undefined {
+  if (at <= 0) return undefined;
+  const low = text.charCodeAt(at - 1);
+  if (low >= 0xdc00 && low <= 0xdfff && at >= 2) {
+    const high = text.charCodeAt(at - 2);
+    if (high >= 0xd800 && high <= 0xdbff) return text.slice(at - 2, at);
+  }
+  return text[at - 1];
+}
+
+/** The character, a whole code point, that starts at a place in a text; `undefined` at its end. */
+function charAt(text: string, at: number): string | undefined {
+  const point = text.codePointAt(at);
+  return point === undefined ? undefined : String.fromCodePoint(point);
+}
+
+/**
+ * True when the character of a run at the side given, its last or its first, is one a delimiter can stand beside on
+ * its far side: neither white space nor punctuation, and not inline code.
+ */
+function wordChar(cell: MarkedRun | undefined, side: 'first' | 'last'): boolean {
+  if (cell === undefined || cell.code) return false;
+  const char = side === 'first' ? charAt(cell.text, 0) : charBefore(cell.text, cell.text.length);
+  return char !== undefined && !SPACE.test(char) && !PUNCTUATION.test(char);
 }
 
 /**
@@ -82,7 +116,8 @@ function wordChar(cell: MarkedRun | undefined): boolean {
 function expelSpaces(runs: readonly MarkedRun[]): MarkedRun[] {
   const cells: MarkedRun[] = [];
   for (const run of runs) {
-    if (run.code) cells.push({ ...run });
+    // only a marked run's edges can move, so a run with no mark stays whole, however long
+    if (run.code || !(run.bold || run.italic || run.strike)) cells.push({ ...run });
     else for (const char of run.text) cells.push({ ...run, text: char });
   }
   for (const mark of MARKS) {
@@ -96,13 +131,13 @@ function expelSpaces(runs: readonly MarkedRun[]): MarkedRun[] {
       while (cells[end]?.[mark] === true) end += 1;
       for (let first = at; first < end; first += 1) {
         const cell = cells[first];
-        if (cell === undefined || !(SPACE.test(cell.text) || (PUNCTUATION.test(cell.text) && wordChar(cells[first - 1])))) break;
+        if (cell === undefined || !(SPACE.test(cell.text) || (PUNCTUATION.test(cell.text) && wordChar(cells[first - 1], 'last')))) break;
         cell[mark] = false;
       }
       for (let last = end - 1; last >= at; last -= 1) {
         const cell = cells[last];
         if (cell === undefined || cell[mark] !== true) break;
-        if (!(SPACE.test(cell.text) || (PUNCTUATION.test(cell.text) && wordChar(cells[last + 1])))) break;
+        if (!(SPACE.test(cell.text) || (PUNCTUATION.test(cell.text) && wordChar(cells[last + 1], 'first')))) break;
         cell[mark] = false;
       }
       at = end;
@@ -121,25 +156,34 @@ function expelSpaces(runs: readonly MarkedRun[]): MarkedRun[] {
  * A run's characters with the escapes that keep them text: every backtick, a backslash before a punctuation character
  * or at the run's end, a star unless a space stands at each side of it inside the run, an underscore unless a letter
  * or a digit stands at each side of it, inside a word, or a space does, and a tilde beside another tilde or at either
- * end of the run, where it could join a struck run's two. The profile reads no underscore as a mark, but CommonMark
- * does, so an underscore that could open or close emphasis there is escaped too, and reads back as itself either way.
+ * end of the run, where it could join a struck run's two. The profile reads none of these as anything but itself
+ * after its backslash, and CommonMark reads more as marks than it does, so the escapes also cover what CommonMark
+ * would read: an underscore that could open or close emphasis, every `[`, which could open a link, a `<` that could
+ * open a tag or an autolink, and a `&` that starts an entity. Characters are read as whole code points.
  */
 export function escapeText(text: string): string {
-  const chars = Array.from(text);
-  return chars
-    .map((char, at) => {
-      const before = chars[at - 1];
-      const after = chars[at + 1];
-      if (char === '`') return '\\`';
-      if (char === '\\' && (after === undefined || ESCAPABLE.test(after))) return '\\\\';
-      if (char === '*' && !(before !== undefined && SPACE.test(before) && after !== undefined && SPACE.test(after))) return '\\*';
-      if (char === '_' && !(before !== undefined && after !== undefined && ((WORD.test(before) && WORD.test(after)) || (SPACE.test(before) && SPACE.test(after))))) {
-        return '\\_';
-      }
-      if (char === '~' && (before === undefined || after === undefined || before === '~' || after === '~')) return '\\~';
-      return char;
-    })
-    .join('');
+  let written = '';
+  let from = 0;
+  for (const match of text.matchAll(SPECIAL)) {
+    const at = match.index ?? 0;
+    const char = match[0];
+    const before = charBefore(text, at);
+    const after = charAt(text, at + 1);
+    let escape = false;
+    if (char === '`' || char === '[') escape = true;
+    else if (char === '\\') escape = after === undefined || ESCAPABLE.test(after);
+    else if (char === '*') escape = !(before !== undefined && SPACE.test(before) && after !== undefined && SPACE.test(after));
+    else if (char === '_') {
+      escape = !(before !== undefined && after !== undefined && ((WORD.test(before) && WORD.test(after)) || (SPACE.test(before) && SPACE.test(after))));
+    } else if (char === '~') escape = before === undefined || after === undefined || before === '~' || after === '~';
+    else if (char === '<') escape = after !== undefined && TAG_START.test(after);
+    else if (char === '&') escape = ENTITY.test(text.slice(at, at + 40));
+    if (escape) {
+      written += `${text.slice(from, at)}\\${char}`;
+      from = at + 1;
+    }
+  }
+  return written + text.slice(from);
 }
 
 /** A code span around its text: a fence of backticks longer than any run inside it, and a space each side where needed. */
@@ -198,7 +242,8 @@ export function writeInline(runs: readonly MarkedRun[]): string {
 /**
  * A written line of words with a backslash before the character that would make it start a block: a heading's hash, a
  * bullet, a number's full stop or bracket, a quote's mark, a divider's first character, and, for a paragraph's line,
- * a table separator's first character; and before a checklist's box at the start of a list item's words.
+ * the first of a line of equals signs (a heading's underline in CommonMark) and a table separator's first character;
+ * and before a checklist's box at the start of a list item's words.
  *
  * @param line - The line as `writeInline` wrote it.
  * @param inItem - Whether the line is a list item's words, after its marker.
@@ -210,6 +255,7 @@ export function escapeStart(line: string, inItem: boolean): string {
   const ordered = ORDERED.exec(line);
   if (ordered !== null) return at(lead + (ordered[2]?.length ?? 0));
   if (inItem && /^\[[ xX]\](?: |$)/.test(line)) return at(0);
+  if (!inItem && SETEXT.test(line)) return at(lead);
   if (!inItem && line.includes('|') && TABLE_SEPARATOR.test(line)) return at(lead);
   return line;
 }

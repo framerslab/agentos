@@ -13,7 +13,10 @@ export type CsvSeparator = ',' | ';' | '\t';
 
 /** How `readCsv` reads a text. */
 export interface ReadCsvOptions {
-  /** The separator. Left out, it is found on the text's first line: a tab, else a semicolon with no comma, else a comma. */
+  /**
+   * The separator. Left out, the text's first line that holds more than white space names it: a tab, else a semicolon
+   * with no comma, else a comma.
+   */
   separator?: CsvSeparator;
   /**
    * The most rows the table keeps, its header row among them; the rows past it are left out and `cut` is true. 0, any
