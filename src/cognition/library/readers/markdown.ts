@@ -51,6 +51,9 @@ const ESCAPABLE = /[!-/:-@[-`{-~]/;
 /** A Unicode white space character, which ends a mark's run at its side. */
 const SPACE = /\s/u;
 
+/** A letter or a digit: an underscore between two of them is inside a word, where it opens and closes nothing. */
+const WORD = /[\p{L}\p{N}]/u;
+
 /** A Unicode punctuation or symbol character, which the rules for a mark's delimiters read. */
 const PUNCTUATION = /[\p{P}\p{S}]/u;
 
@@ -116,8 +119,10 @@ function expelSpaces(runs: readonly MarkedRun[]): MarkedRun[] {
 
 /**
  * A run's characters with the escapes that keep them text: every backtick, a backslash before a punctuation character
- * or at the run's end, a star unless a space stands at each side of it inside the run, and a tilde beside another
- * tilde or at either end of the run, where it could join a struck run's two.
+ * or at the run's end, a star unless a space stands at each side of it inside the run, an underscore unless a letter
+ * or a digit stands at each side of it, inside a word, or a space does, and a tilde beside another tilde or at either
+ * end of the run, where it could join a struck run's two. The profile reads no underscore as a mark, but CommonMark
+ * does, so an underscore that could open or close emphasis there is escaped too, and reads back as itself either way.
  */
 export function escapeText(text: string): string {
   const chars = Array.from(text);
@@ -128,6 +133,9 @@ export function escapeText(text: string): string {
       if (char === '`') return '\\`';
       if (char === '\\' && (after === undefined || ESCAPABLE.test(after))) return '\\\\';
       if (char === '*' && !(before !== undefined && SPACE.test(before) && after !== undefined && SPACE.test(after))) return '\\*';
+      if (char === '_' && !(before !== undefined && after !== undefined && ((WORD.test(before) && WORD.test(after)) || (SPACE.test(before) && SPACE.test(after))))) {
+        return '\\_';
+      }
       if (char === '~' && (before === undefined || after === undefined || before === '~' || after === '~')) return '\\~';
       return char;
     })
@@ -206,12 +214,17 @@ export function escapeStart(line: string, inItem: boolean): string {
   return line;
 }
 
-/** A code block's lines: a fence longer than any run of backticks a line starts with, the language, the code, the fence. */
+/**
+ * A code block's lines: a fence longer than any run of backticks a line starts with, up to three spaces in, since such
+ * a run closes a fence in CommonMark; then the language, the code and the fence.
+ */
 export function writeCodeBlock(code: readonly string[], language: string): string[] {
   let longest = 2;
   for (const line of code) {
+    let start = 0;
+    while (start < 3 && line[start] === ' ') start += 1;
     let run = 0;
-    while (line[run] === '`') run += 1;
+    while (line[start + run] === '`') run += 1;
     longest = Math.max(longest, run);
   }
   const fence = '`'.repeat(longest + 1);
