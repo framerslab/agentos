@@ -21,8 +21,17 @@ export interface MarkedRun {
   code: boolean;
 }
 
-/** A heading line: up to three spaces, one to three hashes, then a space and its words, or nothing. */
-const HEADING = /^( {0,3})(#{1,3})(?: (.*))?$/;
+/**
+ * A line CommonMark reads as a heading: up to three spaces, one to six hashes, then a space or a tab and its words, or
+ * nothing. The profile's headings stop at the third level, but a line of four to six hashes is escaped all the same.
+ */
+const HEADING = /^( {0,3})(#{1,6})(?:[ \t](.*))?$/;
+
+/**
+ * A run of hashes that ends a heading's words after a space or a tab, or is all its words, which CommonMark reads as
+ * the heading's closing sequence and leaves out.
+ */
+const CLOSING_HASHES = /(?:^|[ \t])(#+)[ \t]*$/;
 
 /**
  * A code line a note's text protects: spaces or none, then one or two hashes and a space. A code block's writer puts
@@ -258,6 +267,22 @@ export function escapeStart(line: string, inItem: boolean): string {
   if (!inItem && SETEXT.test(line)) return at(lead);
   if (!inItem && line.includes('|') && TABLE_SEPARATOR.test(line)) return at(lead);
   return line;
+}
+
+/**
+ * A heading's line: its hashes, a space, then its words as `writeInline` wrote them, with a backslash before a run of
+ * hashes that ends them after a space or is all of them, so `Version #` keeps its hash where CommonMark would read it
+ * as the closing sequence. The profile reads the hash after the backslash as itself.
+ *
+ * @param level - The heading's level, one to three.
+ * @param words - The heading's words as `writeInline` wrote them.
+ */
+export function writeHeading(level: number, words: string): string {
+  const closing = CLOSING_HASHES.exec(words);
+  const hashes = closing?.[1];
+  if (closing === null || hashes === undefined) return `${'#'.repeat(level)} ${words}`;
+  const at = words.length - closing[0].length + closing[0].indexOf(hashes);
+  return `${'#'.repeat(level)} ${words.slice(0, at)}\\${words.slice(at)}`;
 }
 
 /**

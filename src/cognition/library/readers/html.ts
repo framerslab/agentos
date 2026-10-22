@@ -17,7 +17,7 @@ import {
   type HtmlDocumentLike,
   type HtmlNodeLike,
 } from './dom.js';
-import { DIVIDER, escapeStart, writeCodeBlock, writeInline, writeTable, type MarkedRun } from './markdown.js';
+import { DIVIDER, escapeStart, writeCodeBlock, writeHeading, writeInline, writeTable, type MarkedRun } from './markdown.js';
 
 /** How `readHtml` reads a page. */
 export interface ReadHtmlOptions {
@@ -25,8 +25,8 @@ export interface ReadHtmlOptions {
    * The most characters of Markdown. The text is cut at the last whole block that fits; past it, a paragraph keeps
    * its words up to a space that fits, a code block the lines that fit with its closing fence, a list the lines that
    * fit, a table its header and the rows that fit, and a quote the blocks that fit with the next one cut by its own
-   * rule. 0, any positive number or `Infinity`; a bound below 0, `NaN` or no number at all is refused with a
-   * `RangeError`.
+   * rule, however deep the quote sits, each line's quote marks counted. 0, any positive number or `Infinity`; a bound
+   * below 0, `NaN` or no number at all is refused with a `RangeError`.
    * @default Infinity
    */
   maxCharacters?: number;
@@ -670,7 +670,9 @@ function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading
     const inner = new Flow();
     for (const child of childrenOf(node)) readInto(child, inner, marks, reading);
     inner.flush();
-    flow.push(inner.blocks.length > 0 ? { kind: 'quote', blocks: inner.blocks } : null);
+    // a quote whose only block is the h1 that named the page writes nothing, and is left out with it
+    const writes = inner.blocks.some((block) => !(block.kind === 'heading' && block.omitted));
+    flow.push(writes ? { kind: 'quote', blocks: inner.blocks } : null);
     return;
   }
   if (PREFORMATTED.has(name)) {
@@ -707,6 +709,19 @@ function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading
   for (const child of childrenOf(node)) readInto(child, flow, inside, reading);
 }
 
+/**
+ * The characters of a node's text and CDATA descendants, in order, as a DOM's `textContent` gives an element's. The
+ * reader reads `textContent` from text nodes alone, so a DOM whose elements answer `null` for it reads alike.
+ */
+function textWithin(node: HtmlNodeLike): string {
+  let text = '';
+  for (const child of childrenOf(node)) {
+    if (isText(child)) text += child.textContent ?? '';
+    else if (child.nodeType === ELEMENT_NODE) text += textWithin(child);
+  }
+  return text;
+}
+
 /** The first `title` element, outside a drawing, a formula and a template; `null` when there is none. */
 function titleElement(node: HtmlNodeLike): HtmlNodeLike | null {
   for (const child of childrenOf(node)) {
@@ -720,6 +735,14 @@ function titleElement(node: HtmlNodeLike): HtmlNodeLike | null {
   return null;
 }
 
+/**
+ * Adds lines to the end of a list of lines one at a time: a spread would pass every line as an argument, and a list or
+ * a code block of many lines passes more than an engine's stack or argument cap takes.
+ */
+function append(lines: string[], more: readonly string[]): void {
+  for (const line of more) lines.push(line);
+}
+
 /** A list's lines, its items' words escaped, the lists under each indented to the item's words. */
 function writeList(list: List, indent: number): string[] {
   const lines: string[] = [];
@@ -730,7 +753,7 @@ function writeList(list: List, indent: number): string[] {
     // the marker and the words together could read as a divider ('- --'): the words' first character is escaped
     const head = words !== '' && DIVIDER.test(`${marker}${words}`) ? `\\${words}` : words;
     lines.push(head === '' ? `${pad}${marker.trimEnd()}` : `${pad}${marker}${head}`);
-    for (const nested of item.lists) lines.push(...writeList(nested, indent + (list.ordered ? marker.length : 2)));
+    for (const nested of item.lists) append(lines, writeList(nested, indent + (list.ordered ? marker.length : 2)));
   });
   return lines;
 }
@@ -747,7 +770,7 @@ function writeBlocks(blocks: readonly Block[]): string[] {
     const written = writeBlock(block);
     if (written.length === 0) continue;
     if (lines.length > 0) lines.push('');
-    lines.push(...written);
+    append(lines, written);
   }
   return lines;
 }
@@ -758,7 +781,7 @@ function writeBlock(block: Block): string[] {
     case 'paragraph':
       return block.lines.map(paragraphLine);
     case 'heading':
-      return block.omitted ? [] : [`${'#'.repeat(block.level)} ${writeInline(block.runs)}`];
+      return block.omitted ? [] : [writeHeading(block.level, writeInline(block.runs))];
     case 'list':
       return writeList(block.list, 0);
     case 'quote':
@@ -800,15 +823,33 @@ function floorOf(block: Block): number {
   }
 }
 
-/** The lines that fit in so many characters, one line feed between two; `''` when fewer than `least` fit. */
-function linesPart(lines: readonly string[], room: number, least: number): string {
+/**
+ * A line's length as written inside so many quotes: an empty line is the quotes' marks alone (`>`, `> >`), any other
+ * line their marks and a space each (`> > words`).
+ */
+function lineCost(line: string, depth: number): number {
+  if (depth === 0) return line.length;
+  return line === '' ? 2 * depth - 1 : line.length + 2 * depth;
+}
+
+/** Lines' length as written inside so many quotes, one line feed between two. */
+function linesCost(lines: readonly string[], depth: number): number {
+  return lines.reduce((sum, line) => sum + lineCost(line, depth), 0) + Math.max(0, lines.length - 1);
+}
+
+/**
+ * The lines that fit in so many characters, written inside so many quotes, one line feed between two; `''` when fewer
+ * than `least` fit.
+ */
+function linesPart(lines: readonly string[], room: number, least: number, depth: number): string {
   const kept: string[] = [];
   let used = 0;
   for (const line of lines) {
     const gap = kept.length > 0 ? 1 : 0;
-    if (used + gap + line.length > room) break;
+    const cost = lineCost(line, depth);
+    if (used + gap + cost > room) break;
     kept.push(line);
-    used += gap + line.length;
+    used += gap + cost;
   }
   while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop();
   return kept.length >= least ? kept.join('\n') : '';
@@ -856,23 +897,28 @@ function wordsThatFit(runs: readonly MarkedRun[], room: number): string {
   return best;
 }
 
-/** What of a paragraph's lines fits: the whole lines that fit, then the next one's words up to a space. */
-function paragraphPart(lines: readonly MarkedRun[][], room: number): string {
+/**
+ * What of a paragraph's lines fits, written inside so many quotes: the whole lines that fit, then the next one's words
+ * up to a space.
+ */
+function paragraphPart(lines: readonly MarkedRun[][], room: number, depth: number): string {
   const kept: string[] = [];
   let used = 0;
   for (const runs of lines) {
     const gap = kept.length > 0 ? 1 : 0;
     const left = room - used - gap;
     if (left < 0) break;
-    if (plainOf(runs).length <= left) {
+    if (lineCost(plainOf(runs), depth) <= left) {
       const line = paragraphLine(runs);
-      if (line.length <= left) {
+      const cost = lineCost(line, depth);
+      if (cost <= left) {
         kept.push(line);
-        used += gap + line.length;
+        used += gap + cost;
         continue;
       }
     }
-    const words = runs.length > 0 ? wordsThatFit(runs, left) : '';
+    // a line with words carries a quote mark and a space for each quote around it
+    const words = runs.length > 0 ? wordsThatFit(runs, left - 2 * depth) : '';
     if (words !== '') kept.push(words);
     break;
   }
@@ -880,16 +926,20 @@ function paragraphPart(lines: readonly MarkedRun[][], room: number): string {
   return kept.join('\n');
 }
 
-/** What of a code block's lines fits: its fence, the code lines that fit, and its closing fence; `''` for no code line. */
-function codePart(lines: readonly string[], room: number): string {
+/**
+ * What of a code block's lines fits, written inside so many quotes: its fence, the code lines that fit, and its closing
+ * fence; `''` for no code line.
+ */
+function codePart(lines: readonly string[], room: number, depth: number): string {
   const open = lines[0] ?? '';
   const close = lines[lines.length - 1] ?? '';
-  let used = open.length + 1 + close.length;
+  let used = lineCost(open, depth) + 1 + lineCost(close, depth);
   const kept = [open];
   for (const line of lines.slice(1, -1)) {
-    if (used + line.length + 1 > room) break;
+    const cost = lineCost(line, depth) + 1;
+    if (used + cost > room) break;
     kept.push(line);
-    used += line.length + 1;
+    used += cost;
   }
   return kept.length > 1 ? [...kept, close].join('\n') : '';
 }
@@ -899,70 +949,58 @@ function quoted(lines: readonly string[]): string[] {
   return lines.map((line) => (line === '' ? '>' : `> ${line}`));
 }
 
-/** The most of a block whose lines, written inside a quote, fit in so many characters. */
-function quotedPartOf(block: Block, room: number): string {
-  let best = '';
-  let low = 0;
-  let high = room;
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    const part = partOf(block, middle);
-    const written = part === '' ? '' : quoted(part.split('\n')).join('\n');
-    if (written.length <= room) {
-      if (written.length > best.length) best = written;
-      low = middle + 1;
-    } else {
-      high = middle - 1;
-    }
-  }
-  return best;
-}
-
 /**
- * What of a quote's blocks fits, each cut by its own rule: the whole blocks that fit, then the most of the next one, so
- * a table inside keeps its header and separator together and a code block its closing fence.
+ * What of a quote's blocks fits, the quote written inside so many quotes, each block cut by its own rule: the whole
+ * blocks that fit, then the most of the next one, so a table inside keeps its header and separator together and a code
+ * block its closing fence. Its blocks' lines are counted one quote deeper, so a quote inside it is cut in the same pass,
+ * whatever its depth.
  */
-function quotePart(blocks: readonly Block[], room: number): string {
+function quotePart(blocks: readonly Block[], room: number, depth: number): string {
+  const inside = depth + 1;
   const kept: string[] = [];
   let used = 0;
   for (const block of blocks) {
     if (block.kind === 'heading' && block.omitted) continue;
-    // an empty quote line stands between two blocks: a line feed, the quote's mark, a line feed
-    const gap = kept.length > 0 ? 3 : 0;
+    // an empty quote line stands between two blocks, with a line feed each side
+    const gap = kept.length > 0 ? lineCost('', inside) + 2 : 0;
     const left = room - used - gap;
     if (left <= 0) break;
     if (floorOf(block) <= left) {
-      const whole = quoted(writeBlock(block)).join('\n');
-      if (whole.length <= left) {
-        if (gap > 0) kept.push('>');
-        kept.push(whole);
-        used += gap + whole.length;
+      const whole = writeBlock(block);
+      const cost = linesCost(whole, inside);
+      if (cost <= left) {
+        if (gap > 0) kept.push('');
+        append(kept, whole);
+        used += gap + cost;
         continue;
       }
     }
-    const part = quotedPartOf(block, left);
+    const part = partOf(block, left, inside);
     if (part !== '') {
-      if (gap > 0) kept.push('>');
-      kept.push(part);
+      if (gap > 0) kept.push('');
+      append(kept, part.split('\n'));
     }
     break;
   }
-  return kept.join('\n');
+  return quoted(kept).join('\n');
 }
 
-/** What of a block fits in so many characters, cut by the block's own rule, as its lines joined; `''` when nothing fits. */
-function partOf(block: Block, room: number): string {
+/**
+ * What of a block fits in so many characters, written inside so many quotes, cut by the block's own rule, as the
+ * block's own lines joined; `''` when nothing fits.
+ */
+function partOf(block: Block, room: number, depth: number): string {
   switch (block.kind) {
     case 'paragraph':
-      return paragraphPart(block.lines, room);
+      return paragraphPart(block.lines, room, depth);
     case 'code':
-      return codePart(writeBlock(block), room);
+      return codePart(writeBlock(block), room, depth);
     case 'table':
-      return linesPart(writeBlock(block), room, 2);
+      return linesPart(writeBlock(block), room, 2, depth);
     case 'list':
-      return linesPart(writeBlock(block), room, 1);
+      return linesPart(writeBlock(block), room, 1, depth);
     case 'quote':
-      return quotePart(block.blocks, room);
+      return quotePart(block.blocks, room, depth);
     default:
       return '';
   }
@@ -987,7 +1025,7 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
         continue;
       }
     }
-    const part = room > 0 ? partOf(block, room) : '';
+    const part = room > 0 ? partOf(block, room, 0) : '';
     if (part !== '') parts.push(part);
     return { markdown: parts.join('\n\n'), cut: true };
   }
@@ -1008,7 +1046,7 @@ export function readHtml(document: HtmlDocumentLike, options?: ReadHtmlOptions):
   const given = options ?? {};
   const maxCharacters = boundOf('readHtml', 'maxCharacters', given.maxCharacters, Number.POSITIVE_INFINITY);
   const element = titleElement(document);
-  const named = element === null ? '' : (element.textContent ?? '').replace(WHITE, ' ').trim();
+  const named = element === null ? '' : textWithin(element).replace(WHITE, ' ').trim();
   const reading: Reading = {
     images: 0,
     cut: false,
