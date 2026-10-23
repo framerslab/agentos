@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { readHtml } from '../browser.js';
-import { HTML_CASES } from './htmlCases.js';
+import { DRAWING_AND_FORMULA, HTML_CASES } from './htmlCases.js';
 import { standInDocument } from './htmlStandIn.js';
 
 describe('readHtml over a stand-in of the DOM', () => {
@@ -24,6 +24,12 @@ describe('readHtml over a stand-in of the DOM', () => {
     const document = standInDocument('<section><h2>Inside</h2><p>Kept.</p></section><p>Outside.</p>');
     const section = document.childNodes[0];
     expect(section && readHtml(section)).toEqual({ title: null, markdown: '## Inside\n\nKept.', images: 0, cut: false });
+  });
+
+  it("takes no title from a drawing or a formula handed over as the element, since a <title> in one is not the page's", () => {
+    const [drawing, formula] = standInDocument(DRAWING_AND_FORMULA).childNodes;
+    expect(drawing && readHtml(drawing)).toEqual({ title: null, markdown: 'Sales', images: 0, cut: false });
+    expect(formula && readHtml(formula)).toEqual({ title: null, markdown: 'x', images: 0, cut: false });
   });
 
   it('keeps a table to 500 rows and 30 columns unless told otherwise', () => {

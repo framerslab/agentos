@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { readCsv, readHtml } from '../browser.js';
-import { HTML_CASES } from './htmlCases.js';
+import { DRAWING_AND_FORMULA, HTML_CASES } from './htmlCases.js';
 
 describe("readHtml over the page's DOMParser", () => {
   for (const page of HTML_CASES) {
@@ -28,6 +28,12 @@ describe("readHtml over the page's DOMParser", () => {
       'application/xhtml+xml',
     );
     expect(readHtml(document)).toEqual({ title: 'Kept', markdown: '## Plan\n\nGo **now**.', images: 0, cut: false });
+  });
+
+  it("takes no title from a drawing or a formula handed over as the element, since a <title> in one is not the page's", () => {
+    const [drawing, formula] = Array.from(new DOMParser().parseFromString(DRAWING_AND_FORMULA, 'text/html').body.children);
+    expect(drawing && readHtml(drawing)).toEqual({ title: null, markdown: 'Sales', images: 0, cut: false });
+    expect(formula && readHtml(formula)).toEqual({ title: null, markdown: 'x', images: 0, cut: false });
   });
 
   it('writes a quote holding a list of 100,000 items under one', () => {

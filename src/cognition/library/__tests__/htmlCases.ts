@@ -18,6 +18,13 @@ export interface HtmlCase {
 const lines = (...each: string[]): string => each.join('\n');
 
 /**
+ * A drawing in SVG and a formula in MathML, each holding a `<title>` and words, which the tests hand to the reader one
+ * element at a time: each reads its words with no title, a `<title>` in either being the drawing's or the formula's.
+ */
+export const DRAWING_AND_FORMULA =
+  '<svg viewBox="0 0 10 10"><title>Chart</title><text x="0" y="5">Sales</text></svg><math><title>Formula</title><mi>x</mi></math>';
+
+/**
  * The pages the HTML reader is held to, each with the title, Markdown, image count and cut it must answer, whether a
  * stand-in of plain objects or a browser's DOMParser parsed the page.
  */
