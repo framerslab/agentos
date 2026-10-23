@@ -438,6 +438,14 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: "a list inside an item's bold or italic words keeps the mark on its items",
+    html: '<ul><li><strong>Top<ul><li>Nested</li></ul></strong></li></ul><ol><li><em>One<ol><li>Two</li></ol></em></li></ol>',
+    title: null,
+    markdown: lines('- **Top**', '  - **Nested**', '', '1. *One*', '   1. *Two*'),
+    images: 0,
+    cut: false,
+  },
+  {
     name: 'a cell spanning its rows to the end of the head stops at the body',
     html: '<table><thead><tr><th rowspan="0">A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>',
     title: null,
