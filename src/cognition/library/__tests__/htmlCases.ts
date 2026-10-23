@@ -367,6 +367,14 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: "a line of two dashes under a paragraph's line is escaped, in a quote too, since CommonMark reads it as a heading's underline",
+    html: '<p>Title<br>--</p><blockquote><p>Quoted<br>--</p></blockquote>',
+    title: null,
+    markdown: lines('Title', '\\--', '', '> Quoted', '> \\--'),
+    images: 0,
+    cut: false,
+  },
+  {
     name: 'a cut inside a quote keeps a table whole or leaves it out',
     html: '<blockquote><p>Intro words here.</p><table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table></blockquote>',
     options: { maxCharacters: 40 },
@@ -415,6 +423,14 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: 'a numbered list whose last number would take ten digits starts at 1, and one whose numbers all take nine at most keeps its start',
+    html: '<ol start="999999999"><li>a</li><li>b</li></ol><p>Then</p><ol start="999999998"><li>c</li><li>d</li></ol>',
+    title: null,
+    markdown: lines('1. a', '2. b', '', 'Then', '', '999999998. c', '999999999. d'),
+    images: 0,
+    cut: false,
+  },
+  {
     name: 'a cell spanning its rows to the end of the head stops at the body',
     html: '<table><thead><tr><th rowspan="0">A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>',
     title: null,
@@ -448,6 +464,18 @@ export const HTML_CASES: readonly HtmlCase[] = [
       '| Ana  | A note longer than forty characters, which runs past its column |',
     ),
     images: 0,
+    cut: true,
+  },
+  {
+    name: 'a table laid out for the page keeps its first rows and columns within the bounds, a row that writes nothing not counted, and counts the images past them',
+    html: lines(
+      '<table role="presentation"><tr><td></td></tr><tr><td>First row</td><td>Beside</td></tr><tr><td>Second row</td></tr></table>',
+      '<table><tr><td><h2>News</h2></td></tr><tr><td><p>Later news</p><img src="later.png"></td></tr></table>',
+    ),
+    options: { maxTableRows: 1, maxTableColumns: 1 },
+    title: null,
+    markdown: lines('First row', '', '## News'),
+    images: 1,
     cut: true,
   },
 ];
