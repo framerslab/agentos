@@ -100,4 +100,19 @@ describe('countWords', () => {
       vi.resetModules();
     }
   });
+
+  it('counts the runs between white space where the runtime has no Intl at all', async () => {
+    // A fresh copy of the module, imported first: its counter is made on its first count, which runs with no Intl.
+    vi.resetModules();
+    const fresh = await import('../tokens.js');
+    let counts: number[] = [];
+    vi.stubGlobal('Intl', undefined);
+    try {
+      counts = [fresh.countWords('Beta ships 3 Oct.'), fresh.countWords('!!!')];
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+    expect(counts).toEqual([4, 1]);
+  });
 });
