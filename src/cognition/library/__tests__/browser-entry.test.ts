@@ -68,7 +68,7 @@ describe('the library\'s browser entry', () => {
   it('names what a page needs', async () => {
     const entry = await import('../browser.js');
     expect(Object.keys(entry).sort()).toEqual(
-      expect.arrayContaining(['FuzzyIndex', 'LexicalIndex', 'chunkTurns', 'lexicalTokens', 'snippetAround', 'withinOneEdit']),
+      expect.arrayContaining(['FuzzyIndex', 'LexicalIndex', 'chunkTurns', 'countWords', 'foldText', 'lexicalTokens', 'snippetAround', 'withinOneEdit']),
     );
   });
 
