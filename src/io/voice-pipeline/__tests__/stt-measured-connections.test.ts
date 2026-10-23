@@ -12,6 +12,7 @@ import type {
   SttConnectionOpening,
   SttMeasuredUsageEvent,
   StreamingSTTSession,
+  TranscriptEvent,
 } from '../types.js';
 
 vi.mock('ws', () => {
@@ -68,6 +69,8 @@ import { OpenAIRealtimeTranscriptionSTT } from '../providers/OpenAIRealtimeTrans
 import { StreamingSTTChain } from '../providers/StreamingSTTChain.js';
 import { SttConnectionAuthorizationError } from '../SttConnectionAuthorizationError.js';
 import { StreamResampler } from '../providers/StreamResampler.js';
+import { splitFinalBySpeaker } from '../transcriptSpeakers.js';
+import { readingOrder, TranscriptLedger } from '../transcriptLedger.js';
 
 interface SocketView extends EventEmitter {
   url: string;
@@ -185,28 +188,47 @@ describe('measured hosted connections', () => {
     expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([12, 4]);
   });
 
-  it('preserves Deepgram interim/final identity and handles empty VAD terminals', async () => {
-    const session = await dg().startSession({ language: 'es' }); sessions.push(session);
-    const socket = sockets.instances[0]!;
+  it('preserves item identity and retracts an empty final before the next item', async () => {
+    const session = await dg().startSession({ language: 'es' });
+    sessions.push(session);
+    const socket = sockets.instances[0];
+    if (socket === undefined) throw new Error('missing fixture socket');
     expect(new URL(socket.url).searchParams.get('language')).toBe('es');
-    const transcripts: Array<{ itemId?: string; isFinal: boolean; text: string; startMs?: number; endMs?: number }> = [];
-    const starts = vi.fn(); const ends = vi.fn();
-    session.on('transcript', (event) => transcripts.push(event));
-    session.on('speech_start', starts); session.on('speech_end', ends);
-    const result = (text: string, final: boolean, terminal: boolean, start = 0) =>
-      socket.emit('message', JSON.stringify({ type: 'Results', start, duration: 1,
-        is_final: final, speech_final: terminal, channel: { alternatives: [{ transcript: text, confidence: 1, words: [] }] } }));
-    result('hola', false, false); result('hola', true, false); result('', true, true);
+    const transcripts: TranscriptEvent[] = [];
+    const starts = vi.fn();
+    const ends = vi.fn();
+    session.on('transcript', (event: TranscriptEvent) => transcripts.push(event));
+    session.on('speech_start', starts);
+    session.on('speech_end', ends);
+    /** Sends a result through the provider's real message handler. */
+    const result = (text: string, final: boolean, terminal: boolean, start = 0): void => {
+      socket.emit('message', JSON.stringify({
+        type: 'Results', start, duration: 1, is_final: final, speech_final: terminal,
+        channel: { alternatives: [{ transcript: text, confidence: 1, words: [] }] },
+      }));
+    };
+    result('hola', false, false);
+    result('hola', true, false);
+    result('', true, true);
     expect(transcripts[0]?.itemId).toMatch(/^[a-f0-9-]{36}:1$/);
-    expect(transcripts[1]).toMatchObject({ itemId: transcripts[0]!.itemId, text: 'hola', isFinal: true, startMs: 0, endMs: 1000 });
-    expect(starts).toHaveBeenCalledTimes(1); expect(ends).toHaveBeenCalledTimes(1);
-    result('unfinished', false, false, 2); result('', true, true, 2);
+    expect(transcripts[1]).toMatchObject({
+      itemId: transcripts[0]?.itemId, text: 'hola', isFinal: true, startMs: 0, endMs: 1000,
+    });
+    expect(starts).toHaveBeenCalledTimes(1);
+    expect(ends).toHaveBeenCalledTimes(1);
+    result('unfinished', false, false, 2);
+    result('', true, true, 2);
     socket.emit('message', JSON.stringify({ type: 'UtteranceEnd' }));
-    expect(transcripts.filter((event) => event.isFinal)).toHaveLength(1);
-    result('next', false, false, 3); result('next', true, true, 3);
-    expect(transcripts[4]?.itemId).toBe(transcripts[3]?.itemId);
-    expect(transcripts[4]?.itemId).not.toBe(transcripts[1]?.itemId);
-    expect(starts).toHaveBeenCalledTimes(3); expect(ends).toHaveBeenCalledTimes(3);
+    expect(transcripts[3]).toMatchObject({
+      itemId: transcripts[2]?.itemId, text: '', words: [], isFinal: true,
+    });
+    expect(transcripts.filter((event) => event.isFinal)).toHaveLength(2);
+    result('next', false, false, 3);
+    result('next', true, true, 3);
+    expect(transcripts[5]?.itemId).toBe(transcripts[4]?.itemId);
+    expect(transcripts[5]?.itemId).not.toBe(transcripts[1]?.itemId);
+    expect(starts).toHaveBeenCalledTimes(3);
+    expect(ends).toHaveBeenCalledTimes(3);
   });
 
   it('tries the allowed backup when Deepgram opens and closes before adoption', async () => {
@@ -602,5 +624,211 @@ describe('accounting refusal after opening', () => {
     expect(seen.openings.map((opening) => opening.entry)).toEqual([dgEntry]);
     session.close();
     expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([1]);
+  });
+});
+
+describe('streaming speaker labels through real provider handlers', () => {
+  /** One provider wire word, before milliseconds and punctuation are normalized. */
+  interface SpeakerWireWord {
+    /** The lexical token. */
+    word: string;
+    /** The display token, when supplied. */
+    punctuated_word?: string;
+    /** Start in seconds. */
+    start: number;
+    /** End in seconds. */
+    end: number;
+    /** Recognition confidence, not speaker confidence. */
+    confidence: number;
+    /** The provider's connection-local number. */
+    speaker?: number;
+  }
+
+  /** A required socket captured by the existing fake. */
+  function speakerSocket(index = 0): SocketView {
+    const socket = sockets.instances[index];
+    if (socket === undefined) throw new Error('missing fixture socket');
+    return socket;
+  }
+
+  /** Sends a result to the real Deepgram parser. */
+  function speakerResult(
+    socket: SocketView,
+    words: readonly SpeakerWireWord[],
+    final: boolean,
+    terminal = false,
+  ): void {
+    socket.emit('message', JSON.stringify({
+      type: 'Results', channel_index: [0], start: 0, duration: 3,
+      is_final: final, speech_final: terminal,
+      channel: { alternatives: [{
+        transcript: words.map((word) => word.punctuated_word ?? word.word).join(' '),
+        confidence: 1, words,
+      }] },
+    }));
+  }
+
+  /** Synthetic provider words with punctuation and an optional raw number. */
+  function speakerWords(labels: readonly (number | undefined)[]): SpeakerWireWord[] {
+    return labels.map((speaker, index) => ({
+      word: `word${index}`, punctuated_word: `Word${index}.`,
+      start: index, end: index + 0.5, confidence: 1,
+      ...(speaker === undefined ? {} : { speaker }),
+    }));
+  }
+
+  it.each([
+    [{ diarize_model: 'latest', diarize: true }, 'latest', null],
+    [{ diarize_model: 'v1' }, 'v1', null],
+    [{ diarize: true }, null, 'true'],
+    [{}, null, null],
+  ] as const)('sends one compatible diarization parameter for %j', async (options, model, legacy) => {
+    const session = await dg().startSession({ language: 'en', providerOptions: options });
+    sessions.push(session);
+    const params = new URL(speakerSocket().url).searchParams;
+    expect(params.get('diarize_model')).toBe(model);
+    expect(params.get('diarize')).toBe(legacy);
+  });
+
+  it('scopes each connection independently and keeps raw per-word labels', async () => {
+    const seen = hooks();
+    const events: TranscriptEvent[] = [];
+    for (let index = 0; index < 2; index++) {
+      const session = await dg().startSession({
+        language: 'en', providerOptions: { diarize_model: 'latest' }, connectionHooks: seen.callbacks,
+      });
+      sessions.push(session);
+      session.on('transcript', (event: TranscriptEvent) => events.push(event));
+      speakerResult(speakerSocket(index), speakerWords([0, 0]), false);
+    }
+    expect(events.map((event) => event.speaker)).toEqual(
+      seen.openings.map((opening) => `${opening.connectionId}:0`),
+    );
+    expect(new Set(events.map((event) => event.speaker)).size).toBe(2);
+    expect(events.map((event) => event.words.map((word) => word.speaker))).toEqual([
+      ['0', '0'], ['0', '0'],
+    ]);
+    expect(events[0]?.words[0]?.word).toBe('Word0.');
+  });
+
+  it('updates a same-text interim from one voice to pending, then writes split finals in run order', async () => {
+    const session = await dg().startSession({ language: 'en', providerOptions: { diarize_model: 'latest' } });
+    sessions.push(session);
+    const ledger = new TranscriptLedger();
+    const events: TranscriptEvent[] = [];
+    session.on('transcript', (event: TranscriptEvent) => {
+      events.push(event);
+      for (const run of splitFinalBySpeaker(event)) ledger.apply(run);
+    });
+    speakerResult(speakerSocket(), speakerWords([0, 0, 0]), false);
+    const first = events[0];
+    if (first === undefined) throw new Error('missing interim');
+    expect(typeof first.speaker).toBe('string');
+    speakerResult(speakerSocket(), speakerWords([0, undefined, 1]), false);
+    expect(events[1]?.text).toBe(first.text);
+    expect(events[1]?.speaker).toBeNull();
+    expect(ledger.items()).toHaveLength(1);
+    expect(ledger.items()[0]?.speaker).toBeNull();
+    speakerResult(speakerSocket(), speakerWords([0, undefined, 1]), true);
+    const ordered = readingOrder(ledger.items());
+    expect(ordered.map((line) => line.itemId)).toEqual([
+      first.itemId, `${first.itemId}.2`, `${first.itemId}.3`,
+    ]);
+    expect(ordered.map((line) => line.speaker)).toEqual([
+      first.speaker, null, first.speaker?.replace(/:0$/, ':1'),
+    ]);
+    expect(ordered.map((line) => [line.text, line.startMs, line.endMs])).toEqual([
+      ['Word0.', 0, 500], ['Word1.', 1000, 1500], ['Word2.', 2000, 2500],
+    ]);
+  });
+
+  it.each(['utterance-end', 'speech-final'] as const)('keeps an open item across %s until its real final', async (boundary) => {
+    const session = await dg().startSession({ language: 'en', providerOptions: { diarize_model: 'latest' } });
+    sessions.push(session);
+    const events: TranscriptEvent[] = [];
+    session.on('transcript', (event: TranscriptEvent) => events.push(event));
+    speakerResult(speakerSocket(), speakerWords([0]), false);
+    if (boundary === 'utterance-end') {
+      speakerSocket().emit('message', JSON.stringify({ type: 'UtteranceEnd' }));
+    } else {
+      speakerResult(speakerSocket(), speakerWords([0]), false, true);
+    }
+    expect(events.filter((event) => event.isFinal)).toEqual([]);
+    speakerResult(speakerSocket(), speakerWords([0]), true);
+    expect(new Set(events.map((event) => event.itemId)).size).toBe(1);
+    expect(events.at(-1)?.isFinal).toBe(true);
+    session.close();
+    expect(events.filter((event) => event.isFinal)).toHaveLength(1);
+  });
+
+  it.each(['close', 'socket-close', 'empty-final'] as const)('retracts an open item at %s exactly once', async (end) => {
+    const session = await dg().startSession({ language: 'en', providerOptions: { diarize_model: 'latest' } });
+    sessions.push(session);
+    const events: TranscriptEvent[] = [];
+    const order: string[] = [];
+    const ledger = new TranscriptLedger();
+    session.on('transcript', (event: TranscriptEvent) => {
+      events.push(event);
+      ledger.apply(event);
+      if (event.isFinal) order.push('final');
+    });
+    session.on('close', () => order.push('close'));
+    speakerResult(speakerSocket(), speakerWords([0]), false);
+    if (end === 'empty-final') speakerResult(speakerSocket(), [], true);
+    else if (end === 'socket-close') speakerSocket().drop();
+    else session.close();
+    session.close();
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      itemId: events[0]?.itemId, text: '', isFinal: true, confidence: 0, words: [], speaker: null,
+    });
+    expect(events[1]).not.toHaveProperty('failed');
+    expect(order).toEqual(['final', 'close']);
+    expect(ledger.items()).toEqual([]);
+    expect(ledger.finalsAfter(undefined, { takenBack: true })).toHaveLength(1);
+  });
+
+  it('sets pending for no labels and leaves non-diarized events without the speaker field', async () => {
+    const events: TranscriptEvent[] = [];
+    for (const diarized of [true, false]) {
+      const session = await dg().startSession({
+        language: 'en', providerOptions: diarized ? { diarize: true } : {},
+      });
+      sessions.push(session);
+      session.on('transcript', (event: TranscriptEvent) => events.push(event));
+      speakerResult(speakerSocket(sockets.instances.length - 1), speakerWords([undefined]), true);
+      session.close();
+    }
+    expect(events).toHaveLength(2);
+    expect(events[0]?.speaker).toBeNull();
+    expect(events[1]).not.toHaveProperty('speaker');
+    expect(splitFinalBySpeaker(events[1] as TranscriptEvent)[0]).toBe(events[1]);
+  });
+
+  it('forwards a retiring Deepgram empty final before the backup and leaves OpenAI unlabelled', async () => {
+    const primary = dg();
+    const backup = oa();
+    Object.defineProperty(primary, 'priority', { value: 1 });
+    Object.defineProperty(backup, 'priority', { value: 2 });
+    const chain = new StreamingSTTChain([primary, backup], { enableMidUtteranceFailover: true });
+    const session = await chain.startSession({ language: 'en', providerOptions: { diarize_model: 'latest' } });
+    sessions.push(session);
+    const events: TranscriptEvent[] = [];
+    const ledger = new TranscriptLedger();
+    session.on('transcript', (event: TranscriptEvent) => { events.push(event); ledger.apply(event); });
+    speakerResult(speakerSocket(), speakerWords([0]), false);
+    speakerSocket().emit('error', new Error('HTTP 503'));
+    await turns();
+    expect(sockets.instances).toHaveLength(2);
+    expect(chain.currentProviderId).toBe('openai-realtime-transcription');
+    expect(events[1]).toMatchObject({ itemId: events[0]?.itemId, text: '', isFinal: true, speaker: null });
+    expect(ledger.items()).toEqual([]);
+    speakerSocket(1).emit('message', JSON.stringify({
+      type: 'conversation.item.input_audio_transcription.completed', item_id: 'backup', transcript: 'Next.',
+    }));
+    await turns();
+    expect(events.at(-1)).toMatchObject({ itemId: 'backup', text: 'Next.', isFinal: true });
+    expect(events.at(-1)).not.toHaveProperty('speaker');
+    session.close();
   });
 });
