@@ -1,18 +1,31 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ENTRY = resolve(here, '../browser.ts');
+/** The page's storage, which the entry re-exports whole. */
+const STORAGE_INDEX = resolve(here, '../../../core/storage/browser/index.ts');
+/** The one module outside this repository the entry reaches: the library's key-value store, from the storage index alone. */
+const KV = '@framers/sql-storage-adapter/kv';
 
 /**
- * The file a relative specifier names, tried as TypeScript resolves it: the specifier with `.ts` added, its `.js` read
- * as `.ts`, then its folder's `index.ts`. A specifier that names none of them fails the walk by name.
+ * The file a relative specifier names, tried as TypeScript resolves it: the file itself when the specifier carries an
+ * extension and it exists (a published `.js`), the specifier with `.ts` added, its `.js` read as `.ts`, `.js` added,
+ * then its folder's `index.ts` or `index.js`. A specifier that names none of them fails the walk by name.
  */
 function resolveRelative(file: string, specifier: string): string {
   const base = resolve(dirname(file), specifier);
-  const candidates = [`${base}.ts`, ...(base.endsWith('.js') ? [`${base.slice(0, -3)}.ts`] : []), join(base, 'index.ts')];
+  const candidates = [
+    ...(/\.[cm]?[jt]s$/.test(base) ? [base] : []),
+    `${base}.ts`,
+    ...(base.endsWith('.js') ? [`${base.slice(0, -3)}.ts`] : []),
+    `${base}.js`,
+    join(base, 'index.ts'),
+    join(base, 'index.js'),
+  ];
   const found = candidates.find((candidate) => existsSync(candidate));
   if (found === undefined) throw new Error(`${file}: ${specifier} names no file (tried ${candidates.join(', ')})`);
   return found;
@@ -48,9 +61,46 @@ function outside(reached: Map<string, string[]>): string[] {
   return found;
 }
 
+/** The checkout of the library beside this one, when there is one: vitest.config.ts aliases the package to its source. */
+const SIBLING_LIBRARY = resolve(here, '../../../../../sql-storage-adapter');
+
+/**
+ * The library's key-value module as the tests reach it: in a checkout of the library beside this one, that module's
+ * source, which vitest.config.ts aliases `@framers/sql-storage-adapter/kv` to whenever the sibling's `src/index.ts`
+ * exists, whether or not the sibling holds a build; otherwise the published file the installed package names under
+ * `./kv`.
+ */
+function libraryKvEntry(): string {
+  if (existsSync(join(SIBLING_LIBRARY, 'src/index.ts'))) {
+    const source = join(SIBLING_LIBRARY, 'src/features/kv/index.ts');
+    if (!existsSync(source)) throw new Error(`the library beside this checkout has no ${source}, where vitest.config.ts sends ${KV}`);
+    return source;
+  }
+  const manifestPath = createRequire(import.meta.url).resolve('@framers/sql-storage-adapter/package.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    exports: Record<string, string | { import?: string | { default?: string }; default?: string } | undefined>;
+  };
+  const kv = manifest.exports['./kv'];
+  if (kv === undefined) throw new Error("the library's package.json names no ./kv export");
+  const target = typeof kv === 'string' ? kv : typeof kv.import === 'string' ? kv.import : (kv.import?.default ?? kv.default);
+  if (target === undefined) throw new Error(`the library's ./kv export names no file: ${JSON.stringify(kv)}`);
+  const published = resolve(dirname(manifestPath), target);
+  if (!existsSync(published)) throw new Error(`the library's ./kv export names ${published}, which does not exist`);
+  return published;
+}
+
 describe('the library\'s browser entry', () => {
-  it('reaches no Node module and no package: only this repository\'s own files', () => {
-    expect(outside(reach(ENTRY))).toEqual([]);
+  it('reaches no Node module and one package module, the library\'s key-value store, from the storage index alone', () => {
+    expect(outside(reach(ENTRY))).toEqual([`${STORAGE_INDEX}: ${KV}`]);
+  });
+
+  it('reaches, through the key-value module, nothing outside that module: no adapter, so neither sql.js nor pg', () => {
+    const kvEntry = libraryKvEntry();
+    const reached = reach(kvEntry);
+    expect(reached.size).toBeGreaterThan(1);
+    expect(outside(reached)).toEqual([]);
+    const folder = dirname(kvEntry);
+    for (const file of reached.keys()) expect(file.startsWith(folder), file).toBe(true);
   });
 
   it('finds the Node module behind an import written without an extension', () => {
@@ -72,10 +122,19 @@ describe('the library\'s browser entry', () => {
     );
   });
 
-  it('names a page\'s storage: the key-value store, the outbox and the comparison of lists', async () => {
+  it('names a page\'s storage: the key-value store over IndexedDB, in memory or over a SQL table, the outbox and the comparison of lists', async () => {
     const entry = await import('../browser.js');
     expect(Object.keys(entry).sort()).toEqual(
-      expect.arrayContaining(['IndexedDbKeyValueStore', 'MemoryKeyValueStore', 'Outbox', 'idb', 'namespaced', 'openIndexedDbStore', 'reconcileList']),
+      expect.arrayContaining([
+        'IndexedDbKeyValueStore',
+        'MemoryKeyValueStore',
+        'Outbox',
+        'createSqlKeyValueStore',
+        'idb',
+        'namespaced',
+        'openIndexedDbStore',
+        'reconcileList',
+      ]),
     );
   });
 });
