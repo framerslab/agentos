@@ -315,15 +315,19 @@ function textOf(node: HtmlNodeLike, reading: Reading): string {
   return text;
 }
 
-/** What a line's reader does with a list inside it, and with a checkbox before its words. */
+/**
+ * What a line's reader does with a list inside it, given the marks of the elements around the list, and with a
+ * checkbox before its words.
+ */
 interface LineHooks {
-  list?: (element: HtmlNodeLike, ordered: boolean) => void;
+  list?: (element: HtmlNodeLike, ordered: boolean, marks: Marks) => void;
   checkbox?: (element: HtmlNodeLike, first: boolean) => void;
 }
 
 /**
  * An element's content read as one line of words: a line break, and a block's edges, as one space; code as inline
- * code; images counted. A list inside it goes to `hooks.list` where given, and is read into the line otherwise.
+ * code; images counted. A list inside it goes to `hooks.list` where given, with the marks of the elements around it,
+ * and is read into the line otherwise.
  */
 function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineHooks = {}): MarkedRun[] {
   const line: MarkedRun[] = [];
@@ -348,7 +352,7 @@ function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineH
       return;
     }
     if (hooks.list !== undefined && LISTS.has(name)) {
-      hooks.list(current, name === 'ol');
+      hooks.list(current, name === 'ol', at);
       return;
     }
     if (CODE.has(name) || PREFORMATTED.has(name)) {
@@ -462,8 +466,9 @@ function itemOf(node: HtmlNodeLike, ordered: boolean, marks: Marks, reading: Rea
   const lists: List[] = [];
   const box: { checked: boolean | null } = { checked: null };
   const runs = lineOf(node, marks, reading, {
-    list: (element, isOrdered) => {
-      const list = listOf(element, isOrdered, marks, reading);
+    // a list inside the item's bold or italic words keeps the mark on its items
+    list: (element, isOrdered, around) => {
+      const list = listOf(element, isOrdered, around, reading);
       if (list !== null) lists.push(list);
     },
     checkbox: (element, first) => {
