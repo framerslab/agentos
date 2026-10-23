@@ -202,7 +202,8 @@ function messageOf(err: unknown): string {
 class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingTTSSession {
   /**
    * The current socket: the open one, or the one opening for a reply; `null` once Deepgram has closed it between
-   * replies, a socket has failed to open, or the session has closed.
+   * replies, the session has given it up for a response it did not send in time, a socket has failed to open, or the
+   * session has closed.
    */
   private ws: WebSocket | null = null;
   /** Whether the current socket has opened. */
@@ -214,7 +215,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   /**
    * Set while the next segment waits for a stale response: the late `Flushed`
    * of a segment that timed out, or the `Cleared` that answers a `Clear`. The
-   * timer bounds the wait.
+   * timer bounds the wait, and gives the socket up when it runs out.
    */
   private stale?: ReturnType<typeof setTimeout>;
   /**
@@ -463,8 +464,9 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * a segment was outstanding, what Deepgram sends before the `Cleared` that
    * answers the `Clear` belongs to the cleared text, so its audio is dropped
    * and its `Flushed` completes nothing, and the next segment starts at the
-   * `Cleared`, or after one second without it. A socket still opening is sent
-   * nothing: the next reply takes it.
+   * `Cleared`, or after one second without it, on a fresh socket, the one that
+   * did not answer given up ({@link staleWaitEnded}). A socket still opening is
+   * sent nothing: the next reply takes it.
    */
   cancel(): void {
     const outstanding = this.segments.hasInFlight || this.stale !== undefined || this.unanswered.length > 0;
@@ -634,16 +636,41 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     }
   }
 
-  /** Keeps the next segment from starting until a stale `Flushed` or a `Cleared` arrives, or `ms` have passed. */
+  /**
+   * Keeps the next segment from starting until a stale `Flushed` or a `Cleared` arrives, or `ms` have passed, when the
+   * socket is given up ({@link staleWaitEnded}).
+   */
   private holdFor(ms: number): void {
     if (this.stale !== undefined) clearTimeout(this.stale);
     this.segments.hold();
-    this.stale = setTimeout(() => this.release(), ms);
+    this.stale = setTimeout(() => this.staleWaitEnded(), ms);
   }
 
   /**
-   * The stale response arrived, or its wait ran out: the next segment may start, and Deepgram's audio is the session's
-   * again. The `Flush` of a timed-out segment stays unanswered until its `Flushed` comes, which completes nothing.
+   * The wait for a stale response ran out: the late `Flushed` of a segment that timed out, or the `Cleared` that
+   * answers a `Clear`, has not come. Deepgram may still send the old text's audio, and the `Flushed` that answers its
+   * `Flush`, after the next segment's `Speak`, and its audio names no segment, so nothing would tell them from that
+   * segment's. The socket is given up: closed, and no longer the session's, so nothing it still sends reaches the
+   * session, and one console warning line says so. The next segment opens a fresh socket, as a reply does after
+   * Deepgram closed the idle one.
+   */
+  private staleWaitEnded(): void {
+    const ws = this.ws;
+    if (ws && this.isOpen()) {
+      const awaited = this.clearing ? 'Cleared' : 'Flushed';
+      this.ws = null;
+      this.ready = false;
+      this.unanswered.length = 0;
+      ws.close(1000, 'response overdue');
+      console.warn(`[deepgram-aura] no ${awaited} came within its wait; the socket is closed, and the next segment opens a fresh one`);
+    }
+    this.release();
+  }
+
+  /**
+   * The stale response arrived, or its wait ran out and the socket was given up: the next segment may start, and
+   * Deepgram's audio is the session's again. The `Flush` of a timed-out segment stays unanswered while the next segment
+   * waits for its `Flushed`, which completes nothing.
    */
   private release(): void {
     this.clearing = false;
@@ -661,10 +688,10 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * `Flush` before it, and else the oldest unanswered one. It completes the
    * segment in flight when it answers that segment's `Flush`; the late one of
    * a segment that timed out completes nothing, and ends the next segment's
-   * wait while that runs, or is written as one console warning line once it
-   * has ended. One that finds no `Flush` unanswered completes nothing and is
-   * written as one console warning line too. Before the `Cleared` that answers
-   * a `Clear`, a `Flushed` is the cleared text's and is dropped.
+   * wait. A wait that ended without it gave its socket up, so it no longer
+   * reaches the session. One that finds no `Flush` unanswered completes
+   * nothing and is written as one console warning line. Before the `Cleared`
+   * that answers a `Clear`, a `Flushed` is the cleared text's and is dropped.
    *
    * @param sequenceId - The message's `sequence_id`.
    */
