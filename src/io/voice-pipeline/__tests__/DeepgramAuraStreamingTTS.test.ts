@@ -353,7 +353,7 @@ describe('DeepgramAuraStreamingTTS', () => {
     await flushed;
   });
 
-  it('starts the next segment once the bounded wait for the late Flushed of a timed-out segment ends, and that Flushed, later still, completes nothing', async () => {
+  it('gives the socket up once the wait for the late Flushed of a timed-out segment ends without it, and speaks the next segment on a fresh one, which nothing the old socket still sends reaches', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
@@ -368,27 +368,126 @@ describe('DeepgramAuraStreamingTTS', () => {
       await vi.advanceTimersByTimeAsync(5_000);
       expect(chunks).toHaveLength(1);
       expect(sent(ws)).toHaveLength(2);
-      // No Flushed comes for five more seconds: the next segment goes out anyway.
+      // No Flushed comes for five more seconds: the socket is closed, one line says so, and the next segment goes out on
+      // a fresh socket.
       await vi.advanceTimersByTimeAsync(4_999);
-      expect(sent(ws)).toHaveLength(2);
+      expect(ws.close).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect(sent(ws).slice(2)).toEqual([{ type: 'Speak', text: ' Second' }, { type: 'Flush' }]);
-      // Deepgram answers in order: the first segment's late audio, then its Flushed, eleven seconds after its Flush.
-      // That Flushed answers the first Flush, so it completes nothing, and is logged once.
+      expect(ws.close).toHaveBeenCalledOnce();
+      expect(ws.close).toHaveBeenCalledWith(1000, 'response overdue');
+      expect(warn).toHaveBeenCalledOnce();
+      let fresh!: MockSocket;
+      await vi.waitFor(() => {
+        fresh = socketOf(session);
+        expect(fresh).toBeTruthy();
+        expect(fresh).not.toBe(ws);
+        expect(sent(fresh)).toEqual([{ type: 'Speak', text: ' Second' }, { type: 'Flush' }]);
+      });
+      // Deepgram answers on the old socket at last, the first segment's late audio, then its Flushed: they reach nothing.
       frame(ws, 2);
       control(ws, { type: 'Flushed', sequence_id: 0 });
       expect(chunks).toHaveLength(1);
-      expect(warn).toHaveBeenCalledOnce();
-      // The second segment's audio, then its own Flushed: the boundary lands on its last frame.
-      frame(ws, 3);
-      control(ws, { type: 'Flushed', sequence_id: 1 });
+      // The second segment's audio, then its own Flushed, on the fresh socket, whose Flush messages count from 0 again:
+      // the boundary lands on its last frame.
+      frame(fresh, 3);
+      control(fresh, { type: 'Flushed', sequence_id: 0 });
       expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary])).toEqual([
         [1, undefined],
-        [2, undefined],
         [3, { segmentId: expect.any(String), start: 10, end: 17, text: ' Second', final: true }],
       ]);
       await flushed;
+      expect(sent(ws)).toHaveLength(2);
       expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("speaks the next reply on a fresh socket once the wait for the late Flushed of the reply before's timed-out sentence ends without it, so none of that sentence's audio plays as the next reply's", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const chunks = recorded(session);
+      ws.send.mockClear();
+
+      // The reply's one sentence times out: its held frame goes out without a boundary, and its flush completes.
+      session.pushTokens('Hello there.');
+      const first = session.flush();
+      frame(ws, 1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await first;
+      // The next reply's text arrives while the late Flushed is waited for, and the wait ends without it.
+      session.pushTokens('Next one. ');
+      const second = session.flush();
+      expect(sent(ws)).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(ws.close).toHaveBeenCalledWith(1000, 'response overdue');
+      let fresh!: MockSocket;
+      await vi.waitFor(() => {
+        fresh = socketOf(session);
+        expect(fresh).toBeTruthy();
+        expect(fresh).not.toBe(ws);
+        expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
+      });
+      // What the old socket still sends of the timed-out sentence, its audio and then its Flushed, reaches nothing; the
+      // next reply's own sentence plays, and its Flushed completes it.
+      frame(ws, 2);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      frame(fresh, 3);
+      control(fresh, { type: 'Flushed', sequence_id: 0 });
+      await second;
+      expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
+        [1, undefined],
+        [3, 'Next one.'],
+      ]);
+      expect(sent(ws)).toEqual([{ type: 'Speak', text: 'Hello there.' }, { type: 'Flush' }]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("gives the socket up when no Cleared answers a cancel's Clear within a second, so what the cleared text still sends reaches nothing and the next segment speaks on a fresh socket", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const chunks = recorded(session);
+      ws.send.mockClear();
+
+      session.pushTokens('Hello there. ');
+      frame(ws, 1);
+      session.cancel();
+      expect(sent(ws)).toEqual([{ type: 'Speak', text: 'Hello there.' }, { type: 'Flush' }, { type: 'Clear' }]);
+      session.pushTokens('Next one. ');
+      const flushed = session.flush();
+      // No Cleared comes within a second: the socket is closed, and the next segment goes out on a fresh one.
+      await vi.advanceTimersByTimeAsync(999);
+      expect(ws.close).not.toHaveBeenCalled();
+      expect(sent(ws)).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ws.close).toHaveBeenCalledWith(1000, 'response overdue');
+      expect(warn).toHaveBeenCalledOnce();
+      let fresh!: MockSocket;
+      await vi.waitFor(() => {
+        fresh = socketOf(session);
+        expect(fresh).toBeTruthy();
+        expect(fresh).not.toBe(ws);
+        expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
+      });
+      // The old socket's late audio of the cleared text, the Flushed of its Flush and the Cleared reach nothing: no frame
+      // of the cleared text plays as the next segment's, and its Flushed completes nothing.
+      frame(ws, 2);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      control(ws, { type: 'Cleared', sequence_id: 0 });
+      expect(chunks).toHaveLength(0);
+      frame(fresh, 3);
+      control(fresh, { type: 'Flushed', sequence_id: 0 });
+      await flushed;
+      expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([[3, 'Next one.']]);
+      expect(sent(ws)).toHaveLength(3);
     } finally {
       warn.mockRestore();
     }
@@ -589,6 +688,8 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(sent(ws)[sent(ws).length - 1]).toEqual({ type: 'Clear' });
     await flushed;
     expect(flushes).not.toHaveBeenCalled();
+    // Deepgram answers the Clear, and the socket is the session's again.
+    control(ws, { type: 'Cleared', sequence_id: 0 });
     await vi.advanceTimersByTimeAsync(61_000);
     expect(flushCount(ws)).toBe(20);
     // The window has passed: the next sentence is flushed as before.
@@ -616,18 +717,28 @@ describe('DeepgramAuraStreamingTTS', () => {
       session.pushTokens('Late. Next. ');
       expect(flushCount(ws)).toBe(20);
       frame(ws, 1);
-      // The twentieth times out, the wait for its late Flushed ends, and the next segment is spoken and waits for a slot.
+      // The twentieth times out, and the wait for its late Flushed ends without it: the socket is given up, and the next
+      // segment is spoken on a fresh one, where it waits for a slot, since the minute's budget counts every socket's Flush.
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(sent(ws)[sent(ws).length - 1]).toEqual({ type: 'Speak', text: ' Next.' });
-      expect(flushCount(ws)).toBe(20);
-      // The twentieth's Flushed comes now: it answers the twentieth Flush, not the next segment's, which has none yet.
+      expect(ws.close).toHaveBeenCalledWith(1000, 'response overdue');
+      let fresh!: MockSocket;
+      await vi.waitFor(() => {
+        fresh = socketOf(session);
+        expect(fresh).toBeTruthy();
+        expect(fresh).not.toBe(ws);
+        expect(sent(fresh)).toEqual([{ type: 'Speak', text: ' Next.' }]);
+      });
+      // The twentieth's Flushed comes now, on the old socket: it completes nothing, least of all the next segment, which
+      // has no Flush yet.
       control(ws, { type: 'Flushed', sequence_id: 19 });
+      expect(chunks.map((chunk) => chunk.audio[0])).toEqual([1]);
       expect(warn).toHaveBeenCalledOnce();
       // The window passes: the next segment's Flush goes out, and its own Flushed completes it.
       await vi.advanceTimersByTimeAsync(first + 61_000 - Date.now());
-      expect(flushCount(ws)).toBe(21);
-      frame(ws, 2);
-      control(ws, { type: 'Flushed', sequence_id: 20 });
+      expect(sent(fresh)).toEqual([{ type: 'Speak', text: ' Next.' }, { type: 'Flush' }]);
+      expect(flushCount(ws)).toBe(20);
+      frame(fresh, 2);
+      control(fresh, { type: 'Flushed', sequence_id: 0 });
       expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
         [1, undefined],
         [2, ' Next.'],
@@ -953,13 +1064,17 @@ describe('DeepgramAuraStreamingTTS', () => {
       session.pushTokens('First one. Second');
       const flushed = session.flush();
       frame(ws, 1);
-      // The first segment times out, and the wait for its late Flushed ends: the next segment goes out.
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(sent(ws).slice(2)).toEqual([{ type: 'Speak', text: ' Second' }, { type: 'Flush' }]);
-      // Deepgram answers in order: the first Flush's late Flushed, then the second's, both with the id 0.
+      // The first segment times out, and the next segment waits for its late Flushed.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sent(ws)).toHaveLength(2);
+      // Deepgram answers in order, both Flushed messages with the id 0: the first Flush's late audio, which goes out as
+      // it comes, and its late Flushed, which completes nothing and ends the wait, so the next segment goes out on the
+      // same socket; then the second's.
+      await vi.advanceTimersByTimeAsync(2_000);
       frame(ws, 2);
       control(ws, { type: 'Flushed', sequence_id: 0 });
-      expect(chunks).toHaveLength(1);
+      expect(chunks).toHaveLength(2);
+      expect(sent(ws).slice(2)).toEqual([{ type: 'Speak', text: ' Second' }, { type: 'Flush' }]);
       frame(ws, 3);
       control(ws, { type: 'Flushed', sequence_id: 0 });
       expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
@@ -968,6 +1083,7 @@ describe('DeepgramAuraStreamingTTS', () => {
         [3, ' Second'],
       ]);
       await flushed;
+      expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
     }
