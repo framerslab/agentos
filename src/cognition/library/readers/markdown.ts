@@ -51,8 +51,11 @@ const BULLET = /^( *)([-*+])(?: (.*))?$/;
 /** A numbered item: its indentation, its number, its full stop or bracket, then its words or nothing. */
 const ORDERED = /^( *)(\d{1,9})([.)])(?: (.*))?$/;
 
-/** A line of equals signs, which CommonMark reads as the underline of a heading after a paragraph's line. */
-const SETEXT = /^ {0,3}=+[ \t]*$/;
+/**
+ * A line of equals signs or of dashes, which CommonMark reads as the underline of a heading after a paragraph's line,
+ * whatever its length: `=` and `--` among them.
+ */
+const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
 
 /** A table's separator line: cells of dashes, a colon at either end allowed, between bars. */
 const TABLE_SEPARATOR = /^ {0,3}\|?(?:[ \t]*:?-+:?[ \t]*\|)*[ \t]*:?-+:?[ \t]*\|?[ \t]*$/;
@@ -251,8 +254,8 @@ export function writeInline(runs: readonly MarkedRun[]): string {
 /**
  * A written line of words with a backslash before the character that would make it start a block: a heading's hash, a
  * bullet, a number's full stop or bracket, a quote's mark, a divider's first character, and, for a paragraph's line,
- * the first of a line of equals signs (a heading's underline in CommonMark) and a table separator's first character;
- * and before a checklist's box at the start of a list item's words.
+ * the first of a line of equals signs or of dashes (a heading's underline in CommonMark) and a table separator's first
+ * character; and before a checklist's box at the start of a list item's words.
  *
  * @param line - The line as `writeInline` wrote it.
  * @param inItem - Whether the line is a list item's words, after its marker.

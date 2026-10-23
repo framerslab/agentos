@@ -30,9 +30,13 @@ export interface ReadHtmlOptions {
    * @default Infinity
    */
   maxCharacters?: number;
-  /** The most rows a table keeps, its header row among them. Bounded as `maxCharacters` is. @default 500 */
+  /**
+   * The most rows a table keeps, its header row among them, and the most rows of cells a table laid out for the page
+   * keeps; a row that writes nothing is not counted. Bounded as `maxCharacters` is.
+   * @default 500
+   */
   maxTableRows?: number;
-  /** The most columns a table keeps. Bounded as `maxCharacters` is. @default 30 */
+  /** The most columns a table keeps, a table laid out for the page among them. Bounded as `maxCharacters` is. @default 30 */
   maxTableColumns?: number;
 }
 
@@ -439,10 +443,18 @@ function headingOf(node: HtmlNodeLike, level: number, marks: Marks, reading: Rea
   return { kind: 'heading', level: Math.min(level, 3), runs, words, omitted };
 }
 
-/** A list's start: its `start` attribute when that is a number a line can write, else 1. */
-function startOf(node: HtmlNodeLike): number {
+/** The highest number a numbered item can take: CommonMark reads a number of nine digits at most as an item's. */
+const LAST_NUMBER = 999_999_999;
+
+/**
+ * A list's start: its `start` attribute when that number and its last item's are numbers a line can write, nine digits
+ * at most, else 1.
+ *
+ * @param items - How many items the list writes, each numbered one after the one before it.
+ */
+function startOf(node: HtmlNodeLike, items: number): number {
   const start = Number.parseInt(node.getAttribute?.('start') ?? '', 10);
-  return Number.isInteger(start) && start >= 0 && start <= 999_999_999 ? start : 1;
+  return Number.isInteger(start) && start >= 0 && start + items - 1 <= LAST_NUMBER ? start : 1;
 }
 
 /** A list item: its words read as one line, a checkbox before them read as its state, the lists inside it under it. */
@@ -495,7 +507,7 @@ function listOf(node: HtmlNodeLike, ordered: boolean, marks: Marks, reading: Rea
   const holds = (item: Item): boolean => item.runs.length > 0 || item.checked !== null || item.lists.length > 0;
   const kept = ordered ? items.slice() : items.filter(holds);
   while (kept.length > 0 && !holds(kept[kept.length - 1] as Item)) kept.pop();
-  return kept.length > 0 ? { ordered, start: ordered ? startOf(node) : 1, items: kept } : null;
+  return kept.length > 0 ? { ordered, start: ordered ? startOf(node, kept.length) : 1, items: kept } : null;
 }
 
 /** A code block's language: a `language-` or `lang-` class on the `pre` or on the `code` inside it. */
@@ -570,66 +582,114 @@ function spanOf(cell: HtmlNodeLike, attribute: 'colspan' | 'rowspan'): number {
   return Math.min(value, attribute === 'colspan' ? 1_000 : 65_534);
 }
 
+/** A table's cell and the column it starts in. */
+interface PlacedCell {
+  readonly cell: HtmlNodeLike;
+  readonly column: number;
+}
+
 /**
- * Reads a table into the flow. A table laid out for the page (marked `role="presentation"`, of one cell, or with a
- * cell that holds a heading, a table, a quote, code or a divider) is read as the blocks its cells hold. A table of
- * data is one table block: a cell spanning columns or rows keeps its words in its first place and leaves the others
- * empty; a row with no words is left out, and so are the columns after the last that holds one.
+ * A table's rows in reading order, each its cells with the column each starts in: a cell spanning columns covers the
+ * places after its own in its row, and a cell spanning rows its places in the rows below it within its group. Places
+ * from `columns` on are not tracked, since a cell that starts at one is left out whichever it is.
+ *
+ * @param groups - The table's row groups, each its rows, each its cells.
+ * @param columns - The most columns the table keeps.
+ */
+function placedRows(groups: readonly (readonly (readonly HtmlNodeLike[])[])[], columns: number): PlacedCell[][] {
+  const placed: PlacedCell[][] = [];
+  for (const group of groups) {
+    // how many rows below each column's cell still covers, within the group
+    const pending: number[] = [];
+    for (const cells of group) {
+      const occupied = pending.map((left) => left > 0);
+      pending.forEach((left, column) => {
+        if (left > 0) pending[column] = left - 1;
+      });
+      const row: PlacedCell[] = [];
+      let column = 0;
+      for (const cell of cells) {
+        while (occupied[column] === true) column += 1;
+        const across = spanOf(cell, 'colspan');
+        const down = spanOf(cell, 'rowspan');
+        row.push({ cell, column });
+        for (let place = column; place < Math.min(column + across, columns); place += 1) {
+          pending[place] = Math.max(pending[place] ?? 0, down - 1);
+        }
+        column += across;
+      }
+      placed.push(row);
+    }
+  }
+  return placed;
+}
+
+/** Whether blocks from a place on write anything: every block does but the `h1` that gave the title its words. */
+function writes(blocks: readonly Block[], from = 0): boolean {
+  for (let at = from; at < blocks.length; at += 1) {
+    const block = blocks[at];
+    if (block !== undefined && !(block.kind === 'heading' && block.omitted)) return true;
+  }
+  return false;
+}
+
+/** Reads what an element holds into a flow as blocks of their own, apart from the words around the element. */
+function readApart(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading): void {
+  flow.flush();
+  for (const child of childrenOf(node)) readInto(child, flow, marks, reading);
+  flow.flush();
+}
+
+/**
+ * Reads a table into the flow, its caption first. A table laid out for the page (marked `role="presentation"` or
+ * `role="none"`, of one cell, or with a cell that holds a heading, a table, a quote, code or a divider) is read as the
+ * blocks its cells hold. A table of data is one table block: a cell spanning columns or rows keeps its words in its
+ * first place and leaves the others empty; a row with no words is left out, and so are the columns after the last that
+ * holds one. Either kind keeps `maxTableRows` rows, a row that writes nothing not counted, and the cells that start
+ * within `maxTableColumns` columns; a row or a cell past a bound is still read, so the images in it are counted as every
+ * image left out is, and sets `cut` when it holds anything to write.
  */
 function readTable(table: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading): void {
   const [caption] = childElements(table, CAPTION);
-  if (caption !== undefined) {
-    flow.flush();
-    for (const child of childrenOf(caption)) readInto(child, flow, marks, reading);
-    flow.flush();
-  }
+  if (caption !== undefined) readApart(caption, flow, marks, reading);
   const groups = rowGroupsOf(table).map((group) => group.map((row) => childElements(row, CELL)));
   const role = (table.getAttribute?.('role') ?? '').trim().toLowerCase();
   const all = groups.flat(2);
+  const placed = placedRows(groups, reading.maxTableColumns);
   if (role === 'presentation' || role === 'none' || all.length === 1 || all.some(holdsLayout)) {
-    for (const cell of all) {
-      flow.flush();
-      for (const child of childrenOf(cell)) readInto(child, flow, marks, reading);
-      flow.flush();
+    // the words before the table end at its first cell, whether that cell is kept or left out
+    if (all.length > 0) flow.flush();
+    let kept = 0;
+    for (const row of placed) {
+      const within = kept < reading.maxTableRows;
+      const from = flow.blocks.length;
+      const left = new Flow();
+      for (const { cell, column } of row) readApart(cell, within && column < reading.maxTableColumns ? flow : left, marks, reading);
+      if (within && writes(flow.blocks, from)) kept += 1;
+      if (writes(left.blocks)) reading.cut = true;
     }
     return;
   }
 
   const rows: MarkedRun[][][] = [];
-  for (const group of groups) {
-    // how many rows below each column's cell still covers, within the group
-    const pending: number[] = [];
-    for (const rowCells of group) {
-      const occupied = pending.map((left) => left > 0);
-      pending.forEach((left, column) => {
-        if (left > 0) pending[column] = left - 1;
-      });
-      const row: MarkedRun[][] = [];
-      let column = 0;
-      for (const cell of rowCells) {
-        while (occupied[column] === true) column += 1;
-        const across = spanOf(cell, 'colspan');
-        const down = spanOf(cell, 'rowspan');
-        const runs = lineOf(cell, marks, reading);
-        for (const run of runs) run.text = run.text.replace(/\|/g, '/');
-        if (column >= reading.maxTableColumns) {
-          if (runs.length > 0) reading.cut = true;
-        } else {
-          row[column] = runs;
-        }
-        for (let place = column; place < Math.min(column + across, reading.maxTableColumns); place += 1) {
-          pending[place] = Math.max(pending[place] ?? 0, down - 1);
-        }
-        column += across;
+  for (const cells of placed) {
+    const row: MarkedRun[][] = [];
+    for (const { cell, column } of cells) {
+      const runs = lineOf(cell, marks, reading);
+      for (const run of runs) run.text = run.text.replace(/\|/g, '/');
+      if (column >= reading.maxTableColumns) {
+        if (runs.length > 0) reading.cut = true;
+      } else {
+        row[column] = runs;
       }
-      if (!row.some((runs) => runs !== undefined && runs.length > 0)) continue;
-      // a row past the bound is still read, so the images in it are counted as every image left out is
-      if (rows.length >= reading.maxTableRows) {
-        reading.cut = true;
-        continue;
-      }
-      rows.push(row);
     }
+    if (!row.some((runs) => runs !== undefined && runs.length > 0)) continue;
+    // a row past the bound is still read, so the images in it are counted as every image left out is
+    if (rows.length >= reading.maxTableRows) {
+      reading.cut = true;
+      continue;
+    }
+    rows.push(row);
   }
 
   let columns = 0;
@@ -671,8 +731,7 @@ function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading
     for (const child of childrenOf(node)) readInto(child, inner, marks, reading);
     inner.flush();
     // a quote whose only block is the h1 that named the page writes nothing, and is left out with it
-    const writes = inner.blocks.some((block) => !(block.kind === 'heading' && block.omitted));
-    flow.push(writes ? { kind: 'quote', blocks: inner.blocks } : null);
+    flow.push(writes(inner.blocks) ? { kind: 'quote', blocks: inner.blocks } : null);
     return;
   }
   if (PREFORMATTED.has(name)) {
