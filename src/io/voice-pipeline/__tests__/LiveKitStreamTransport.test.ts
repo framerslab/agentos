@@ -2127,6 +2127,39 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     await transport.whenClosed();
   });
 
+  it("ends the agent's line with the played prefix alone when the track refuses a chunk of the reply, though the reply's playout wait then resolves", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const { transport, errors } = speakingTo(room, 'user-1');
+    await transport.sendControl({ type: 'agent_speaking', text: '' });
+    await transport.sendAudio(spoken(1, 'seg-1', 0, 'Your order shipped.'));
+    const source = FakeAudioSource.created[0]!;
+    const first = transport.waitForPlayback(firstGeneration, 1, new AbortController().signal);
+    source.playOut();
+    await first;
+    await settle();
+    // The track fails to take the second sentence: its send rejects, and none of it plays.
+    source.captureFrame = async () => {
+      throw new Error('capture failed');
+    };
+    await expect(transport.sendAudio(spoken(2, 'seg-2', 19, ' It arrives Monday.'))).rejects.toThrow('capture failed');
+    // The wait for the reply's playout still resolves: the track has played out all it took.
+    await transport.waitForPlayout();
+    await settle();
+    // A host that sends the whole reply's text: the final keeps what the track proved played.
+    await transport.sendControl({ type: 'agent_done', text: 'Your order shipped. It arrives Monday.', durationMs: 40 });
+    await settle();
+    const line = `${transport.id}:agent-1`;
+    expect(lines(room)).toEqual([
+      ['Your order shipped.', line, 'false', 'TR_AGENT'],
+      ['Your order shipped.', line, 'true', 'TR_AGENT'],
+    ]);
+    expect(transport.state).toBe('open');
+    expect(errors).toEqual([]);
+    transport.close();
+    await transport.whenClosed();
+  });
+
   it('transcriptionOutput: false writes nothing', async () => {
     const room = new FakeRoom();
     room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
