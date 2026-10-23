@@ -92,8 +92,9 @@ describe('countWords', () => {
       const fresh = await import('../tokens.js');
       expect(fresh.countWords('Beta ships 3 Oct.')).toBe(4);
       expect(fresh.countWords(' a  b ')).toBe(2);
-      // one run here, where the segmenter cuts the text into its words
+      // one run each here, where the segmenter cuts the first into its words and finds no word in the second
       expect(fresh.countWords('明日の会議資料')).toBe(1);
+      expect(fresh.countWords('!!!')).toBe(1);
     } finally {
       if (held !== undefined) Object.defineProperty(Intl, 'Segmenter', held);
       vi.resetModules();
