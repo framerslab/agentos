@@ -781,13 +781,18 @@ function textWithin(node: HtmlNodeLike): string {
   return text;
 }
 
-/** The first `title` element, outside a drawing, a formula and a template; `null` when there is none. */
+/** The elements whose `title` is their own, never the page's: a drawing, a formula and a template. */
+const OWN_TITLE = new Set(['svg', 'math', 'template']);
+
+/**
+ * The first `title` element outside a drawing, a formula and a template, the node handed over held to the same rule as
+ * what it holds; `null` when there is none.
+ */
 function titleElement(node: HtmlNodeLike): HtmlNodeLike | null {
+  if (node.nodeType === ELEMENT_NODE && OWN_TITLE.has(nameOf(node))) return null;
   for (const child of childrenOf(node)) {
     if (child.nodeType !== ELEMENT_NODE) continue;
-    const name = nameOf(child);
-    if (name === 'title') return child;
-    if (name === 'svg' || name === 'math' || name === 'template') continue;
+    if (nameOf(child) === 'title') return child;
     const found = titleElement(child);
     if (found !== null) return found;
   }
@@ -1095,7 +1100,8 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
  * Reads a parsed HTML page into its title and its body as Markdown. The body leaves out the head, scripts, styles,
  * templates, `noscript`, the page's `nav`, `header`, `footer` and `aside`, frames, forms and their controls, embedded
  * media, drawings in SVG and formulas in MathML, and any element marked `hidden`, `aria-hidden="true"` or styled
- * `display: none`. Comments are not read. An element handed over is read as a document is, whatever its own name.
+ * `display: none`. Comments are not read. An element handed over is read as a document is, whatever its own name, but
+ * an `svg` or `math` element handed over takes no title from a `<title>` in it, which is the drawing's or the formula's.
  *
  * @param document - A parsed document, or an element, as a page's `DOMParser` gives it; nothing is fetched.
  * @param options - The bounds on the Markdown and on each table.
