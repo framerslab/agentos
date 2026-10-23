@@ -534,6 +534,16 @@ export interface TranscriptEvent {
   itemId?: string;
 
   /**
+   * One connection-scoped speaker when every word has that voice; null when
+   * diarization was requested but the words do not name exactly one voice.
+   * Absent when diarization was not requested. Per-word speakers stay raw.
+   */
+  speaker?: string | null;
+
+  /** The original item id on a later run of a split final. */
+  runOf?: string;
+
+  /**
    * Start of the utterance's audio, in milliseconds counted from the first
    * frame pushed into the session, when the provider reports speech
    * boundaries.

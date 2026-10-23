@@ -52,6 +52,7 @@ import { sttLanguageOptions } from '../LowestCostStt.js';
 import { SttConnectionMeter } from './SttConnectionMeter.js';
 import { SttConnectionAuthorizationError } from '../SttConnectionAuthorizationError.js';
 import { RollingSTTSession } from './RollingSTTSession.js';
+import { lineSpeaker } from '../transcriptSpeakers.js';
 
 /**
  * Shape of the injected health probe used for deterministic tests.
@@ -135,6 +136,8 @@ export interface DeepgramStreamingSTTConfig {
 /** Word-level data from Deepgram streaming response. */
 interface DGWord {
   word: string;
+  /** The provider's display token, preserving punctuation in a split final. */
+  punctuated_word?: string;
   start: number;
   end: number;
   confidence: number;
@@ -222,6 +225,12 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     return this.samplesSent / WIRE_SAMPLE_RATE;
   }
 
+  /** Whether this connection requested the current model option or the legacy flag. */
+  private get diarized(): boolean {
+    const opts = this.sessionConfig.providerOptions ?? {};
+    return (typeof opts.diarize_model === 'string' && opts.diarize_model.length > 0) || Boolean(opts.diarize);
+  }
+
   /** The host's funded ceiling for this socket, in wire seconds; unbounded without the hook. */
   get audioCeiling(): number {
     return this.sessionConfig.connectionHooks?.audioCeiling?.(this.meter.opening) ?? Infinity;
@@ -264,13 +273,14 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     if (event) this.emit('usage', event);
   }
 
-  /** Ends the session once: its timer and speech, its final usage report, then `'close'`. */
+  /** Ends once, retracting an open item before speech, usage and close finish. */
   private finish(): void {
     if (this.closed) return;
     this.closed = true;
-    if (this.usageTimer !== undefined) clearInterval(this.usageTimer);
+    if (this.usageTimer) clearInterval(this.usageTimer);
     this.usageTimer = undefined;
     this.meter.cancelAuthorization();
+    this.retractOpenItem();
     this.endSpeech();
     this.reportUsage(true);
     this.emit('close');
@@ -313,7 +323,13 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     // Deepgram feature flags from providerOptions
     if (opts.sentiment) params.set('sentiment', 'true');
     if (opts.smart_format) params.set('smart_format', 'true');
-    if (opts.diarize) params.set('diarize', 'true');
+    if (typeof opts.diarize_model === 'string' && opts.diarize_model.length > 0) {
+      params.delete('diarize');
+      params.set('diarize_model', opts.diarize_model);
+    } else if (opts.diarize) {
+      params.delete('diarize_model');
+      params.set('diarize', 'true');
+    }
     if (opts.utterance_end_ms) params.set('utterance_end_ms', String(opts.utterance_end_ms));
     if (this.config.mipOptOut === true || opts.mip_opt_out === true) params.set('mip_opt_out', 'true');
     if (Array.isArray(opts.keywords)) {
@@ -441,26 +457,37 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     this.emit('speech_start');
   }
 
+  /** Ends VAD without ending an item whose final can still arrive. */
   private endSpeech(): void {
-    // An empty terminal message ends VAD but never promotes speculative interim text.
-    this.itemId = undefined;
-    if (!this.speechActive) return;
+    if (this.speechActive === false) return;
     this.speechActive = false;
     this.emit('speech_end');
   }
 
+  /** Takes back speculative text exactly once when no final text can follow. */
+  private retractOpenItem(): void {
+    const itemId = this.itemId;
+    if (itemId === undefined) return;
+    this.itemId = undefined;
+    const event: TranscriptEvent = {
+      itemId, text: '', isFinal: true, confidence: 0, words: [],
+      beforeSpeechEnd: this.speechActive,
+      ...(this.diarized ? { speaker: null } : {}),
+    };
+    this.emit('transcript', event);
+  }
+
   /**
-   * Parse and dispatch a Deepgram WebSocket message. Every final segment ends
-   * its transcript identity, so later interim and final segments get a new
-   * `itemId`, within one VAD span too. An empty terminal discards unfinalized
-   * interim text, emits one speech end and never fabricates a final.
+   * Maps results to keyed lines. A final closes its item; an empty final
+   * retracts an open item. Speech boundaries alone leave its identity intact.
+   * The line label is connection-scoped while each word retains its raw label.
    */
   private _handleMessage(raw: string): void {
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      return; // Malformed JSON — skip
+      return;
     }
     if (this.closed) return;
     const metadata = msg.metadata as { request_id?: unknown } | undefined;
@@ -469,7 +496,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
       try {
         this.meter.bindSupplierRequest(requestId);
       } catch {
-        // The socket's first valid request id stays bound; usage keeps that identity.
+        // The first valid request id remains the usage identity.
       }
     }
     if (msg.type === 'SpeechStarted') {
@@ -480,45 +507,51 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
       this.endSpeech();
       return;
     }
-    if (msg.type !== 'Results') return;
-    const result = msg as unknown as DGResult;
-    const alt = result.channel?.alternatives?.[0];
-    if (alt?.transcript?.trim()) {
-      const startMs = Math.round(result.start * 1000);
-      const endMs = Math.round((result.start + result.duration) * 1000);
-      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs < 0 || endMs < startMs) return;
-      this.beginSpeech();
-      this.itemId ??= `${this.meter.opening.connectionId}:${++this.utteranceSequence}`;
-      const event: TranscriptEvent = {
-        itemId: this.itemId,
-        text: alt.transcript,
-        confidence: alt.confidence,
-        isFinal: result.is_final,
-        startMs,
-        endMs,
-        durationMs: endMs - startMs,
-        // Speech has begun above, and its end (`speech_final`, `UtteranceEnd` or the close) follows this result.
-        beforeSpeechEnd: true,
-        words: (alt.words ?? []).map((word) => ({
-          word: word.word,
-          start: Math.round(word.start * 1000), // seconds → ms
+    if (msg.type === 'Results') {
+      const result = msg as unknown as DGResult;
+      const alt = result.channel?.alternatives?.[0];
+      if (alt?.transcript?.trim()) {
+        const startMs = Math.round(result.start * 1000);
+        const endMs = Math.round((result.start + result.duration) * 1000);
+        if (Number.isFinite(startMs) === false || Number.isFinite(endMs) === false || startMs < 0 || endMs < startMs) return;
+        this.beginSpeech();
+        this.itemId ??= `${this.meter.opening.connectionId}:${++this.utteranceSequence}`;
+        const words = (alt.words ?? []).map((word) => ({
+          word: word.punctuated_word ?? word.word,
+          start: Math.round(word.start * 1000),
           end: Math.round(word.end * 1000),
           confidence: word.confidence,
           ...(word.speaker === undefined ? {} : { speaker: String(word.speaker) }),
-        })),
-      };
-      // Attach sentiment when Deepgram returns it
-      if (result.sentiments?.average) {
-        event.sentiment = {
-          label: result.sentiments.average.sentiment,
-          confidence: Math.abs(result.sentiments.average.sentiment_score),
+        }));
+        const rawSpeaker = lineSpeaker(words, this.diarized);
+        const event: TranscriptEvent = {
+          itemId: this.itemId,
+          text: alt.transcript,
+          confidence: alt.confidence,
+          isFinal: result.is_final,
+          startMs,
+          endMs,
+          durationMs: endMs - startMs,
+          beforeSpeechEnd: true,
+          words,
+          ...(rawSpeaker === undefined ? {} : {
+            speaker: rawSpeaker === null ? null : `${this.meter.opening.connectionId}:${rawSpeaker}`,
+          }),
         };
+        if (result.sentiments?.average) {
+          event.sentiment = {
+            label: result.sentiments.average.sentiment,
+            confidence: Math.abs(result.sentiments.average.sentiment_score),
+          };
+        }
+        // Close the identity before listeners run, so a reentrant close emits no second final.
+        if (event.isFinal) this.itemId = undefined;
+        this.emit('transcript', event);
+      } else if (result.is_final) {
+        this.retractOpenItem();
       }
-      this.emit('transcript', event);
-      if (event.isFinal) this.itemId = undefined;
+      if (result.speech_final) this.endSpeech();
     }
-    // speech_final indicates the speaker paused — emit speech_end
-    if (result.speech_final) this.endSpeech();
   }
 }
 

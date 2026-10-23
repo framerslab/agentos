@@ -32,6 +32,12 @@ export const LIVEKIT_TRANSCRIPTION_ATTRIBUTES = {
 /** The attribute this library adds to a line the provider could not transcribe, holding a short reason. */
 export const TRANSCRIPTION_FAILED_ATTRIBUTE = 'agentos.transcription_failed';
 
+/** A line's connection-scoped label, or the empty string for explicit null. */
+export const TRANSCRIPTION_SPEAKER_ATTRIBUTE = 'agentos.speaker';
+
+/** The parent item id on a later run of a split final. */
+export const TRANSCRIPTION_RUN_OF_ATTRIBUTE = 'agentos.run_of';
+
 /**
  * The attributes this library adds to a final: the line's start and end on the
  * session's audio clock, when the provider gave them, each as whole
@@ -60,6 +66,10 @@ export interface LedgerItem {
   readonly language?: string;
   /** Why the provider could not transcribe the line; its text is then empty. */
   readonly failed?: string;
+  /** One known voice, null for requested but uncertain attribution, absent when not requested. */
+  readonly speaker?: string | null;
+  /** The original item id on a later run of a split final. */
+  readonly runOf?: string;
 }
 
 /**
@@ -82,6 +92,10 @@ export interface LedgerEvent {
   language?: string;
   /** Why the provider could not transcribe the line; its text is then empty. An empty reason counts as none. */
   failed?: string;
+  /** One known voice, null for requested but uncertain attribution, absent when not requested. */
+  speaker?: string | null;
+  /** The original item id on a later run of a split final. */
+  runOf?: string;
 }
 
 /** Options of {@link TranscriptLedger}. */
@@ -115,35 +129,40 @@ export class TranscriptLedger {
   }
 
   /**
-   * Applies one transcript. Answers `true` when the ledger changed: a new
-   * line, a new interim text, the final, or a line taken back. An empty final
-   * with no failure takes back the text a line showed so far (a device
-   * session's retraction when it closes), and the line is hidden from then on.
-   * An event with no item id, a final for a line already final, an interim
-   * after the final, an interim with the same text and the retraction of a
-   * line never shown change nothing.
+   * Applies a new line, changed interim text or speaker, final or retraction.
+   * An empty final with no failure hides a previously shown line. First-seen
+   * order never changes. An interim with identical text and speaker, a
+   * repeated final and an interim after a final change nothing. Omitting a
+   * previously present speaker removes it; null remains distinct from absent.
    */
   apply(event: LedgerEvent): boolean {
     const itemId = event.itemId;
-    if (!itemId) return false;
+    if (itemId === undefined || itemId === '') return false;
     const held = this.lines.get(itemId);
     if (held?.isFinal) return false;
-    // An empty reason is no reason: the LiveKit stream carries none, so a reader takes such a line back.
     const failed = event.failed || undefined;
+    const fields = {
+      ...(event.speaker === undefined ? {} : { speaker: event.speaker }),
+      ...(event.runOf === undefined ? {} : { runOf: event.runOf }),
+    };
     if (event.isFinal && event.text === '' && failed === undefined) {
       if (held === undefined) return false;
       this.retracted.add(itemId);
-      this.lines.set(itemId, { itemId, text: '', isFinal: true });
+      this.lines.set(itemId, { itemId, text: '', isFinal: true, ...fields });
       this.trim(itemId);
       return true;
     }
-    if (!event.isFinal && held !== undefined && held.text === event.text) return false;
-    const line: { -readonly [K in keyof LedgerItem]: LedgerItem[K] } = { itemId, text: event.text, isFinal: event.isFinal };
-    if (event.startMs !== undefined) line.startMs = event.startMs;
-    if (event.endMs !== undefined) line.endMs = event.endMs;
-    if (event.language !== undefined) line.language = event.language;
-    if (failed !== undefined) line.failed = failed;
-    // Setting a key a Map already holds keeps its place, so a line stays where it was first seen.
+    if (event.isFinal === false && held && held.text === event.text && held.speaker === event.speaker) return false;
+    const line: LedgerItem = {
+      itemId,
+      text: event.text,
+      isFinal: event.isFinal,
+      ...fields,
+      ...(event.startMs === undefined ? {} : { startMs: event.startMs }),
+      ...(event.endMs === undefined ? {} : { endMs: event.endMs }),
+      ...(event.language === undefined ? {} : { language: event.language }),
+      ...(failed === undefined ? {} : { failed }),
+    };
     this.lines.set(itemId, line);
     this.trim(itemId);
     return true;
@@ -214,6 +233,8 @@ export class TranscriptLedger {
         ...(typeof line.endMs === 'number' ? { endMs: line.endMs } : {}),
         ...(typeof line.language === 'string' ? { language: line.language } : {}),
         ...(typeof line.failed === 'string' ? { failed: line.failed } : {}),
+        ...(typeof line.speaker === 'string' || line.speaker === null ? { speaker: line.speaker } : {}),
+        ...(typeof line.runOf === 'string' ? { runOf: line.runOf } : {}),
       });
     }
     return ledger;
@@ -242,17 +263,63 @@ export class TranscriptLedger {
 }
 
 /**
+ * Presentation order without changing replay order. Each parent and its
+ * children occupy the family's first-seen position, parent first, then child
+ * suffixes in numeric order. Other lines retain first-seen order. Missing
+ * parents are allowed; malformed suffixes follow valid ones in arrival order.
+ */
+export function readingOrder(items: readonly LedgerItem[]): LedgerItem[] {
+  const families = new Map<string, LedgerItem[]>();
+  for (const item of items) {
+    const key = item.runOf ?? item.itemId;
+    const family = families.get(key);
+    if (family) family.push(item);
+    else families.set(key, [item]);
+  }
+  const ordered: LedgerItem[] = [];
+  for (const [parent, family] of families) {
+    const ranked = family.map((item, index) => ({ item, index, rank: runPosition(item, parent) }));
+    ranked.sort((left, right) => {
+      if (left.rank < right.rank) return -1;
+      if (left.rank > right.rank) return 1;
+      return left.index - right.index;
+    });
+    ordered.push(...ranked.map(({ item }) => item));
+  }
+  return ordered;
+}
+
+/** Parent first, then safe numeric child suffixes, then malformed children. */
+function runPosition(item: LedgerItem, parent: string): number {
+  if (item.itemId === parent) return 0;
+  const prefix = `${parent}.`;
+  if (item.itemId.startsWith(prefix) === false) return Infinity;
+  const suffix = item.itemId.slice(prefix.length);
+  if (/^\d+$/.test(suffix) === false) return Infinity;
+  const position = Number(suffix);
+  return Number.isSafeInteger(position) && position >= 2 ? position : Infinity;
+}
+
+/**
  * Reads one LiveKit transcription stream (its text and attributes) as a
  * {@link LedgerEvent}, or `null` when it carries no segment id. The stream's
  * {@link TRANSCRIPTION_TIME_ATTRIBUTES} become the event's `startMs` and
  * `endMs`, each only when it holds whole milliseconds in decimal digits; a time
  * the stream does not carry, or carries in any other form, is left undefined.
+ *
+ * A speaker attribute is read on interims and finals: an empty string means
+ * null, while absence means no requested speaker information. A split run's
+ * parent attribute becomes runOf. Neither field changes the replay cursor.
  */
 export function transcriptEventFromLiveKit(text: string, attributes: Readonly<Record<string, string>> | undefined): LedgerEvent | null {
   if (attributes === undefined) return null;
   const itemId = attributes[LIVEKIT_TRANSCRIPTION_ATTRIBUTES.segmentId];
   if (!itemId) return null;
   const event: LedgerEvent = { itemId, text, isFinal: attributes[LIVEKIT_TRANSCRIPTION_ATTRIBUTES.final] === 'true' };
+  const speaker = attributes[TRANSCRIPTION_SPEAKER_ATTRIBUTE];
+  if (typeof speaker === 'string') event.speaker = speaker === '' ? null : speaker;
+  const runOf = attributes[TRANSCRIPTION_RUN_OF_ATTRIBUTE];
+  if (typeof runOf === 'string') event.runOf = runOf;
   const failed = attributes[TRANSCRIPTION_FAILED_ATTRIBUTE];
   if (failed) event.failed = failed;
   const startMs = readMs(attributes[TRANSCRIPTION_TIME_ATTRIBUTES.startMs]);

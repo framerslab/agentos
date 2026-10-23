@@ -1179,6 +1179,35 @@ The existing listen-only session remains separate: it requires no TTS or reasoni
 
 ---
 
+## Speaker labels in streaming transcripts
+
+`TranscriptEvent`, `LedgerEvent` and `LedgerItem` accept optional `speaker` and `runOf` fields. A string speaker names one voice on one connection. Null means diarization was requested but the line's words do not name exactly one voice; an absent field means no speaker information was requested. `runOf` names the original item on a later run of a split final. These fields are additive.
+
+`lineSpeaker(words, diarized)` returns a raw label only if every word has that same label. Mixed labels, a labelled word beside an unlabelled one, and no labels return null when diarization was requested. The existing orchestrator speaker selection is unchanged.
+
+Deepgram's `providerOptions.diarize_model` sends its string value and suppresses the legacy `diarize` parameter. Use `latest` or `v1` for streaming. The existing `providerOptions.diarize: true` still sends `diarize=true`. `latest` may resolve to a newer streaming diarizer later. Source: https://developers.deepgram.com/docs/diarization, read 22 October 2026. Line labels use `<connectionId>:<rawLabel>`; per-word labels remain raw provider values. No word-level speaker confidence is assumed. OpenAI does not set the new line field.
+
+`splitFinalBySpeaker(event)` returns one final per consecutive voice run. The first retains the item id; subsequent runs use `.2`, `.3` and `runOf`. Unknown words form their own null-labelled runs. Runs retain punctuated tokens and derive their times from their first and last words. Homogeneous finals and interims are returned unchanged. The helper only splits keyed events with requested speaker information and leaves existing child runs unchanged. Deepgram item ids supply the connection prefix; generic unscoped item ids retain raw word labels.
+
+```typescript
+import { splitFinalBySpeaker, type TranscriptEvent } from '@framers/agentos/io/voice-pipeline';
+
+/** Deliver each finalized run to the host's existing output and final-only keep writer. */
+export function finalizedRuns(event: TranscriptEvent): TranscriptEvent[] {
+  return event.isFinal ? splitFinalBySpeaker(event) : [event];
+}
+```
+
+The ledger stores every line in first-seen order. `resumeAfterId()` and `finalsAfter()` retain that order for replay. Render or export `readingOrder(ledger.items())`: it keeps a parent and its numerically ordered runs at the family's first-seen position, even if a child arrived before its parent or children arrived out of order. Do not replace the ledger's cursor order with display order. `toJSON()` and `fromJSON()` preserve the fields. A same-text interim whose speaker changes or becomes absent now updates its ledger line; a final remains immutable.
+
+`LiveKitTranscriptionOutput` writes `TRANSCRIPTION_SPEAKER_ATTRIBUTE` (`agentos.speaker`) on interims and finals, using an empty string for null and no attribute for absence. A split final also carries `TRANSCRIPTION_RUN_OF_ATTRIBUTE` (`agentos.run_of`). `transcriptEventFromLiveKit` reads both, including the null value. `write(event, extra)` accepts `extra.speaker`, including a null override. Replays preserve both fields. The browser entry exports the ledger, attributes, types, `lineSpeaker`, `splitFinalBySpeaker` and `readingOrder` without loading a Node provider.
+
+Deepgram now ends an item's identity only at its final or connection close. An `UtteranceEnd` or `speech_final` ends speech but preserves an item still waiting for its final. An empty final result or a close with an open item emits that item's empty final before closing, retracting speculative text without inventing a failure. A completed item emits no second final. The chain forwards these retractions and LiveKit replays them to a reader that missed them. This fixes unfinished text remaining visible after the connection ended. The provider's word mapping prefers `punctuated_word` when supplied. Source for the distinction between speech end and subsequent speech: https://developers.deepgram.com/docs/utterance-end, read 22 October 2026.
+
+`DEEPGRAM_STREAMING_ADDONS.diarization` is 0.0020 USD per minute. `sttEntryPricePerMinute(entry, { diarize: true })` adds it only to a known Deepgram streaming row; other entries and omitted options retain their earlier answers, and unknown rows remain undefined. Source: https://deepgram.com/pricing, read 22 October 2026. These are published pay-as-you-go reference tariffs. The opted-out request tariff remains unverified until checked against the account's tariff or invoice.
+
+---
+
 ## References
 
 ### Voice activity detection and endpoint detection

@@ -55,3 +55,11 @@ export function deepgramPreRecordedPricing(modelId: string | undefined): number 
     ? DEEPGRAM_PRE_RECORDED_PRICING[modelId]
     : undefined;
 }
+
+/**
+ * Streaming add-ons in US dollars per minute, pay as you go. Speaker
+ * diarization is 0.0020 at https://deepgram.com/pricing, read 22 October 2026.
+ * This is a published reference tariff, not a measured bill or verification
+ * of the tariff for an opted-out request.
+ */
+export const DEEPGRAM_STREAMING_ADDONS = Object.freeze({ diarization: 0.0020 });
