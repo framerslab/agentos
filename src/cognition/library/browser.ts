@@ -1,7 +1,8 @@
 /**
- * @fileoverview The library's browser entry: what a page may import. Nothing here reaches a Node module or a
- * package; a test walks its import graph. Nothing here reaches the DOM either, but for IndexedDB, which the
- * key-value store reaches only when it is opened.
+ * @fileoverview The library's browser entry: what a page may import. Nothing here reaches a Node module, and the one
+ * package it reaches is the library's key-value module, `@framers/sql-storage-adapter/kv`, from the storage entry
+ * alone; a test walks its import graph. Nothing here reaches the DOM either, but for IndexedDB, which the key-value
+ * store reaches only when it is opened; `readHtml` reads the parsed document a page hands it.
  * @module agentos/cognition/library/browser
  */
 
