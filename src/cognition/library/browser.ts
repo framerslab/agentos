@@ -5,7 +5,7 @@
  * @module agentos/cognition/library/browser
  */
 
-export { lexicalTokens, snippetAround, type Snippet } from './tokens.js';
+export { countWords, foldText, lexicalTokens, snippetAround, type FoldedText, type Snippet } from './tokens.js';
 export { chunkTurns, type ChunkTurnsOptions, type LibraryTurn, type TurnChunk } from './chunkTurns.js';
 export {
   LexicalIndex,

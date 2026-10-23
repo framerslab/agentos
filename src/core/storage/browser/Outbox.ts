@@ -5,7 +5,7 @@
  * @module agentos/core/storage/browser/Outbox
  */
 
-import type { KeyValueStore } from './KeyValueStore.js';
+import type { KeyValueStore } from '@framers/sql-storage-adapter/kv';
 
 /** One held change. */
 export interface OutboxEntry<T = unknown> {
