@@ -164,14 +164,14 @@ export interface FoldedText {
 }
 
 /**
- * The fold the library's find and search match by, with the map back to the source: each code point decomposed (NFD),
- * its combining marks dropped and a curly apostrophe (U+2019) made straight, then the text lower-cased whole, as a
- * search lower-cases a whole word, so the folded text of a word is that word's fold. Lower case maps each code point
- * alone but for a capital sigma, whose final form depends on its neighbours, and a sigma's two forms are one unit each,
- * so each code point takes the piece of the whole text's lower case as long as its own lower case, and its units take
- * the code point's interval. A code point that yields nothing, a combining mark, widens the interval of the character
- * before it. The fold changes a text's length, so a match found in `text` is placed in the source through `map`, never
- * by its offsets in `text`.
+ * A text folded for matching, with the map back to the source: each code point decomposed (NFD), its combining marks
+ * dropped and a curly apostrophe (U+2019) made straight, then the text lower-cased whole, as a search lower-cases a
+ * whole word, so the folded text of a word is that word's fold. Lower case maps each code point alone but for a capital
+ * sigma, whose final form depends on its neighbours, and a sigma's two forms are one unit each, so each code point
+ * takes the piece of the whole text's lower case as long as its own lower case, and its units take the code point's
+ * interval. A code point that yields nothing, a combining mark, widens the interval of the character before it. The
+ * fold changes a text's length, so a match found in `text` is placed in the source through `map`, never by its offsets
+ * in `text`.
  */
 export function foldText(text: string): FoldedText {
   const points = Array.from(text);
@@ -203,24 +203,43 @@ export function foldText(text: string): FoldedText {
   return { text: units.join(''), map };
 }
 
-/** The part of a word segmenter the counter reads; the package's TypeScript library, ES2021, has no `Intl.Segmenter` type. */
-interface WordCounter {
-  segment(text: string): Iterable<{ isWordLike?: boolean }>;
+/** What the word rules read of a segment `Intl.Segmenter` cuts at the `word` granularity. */
+interface WordSegmentData {
+  /** The segment's text. */
+  segment: string;
+  /** True for a word: letters, numbers or ideographs; false or absent for spaces and punctuation. */
+  isWordLike?: boolean;
+}
+
+/**
+ * `Intl.Segmenter` at the `word` granularity, as the word rules call it; the package's TypeScript library, ES2021, has no
+ * type for it.
+ */
+type WordSegmenterConstructor = new (
+  locale?: string,
+  options?: { granularity: 'word' },
+) => { segment(text: string): Iterable<WordSegmentData> };
+
+/** `Intl.Segmenter` where the runtime has it, else undefined: a runtime with no segmenter, or with no `Intl` at all. */
+function runtimeSegmenter(): WordSegmenterConstructor | undefined {
+  if (typeof Intl === 'undefined') return undefined;
+  const Segmenter = (Intl as unknown as { Segmenter?: unknown }).Segmenter;
+  return typeof Segmenter === 'function' ? (Segmenter as WordSegmenterConstructor) : undefined;
 }
 
 /** The counter's segmenter, made on the first count and kept for the module's life; null where the runtime has none. */
-let wordCounter: WordCounter | null | undefined;
+let wordCounter: InstanceType<WordSegmenterConstructor> | null | undefined;
 
 /**
  * The words a text holds, as a person counts them: the segments `Intl.Segmenter` cuts at the `word` granularity and
  * marks word-like (letters, numbers, ideographs), so `don't` and `1.2M` are one word each and punctuation is none.
  * Chinese and Japanese are cut by a dictionary, so two runtimes can differ by a word or two on such a text. Where the
- * runtime has no `Intl.Segmenter`, the runs between white space.
+ * runtime has no `Intl.Segmenter`, or no `Intl` at all, the runs between white space.
  */
 export function countWords(text: string): number {
   if (wordCounter === undefined) {
-    const Segmenter = (Intl as unknown as { Segmenter?: new (locale?: string, options?: { granularity: 'word' }) => WordCounter }).Segmenter;
-    wordCounter = typeof Segmenter === 'function' ? new Segmenter(undefined, { granularity: 'word' }) : null;
+    const Segmenter = runtimeSegmenter();
+    wordCounter = Segmenter === undefined ? null : new Segmenter(undefined, { granularity: 'word' });
   }
   if (wordCounter === null) return text.split(/\s+/u).filter((run) => run !== '').length;
   let count = 0;
@@ -252,12 +271,15 @@ export type WordSegmenter = (run: string) => string[];
 /** The runtime's word segmenter, made once on the first ask, or null where the runtime has no `Intl.Segmenter`. */
 let runtimeWordSegmenter: WordSegmenter | null | undefined;
 
-/** `Intl.Segmenter`'s word boundaries where the runtime has it, else null. The segmenter is made once and shared. */
+/**
+ * `Intl.Segmenter`'s word boundaries where the runtime has it, else null, a runtime with no `Intl` at all among them.
+ * The segmenter is made once and shared.
+ */
 export function defaultWordSegmenter(): WordSegmenter | null {
   if (runtimeWordSegmenter !== undefined) return runtimeWordSegmenter;
-  const Segmenter = (Intl as unknown as { Segmenter?: new (locale?: string, options?: { granularity: 'word' }) => { segment(text: string): Iterable<{ segment: string }> } }).Segmenter;
+  const Segmenter = runtimeSegmenter();
   let found: WordSegmenter | null = null;
-  if (typeof Segmenter === 'function') {
+  if (Segmenter !== undefined) {
     const segmenter = new Segmenter(undefined, { granularity: 'word' });
     found = (run: string): string[] => Array.from(segmenter.segment(run), (part) => part.segment);
   }
