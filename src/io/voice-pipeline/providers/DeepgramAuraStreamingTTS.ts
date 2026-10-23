@@ -38,15 +38,19 @@
  * before it starts. Meanwhile the segment's late audio goes out as it comes,
  * without a boundary, while its reply is the session's: once the next reply's
  * text has arrived it is dropped, so no reply plays the tail of the one
- * before. The late `Flushed` of a segment that timed out completes
- * nothing, however late it comes: one later than that wait is written as one
- * console warning line, and so is a `Flushed` that answers no `Flush` of the
- * socket. After a `cancel()`
+ * before. The late `Flushed` of a segment that timed out completes nothing,
+ * and a `Flushed` that answers no `Flush` of the socket is written as one
+ * console warning line. After a `cancel()`
  * that cut a segment, Deepgram stops sending audio "as soon as possible" and
  * answers the `Clear` with `Cleared`: what arrives before the `Cleared` is the
  * cleared text's, so its audio is dropped and its `Flushed` completes nothing,
  * and the next segment starts at the `Cleared`, or one second after the cancel
- * without it. Deepgram takes at most 20 `Flush` messages in 60
+ * without it. A wait that ends without the response it waited for gives the
+ * socket up: Deepgram's audio names no segment, so what it still sent of the
+ * old text after the next segment's `Speak` would play as that segment's, and
+ * the old `Flushed` would complete it. The socket is closed, nothing it still
+ * sends reaches the session, one console warning line says so, and the next
+ * segment opens a fresh socket. Deepgram takes at most 20 `Flush` messages in 60
  * seconds and answers the rest with a `Warning`: a segment that would pass that
  * limit is spoken without a `Flush`, the segments after it join it, each as its
  * own `Speak`, and one `Flush` once the window has passed completes them
@@ -61,6 +65,8 @@
  * 60-minute limit. A socket closed between replies closes nothing and reports
  * nothing: the next reply's first segment opens a fresh socket, the reply's one
  * try, and a reply that follows a cut one takes the socket still opening. A
+ * socket the session gave up for a response it did not send in time is
+ * followed the same way, by the next segment's fresh socket. A
  * socket that fails to open for a reply (refused, closed or failed before it
  * opens, or not open within eight seconds) is a `'warning'` naming the cause,
  * one console warning line when nothing listens for it, never `'error'`, and
