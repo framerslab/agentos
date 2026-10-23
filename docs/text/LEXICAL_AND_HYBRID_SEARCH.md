@@ -67,7 +67,7 @@ The index keeps no text: a hit carries its id, score and metadata, and the calle
 
 ### In a browser
 
-A page imports `@framers/agentos/cognition/library/browser`. It exports `LexicalIndex`, `FuzzyIndex`, `withinOneEdit`, `lexicalTokens`, `snippetAround` and `chunkTurns` with their types, the page's own storage: a key-value store over IndexedDB or memory, an outbox and `reconcileList`, and the readers of transcript files from other notetakers with the plan of an archive's entries. Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph. [Library Index: On a device](../features/LIBRARY_INDEX.md#on-a-device) lists every export and builds a page's index from a transcript's passages with `lexicalTokens`.
+A page imports `@framers/agentos/cognition/library/browser`. It exports `LexicalIndex`, `FuzzyIndex`, `withinOneEdit`, `lexicalTokens`, `snippetAround`, `countWords`, `foldText` and `chunkTurns` with their types, the page's own storage: a key-value store over IndexedDB or memory, an outbox and `reconcileList`, and the readers of transcript files from other notetakers with the plan of an archive's entries. Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph. [Library Index: On a device](../features/LIBRARY_INDEX.md#on-a-device) lists every export and builds a page's index from a transcript's passages with `lexicalTokens`.
 
 ## BM25Index
 
