@@ -2079,8 +2079,9 @@ export const VOICE_SESSION_EVENT_NAMES: readonly (keyof VoiceSessionEventMap)[] 
  * A transcript the client made itself, sent in place of audio by a client
  * that transcribes on its own device (for example with `MoonshineBrowserSTT`
  * in a browser). It carries the {@link TranscriptEvent} fields a display and
- * an endpoint detector read; every interim and the final of one line carry
- * the same `itemId`, and the final comes once, when the line is complete.
+ * an endpoint detector read, `speaker` and `runOf` included; every interim
+ * and the final of one line carry the same `itemId`, and the final comes
+ * once, when the line is complete.
  * `toClientTranscriptMessage()` makes one from a `TranscriptEvent`;
  * `isClientTranscriptMessage()` checks one a server received, and
  * `transcriptEventFromClient()` turns it back into a `TranscriptEvent`.
@@ -2115,6 +2116,15 @@ export interface ClientTranscriptMessage {
   endMs?: number;
   /** Language of `text` (for example `'en'`), at most 64 characters. */
   language?: string;
+  /**
+   * The line's speaker, as `TranscriptEvent.speaker` carries it: one
+   * connection-scoped label of 1 to 128 characters, or null when diarization
+   * was requested and the line's words do not name exactly one voice. Absent
+   * when no speaker information was requested.
+   */
+  speaker?: string | null;
+  /** The original line's id on a later run of a final split by speaker, 1 to 128 characters. */
+  runOf?: string;
 }
 
 /**
