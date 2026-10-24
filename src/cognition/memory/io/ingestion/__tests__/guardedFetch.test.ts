@@ -366,14 +366,91 @@ describe('guardedFetch', () => {
       const lookup = counting();
       const truthy = (() => 1) as unknown as GuardedFetchOptions['allowHost'];
       expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: truthy })))).toBe('host');
-      // A rule that fails is a rule that did not say yes.
+      // A rule that fails is a rule that did not say yes. What it threw is the
+      // refusal's cause, for whoever reads the rule's own logs; the message
+      // keeps its details out.
+      const trouble = new Error('the list could not be read from 10.0.0.53');
       const failing = (): boolean => {
-        throw new Error('the rule could not read its list');
+        throw trouble;
       };
-      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: failing })))).toBe('host');
+      const refused = await guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: failing })).then(
+        () => 'read',
+        (error: unknown) => error,
+      );
+      expect(refused).toBeInstanceOf(GuardedFetchError);
+      expect(refused).toMatchObject({ reason: 'host', message: 'pages.test is not read: the host rule failed' });
+      expect(refused).toHaveProperty('cause', trouble);
       const notARule = 'docs.google.com' as unknown as GuardedFetchOptions['allowHost'];
       await expect(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: notARule }))).rejects.toBeInstanceOf(TypeError);
       expect(lookup.lookups()).toBe(0);
+    });
+
+    it('is asked under the deadline: a rule that outlasts it leaves the read refused for the deadline, not read with a fresh one', async () => {
+      const before = connections;
+      let lookups = 0;
+      /** Answers at the next turn of the event loop, as a lookup does, so a deadline that has passed is noticed first. */
+      const nextTurn = async () => {
+        lookups += 1;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        return [{ address: '127.0.0.1', family: 4 }];
+      };
+      const deadlineMs = 100;
+      /** A rule that takes three times the deadline to say yes. */
+      const slow = (): boolean => {
+        const until = Date.now() + 3 * deadlineMs;
+        while (Date.now() < until) {
+          // The rule is at work.
+        }
+        return true;
+      };
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: nextTurn, allowHost: slow, deadlineMs })))).toBe('deadline');
+      // The lookup was asked for, since the deadline's timer fires only once
+      // the rule has returned; its answer came too late for anything to be
+      // connected to.
+      expect(lookups).toBe(1);
+      expect(connections).toBe(before);
+    });
+
+    it("ends on the caller's abort from inside the rule with the signal's reason and no lookup, at the first address as at a redirect", async () => {
+      const reason = new Error('the caller moved on');
+      // A rule that refuses, having told the fetch to stop: the signal's reason wins over the refusal.
+      const refusing = counting();
+      const stopper = new AbortController();
+      const refusesAndStops = (): boolean => {
+        stopper.abort(reason);
+        return false;
+      };
+      await expect(
+        guardedFetch(at('/page'), reach({ resolve: refusing.resolve, allowHost: refusesAndStops, signal: stopper.signal })),
+      ).rejects.toBe(reason);
+      expect(refusing.lookups()).toBe(0);
+
+      // A rule that allows, having told the fetch to stop: no lookup is started for a read that has ended.
+      const allowing = counting();
+      const stopperToo = new AbortController();
+      const allowsAndStops = (): boolean => {
+        stopperToo.abort(reason);
+        return true;
+      };
+      await expect(
+        guardedFetch(at('/page'), reach({ resolve: allowing.resolve, allowHost: allowsAndStops, signal: stopperToo.signal })),
+      ).rejects.toBe(reason);
+      expect(allowing.lookups()).toBe(0);
+
+      // The same at a redirect: the first hop's host was resolved, the redirect's target never.
+      const atTheRedirect = counting();
+      const seen: string[] = [];
+      const stopperAtTheRedirect = new AbortController();
+      const stopsAtTheSecond = (host: string): boolean => {
+        seen.push(host);
+        if (seen.length === 2) stopperAtTheRedirect.abort(reason);
+        return true;
+      };
+      await expect(
+        guardedFetch(at('/redirect/1'), reach({ resolve: atTheRedirect.resolve, allowHost: stopsAtTheSecond, signal: stopperAtTheRedirect.signal })),
+      ).rejects.toBe(reason);
+      expect(seen).toEqual(['pages.test', 'pages.test']);
+      expect(atTheRedirect.lookups()).toBe(1);
     });
   });
 
