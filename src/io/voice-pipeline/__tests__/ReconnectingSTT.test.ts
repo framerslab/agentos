@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { ReconnectingSTT } from '../ReconnectingSTT.js';
 import { TranscriptDedupe } from '../TranscriptDedupe.js';
-import type { AudioFrame, IStreamingSTT, StreamingSTTSession, TranscriptEvent } from '../types.js';
+import type { AudioFrame, IStreamingSTT, StreamingSTTSession, TranscriptEvent, TranscriptWord } from '../types.js';
 
 /** A provider whose sessions the test drives: it records pushed frames and emits what the test says. */
 function scripted() {
@@ -211,6 +211,32 @@ describe('ReconnectingSTT', () => {
     await vi.waitFor(() => expect(sessions[1].frames.length).toBe(60)); // the replayed second, then the queue
     sessions[1].emit('transcript', final('across the drop', 900, 1_150)); // the new session's clock starts where the replay does, at the timeline's 0
     expect(got).toEqual([[900, 1_150]]);
+  });
+  it('moves word times onto the session timeline as it moves the transcript\'s bounds, across an overflow gap, and leaves words without times as they are', async () => {
+    const { stt, sessions } = scripted();
+    const r = new ReconnectingSTT(stt, { ringBufferCapacityMs: 1_000, minReplayMs: 0, queueCapacityMs: 2_000, clock: () => 0 });
+    const session = await r.startSession();
+    const got: TranscriptEvent[] = [];
+    session.on('transcript', (e: TranscriptEvent) => got.push(e));
+    for (let t = 0; t < 5_000; t += 20) session.pushAudio(frame(t)); // five seconds on the first socket; the buffer keeps the last second
+    sessions[0].emit('error', new Error('drop'));
+    for (let t = 5_000; t < 8_000; t += 20) session.pushAudio(frame(t)); // three seconds into a two-second queue: the first second is dropped
+    await vi.waitFor(() => expect(sessions[1].frames.length).toBe(150));
+    // On the new socket's clock the replay is 0-1000 ms (4000-5000 ms of the session) and the retained queue
+    // begins at 1000 ms (6000 ms of the session, after the dropped second).
+    const word = (text: string, start: number, end: number): TranscriptWord => ({ word: text, start, end, confidence: 0.9 });
+    sessions[1].emit('transcript', { ...final('after the drop', 1_200, 2_000), words: [word('after', 1_200, 1_500), word('the', 1_500, 1_650), word('drop', 1_650, 2_000)] });
+    sessions[1].emit('transcript', { ...final('across the gap', 800, 1_400), words: [word('across', 800, 1_000), word('the', 1_000, 1_200), word('gap', 1_200, 1_400)] });
+    const untimed: TranscriptEvent = { text: 'untimed', confidence: 1, words: [{ word: 'untimed', confidence: 0.9 } as TranscriptWord], isFinal: true };
+    sessions[1].emit('transcript', untimed);
+    expect(got).toHaveLength(3);
+    expect(got.slice(0, 2).map((e) => [e.startMs, e.endMs, e.words.map((w) => [w.start, w.end])])).toEqual([
+      [6_200, 7_000, [[6_200, 6_500], [6_500, 6_650], [6_650, 7_000]]],
+      // a word that ends where the replay ends stays before the gap, as the transcript's end would
+      [4_800, 6_400, [[4_800, 5_000], [6_000, 6_200], [6_200, 6_400]]],
+    ]);
+    expect(got[2]).toStrictEqual(untimed);
+    session.close();
   });
   it('gives up after three attempts in a minute and emits error then close', async () => {
     const { stt, sessions } = scripted();
