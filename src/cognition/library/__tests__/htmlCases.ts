@@ -526,6 +526,14 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: 'a tilde is escaped unless a space stands at each side of it, since GFM reads one tilde each side as struck words',
+    html: '<p>x ~a~ y, b~c~d and 2 ~ 3</p>',
+    title: null,
+    markdown: 'x \\~a\\~ y, b\\~c\\~d and 2 ~ 3',
+    images: 0,
+    cut: false,
+  },
+  {
     name: 'a cell spanning its rows to the end of the head stops at the body',
     html: '<table><thead><tr><th rowspan="0">A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>',
     title: null,
