@@ -388,10 +388,15 @@ describe('guardedFetch', () => {
     it('is asked under the deadline: a rule that outlasts it leaves the read refused for the deadline, not read with a fresh one', async () => {
       const before = connections;
       let lookups = 0;
-      /** Answers at the next turn of the event loop, as a lookup does, so a deadline that has passed is noticed first. */
+      /**
+       * Answers with the next turn's timers, where a deadline already due fires
+       * first. A lookup can answer no sooner: its answer comes with the I/O
+       * after the timers. (`setImmediate` would run in the check phase, before
+       * the next timers, when the case begins from an I/O callback.)
+       */
       const nextTurn = async () => {
         lookups += 1;
-        await new Promise<void>((resolve) => setImmediate(resolve));
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
         return [{ address: '127.0.0.1', family: 4 }];
       };
       const deadlineMs = 100;
@@ -451,6 +456,29 @@ describe('guardedFetch', () => {
       ).rejects.toBe(reason);
       expect(seen).toEqual(['pages.test', 'pages.test']);
       expect(atTheRedirect.lookups()).toBe(1);
+    });
+
+    it('begins no connection for a read the rule ended at a literal address, which needs no lookup', async () => {
+      const reason = new Error('the caller moved on');
+      // A public address written as a literal reaches the connection step with
+      // no lookup to end the read at. Blocked here, so no case reaches past
+      // this machine if the step regresses.
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        const stopper = new AbortController();
+        const allowsAndStops = (): boolean => {
+          stopper.abort(reason);
+          return true;
+        };
+        await expect(
+          guardedFetch('http://93.184.215.14/page', reach({ allowHost: allowsAndStops, allowPorts: [80], signal: stopper.signal })),
+        ).rejects.toBe(reason);
+        expect(connect).not.toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
     });
   });
 
