@@ -1055,6 +1055,78 @@ describe('VoicePipelineOrchestrator', () => {
     ]);
   });
 
+  it("drops the client's open lines as typed text takes the turn: a line it opens next interrupts the text's reply, and what it still sends of a dropped line reaches nothing", async () => {
+    await startSession();
+    const log = logDetector();
+    // The user starts to speak, then types: line 61's final has not come when the text arrives.
+    transport.emit('message', clientTranscript('61', 'Book a', false));
+    await vi.advanceTimersByTimeAsync(0);
+    transport.emit('message', { type: 'text_input', text: 'Cancel my order.' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+    // The user speaks over the text's reply on a line of its own: a speech start, which interrupts the reply.
+    transport.emit('message', clientTranscript('62', 'Wait', false));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ttsSession.cancel).toHaveBeenCalledOnce();
+    expect(transport.sendControl).toHaveBeenCalledWith(expect.objectContaining({ type: 'barge_in' }));
+    expect(orchestrator.state).toBe('listening');
+    // Line 61's late final belongs to the speech the text dropped: it reaches nothing. Line 62's final ends the speech.
+    transport.emit('message', clientTranscript('61', 'Book a table.', true));
+    transport.emit('message', clientTranscript('62', 'Wait, stop.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log).toEqual([
+      'vad speech_start',
+      'interim Book a',
+      // The text drops what the detector holds of the speech line 61 held open.
+      'reset',
+      'vad speech_start',
+      'reset',
+      'interim Wait',
+      'final Wait, stop.',
+      'vad speech_end',
+    ]);
+    expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Cancel my order.']);
+    // Neither line is open any more, so no line's timer closes one later with an empty final.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(log).toHaveLength(8);
+    expect(orchestrator.state).toBe('listening');
+  });
+
+  it("closes no line typed text dropped while the text's reply speaks: its timer ends no speech five seconds later, and the user listens from the text on", async () => {
+    await startSession();
+    const log = logDetector();
+    const users: string[] = [];
+    orchestrator.on('user_state_changed', (event: VoiceSessionEventMap['user_state_changed']) => users.push(`${event.oldState}>${event.newState}`));
+    transport.emit('message', clientTranscript('63', 'Book a', false));
+    await vi.advanceTimersByTimeAsync(0);
+    transport.emit('message', { type: 'text_input', text: 'Cancel my order.' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+    expect(users).toEqual(['listening>speaking', 'speaking>listening']);
+    // Line 63 gets no message again: five seconds on, the text's reply still speaks, and its timer closed nothing.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(log).toEqual(['vad speech_start', 'interim Book a', 'reset']);
+    expect(users).toEqual(['listening>speaking', 'speaking>listening']);
+    expect(orchestrator.state).toBe('speaking');
+  });
+
+  it('takes typed text as the turn though the speech it drops holds a final that ends a sentence, on the HeuristicEndpointDetector', async () => {
+    endpoint = new HeuristicEndpointDetector() as unknown as typeof endpoint;
+    await startSession();
+    // Line 64's final ends a sentence while line 65 is open: the speech has not ended, so the detector holds the final.
+    transport.emit('message', clientTranscript('64', 'Book', false));
+    transport.emit('message', clientTranscript('65', 'for', false));
+    transport.emit('message', clientTranscript('64', 'Book a table.', true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    // The text drops the speech: no end of it reaches the detector, whose held final would complete it as the turn.
+    transport.emit('message', { type: 'text_input', text: 'Cancel my order.' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Cancel my order.']);
+    expect(orchestrator.state).toBe('speaking');
+  });
+
   it('should hold at most eight client lines open, and stop a turn at 16,000 characters', async () => {
     await startSession();
     const log = logDetector();
