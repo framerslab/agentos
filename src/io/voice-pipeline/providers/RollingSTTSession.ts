@@ -73,7 +73,7 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
         ...(event.startMs === undefined ? {} : { startMs: event.startMs + offset }),
         ...(event.endMs === undefined ? {} : { endMs: event.endMs + offset }),
         // A transcript with no bounds counts its words from its own audio, so they stay as the provider gave them.
-        ...(event.words === undefined || event.startMs === undefined
+        ...(event.words === undefined || (event.startMs === undefined && event.endMs === undefined)
           ? {}
           : { words: event.words.map((word) => ({ ...word, start: word.start + offset, end: word.end + offset })) }),
       });
