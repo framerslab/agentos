@@ -43,7 +43,7 @@ import { VoiceMetricsReporter } from './VoiceMetricsReporter.js';
 import type { IStreamingSTT, IStreamingTTS } from './types.js';
 import type { HealthyProvider } from './HealthyProvider.js';
 import { openAITranscriptionPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
-import { deepgramStreamingPricing } from './providers/deepgramPricing.js';
+import { DEEPGRAM_STREAMING_ADDONS, deepgramStreamingPricing } from './providers/deepgramPricing.js';
 import { parseSttEntry } from './sttEntries.js';
 import { legacyProviderPolicy } from './ProviderPolicy.js';
 
@@ -363,19 +363,25 @@ export interface SttChainEntryOptions {
 }
 
 /**
- * US dollars a minute of an entry's audio, from the providers' price rows;
- * `undefined` when there is no row.
- *
- * @throws {RangeError} For an entry {@link parseSttEntry} refuses: another
- *   shape, or a vendor outside `STT_CHAIN_VENDORS`, such as
- *   `device:moonshine-auto`.
+ * US dollars per minute from the entry's published reference row, undefined
+ * when no row exists. Requested diarization adds the streaming add-on only
+ * for Deepgram. Omitted options retain the existing answer. The lookup does
+ * not establish an account's opted-out tariff.
+ * @param entry - The vendor and model accepted by parseSttEntry.
+ * @param options - Whether this Deepgram request asks for diarization.
+ * @throws {RangeError} When parseSttEntry refuses the entry.
  */
-export function sttEntryPricePerMinute(entry: string): number | undefined {
+export function sttEntryPricePerMinute(
+  entry: string,
+  options?: { diarize?: boolean },
+): number | undefined {
   const { vendor, model } = parseSttEntry(entry);
-  const price = vendor === 'openai' ? openAITranscriptionPricing(model) : vendor === 'deepgram' ? deepgramStreamingPricing(model) : undefined;
-  // A model named like a member every object inherits (`constructor`, `toString`)
-  // has no row; the guard keeps the answer a number or undefined for it.
-  return typeof price === 'number' ? price : undefined;
+  const price = vendor === 'openai' ? openAITranscriptionPricing(model)
+    : vendor === 'deepgram' ? deepgramStreamingPricing(model) : undefined;
+  if (typeof price === 'number') {
+    return price + (vendor === 'deepgram' && options?.diarize === true ? DEEPGRAM_STREAMING_ADDONS.diarization : 0);
+  }
+  return undefined;
 }
 
 /**

@@ -251,12 +251,16 @@ export {
   LIVEKIT_TRANSCRIPTION_TOPIC,
   TRANSCRIPTION_FAILED_ATTRIBUTE,
   TRANSCRIPTION_TIME_ATTRIBUTES,
+  TRANSCRIPTION_SPEAKER_ATTRIBUTE,
+  TRANSCRIPTION_RUN_OF_ATTRIBUTE,
+  readingOrder,
   TranscriptLedger,
   transcriptEventFromLiveKit,
   type LedgerEvent,
   type LedgerItem,
   type TranscriptLedgerOptions,
 } from './transcriptLedger.js';
+export { lineSpeaker, splitFinalBySpeaker } from './transcriptSpeakers.js';
 export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardResult } from './phraseHeard.js';
 export {
   VoiceMetricsReporter,
@@ -281,6 +285,7 @@ export {
 } from './env-constructor.js';
 export {
   DEEPGRAM_PRE_RECORDED_PRICING,
+  DEEPGRAM_STREAMING_ADDONS,
   DEEPGRAM_STREAMING_PRICING,
   deepgramPreRecordedPricing,
   deepgramStreamingPricing,

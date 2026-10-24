@@ -574,6 +574,16 @@ export interface TranscriptEvent {
   itemId?: string;
 
   /**
+   * One connection-scoped speaker when every word has that voice; null when
+   * diarization was requested but the words do not name exactly one voice.
+   * Absent when diarization was not requested. Per-word speakers stay raw.
+   */
+  speaker?: string | null;
+
+  /** The original item id on a later run of a final split by speaker. */
+  runOf?: string;
+
+  /**
    * Start of the utterance's audio, in milliseconds counted from the first
    * frame pushed into the session, when the provider reports speech
    * boundaries.
@@ -590,9 +600,12 @@ export interface TranscriptEvent {
   /**
    * `true` on a result the provider sends before the end of speech of the
    * speech it transcribes: the session's `'speech_end'` for that speech
-   * follows it. `DeepgramStreamingSTT` sets it on every result: it emits a
-   * segment's final before the `'speech_end'` that Deepgram's `speech_final`
-   * or `UtteranceEnd` raises. A provider that sends an utterance's final
+   * follows it. `DeepgramStreamingSTT` sets it on each result of an item
+   * whose speech has not ended: it emits a segment's final before the
+   * `'speech_end'` that Deepgram's `speech_final` or `UtteranceEnd` raises.
+   * It sets `false` on a result of an item whose `'speech_end'` came before
+   * its final (a final delayed past an `UtteranceEnd`), so that final answers
+   * the end already waiting. A provider that sends an utterance's final
    * after that utterance's `'speech_end'`, as `OpenAIRealtimeTranscriptionSTT`
    * does, leaves it undefined. {@link HeuristicEndpointDetector} reads it on
    * a final that carries an `itemId`: such a final belongs to the speech it
@@ -2107,8 +2120,9 @@ export const VOICE_SESSION_EVENT_NAMES: readonly (keyof VoiceSessionEventMap)[] 
  * A transcript the client made itself, sent in place of audio by a client
  * that transcribes on its own device (for example with `MoonshineBrowserSTT`
  * in a browser). It carries the {@link TranscriptEvent} fields a display and
- * an endpoint detector read; every interim and the final of one line carry
- * the same `itemId`, and the final comes once, when the line is complete.
+ * an endpoint detector read, `speaker` and `runOf` included; every interim
+ * and the final of one line carry the same `itemId`, and the final comes
+ * once, when the line is complete.
  * `toClientTranscriptMessage()` makes one from a `TranscriptEvent`;
  * `isClientTranscriptMessage()` checks one a server received, and
  * `transcriptEventFromClient()` turns it back into a `TranscriptEvent`.
@@ -2143,6 +2157,15 @@ export interface ClientTranscriptMessage {
   endMs?: number;
   /** Language of `text` (for example `'en'`), at most 64 characters. */
   language?: string;
+  /**
+   * The line's speaker, as `TranscriptEvent.speaker` carries it: one
+   * connection-scoped label of 1 to 128 characters, or null when diarization
+   * was requested and the line's words do not name exactly one voice. Absent
+   * when no speaker information was requested.
+   */
+  speaker?: string | null;
+  /** The original line's id on a later run of a final split by speaker, 1 to 128 characters. */
+  runOf?: string;
 }
 
 /**
