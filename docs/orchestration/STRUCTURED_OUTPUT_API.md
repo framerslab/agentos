@@ -5,7 +5,7 @@ Three functions exported from `@framers/agentos` turn a model call into data:
 | Function | Returns |
 |-----|---------|
 | [`generateObject()`](https://github.com/framerslab/agentos/blob/master/src/api/generateObject.ts) | An object validated against a Zod schema, retrying with the validation errors when a reply does not fit |
-| [`streamObject()`](https://github.com/framerslab/agentos/blob/master/src/api/streamObject.ts) | Partial objects while the reply streams, and the validated object when it ends |
+| [`streamObject()`](https://github.com/framerslab/agentos/blob/master/src/api/streamObject.ts) | Partial objects, and each completed element of one array field, while the reply streams, and the validated object when it ends |
 | [`embedText()`](https://github.com/framerslab/agentos/blob/master/src/api/embedText.ts) | One embedding vector per input text |
 
 [`StructuredOutputManager`](./STRUCTURED_OUTPUT.md) is the lower-level class that works with JSON Schema, and a [structured reply](../features/STRUCTURED_REPLY.md) asks for a schema answer inside an agent session.
@@ -79,7 +79,7 @@ When the reply does not parse or does not validate, the reply (shortened) and a 
 
 ## streamObject()
 
-`streamObject()` returns at once with an async iterable of partial objects and three promises:
+`streamObject()` returns at once with two async iterables, of partial objects and of the completed elements of one array field ([Elements of an array field](#elements-of-an-array-field)), and five promises:
 
 ```typescript
 import { streamObject } from '@framers/agentos';
@@ -106,11 +106,45 @@ const article = await object; // validated against ArticleSchema
 console.log(await usage);
 ```
 
-- The model call starts when `partialObjectStream` is first read, and `object`, `text` and `usage` settle after the stream ends. A caller that never reads `partialObjectStream` waits on them forever.
-- After each text chunk, the text so far is parsed with the open strings, arrays and objects closed, and an object is yielded when it differs from the last one yielded. The partial values are not validated: a field can hold a string that is still being written.
-- When the stream ends, the whole text is parsed (as in `generateObject()`: whole text, fenced block, first `{` to last `}`) and validated. `object` rejects with `ObjectGenerationError` when the text does not parse or does not validate; there is no retry, and `maxRetries` is accepted and not read.
-- `streamObject()` reads only the text of the stream. When the provider call fails, the text ends where it stopped and the iteration ends without throwing; the provider's error does not reach the caller, and `object` rejects with the parse or validation error of the text that arrived. When `abortSignal` aborts, the provider's stream stops, the iteration ends, and `object` rejects with the signal's reason.
-- The schema reaches the model only in the system prompt: `streamObject()` sends no provider-side format. Its options are `schema`, `schemaName` and `schemaDescription` (written into the system prompt), `maxRetries` (not read), and `provider`, `model`, `prompt`, `messages`, `system` (a string), `temperature`, `maxTokens`, `effort`, `thinking`, `apiKey`, `baseUrl`, `abortSignal`, `maxAttempts` and `onAttempt`, which go to `streamText()` ([Attempts](../getting-started/HIGH_LEVEL_API.md#attempts)). It takes no fallback, policy-tier, timeout or cache option, so `streamText()` runs its default fallback chain (built from the keys in the environment) when the first provider fails with a retryable error before any text arrives.
+- The model call starts when `partialObjectStream` or `elementStream` is first read, and `object`, `text`, `usage`, `reportedUsage` and `skipped` settle after the stream ends. A caller that reads neither waits on them forever. The two iterables can be read together, and the stream moves as fast as its readers read it. When every iterable that was read stops before the end (a `break` out of its loop), the request is closed: `object` rejects with `ObjectGenerationError` (`Stream interrupted: ...`), `text` resolves to the text that arrived, and `reportedUsage` to `undefined`. When `abortSignal` aborted before the stop, `object` rejects with the signal's reason instead.
+- After each text chunk, the text so far is parsed with the open strings, arrays and objects closed, and an object is yielded when it differs from the last one yielded. The partial values are not validated: a field can hold a string that is still being written. A reader of `partialObjectStream` that starts after `elementStream` began the stream receives the latest partial object first.
+- When the stream ends, the whole text is parsed (as in `generateObject()`: whole text, fenced block, first `{` to last `}`) and validated. `object` rejects with `ObjectGenerationError` when the text does not parse or does not validate; there is no retry, and `maxRetries` is accepted and not read. A rejection of `object` that nothing awaits is not reported as an unhandled rejection.
+- `streamObject()` reads the `fullStream` of `streamText()`, so a failed stream ends at its `error` part: `partialObjectStream` ends without throwing, `elementStream` throws the stream's error, and `object` rejects with `ObjectGenerationError` (`Stream interrupted: <message>`, the provider's message). When `abortSignal` aborts, the provider's stream stops, both iterations end, and `object` rejects with the signal's reason.
+- `usage` resolves to the token usage `streamText()` summed, in which usage the provider never reported counts as zero. `reportedUsage` resolves to that usage when the stream ended on its own and the provider reported a token count or a cost, and to `undefined` when the stream failed, was aborted or was not read to its end, or no usage was reported, so a cut stream never reads as costing nothing.
+- The schema reaches the model only in the system prompt: `streamObject()` sends no provider-side format. Its options are `schema`, `schemaName` and `schemaDescription` (written into the system prompt), `elements` (below), `maxRetries` (not read), and `provider`, `model`, `prompt`, `messages`, `system` (a string), `temperature`, `maxTokens`, `effort`, `thinking`, `apiKey`, `baseUrl`, `abortSignal`, `requestTimeout` (the per-call request timeout in milliseconds), `maxAttempts` and `onAttempt`, which go to `streamText()` ([Attempts](../getting-started/HIGH_LEVEL_API.md#attempts)). It takes no fallback, policy-tier or cache option, so `streamText()` runs its default fallback chain (built from the keys in the environment) when the first provider fails with a retryable error before any text arrives.
+
+### Elements of an array field
+
+With `elements` naming one array field of the schema, `elementStream` yields each element of that array as soon as it is complete, so a caller can use the first item of an answer while the rest is still streaming:
+
+```typescript
+import { streamObject } from '@framers/agentos';
+import { z } from 'zod';
+
+const AnswerSchema = z.object({
+  sentences: z.array(z.object({ text: z.string().min(1), passage: z.number().int().min(1) })),
+});
+
+const { elementStream, skipped, reportedUsage } = streamObject({
+  provider: 'openai',
+  schema: AnswerSchema,
+  elements: 'sentences',
+  prompt: 'Answer from the passages, one sentence per claim, citing the passage number.',
+});
+
+for await (const sentence of elementStream) {
+  // { text: string; passage: number }, validated against the element schema
+  console.log(sentence.passage, sentence.text);
+}
+
+console.log(await skipped, await reportedUsage);
+```
+
+- An element is complete once the next element begins, and the last one when the stream ends with text that parses, so a reply cut off at the token limit never yields its unfinished last element.
+- Each element is parsed by the array's element schema and yielded as the value the schema parses it to. An element that fails the schema is skipped, and `skipped` resolves to the number skipped when the stream ends.
+- `elements` names a top-level field of the schema that holds an array; an optional, nullable or default array counts. Any other name throws a `TypeError` at the call, before a request is sent.
+- When the stream fails, `elementStream` throws the stream's error after the elements completed before it, so a failed answer never reads as a finished one. When `abortSignal` aborts, the iteration ends.
+- Without `elements`, `elementStream` yields nothing and `skipped` resolves to 0.
 
 ---
 

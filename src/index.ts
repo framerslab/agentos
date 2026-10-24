@@ -478,7 +478,7 @@ export {
 export type { StructuredReplySpec, StructuredOutputMeta, StructuredReplyOutput, IStructuredSchemaRegistry, ResolvedStructuredReply } from './api/runtime/structuredReply.js';
 export type { GenerateObjectOptions, GenerateObjectResult } from './api/generateObject.js';
 export { streamObject } from './api/streamObject.js';
-export type { StreamObjectOptions, StreamObjectResult, DeepPartial } from './api/streamObject.js';
+export type { StreamObjectOptions, StreamObjectResult, StreamObjectElement, DeepPartial } from './api/streamObject.js';
 export { embedText } from './api/embedText.js';
 export type { EmbedTextOptions, EmbedTextResult } from './api/embedText.js';
 export { SpendBudget, UnpricedModelError, asSpendBudget, costOfUsageUSD, estimateCallCostUSD } from './api/runtime/spendBudget.js';
