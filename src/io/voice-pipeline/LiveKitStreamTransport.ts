@@ -400,13 +400,16 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private readonly held: AudioFrame[] = [];
   private heldMs = 0;
   private droppedMs = 0;
-  /** The participant's text streams being read; {@link close} closes them. */
+  /** The linked participant's text streams being read; {@link close}, and a change of the linked participant, close them. */
   private readonly readers = new Set<LiveKitTextStreamReaderLike>();
   /**
    * The linked participant's text-input streams being read, apart from the control topic's, so a chat in flight never
-   * counts against the four control streams a speaking transport reads at once; {@link close} closes them too.
+   * counts against the four control streams a speaking transport reads at once; {@link close}, and a change of the
+   * linked participant, close them too.
    */
   private readonly textInputReaders = new Set<LiveKitTextStreamReaderLike>();
+  /** How many times the linked participant has changed: a stream accepted before the last change delivers nothing. */
+  private links = 0;
   private closing: Promise<void> = Promise.resolve();
   private sendingControls = 0;
   /**
@@ -524,7 +527,9 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   /**
    * Links another participant: the audio source moves to its microphone, its frames carrying its identity as
    * `speakerHint`, the control topic and text input take its streams alone, control messages go to it, and the
-   * departure that closes the transport is its departure. With a publisher, a playout mode already fixed is fixed again
+   * departure that closes the transport is its departure. The streams of the participant linked before that are still
+   * arriving are closed, and nothing they still deliver reaches the session: no message, no typed text, no receipt and
+   * no refusal. With a publisher, a playout mode already fixed is fixed again
    * for it, from its kind and its `agentos.playout` attribute, so a phone caller is played natively; the participant
    * linked before is no longer read, so a playback wait pending on its receipt ends once the track has played the chunk
    * out, and a clear pending on its answer ends with the queue it emptied. A `'first'` wait ends. A transport that is
@@ -538,17 +543,27 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     if (this._state === 'open') this.link(identity);
   }
   /**
-   * Links the participant with the identity, ending a `'first'` wait. A speaking transport's playout mode is fixed again
-   * for it, and the first participant linked gets the messages held while nobody was.
+   * Links the participant with the identity, ending a `'first'` wait. The participant linked before is no longer read:
+   * its text streams still arriving are closed, and nothing they still deliver reaches the session ({@link reads}). A
+   * speaking transport's playout mode is fixed again for it, and the first participant linked gets the messages held
+   * while nobody was.
    */
   private link(identity: string): void {
     this.stopWaitingForFirst();
     if (identity === this.linked) return;
     const first = this.linked === undefined;
-    this.linked = identity; this.source.setParticipant(identity);
+    this.linked = identity; this.links++; this.source.setParticipant(identity);
+    // rtc-node's close() ends a read under way with what had arrived, which reads() then drops.
+    for (const reader of [...this.readers, ...this.textInputReaders]) closeTextReader(reader);
+    this.readers.clear(); this.textInputReaders.clear();
     this.publisher?.participantChanged();
     if (first) this.deliverHeld();
   }
+  /**
+   * Whether a text stream accepted while the link counted `link` may still deliver what it read: the transport is open,
+   * and the participant who sent it is still the one linked.
+   */
+  private reads(link: number): boolean { return this._state === 'open' && link === this.links; }
   /** The first remote participant in the room, in the room's order, whose kind `'first'` links. */
   private firstOfKind(): string | undefined {
     for (const participant of this.options.room.remoteParticipants.values()) {
@@ -937,9 +952,11 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     if (participant.identity !== this.linked || this._state !== 'open') { closeTextReader(reader); return; }
     if (this.publisher && this.readers.size >= 4) { closeTextReader(reader); this.emitErrorSafe(new Error('livekit control refused')); this.close(); return; }
     this.readers.add(reader);
+    // Once setParticipant() links another participant, what this stream delivers, or how it fails, reaches nobody.
+    const link = this.links;
     const read = this.publisher ? this.readBounded(reader, CONTROL_TEXT_INPUT_MAX_BYTES) : reader.readAll();
     void read.then((text) => {
-      if (this._state !== 'open') return; let value: unknown; try { value = JSON.parse(text); } catch { throw new Error('LiveKitStreamTransport: failed to parse inbound text message as JSON'); }
+      if (!this.reads(link)) return; let value: unknown; try { value = JSON.parse(text); } catch { throw new Error('LiveKitStreamTransport: failed to parse inbound text message as JSON'); }
       if (this.publisher) {
         // A page that speaks the client protocol sends what its user types here: it is taken as text input takes a text.
         if (typeof value === 'object' && value !== null && !Array.isArray(value) && (value as { type?: unknown }).type === 'text_input') {
@@ -952,7 +969,7 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
         this.emit('message', isClientTranscriptMessage(value) ? value : controlSchema.parse(value));
       } else this.emit('message', value as ClientTextMessage);
     }).catch((error: unknown) => {
-      if (this._state !== 'open') return;
+      if (!this.reads(link)) return;
       this.emitErrorSafe(this.publisher ? new Error('livekit control refused') : error instanceof Error ? error : new Error(String(error)));
       if (this.publisher) this.close();
     }).finally(() => { this.readers.delete(reader); });
@@ -967,10 +984,12 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
   private readonly onTextInput = (reader: LiveKitTextStreamReaderLike, participant: { identity: string }): void => {
     if (participant.identity !== this.linked || this._state !== 'open') { closeTextReader(reader); return; }
     this.textInputReaders.add(reader);
+    // Once setParticipant() links another participant, what this stream delivers, or how it fails, reaches nobody.
+    const link = this.links;
     const read = reader[Symbol.asyncIterator] ? this.readBounded(reader, TEXT_INPUT_MAX_BYTES) : reader.readAll();
     // The warning names the refusal, never the text; an 'error' would end the session on the transport.
-    const refused = (): void => { if (this._state === 'open') this.warnOf(new Error('livekit text input refused')); };
-    void read.then((text) => { if (this._state === 'open') this.takeTextInput(text); }, refused)
+    const refused = (): void => { if (this.reads(link)) this.warnOf(new Error('livekit text input refused')); };
+    void read.then((text) => { if (this.reads(link)) this.takeTextInput(text); }, refused)
       // A 'message' or 'warning' listener that throws is reported as the transport's error, as the control topic reports one.
       .catch((error: unknown) => { if (this._state === 'open') this.emitErrorSafe(error instanceof Error ? error : new Error(String(error))); })
       .finally(() => { this.textInputReaders.delete(reader); });
