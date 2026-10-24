@@ -6,7 +6,9 @@
  * address inside IPv6 read as IPv4); the connection is made to the address
  * that was checked, on a connection of its own, so a second lookup cannot
  * point it elsewhere; at most `maxRedirects` redirects, each checked the same
- * way; `http:` and `https:` on their default ports; the body read as a stream
+ * way; a caller's rule over the host (`allowHost`), asked about the first
+ * address and about every redirect's target before either is resolved;
+ * `http:` and `https:` on their default ports; the body read as a stream
  * under a cap, counted as it arrives and again after decoding; one deadline
  * over the whole read; the content types the caller accepts. An IPv6 address
  * is also checked for an IPv4 one it carries under a NAT64 prefix of this
@@ -28,6 +30,7 @@ import { isPublicNetworkAddress, nat64PrefixesFrom, type Nat64Prefix } from '../
  * Why a fetch was refused or stopped:
  *
  * - `'address'`: the host, or a redirect's host, resolves to an address that is not public.
+ * - `'host'`: the host, or a redirect's host, is one the caller's `allowHost` does not allow, or that rule failed.
  * - `'scheme'`: not an `http:` or `https:` address, not an address at all, or one with a user name or password.
  * - `'port'`: a port the caller does not allow.
  * - `'redirects'`: more redirects than `maxRedirects`.
@@ -40,6 +43,7 @@ import { isPublicNetworkAddress, nat64PrefixesFrom, type Nat64Prefix } from '../
  */
 export type GuardedFetchReason =
   | 'address'
+  | 'host'
   | 'scheme'
   | 'port'
   | 'redirects'
@@ -82,6 +86,20 @@ export interface GuardedFetchOptions {
   accept?: readonly string[];
   /** Ports read. @default [80, 443] */
   allowPorts?: readonly number[];
+  /**
+   * A rule over the host, asked about the host of the address and about the
+   * host of every redirect's target, after the scheme and credential checks
+   * and before the port check and the lookup: the read is refused with the
+   * reason `'host'` unless it answers `true`, so a refused host is never
+   * resolved or connected to. It sees the host alone: lower case, without a
+   * port, without the brackets around an IPv6 address, without a trailing
+   * dot. A host it allows is still resolved and checked as every host is:
+   * the rule narrows what the fetch reads and never widens it. A rule that
+   * throws refuses as one that answers `false`; a value that is not a
+   * function is a `TypeError` before any lookup.
+   * @default every host
+   */
+  allowHost?: (host: string) => boolean;
   /** The `User-Agent` header; none is sent when absent. */
   userAgent?: string;
   /** Ends the read early; the fetch then rejects with the signal's reason. */
@@ -170,8 +188,28 @@ function hostOf(url: URL): string {
   return url.hostname.replace(/^\[|\]$/g, '');
 }
 
-/** `text`, resolved against `base` when given, as a URL the fetch may read. */
-function checkedUrl(text: string, ports: readonly number[], base?: URL): URL {
+/**
+ * The host of `url` as a caller's `allowHost` sees it: {@link hostOf} with
+ * any trailing dot removed, since `example.com.` names the same host as
+ * `example.com` and a rule that refuses one must refuse the other. The URL
+ * parser has already lower-cased a name and put an international one in its
+ * ASCII form. The request itself goes to the host as written.
+ */
+function ruleHostOf(url: URL): string {
+  return hostOf(url).replace(/\.+$/, '');
+}
+
+/** A caller's rule over the host, or `undefined` when every host may be read. */
+type HostRule = GuardedFetchOptions['allowHost'];
+
+/**
+ * `text`, resolved against `base` when given, as a URL the fetch may read: an
+ * `http:` or `https:` address without credentials, whose host `allowHost`
+ * allows, on a port in `ports`. The host is asked about before the port, so a
+ * refused host is never reported in terms of its port, and before any lookup,
+ * so it costs no resolution.
+ */
+function checkedUrl(text: string, ports: readonly number[], allowHost: HostRule, base?: URL): URL {
   let url: URL;
   try {
     url = new URL(text, base);
@@ -180,6 +218,16 @@ function checkedUrl(text: string, ports: readonly number[], base?: URL): URL {
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new GuardedFetchError('scheme', `${url.protocol} is not read`);
   if (url.username !== '' || url.password !== '') throw new GuardedFetchError('scheme', 'an address with a user name is not read');
+  if (allowHost !== undefined) {
+    const host = ruleHostOf(url);
+    let answer: unknown;
+    try {
+      answer = allowHost(host);
+    } catch {
+      throw new GuardedFetchError('host', `${host} is not read: the host rule failed`);
+    }
+    if (answer !== true) throw new GuardedFetchError('host', `${host} is not read`);
+  }
   const port = url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : Number(url.port);
   if (!ports.includes(port)) throw new GuardedFetchError('port', `port ${port} is not read`);
   return url;
@@ -423,8 +471,9 @@ function failureOf(error: unknown, callerSignal: AbortSignal | undefined, deadli
 
 /**
  * Reads `address`, an http or https address a person gave a server, under
- * `options`. Each hop resolves the host and refuses it when any of its
- * addresses is not public ({@link isPublicAddress}) and not in
+ * `options`. Each hop asks the caller's `allowHost`, when given, about the
+ * host before anything is resolved, then resolves the host and refuses it
+ * when any of its addresses is not public ({@link isPublicAddress}) and not in
  * `allowAddresses`, then connects to a checked address on a connection of
  * its own, trying the next one when the first cannot be reached; a redirect is followed only to an address that
  * passes the same checks, at most `maxRedirects` times. The answer must be a
@@ -441,6 +490,7 @@ function failureOf(error: unknown, callerSignal: AbortSignal | undefined, deadli
  * @throws {RangeError} When `maxBytes` or `deadlineMs` is not a positive
  *   number (or `deadlineMs` is longer than Node's longest timer), or
  *   `maxRedirects` is not a whole number of 0 or more, before any lookup.
+ * @throws {TypeError} When `allowHost` is given and is not a function, before any lookup.
  * @throws {GuardedFetchError} When the address, a redirect or the answer is
  *   refused, or the read fails or passes its deadline; `reason` says which.
  * @throws The reason of `options.signal` when the caller aborts it.
@@ -452,6 +502,11 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
   if (!Number.isInteger(maxRedirects) || maxRedirects < 0) {
     throw new RangeError(`guardedFetch: maxRedirects must be a whole number of 0 or more, not ${String(maxRedirects)}.`);
   }
+  const hostRule: unknown = options.allowHost;
+  if (hostRule !== undefined && typeof hostRule !== 'function') {
+    throw new TypeError(`guardedFetch: allowHost must be a function over the host, not ${typeof hostRule}.`);
+  }
+  const allowHost = options.allowHost;
   options.signal?.throwIfAborted();
   const accept = options.accept ?? DEFAULT_ACCEPT;
   const ports = options.allowPorts ?? DEFAULT_PORTS;
@@ -463,7 +518,7 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
     'accept-encoding': 'gzip, deflate, br',
     ...(options.userAgent ? { 'user-agent': options.userAgent } : {}),
   };
-  let url = checkedUrl(address, ports);
+  let url = checkedUrl(address, ports, allowHost);
   const deadline = AbortSignal.timeout(Math.ceil(deadlineMs));
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
   // Asked once a fetch, the first time an IPv6 address comes up, whatever
@@ -481,7 +536,7 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
         response.destroy();
         if (location === undefined) throw new GuardedFetchError('status', 'a redirect with no address', status);
         if (hop >= maxRedirects) throw new GuardedFetchError('redirects', 'too many redirects', status);
-        url = checkedUrl(location, ports, url);
+        url = checkedUrl(location, ports, allowHost, url);
         continue;
       }
       if (status < 200 || status > 299) {
