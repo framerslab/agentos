@@ -513,7 +513,8 @@ describe('StreamingSTTChain: the mid-utterance failover facade', () => {
     const b = recordingProvider('b', 20);
     const chain = new StreamingSTTChain([a.provider, b.provider], { enableMidUtteranceFailover: true, ringBufferCapacityMs: 500 });
     const facade = await chain.startSession();
-    for (let i = 0; i < 3; i += 1) await facade.pushAudio(halfSecond());
+    // the ring measures its audio by the frames' timestamps, so they stand half a second apart and it keeps the last
+    for (let i = 0; i < 3; i += 1) await facade.pushAudio({ ...halfSecond(), timestamp: i * 500 });
     a.sessions[0].emit('error', new Error('socket hang up'));
     await vi.waitFor(() => expect(b.sessions[0]?.pushed).toHaveLength(1));
     const got: TranscriptEvent[] = [];
