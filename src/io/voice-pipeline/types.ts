@@ -111,9 +111,12 @@ export interface AudioFrame {
  * `isFinal`) and attaches the segment's boundary to the last audio frame of
  * that segment alone, so a frame that carries one ends a whole segment; the
  * frames before it carry none, and a flush that ends on a timeout attaches
- * none. A consumer counts the text as heard only once the transport has
- * acknowledged that frame as played, and only the contiguous prefix of
- * acknowledged segments; a cleared or stale frame advances nothing. The legacy
+ * none. A segment the provider completed with no frame has no frame to carry
+ * its boundary: its text joins the boundary of the next segment that ends on
+ * one, which then starts where it starts. A consumer counts the text as heard
+ * only once the transport has acknowledged that frame as played, and only the
+ * contiguous prefix of acknowledged segments; a cleared or stale frame
+ * advances nothing. The legacy
  * `EncodedAudioChunk.text` is never read as a played fragment: the adapters
  * fill it with the text of the segment in flight.
  */

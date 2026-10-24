@@ -9,9 +9,14 @@
  * the segment in flight and attaches the segment's boundary
  * ({@link TtsTextBoundary}) to that frame when the terminal response proves
  * the segment complete. Every earlier frame goes out without one. A segment
+ * the provider completes with no frame, as an ellipsis alone can be, attaches
+ * nothing: its text joins the boundary of the next segment of the reply that
+ * ends on a frame, which then starts where it starts, so the boundaries stay
+ * contiguous and the played prefix runs on past it. A segment
  * with no terminal response within `timeoutMs` ends without a boundary, and
  * so does one the adapter abandons because its socket closed first: a timeout
- * is not completion. The wait runs from the moment the adapter has asked for
+ * is not completion, and a segment completed with no frame before either is
+ * proven by no boundary. The wait runs from the moment the adapter has asked for
  * the terminal response, `hooks.start` returning or resolving. While a start is
  * still pending and no segment waits behind it, the adapter may take a new
  * segment into the one in flight (`hooks.extend`), so the provider gets the
