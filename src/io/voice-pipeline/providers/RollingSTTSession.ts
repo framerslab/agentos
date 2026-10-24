@@ -29,7 +29,9 @@ export interface FundedSocketSession extends StreamingSTTSession {
  * clock by the seconds the earlier sockets carried. A socket the facade lets
  * go of, at a ceiling or at its own close, still delivers the transcripts it
  * emits as it closes, such as the empty final with which it takes back a line
- * it held open. A successor whose authorization is refused, or whose ceiling
+ * it held open; a `close()` made from a transcript listener on one of those
+ * ends the facade there, and no successor is authorized or opened. A
+ * successor whose authorization is refused, or whose ceiling
  * holds no audio, ends the facade with a {@link SttConnectionAuthorizationError}:
  * no frame is sent past a funded ceiling and no other vendor is tried.
  */
@@ -98,7 +100,10 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
     });
   }
 
-  /** Hands one frame on, draining, letting go of and replacing each socket whose funded ceiling it reaches. */
+  /**
+   * Hands one frame on, draining, letting go of and replacing each socket whose funded ceiling it reaches. A close
+   * made while a socket is let go of ends the frame there, with no successor.
+   */
   private async send(frame: AudioFrame): Promise<void> {
     if (!Number.isSafeInteger(frame.sampleRate) || frame.sampleRate <= 0) throw new RangeError('invalid input sample rate');
     let consumed = 0;
@@ -118,6 +123,8 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
           this.active = undefined;
           this.draining = undefined;
           this.retire(current);
+          // A transcript listener may close the facade on the retiring socket's closing transcript: no successor then.
+          if (this.closed) return;
           await this.adopt();
         } finally {
           if (this.draining === current) this.draining = undefined;
