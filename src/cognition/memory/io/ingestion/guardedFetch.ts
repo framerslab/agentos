@@ -58,9 +58,11 @@ export type GuardedFetchReason =
 export class GuardedFetchError extends Error {
   /**
    * What the caller's host rule threw, when the refusal is that rule's
-   * failure; absent otherwise. The message keeps its details out.
+   * failure; absent otherwise. The message keeps its details out, and so do
+   * `Object.keys`, `JSON.stringify` and a spread of the error: as on a native
+   * error, the property is not enumerable.
    */
-  readonly cause?: unknown;
+  declare readonly cause?: unknown;
 
   /**
    * @param reason - Why the fetch stopped.
@@ -76,7 +78,13 @@ export class GuardedFetchError extends Error {
   ) {
     super(message);
     this.name = 'GuardedFetchError';
-    if (cause !== undefined) this.cause = cause;
+    // Defined as a native error defines its cause, so a log line that
+    // serializes or spreads the error leaves out what the rule threw. The
+    // property is declared with `declare` above, so no class field puts an
+    // enumerable `cause` on every error first.
+    if (cause !== undefined) {
+      Object.defineProperty(this, 'cause', { value: cause, writable: true, enumerable: false, configurable: true });
+    }
   }
 }
 
@@ -101,10 +109,22 @@ export interface GuardedFetchOptions {
    * host of every redirect's target, after the scheme and credential checks
    * and before the port check and the lookup: the read is refused with the
    * reason `'host'` unless it answers `true`, so a refused host is never
-   * resolved or connected to. It sees the host alone: lower case, without a
-   * port, without the brackets around an IPv6 address, without a trailing
-   * dot. A host it allows is still resolved and checked as every host is:
-   * the rule narrows what the fetch reads and never widens it. A rule that
+   * resolved or connected to. It sees the host alone, as the URL parser
+   * writes it: lower case, without a port, without the brackets around an
+   * IPv6 address, without a trailing dot. An international name comes in its
+   * ASCII form (`bücher.example` as `xn--bcher-kva.example`), an IPv4
+   * address in dotted decimal however the address wrote it, an IPv4-mapped
+   * IPv6 address included (`0x5db8d70e` and `[::ffff:93.184.215.14]` as
+   * `93.184.215.14`), and any other IPv6 address in compressed hex
+   * (`[2606:4700:4700:0:0:0:0:1111]` as `2606:4700:4700::1111`). A
+   * subdomain is a host of its own, so a rule for a site and its subdomains
+   * compares on a dot boundary:
+   * `host === 'example.com' || host.endsWith('.example.com')`, since
+   * `notexample.com` also ends with `example.com`. The rule judges the host
+   * the address names. A name is not resolved for it, so a rule that refuses
+   * an address does not refuse a name that resolves to that address. A host
+   * it allows is still resolved and checked as every host is: the rule
+   * narrows what the fetch reads and never widens it. A rule that
    * throws refuses as one that answers `false`, with what it threw as the
    * refusal's `cause`; a value that is not a function is a `TypeError`
    * before any lookup. The rule is asked under the deadline and the caller's
@@ -204,14 +224,32 @@ function hostOf(url: URL): string {
 }
 
 /**
+ * An IPv4-mapped IPv6 address as the URL parser writes it, whatever spelling
+ * the address used: `::ffff:` and two groups of lower-case hex
+ * (https://url.spec.whatwg.org/#concept-ipv6-serializer).
+ */
+const IPV4_MAPPED = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/;
+
+/**
  * The host of `url` as a caller's `allowHost` sees it: {@link hostOf} with
  * any trailing dot removed, since `example.com.` names the same host as
- * `example.com` and a rule that refuses one must refuse the other. The URL
- * parser has already lower-cased a name and put an international one in its
- * ASCII form. The request itself goes to the host as written.
+ * `example.com` and a rule that refuses one must refuse the other; and an
+ * IPv4-mapped IPv6 address as the IPv4 address it carries, since a
+ * connection to `[::ffff:93.184.215.14]` goes to `93.184.215.14` and a rule
+ * that refuses one must refuse the other. The URL parser has already
+ * lower-cased a name, put an international one in its ASCII form, written
+ * an IPv4 address in dotted decimal and an IPv6 one in compressed hex. The
+ * request itself goes to the host as written.
  */
 function ruleHostOf(url: URL): string {
-  return hostOf(url).replace(/\.+$/, '');
+  const host = hostOf(url);
+  const mapped = IPV4_MAPPED.exec(host);
+  if (mapped !== null) {
+    const high = parseInt(mapped[1], 16);
+    const low = parseInt(mapped[2], 16);
+    return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  }
+  return host.replace(/\.+$/, '');
 }
 
 /** A caller's rule over the host, or `undefined` when every host may be read. */
