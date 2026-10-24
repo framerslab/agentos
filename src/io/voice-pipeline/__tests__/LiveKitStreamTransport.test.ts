@@ -1606,6 +1606,53 @@ function streamOn(sid: string): FakeAudioStream | undefined {
   return FakeAudioStream.opened.find((stream) => stream.track.sid === sid);
 }
 
+/**
+ * A text stream still arriving, as rtc-node's `TextStreamReader` delivers one: its async iterator yields each piece the
+ * test sends, and ends once the test ends the stream or, unless `closable` is `false`, once the reader is closed, since
+ * rtc-node's `close()` cancels the read under way, which then ends with what had arrived. `readAll()` reads the same way.
+ */
+function arrivingStream({ closable = true }: { closable?: boolean } = {}) {
+  const pieces: string[] = [];
+  let ended = false;
+  let wake: (() => void) | undefined;
+  const woken = (): void => {
+    const resolve = wake;
+    wake = undefined;
+    resolve?.();
+  };
+  const next = async (): Promise<IteratorResult<string>> => {
+    while (pieces.length === 0 && !ended) await new Promise<void>((resolve) => (wake = resolve));
+    return pieces.length > 0 ? { done: false, value: pieces.shift()! } : { done: true, value: undefined };
+  };
+  const reader = {
+    readAll: vi.fn(async () => {
+      let text = '';
+      for (let piece = await next(); !piece.done; piece = await next()) text += piece.value;
+      return text;
+    }),
+    [Symbol.asyncIterator]: () => ({ next }),
+    ...(closable
+      ? {
+          close: vi.fn(async () => {
+            ended = true;
+            woken();
+          }),
+        }
+      : {}),
+  };
+  return {
+    reader,
+    send(piece: string): void {
+      pieces.push(piece);
+      woken();
+    },
+    end(): void {
+      ended = true;
+      woken();
+    },
+  };
+}
+
 describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", () => {
   beforeEach(() => {
     FakeAudioSource.created.length = 0;
@@ -1720,6 +1767,46 @@ describe("LiveKitStreamTransport follows LiveKit Agents' session conventions", (
     expect(lines(room).map(([, , , track]) => track)).toEqual(['TR_2']);
     expect(room.sentOn('agentos.voice').map((stream) => stream.destinationIdentities)).toEqual([['user-2']]);
     transport.close();
+  });
+
+  it('setParticipant() closes the streams of the participant linked before, and nothing they still deliver reaches the session', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    room.addParticipant('user-2', new FakePublication(new FakeTrack('TR_2')));
+    const { transport, messages, errors, warnings } = speakingTo(room, 'user-1');
+    await settle();
+    // Three streams of the first participant's are still arriving: a chat, a control message, and a chat whose reader
+    // has no close().
+    const chat = arrivingStream();
+    const control = arrivingStream();
+    const unclosable = arrivingStream({ closable: false });
+    room.textHandlers.get('lk.chat')!(chat.reader, { identity: 'user-1' });
+    room.textHandlers.get('agentos.voice')!(control.reader, { identity: 'user-1' });
+    room.textHandlers.get('lk.chat')!(unclosable.reader, { identity: 'user-1' });
+    chat.send('Book a');
+    control.send('{"type":"control","action":');
+    unclosable.send('Cancel my');
+    await settle();
+    transport.setParticipant('user-2');
+    // The streams a reader can close are closed at once: each read ends with the part that had arrived.
+    expect(chat.reader.close).toHaveBeenCalled();
+    expect(control.reader.close).toHaveBeenCalled();
+    // The other ends in its own time.
+    unclosable.send(' order.');
+    unclosable.end();
+    await settle();
+    // None of it reaches the session, and the part of the control message, no JSON, is no refused message: the
+    // transport stays open.
+    expect(messages).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+    expect(transport.state).toBe('open');
+    // The participant linked now is read.
+    room.chat('user-2', 'Is anyone there?');
+    await settle();
+    expect(messages).toEqual([{ type: 'text_input', text: 'Is anyone there?' }]);
+    transport.close();
+    await transport.whenClosed();
   });
 
   it("with participant, the linked participant's departure closes a listen-only transport", async () => {
