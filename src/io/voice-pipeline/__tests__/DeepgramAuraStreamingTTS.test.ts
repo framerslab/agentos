@@ -613,6 +613,105 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(played.playedText).toBe('Your order shipped.');
   });
 
+  it('carries a segment Deepgram completes with no frame, an ellipsis alone, on the boundary of the next one that ends on a frame, so the played text runs on past it', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    // A consumer that records each chunk under its place in the stream, as a transport's playback sequence names it.
+    const played = new PlayedTextTracker();
+    const chunks: EncodedAudioChunk[] = [];
+    session.on('audio', (chunk: EncodedAudioChunk) => {
+      chunks.push(chunk);
+      played.sent(chunks.length, chunk.textBoundary);
+    });
+    ws.send.mockClear();
+
+    session.pushTokens('Sure. ... Let me check.');
+    const flushed = session.flush();
+    frame(ws, 1);
+    control(ws, { type: 'Flushed', sequence_id: 0 });
+    // The second segment is the ellipsis alone, and Deepgram answers its Flush with no audio before the Flushed.
+    expect(sent(ws).slice(2)).toEqual([{ type: 'Speak', text: ' ...' }, { type: 'Flush' }]);
+    control(ws, { type: 'Flushed', sequence_id: 1 });
+    expect(sent(ws).slice(4)).toEqual([{ type: 'Speak', text: ' Let me check.' }, { type: 'Flush' }]);
+    frame(ws, 2);
+    control(ws, { type: 'Flushed', sequence_id: 2 });
+    await flushed;
+    // The boundary of the sentence after the ellipsis starts where the ellipsis does, so the boundaries are contiguous.
+    expect(chunks.map((chunk) => chunk.textBoundary)).toEqual([
+      { segmentId: expect.any(String), start: 0, end: 5, text: 'Sure.', final: true },
+      { segmentId: expect.any(String), start: 5, end: 23, text: ' ... Let me check.', final: true },
+    ]);
+    played.acknowledged(1);
+    expect(played.playedText).toBe('Sure.');
+    played.acknowledged(2);
+    expect(played.playedText).toBe('Sure. ... Let me check.');
+  });
+
+  it('carries a segment completed with no frame no further than the next segment of its own reply, and never past one that timed out', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const chunks = recorded(session);
+      ws.send.mockClear();
+
+      // "Sure." plays, the ellipsis is completed with no audio, and " Wait." times out: no Flushed within five seconds.
+      session.pushTokens('Sure. ... Wait. Done.');
+      const flushed = session.flush();
+      frame(ws, 1);
+      control(ws, { type: 'Flushed', sequence_id: 0 });
+      control(ws, { type: 'Flushed', sequence_id: 1 });
+      frame(ws, 2);
+      await vi.advanceTimersByTimeAsync(5_000);
+      // Deepgram answers the timed-out Flush late, within the wait, and the last segment ends on a frame.
+      control(ws, { type: 'Flushed', sequence_id: 2 });
+      frame(ws, 3);
+      control(ws, { type: 'Flushed', sequence_id: 3 });
+      await flushed;
+      // The segment after the ellipsis timed out, so no boundary covers the ellipsis, and the last one is its own.
+      expect(chunks.map((chunk) => chunk.textBoundary?.text)).toEqual(['Sure.', undefined, ' Done.']);
+      expect(chunks[2]!.textBoundary).toEqual({ segmentId: expect.any(String), start: 15, end: 21, text: ' Done.', final: true });
+
+      // A reply that ends with an ellipsis completed with no audio: the next reply's offsets count from 0 again, and its
+      // second segment, which starts at 9 as the ellipsis ended, carries a boundary of its own text alone.
+      chunks.length = 0;
+      session.pushTokens('Okay. ...');
+      const ended = session.flush();
+      frame(ws, 4);
+      control(ws, { type: 'Flushed', sequence_id: 4 });
+      control(ws, { type: 'Flushed', sequence_id: 5 });
+      await ended;
+      session.pushTokens('Yes I am. Go.');
+      const next = session.flush();
+      frame(ws, 5);
+      control(ws, { type: 'Flushed', sequence_id: 6 });
+      frame(ws, 6);
+      control(ws, { type: 'Flushed', sequence_id: 7 });
+      await next;
+      expect(chunks.map((chunk) => chunk.textBoundary)).toEqual([
+        { segmentId: expect.any(String), start: 0, end: 5, text: 'Okay.', final: true },
+        { segmentId: expect.any(String), start: 0, end: 9, text: 'Yes I am.', final: true },
+        { segmentId: expect.any(String), start: 9, end: 13, text: ' Go.', final: true },
+      ]);
+
+      // A reply that begins with one: the boundary of its next segment covers both, from 0.
+      chunks.length = 0;
+      session.pushTokens('... Okay.');
+      const begun = session.flush();
+      control(ws, { type: 'Flushed', sequence_id: 8 });
+      frame(ws, 7);
+      control(ws, { type: 'Flushed', sequence_id: 9 });
+      await begun;
+      expect(chunks.map((chunk) => chunk.textBoundary)).toEqual([
+        { segmentId: expect.any(String), start: 0, end: 9, text: '... Okay.', final: true },
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   /** How many Flush messages the session has sent on the socket. */
   const flushCount = (ws: MockSocket): number => sent(ws).filter((message) => (message as { type: string }).type === 'Flush').length;
 
