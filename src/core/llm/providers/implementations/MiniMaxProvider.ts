@@ -6,6 +6,7 @@ import type {
   ProviderEmbeddingResponse,
 } from '../IProvider';
 import { OpenAIProvider, OpenAIProviderConfig } from './OpenAIProvider';
+import { keyPoolStrategyFromEnv } from '../../../providers/ApiKeyPool';
 
 /** Configuration for MiniMax's OpenAI-compatible Chat Completions transport. */
 export type MiniMaxProviderConfig = OpenAIProviderConfig;
@@ -26,12 +27,22 @@ const FLASH_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export class MiniMaxProvider extends OpenAIProvider {
   public readonly providerId = 'minimax';
 
-  /** @inheritdoc */
+  /**
+   * Initializes the shared transport on MiniMax's endpoint and default model.
+   * A comma-separated `apiKey` builds a key pool whose strategy comes from
+   * `keyPool.strategy`, else `AGENTOS_KEY_POOL_STRATEGY_MINIMAX`, else
+   * `AGENTOS_KEY_POOL_STRATEGY`, else round-robin; never from
+   * `AGENTOS_KEY_POOL_STRATEGY_OPENAI`, which names OpenAI's keys.
+   *
+   * @param config - The key or key list, the endpoint and the transport options.
+   */
   public override async initialize(config: MiniMaxProviderConfig): Promise<void> {
     await super.initialize({
       ...config,
       baseURL: config.baseURL ?? 'https://api.minimax.io/v1',
       defaultModelId: config.defaultModelId ?? CURRENT_MODELS[0],
+      // The strategy is always given, so the inherited initialize never reads the OpenAI variable.
+      keyPool: { ...config.keyPool, strategy: config.keyPool?.strategy ?? keyPoolStrategyFromEnv('minimax').strategy ?? 'round-robin' },
     });
   }
 
