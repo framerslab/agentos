@@ -647,6 +647,34 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(played.playedText).toBe('Sure. ... Let me check.');
   });
 
+  it('carries no segment with words that Deepgram completes with no frame: nothing proves it was spoken, so the played text stops before it', async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const played = new PlayedTextTracker();
+    const chunks: EncodedAudioChunk[] = [];
+    session.on('audio', (chunk: EncodedAudioChunk) => {
+      chunks.push(chunk);
+      played.sent(chunks.length, chunk.textBoundary);
+    });
+
+    session.pushTokens('Sure. Wait. Done.');
+    const flushed = session.flush();
+    frame(ws, 1);
+    control(ws, { type: 'Flushed', sequence_id: 0 });
+    // " Wait." is answered with no audio before its Flushed: a sentence with words the provider did not speak.
+    control(ws, { type: 'Flushed', sequence_id: 1 });
+    frame(ws, 2);
+    control(ws, { type: 'Flushed', sequence_id: 2 });
+    await flushed;
+    expect(chunks.map((chunk) => chunk.textBoundary)).toEqual([
+      { segmentId: expect.any(String), start: 0, end: 5, text: 'Sure.', final: true },
+      { segmentId: expect.any(String), start: 11, end: 17, text: ' Done.', final: true },
+    ]);
+    played.acknowledged(1);
+    played.acknowledged(2);
+    expect(played.playedText).toBe('Sure.');
+  });
+
   it('carries a segment completed with no frame no further than the next segment of its own reply, and never past one that timed out', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
