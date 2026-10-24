@@ -309,6 +309,60 @@ describe('guardedFetch', () => {
       expect(connections).toBe(before);
     });
 
+    it('sees the host as the URL parser writes it: a name in ASCII, an IPv6 address in hex, an IPv4 address in dotted decimal, inside IPv6 too', async () => {
+      const lookup = counting();
+      const seen: string[] = [];
+      /** A rule that records each host it is asked about and refuses it, so nothing is resolved or connected to. */
+      const refusingAll = (host: string): boolean => {
+        seen.push(host);
+        return false;
+      };
+      const addresses = [
+        'https://bücher.example/notes',
+        'http://[2606:4700:4700:0:0:0:0:1111]/page',
+        'http://93.184.215.14/page',
+        'http://0x5db8d70e/page',
+        // IPv4-mapped: a connection to it goes to the IPv4 address it carries.
+        'http://[::ffff:93.184.215.14]/page',
+        'http://[::FFFF:5DB8:D70E]/page',
+      ];
+      for (const address of addresses) {
+        expect(await reasonOf(guardedFetch(address, reach({ resolve: lookup.resolve, allowHost: refusingAll }))), address).toBe('host');
+      }
+      expect(seen).toEqual([
+        'xn--bcher-kva.example',
+        '2606:4700:4700::1111',
+        '93.184.215.14',
+        '93.184.215.14',
+        '93.184.215.14',
+        '93.184.215.14',
+      ]);
+      expect(lookup.lookups()).toBe(0);
+    });
+
+    it('refuses an IPv4 address the rule refuses when the address writes it inside IPv6, before any lookup or connection', async () => {
+      // Blocked, so no case reaches past this machine if the check regresses.
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        const lookup = counting();
+        const mapped = 'http://[::ffff:93.184.215.14]/page';
+        /** A caller's blocklist of one public address. */
+        const notThatAddress = (host: string): boolean => host !== '93.184.215.14';
+        expect(await reasonOf(guardedFetch(mapped, reach({ resolve: lookup.resolve, allowHost: notThatAddress, allowPorts: [80] })))).toBe('host');
+        expect(lookup.lookups()).toBe(0);
+        expect(connect).not.toHaveBeenCalled();
+        // An allow-list of the same address reads it: the address check
+        // passes, and the connection, blocked here, is the next step.
+        const onlyThatAddress = (host: string): boolean => host === '93.184.215.14';
+        expect(await reasonOf(guardedFetch(mapped, reach({ allowHost: onlyThatAddress, allowPorts: [80] })))).toBe('network');
+        expect(connect).toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
+    });
+
     it('refuses a redirect to such a host at the redirect: the first request made, the second not', async () => {
       const asked = hosts.length;
       const before = connections;
@@ -344,14 +398,18 @@ describe('guardedFetch', () => {
         const address = `http://${host}:${port}/page`;
         expect(await reasonOf(guardedFetch(address, reach({ allowHost: everything, allowAddresses: [] }))), address).toBe('address');
       }
-      // An IPv6 literal reaches the rule without its brackets, and is still refused by its address.
+      // An IPv6 literal reaches the rule without its brackets, an IPv4-mapped
+      // one as the IPv4 address it carries, and each is still refused by its address.
       const seen: string[] = [];
       const recording = (host: string) => {
         seen.push(host);
         return true;
       };
-      expect(await reasonOf(guardedFetch(`http://[::ffff:7f00:1]:${port}/page`, reach({ allowHost: recording, allowAddresses: [] })))).toBe('address');
-      expect(seen).toEqual(['::ffff:7f00:1']);
+      for (const host of ['[fd00::1]', '[::ffff:7f00:1]']) {
+        const address = `http://${host}:${port}/page`;
+        expect(await reasonOf(guardedFetch(address, reach({ allowHost: recording, allowAddresses: [] }))), address).toBe('address');
+      }
+      expect(seen).toEqual(['fd00::1', '127.0.0.1']);
       // The scheme and the port hold too.
       expect(await reasonOf(guardedFetch('ftp://pages.test/notes', reach({ allowHost: everything })))).toBe('scheme');
       expect(await reasonOf(guardedFetch('http://pages.test:8080/', reach({ allowHost: everything })))).toBe('port');
@@ -383,6 +441,32 @@ describe('guardedFetch', () => {
       const notARule = 'docs.google.com' as unknown as GuardedFetchOptions['allowHost'];
       await expect(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: notARule }))).rejects.toBeInstanceOf(TypeError);
       expect(lookup.lookups()).toBe(0);
+    });
+
+    it("keeps what a failing rule threw out of the error's enumerable keys, as a native error's cause is", async () => {
+      // What a rule throws can name an internal address. The message leaves
+      // it out, and so must a log line that serializes or spreads the error.
+      const thrown = 'blocklist at 10.0.0.53 timed out';
+      const failing = (): boolean => {
+        throw thrown;
+      };
+      const outcome = await guardedFetch(at('/page'), reach({ allowHost: failing })).then(
+        () => 'read',
+        (error: unknown) => error,
+      );
+      expect(outcome).toBeInstanceOf(GuardedFetchError);
+      const refusal = outcome as GuardedFetchError;
+      expect(refusal.cause).toBe(thrown);
+      expect(Object.keys(refusal)).not.toContain('cause');
+      expect(JSON.parse(JSON.stringify(refusal))).not.toHaveProperty('cause');
+      expect(Object.getOwnPropertyDescriptor(refusal, 'cause')).toEqual({ value: thrown, writable: true, enumerable: false, configurable: true });
+      // A refusal for any other reason has no cause at all.
+      const plain = await guardedFetch(at('/page'), reach({ allowHost: () => false })).then(
+        () => 'read',
+        (error: unknown) => error,
+      );
+      expect(plain).toBeInstanceOf(GuardedFetchError);
+      expect(Object.prototype.hasOwnProperty.call(plain, 'cause')).toBe(false);
     });
 
     it('is asked under the deadline: a rule that outlasts it leaves the read refused for the deadline, with nothing begun after it', async () => {
