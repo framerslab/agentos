@@ -241,6 +241,21 @@ describe('ReconnectingSTT', () => {
     expect(got[2]).toStrictEqual(untimed);
     session.close();
   });
+  it('leaves the word times of a transcript that carries no bounds as its provider gave them, counted from the audio of that transcript', async () => {
+    const { stt, sessions } = scripted();
+    const r = new ReconnectingSTT(stt, { ringBufferCapacityMs: 1_000, minReplayMs: 0, clock: () => 0 });
+    const session = await r.startSession();
+    const got: TranscriptEvent[] = [];
+    session.on('transcript', (e: TranscriptEvent) => got.push(e));
+    for (let t = 0; t < 5_000; t += 20) session.pushAudio(frame(t));
+    sessions[0].emit('error', new Error('drop'));
+    await vi.waitFor(() => expect(sessions[1]?.frames.length).toBe(50));
+    // ElevenLabsStreamingSTT reports no startMs and endMs, and its words count from the audio it sent for the transcript
+    const unbounded: TranscriptEvent = { text: 'no bounds', confidence: 1, isFinal: true, words: [{ word: 'no', start: 0, end: 300, confidence: 0.9 }, { word: 'bounds', start: 300, end: 700, confidence: 0.9 }] };
+    sessions[1].emit('transcript', unbounded);
+    expect(got).toStrictEqual([unbounded]);
+    session.close();
+  });
   it('moves a Moonshine line\'s words with its bounds after a reconnect, since the provider puts both on its session\'s clock', async () => {
     // The provider on the package's fakes, as its own tests run it. Moonshine times a line's words on the clock of the
     // line's startTime, and the provider puts them, with the line's startMs and endMs, on the session's clock.
