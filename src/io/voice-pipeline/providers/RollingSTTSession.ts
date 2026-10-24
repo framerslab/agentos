@@ -26,14 +26,20 @@ export interface FundedSocketSession extends StreamingSTTSession {
 /**
  * A stable session facade over separately funded same-provider sockets.
  * Transcript times, word times included, are moved onto the facade's audio
- * clock by the seconds the earlier sockets carried. A successor whose
- * authorization is refused, or whose ceiling holds no audio, ends the facade
- * with a {@link SttConnectionAuthorizationError}: no frame is sent past a
- * funded ceiling and no other vendor is tried.
+ * clock by the seconds the earlier sockets carried. A socket the facade lets
+ * go of, at a ceiling or at its own close, still delivers the transcripts it
+ * emits as it closes, such as the empty final with which it takes back a line
+ * it held open; a `close()` made from a transcript listener on one of those
+ * ends the facade there, and no successor is authorized or opened. A
+ * successor whose authorization is refused, or whose ceiling
+ * holds no audio, ends the facade with a {@link SttConnectionAuthorizationError}:
+ * no frame is sent past a funded ceiling and no other vendor is tried.
  */
 export class RollingSTTSession extends EventEmitter implements StreamingSTTSession {
   private active: FundedSocketSession | undefined;
   private draining: FundedSocketSession | undefined;
+  /** The socket the facade is closing: the transcripts it emits as it closes still go out. */
+  private retiring: FundedSocketSession | undefined;
   private closed = false;
   private offsetMs = 0;
   private tail: Promise<void> = Promise.resolve();
@@ -54,6 +60,7 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
     return session;
   }
 
+  /** Opens the next funded socket and makes it the one in use, forwarding its events onto the facade's clock. */
   private async adopt(): Promise<void> {
     const socket = await this.open();
     if (this.closed || !socket.isOpen) {
@@ -67,7 +74,7 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
     this.active = socket;
     const offset = this.offsetMs;
     socket.on('transcript', (event: TranscriptEvent) => {
-      if (this.closed || this.active !== socket) return;
+      if (socket !== this.retiring && (this.closed || this.active !== socket)) return;
       this.emit('transcript', {
         ...event,
         ...(event.startMs === undefined ? {} : { startMs: event.startMs + offset }),
@@ -94,6 +101,10 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
     });
   }
 
+  /**
+   * Hands one frame on, draining, letting go of and replacing each socket whose funded ceiling it reaches. A close
+   * made while a socket is let go of ends the frame there, with no successor.
+   */
   private async send(frame: AudioFrame): Promise<void> {
     if (!Number.isSafeInteger(frame.sampleRate) || frame.sampleRate <= 0) throw new RangeError('invalid input sample rate');
     let consumed = 0;
@@ -112,7 +123,9 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
           this.offsetMs += current.audioSeconds * 1000;
           this.active = undefined;
           this.draining = undefined;
-          current.close();
+          this.retire(current);
+          // A transcript listener may close the facade on the retiring socket's closing transcript: no successor then.
+          if (this.closed) return;
           await this.adopt();
         } finally {
           if (this.draining === current) this.draining = undefined;
@@ -164,13 +177,30 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
     await this.active?.flush();
   }
 
-  /** Closes the socket in use, which reports its final usage, and emits `'close'` once. */
+  /**
+   * Closes the socket in use, which reports its final usage and delivers the transcripts it emits as it closes, then
+   * emits `'close'` once.
+   */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     const current = this.active;
     this.active = undefined;
-    current?.close();
+    this.retire(current);
     this.emit('close');
+  }
+
+  /**
+   * Closes a socket the facade lets go of. The transcripts it emits as it closes, such as the empty final that takes
+   * back a line it held open, go out first; its speech events do not.
+   */
+  private retire(socket: FundedSocketSession | undefined): void {
+    if (socket === undefined) return;
+    this.retiring = socket;
+    try {
+      socket.close();
+    } finally {
+      this.retiring = undefined;
+    }
   }
 }

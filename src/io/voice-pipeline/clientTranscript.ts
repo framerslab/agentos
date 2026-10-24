@@ -34,13 +34,16 @@ const MAX_ITEM_ID_LENGTH = 128;
 /** The longest `language` {@link isClientTranscriptMessage} accepts. */
 const MAX_LANGUAGE_LENGTH = 64;
 
+/** The longest `speaker` {@link isClientTranscriptMessage} accepts; `runOf` is a line id and takes the `itemId` bound. */
+const MAX_SPEAKER_LENGTH = 128;
+
 /**
  * Makes the message a client sends for one of its transcripts.
  *
  * @param event - A transcript from any streaming STT session.
  * @param itemId - The line's id when the event has none; `event.itemId` by default.
- * @returns The message, with `confidence` and whichever of `startMs`, `endMs`
- *   and `language` the event carries.
+ * @returns The message, with `confidence` and whichever of `startMs`, `endMs`,
+ *   `language`, `speaker` (null included) and `runOf` the event carries.
  * @throws {RangeError} When neither the event nor the caller gives a line id.
  */
 export function toClientTranscriptMessage(
@@ -62,6 +65,8 @@ export function toClientTranscriptMessage(
   if (event.startMs !== undefined) message.startMs = event.startMs;
   if (event.endMs !== undefined) message.endMs = event.endMs;
   if (event.language !== undefined) message.language = event.language;
+  if (event.speaker !== undefined) message.speaker = event.speaker;
+  if (event.runOf !== undefined) message.runOf = event.runOf;
   return message;
 }
 
@@ -70,14 +75,16 @@ export function toClientTranscriptMessage(
  * {@link ClientTranscriptMessage}. A client's message is untrusted input, so
  * this refuses a field of the wrong type, an empty `itemId`, a `confidence`
  * outside 0 to 1, a negative or non-finite offset, an `endMs` before its
- * `startMs`, and a `text` over 4,000 characters, an `itemId` over 128 or a
- * `language` over 64.
+ * `startMs`, a `text` over 4,000 characters, an `itemId` over 128 or a
+ * `language` over 64, a `speaker` that is neither null nor a label of 1 to
+ * 128 characters, and a `runOf` that is not a line id of 1 to 128.
  *
  * @param value - A parsed message, as a transport emits it.
  */
 export function isClientTranscriptMessage(value: unknown): value is ClientTranscriptMessage {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const { type, text, itemId, isFinal, confidence, startMs, endMs, language } = value as Record<string, unknown>;
+  const { type, text, itemId, isFinal, confidence, startMs, endMs, language, speaker, runOf } =
+    value as Record<string, unknown>;
   if (type !== 'transcript' || typeof text !== 'string' || typeof isFinal !== 'boolean') return false;
   if (text.length > MAX_TEXT_LENGTH) return false;
   if (typeof itemId !== 'string' || itemId.length === 0 || itemId.length > MAX_ITEM_ID_LENGTH) return false;
@@ -86,6 +93,8 @@ export function isClientTranscriptMessage(value: unknown): value is ClientTransc
   if (endMs !== undefined && !isOffset(endMs)) return false;
   if (typeof startMs === 'number' && typeof endMs === 'number' && endMs < startMs) return false;
   if (language !== undefined && (typeof language !== 'string' || language.length > MAX_LANGUAGE_LENGTH)) return false;
+  if (speaker !== undefined && speaker !== null && !isLabel(speaker, MAX_SPEAKER_LENGTH)) return false;
+  if (runOf !== undefined && !isLabel(runOf, MAX_ITEM_ID_LENGTH)) return false;
   return true;
 }
 
@@ -93,7 +102,8 @@ export function isClientTranscriptMessage(value: unknown): value is ClientTransc
  * Turns a client's transcript message into the {@link TranscriptEvent} a
  * server's endpoint detector and listeners take: `confidence` 1 when the
  * message has none (as providers report for a service that gives no score),
- * no word timings, and `durationMs` on a final that carries both offsets.
+ * no word timings, `durationMs` on a final that carries both offsets, and
+ * `speaker` and `runOf` as the message carries them.
  *
  * @param message - A message {@link isClientTranscriptMessage} accepted.
  */
@@ -111,6 +121,8 @@ export function transcriptEventFromClient(message: ClientTranscriptMessage): Tra
   if (message.startMs !== undefined) event.startMs = message.startMs;
   if (message.endMs !== undefined) event.endMs = message.endMs;
   if (message.language !== undefined) event.language = message.language;
+  if (message.speaker !== undefined) event.speaker = message.speaker;
+  if (message.runOf !== undefined) event.runOf = message.runOf;
   return event;
 }
 
@@ -122,4 +134,9 @@ function isFiniteNumber(value: unknown): value is number {
 /** A finite, non-negative number of milliseconds. */
 function isOffset(value: unknown): value is number {
   return isFiniteNumber(value) && value >= 0;
+}
+
+/** A non-empty string of at most `max` characters. */
+function isLabel(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max;
 }

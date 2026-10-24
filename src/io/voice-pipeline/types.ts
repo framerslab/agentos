@@ -103,6 +103,38 @@ export interface AudioFrame {
 }
 
 /**
+ * The text a TTS chunk proves spoken: the submitted text of one reply, from
+ * `start` to `end`, exclusive of `end`, as the TTS session received it, with
+ * every character and every space kept. A streaming TTS adapter cuts the text
+ * it is given into immutable sentence segments, synthesizes each through its
+ * provider's completion boundary (Deepgram Aura's `Flushed`, ElevenLabs'
+ * `isFinal`) and attaches the segment's boundary to the last audio frame of
+ * that segment alone, so a frame that carries one ends a whole segment; the
+ * frames before it carry none, and a flush that ends on a timeout attaches
+ * none. A segment the provider completed with no frame has no frame to carry
+ * its boundary: one with no letter or digit, nothing to hear, joins the
+ * boundary of the next segment that ends on one, which then starts where it
+ * starts, and one with words proves nothing. A consumer counts the text as heard
+ * only once the transport has acknowledged that frame as played, and only the
+ * contiguous prefix of acknowledged segments; a cleared or stale frame
+ * advances nothing. The legacy
+ * `EncodedAudioChunk.text` is never read as a played fragment: the adapters
+ * fill it with the text of the segment in flight.
+ */
+export interface TtsTextBoundary {
+  /** The segment's id, unique within the reply. */
+  segmentId: string;
+  /** Offset of the segment's first character in the reply's submitted text. */
+  start: number;
+  /** Offset past the segment's last character in the reply's submitted text. */
+  end: number;
+  /** The segment's text, `submitted.slice(start, end)`, kept exactly. */
+  text: string;
+  /** Always `true`: the frame is the last of a segment the provider reported complete. */
+  final: true;
+}
+
+/**
  * A compressed audio chunk ready for transmission over the wire (e.g. to a
  * TTS websocket or a playback buffer). Contains the rendered text to allow
  * barge-in handlers to track interrupted utterance state.
@@ -149,9 +181,10 @@ export interface EncodedAudioChunk {
   durationMs: number;
 
   /**
-   * The text fragment that was synthesised into this chunk. Preserved so
-   * barge-in handlers can report `VoiceTurnMetadata.interruptedRemainder`
-   * accurately when playback is cut short.
+   * Legacy: the text of the sentence segment in flight when the provider sent
+   * this chunk, the text submitted to it since its last terminal response. It
+   * is not the text this chunk plays and is never read as heard: the played
+   * text comes from `textBoundary` on acknowledged frames.
    */
   text: string;
 
@@ -169,6 +202,13 @@ export interface EncodedAudioChunk {
 
   /** Monotonic playback chunk sequence within the inference generation. */
   sequence?: number;
+
+  /**
+   * The text this chunk completes ({@link TtsTextBoundary}), on the last frame
+   * of a sentence segment the provider reported complete; absent on every
+   * other frame.
+   */
+  textBoundary?: TtsTextBoundary;
 }
 
 // ============================================================================
@@ -542,6 +582,16 @@ export interface TranscriptEvent {
   itemId?: string;
 
   /**
+   * One connection-scoped speaker when every word has that voice; null when
+   * diarization was requested but the words do not name exactly one voice.
+   * Absent when diarization was not requested. Per-word speakers stay raw.
+   */
+  speaker?: string | null;
+
+  /** The original item id on a later run of a final split by speaker. */
+  runOf?: string;
+
+  /**
    * Start of the utterance's audio, in milliseconds counted from the first
    * frame pushed into the session, when the provider reports speech
    * boundaries.
@@ -558,9 +608,12 @@ export interface TranscriptEvent {
   /**
    * `true` on a result the provider sends before the end of speech of the
    * speech it transcribes: the session's `'speech_end'` for that speech
-   * follows it. `DeepgramStreamingSTT` sets it on every result: it emits a
-   * segment's final before the `'speech_end'` that Deepgram's `speech_final`
-   * or `UtteranceEnd` raises. A provider that sends an utterance's final
+   * follows it. `DeepgramStreamingSTT` sets it on each result of an item
+   * whose speech has not ended: it emits a segment's final before the
+   * `'speech_end'` that Deepgram's `speech_final` or `UtteranceEnd` raises.
+   * It sets `false` on a result of an item whose `'speech_end'` came before
+   * its final (a final delayed past an `UtteranceEnd`), so that final answers
+   * the end already waiting. A provider that sends an utterance's final
    * after that utterance's `'speech_end'`, as `OpenAIRealtimeTranscriptionSTT`
    * does, leaves it undefined. {@link HeuristicEndpointDetector} reads it on
    * a final that carries an `itemId`: such a final belongs to the speech it
@@ -1185,6 +1238,7 @@ export interface StreamingTTSConfig {
  * |--------------------|---------------------------|--------------------------------------|
  * | `'audio'`          | {@link EncodedAudioChunk}  | A synthesised chunk ready for playback. |
  * | `'flush_complete'`  | *(none)*                  | All queued tokens have been synthesised. |
+ * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`), or a socket that failed to open for a reply, which ends unplayed (`DeepgramAuraStreamingTTS`). With nothing listening for it, the provider writes one warning line; `StreamingTTSChain`'s failover facade carries the warning of the provider session in use; `VoicePipelineOrchestrator` listens, and reports it as a recoverable `session_error` of the TTS part. |
  * | `'error'`          | `Error`                   | Unrecoverable synthesis error.       |
  * | `'close'`          | *(none)*                  | Session terminated.                  |
  *
@@ -2074,8 +2128,9 @@ export const VOICE_SESSION_EVENT_NAMES: readonly (keyof VoiceSessionEventMap)[] 
  * A transcript the client made itself, sent in place of audio by a client
  * that transcribes on its own device (for example with `MoonshineBrowserSTT`
  * in a browser). It carries the {@link TranscriptEvent} fields a display and
- * an endpoint detector read; every interim and the final of one line carry
- * the same `itemId`, and the final comes once, when the line is complete.
+ * an endpoint detector read, `speaker` and `runOf` included; every interim
+ * and the final of one line carry the same `itemId`, and the final comes
+ * once, when the line is complete.
  * `toClientTranscriptMessage()` makes one from a `TranscriptEvent`;
  * `isClientTranscriptMessage()` checks one a server received, and
  * `transcriptEventFromClient()` turns it back into a `TranscriptEvent`.
@@ -2110,13 +2165,39 @@ export interface ClientTranscriptMessage {
   endMs?: number;
   /** Language of `text` (for example `'en'`), at most 64 characters. */
   language?: string;
+  /**
+   * The line's speaker, as `TranscriptEvent.speaker` carries it: one
+   * connection-scoped label of 1 to 128 characters, or null when diarization
+   * was requested and the line's words do not name exactly one voice. Absent
+   * when no speaker information was requested.
+   */
+  speaker?: string | null;
+  /** The original line's id on a later run of a final split by speaker, 1 to 128 characters. */
+  runOf?: string;
+}
+
+/**
+ * Text the user typed, sent in place of speech: a user turn that interrupts
+ * the agent's speech when it is speaking, as LiveKit Agents' text input does
+ * (https://docs.livekit.io/agents/build/text/). `LiveKitStreamTransport` sends
+ * one for each `lk.chat` text stream of its linked participant; a WebSocket
+ * client sends one as JSON. `isClientTextInputMessage()` checks one on the
+ * server: `text` holds at least one character besides whitespace and at most
+ * 4,000 characters.
+ */
+export interface ClientTextInputMessage {
+  /** Discriminator of the client message. */
+  type: 'text_input';
+  /** The user's text, from 1 to 4,000 characters, not whitespace alone. */
+  text: string;
 }
 
 /**
  * Messages sent from the client (browser/app) to the server over the transport.
  * All messages are JSON-serialised.
  * A client that transcribes on its own device sends
- * {@link ClientTranscriptMessage}s in place of audio.
+ * {@link ClientTranscriptMessage}s in place of audio, and a client whose user
+ * types sends {@link ClientTextInputMessage}s.
  *
  * @see {@link ServerTextMessage} for the server-to-client counterpart.
  *
@@ -2146,7 +2227,8 @@ export type ClientTextMessage =
       /** The control action to perform. */
       action: TransportControlMessage;
     }
-  | ClientTranscriptMessage;
+  | ClientTranscriptMessage
+  | ClientTextInputMessage;
 
 // ============================================================================
 // Section 11 -- Wire protocol: server -> client messages
@@ -2223,7 +2305,11 @@ export type ServerTextMessage =
        * Emitted when the agent's complete response has been synthesised and sent.
        */
       type: 'agent_done';
-      /** Full text of the completed response. */
+      /**
+       * The reply's text. Empty once a pause discarded audio that a transport playing the audio itself held, or once the
+       * TTS session warned while the reply spoke, as one does that dropped some of the reply's text: the session then
+       * vouches for none of it, and a transport that writes the reply's line ends it with what it proved.
+       */
       text: string;
       /** Duration of the synthesised audio in milliseconds. */
       durationMs: number;

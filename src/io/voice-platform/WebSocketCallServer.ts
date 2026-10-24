@@ -6,13 +6,28 @@ import { z } from 'zod';
 import { WebSocketStreamTransport, type WebSocketLike } from '../voice-pipeline/WebSocketStreamTransport.js';
 import { PlaybackAcknowledgements, PlaybackAcknowledgementSchema } from '../voice-pipeline/PlaybackAcknowledgements.js';
 import { inspectPcm16 } from '../voice-pipeline/audioFormat.js';
+import { MAX_TEXT_INPUT_LENGTH } from '../voice-pipeline/clientTextInput.js';
 import type { AudioFrame, EncodedAudioChunk, IPlaybackTransport, PlaybackReceipt, ServerTextMessage, VoiceGeneration } from '../voice-pipeline/types.js';
 import type { CallTransportBinding } from './CallTransportBinding.js'; import { MediaAuthenticationSchema } from './contracts/index.js';
 
-/** Public browser media protocol; credentials are sent only after negotiation. */
+/**
+ * Public browser media protocol; credentials are sent only after negotiation. After its authentication frame and the
+ * server's `ready`, a client sends its audio as binary frames, `playback` and `cleared` receipts, `control` with `mute`,
+ * `unmute` or `stop`, and what its user types as `{ type: 'text_input', text }`, which the call takes as a user turn.
+ */
 export const CALL_WEBSOCKET_PROTOCOL = 'agentos.voice.v1';
 const authSchema = MediaAuthenticationSchema;
 const commandSchema = z.strictObject({ type: z.literal('control'), action: z.strictObject({ type: z.enum(['mute', 'unmute', 'stop']) }) });
+/** A client's typed text as the server hands it to the call: its text as sent, which the call checks, and no other field. */
+interface TextInputCommand { type: 'text_input'; text: unknown }
+/** The most a text frame after authentication other than a `text_input` message is, in bytes. */
+const MAX_TEXT_FRAME_BYTES = 4096;
+/**
+ * The most a `text_input` frame is, in bytes, so one holding any text `isClientTextInputMessage()` accepts fits whole:
+ * a JSON encoder writes a UTF-16 code unit in six bytes at most (`\u00e9`), and 576 bytes are left for the message around
+ * the text.
+ */
+const MAX_TEXT_INPUT_FRAME_BYTES = MAX_TEXT_INPUT_LENGTH * 6 + 576;
 const ACK_TIMEOUT = 5000;
 /** Host routing only. The returned binding performs durable authentication and slot/dispatch checks. */
 export interface WebSocketCallServerOptions {
@@ -24,6 +39,10 @@ export interface WebSocketCallServerOptions {
 }
 function bytes(data: RawData): Buffer {
   return Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+}
+/** Whether a parsed text frame is a `text_input` message, whatever its text holds: the call checks the text. */
+function isTextInputFrame(value: unknown): value is { type: 'text_input'; text?: unknown } {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && (value as { type?: unknown }).type === 'text_input';
 }
 function send(ws: WebSocket, data: string | Buffer): Promise<void> {
   if (ws.readyState !== ws.OPEN || ws.bufferedAmount + Buffer.byteLength(data) > 65536) return Promise.reject(new Error('socket backpressure'));
@@ -41,7 +60,7 @@ class ValidatedSocket extends EventEmitter implements WebSocketLike {
   send(data: Buffer | string, cb?: (error?: Error) => void): void { void send(this.ws, data).then(() => cb?.(), () => cb?.(new Error('socket send failed'))); }
   close(_code?: number, _reason?: string): void { this.ws.terminate(); }
   audio(pcm: Buffer): void { this.emit('message', pcm, true); }
-  command(message: z.infer<typeof commandSchema>): void { this.emit('message', JSON.stringify(message), false); }
+  command(message: z.infer<typeof commandSchema> | TextInputCommand): void { this.emit('message', JSON.stringify(message), false); }
   ended(): void { this.emit('close'); }
 }
 class SocketPlaybackTransport extends EventEmitter implements IPlaybackTransport {
@@ -108,7 +127,7 @@ export class WebSocketCallServer {
     if (!Number.isSafeInteger(options.maxConnections) || options.maxConnections < 1) throw new Error('invalid connection bound');
     this.prefix = options.pathPrefix ?? '/web-calls';
     if (!/^\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+$/.test(this.prefix)) throw new Error('invalid route prefix');
-    this.wss = new WebSocketServer({ noServer: true, maxPayload: 16384, perMessageDeflate: false,
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_TEXT_INPUT_FRAME_BYTES, perMessageDeflate: false,
       handleProtocols: (protocols) => protocols.size === 1 && protocols.has(CALL_WEBSOCKET_PROTOCOL) ? CALL_WEBSOCKET_PROTOCOL : false });
     this.wss.on('error', () => { /* Per-connection callbacks own safe failure responses. */ });
   }
@@ -173,8 +192,12 @@ export class WebSocketCallServer {
           if (sequence !== lastSequence + 1) physical.emit('gap', { lostMs: 0, reason: 'sequence' });
           lastSequence = sequence; physical.receiveAudio(data.subarray(12), sequence); return;
         }
-        if (data.length > 4096) { terminate(); return; }
+        if (data.length > MAX_TEXT_INPUT_FRAME_BYTES) { terminate(); return; }
         const value: unknown = JSON.parse(data.toString('utf8'));
+        // Typed text is a user turn: the call checks the text, and reports and drops one the check refuses, so the
+        // socket stays open. Only this message may pass MAX_TEXT_FRAME_BYTES.
+        if (isTextInputFrame(value)) { physical.bridge.command({ type: 'text_input', text: value.text }); return; }
+        if (data.length > MAX_TEXT_FRAME_BYTES) { terminate(); return; }
         const receipt = PlaybackAcknowledgementSchema.safeParse(value);
         if (receipt.success) { physical.receiveReceipt(receipt.data); return; }
         physical.bridge.command(commandSchema.parse(value));

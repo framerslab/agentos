@@ -150,6 +150,11 @@ export {
   isClientTranscriptMessage,
   transcriptEventFromClient,
 } from './clientTranscript.js';
+// The text input message's check: a user who types sends text in place of speech.
+export { isClientTextInputMessage, MAX_TEXT_INPUT_LENGTH } from './clientTextInput.js';
+// The text a reply has proven spoken: sentence segments with exact offsets, and the acknowledged prefix.
+export { SentenceSegmenter, PlayedTextTracker, boundaryOf } from './ttsTextBoundaries.js';
+export type { TextSegment } from './ttsTextBoundaries.js';
 
 // Concrete barge-in handler implementations
 export { HardCutBargeinHandler } from './HardCutBargeinHandler.js';
@@ -246,12 +251,16 @@ export {
   LIVEKIT_TRANSCRIPTION_TOPIC,
   TRANSCRIPTION_FAILED_ATTRIBUTE,
   TRANSCRIPTION_TIME_ATTRIBUTES,
+  TRANSCRIPTION_SPEAKER_ATTRIBUTE,
+  TRANSCRIPTION_RUN_OF_ATTRIBUTE,
+  readingOrder,
   TranscriptLedger,
   transcriptEventFromLiveKit,
   type LedgerEvent,
   type LedgerItem,
   type TranscriptLedgerOptions,
 } from './transcriptLedger.js';
+export { lineSpeaker, splitFinalBySpeaker } from './transcriptSpeakers.js';
 export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardResult } from './phraseHeard.js';
 export {
   VoiceMetricsReporter,
@@ -276,6 +285,7 @@ export {
 } from './env-constructor.js';
 export {
   DEEPGRAM_PRE_RECORDED_PRICING,
+  DEEPGRAM_STREAMING_ADDONS,
   DEEPGRAM_STREAMING_PRICING,
   deepgramPreRecordedPricing,
   deepgramStreamingPricing,

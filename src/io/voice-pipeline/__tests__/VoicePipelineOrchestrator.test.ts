@@ -63,6 +63,11 @@
  *   a cancel emits barge_in and an interrupted item; a failure keeps its Error on 'error' and errorMonitor and adds
  *   session_error before close; session_started goes out as the session opens and session_ended before the transport
  *   closes; state_change and turn_complete stay beside the new events; the user is away after userAwayTimeoutMs
+ * - Typed text, a text_input message, is a user turn of its own, an item with source 'text' and no turn_complete:
+ *   while the agent speaks it cancels the reply as a cancel barge-in does, with no speech, and the agent receives the
+ *   text once the cut reply's request has ended, as AgentSessionVoiceAdapter needs; while the session listens it drops
+ *   the speech the detector holds and starts a turn; a text the check refuses is dropped; and it is no speech, so a
+ *   session that takes its speech from audio or from client transcripts takes it all the same
  * - The floor until playout: a reply stays speaking until a transport that reports its playout says the audio played,
  *   or, on one that cannot, for the sent audio's duration, at most maxPlayoutWaitMs; a barge-in or a stop ends the wait
  */
@@ -73,6 +78,7 @@ import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
 import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
 import { HardCutBargeinHandler } from '../HardCutBargeinHandler.js';
 import { SoftFadeBargeinHandler } from '../SoftFadeBargeinHandler.js';
+import { AgentSessionVoiceAdapter } from '../providers/AgentSessionVoiceAdapter.js';
 import { recordSessionEvents } from './session-event-log.js';
 import type {
   AudioFrame,
@@ -417,6 +423,60 @@ describe('VoicePipelineOrchestrator', () => {
     expect(sttSession.close).toHaveBeenCalled();
     expect(ttsSession.close).toHaveBeenCalled();
     expect(transport.close).toHaveBeenCalledWith(1000, 'test teardown');
+  });
+
+  it("ends the session as the TTS part's failure when the TTS session closes on its own, so no reply waits on a closed one", async () => {
+    const session = await startSession();
+    const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const closes: Array<VoiceSessionEventMap['close']> = [];
+    session.on('session_error', (event) => sessionErrors.push(event));
+    session.on('close', (event) => closes.push(event));
+    orchestrator.on('error', () => undefined);
+
+    // The provider's session closes while the session listens: every later reply would go to a closed session.
+    ttsSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(orchestrator.state).toBe('closed');
+    expect(sessionErrors.map((event) => [event.source, event.recoverable])).toEqual([['tts', false]]);
+    expect(closes.map((event) => event.reason)).toEqual(['provider_failure']);
+  });
+
+  it('reports a TTS session that fails and then closes as one failure, and takes the close its own stop makes as none', async () => {
+    // A TTS session that emits close as it is closed, as the providers do.
+    vi.mocked(ttsSession.close).mockImplementation(() => {
+      ttsSession.emit('close');
+    });
+    orchestrator.on('error', () => undefined);
+    const failing = await startSession();
+    const failures: Array<VoiceSessionEventMap['session_error']> = [];
+    failing.on('session_error', (event) => failures.push(event));
+    ttsSession.emit('error', new Error('deepgram aura ws closed'));
+    ttsSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('closed');
+    expect(failures.map((event) => event.source)).toEqual(['tts']);
+
+    // A session stopped by its host closes its TTS session, and that close is no failure.
+    const other = new VoicePipelineOrchestrator(makeConfig());
+    const otherTTS = createMockTTSSession();
+    vi.mocked(otherTTS.close).mockImplementation(() => {
+      otherTTS.emit('close');
+    });
+    const stopped = await other.startSession(createMockTransport(), createMockAgentSession(), {
+      streamingSTT: createMockSTT(createMockSTTSession()),
+      streamingTTS: createMockTTS(otherTTS),
+      endpointDetector: createMockEndpoint(),
+      bargeinHandler: createMockBargeinHandler(),
+    });
+    const stopErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const stopCloses: Array<VoiceSessionEventMap['close']> = [];
+    stopped.on('session_error', (event) => stopErrors.push(event));
+    stopped.on('close', (event) => stopCloses.push(event));
+    await other.stopSession('done');
+    expect(otherTTS.close).toHaveBeenCalledOnce();
+    expect(stopErrors).toEqual([]);
+    expect(stopCloses.map((event) => event.reason)).toEqual(['done']);
   });
 
   it('should reset endpoint detector after flush_complete to prepare for next turn', async () => {
@@ -993,6 +1053,78 @@ describe('VoicePipelineOrchestrator', () => {
       'final Lights on.',
       'vad speech_end',
     ]);
+  });
+
+  it("drops the client's open lines as typed text takes the turn: a line it opens next interrupts the text's reply, and what it still sends of a dropped line reaches nothing", async () => {
+    await startSession();
+    const log = logDetector();
+    // The user starts to speak, then types: line 61's final has not come when the text arrives.
+    transport.emit('message', clientTranscript('61', 'Book a', false));
+    await vi.advanceTimersByTimeAsync(0);
+    transport.emit('message', { type: 'text_input', text: 'Cancel my order.' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+    // The user speaks over the text's reply on a line of its own: a speech start, which interrupts the reply.
+    transport.emit('message', clientTranscript('62', 'Wait', false));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ttsSession.cancel).toHaveBeenCalledOnce();
+    expect(transport.sendControl).toHaveBeenCalledWith(expect.objectContaining({ type: 'barge_in' }));
+    expect(orchestrator.state).toBe('listening');
+    // Line 61's late final belongs to the speech the text dropped: it reaches nothing. Line 62's final ends the speech.
+    transport.emit('message', clientTranscript('61', 'Book a table.', true));
+    transport.emit('message', clientTranscript('62', 'Wait, stop.', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log).toEqual([
+      'vad speech_start',
+      'interim Book a',
+      // The text drops what the detector holds of the speech line 61 held open.
+      'reset',
+      'vad speech_start',
+      'reset',
+      'interim Wait',
+      'final Wait, stop.',
+      'vad speech_end',
+    ]);
+    expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Cancel my order.']);
+    // Neither line is open any more, so no line's timer closes one later with an empty final.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(log).toHaveLength(8);
+    expect(orchestrator.state).toBe('listening');
+  });
+
+  it("closes no line typed text dropped while the text's reply speaks: its timer ends no speech five seconds later, and the user listens from the text on", async () => {
+    await startSession();
+    const log = logDetector();
+    const users: string[] = [];
+    orchestrator.on('user_state_changed', (event: VoiceSessionEventMap['user_state_changed']) => users.push(`${event.oldState}>${event.newState}`));
+    transport.emit('message', clientTranscript('63', 'Book a', false));
+    await vi.advanceTimersByTimeAsync(0);
+    transport.emit('message', { type: 'text_input', text: 'Cancel my order.' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+    expect(users).toEqual(['listening>speaking', 'speaking>listening']);
+    // Line 63 gets no message again: five seconds on, the text's reply still speaks, and its timer closed nothing.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(log).toEqual(['vad speech_start', 'interim Book a', 'reset']);
+    expect(users).toEqual(['listening>speaking', 'speaking>listening']);
+    expect(orchestrator.state).toBe('speaking');
+  });
+
+  it('takes typed text as the turn though the speech it drops holds a final that ends a sentence, on the HeuristicEndpointDetector', async () => {
+    endpoint = new HeuristicEndpointDetector() as unknown as typeof endpoint;
+    await startSession();
+    // Line 64's final ends a sentence while line 65 is open: the speech has not ended, so the detector holds the final.
+    transport.emit('message', clientTranscript('64', 'Book', false));
+    transport.emit('message', clientTranscript('65', 'for', false));
+    transport.emit('message', clientTranscript('64', 'Book a table.', true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    // The text drops the speech: no end of it reaches the detector, whose held final would complete it as the turn.
+    transport.emit('message', { type: 'text_input', text: 'Cancel my order.' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Cancel my order.']);
+    expect(orchestrator.state).toBe('speaking');
   });
 
   it('should hold at most eight client lines open, and stop a turn at 16,000 characters', async () => {
@@ -1790,6 +1922,30 @@ describe('VoicePipelineOrchestrator', () => {
     expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'It is booked for two at seven.', durationMs: 200 });
   });
 
+  it('ends a reply a pause held on a transport that plays the audio itself with the text proven played alone, which is none', async () => {
+    // A speaking LiveKitStreamTransport reports its playout, and its pause discards the audio its track held: which of
+    // the reply's words were heard after that is not known, as when its playout wait fails.
+    (transport as any).waitForPlayout = vi.fn(async () => {});
+    const { sent, states } = await speakingWith(new SoftFadeBargeinHandler());
+    const log = recordSessionEvents(orchestrator);
+
+    sttSession.emit('speech_start');
+    await vi.advanceTimersByTimeAsync(100); // the handler pauses at its 100 ms, the first chunk sent
+    ttsSession.emit('audio', replyChunk('two'));
+    ttsSession.emit('flush_complete'); // the last of the reply's audio is held by the pause
+    sttSession.emit('transcript', sttFinal('uh huh'));
+    sttSession.emit('speech_end');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sent).toEqual(['audio one', 'barge_in pause', 'barge_in resume', 'audio two']);
+    expect(states).toEqual(['listening']);
+    // agent_done carries no text the track is not proven to have played, and the reply joins the conversation as
+    // interrupted with none of it known heard.
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: '', durationMs: 200 });
+    expect(log).toContain('item assistant interrupted It is booked for two at seven.|');
+    expect(log).not.toContain('item assistant played It is booked for two at seven.|It is booked for two at seven.');
+  });
+
   it("measures a client's line said over the reply, and hands its words to the agent when they cancel the reply", async () => {
     const { sent, turns } = await speakingWith(new SoftFadeBargeinHandler(), { client: true });
 
@@ -1868,6 +2024,12 @@ describe('VoicePipelineOrchestrator session events', () => {
   /** The detector completes the user's turn, "Hello there", and the agent's reply, "Hello world", has its words. */
   async function takeTurn(): Promise<void> {
     endpoint.emit('turn_complete', makeTurnComplete());
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  /** The user types `text`: the client sends a `text_input` message. */
+  async function typeText(text: string): Promise<void> {
+    transport.emit('message', { type: 'text_input', text });
     await vi.advanceTimersByTimeAsync(0);
   }
 
@@ -1953,6 +2115,354 @@ describe('VoicePipelineOrchestrator session events', () => {
       { speechDurationMs: 0, interruptedText: 'Hello world', playedDurationMs: 0, action: 'cancel', createdAt: expect.any(Number) },
     ]);
     expect(transport.sendControl).toHaveBeenCalledWith({ type: 'barge_in', action: { type: 'cancel' } });
+    expect(orchestrator.state).toBe('listening');
+  });
+
+  it('a text_input while the agent speaks cancels the reply and the agent receives the text', async () => {
+    const session = await start();
+    const log = recordSessionEvents(session);
+    const bargeIns: Array<VoiceSessionEventMap['barge_in']> = [];
+    session.on('barge_in', (event) => bargeIns.push(event));
+
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    await typeText('Book a table.');
+
+    expect(log).toEqual([
+      'item user speech Hello there',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+      'barge_in cancel',
+      // Which of its words were heard is not known: playedText says none rather than guess.
+      'item assistant interrupted Hello world|',
+      'agent speaking>listening',
+      // The text is the user's turn, with no transcript, and the agent answers it.
+      'item user text Book a table.',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+    ]);
+    expect(ttsSession.cancel).toHaveBeenCalledOnce();
+    expect(agentSession.abort).toHaveBeenCalledOnce();
+    expect(transport.sendControl).toHaveBeenCalledWith({ type: 'barge_in', action: { type: 'cancel' } });
+    // No speech cut the reply.
+    expect(bargeIns).toEqual([
+      { speechDurationMs: 0, interruptedText: 'Hello world', playedDurationMs: 0, action: 'cancel', createdAt: expect.any(Number) },
+    ]);
+    expect(agentSession.sendText).toHaveBeenCalledTimes(2);
+    expect(agentSession.sendText).toHaveBeenLastCalledWith('Book a table.', {
+      speakers: [],
+      endpointReason: 'manual',
+      speechDurationMs: 0,
+      wasInterrupted: false,
+      transcriptConfidence: 1,
+    });
+    expect(orchestrator.state).toBe('speaking');
+  });
+
+  it('a text_input while listening starts a turn', async () => {
+    const session = await start();
+    const log = recordSessionEvents(session);
+    const items: VoiceConversationItem[] = [];
+    session.on('conversation_item_added', ({ item }) => items.push(item));
+    const turns = vi.fn();
+    orchestrator.on('turn_complete', turns);
+    session.on('turn_complete', turns);
+    // The session's start resets the detector for the session; the reset counted below is the text's.
+    vi.mocked(endpoint.reset).mockClear();
+
+    await typeText('Book a table.');
+
+    expect(log).toEqual(['item user text Book a table.', 'agent listening>thinking', 'speech reply false', 'agent thinking>speaking']);
+    expect(items[0]).toEqual({ role: 'user', text: 'Book a table.', source: 'text', endpointReason: 'manual' });
+    // What the detector holds of the user's speech is dropped before the agent takes the text.
+    expect(endpoint.reset).toHaveBeenCalledOnce();
+    expect(vi.mocked(endpoint.reset).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(agentSession.sendText).mock.invocationCallOrder[0]!
+    );
+    expect(turns).not.toHaveBeenCalled();
+    expect(agentSession.sendText).toHaveBeenCalledWith('Book a table.', {
+      speakers: [],
+      endpointReason: 'manual',
+      speechDurationMs: 0,
+      wasInterrupted: false,
+      transcriptConfidence: 1,
+    });
+    expect(transport.sendControl).toHaveBeenCalledWith({ type: 'agent_thinking' });
+    expect(transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'barge_in' }));
+    expect(orchestrator.state).toBe('speaking');
+  });
+
+  it('drops a text_input the check refuses with a warning that names why, never the text', async () => {
+    const session = await start();
+    const log = recordSessionEvents(session);
+    const errors: Error[] = [];
+    orchestrator.on('error', (error: Error) => errors.push(error));
+
+    await typeText('   ');
+    await typeText('x'.repeat(4_001));
+    transport.emit('message', { type: 'text_input', text: 42 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Each refused message is reported as the orchestrator's 'error' and a recoverable session_error, naming the
+    // reason and none of the text; the session listens on and the agent is not asked.
+    expect(errors.map((error) => error.message)).toEqual([
+      'a text_input message was dropped: its text is blank',
+      'a text_input message was dropped: its text is over 4000 characters',
+      'a text_input message was dropped: its text is not a string',
+    ]);
+    expect(errors.some((error) => error.message.includes('xxx'))).toBe(false);
+    expect(log).toEqual(['session_error session true', 'session_error session true', 'session_error session true']);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    expect(orchestrator.state).toBe('listening');
+  });
+
+  it('writes a refused text_input as one console warning when nothing listens for error', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await start();
+      await typeText('   ');
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith('[voice-pipeline-orchestrator] a refused text_input:', 'a text_input message was dropped: its text is blank');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each(['client transcripts', 'audio'] as const)(
+    'takes a text_input though the session takes its speech from %s',
+    async (source) => {
+      const session = await start();
+      const errors: Error[] = [];
+      orchestrator.on('error', (error: Error) => errors.push(error));
+      const log = recordSessionEvents(session);
+
+      // The session takes its speech from the first source it receives.
+      if (source === 'audio') transport.emit('audio', makeFrame());
+      else transport.emit('message', { type: 'transcript', text: 'Hello there.', itemId: '1', isFinal: true });
+      await typeText('Book a table.');
+
+      // Typed text is no speech: it is not dropped as speech from a second source.
+      expect(errors).toEqual([]);
+      expect(log.filter((line) => !line.startsWith('user') && !line.startsWith('transcribed'))).toEqual([
+        'item user text Book a table.',
+        'agent listening>thinking',
+        'speech reply false',
+        'agent thinking>speaking',
+      ]);
+      expect(agentSession.sendText).toHaveBeenCalledOnce();
+      expect(agentSession.sendText).toHaveBeenCalledWith('Book a table.', expect.objectContaining({ endpointReason: 'manual' }));
+    }
+  );
+
+  it('waits for the request of the reply a text_input cuts to end before the agent receives the text', async () => {
+    // AgentSessionVoiceAdapter streams one request at a time: a request pulled while the last one unwinds is refused.
+    const stream = vi
+      .fn()
+      .mockImplementationOnce((_text: string, { abortSignal }: { abortSignal: AbortSignal }) => ({
+        textStream: (async function* () {
+          yield 'Hello';
+          // The model's stream ends once the request is aborted.
+          await new Promise<void>((resolve) => abortSignal.addEventListener('abort', () => resolve(), { once: true }));
+        })(),
+      }))
+      .mockImplementationOnce(() => ({
+        textStream: (async function* () {
+          yield 'A table for two.';
+        })(),
+      }));
+    agentSession = new AgentSessionVoiceAdapter({ stream } as any);
+    const session = await start();
+    const failures: string[] = [];
+    session.on('session_error', (event) => failures.push(event.source));
+    const log = recordSessionEvents(session);
+
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    await typeText('Book a table.');
+
+    expect(failures).toEqual([]);
+    expect(stream.mock.calls.map(([text]) => text)).toEqual(['Hello there', 'Book a table.']);
+    expect(log).toEqual([
+      'item user speech Hello there',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+      'barge_in cancel',
+      'item assistant interrupted Hello|',
+      'agent speaking>listening',
+      'item user text Book a table.',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+    ]);
+    expect(ttsSession.pushTokens).toHaveBeenLastCalledWith('A table for two.');
+    expect(orchestrator.state).toBe('speaking');
+  });
+
+  it("takes the text two seconds after the cut when the agent's stream does not end, holds no later message behind it, and keeps a late token of the cut reply out of the next", async () => {
+    // An agent whose abort() is a no-op and whose stream, after its first token, yields nothing until the test lets it.
+    let release!: (token: string) => void;
+    const stalled = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    agentSession = {
+      sendText: vi.fn((text: string) => ({
+        [Symbol.asyncIterator]: async function* () {
+          if (text === 'Hello there') {
+            yield 'Hello';
+            yield await stalled;
+          } else yield `Reply to ${text}`;
+        },
+      })),
+      abort: vi.fn(),
+    };
+    const session = await start();
+    const log = recordSessionEvents(session);
+
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    await typeText('Book a table.');
+    // The reply is cut at once; the agent's request for it has not ended, so the text waits for it.
+    expect(log.slice(4)).toEqual(['barge_in cancel', 'item assistant interrupted Hello|', 'agent speaking>listening']);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    // A second text waits behind the first.
+    transport.emit('message', { type: 'text_input', text: 'By the window.' });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(0);
+    // Two seconds after the cut the agent receives the first text anyway. The second text, next in the chain, cuts
+    // the first text's reply before its first word, so that reply joins the conversation as nothing and no barge-in
+    // item is added, and the second text is taken in its turn.
+    expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Hello there', 'Book a table.', 'By the window.']);
+    expect(log.slice(7)).toEqual([
+      'item user text Book a table.',
+      'agent listening>thinking',
+      'barge_in cancel',
+      'agent thinking>listening',
+      'item user text By the window.',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+    ]);
+    expect(orchestrator.state).toBe('speaking');
+    // The cut replies' streams yield at last: their tokens belong to no reply that speaks now.
+    release(' late');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls.map(([token]) => token)).toEqual(['Hello', 'Reply to By the window.']);
+    expect(orchestrator.state).toBe('speaking');
+    // The bound's timer is cleared once the wait ends, and the watchdog is cleared while the agent speaks.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cuts the reply a turn of speech started while the cut reply's request unwound, and the agent receives the text", async () => {
+    // An agent whose abort() is a no-op and whose first stream, after its first token, yields nothing until the test
+    // lets it; every later request is answered at once.
+    let release!: (token: string) => void;
+    const stalled = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    let requests = 0;
+    agentSession = {
+      sendText: vi.fn((text: string) => ({
+        [Symbol.asyncIterator]: async function* () {
+          if (++requests === 1) {
+            yield 'Hello';
+            yield await stalled;
+          } else yield `Reply to ${text}`;
+        },
+      })),
+      abort: vi.fn(),
+    };
+    const session = await start();
+    const log = recordSessionEvents(session);
+
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    await typeText('Book a table.');
+    expect(log.slice(4)).toEqual(['barge_in cancel', 'item assistant interrupted Hello|', 'agent speaking>listening']);
+    // The detector completes a turn of speech while the text waits for the cut reply's request to end: its reply speaks.
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Hello there', 'Hello there']);
+    // Two seconds after the cut the wait ends: the text cuts that reply too, then the agent receives it.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(agentSession.sendText).mock.calls.map(([text]) => text)).toEqual(['Hello there', 'Hello there', 'Book a table.']);
+    expect(log.slice(7)).toEqual([
+      'item user speech Hello there',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+      'barge_in cancel',
+      'item assistant interrupted Reply to Hello there|',
+      'agent speaking>listening',
+      'item user text Book a table.',
+      'agent listening>thinking',
+      'speech reply false',
+      'agent thinking>speaking',
+    ]);
+    expect(orchestrator.state).toBe('speaking');
+    // The first reply's stream yields at last: its token belongs to no reply that speaks now.
+    release(' late');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls.map(([token]) => token)).toEqual(['Hello', 'Reply to Hello there', 'Reply to Book a table.']);
+    expect(orchestrator.state).toBe('speaking');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("flushes nothing of the text's reply when the cut reply's stream ends after the bound, and that reply ends whole", async () => {
+    // An agent whose abort() is a no-op: the cut reply's stream ends only when the test lets it, once the text's reply
+    // speaks, and the text's reply holds its last token until the test lets it.
+    let endFirst!: () => void;
+    const firstHeld = new Promise<void>((resolve) => {
+      endFirst = resolve;
+    });
+    let sendRest!: () => void;
+    const restHeld = new Promise<void>((resolve) => {
+      sendRest = resolve;
+    });
+    agentSession = {
+      sendText: vi.fn((text: string) => ({
+        [Symbol.asyncIterator]: async function* () {
+          if (text === 'Hello there') {
+            yield 'Hello';
+            await firstHeld;
+          } else {
+            yield 'Booked';
+            await restHeld;
+            yield ' for two.';
+          }
+        },
+      })),
+      abort: vi.fn(),
+    };
+    // The TTS session completes each flush at once, so the reply a flush belongs to ends with it.
+    vi.mocked(ttsSession.flush).mockImplementation(async () => {
+      ttsSession.emit('flush_complete');
+    });
+    await start();
+
+    await takeTurn();
+    await typeText('Book a table.');
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(orchestrator.state).toBe('speaking');
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls.map(([token]) => token)).toEqual(['Hello', 'Booked']);
+
+    // The cut reply's stream ends while the text's reply speaks: the TTS session it shares is not flushed for it.
+    endFirst();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ttsSession.flush).not.toHaveBeenCalled();
+    expect(orchestrator.state).toBe('speaking');
+
+    // The text's reply ends with its own last token, whole.
+    sendRest();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(ttsSession.pushTokens).mock.calls.map(([token]) => token)).toEqual(['Hello', 'Booked', ' for two.']);
+    expect(ttsSession.flush).toHaveBeenCalledOnce();
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'Booked for two.', durationMs: 0 });
     expect(orchestrator.state).toBe('listening');
   });
 
