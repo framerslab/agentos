@@ -579,6 +579,20 @@ interface SpeechEdges {
   tell(work: () => void): void;
 }
 
+/** A client's transcript lines, for a session that takes its speech from them (`_wireClientTranscripts`). */
+interface ClientLines {
+  /** The lines open, each with the timer that closes it as by an empty final. */
+  open: Map<string, ReturnType<typeof setTimeout>>;
+  /**
+   * The lines typed text dropped while they were open (`_dropClientLines`), each with the timer that forgets it: what
+   * the client still sends of one is dropped, until its final, or until it has had no message for
+   * `CLIENT_LINE_TIMEOUT_MS`.
+   */
+  dropped: Map<string, ReturnType<typeof setTimeout>>;
+  /** The finals of the endpoint detector's current turn, joined as the detector is told them. */
+  finals: string[];
+}
+
 /** What a session without a call profile keeps of the reply being spoken. */
 interface ReplyRecord {
   /** Whether a refused chunk of the reply has been reported; the rest of its refusals are not. */
@@ -841,8 +855,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   /** The language of the current turn's last final transcript, for the user's conversation item. */
   private turnLanguage?: string;
   /**
-   * Clears the client's open transcript lines and the timer of each (`_wireClientTranscripts`), so that none fires
-   * after a stop; set when a session without a call profile starts.
+   * Clears the client's open transcript lines, the lines typed text dropped and the timer of each
+   * (`_wireClientTranscripts`), so that none fires after a stop; set when a session without a call profile starts.
    */
   private endClientLines?: () => void;
   /**
@@ -1870,9 +1884,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * final, so a line whose final never comes (a client session that failed, a
    * message lost in a reconnect) holds no speech open. A stop, by
    * `stopSession()` or a transport close, ends every open line and clears its
-   * timer, so none fires after the session. A client's input is bounded: at
-   * most `CLIENT_MAX_OPEN_LINES` lines open, the oldest giving way, and a
-   * turn's joined text at most `CLIENT_TURN_MAX_TEXT` characters.
+   * timer, so none fires after the session. Typed text that takes the turn
+   * drops the lines open then (`_dropClientLines`): the user listens again,
+   * the detector is told no end of their speech, which its reset drops, and
+   * what the client still sends of them, their finals included, is dropped,
+   * so the next line it opens is a speech start of its own. A
+   * client's input is bounded: at most `CLIENT_MAX_OPEN_LINES` lines open, the
+   * oldest giving way, as many dropped lines remembered, and a turn's joined
+   * text at most `CLIENT_TURN_MAX_TEXT` characters.
    * Messages are handled one at a time, in the order they arrive, and one
    * that fails ends the session as a failure of the STT session's events
    * does. Nothing is relayed back, since the client shows its own text, and
@@ -1888,10 +1907,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * @param parts - The session's parts, for a turn of typed text.
    */
   private _wireClientTranscripts(transport: IStreamTransport, endpoint: IEndpointDetector, speech: SpeechEdges, parts: ReplyParts): void {
-    const lines = { open: new Map<string, ReturnType<typeof setTimeout>>(), finals: [] as string[] };
+    const lines: ClientLines = { open: new Map(), dropped: new Map(), finals: [] };
     this.endClientLines = () => {
       for (const timer of lines.open.values()) clearTimeout(timer);
       lines.open.clear();
+      for (const timer of lines.dropped.values()) clearTimeout(timer);
+      lines.dropped.clear();
     };
     this._onEndpoint(endpoint, 'turn_complete', () => {
       lines.finals = [];
@@ -1963,20 +1984,28 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    *
    * @param message - The client's message.
    * @param lines - The client's open lines, each with the timer that closes it,
-   *   and the finals of the detector's current turn.
+   *   the lines typed text dropped, and the finals of the detector's current turn.
    * @param handle - Hands a message to the chain, as one from the transport.
    * @param endpoint - The session's endpoint detector.
    * @param speech - What speech starting and ending does.
    */
   private async _onClientTranscript(
     message: ClientTranscriptMessage,
-    lines: { open: Map<string, ReturnType<typeof setTimeout>>; finals: string[] },
+    lines: ClientLines,
     handle: (message: ClientTranscriptMessage) => void,
     endpoint: IEndpointDetector,
     speech: SpeechEdges
   ): Promise<void> {
     if (this.current === 'closed') return;
     const { itemId } = message;
+    // A line typed text dropped: what the client still sends of it is the dropped speech's, and is dropped too, until
+    // its final, or until it has had no message for CLIENT_LINE_TIMEOUT_MS.
+    if (lines.dropped.has(itemId)) {
+      clearTimeout(lines.dropped.get(itemId));
+      lines.dropped.delete(itemId);
+      if (!message.isFinal) this._rememberDropped(lines, itemId);
+      return;
+    }
     const text = message.text.trim();
     const opening = !lines.open.has(itemId);
     if (opening && !text) return;
@@ -2043,16 +2072,18 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * `barge_in`. Then, once the agent's request for the cut reply has ended (`agentRequest`), or `TEXT_TURN_UNWIND_MS`
    * after the cut when it has not (`_unwound`), the text is taken; a reply that took the floor meanwhile, from a turn
    * of the user's speech, is cut in its turn, since the text interrupts whatever the agent says, as LiveKit Agents'
-   * text input does. The session, listening, resets the endpoint detector, dropping what it holds of the user's
-   * speech, with that speech's language and the client's finals joined for it, and takes the text as the user's turn
-   * (`_takeTurn`): no `turn_complete` and no `user_input_transcribed`, `source: 'text'`, `endpointReason: 'manual'`,
-   * no speech and full confidence. A text that finds the session closed, or in no state that takes a turn, is dropped.
+   * text input does. The session, listening, drops the client's open transcript lines (`_dropClientLines`), so the
+   * user listens again and what the client still sends of them is dropped, resets the endpoint detector, dropping
+   * what it holds of the user's speech, with that speech's language and the client's finals joined for it, and takes
+   * the text as the user's turn (`_takeTurn`): no `turn_complete` and no `user_input_transcribed`, `source: 'text'`,
+   * `endpointReason: 'manual'`, no speech and full confidence. A text that finds the session closed, or in no state
+   * that takes a turn, is dropped.
    *
    * @param text - The text, as `isClientTextInputMessage()` accepted it.
    * @param parts - The session's parts.
-   * @param lines - The client's transcript lines, whose finals joined for the dropped speech go with it.
+   * @param lines - The client's transcript lines, which go with the dropped speech, with the finals joined for it.
    */
-  private async _onClientText(text: string, parts: ReplyParts, lines: { finals: string[] }): Promise<void> {
+  private async _onClientText(text: string, parts: ReplyParts, lines: ClientLines): Promise<void> {
     for (;;) {
       if (this.current === 'speaking') this._cancelReply(parts, { type: 'cancel' });
       else if (this.current === 'processing') {
@@ -2067,10 +2098,55 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // A reply that took the floor while the wait ran is cut in its turn, and the text waits for its request the same way.
       if (this.current === 'listening') break;
     }
+    this._dropClientLines(lines);
+    // A listener of the user's state may have stopped the session.
+    if ((this.current as PipelineState) !== 'listening') return;
     inPart('endpoint', () => parts.endpoint.reset());
     this.turnLanguage = undefined;
     lines.finals = [];
     this._takeTurn(parts, { text, source: 'text', reason: 'manual', durationMs: 0, confidence: 1 });
+  }
+
+  /**
+   * Drops the client's open transcript lines as typed text takes the turn (`_onClientText`), which drops the speech
+   * they hold: their timers are cleared, so none closes a line with an empty final while the text's reply speaks, and
+   * each is remembered as dropped (`_rememberDropped`), so what the client still sends of it, its final among them, is
+   * dropped too and never reaches the endpoint detector or an interruption of the text's reply. With no line open, the
+   * next line the client opens is a speech start of its own, which interrupts the text's reply as speech over a reply
+   * does. The user, speaking while the lines were open, listens again (`user_state_changed`). The endpoint detector is
+   * told no end of the speech: one that found a final ending a sentence held would complete the dropped speech as the
+   * turn at once, and the text would be lost; the reset that follows drops what it holds instead.
+   *
+   * @param lines - The client's transcript lines.
+   */
+  private _dropClientLines(lines: ClientLines): void {
+    if (lines.open.size === 0) return;
+    for (const [itemId, timer] of lines.open) {
+      clearTimeout(timer);
+      this._rememberDropped(lines, itemId);
+    }
+    lines.open.clear();
+    if (this.events.user === 'speaking') this.events.userTo('listening');
+  }
+
+  /**
+   * Remembers a line typed text dropped until it has had no message for `CLIENT_LINE_TIMEOUT_MS`; at most
+   * `CLIENT_MAX_OPEN_LINES` are remembered, the oldest giving way.
+   *
+   * @param lines - The client's transcript lines.
+   * @param itemId - The dropped line's `itemId`.
+   */
+  private _rememberDropped(lines: ClientLines, itemId: string): void {
+    clearTimeout(lines.dropped.get(itemId));
+    lines.dropped.delete(itemId);
+    if (lines.dropped.size >= CLIENT_MAX_OPEN_LINES) {
+      const oldest = lines.dropped.keys().next();
+      if (!oldest.done) {
+        clearTimeout(lines.dropped.get(oldest.value));
+        lines.dropped.delete(oldest.value);
+      }
+    }
+    lines.dropped.set(itemId, setTimeout(() => lines.dropped.delete(itemId), CLIENT_LINE_TIMEOUT_MS));
   }
 
   /**
