@@ -193,8 +193,29 @@ const BOLD = new Set(['b', 'strong']);
 const ITALIC = new Set(['i', 'em']);
 const STRUCK = new Set(['del', 's', 'strike']);
 
-/** Every element that stands as a block: inside a line, its edges are spaces. */
-const BLOCK_LEVEL = new Set([...CONTAINERS, ...LISTS, ...PREFORMATTED, 'blockquote', 'table', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+/**
+ * Every element that stands as a block, read or left out: its edges end the paragraph being gathered, and are a space
+ * inside a line and a line break in code, so the words on either side of it stay apart.
+ */
+const BLOCK_LEVEL = new Set([
+  ...CONTAINERS,
+  ...LISTS,
+  ...PREFORMATTED,
+  'blockquote',
+  'table',
+  'hr',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'nav',
+  'header',
+  'footer',
+  'aside',
+  'form',
+]);
 
 /** What a cell of a table holds that marks the table as one laid out for the page, not a table of data. */
 const LAYOUT = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'blockquote', 'hr', ...PREFORMATTED]);
@@ -287,7 +308,8 @@ function plainOf(line: readonly MarkedRun[]): string {
 
 /**
  * An element's text as written, for code: text nodes as they are, a line break for `br` and at a block's edges (as a
- * highlighter that writes a line to a `div` shows it), images counted, the parts of a page that are not read left out.
+ * highlighter that writes a line to a `div` shows it), a block left out among them, images counted, the parts of a page
+ * that are not read left out.
  */
 function textOf(node: HtmlNodeLike, reading: Reading): string {
   let text = '';
@@ -298,7 +320,12 @@ function textOf(node: HtmlNodeLike, reading: Reading): string {
     }
     if (child.nodeType !== ELEMENT_NODE) continue;
     const name = nameOf(child);
-    if (skipped(child, name)) continue;
+    const block = BLOCK_LEVEL.has(name);
+    if (skipped(child, name)) {
+      // a block left out still parts the lines on either side of it
+      if (block && text !== '' && !text.endsWith('\n')) text += '\n';
+      continue;
+    }
     if (name === 'img') {
       reading.images += 1;
       continue;
@@ -307,7 +334,6 @@ function textOf(node: HtmlNodeLike, reading: Reading): string {
       text += '\n';
       continue;
     }
-    const block = BLOCK_LEVEL.has(name);
     if (block && text !== '' && !text.endsWith('\n')) text += '\n';
     text += textOf(child, reading);
     if (block && text !== '' && !text.endsWith('\n')) text += '\n';
@@ -325,9 +351,10 @@ interface LineHooks {
 }
 
 /**
- * An element's content read as one line of words: a line break, and a block's edges, a code block's and those of a
- * list handed to `hooks.list` among them, as one space; code as inline code; images counted. A list inside it goes to
- * `hooks.list` where given, with the marks of the elements around it, and is read into the line otherwise.
+ * An element's content read as one line of words: a line break, and a block's edges, those of a code block, of a list
+ * handed to `hooks.list` and of a block left out among them, as one space; code as inline code; images counted. A list
+ * inside it goes to `hooks.list` where given, with the marks of the elements around it, and is read into the line
+ * otherwise.
  */
 function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineHooks = {}): MarkedRun[] {
   const line: MarkedRun[] = [];
@@ -338,7 +365,11 @@ function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineH
     }
     if (current.nodeType !== ELEMENT_NODE) return;
     const name = nameOf(current);
-    if (skipped(current, name)) return;
+    if (skipped(current, name)) {
+      // a block left out still keeps the words on either side of it a space apart
+      if (BLOCK_LEVEL.has(name)) addWords(line, ' ', at, false);
+      return;
+    }
     if (name === 'img') {
       reading.images += 1;
       return;
@@ -713,7 +744,10 @@ function readTable(table: HtmlNodeLike, flow: Flow, marks: Marks, reading: Readi
   flow.push({ kind: 'table', rows: rows.map((row) => Array.from({ length: columns }, (_, column) => row[column] ?? [])), columns });
 }
 
-/** Reads a node into the flow of blocks: an element by what it is, text into the paragraph being gathered. */
+/**
+ * Reads a node into the flow of blocks: an element by what it is, text into the paragraph being gathered, which a block
+ * left out ends as a block read does.
+ */
 function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading, root = false): void {
   if (isText(node)) {
     flow.text(node.textContent ?? '', marks, false);
@@ -726,7 +760,10 @@ function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading
   if (node.nodeType !== ELEMENT_NODE) return;
   const name = nameOf(node);
   // the element a caller hands over is read whatever it is; only what it holds can be left out
-  if (!root && skipped(node, name)) return;
+  if (!root && skipped(node, name)) {
+    if (BLOCK_LEVEL.has(name)) flow.flush();
+    return;
+  }
   const level = headingLevel(name);
   if (level > 0) {
     flow.push(headingOf(node, level, marks, reading));

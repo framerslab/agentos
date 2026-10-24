@@ -123,7 +123,8 @@ function wordChar(cell: MarkedRun | undefined, side: 'first' | 'last'): boolean 
 /**
  * The runs with the white space at either edge of a bold, italic or struck run moved outside the mark, since a mark's
  * delimiters cannot stand beside a space, and the punctuation at an edge moved outside it where a letter or a digit
- * stands beyond that edge, as CommonMark's flanking rules need; then merged with their like.
+ * stands beyond that edge, as CommonMark's flanking rules need; then merged with their like, code with the code
+ * beside it.
  */
 function expelSpaces(runs: readonly MarkedRun[]): MarkedRun[] {
   const cells: MarkedRun[] = [];
@@ -158,7 +159,9 @@ function expelSpaces(runs: readonly MarkedRun[]): MarkedRun[] {
   const merged: MarkedRun[] = [];
   for (const cell of cells) {
     const last = merged[merged.length - 1];
-    if (last !== undefined && !last.code && !cell.code && MARKS.every((mark) => last[mark] === cell[mark])) last.text += cell.text;
+    // code beside code is one span, so one span's closing backticks never meet the next one's opening
+    if (last !== undefined && last.code && cell.code) last.text += cell.text;
+    else if (last !== undefined && !last.code && !cell.code && MARKS.every((mark) => last[mark] === cell[mark])) last.text += cell.text;
     else merged.push(cell);
   }
   return merged;
