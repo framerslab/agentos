@@ -13,7 +13,9 @@
  * room holds none, the first of them to join; participants of other kinds (an
  * agent, a recorder, an ingress) are passed over. `participantIdentity` links
  * one identity with the transport's own defaults. `setParticipant()` links
- * another participant at any time. While nobody is linked, the audio source
+ * another participant at any time: the streams the participant linked before
+ * still has arriving are closed, and nothing they still deliver reaches the
+ * session. While nobody is linked, the audio source
  * waits, `sendControl()` holds the session's messages, the last eight, and
  * resolves, and every text stream that arrives is closed unread; the first
  * participant linked gets the held messages in order, one at a time, ahead of
