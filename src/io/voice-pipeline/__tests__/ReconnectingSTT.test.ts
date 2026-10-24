@@ -253,7 +253,10 @@ describe('ReconnectingSTT', () => {
     // ElevenLabsStreamingSTT reports no startMs and endMs, and its words count from the audio it sent for the transcript
     const unbounded: TranscriptEvent = { text: 'no bounds', confidence: 1, isFinal: true, words: [{ word: 'no', start: 0, end: 300, confidence: 0.9 }, { word: 'bounds', start: 300, end: 700, confidence: 0.9 }] };
     sessions[1].emit('transcript', unbounded);
-    expect(got).toStrictEqual([unbounded]);
+    // one bound puts the words on the session's clock, so they move with it
+    sessions[1].emit('transcript', { ...unbounded, text: 'one bound', endMs: 700 });
+    expect(got[0]).toStrictEqual(unbounded);
+    expect([got[1].startMs, got[1].endMs, got[1].words.map((w) => [w.start, w.end])]).toEqual([undefined, 4_700, [[4_000, 4_300], [4_300, 4_700]]]);
     session.close();
   });
   it('moves a Moonshine line\'s words with its bounds after a reconnect, since the provider puts both on its session\'s clock', async () => {
