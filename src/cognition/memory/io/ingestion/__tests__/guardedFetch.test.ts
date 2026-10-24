@@ -385,35 +385,39 @@ describe('guardedFetch', () => {
       expect(lookup.lookups()).toBe(0);
     });
 
-    it('is asked under the deadline: a rule that outlasts it leaves the read refused for the deadline, not read with a fresh one', async () => {
+    it('is asked under the deadline: a rule that outlasts it leaves the read refused for the deadline, with nothing begun after it', async () => {
       const before = connections;
-      let lookups = 0;
-      /**
-       * Answers with the next turn's timers, where a deadline already due fires
-       * first. A lookup can answer no sooner: its answer comes with the I/O
-       * after the timers. (`setImmediate` would run in the check phase, before
-       * the next timers, when the case begins from an I/O callback.)
-       */
-      const nextTurn = async () => {
-        lookups += 1;
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        return [{ address: '127.0.0.1', family: 4 }];
-      };
-      const deadlineMs = 100;
-      /** A rule that takes three times the deadline to say yes. */
-      const slow = (): boolean => {
+      const lookup = counting();
+      const deadlineMs = 50;
+      /** A rule that takes three times the deadline to give `answer`. */
+      const slow = (answer: boolean) => (): boolean => {
         const until = Date.now() + 3 * deadlineMs;
         while (Date.now() < until) {
           // The rule is at work.
         }
-        return true;
+        return answer;
       };
-      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: nextTurn, allowHost: slow, deadlineMs })))).toBe('deadline');
-      // The lookup was asked for, since the deadline's timer fires only once
-      // the rule has returned; its answer came too late for anything to be
-      // connected to.
-      expect(lookups).toBe(1);
+      // A rule that says yes too late: no lookup is asked for and nothing is
+      // connected to. The deadline's timer cannot fire while the rule runs, so
+      // the deadline is read from the clock once the rule returns.
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: slow(true), deadlineMs })))).toBe('deadline');
+      expect(lookup.lookups()).toBe(0);
+      // A rule that says no too late: the deadline, not the host, is the reason.
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: slow(false), deadlineMs })))).toBe('deadline');
+      expect(lookup.lookups()).toBe(0);
       expect(connections).toBe(before);
+      // A literal public address needs no lookup, so the connection is the next
+      // step: nothing is begun there either. Blocked, so no case reaches past
+      // this machine if the step regresses.
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        expect(await reasonOf(guardedFetch('http://93.184.215.14/page', reach({ allowHost: slow(true), allowPorts: [80], deadlineMs })))).toBe('deadline');
+        expect(connect).not.toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
     });
 
     it("ends on the caller's abort from inside the rule with the signal's reason and no lookup, at the first address as at a redirect", async () => {
@@ -480,6 +484,23 @@ describe('guardedFetch', () => {
         connect.mockRestore();
       }
     });
+  });
+
+  it("ends with the caller's reason when the resolver aborts the signal as it starts and never answers", async () => {
+    const reason = new Error('the caller moved on');
+    const stopper = new AbortController();
+    /** A resolver that stops the read as it starts and then never answers, as one wired to the caller's own cancellation might. */
+    const stopsAndHangs = () => {
+      stopper.abort(reason);
+      return new Promise<Array<{ address: string; family: number }>>(() => {});
+    };
+    const outcome = guardedFetch(at('/page'), reach({ resolve: stopsAndHangs, signal: stopper.signal })).then(
+      () => 'read',
+      (error: unknown) => error,
+    );
+    // A read that waited for the resolver's answer would never end; the race says so within a second.
+    const hung = new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 1_000));
+    expect(await Promise.race([outcome, hung])).toBe(reason);
   });
 
   /** The addresses each new client socket tries to connect to, in order, while `run` runs. */
