@@ -95,6 +95,24 @@ describe("MiniMax image API integration", () => {
     expect(JSON.parse(String(init?.body)).model).toBe("image-01");
   });
 
+  it("generates with image-01 on the China root when the global default names MiniMax's text model", async () => {
+    // MINIMAX_BASE_URL set to MiniMax's China root picks a region of MiniMax's
+    // own API, which serves the same model names; it is not a custom endpoint
+    // that keeps the default's model.
+    vi.stubEnv("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1");
+    setDefaultProvider({
+      provider: "minimax",
+      model: "MiniMax-M3.1-Flash",
+      apiKey: "default-key",
+    });
+    const result = await generateImage({ prompt: "A lighthouse" });
+    expect(result.provider).toBe("minimax");
+    expect(result.model).toBe("image-01");
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("https://api.minimaxi.com/v1/image_generation");
+    expect(JSON.parse(String(init?.body)).model).toBe("image-01");
+  });
+
   it("requires a key and honors inline credential overrides", () => {
     vi.stubEnv("MINIMAX_API_KEY", "");
     expect(() => resolveMediaProvider("minimax", "image-01")).toThrow(
