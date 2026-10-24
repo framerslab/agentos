@@ -59,9 +59,11 @@
  * - Both runtimes take the user's typed text, a `text_input` message that `isClientTextInputMessage()` accepts, as a
  *   user turn of its own, whatever the session takes its speech from: `conversation_item_added` with
  *   `source: 'text'` and `endpointReason: 'manual'`, with no `turn_complete` and no `user_input_transcribed`, and the
- *   speech heard so far is dropped. A text that comes while the session is `speaking`, before or after the reply's
- *   first word, cuts the reply as a `cancel` barge-in does, with `speechDurationMs: 0`; a reply cut before its first
- *   word adds no assistant item. Without a call profile the text's turn starts once the agent's request for the cut
+ *   speech heard so far is dropped, with a client's open transcript lines: what the client still sends of them is
+ *   dropped too, and the next line it opens is a speech start of its own. A text that comes while the session is
+ *   `speaking`, before or after the reply's first word, cuts the reply as a `cancel` barge-in does, with
+ *   `speechDurationMs: 0`; a reply cut before its first word adds no assistant item. Without a call profile the
+ *   text's turn starts once the agent's request for the cut
  *   reply has ended, since an agent answers one request at a time, or `TEXT_TURN_UNWIND_MS` after the cut when that
  *   request has not ended, and a reply that took the floor meanwhile is cut in its turn (`_onClientText`); a call
  *   profile cuts through `interrupt()` and its generation fence (`takeText`), where a turn the agent has yet to answer
