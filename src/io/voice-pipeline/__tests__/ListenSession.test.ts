@@ -182,6 +182,46 @@ describe('startListenSession', () => {
       vi.useRealTimers();
     }
   });
+  it('takes no text or times for an acoustic turn from a final with no words', async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider, sessions } = stt();
+      const sink = new ArraySink();
+      const detector = new AcousticEndpointDetector();
+      const session = await startListenSession(transport(), sink, { streamingSTT: provider, runId: 'r1', endpointDetector: detector, reconnect: false });
+      const turns: TranscriptTurn[] = [];
+      session.on('turn', (turn: TranscriptTurn) => turns.push(turn));
+      /** The empty final with which a provider takes back an item's interim text: no words and no times. */
+      const takenBack = (itemId: string): TranscriptEvent => ({ itemId, text: '', confidence: 0, words: [], isFinal: true });
+      sessions[0].emit('speech_start');
+      sessions[0].emit('transcript', takenBack('item_A'));
+      sessions[0].emit('transcript', final('first clause', 100, 400));
+      sessions[0].emit('transcript', final('second clause', 500, 900));
+      sessions[0].emit('transcript', takenBack('item_Z'));
+      sessions[0].emit('speech_end');
+      await vi.advanceTimersByTimeAsync(3_000);
+      const closing = session.close('stopped');
+      await vi.advanceTimersByTimeAsync(3_000);
+      await closing;
+      expect(sink.turns.map((turn) => [turn.text, turn.startMs, turn.endMs])).toEqual([['first clause second clause', 100, 900]]);
+      expect(turns).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('writes no turn and no interim for a final with no words, without a detector', async () => {
+    const { provider, sessions } = stt();
+    const sink = new ArraySink();
+    const session = await startListenSession(transport(), sink, { streamingSTT: provider, runId: 'r1', reconnect: false, drainMs: 0 });
+    const interims = vi.fn();
+    session.on('interim', interims);
+    sessions[0].emit('transcript', { ...final('speculative words', 0, 500), itemId: 'item_A', isFinal: false });
+    sessions[0].emit('transcript', { itemId: 'item_A', text: '', confidence: 0, words: [], isFinal: true });
+    sessions[0].emit('transcript', { ...final('kept words', 600, 900), itemId: 'item_B' });
+    await session.close('stopped');
+    expect(sink.turns.map((turn) => [turn.text, turn.startMs, turn.endMs])).toEqual([['kept words', 600, 900]]);
+    expect(interims).toHaveBeenCalledTimes(1);
+  });
   it.each(['purged', 'sink_failed', 'transport_closed', 'transport_failed', 'stt_failed'] as const)('releases a paused transport once during %s cleanup', async (reason) => {
     const t = transport();
     const { provider, sessions } = stt();

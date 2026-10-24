@@ -2,8 +2,8 @@
  * @module voice-pipeline/ListenSession
  *
  * A session that listens and writes: a transport's audio into a streaming
- * transcriber, each final (or each detector turn) into a sink as a numbered
- * turn. No synthesis, no barge-in, no agent turn. Built for a notetaker, a
+ * transcriber, each final with words (or each detector turn) into a sink as a
+ * numbered turn. No synthesis, no barge-in, no agent turn. Built for a notetaker, a
  * meeting bot or a transcription job, where {@link VoicePipelineOrchestrator}
  * is built for a conversation.
  */
@@ -29,8 +29,10 @@ export interface ListenSessionOverrides {
   /** The run the turns belong to; turn ids are `<runId>:<n>`. */
   runId: string;
   /**
-   * When given, its `turn_complete` events are the turns; without one, each final is a turn.
-   * An empty detector transcript uses the STT finals since the previous turn, joined with spaces,
+   * When given, its `turn_complete` events are the turns; without one, each final with words is a turn.
+   * A final with no words, a transcriber taking back interim text it showed, is no turn, and an empty
+   * detector transcript takes no text, time or confidence from it.
+   * An empty detector transcript uses the STT finals with words since the previous turn, joined with spaces,
    * and their first start and last end times (including with {@link AcousticEndpointDetector}).
    * A `late_final` it emits, a final that arrived after its turn completed and that no turn takes,
    * is written as a turn of its own, as a final is without a detector; one with no words writes nothing.
@@ -96,15 +98,16 @@ export interface ListenSession extends EventEmitter {
  * Starts listening. Emits `turn` (a {@link TranscriptTurn}), `interim` (a {@link TranscriptEvent}), `stt:reconnected`,
  * `stt:gap`, `paused`, `resumed` and `ended` (`{ reason, error? }`).
  *
- * The transport's frames go to the transcriber. Each final, or with an endpoint detector each `turn_complete` and each
- * `late_final` (a final the detector's turns left out), goes to the sink, one write at a time in arrival order; the
- * sink numbers it. When `sinkQueueLimit` finals wait for the sink, the session emits `pause` on the transport and
- * `paused` on itself, and `resume` and `resumed` once the queue is down to half or the session ends; a final is never
+ * The transport's frames go to the transcriber. Each final with words, or with an endpoint detector each
+ * `turn_complete` and each `late_final` (a final the detector's turns left out), goes to the sink, one write at a time
+ * in arrival order; the sink numbers it. A final with no words, with which a transcriber takes back interim text it
+ * showed, writes nothing. When `sinkQueueLimit` finals wait for the sink, the session emits `pause` on the transport
+ * and `paused` on itself, and `resume` and `resumed` once the queue is down to half or the session ends; a final is never
  * dropped for a slow sink. The transcriber's `speech_start`
  * and `speech_end` reach the detector as voice activity, as the orchestrator gives them. The session ends once, for the first
  * {@link ListenEndReason}; it closes the transcriber and leaves the transport open, since the transport is the
  * caller's. A transport error ends it with `transport_failed` and the error in `ended`. Its transport listeners
- * are removed on every end. An empty detector turn uses the accumulated STT finals and their timing.
+ * are removed on every end. An empty detector turn uses the accumulated STT finals with words and their timing.
  *
  * @param transport - Where the audio comes from: the session listens for its `audio`, `close` and `error`.
  * @param sink - Where the turns go; it assigns each turn's number and id.
@@ -290,14 +293,17 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
 
   sttSession.on('transcript', (event: TranscriptEvent) => {
     if (!accepting()) return;
+    // A final with no words takes back interim text the transcriber showed: it is no turn, and it joins no empty
+    // detector turn, whose text, times and confidence come from the finals with words.
+    const spoken = event.isFinal && event.text.trim() !== '';
     if (detector) {
-      if (event.isFinal) finals.push(event);
+      if (spoken) finals.push(event);
       detector.pushTranscript(event);
       if (!event.isFinal) emitter.emit('interim', event);
       return;
     }
-    if (event.isFinal) write(event.text, event);
-    else emitter.emit('interim', event);
+    if (spoken) write(event.text, event);
+    else if (!event.isFinal) emitter.emit('interim', event);
   });
   const onVad = (event: VadEvent): void => {
     if (!accepting()) return;
