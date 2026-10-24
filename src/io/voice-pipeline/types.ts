@@ -112,8 +112,9 @@ export interface AudioFrame {
  * that segment alone, so a frame that carries one ends a whole segment; the
  * frames before it carry none, and a flush that ends on a timeout attaches
  * none. A segment the provider completed with no frame has no frame to carry
- * its boundary: its text joins the boundary of the next segment that ends on
- * one, which then starts where it starts. A consumer counts the text as heard
+ * its boundary: one with no letter or digit, nothing to hear, joins the
+ * boundary of the next segment that ends on one, which then starts where it
+ * starts, and one with words proves nothing. A consumer counts the text as heard
  * only once the transport has acknowledged that frame as played, and only the
  * contiguous prefix of acknowledged segments; a cleared or stale frame
  * advances nothing. The legacy

@@ -9,10 +9,12 @@
  * the segment in flight and attaches the segment's boundary
  * ({@link TtsTextBoundary}) to that frame when the terminal response proves
  * the segment complete. Every earlier frame goes out without one. A segment
- * the provider completes with no frame, as an ellipsis alone can be, attaches
- * nothing: its text joins the boundary of the next segment of the reply that
+ * the provider completes with no frame attaches nothing. One with nothing to
+ * say, no letter or digit, as an ellipsis or an emoji alone, has nothing to
+ * hear: its text joins the boundary of the next segment of the reply that
  * ends on a frame, which then starts where it starts, so the boundaries stay
- * contiguous and the played prefix runs on past it. A segment
+ * contiguous and the played prefix runs on past it. One with words was not
+ * spoken, so the played prefix stops before it. A segment
  * with no terminal response within `timeoutMs` ends without a boundary, and
  * so does one the adapter abandons because its socket closed first: a timeout
  * is not completion, and a segment completed with no frame before either is
