@@ -78,8 +78,11 @@ const SPECIAL = /[`\\*_~[<&]/g;
 /** An entity or a numeric character reference at a text's start, which CommonMark reads as the character it names. */
 const ENTITY = /^&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});/;
 
-/** What can follow `<` to open an HTML tag, a comment, a declaration or an autolink in CommonMark. */
-const TAG_START = /[A-Za-z/!?]/;
+/**
+ * What can follow `<` to open an HTML tag, a comment, a declaration or an autolink in CommonMark: a letter, `/`, `!` or
+ * `?`, and every character an email autolink's address may start with, digits among them (`<3@example.com>`).
+ */
+const TAG_START = /[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]/;
 
 /** The three marks a run can carry beside code. */
 type RunMark = 'bold' | 'italic' | 'strike';
@@ -174,7 +177,8 @@ function expelSpaces(runs: readonly MarkedRun[]): MarkedRun[] {
  * end of the run, where it could join a struck run's two. The profile reads none of these as anything but itself
  * after its backslash, and CommonMark reads more as marks than it does, so the escapes also cover what CommonMark
  * would read: an underscore that could open or close emphasis, every `[`, which could open a link, a `<` that could
- * open a tag or an autolink, and a `&` that starts an entity. Characters are read as whole code points.
+ * open a tag, an autolink or an email autolink, and a `&` that starts an entity. Characters are read as whole code
+ * points.
  */
 export function escapeText(text: string): string {
   let written = '';

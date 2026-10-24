@@ -352,9 +352,9 @@ interface LineHooks {
 
 /**
  * An element's content read as one line of words: a line break, and a block's edges, those of a code block, of a list
- * handed to `hooks.list` and of a block left out among them, as one space; code as inline code; images counted. A list
- * inside it goes to `hooks.list` where given, with the marks of the elements around it, and is read into the line
- * otherwise.
+ * handed to `hooks.list`, of a block left out and of a first `h1` whose words gave the title among them, as one space;
+ * code as inline code; images counted. A list inside it goes to `hooks.list` where given, with the marks of the elements
+ * around it, and is read into the line otherwise.
  */
 function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineHooks = {}): MarkedRun[] {
   const line: MarkedRun[] = [];
@@ -398,11 +398,10 @@ function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineH
     }
     if (headingLevel(name) === 1 && reading.firstH1 === undefined) {
       // the page's first h1 read into a line, as a list item's words: noted for the title, and left out with its words
-      // when it gives the title
+      // when it gives the title; its edges are a block's either way, so the words on either side of it stay apart
       const runs = lineOf(current, at, reading);
-      if (firstH1Leaves(plainOf(runs), reading)) return;
       addWords(line, ' ', at, false);
-      for (const run of runs) addWords(line, run.text, run, run.code);
+      if (!firstH1Leaves(plainOf(runs), reading)) for (const run of runs) addWords(line, run.text, run, run.code);
       addWords(line, ' ', at, false);
       return;
     }
@@ -683,15 +682,17 @@ function readApart(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Readin
 }
 
 /**
- * Reads a table into the flow, its caption first. A table laid out for the page (marked `role="presentation"` or
- * `role="none"`, of one cell, or with a cell that holds a heading, a table, a quote, code or a divider) is read as the
- * blocks its cells hold. A table of data is one table block: a cell spanning columns or rows keeps its words in its
- * first place and leaves the others empty; a row with no words is left out, and so are the columns after the last that
- * holds one. Either kind keeps `maxTableRows` rows, a row that writes nothing not counted, and the cells that start
- * within `maxTableColumns` columns; a row or a cell past a bound is still read, so the images in it are counted as every
- * image left out is, and sets `cut` when it holds anything to write.
+ * Reads a table into the flow, its caption first, the paragraph before it ended whatever the table holds. A table laid
+ * out for the page (marked `role="presentation"` or `role="none"`, of one cell, or with a cell that holds a heading, a
+ * table, a quote, code or a divider) is read as the blocks its cells hold. A table of data is one table block: a cell
+ * spanning columns or rows keeps its words in its first place and leaves the others empty; a row with no words is left
+ * out, and so are the columns after the last that holds one. Either kind keeps `maxTableRows` rows, a row that writes
+ * nothing not counted, and the cells that start within `maxTableColumns` columns; a row or a cell past a bound is still
+ * read, so the images in it are counted as every image left out is, and sets `cut` when it holds anything to write.
  */
 function readTable(table: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading): void {
+  // the words before a table end at its edge, whatever it holds, a table that writes nothing among them
+  flow.flush();
   const [caption] = childElements(table, CAPTION);
   if (caption !== undefined) readApart(caption, flow, marks, reading);
   const groups = rowGroupsOf(table).map((group) => group.map((row) => childElements(row, CELL)));
@@ -699,8 +700,6 @@ function readTable(table: HtmlNodeLike, flow: Flow, marks: Marks, reading: Readi
   const all = groups.flat(2);
   const placed = placedRows(groups, reading.maxTableColumns);
   if (role === 'presentation' || role === 'none' || all.length === 1 || all.some(holdsLayout)) {
-    // the words before the table end at its first cell, whether that cell is kept or left out
-    if (all.length > 0) flow.flush();
     let kept = 0;
     for (const row of placed) {
       const within = kept < reading.maxTableRows;
