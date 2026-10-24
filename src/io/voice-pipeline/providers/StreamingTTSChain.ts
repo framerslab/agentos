@@ -79,9 +79,11 @@ export interface StreamingTTSChainOptions {
    * policy permits when the session in use fails. Under a `ProviderPolicy`
    * that happens only while the text has produced no audio; a failure after
    * audio ends the facade instead. The session is then the chain's facade:
-   * it forwards `'audio'` and
-   * `'flush_complete'` from the provider session in use and `'usage'` from
-   * every provider session it attached. A backup that fails as it takes the
+   * it forwards `'audio'`, `'flush_complete'` and `'warning'` from the
+   * provider session in use (under a `ProviderPolicy` a warning arrives as
+   * `Error('provider warning')`, without the provider's text, and one nobody
+   * listens for is not printed) and `'usage'` from every provider session it
+   * attached. A backup that fails as it takes the
    * text (an `'error'` or a `'close'`, or a write it refuses) is recorded as
    * failed and closed, and the next provider is tried. A provider close after
    * `flush_complete`, after its `flush()` resolved or after `cancel()` ends
@@ -191,9 +193,10 @@ export class StreamingTTSChain implements IStreamingTTS {
    * completed or `cancel()`, cancels and closes it, opens the next remaining provider (authorized first under a
    * `ProviderPolicy`) and sends it the admitted text. A backup that reports an error or a close while it takes that
    * text, or refuses a write of it, is recorded as failed and closed, and the next remaining provider is opened; so
-   * is one without the pull contract when the audio goes to a sink, but without a recorded failure. Audio,
-   * `flush_complete` and errors of a session that is no longer active never reach the facade; its `usage` reports
-   * do. `cancel()` and `close()` advance an epoch, so a switch begun before them stops, and a backup that opens after
+   * is one without the pull contract when the audio goes to a sink, but without a recorded failure. The active
+   * session's warnings reach the facade, as `Error('provider warning')` under a `ProviderPolicy`. Audio,
+   * `flush_complete`, warnings and errors of a session that is no longer active never reach the facade; its `usage`
+   * reports do. `cancel()` and `close()` advance an epoch, so a switch begun before them stops, and a backup that opens after
    * them is cancelled and closed. With the pull contract (`setAudioSink()` and `writeTokens()`), audio flows only
    * through the sink, and a chunk emitted as `'audio'` as well ends the facade.
    */
@@ -268,6 +271,15 @@ export class StreamingTTSChain implements IStreamingTTS {
       });
     };
     const attach = (session: StreamingTTSSession): void => {
+      const id = provider.providerId;
+      // A failure the session in use goes on after, such as a socket that failed to open for a reply: the caller learns
+      // from it that some of the reply may never have been spoken. A provider session prints a warning nobody listens
+      // for; the legacy facade does the same, and a strict policy's facade forwards no provider text.
+      session.on('warning', (warning: Error) => {
+        if (closed || current !== session) return;
+        if (facade.listenerCount('warning')) facade.emit('warning', this.policy.mode === 'legacy' ? warning : new Error('provider warning'));
+        else if (this.policy.mode === 'legacy') console.warn('[' + id + '] ' + warning.message);
+      });
       session.on('audio', (chunk: EncodedAudioChunk) => {
         if (closed || cancelled || current !== session) return;
         if (sink) {
