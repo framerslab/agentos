@@ -446,6 +446,22 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: 'words on either side of a list inside an item stay a space apart',
+    html: '<ul><li>Before<ul><li>Nested</li></ul>After</li></ul><ol><li><em>One<ol><li>Two</li></ol>Three</em></li></ol>',
+    title: null,
+    markdown: lines('- Before After', '  - Nested', '', '1. *One Three*', '   1. *Two*'),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: 'words on either side of a code block inside an item stay a space apart',
+    html: '<ul><li>Run<pre>make test</pre>first</li></ul>',
+    title: null,
+    markdown: '- Run `make test` first',
+    images: 0,
+    cut: false,
+  },
+  {
     name: 'a cell spanning its rows to the end of the head stops at the body',
     html: '<table><thead><tr><th rowspan="0">A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>',
     title: null,
