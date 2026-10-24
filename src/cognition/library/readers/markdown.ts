@@ -177,8 +177,9 @@ function expelSpaces(runs: readonly MarkedRun[]): MarkedRun[] {
  * end of the run, where it could join a struck run's two. The profile reads none of these as anything but itself
  * after its backslash, and CommonMark reads more as marks than it does, so the escapes also cover what CommonMark
  * would read: an underscore that could open or close emphasis, every `[`, which could open a link, a `<` that could
- * open a tag, an autolink or an email autolink, and a `&` that starts an entity. Characters are read as whole code
- * points.
+ * open a tag, an autolink or an email autolink, the one at the run's end among them, since a mark's delimiters or a
+ * code span's backticks follow it there and can start an email address, and a `&` that starts an entity. Characters
+ * are read as whole code points.
  */
 export function escapeText(text: string): string {
   let written = '';
@@ -195,7 +196,7 @@ export function escapeText(text: string): string {
     else if (char === '_') {
       escape = !(before !== undefined && after !== undefined && ((WORD.test(before) && WORD.test(after)) || (SPACE.test(before) && SPACE.test(after))));
     } else if (char === '~') escape = before === undefined || after === undefined || before === '~' || after === '~';
-    else if (char === '<') escape = after !== undefined && TAG_START.test(after);
+    else if (char === '<') escape = after === undefined || TAG_START.test(after);
     else if (char === '&') escape = ENTITY.test(text.slice(at, at + 40));
     if (escape) {
       written += `${text.slice(from, at)}\\${char}`;
