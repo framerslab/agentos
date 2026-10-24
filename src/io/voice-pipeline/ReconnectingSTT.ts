@@ -186,7 +186,8 @@ export class ReconnectingSTT implements IStreamingSTT {
           ...raw,
           ...(raw.startMs !== undefined ? { startMs: mapTime(raw.startMs) } : {}),
           ...(raw.endMs !== undefined ? { endMs: mapTime(raw.endMs, true) } : {}),
-          ...(raw.words?.length ? { words: raw.words.map(mapWord) } : {}),
+          // A transcript with no bounds counts its words from its own audio, so they stay as the provider gave them.
+          ...(raw.words?.length && raw.startMs !== undefined ? { words: raw.words.map(mapWord) } : {}),
         };
         if (evt.isFinal && evt.startMs !== undefined && evt.endMs !== undefined && Number.isFinite(evt.startMs) && Number.isFinite(evt.endMs) && evt.endMs > evt.startMs) {
           const r = dedupe.evaluate({ provider: providerId, text: evt.text, audioStartMs: evt.startMs, audioEndMs: evt.endMs, isFinal: true });

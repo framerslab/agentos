@@ -363,7 +363,8 @@ export class StreamingSTTChain implements IStreamingSTT {
           ...event,
           ...(event.startMs === undefined ? {} : { startMs: origin + event.startMs }),
           ...(event.endMs === undefined ? {} : { endMs: origin + event.endMs }),
-          ...(event.words === undefined ? {} : { words: event.words.map((word) => ({ ...word, start: origin + word.start, end: origin + word.end })) }),
+          // A transcript with no bounds counts its words from its own audio, so they stay as the provider gave them.
+          ...(event.words === undefined || event.startMs === undefined ? {} : { words: event.words.map((word) => ({ ...word, start: origin + word.start, end: origin + word.end })) }),
         };
         // An empty final retracts interim text its own provider showed and repeats no one's words, so it is never
         // a duplicate.

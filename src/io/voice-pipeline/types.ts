@@ -449,7 +449,8 @@ export interface TranscriptWord {
    * bounds onto another timeline (`ReconnectingSTT`, `StreamingSTTChain`,
    * `RollingSTTSession`) moves its words by the same amount. A provider that
    * reports no `startMs` and `endMs` (`ElevenLabsStreamingSTT`) counts from
-   * the start of the audio it transcribed for the event.
+   * the start of the audio it transcribed for the event, and those wrappers
+   * leave such an event's words as the provider gave them.
    */
   start: number;
 
