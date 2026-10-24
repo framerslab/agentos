@@ -34,9 +34,10 @@ export interface GlobalDefaultProvider {
    * too unless it is recognizably a chat model (GPT, Claude, Gemini, Llama,
    * MiniMax and similar families) sent to the provider's own endpoint, in
    * which case the provider's default model for the task applies. With a
-   * custom endpoint (`baseUrl` here, inline, or the provider's base-URL env
-   * var), and for `embedText` on Ollama, it is always used. MiniMax's two API
-   * roots, `https://api.minimax.io/v1` and the China root
+   * custom endpoint, and for `embedText` on Ollama, it is always used. The
+   * endpoint is the base URL the call is sent to: the call's own `baseUrl`,
+   * else `baseUrl` here, else the provider's base-URL env var. MiniMax's two
+   * API roots, `https://api.minimax.io/v1` and the China root
    * `https://api.minimaxi.com/v1`, are its own endpoint, not a custom one.
    */
   model?: string;

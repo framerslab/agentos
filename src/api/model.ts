@@ -531,13 +531,14 @@ const PROVIDER_API_ROOTS: Record<string, readonly string[]> = {
 
 /**
  * Whether `url` is a base URL other than an API root `provider` documents for
- * its own service (see {@link PROVIDER_API_ROOTS}); trailing slashes are
- * ignored. An unset or empty URL is not custom.
+ * its own service (see {@link PROVIDER_API_ROOTS}). Surrounding whitespace and
+ * trailing slashes are ignored, as MiniMax's image provider ignores them when
+ * it sends. An unset or empty URL is not custom.
  */
 function isCustomBaseUrl(provider: string | undefined, url: unknown): boolean {
   if (typeof url !== 'string' || !url) return false;
   const roots = provider ? PROVIDER_API_ROOTS[provider] : undefined;
-  return !roots?.includes(url.replace(/\/+$/, ''));
+  return !roots?.includes(url.trim().replace(/\/+$/, ''));
 }
 
 /**
@@ -552,17 +553,19 @@ function withGlobalDefault(opts: ModelOption, task: TaskType): ModelOption {
   if (opts.provider || opts.model) return opts;
   const def = getDefaultProvider();
   if (!def?.provider) return opts;
-  // A custom endpoint (the default's baseUrl, an inline baseUrl on callers
-  // such as embedText, or the provider's base-URL env var) may serve any
-  // model under any name, so the default's model stays. A regional root the
-  // provider documents (MiniMax's China API) serves the provider's own names
-  // and is not custom.
+  // A custom endpoint may serve any model under any name, so the default's
+  // model stays. The endpoint is the base URL the call is sent to: an inline
+  // baseUrl on callers such as embedText, else the default's baseUrl, else
+  // the provider's base-URL env var, the order resolveProvider and
+  // resolveMediaProvider take them in. A regional root the provider documents
+  // (MiniMax's China API) serves the provider's own names and is not custom,
+  // even when a setting the call does not use names a custom endpoint.
   const inlineBaseUrl = (opts as { baseUrl?: unknown }).baseUrl;
   const envBaseUrlVar = def.provider ? ENV_URL_MAP[def.provider] : undefined;
-  const customEndpoint =
-    isCustomBaseUrl(def.provider, def.baseUrl) ||
-    isCustomBaseUrl(def.provider, inlineBaseUrl) ||
-    (envBaseUrlVar !== undefined && isCustomBaseUrl(def.provider, process.env[envBaseUrlVar]));
+  const sentTo = [inlineBaseUrl, def.baseUrl, envBaseUrlVar ? process.env[envBaseUrlVar] : undefined].find(
+    (url) => typeof url === 'string' && url !== '',
+  );
+  const customEndpoint = isCustomBaseUrl(def.provider, sentTo);
   return {
     ...opts,
     provider: def.provider,
