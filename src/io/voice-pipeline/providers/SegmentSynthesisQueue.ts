@@ -52,6 +52,11 @@ import { SentenceSegmenter, boundaryOf, type TextSegment } from '../ttsTextBound
 /** How long a segment waits for its terminal response before it ends without a boundary. */
 export const DEFAULT_SEGMENT_TIMEOUT_MS = 5_000;
 
+/** Two contiguous segments as one, under the first one's id. */
+function joined(first: TextSegment, next: TextSegment): TextSegment {
+  return { segmentId: first.segmentId, start: first.start, end: next.end, text: first.text + next.text };
+}
+
 /** What the queue asks of its adapter. */
 export interface SegmentSynthesisHooks {
   /**
@@ -127,6 +132,13 @@ export class SegmentSynthesisQueue {
   /** The segments waiting to start, in order, each with how many queued segments it holds: one, unless it is a flight sent again. */
   private readonly pending: Array<{ segment: TextSegment; count: number }> = [];
   private flight?: Flight;
+  /**
+   * The segments the provider completed with no frame, joined, until the segment after them ends: the boundary of the
+   * next segment that ends on a frame starts where they start, so the played prefix runs on past a segment with nothing
+   * to hear, such as an ellipsis alone. A segment that starts elsewhere, as the next reply's first does, a timeout, an
+   * abandonment, a loss and a cancel forget them.
+   */
+  private silent?: TextSegment;
   private queued = 0;
   private ended = 0;
   private waiters: FlushWaiter[] = [];
@@ -192,12 +204,20 @@ export class SegmentSynthesisQueue {
     if (previous) this.hooks.emit(previous);
   }
 
-  /** The provider's terminal response: the held frame goes out with the segment's boundary. With nothing in flight, nothing happens. */
+  /**
+   * The provider's terminal response: the held frame goes out with the segment's boundary, which starts where the
+   * segments completed with no frame just before it start, so the boundaries stay contiguous. A segment completed with no
+   * frame attaches nothing and joins them. With nothing in flight, nothing happens.
+   */
   completed(): void {
     const flight = this.flight;
     if (!flight) return;
     this.end(flight);
-    if (flight.held) this.hooks.emit({ ...flight.held, textBoundary: boundaryOf(flight.segment) });
+    const segment = this.silent && this.silent.end === flight.segment.start ? joined(this.silent, flight.segment) : flight.segment;
+    if (flight.held) {
+      this.silent = undefined;
+      this.hooks.emit({ ...flight.held, textBoundary: boundaryOf(segment) });
+    } else this.silent = segment;
     this.finish(flight);
   }
 
@@ -206,6 +226,7 @@ export class SegmentSynthesisQueue {
     const flight = this.flight;
     if (!flight) return;
     this.end(flight);
+    this.silent = undefined;
     if (flight.held) this.hooks.emit(flight.held);
     this.finish(flight);
   }
@@ -235,6 +256,7 @@ export class SegmentSynthesisQueue {
       this.end(flight);
       if (flight.held) this.hooks.emit(flight.held);
     }
+    this.silent = undefined;
     this.pending.length = 0;
     this.segmenter.reset();
     this.ended = this.queued;
@@ -244,6 +266,7 @@ export class SegmentSynthesisQueue {
   /** Drops the queued segments, the held frame and the segment in flight, forgets the text, and resolves the pending flushes without `flush_complete`. */
   cancel(): void {
     if (this.flight) this.end(this.flight);
+    this.silent = undefined;
     this.pending.length = 0;
     this.segmenter.reset();
     this.ended = this.queued;
@@ -281,6 +304,8 @@ export class SegmentSynthesisQueue {
     if (this.flight || this.holding) return;
     const next = this.pending.shift();
     if (!next) return;
+    // Segments completed with no frame join only the segment that follows them in the same reply.
+    if (this.silent && this.silent.end !== next.segment.start) this.silent = undefined;
     const flight: Flight = { segment: next.segment, abort: new AbortController(), armed: false, count: next.count };
     this.flight = flight;
     let started: Promise<void>;
@@ -307,6 +332,7 @@ export class SegmentSynthesisQueue {
   private timeout(flight: Flight): void {
     if (this.flight !== flight) return;
     this.end(flight);
+    this.silent = undefined;
     if (flight.held) this.hooks.emit(flight.held);
     this.hooks.timedOut?.(flight.segment);
     this.finish(flight);
