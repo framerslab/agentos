@@ -325,9 +325,9 @@ interface LineHooks {
 }
 
 /**
- * An element's content read as one line of words: a line break, and a block's edges, as one space; code as inline
- * code; images counted. A list inside it goes to `hooks.list` where given, with the marks of the elements around it,
- * and is read into the line otherwise.
+ * An element's content read as one line of words: a line break, and a block's edges, a code block's and those of a
+ * list handed to `hooks.list` among them, as one space; code as inline code; images counted. A list inside it goes to
+ * `hooks.list` where given, with the marks of the elements around it, and is read into the line otherwise.
  */
 function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineHooks = {}): MarkedRun[] {
   const line: MarkedRun[] = [];
@@ -352,11 +352,17 @@ function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineH
       return;
     }
     if (hooks.list !== undefined && LISTS.has(name)) {
+      // the list leaves the line, and its edges are a block's: the words on either side of it stay a space apart
+      addWords(line, ' ', at, false);
       hooks.list(current, name === 'ol', at);
+      addWords(line, ' ', at, false);
       return;
     }
     if (CODE.has(name) || PREFORMATTED.has(name)) {
+      const block = PREFORMATTED.has(name);
+      if (block) addWords(line, ' ', at, false);
       addWords(line, textOf(current, reading), at, true);
+      if (block) addWords(line, ' ', at, false);
       return;
     }
     if (headingLevel(name) === 1 && reading.firstH1 === undefined) {
