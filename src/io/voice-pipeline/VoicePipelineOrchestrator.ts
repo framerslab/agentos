@@ -68,9 +68,9 @@
  *   request has not ended, and a reply that took the floor meanwhile is cut in its turn (`_onClientText`); a call
  *   profile cuts through `interrupt()` and its generation fence (`takeText`), where a turn the agent has yet to answer
  *   is aborted with no `barge_in`, and takes texts one after another: one that arrives while the generation changes
- *   waits for the change, at most four behind the one being taken. A `text_input` message the check refuses, or one
- *   past those four, is dropped and reported as a warning naming the reason, never the text (`'error'`, or a console
- *   warning when nothing listens, and a recoverable `session_error`).
+ *   waits for the change, at most four behind the one being taken. A `text_input` message the check refuses, one
+ *   past those four, or one that finds the call detached, is dropped and reported as a warning naming the reason,
+ *   never the text (`'error'`, or a console warning when nothing listens, and a recoverable `session_error`).
  * - A transport that plays one audio format alone (`IStreamTransport.playbackFormat`, `'pcm'` for
  *   `LiveKitStreamTransport` with a publisher) gets it: the TTS session is asked for that format, and a chunk in
  *   another one is reported once, naming the TTS provider, and not sent.
@@ -810,7 +810,7 @@ export interface VoicePipelineOverrides {
  * | `'turn_complete'`      | {@link TurnCompleteEvent}; a {@link ScopedTurnCompleteEvent} under a call profile; none for a turn of typed text |
  * | `'close'`              | `{ reason, error?, createdAt }`: the session moved to `closed` |
  * | `'agent_state_changed'`, `'user_state_changed'`, `'user_input_transcribed'`, `'conversation_item_added'`, `'speech_created'`, `'barge_in'`, `'session_error'` | the session's events ({@link VoiceSessionEventMap}), emitted here as on the session, from the moment `startSession()` is called |
- * | `'error'`              | `Error`: a listener of the session's events threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); a TTS chunk came in another format than the transport's `playbackFormat` and was dropped (the session's first only, naming the provider); the TTS session of a session without a profile warned, with the warning's own `Error`; a `text_input` message was dropped, naming why and never the text (the check refused it, or under a call profile four texts already waited); under a call profile the agent's stream of a cut reply did not end within `abortGraceMs` of `abort()`; or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
+ * | `'error'`              | `Error`: a listener of the session's events threw or rejected; a transport send rejected (of a reply's audio, the first refused chunk only); speech came from a second source and was dropped (the session's first drop only); a TTS chunk came in another format than the transport's `playbackFormat` and was dropped (the session's first only, naming the provider); the TTS session of a session without a profile warned, with the warning's own `Error`; a `text_input` message was dropped, naming why and never the text (the check refused it, or under a call profile four texts already waited or the call was detached); under a call profile the agent's stream of a cut reply did not end within `abortGraceMs` of `abort()`; or, as the content-free `Error('voice pipeline failed')`, a part of a session without a profile failed and the session closes. With no `'error'` listener it is written as a console warning instead |
  * | `'cleanup_incomplete'` | *(none)*: the stop that followed such a failure could not close every part |
  * | `'transcript'`, `'gap'`, `'generation'`, `'interrupted'`, `'usage'`, `'failure'`, `'detached'`, `'reattached'` | re-emitted from a call profile's session |
  *
@@ -2873,7 +2873,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
    * can be anything the user typed, or as one console warning when nothing listens for `'error'`, and as a recoverable
    * `session_error`; the call goes on.
    *
-   * @param reason - Why: the check's refusal (`textInputRefusal`), or the texts already waiting.
+   * @param reason - Why: the check's refusal (`textInputRefusal`), the texts already waiting, or the call's detach.
    */
   private textInputRefused(reason: string): void {
     const error = this.report(new Error(`a text_input message was dropped: ${reason}`), 'a refused text_input');
@@ -2888,14 +2888,20 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
    * a prompt being spoken, with `speechDurationMs: 0`, and a turn the agent has yet to answer is aborted with none. One
    * that finds the generation changing, as the text before it or the user's speech left it, waits for the change to
    * complete (`whenChanged`) and is then taken, so texts typed in quick succession each cut the turn before them and
-   * the agent answers the last. A text that comes while the call stops or is detached, or once it has closed, is
-   * dropped, and so is one whose interruption leaves the call other than listening. A muted call takes typed text.
+   * the agent answers the last. A text that comes while the call stops, or once it has closed, is dropped, and so is
+   * one whose interruption leaves the call other than listening. One that finds the call detached, as when the media
+   * path is lost while the text interrupts the reply, is dropped and reported as a refused text is
+   * (`textInputRefused`): the user typed it, and the call goes on once it is reattached. A muted call takes typed text.
    *
    * @param text - The text, as `isClientTextInputMessage()` accepted it.
    */
   private async takeText(text: string): Promise<void> {
     for (;;) {
-      if (this.stopping || this.detached || this.current === 'closed') return;
+      if (this.stopping || this.current === 'closed') return;
+      if (this.detached) {
+        this.textInputRefused('the call is detached');
+        return;
+      }
       if (this.changing) {
         await this.whenChanged();
         continue;

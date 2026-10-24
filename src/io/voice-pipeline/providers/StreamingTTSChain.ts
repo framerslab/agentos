@@ -11,7 +11,10 @@
  * the text admitted since the last `flush_complete` or `cancel()`, at most
  * `maxReplayCharacters` of it, and when the session in use fails it opens the
  * next provider the policy permits and sends that text again; a backup that
- * fails as it takes the text is passed over for the next one. Under a
+ * fails as it takes the text is passed over for the next one. From the moment
+ * the session in use fails, nothing it emits reaches the facade: a provider
+ * that completes its flush as it reports a lost connection leaves the text to
+ * the backup. Under a
  * `ProviderPolicy` a request that has already produced audio is never sent
  * again: the facade fails rather than repeat speech the listener may have
  * heard. Under the legacy policy the text is sent again either way.
@@ -83,7 +86,13 @@ export interface StreamingTTSChainOptions {
    * provider session in use (under a `ProviderPolicy` a warning arrives as
    * `Error('provider warning')`, without the provider's text, and one nobody
    * listens for is not printed) and `'usage'` from every provider session it
-   * attached. A backup that fails as it takes the
+   * attached. From the moment a failure of the session in use begins a
+   * switch, nothing that session emits is forwarded but its `'usage'`, though
+   * the switch takes it out of use only in a later promise job: a provider
+   * that reports a lost connection as `'error'` and then, in the same call,
+   * sends out the frame it held and completes its flush, as
+   * `DeepgramAuraStreamingTTS` does, does not end the request, and the backup
+   * takes its text. A backup that fails as it takes the
    * text (an `'error'` or a `'close'`, or a write it refuses) is recorded as
    * failed and closed, and the next provider is tried. A provider close after
    * `flush_complete`, after its `flush()` resolved or after `cancel()` ends
@@ -196,9 +205,12 @@ export class StreamingTTSChain implements IStreamingTTS {
    * is one without the pull contract when the audio goes to a sink, but without a recorded failure. The active
    * session's warnings reach the facade, as `Error('provider warning')` under a `ProviderPolicy`. Audio,
    * `flush_complete`, warnings and errors of a session that is no longer active never reach the facade; its `usage`
-   * reports do. `cancel()` and `close()` advance an epoch, so a switch begun before them stops, and a backup that opens after
-   * them is cancelled and closed. With the pull contract (`setAudioSink()` and `writeTokens()`), audio flows only
-   * through the sink, and a chunk emitted as `'audio'` as well ends the facade.
+   * reports do. A session is no longer active from the moment its failure begins a switch, though the switch takes it
+   * out of use only in a later promise job, so what it emits in the same call as its error, as a frame it held and the
+   * `flush_complete` of its flush, ends nothing and goes nowhere. `cancel()` and `close()` advance an epoch, so a
+   * switch begun before them stops, and a backup that opens after them is cancelled and closed. With the pull contract
+   * (`setAudioSink()` and `writeTokens()`), audio flows only through the sink, and a chunk emitted as `'audio'` as
+   * well ends the facade.
    */
   private wrap(initial: StreamingTTSSession, first: TTSProvider, candidates: TTSProvider[], config?: StreamingTTSConfig): StreamingTTSSession {
     if (!this.opts.enableMidSynthesisFailover) return initial;
@@ -216,6 +228,13 @@ export class StreamingTTSChain implements IStreamingTTS {
     let epoch = 0;
     let flushed = false;
     let switching: Promise<void> | undefined;
+    // The session whose failure began the switch under way. The switch takes it out of use only in a later promise job,
+    // so until then it is still `current`, and what it emits from the moment of its failure is not the facade's: a
+    // provider that reports a lost connection as 'error' and then, in the same call, sends out the frame it held and
+    // completes its flush, as DeepgramAuraStreamingTTS does, would end the request as spoken, and the backup would take
+    // none of its text.
+    let failed: StreamingTTSSession | undefined;
+    const failedNow = (session: StreamingTTSSession): boolean => switching !== undefined && session === failed;
     // An error or close of the backup a switch has attached, reported before the switch ended; the switch passes over it.
     let lost: Error | undefined;
     let sink: ((chunk: EncodedAudioChunk) => Promise<void>) | undefined;
@@ -265,7 +284,7 @@ export class StreamingTTSChain implements IStreamingTTS {
       if (!sink) return;
       if (!session.setAudioSink || !session.writeTokens) throw new Error('fallback lacks awaited producer');
       session.setAudioSink(async (chunk) => {
-        if (closed || cancelled || current !== session) throw new Error('stale synthesis');
+        if (closed || cancelled || current !== session || failedNow(session)) throw new Error('stale synthesis');
         emittedAudio = true;
         await sink!(chunk);
       });
@@ -276,12 +295,12 @@ export class StreamingTTSChain implements IStreamingTTS {
       // from it that some of the reply may never have been spoken. A provider session prints a warning nobody listens
       // for; the legacy facade does the same, and a strict policy's facade forwards no provider text.
       session.on('warning', (warning: Error) => {
-        if (closed || current !== session) return;
+        if (closed || current !== session || failedNow(session)) return;
         if (facade.listenerCount('warning')) facade.emit('warning', this.policy.mode === 'legacy' ? warning : new Error('provider warning'));
         else if (this.policy.mode === 'legacy') console.warn('[' + id + '] ' + warning.message);
       });
       session.on('audio', (chunk: EncodedAudioChunk) => {
-        if (closed || cancelled || current !== session) return;
+        if (closed || cancelled || current !== session || failedNow(session)) return;
         if (sink) {
           fatal(new Error('producer emitted duplicate audio'));
           return;
@@ -291,7 +310,7 @@ export class StreamingTTSChain implements IStreamingTTS {
       });
       session.on('usage', (event: unknown) => facade.emit('usage', event));
       session.on('flush_complete', () => {
-        if (!closed && !cancelled && current === session) {
+        if (!closed && !cancelled && current === session && !failedNow(session)) {
           flushed = true;
           tokens = [];
           characters = 0;
@@ -401,6 +420,7 @@ export class StreamingTTSChain implements IStreamingTTS {
     const begin = (error: Error): void => {
       if (closed || cancelled || switching) return;
       const capturedEpoch = epoch;
+      failed = current;
       switching = Promise.resolve().then(() => failover(error, capturedEpoch)).catch((error: unknown) => fatal(error instanceof Error ? error : new Error('TTS failed'))).finally(() => {
         switching = undefined;
         // The backup failed after its replay, before the switch ended: the next switch starts from it. Returned here,
