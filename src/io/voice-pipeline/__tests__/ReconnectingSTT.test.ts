@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { ReconnectingSTT } from '../ReconnectingSTT.js';
 import { TranscriptDedupe } from '../TranscriptDedupe.js';
+import { MoonshineBrowserSTT } from '../providers/MoonshineBrowserSTT.js';
 import type { AudioFrame, IStreamingSTT, StreamingSTTSession, TranscriptEvent, TranscriptWord } from '../types.js';
+import { FakeTranscriber, fakeMoonshine, line } from './moonshine-fakes.js';
 
 /** A provider whose sessions the test drives: it records pushed frames and emits what the test says. */
 function scripted() {
@@ -212,7 +214,7 @@ describe('ReconnectingSTT', () => {
     sessions[1].emit('transcript', final('across the drop', 900, 1_150)); // the new session's clock starts where the replay does, at the timeline's 0
     expect(got).toEqual([[900, 1_150]]);
   });
-  it('moves word times onto the session timeline as it moves the transcript\'s bounds, across an overflow gap, and leaves words without times as they are', async () => {
+  it('moves word times, which a provider puts on its session\'s clock as it puts the transcript\'s bounds, onto the session timeline with those bounds, across an overflow gap, and leaves words without times as they are', async () => {
     const { stt, sessions } = scripted();
     const r = new ReconnectingSTT(stt, { ringBufferCapacityMs: 1_000, minReplayMs: 0, queueCapacityMs: 2_000, clock: () => 0 });
     const session = await r.startSession();
@@ -223,7 +225,8 @@ describe('ReconnectingSTT', () => {
     for (let t = 5_000; t < 8_000; t += 20) session.pushAudio(frame(t)); // three seconds into a two-second queue: the first second is dropped
     await vi.waitFor(() => expect(sessions[1].frames.length).toBe(150));
     // On the new socket's clock the replay is 0-1000 ms (4000-5000 ms of the session) and the retained queue
-    // begins at 1000 ms (6000 ms of the session, after the dropped second).
+    // begins at 1000 ms (6000 ms of the session, after the dropped second). The words are where DeepgramStreamingSTT
+    // puts them: on the socket's clock, beside the segment's startMs and endMs.
     const word = (text: string, start: number, end: number): TranscriptWord => ({ word: text, start, end, confidence: 0.9 });
     sessions[1].emit('transcript', { ...final('after the drop', 1_200, 2_000), words: [word('after', 1_200, 1_500), word('the', 1_500, 1_650), word('drop', 1_650, 2_000)] });
     sessions[1].emit('transcript', { ...final('across the gap', 800, 1_400), words: [word('across', 800, 1_000), word('the', 1_000, 1_200), word('gap', 1_200, 1_400)] });
@@ -237,6 +240,28 @@ describe('ReconnectingSTT', () => {
     ]);
     expect(got[2]).toStrictEqual(untimed);
     session.close();
+  });
+  it('moves a Moonshine line\'s words with its bounds after a reconnect, since the provider puts both on its session\'s clock', async () => {
+    // The provider on the package's fakes, as its own tests run it. Moonshine times a line's words on the clock of the
+    // line's startTime, and the provider puts them, with the line's startMs and endMs, on the session's clock.
+    const stt = new MoonshineBrowserSTT({ moonshine: fakeMoonshine(), thread: 'calling', model: 'moonshine-small' });
+    const r = new ReconnectingSTT(stt, { ringBufferCapacityMs: 1_000, minReplayMs: 0, clock: () => 0 });
+    const session = await r.startSession();
+    const got: TranscriptEvent[] = [];
+    session.on('transcript', (e: TranscriptEvent) => got.push(e));
+    const streams = FakeTranscriber.loaded[FakeTranscriber.loaded.length - 1].streams;
+    for (let t = 0; t < 4_980; t += 20) session.pushAudio(frame(t)); // the buffer keeps the last second
+    streams[0].failNextPass = new Error('ORT run failed: out of memory');
+    session.pushAudio(frame(4_980)); // the pass over the 250th frame fails: the session errors and closes, and a new one opens
+    await vi.waitFor(() => expect(streams.length).toBe(2));
+    await vi.waitFor(() => expect(streams[1].audio).toHaveLength(50)); // the replayed second: the new session's clock 0 is the timeline's 4000 ms
+    const word = (text: string, start: number, end: number) => ({ text, start, end, confidence: 0.9 });
+    streams[1].passes.push([line('m', 'after the drop', 1.2, 0.8, true, [word('after', 1.2, 1.5), word('the', 1.5, 1.65), word('drop', 1.65, 2)])]);
+    session.pushAudio(frame(5_000)); // the pass over this frame completes the line, 1200 ms into the new session's audio
+    await vi.waitFor(() => expect(got).toHaveLength(1));
+    expect([got[0].startMs, got[0].endMs, got[0].words.map((w) => [w.start, w.end])]).toEqual([5_200, 6_000, [[5_200, 5_500], [5_500, 5_650], [5_650, 6_000]]]);
+    session.close();
+    stt.dispose();
   });
   it('gives up after three attempts in a minute and emits error then close', async () => {
     const { stt, sessions } = scripted();
