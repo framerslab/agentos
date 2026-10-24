@@ -123,9 +123,10 @@ When no provider is explicitly configured, AgentOS probes in this order:
 7. mistral         → MISTRAL_API_KEY
 8. xai             → XAI_API_KEY
 9. requesty        → REQUESTY_API_KEY
-10. claude-code-cli → `which claude` (PATH detection)
-11. gemini-cli     → `which gemini` (PATH detection)
-12. ollama         → OLLAMA_BASE_URL
+10. minimax         → MINIMAX_API_KEY (text)
+11. claude-code-cli → `which claude` (PATH detection)
+12. gemini-cli     → `which gemini` (PATH detection)
+13. ollama         → OLLAMA_BASE_URL
 ```
 
-API-key providers take priority (explicitly configured). CLI providers come next (subscription-grade models). Ollama is last (local/free).
+API-key providers take priority (explicitly configured). CLI providers come next (subscription-grade models). Ollama is last (local/free). For an image, MiniMax comes after the other image providers.

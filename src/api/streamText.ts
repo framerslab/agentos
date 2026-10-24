@@ -1071,10 +1071,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         );
 
         const reconstructor = new StreamingReconstructor();
+        let stepReasoningText = '';
         stepTextSoFar = '';
 
         try {
           for await (const chunk of stream) {
+            if (resolved.providerId === 'minimax' && chunk.reasoningTextDelta) {
+              stepReasoningText += chunk.reasoningTextDelta;
+            }
             // Capture the provider-reported identity from EVERY chunk (not
             // only the usage-final one) so an error or abandonment after a
             // model-bearing chunk still resolves responseModel/serviceTier.
@@ -1327,6 +1331,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           role: 'assistant',
           content: effectiveStepText || null,
           tool_calls: streamedToolCalls,
+          ...(stepReasoningText ? { reasoningText: stepReasoningText } : {}),
           ...(stepThinkingBlocks && stepThinkingBlocks.length > 0
             ? { thinkingBlocks: stepThinkingBlocks }
             : {}),

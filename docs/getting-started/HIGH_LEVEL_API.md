@@ -72,12 +72,35 @@ for the requested task automatically:
 | `requesty`               | Cloud | `openai/gpt-4o`            | —                                | —                        | `REQUESTY_API_KEY`                |
 | `bfl`                    | Cloud | —                          | `flux-pro-1.1`                   | —                        | `BFL_API_KEY`                     |
 | `fal`                    | Cloud | —                          | `fal-ai/flux/dev`                | —                        | `FAL_API_KEY`                     |
-| `minimax`                | Cloud | —                          | `image-01`                       | —                        | `MINIMAX_API_KEY`                 |
+| `minimax`                | Cloud | `MiniMax-M3.1-Flash`        | `image-01`                       | —                        | `MINIMAX_API_KEY`                 |
 | `ollama`                 | Local | `llama3.2`                 | —                                | `nomic-embed-text`       | `OLLAMA_BASE_URL`                 |
 | `stable-diffusion-local` | Local | —                          | `v1-5-pruned-emaonly`            | —                        | `STABLE_DIFFUSION_LOCAL_BASE_URL` |
 
 When neither `provider` nor `model` is given, AgentOS checks configured runtimes in order
-(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
+(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `MINIMAX_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
+
+MiniMax text requests default to `MiniMax-M3.1-Flash`; the current catalog also includes
+`MiniMax-M3`. Both accept image input and tools. Explicit model IDs, including saved
+legacy or custom IDs, remain unchanged. Set `MINIMAX_API_KEY` and optionally
+`MINIMAX_BASE_URL` (`https://api.minimax.io/v1` by default, or
+`https://api.minimaxi.com/v1` for China). For example:
+
+```ts
+await generateText({ provider: 'minimax', prompt: 'Explain this briefly.', effort: 'high' });
+await generateText({ model: 'minimax:MiniMax-M3', prompt: 'Explain this briefly.' });
+```
+
+Flash always uses adaptive thinking. Its allowed `effort` values are `low`, `medium`,
+`high`, `xhigh`, and `max`; omitting effort leaves the server default in place.
+`thinking: false`, `service_tier`, and `reasoning_split: false` are rejected for Flash.
+Tool continuations preserve separate reasoning content, and image URL/data-URL parts
+are forwarded through the Chat Completions API. See the
+[MiniMax OpenAI API reference](https://platform.minimax.io/docs/api-reference/text-openai-api).
+MiniMax image generation uses `image-01`, also when `setDefaultProvider()` names a MiniMax text
+model such as `MiniMax-M3.1-Flash`: on the global root and on the China root, an image call drops
+the chat model the default names and takes the provider's image model. MiniMax publishes no
+embedding model, so the `minimax` provider refuses an embedding request before sending it; embed
+with another provider.
 
 ### Inline API Keys
 

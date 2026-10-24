@@ -510,13 +510,36 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
 /**
  * Chat model families, optionally behind a provider prefix such as `openai:`
  * and a gateway prefix such as `openai/` or `meta-llama/`
- * (`openrouter:openai/gpt-4o`).
+ * (`openrouter:openai/gpt-4o`). MiniMax's text models are `MiniMax-` names
+ * (`MiniMax-M3.1-Flash`); the hyphen keeps a bare `minimax:` provider prefix
+ * or `minimax/` gateway prefix from reading as the family.
  */
 const CHAT_MODEL_FAMILY =
-  /^(?:[\w.-]+:)?(?:[\w.-]+\/)?(?:gpt-|chatgpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|codestral|ministral|magistral|grok|deepseek|qwen|command|phi-|sonar|kimi|glm)/i;
+  /^(?:[\w.-]+:)?(?:[\w.-]+\/)?(?:gpt-|chatgpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|codestral|ministral|magistral|grok|deepseek|qwen|command|phi-|sonar|kimi|glm|minimax-)/i;
 
 /** Names that mark a non-chat model inside a chat family (gpt-image-2.5-flare, gemini-embedding-2). */
 const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|audio|realtime|moderation/i;
+
+/**
+ * API roots a provider documents for its own service, each serving the
+ * provider's own model names: a base URL among them picks a region, not a
+ * custom endpoint. MiniMax documents its global root and its China root.
+ */
+const PROVIDER_API_ROOTS: Record<string, readonly string[]> = {
+  minimax: ['https://api.minimax.io/v1', 'https://api.minimaxi.com/v1'],
+};
+
+/**
+ * Whether `url` is a base URL other than an API root `provider` documents for
+ * its own service (see {@link PROVIDER_API_ROOTS}). Surrounding whitespace and
+ * trailing slashes are ignored, as MiniMax's image provider ignores them when
+ * it sends. An unset or empty URL is not custom.
+ */
+function isCustomBaseUrl(provider: string | undefined, url: unknown): boolean {
+  if (typeof url !== 'string' || !url) return false;
+  const roots = provider ? PROVIDER_API_ROOTS[provider] : undefined;
+  return !roots?.includes(url.trim().replace(/\/+$/, ''));
+}
 
 /**
  * `opts` with the global default's `provider` and `model` filled in when the
@@ -530,16 +553,19 @@ function withGlobalDefault(opts: ModelOption, task: TaskType): ModelOption {
   if (opts.provider || opts.model) return opts;
   const def = getDefaultProvider();
   if (!def?.provider) return opts;
-  // A custom endpoint (the default's baseUrl, an inline baseUrl on callers
-  // such as embedText, or the provider's base-URL env var) may serve any
-  // model under any name, so the default's model stays.
+  // A custom endpoint may serve any model under any name, so the default's
+  // model stays. The endpoint is the base URL the call is sent to: an inline
+  // baseUrl on callers such as embedText, else the default's baseUrl, else
+  // the provider's base-URL env var, the order resolveProvider and
+  // resolveMediaProvider take them in. A regional root the provider documents
+  // (MiniMax's China API) serves the provider's own names and is not custom,
+  // even when a setting the call does not use names a custom endpoint.
   const inlineBaseUrl = (opts as { baseUrl?: unknown }).baseUrl;
   const envBaseUrlVar = def.provider ? ENV_URL_MAP[def.provider] : undefined;
-  const customEndpoint = Boolean(
-    def.baseUrl ||
-      (typeof inlineBaseUrl === 'string' && inlineBaseUrl) ||
-      (envBaseUrlVar && process.env[envBaseUrlVar]),
+  const sentTo = [inlineBaseUrl, def.baseUrl, envBaseUrlVar ? process.env[envBaseUrlVar] : undefined].find(
+    (url) => typeof url === 'string' && url !== '',
   );
+  const customEndpoint = isCustomBaseUrl(def.provider, sentTo);
   return {
     ...opts,
     provider: def.provider,

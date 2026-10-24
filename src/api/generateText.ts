@@ -2994,6 +2994,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           messages.push({
             role: 'assistant',
             content: textContent,
+            ...(resolved.providerId === 'minimax' && choice.message?.reasoningText !== undefined
+              ? { reasoningText: choice.message.reasoningText } : {}),
             ...(((choice.message as unknown as { thinking?: unknown } | undefined)?.thinking) !== undefined
               ? { thinking: (choice.message as unknown as { thinking?: unknown }).thinking }
               : {}),
@@ -3034,6 +3036,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             role: 'assistant',
             content: textContent || null,
             tool_calls: toolCallsInChoice,
+            ...(resolved.providerId === 'minimax' && choice.message?.reasoningText !== undefined
+              ? { reasoningText: choice.message.reasoningText } : {}),
             ...(stepThinkingBlocks && stepThinkingBlocks.length > 0
               ? { thinkingBlocks: stepThinkingBlocks }
               : {}),
@@ -3200,6 +3204,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         messages.push({
           role: 'assistant',
           content: textContent,
+          ...(resolved.providerId === 'minimax' && choice.message?.reasoningText !== undefined
+            ? { reasoningText: choice.message.reasoningText } : {}),
           ...(((choice.message as unknown as { thinking?: unknown } | undefined)?.thinking) !== undefined
             ? { thinking: (choice.message as unknown as { thinking?: unknown }).thinking }
             : {}),
