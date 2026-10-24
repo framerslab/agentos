@@ -34,6 +34,9 @@ import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/Ge
 import { LiteLLMProvider, LiteLLMProviderConfig } from './implementations/LiteLLMProvider';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
 import { contentSafeConsole as console } from '../../logging/contentSafeConsole.js';
+import { lazyLogger } from '../../logging/loggerFactory.js';
+import { providerName } from '../../logging/events.js';
+const log = lazyLogger('llm.manager');
 
 /**
  * Configuration for a single AI model provider entry within the manager.
@@ -70,11 +73,11 @@ export class AIModelProviderManager {
   constructor() {}
 
   /**
-   * Emit informational init traces only when AGENTOS_DEBUG=1 (or when
-   * the caller has explicitly set AGENTOS_LOG_LEVEL=debug). Each new
-   * manager instance would otherwise produce four console.log lines
-   * on every LLM call site that memoizes a fresh manager, drowning
-   * out actual run progress. Errors and warnings still log unchanged.
+   * Gates the start-up trace still written to the console (no providers
+   * enabled) to AGENTOS_DEBUG=1 or true, or AGENTOS_LOG_LEVEL=debug, so a
+   * call site that memoizes a fresh manager does not print it on every call.
+   * The other start-up lines are debug events, which the logger's level
+   * filters. Errors and warnings still log unchanged.
    */
   private static debugEnabled(): boolean {
     const env = typeof process !== 'undefined' ? process.env : undefined;
@@ -177,9 +180,7 @@ export class AIModelProviderManager {
 
         await providerInstance.initialize(providerEntry.config || {});
         this.providers.set(providerInstance.providerId, providerInstance);
-        if (AIModelProviderManager.debugEnabled()) {
-          console.log(`AIModelProviderManager: Initialized provider '${providerInstance.providerId}'.`);
-        }
+        log.debug('llm.provider_ready', { provider: providerName(providerInstance.providerId) });
 
         if (providerEntry.isDefault && !this.defaultProviderId) {
           this.defaultProviderId = providerInstance.providerId;
@@ -204,18 +205,14 @@ export class AIModelProviderManager {
     }
 
     if (this.defaultProviderId) {
-      if (AIModelProviderManager.debugEnabled()) {
-        console.log(`AIModelProviderManager: Default provider set to '${this.defaultProviderId}'.`);
-      }
+      log.debug('llm.default_changed', { provider: providerName(this.defaultProviderId) });
     } else if (config.providers.some(p => p.enabled)) {
       console.warn("AIModelProviderManager: No default provider could be set.");
     } else if (AIModelProviderManager.debugEnabled()) {
       console.log("AIModelProviderManager: No providers enabled or configured.");
     }
     this.isInitialized = true;
-    if (AIModelProviderManager.debugEnabled()) {
-      console.log(`AIModelProviderManager initialized with ${this.providers.size} active providers.`);
-    }
+    log.debug('llm.manager_state', { state: 'ready', count: this.providers.size });
   }
 
   private async cacheModelsFromProvider(provider: IProvider): Promise<void> {

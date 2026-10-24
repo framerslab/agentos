@@ -34,27 +34,9 @@ vi.mock('../../model.js', () => ({
   createProviderManager: hoisted.createProviderManager,
 }));
 
-// The walker logs through pino. A captured logger lets a test read which
-// fallback events fired.
-vi.mock('../../../core/logging/loggerFactory.js', () => {
-  const makeLogger = (): unknown =>
-    new Proxy(
-      {},
-      {
-        get: (_target, prop) => {
-          if (prop === 'then') return undefined;
-          if (prop === 'child') return () => makeLogger();
-          return (_message: unknown, meta?: unknown) => {
-            const event = (meta as { event?: unknown } | undefined)?.event;
-            if (typeof event === 'string') hoisted.logEvents.push(event);
-          };
-        },
-      },
-    );
-  return { createLogger: () => makeLogger(), setLoggerFactory: () => {}, resetLoggerFactory: () => {} };
-});
-
+import pino from 'pino';
 import { streamText } from '../streamText.js';
+import { setLogger, resetLoggerFactory } from '../../../core/logging/loggerFactory.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import { setGlobalLlmObserver, type LlmUsageEvent } from '../../observers.js';
 
@@ -142,10 +124,15 @@ beforeEach(() => {
   hoisted.generateCompletion.mockReset();
   hoisted.logEvents.length = 0;
   globalLLMProviderHealth.reset();
+  // The walker logs through the logger a host hands over; this one records which fallback events fired.
+  setLogger(pino({ level: 'debug', base: undefined }, {
+    write(line: string) { hoisted.logEvents.push(JSON.parse(line).event); },
+  }));
 });
 
 afterEach(() => {
   setGlobalLlmObserver(null);
+  resetLoggerFactory();
 });
 
 describe('a leg that fails before output', () => {
@@ -159,7 +146,7 @@ describe('a leg that fails before output', () => {
     expect(r.errors).toHaveLength(0);
     expect(r.finishReason).toBe('stop');
     expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(3);
-    expect(count('fallback_succeeded')).toBe(1);
+    expect(count('llm.fallback_succeeded')).toBe(1);
   });
 
   it('runs each leg once on a full outage, shows one terminal error and logs no success', async () => {
@@ -170,8 +157,8 @@ describe('a leg that fails before output', () => {
     expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(4);
     expect(r.errors).toHaveLength(1);
     expect(r.finishReason).toBe('error');
-    expect(count('fallback_succeeded')).toBe(0);
-    expect(count('fallback_exhausted')).toBeGreaterThan(0);
+    expect(count('llm.fallback_succeeded')).toBe(0);
+    expect(count('llm.fallback_exhausted')).toBeGreaterThan(0);
   });
 
   it('stops the walk when a leg ran a prompt-emulated tool before it failed, and marks the error', async () => {
@@ -243,8 +230,8 @@ describe('a leg that fails after output', () => {
     expect(r.errors).toHaveLength(1);
     expect(r.finishReason).toBe('error');
     expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(2);
-    expect(count('fallback_succeeded')).toBe(0);
-    expect(count('fallback_failed_after_output')).toBe(1);
+    expect(count('llm.fallback_succeeded')).toBe(0);
+    expect(count('llm.fallback_failed_after_output')).toBe(1);
   });
 
   it("reports the stream failed when the consumer stops at a leg's error part", async () => {
@@ -275,7 +262,7 @@ describe('a leg that fails after output', () => {
     expect(r.errors).toHaveLength(1);
     expect(r.finishReason).toBe('error');
     expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(2);
-    expect(count('fallback_failed_after_output')).toBe(1);
+    expect(count('llm.fallback_failed_after_output')).toBe(1);
   });
 });
 

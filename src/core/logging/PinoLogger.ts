@@ -1,5 +1,7 @@
 import pino, { Logger, LoggerOptions } from 'pino';
 import { ILogger } from './ILogger';
+import { parseLogLevel } from './level.js';
+import type { Level } from './Logger.js';
 import { context } from '@opentelemetry/api';
 import { logs, SeverityNumber } from '@opentelemetry/api-logs';
 import {
@@ -36,13 +38,14 @@ function sanitizeAttributes(attributes?: Record<string, any>): Record<string, an
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function severityForLevel(level: 'debug' | 'info' | 'warn' | 'error'): {
+function severityForLevel(level: Level): {
   severityNumber: SeverityNumber;
   severityText: string;
 } {
   if (level === 'debug') return { severityNumber: SeverityNumber.DEBUG, severityText: 'DEBUG' };
   if (level === 'info') return { severityNumber: SeverityNumber.INFO, severityText: 'INFO' };
   if (level === 'warn') return { severityNumber: SeverityNumber.WARN, severityText: 'WARN' };
+  if (level === 'fatal') return { severityNumber: SeverityNumber.FATAL, severityText: 'FATAL' };
   return { severityNumber: SeverityNumber.ERROR, severityText: 'ERROR' };
 }
 
@@ -56,7 +59,7 @@ function pickError(meta?: Record<string, any>): Error | null {
 }
 
 function maybeEmitOtelLog(
-  level: 'debug' | 'info' | 'warn' | 'error',
+  level: Level,
   message: string,
   meta?: Record<string, any>,
   bindings?: Record<string, any>,
@@ -94,8 +97,10 @@ function maybeEmitOtelLog(
 
 /**
  * An {@link ILogger} on pino: structured JSON records, trace ids in their fields when configured, and an optional
- * OpenTelemetry copy of each record. While content-safe telemetry is on (`enableContentSafeTelemetry`), each record
- * becomes one fixed event for the host's sink instead and nothing of it is read, and `child` returns the same logger.
+ * OpenTelemetry copy of each record. A logger built without a pino instance takes its level from the environment
+ * (`AGENTOS_LOG_LEVEL`, `AGENTOS_DEBUG=1`) unless `options.level` sets one. While content-safe telemetry is on
+ * (`enableContentSafeTelemetry`), each record, `fatal` lines and events included, becomes one fixed event for the
+ * host's sink instead and nothing of it is read, and `child` returns the same logger.
  */
 export class PinoLogger implements ILogger {
   private readonly base: Logger;
@@ -105,7 +110,7 @@ export class PinoLogger implements ILogger {
    * @param existing - A pino logger to wrap instead of creating one.
    */
   constructor(options?: LoggerOptions, existing?: Logger) {
-    this.base = existing ?? pino(options);
+    this.base = existing ?? pino({ level: parseLogLevel(process.env).level, ...options });
   }
 
   /**
@@ -159,6 +164,37 @@ export class PinoLogger implements ILogger {
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.debug(metaWithTrace, message);
     maybeEmitOtelLog('debug', message, metaWithTrace, this.base.bindings());
+  }
+
+  /**
+   * Writes the process's last line, or passes one fixed event at `error` to the content-safe sink while that mode is
+   * on. pino flushes its destination synchronously at `fatal` when the destination supports it.
+   *
+   * @param message - The line's message.
+   * @param meta - Fields for the line.
+   */
+  fatal(message: string, meta?: Record<string, any>): void {
+    if (emitContentSafeLog('error')) return;
+    const metaWithTrace = maybeAttachTraceMeta(meta);
+    this.base.fatal(metaWithTrace, message);
+    maybeEmitOtelLog('fatal', message, metaWithTrace, this.base.bindings());
+  }
+
+  /**
+   * Writes one event object first, with no message: `{ ...fields, event }`, plus trace ids
+   * when they are on. The OpenTelemetry mirror, when it is on, takes the event's name as the
+   * record's body. While content-safe telemetry is on, it passes one fixed event to the sink
+   * instead (a `fatal` line at `error`) and reads nothing of the event.
+   *
+   * @param level - The line's level.
+   * @param event - The event's name.
+   * @param fields - The event's fields and context.
+   */
+  writeEvent(level: Level, event: string, fields: Record<string, unknown>): void {
+    if (emitContentSafeLog(level === 'fatal' ? 'error' : level)) return;
+    const meta = maybeAttachTraceMeta({ ...fields, event });
+    this.base[level](meta);
+    maybeEmitOtelLog(level, event, meta, this.base.bindings());
   }
 
   /**

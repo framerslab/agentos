@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from 'pino';
 import type { ILogger } from '../ILogger.js';
 import { PinoLogger } from '../PinoLogger.js';
-import { createLogger, setLoggerFactory, resetLoggerFactory } from '../loggerFactory.js';
+import { createLogger, lazyLogger, setLoggerFactory, resetLoggerFactory } from '../loggerFactory.js';
 import {
   enableContentSafeTelemetry, isContentSafeTelemetryEnabled,
   type ContentSafeLogEvent,
@@ -48,6 +48,8 @@ describe('content-safe server telemetry', () => {
     };
     setLoggerFactory(() => custom);
     const factoryLogger = createLogger('fixture-secret-component');
+    // An event handle made before the mode, as a module makes one at import.
+    const handle = lazyLogger('test');
     const native = ['log', 'info', 'warn', 'error', 'debug'] as const;
     const spies = native.map((level) => vi.spyOn(console, level).mockImplementation(() => {}));
     const output: ContentSafeLogEvent[] = [];
@@ -65,10 +67,14 @@ describe('content-safe server telemetry', () => {
     logger.child(hostile).warn('fixture-secret-child', hostile);
     factoryLogger.info('fixture-secret-factory', hostile);
     factoryLogger.child?.(hostile).error('fixture-secret-nested', hostile);
+    // The fatal path and an event handle's line: one event each, and neither the message nor a field is read.
+    before.fatal?.('fixture-secret-fatal', hostile);
+    factoryLogger.fatal?.('fixture-secret-fatal', hostile);
+    handle.warn('llm.retry', hostile as never);
     resetLoggerFactory();
     createLogger('fixture-secret-new', hostile).debug?.('fixture-secret-debug', hostile);
     for (const level of native) contentSafeConsole[level]('fixture-secret-console', hostile);
-    expect(output.length).toBe(10);
+    expect(output.length).toBe(13);
     for (const event of output) {
       expect(Object.keys(event).sort()).toEqual(['kind', 'n', 'state']);
       expect(event.kind).toBe('library_event');

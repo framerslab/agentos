@@ -61,16 +61,27 @@ import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstructor.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
-import { lazyLogger } from './runtime/lazyLogger.js';
+import { lazyLogger } from '../core/logging/loggerFactory.js';
+import { errorFields, providerName } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
 
 /**
- * The `fallback` component's lines, to the logger the host's factory makes when
- * each line is written: a factory set with `setLoggerFactory` after this module
- * was imported still receives every failover line.
+ * The `fallback` component's events, to the target current when each is
+ * written: a logger or a factory set with `setLogger` or `setLoggerFactory`
+ * after this module was imported still receives every failover event.
  */
 const fallbackLogger = lazyLogger('fallback');
+
+// A fallback skip's reason as one of the fixed words `llm.fallback_skipped` takes, never the reason's own text.
+function skipReason(reason: string): 'duplicate' | 'excluded' | 'capability' | 'refusal' | 'refill' | 'unknown' {
+  if (reason.includes('duplicate') || reason.includes('primary')) return 'duplicate';
+  if (reason.includes('exclud')) return 'excluded';
+  if (reason.includes('capabil')) return 'capability';
+  if (reason.includes('refus') || reason.includes('claude')) return 'refusal';
+  if (reason.includes('refill')) return 'refill';
+  return 'unknown';
+}
 
 async function recordAgentOSUsageLazy(
   input: Parameters<typeof import('./runtime/usageLedger.js')['recordAgentOSUsage']>[0]
@@ -1612,14 +1623,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         ? buildPolicyAwareFallbackChain(walkTier, recordedProviderId)
         : opts.fallbackProviders;
       const logLegSkip = (entry: FallbackProviderEntry, reason: FallbackSkipReason): void =>
-        fallbackLogger.info('streaming provider fallback skipped', {
-          event: 'fallback_leg_skipped',
-          api: 'streamText',
-          reason,
-          primaryProvider: recordedProviderId,
-          fallbackProvider: entry.provider,
-          fallbackModel: entry.model,
-        });
+        fallbackLogger.warn('llm.fallback_skipped', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(entry.provider), reason: skipReason(reason) });
       // A stream that already handed text or tool activity to the consumer
       // is not restarted on another provider (a refusal after text
       // included): the consumer would receive the partial answer followed by
@@ -1688,14 +1692,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           const legOnSharedCredentials =
             fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;
           if (legOnSharedCredentials && globalLLMProviderHealth.isOpen(legProvider)) {
-            fallbackLogger.info('streaming provider fallback skipped (circuit open)', {
-              event: 'fallback_skipped_circuit_open',
-              api: 'streamText',
-              primaryProvider: recordedProviderId,
-              fallbackProvider: legProvider,
-              fallbackModel: fb.model,
-              attempt,
-            });
+            fallbackLogger.warn('llm.fallback_circuit_open', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), attempt });
             // An open breaker is an availability failure: a standing leg is
             // owed a refill.
             walkState = advanceFallbackWalk(walkState, fb.walkRole, undefined);
@@ -1708,17 +1705,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // The run this leg reports as the one that answered, once it ended.
           let legAnswer: { provider: string; model: string } | undefined;
           try {
-            fallbackLogger.info('streaming provider fallback triggered', {
-              event: 'fallback_fired',
-              api: 'streamText',
-              primaryProvider: recordedProviderId,
-              fallbackProvider: fb.provider,
-              fallbackModel: fb.model,
-              errorType: lastFallbackError.name,
-              // A seat's mask first: a provider's message can echo the key it was sent.
-              errorMessage: maskToolText(lastFallbackError.message).slice(0, 200),
-              attempt,
-            });
+            fallbackLogger.warn('llm.fallback_fired', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(fb.provider), attempt, ...errorFields(lastFallbackError) });
             // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
             opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastFallbackError) as Error) : lastFallbackError, fb.provider);
             const fallbackResult = streamText({
@@ -1844,24 +1831,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
             if (fallbackFinishReason === 'error') {
               outcome = 'failed-after-output';
-              fallbackLogger.warn('streaming provider fallback failed after output', {
-                event: 'fallback_failed_after_output',
-                api: 'streamText',
-                primaryProvider: recordedProviderId,
-                fallbackProvider: fb.provider,
-                fallbackModel: fb.model,
-                attempt,
-              });
+              fallbackLogger.error('llm.fallback_failed_after_output', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(fb.provider), attempt });
             } else {
               outcome = 'served';
-              fallbackLogger.info('streaming provider fallback succeeded', {
-                event: 'fallback_succeeded',
-                api: 'streamText',
-                primaryProvider: recordedProviderId,
-                fallbackProvider: fb.provider,
-                fallbackModel: fb.model,
-                attempt,
-              });
+              fallbackLogger.info('llm.fallback_succeeded', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(fb.provider), attempt });
             }
             break;
           } catch (fbErr: any) {
@@ -1909,14 +1882,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           const walkSignal = opts.abortSignal;
           const walkStoppedBy = walkSignal?.aborted ? abortReasonError(walkSignal) : undefined;
           if (!walkStoppedBy) {
-            fallbackLogger.warn('streaming provider fallbacks exhausted', {
-              event: 'fallback_exhausted',
-              api: 'streamText',
-              primaryProvider: recordedProviderId,
-              attempts: attempt,
-              errorType: lastFallbackError.name,
-              errorMessage: maskToolText(lastFallbackError.message).slice(0, 200),
-            });
+            fallbackLogger.error('llm.fallback_exhausted', { api: 'streamText', primaryProvider: providerName(recordedProviderId), attempts: attempt, ...errorFields(lastFallbackError) });
           }
           metricStatus = 'error';
           // No leg answered: the trail names this attempt's provider.
