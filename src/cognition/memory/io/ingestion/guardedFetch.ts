@@ -21,6 +21,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
+import { performance } from 'node:perf_hooks';
 import { pipeline, type Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 
@@ -83,7 +84,7 @@ export class GuardedFetchError extends Error {
 export interface GuardedFetchOptions {
   /** The most bytes the body may hold, counted as they arrive and again after a gzip, deflate or br coding is decoded. */
   maxBytes: number;
-  /** How long the whole read may take in milliseconds: the lookups, every redirect and the body. */
+  /** How long the whole read may take in milliseconds: the host rule, the lookups, every redirect and the body. */
   deadlineMs: number;
   /** The most redirects followed, each checked as the first address is. @default 3 */
   maxRedirects?: number;
@@ -107,8 +108,10 @@ export interface GuardedFetchOptions {
    * throws refuses as one that answers `false`, with what it threw as the
    * refusal's `cause`; a value that is not a function is a `TypeError`
    * before any lookup. The rule is asked under the deadline and the caller's
-   * signal like every other step: its time counts against `deadlineMs`, and
-   * when it aborts the signal the read ends with that signal's reason.
+   * signal like every other step: its time counts against `deadlineMs`, so a
+   * rule that outlasts the deadline leaves the read refused `'deadline'` with
+   * nothing more begun, and when it aborts the signal the read ends with that
+   * signal's reason.
    * @default every host
    */
   allowHost?: (host: string) => boolean;
@@ -248,15 +251,24 @@ function checkedUrl(text: string, ports: readonly number[], allowHost: HostRule,
 /**
  * The result of `work`, or a rejection with the signal's reason once `signal`
  * aborts first. The work is not begun when the signal has already aborted, so
- * no lookup is started for a read that has ended; once begun, it goes on when
- * the signal aborts, since a lookup cannot be cancelled.
+ * no lookup is started for a read that has ended, and the abort is listened
+ * for before the work begins, so work that aborts the signal as it starts ends
+ * the wait too; once begun, the work goes on when the signal aborts, since a
+ * lookup cannot be cancelled.
  */
 function untilAborted<T>(work: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise<T>((resolve, reject) => {
-    const promise = work();
     const onAbort = () => reject(signal.reason);
     signal.addEventListener('abort', onAbort, { once: true });
+    let promise: Promise<T>;
+    try {
+      promise = work();
+    } catch (error) {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+      return;
+    }
     promise.then(
       (value) => {
         signal.removeEventListener('abort', onAbort);
@@ -475,14 +487,20 @@ async function readBody(response: http.IncomingMessage, maxBytes: number, signal
   }
 }
 
+/** The refusal of a read that passed its deadline. */
+function deadlinePassed(): GuardedFetchError {
+  return new GuardedFetchError('deadline', 'the read took too long');
+}
+
 /**
  * What a read that failed rejects with: the caller's own reason when its
- * signal aborted, a deadline refusal once the deadline passed, a refusal as it
+ * signal aborted, a deadline refusal once the deadline passed (by its signal,
+ * or by the clock when a synchronous step held the timer), a refusal as it
  * was thrown, and any other failure as a network one.
  */
-function failureOf(error: unknown, callerSignal: AbortSignal | undefined, deadline: AbortSignal): unknown {
+function failureOf(error: unknown, callerSignal: AbortSignal | undefined, deadline: AbortSignal, overdue: () => boolean): unknown {
   if (callerSignal?.aborted) return callerSignal.reason;
-  if (deadline.aborted) return new GuardedFetchError('deadline', 'the read took too long');
+  if (deadline.aborted || overdue()) return deadlinePassed();
   if (error instanceof GuardedFetchError) return error;
   return new GuardedFetchError('network', 'The network read failed.');
 }
@@ -537,8 +555,20 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
     'accept-encoding': 'gzip, deflate, br',
     ...(options.userAgent ? { 'user-agent': options.userAgent } : {}),
   };
+  const started = performance.now();
   const deadline = AbortSignal.timeout(Math.ceil(deadlineMs));
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+  /**
+   * True once the deadline has passed by the clock. The host rule runs
+   * synchronously and so holds the deadline's timer until it returns; the
+   * clock says what the timer cannot say yet.
+   */
+  const overdue = (): boolean => performance.now() - started >= deadlineMs;
+  /** Throws when the read has ended: by the caller's abort, or by the deadline, read from the signal or from the clock. */
+  const ended = (): void => {
+    signal.throwIfAborted();
+    if (overdue()) throw deadlinePassed();
+  };
   // Asked once a fetch, the first time an IPv6 address comes up, whatever
   // number of redirects follows.
   let nat64Asked: ReturnType<Nat64Lookup> | undefined;
@@ -550,10 +580,13 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
     // with that signal's reason.
     let url = checkedUrl(address, ports, allowHost);
     for (let hop = 0; ; hop += 1) {
+      // Nothing is begun for a read that has ended: the rule may have aborted
+      // the signal, or outlasted the deadline, whose timer could not fire
+      // while it ran.
+      ended();
       const targets = await checkedAddresses(url, resolve, allowed, signal, nat64);
-      // A literal address arrives here with no lookup to end the read at, and
-      // the rule may have ended it: nothing is begun for a read that has ended.
-      signal.throwIfAborted();
+      // A literal address arrives here with no lookup to end the read at.
+      ended();
       const response = await requestOnce(url, targets, headers, signal);
       const status = response.statusCode ?? 0;
       if (REDIRECTS.has(status)) {
@@ -583,6 +616,6 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
       return { url: url.toString(), status, contentType, body };
     }
   } catch (error) {
-    throw failureOf(error, options.signal, deadline);
+    throw failureOf(error, options.signal, deadline, overdue);
   }
 }
