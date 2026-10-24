@@ -6,7 +6,9 @@
  * stream holding the line's whole text, with `lk.segment_id` (the transcript's
  * `itemId`), `lk.transcription_final` and `lk.transcribed_track_id`, and on a
  * final whose transcript has times, `agentos.start_ms` and `agentos.end_ms`
- * (whole milliseconds on the session's audio clock), which
+ * (whole milliseconds on the session's audio clock); a line with speaker
+ * information carries `agentos.speaker` (an empty string for `null`), and a
+ * later run of a final split by speaker `agentos.run_of`, all of which
  * `transcriptEventFromLiveKit()` reads back. Writes go out in the order they
  * were asked for. The finals are kept in a {@link TranscriptLedger}, so a
  * participant that reconnects can be sent again the finals after the last line

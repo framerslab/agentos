@@ -3,7 +3,9 @@
  * US dollars a minute of audio for Deepgram's models, pay as you go, one language, no add-on, from Deepgram's pricing
  * page (https://deepgram.com/pricing). Deepgram prices streamed and pre-recorded audio separately, so each has a table
  * of its own, and a live entry reads only the streaming table. A row that is added or changed names its source and the
- * day it was read here. Both tables are frozen, as the other price tables are.
+ * day it was read here. Both tables are frozen, as the other price tables are. The streaming add-ons a request can turn
+ * on, diarization among them, are a frozen table of their own, {@link DEEPGRAM_STREAMING_ADDONS}, billed on top of a
+ * streaming row.
  *
  * Neither table establishes the price of a request sent with `mip_opt_out=true`. Deepgram's API reference asks callers
  * to check the pricing impact of opting out of its Model Improvement Program before sending it, and neither the pricing

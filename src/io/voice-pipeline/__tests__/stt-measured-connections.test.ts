@@ -8,11 +8,14 @@ import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AudioFrame,
+  IStreamTransport,
+  ITranscriptInputSink,
   SttConnectionHooks,
   SttConnectionOpening,
   SttMeasuredUsageEvent,
   StreamingSTTSession,
   TranscriptEvent,
+  TranscriptInput,
 } from '../types.js';
 
 vi.mock('ws', () => {
@@ -71,6 +74,7 @@ import { SttConnectionAuthorizationError } from '../SttConnectionAuthorizationEr
 import { StreamResampler } from '../providers/StreamResampler.js';
 import { splitFinalBySpeaker } from '../transcriptSpeakers.js';
 import { readingOrder, TranscriptLedger } from '../transcriptLedger.js';
+import { startListenSession } from '../ListenSession.js';
 
 interface SocketView extends EventEmitter {
   url: string;
@@ -830,5 +834,95 @@ describe('streaming speaker labels through real provider handlers', () => {
     expect(events.at(-1)).toMatchObject({ itemId: 'backup', text: 'Next.', isFinal: true });
     expect(events.at(-1)).not.toHaveProperty('speaker');
     session.close();
+  });
+
+  it.each(['close', 'ceiling'] as const)('takes back an open item when a funded socket is let go of at its %s', async (end) => {
+    const seen = hooks();
+    const session = await dg().startSession({
+      language: 'en', providerOptions: { diarize_model: 'latest' }, connectionHooks: {
+        ...seen.callbacks, audioCeiling: () => 1, beforeAudio: (_opening, seconds) => seconds <= 1,
+      },
+    });
+    sessions.push(session);
+    const events: TranscriptEvent[] = [];
+    const order: string[] = [];
+    const ledger = new TranscriptLedger();
+    session.on('transcript', (event: TranscriptEvent) => {
+      events.push(event);
+      ledger.apply(event);
+      if (event.isFinal) order.push('final');
+    });
+    session.on('close', () => order.push('close'));
+    await session.pushAudio(frame());
+    speakerResult(speakerSocket(), speakerWords([0]), false);
+    if (end === 'close') {
+      session.close();
+    } else {
+      // The socket's funded second is spent: the next frame drains it, lets it go and opens the next socket.
+      const next = session.pushAudio(frame());
+      await vi.advanceTimersByTimeAsync(200);
+      await turns();
+      await next;
+      expect(sockets.instances).toHaveLength(2);
+    }
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      itemId: events[0]?.itemId, text: '', isFinal: true, confidence: 0, words: [], speaker: null,
+    });
+    expect(ledger.items()).toEqual([]);
+    expect(order).toEqual(end === 'close' ? ['final', 'close'] : ['final']);
+  });
+});
+
+describe('listen turns over the real Deepgram handler', () => {
+  /** A transport that only carries the events a listen session listens for. */
+  function listenTransport(): IStreamTransport & EventEmitter {
+    const transport = new EventEmitter() as IStreamTransport & EventEmitter;
+    Object.defineProperty(transport, 'id', { value: 'listen-transport' });
+    Object.defineProperty(transport, 'state', { value: 'open', writable: true });
+    transport.sendAudio = vi.fn();
+    transport.sendControl = vi.fn();
+    transport.close = vi.fn();
+    return transport;
+  }
+
+  /** Sends a result with no words through the provider's real message handler. */
+  function listenResult(socket: SocketView, text: string, final: boolean, start: number): void {
+    socket.emit('message', JSON.stringify({
+      type: 'Results', start, duration: 1, is_final: final, speech_final: final,
+      channel: { alternatives: [{ transcript: text, confidence: 1, words: [] }] },
+    }));
+  }
+
+  it.each(['empty-final', 'socket-close'] as const)('writes no turn for a line Deepgram takes back at its %s', async (end) => {
+    const inputs: TranscriptInput[] = [];
+    const sink: ITranscriptInputSink = {
+      async append() {},
+      async appendNext(input: TranscriptInput) {
+        inputs.push(input);
+        return { ...input, seq: inputs.length, turnId: `${input.runId}:${inputs.length}` };
+      },
+    };
+    const listen = await startListenSession(listenTransport(), sink, {
+      streamingSTT: dg(), runId: 'run-1', sttConfig: { language: 'en' }, reconnect: false,
+    });
+    const interims = vi.fn();
+    listen.on('interim', interims);
+    const socket = sockets.instances[0];
+    if (socket === undefined) throw new Error('missing fixture socket');
+    listenResult(socket, 'Kept words.', true, 0);
+    listenResult(socket, 'speculative', false, 1);
+    if (end === 'empty-final') {
+      listenResult(socket, '', true, 1);
+      listenResult(socket, 'Next words.', true, 2);
+    } else {
+      socket.drop();
+    }
+    await turns();
+    await listen.close('purged');
+    expect(interims).toHaveBeenCalledTimes(1);
+    expect(inputs.map((input) => [input.text, input.startMs, input.endMs])).toEqual(end === 'empty-final'
+      ? [['Kept words.', 0, 1000], ['Next words.', 2000, 3000]]
+      : [['Kept words.', 0, 1000]]);
   });
 });

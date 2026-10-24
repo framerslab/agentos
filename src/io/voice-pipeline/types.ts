@@ -540,7 +540,7 @@ export interface TranscriptEvent {
    */
   speaker?: string | null;
 
-  /** The original item id on a later run of a split final. */
+  /** The original item id on a later run of a final split by speaker. */
   runOf?: string;
 
   /**

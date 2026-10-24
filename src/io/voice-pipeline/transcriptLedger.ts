@@ -7,8 +7,10 @@
  * no failure takes a line back, and the ledger hides it. LiveKit carries
  * transcripts as text streams on its `lk.transcription` topic with the
  * attributes its own transcription output sets, to which this library adds
- * `agentos.transcription_failed` on a line the provider could not transcribe
- * and `agentos.start_ms` and `agentos.end_ms` on a final with times:
+ * `agentos.transcription_failed` on a line the provider could not transcribe,
+ * `agentos.start_ms` and `agentos.end_ms` on a final with times,
+ * `agentos.speaker` on a line that carries speaker information and
+ * `agentos.run_of` on a later run of a final split by speaker:
  * `transcriptEventFromLiveKit()` reads such a stream, and
  * `LiveKitTranscriptionOutput` (`@framers/agentos/io/hearing/livekit`) writes
  * them. The module imports nothing, its types included, so a browser bundle
