@@ -172,14 +172,14 @@ function expelSpaces(runs: readonly MarkedRun[]): MarkedRun[] {
 
 /**
  * A run's characters with the escapes that keep them text: every backtick, a backslash before a punctuation character
- * or at the run's end, a star unless a space stands at each side of it inside the run, an underscore unless a letter
- * or a digit stands at each side of it, inside a word, or a space does, and a tilde beside another tilde or at either
- * end of the run, where it could join a struck run's two. The profile reads none of these as anything but itself
- * after its backslash, and CommonMark reads more as marks than it does, so the escapes also cover what CommonMark
- * would read: an underscore that could open or close emphasis, every `[`, which could open a link, a `<` that could
- * open a tag, an autolink or an email autolink, the one at the run's end among them, since a mark's delimiters or a
- * code span's backticks follow it there and can start an email address, and a `&` that starts an entity. Characters
- * are read as whole code points.
+ * or at the run's end, a star or a tilde unless a space stands at each side of it inside the run, and an underscore
+ * unless a letter or a digit stands at each side of it, inside a word, or a space does. The profile reads none of
+ * these as anything but itself after its backslash, and CommonMark and GFM read more as marks than it does, so the
+ * escapes also cover what they would read: a tilde that one tilde on the words' other side would make struck words of
+ * in GFM, an underscore that could open or close emphasis, every `[`, which could open a link, a `<` that could open a
+ * tag, an autolink or an email autolink, the one at the run's end among them, since a mark's delimiters or a code
+ * span's backticks follow it there and can start an email address, and a `&` that starts an entity. Characters are
+ * read as whole code points.
  */
 export function escapeText(text: string): string {
   let written = '';
@@ -192,11 +192,11 @@ export function escapeText(text: string): string {
     let escape = false;
     if (char === '`' || char === '[') escape = true;
     else if (char === '\\') escape = after === undefined || ESCAPABLE.test(after);
-    else if (char === '*') escape = !(before !== undefined && SPACE.test(before) && after !== undefined && SPACE.test(after));
+    // GFM reads one tilde each side of words as struck words, as it reads two, so a tilde is held to the star's rule
+    else if (char === '*' || char === '~') escape = !(before !== undefined && SPACE.test(before) && after !== undefined && SPACE.test(after));
     else if (char === '_') {
       escape = !(before !== undefined && after !== undefined && ((WORD.test(before) && WORD.test(after)) || (SPACE.test(before) && SPACE.test(after))));
-    } else if (char === '~') escape = before === undefined || after === undefined || before === '~' || after === '~';
-    else if (char === '<') escape = after === undefined || TAG_START.test(after);
+    } else if (char === '<') escape = after === undefined || TAG_START.test(after);
     else if (char === '&') escape = ENTITY.test(text.slice(at, at + 40));
     if (escape) {
       written += `${text.slice(from, at)}\\${char}`;
