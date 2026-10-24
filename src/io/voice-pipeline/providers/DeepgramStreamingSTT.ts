@@ -20,9 +20,12 @@
  * - `is_final: false` → emits `'transcript'` with `isFinal: false` (interim)
  * - every interim and the final of one segment share an `itemId`, and carry
  *   `startMs` and `endMs` on the socket's audio clock
- * - every result carries `beforeSpeechEnd: true`: Deepgram sends a segment's
- *   final before the end of speech of its utterance, so the session's
- *   `'speech_end'` for that speech follows it
+ * - a result carries `beforeSpeechEnd: true` while its item's speech has not
+ *   ended: Deepgram sends a segment's final before the end of speech of its
+ *   utterance, so the session's `'speech_end'` for that speech follows it.
+ *   A result of an item whose speech ended before its final came (an
+ *   `UtteranceEnd` or `speech_final` preceded it) carries
+ *   `beforeSpeechEnd: false` and begins no new speech span
  * - `speech_final: true` or `UtteranceEnd` → emits `'speech_end'` VAD event
  * - `SpeechStarted` or a segment's first words → emits `'speech_start'`
  * - the audio sent on the socket → `'usage'` (an `SttMeasuredUsageEvent`)
@@ -218,6 +221,14 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
   private samplesSent = 0;
   private utteranceSequence = 0;
   private itemId: string | undefined;
+  /**
+   * Whether the open item's speech has ended: an `UtteranceEnd` or `speech_final`
+   * came while its final was still awaited. Its later results come after that
+   * end of speech, so they begin no new speech span and carry
+   * `beforeSpeechEnd: false`. Holds only while an item is open: the item's
+   * final or retraction clears it.
+   */
+  private openItemSpeechEnded = false;
   private usageTimer: ReturnType<typeof setInterval> | undefined;
 
   /** Wire seconds sent on this socket so far. */
@@ -461,17 +472,24 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
   private endSpeech(): void {
     if (this.speechActive === false) return;
     this.speechActive = false;
+    // The item still awaiting its final gets it after this end of speech.
+    if (this.itemId !== undefined) this.openItemSpeechEnded = true;
     this.emit('speech_end');
   }
 
-  /** Takes back speculative text exactly once when no final text can follow. */
+  /**
+   * Takes back speculative text exactly once when no final text can follow,
+   * marked before its speech end unless that end has already come.
+   */
   private retractOpenItem(): void {
     const itemId = this.itemId;
     if (itemId === undefined) return;
     this.itemId = undefined;
+    const beforeSpeechEnd = !this.openItemSpeechEnded;
+    this.openItemSpeechEnded = false;
     const event: TranscriptEvent = {
       itemId, text: '', isFinal: true, confidence: 0, words: [],
-      beforeSpeechEnd: this.speechActive,
+      beforeSpeechEnd,
       ...(this.diarized ? { speaker: null } : {}),
     };
     this.emit('transcript', event);
@@ -480,6 +498,9 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
   /**
    * Maps results to keyed lines. A final closes its item; an empty final
    * retracts an open item. Speech boundaries alone leave its identity intact.
+   * A result of an item whose speech has ended is that speech's: it begins no
+   * new speech span and is not marked before its speech end, so a detector
+   * pairs the delayed final with the end of speech already waiting.
    * The line label is connection-scoped while each word retains its raw label.
    */
   private _handleMessage(raw: string): void {
@@ -514,7 +535,9 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
         const startMs = Math.round(result.start * 1000);
         const endMs = Math.round((result.start + result.duration) * 1000);
         if (Number.isFinite(startMs) === false || Number.isFinite(endMs) === false || startMs < 0 || endMs < startMs) return;
-        this.beginSpeech();
+        // A result of an item whose speech has ended comes after that end: it begins no new speech span.
+        const afterSpeechEnd = this.openItemSpeechEnded;
+        if (!afterSpeechEnd) this.beginSpeech();
         this.itemId ??= `${this.meter.opening.connectionId}:${++this.utteranceSequence}`;
         const words = (alt.words ?? []).map((word) => ({
           word: word.punctuated_word ?? word.word,
@@ -532,7 +555,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
           startMs,
           endMs,
           durationMs: endMs - startMs,
-          beforeSpeechEnd: true,
+          beforeSpeechEnd: !afterSpeechEnd,
           words,
           ...(rawSpeaker === undefined ? {} : {
             speaker: rawSpeaker === null ? null : `${this.meter.opening.connectionId}:${rawSpeaker}`,
@@ -545,7 +568,10 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
           };
         }
         // Close the identity before listeners run, so a reentrant close emits no second final.
-        if (event.isFinal) this.itemId = undefined;
+        if (event.isFinal) {
+          this.itemId = undefined;
+          this.openItemSpeechEnded = false;
+        }
         this.emit('transcript', event);
       } else if (result.is_final) {
         this.retractOpenItem();

@@ -560,9 +560,12 @@ export interface TranscriptEvent {
   /**
    * `true` on a result the provider sends before the end of speech of the
    * speech it transcribes: the session's `'speech_end'` for that speech
-   * follows it. `DeepgramStreamingSTT` sets it on every result: it emits a
-   * segment's final before the `'speech_end'` that Deepgram's `speech_final`
-   * or `UtteranceEnd` raises. A provider that sends an utterance's final
+   * follows it. `DeepgramStreamingSTT` sets it on each result of an item
+   * whose speech has not ended: it emits a segment's final before the
+   * `'speech_end'` that Deepgram's `speech_final` or `UtteranceEnd` raises.
+   * It sets `false` on a result of an item whose `'speech_end'` came before
+   * its final (a final delayed past an `UtteranceEnd`), so that final answers
+   * the end already waiting. A provider that sends an utterance's final
    * after that utterance's `'speech_end'`, as `OpenAIRealtimeTranscriptionSTT`
    * does, leaves it undefined. {@link HeuristicEndpointDetector} reads it on
    * a final that carries an `itemId`: such a final belongs to the speech it
