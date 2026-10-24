@@ -100,6 +100,9 @@ describe('readCsv', () => {
     expect(readCsv('Tag\n_draft_\nsnake_case\n').markdown).toBe(
       lines(`| ${'Tag'.padEnd(10)} |`, `| ${'-'.repeat(10)} |`, `| ${'\\_draft\\_'.padEnd(10)} |`, '| snake_case |'),
     );
+    expect(readCsv('Mail\n<3@example.com>\n').markdown).toBe(
+      lines(`| ${'Mail'.padEnd(16)} |`, `| ${'-'.repeat(16)} |`, '| \\<3@example.com> |'),
+    );
   });
 
   it('keeps a quote inside an unquoted field and the words after a closing quote, and skips a blank line', () => {
