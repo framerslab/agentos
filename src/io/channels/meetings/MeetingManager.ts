@@ -274,6 +274,14 @@ function runLimits(requested: Partial<MeetingRunLimits> | undefined): MeetingRun
   return limits;
 }
 
+/** Chat text as the stop phrase is compared with it: each run of whitespace one space, trimmed and lowercased. */
+function foldChatText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** What may follow the stop phrase in a message that is the phrase: closing punctuation and whitespace, or nothing. */
+const STOP_PHRASE_TAIL = /^[.!?\s]*$/;
+
 /**
  * The meeting-participant channel's manager: sends bots, dispatches them under
  * a lease, applies the providers' reports and enforces each run's lifecycle
@@ -1414,8 +1422,17 @@ export class MeetingManager {
     }
   }
 
+  /**
+   * Whether a chat message is the run's stop phrase. Both are compared with each run of whitespace folded to one space,
+   * trimmed and lowercased, and the message may close with punctuation (`.`, `!`, `?`) after the phrase. A message that
+   * holds the phrase among other words is not a stop: a bot's notice tells people to type the phrase, and with two bots
+   * in one meeting each reads the other's notice in the chat. A phrase that folds to nothing matches no message.
+   */
   private isStopPhrase(run: MeetingRunRecord, text: string | undefined): boolean {
-    return !!text && text.toLowerCase().includes(run.stopPhrase.toLowerCase());
+    const phrase = foldChatText(run.stopPhrase);
+    if (!text || !phrase) return false;
+    const message = foldChatText(text);
+    return message.startsWith(phrase) && STOP_PHRASE_TAIL.test(message.slice(phrase.length));
   }
 
   /**
@@ -1428,7 +1445,7 @@ export class MeetingManager {
     if (run.state === 'in_call' && provider?.capabilities.postsChat) await provider.command(run.runId, { name: 'postChat', text: run.notice.lateArrivalText });
   }
 
-  /** Whether a report asks the bot to stop: a stop command, or a chat message holding the stop phrase. */
+  /** Whether a report asks the bot to stop: a stop command, or a chat message that is the stop phrase. */
   private isStop(run: MeetingRunRecord, event: NormalizedMeetingEvent): boolean {
     return event.type === 'stop_command' || (event.type === 'chat_message' && this.isStopPhrase(run, event.data?.text));
   }
