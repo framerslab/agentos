@@ -57,6 +57,9 @@ import { SentenceSegmenter, boundaryOf, type TextSegment } from '../ttsTextBound
 /** How long a segment waits for its terminal response before it ends without a boundary. */
 export const DEFAULT_SEGMENT_TIMEOUT_MS = 5_000;
 
+/** A letter or a digit, in any script: a segment without one, such as an ellipsis or an emoji alone, has nothing to say. */
+const SPEAKABLE = /[\p{L}\p{N}]/u;
+
 /** Two contiguous segments as one, under the first one's id. */
 function joined(first: TextSegment, next: TextSegment): TextSegment {
   return { segmentId: first.segmentId, start: first.start, end: next.end, text: first.text + next.text };
@@ -138,10 +141,11 @@ export class SegmentSynthesisQueue {
   private readonly pending: Array<{ segment: TextSegment; count: number }> = [];
   private flight?: Flight;
   /**
-   * The segments the provider completed with no frame, joined, until the segment after them ends: the boundary of the
-   * next segment that ends on a frame starts where they start, so the played prefix runs on past a segment with nothing
-   * to hear, such as an ellipsis alone. A segment that starts elsewhere, as the next reply's first does, a timeout, an
-   * abandonment, a loss and a cancel forget them.
+   * The segments with nothing to say (no letter or digit) that the provider completed with no frame, joined, until the
+   * segment after them ends: the boundary of the next segment that ends on a frame starts where they start, so the
+   * played prefix runs on past a segment with nothing to hear, such as an ellipsis alone. A segment with words that
+   * completes with no frame, one that starts elsewhere, as the next reply's first does, a timeout, an abandonment, a
+   * loss and a cancel forget them.
    */
   private silent?: TextSegment;
   private queued = 0;
@@ -211,8 +215,9 @@ export class SegmentSynthesisQueue {
 
   /**
    * The provider's terminal response: the held frame goes out with the segment's boundary, which starts where the
-   * segments completed with no frame just before it start, so the boundaries stay contiguous. A segment completed with no
-   * frame attaches nothing and joins them. With nothing in flight, nothing happens.
+   * segments with nothing to say completed with no frame just before it start, so the boundaries stay contiguous. A
+   * segment completed with no frame attaches nothing: one with nothing to say joins them, and one with words, which
+   * nothing proves was spoken, ends them, so the played prefix stops before it. With nothing in flight, nothing happens.
    */
   completed(): void {
     const flight = this.flight;
@@ -222,7 +227,7 @@ export class SegmentSynthesisQueue {
     if (flight.held) {
       this.silent = undefined;
       this.hooks.emit({ ...flight.held, textBoundary: boundaryOf(segment) });
-    } else this.silent = segment;
+    } else this.silent = SPEAKABLE.test(flight.segment.text) ? undefined : segment;
     this.finish(flight);
   }
 
