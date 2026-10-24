@@ -442,12 +442,19 @@ export interface TranscriptWord {
   word: string;
 
   /**
-   * Millisecond offset from the start of the utterance at which this word begins.
+   * When the word begins, in milliseconds on the clock of the event's
+   * `startMs` and `endMs`: counted from the first frame pushed into the
+   * session, so a word's time compares with its event's bounds and with the
+   * words of the session's other events, and a wrapper that moves an event's
+   * bounds onto another timeline (`ReconnectingSTT`, `StreamingSTTChain`,
+   * `RollingSTTSession`) moves its words by the same amount. A provider that
+   * reports no `startMs` and `endMs` (`ElevenLabsStreamingSTT`) counts from
+   * the start of the audio it transcribed for the event.
    */
   start: number;
 
   /**
-   * Millisecond offset from the start of the utterance at which this word ends.
+   * When the word ends, in milliseconds on the same clock as `start`.
    */
   end: number;
 
