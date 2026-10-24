@@ -16,6 +16,7 @@ import type {
   StreamingSTTSession,
   TranscriptEvent,
   TranscriptInput,
+  TurnCompleteEvent,
 } from '../types.js';
 
 vi.mock('ws', () => {
@@ -75,6 +76,7 @@ import { StreamResampler } from '../providers/StreamResampler.js';
 import { splitFinalBySpeaker } from '../transcriptSpeakers.js';
 import { readingOrder, TranscriptLedger } from '../transcriptLedger.js';
 import { startListenSession } from '../ListenSession.js';
+import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
 
 interface SocketView extends EventEmitter {
   url: string;
@@ -268,6 +270,40 @@ describe('measured hosted connections', () => {
     expect(new Set(seen.openings.map((opening) => opening.connectionId)).size).toBe(2);
     expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([1, 1]);
     expect(sockets.instances.every((socket) => new URL(socket.url).searchParams.get('mip_opt_out') === 'true')).toBe(true);
+  });
+
+  it('opens no successor socket when a transcript listener closes the session as a funded socket is let go of', async () => {
+    const seen = hooks();
+    const session = await dg().startSession({ language: 'en', connectionHooks: {
+      ...seen.callbacks, audioCeiling: () => 1, beforeAudio: (_opening, seconds) => seconds <= 1,
+    } });
+    sessions.push(session);
+    const events: TranscriptEvent[] = [];
+    const closes = vi.fn();
+    session.on('close', closes);
+    session.on('transcript', (event: TranscriptEvent) => {
+      events.push(event);
+      // The socket let go of at its ceiling takes back its open line; the host ends the session on that final.
+      if (event.isFinal) session.close();
+    });
+    await session.pushAudio(frame());
+    const socket = sockets.instances[0];
+    if (socket === undefined) throw new Error('missing fixture socket');
+    socket.emit('message', JSON.stringify({
+      type: 'Results', start: 0, duration: 1, is_final: false, speech_final: false,
+      channel: { alternatives: [{ transcript: 'speculative', confidence: 1, words: [] }] },
+    }));
+    // The socket's funded second is spent: the next frame drains it and lets it go.
+    const next = session.pushAudio(frame());
+    await vi.advanceTimersByTimeAsync(200);
+    await turns();
+    await next;
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ itemId: events[0]?.itemId, text: '', isFinal: true });
+    expect(closes).toHaveBeenCalledTimes(1);
+    expect(seen.openings).toHaveLength(1);
+    expect(sockets.instances).toHaveLength(1);
+    expect(seen.usage.filter((event) => event.final).map((event) => event.audioSeconds)).toEqual([1]);
   });
 
   it.each(['deepgram', 'openai'] as const)('awaits %s authorization before constructing any socket', async (vendor) => {
@@ -925,4 +961,57 @@ describe('listen turns over the real Deepgram handler', () => {
       ? [['Kept words.', 0, 1000], ['Next words.', 2000, 3000]]
       : [['Kept words.', 0, 1000]]);
   });
+});
+
+describe('turn completion over the real Deepgram handler', () => {
+  /** Sends a result through the provider's real message handler. */
+  function result(socket: SocketView, text: string, final: boolean, terminal: boolean): void {
+    socket.emit('message', JSON.stringify({
+      type: 'Results', start: 0, duration: 1, is_final: final, speech_final: terminal,
+      channel: { alternatives: [{ transcript: text, confidence: 1, words: [] }] },
+    }));
+  }
+
+  it.each([false, true])(
+    'completes the turn at the end of speech an interim left waiting when its final comes after UtteranceEnd (speech_final=%s)',
+    async (terminal) => {
+      const session = await dg().startSession({ language: 'en' });
+      sessions.push(session);
+      const socket = sockets.instances[0];
+      if (socket === undefined) throw new Error('missing fixture socket');
+      const detector = new HeuristicEndpointDetector({ silenceTimeoutMs: 1_500 });
+      const completed: TurnCompleteEvent[] = [];
+      detector.on('turn_complete', (event: TurnCompleteEvent) => completed.push(event));
+      const starts = vi.fn();
+      const ends = vi.fn();
+      const finals: TranscriptEvent[] = [];
+      // As the orchestrator wires them: the transcriber's speech events and transcripts reach the detector as they come.
+      session.on('speech_start', () => {
+        starts();
+        detector.pushVadEvent({ type: 'speech_start', timestamp: Date.now(), source: 'stt' });
+      });
+      session.on('speech_end', () => {
+        ends();
+        detector.pushVadEvent({ type: 'speech_end', timestamp: Date.now(), source: 'stt' });
+      });
+      session.on('transcript', (event: TranscriptEvent) => {
+        if (event.isFinal) finals.push(event);
+        detector.pushTranscript(event);
+      });
+      result(socket, 'Hello there', false, false);
+      socket.emit('message', JSON.stringify({ type: 'UtteranceEnd', channel: [0, 1], last_word_end: 0.9 }));
+      expect(ends).toHaveBeenCalledTimes(1);
+      expect(completed).toEqual([]);
+      // The segment's final comes after its end of speech: it is that speech's, not the start of another.
+      result(socket, 'Hello there.', true, terminal);
+      expect(completed).toEqual([expect.objectContaining({ transcript: 'Hello there.', reason: 'punctuation' })]);
+      expect(starts).toHaveBeenCalledTimes(1);
+      expect(ends).toHaveBeenCalledTimes(1);
+      expect(finals).toHaveLength(1);
+      expect(finals[0]).toMatchObject({ text: 'Hello there.', beforeSpeechEnd: false });
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(completed).toHaveLength(1);
+      detector.reset('session');
+    }
+  );
 });
