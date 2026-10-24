@@ -56,17 +56,26 @@ export type GuardedFetchReason =
 /** A fetch that {@link guardedFetch} refused or could not finish. */
 export class GuardedFetchError extends Error {
   /**
+   * What the caller's host rule threw, when the refusal is that rule's
+   * failure; absent otherwise. The message keeps its details out.
+   */
+  readonly cause?: unknown;
+
+  /**
    * @param reason - Why the fetch stopped.
    * @param message - What happened, in words.
    * @param status - The HTTP status of the answer that was refused, when there was one.
+   * @param cause - What the host rule threw, when that is why.
    */
   constructor(
     readonly reason: GuardedFetchReason,
     message: string,
     readonly status?: number,
+    cause?: unknown,
   ) {
     super(message);
     this.name = 'GuardedFetchError';
+    if (cause !== undefined) this.cause = cause;
   }
 }
 
@@ -95,8 +104,11 @@ export interface GuardedFetchOptions {
    * port, without the brackets around an IPv6 address, without a trailing
    * dot. A host it allows is still resolved and checked as every host is:
    * the rule narrows what the fetch reads and never widens it. A rule that
-   * throws refuses as one that answers `false`; a value that is not a
-   * function is a `TypeError` before any lookup.
+   * throws refuses as one that answers `false`, with what it threw as the
+   * refusal's `cause`; a value that is not a function is a `TypeError`
+   * before any lookup. The rule is asked under the deadline and the caller's
+   * signal like every other step: its time counts against `deadlineMs`, and
+   * when it aborts the signal the read ends with that signal's reason.
    * @default every host
    */
   allowHost?: (host: string) => boolean;
@@ -223,8 +235,8 @@ function checkedUrl(text: string, ports: readonly number[], allowHost: HostRule,
     let answer: unknown;
     try {
       answer = allowHost(host);
-    } catch {
-      throw new GuardedFetchError('host', `${host} is not read: the host rule failed`);
+    } catch (cause) {
+      throw new GuardedFetchError('host', `${host} is not read: the host rule failed`, undefined, cause);
     }
     if (answer !== true) throw new GuardedFetchError('host', `${host} is not read`);
   }
@@ -233,10 +245,16 @@ function checkedUrl(text: string, ports: readonly number[], allowHost: HostRule,
   return url;
 }
 
-/** `promise`, or a rejection with the signal's reason once `signal` aborts first. The work behind `promise` goes on. */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+/**
+ * The result of `work`, or a rejection with the signal's reason once `signal`
+ * aborts first. The work is not begun when the signal has already aborted, so
+ * no lookup is started for a read that has ended; once begun, it goes on when
+ * the signal aborts, since a lookup cannot be cancelled.
+ */
+function untilAborted<T>(work: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise<T>((resolve, reject) => {
+    const promise = work();
     const onAbort = () => reject(signal.reason);
     signal.addEventListener('abort', onAbort, { once: true });
     promise.then(
@@ -259,7 +277,7 @@ type Nat64Lookup = () => Promise<Nat64Prefix[] | undefined>;
  * The addresses the connection may go to: every address of the host, each
  * public or allowed, in the order the resolver gave them. A lookup cannot be
  * cancelled, so the wait for it ends at the deadline while the lookup itself
- * runs on.
+ * runs on; none is begun once the read has ended.
  */
 async function checkedAddresses(
   url: URL,
@@ -270,7 +288,7 @@ async function checkedAddresses(
 ): Promise<CheckedAddress[]> {
   const host = hostOf(url);
   const literal = isIP(host);
-  const answers = literal !== 0 ? [{ address: host, family: literal }] : await untilAborted(resolve(host), signal);
+  const answers = literal !== 0 ? [{ address: host, family: literal }] : await untilAborted(() => resolve(host), signal);
   if (answers.length === 0) throw new GuardedFetchError('network', `${host} has no address`);
   for (const answer of answers) {
     if (!allowed.has(answer.address) && !isPublicAddress(answer.address)) {
@@ -312,7 +330,7 @@ async function nat64PrefixesOf(
 ): Promise<Nat64Prefix[] | undefined> {
   let answers: Array<{ address: string; family: number }>;
   try {
-    answers = await untilAborted(resolve('ipv4only.arpa'), signal);
+    answers = await untilAborted(() => resolve('ipv4only.arpa'), signal);
   } catch (error) {
     if (signal.aborted) throw error;
     return undefined;
@@ -492,7 +510,8 @@ function failureOf(error: unknown, callerSignal: AbortSignal | undefined, deadli
  *   `maxRedirects` is not a whole number of 0 or more, before any lookup.
  * @throws {TypeError} When `allowHost` is given and is not a function, before any lookup.
  * @throws {GuardedFetchError} When the address, a redirect or the answer is
- *   refused, or the read fails or passes its deadline; `reason` says which.
+ *   refused, or the read fails or passes its deadline; `reason` says which,
+ *   and a host rule's own failure is the error's `cause`.
  * @throws The reason of `options.signal` when the caller aborts it.
  */
 export async function guardedFetch(address: string, options: GuardedFetchOptions): Promise<GuardedResponse> {
@@ -518,7 +537,6 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
     'accept-encoding': 'gzip, deflate, br',
     ...(options.userAgent ? { 'user-agent': options.userAgent } : {}),
   };
-  let url = checkedUrl(address, ports, allowHost);
   const deadline = AbortSignal.timeout(Math.ceil(deadlineMs));
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
   // Asked once a fetch, the first time an IPv6 address comes up, whatever
@@ -526,8 +544,16 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
   let nat64Asked: ReturnType<Nat64Lookup> | undefined;
   const nat64: Nat64Lookup = () => (nat64Asked ??= nat64PrefixesOf(resolve, signal));
   try {
+    // The first address is checked under the deadline and the caller's
+    // signal, as every redirect's target is: the host rule's time counts
+    // against the deadline, and a rule that aborts the signal ends the read
+    // with that signal's reason.
+    let url = checkedUrl(address, ports, allowHost);
     for (let hop = 0; ; hop += 1) {
       const targets = await checkedAddresses(url, resolve, allowed, signal, nat64);
+      // A literal address arrives here with no lookup to end the read at, and
+      // the rule may have ended it: nothing is begun for a read that has ended.
+      signal.throwIfAborted();
       const response = await requestOnce(url, targets, headers, signal);
       const status = response.statusCode ?? 0;
       if (REDIRECTS.has(status)) {
