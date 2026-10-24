@@ -96,8 +96,11 @@ Flash always uses adaptive thinking. Its allowed `effort` values are `low`, `med
 Tool continuations preserve separate reasoning content, and image URL/data-URL parts
 are forwarded through the Chat Completions API. See the
 [MiniMax OpenAI API reference](https://platform.minimax.io/docs/api-reference/text-openai-api).
-MiniMax image generation continues to use `image-01`. MiniMax publishes no embedding model, so the
-`minimax` provider refuses an embedding request before sending it; embed with another provider.
+MiniMax image generation uses `image-01`, also when `setDefaultProvider()` names a MiniMax text
+model such as `MiniMax-M3.1-Flash`: on the global root and on the China root, an image call drops
+the chat model the default names and takes the provider's image model. MiniMax publishes no
+embedding model, so the `minimax` provider refuses an embedding request before sending it; embed
+with another provider.
 
 ### Inline API Keys
 
