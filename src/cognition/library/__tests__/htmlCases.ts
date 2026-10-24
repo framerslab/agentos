@@ -518,6 +518,14 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: 'an angle bracket before bold words or inline code keeps its backslash, so no email address in angle brackets forms across them',
+    html: '<p>&lt;<b>3@example.com&gt;</b> and &lt;<code>4@example.com&gt;</code></p>',
+    title: null,
+    markdown: '\\<**3@example.com>** and \\<`4@example.com>`',
+    images: 0,
+    cut: false,
+  },
+  {
     name: 'a cell spanning its rows to the end of the head stops at the body',
     html: '<table><thead><tr><th rowspan="0">A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>',
     title: null,
