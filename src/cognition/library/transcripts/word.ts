@@ -1,7 +1,7 @@
 /**
  * @fileoverview A Word transcript (`.docx`): its text taken out by an extractor the caller passes, such as mammoth's
- * `extractRawText`, then read by the layout the caller names, or by Otter's headers when it is laid out as Otter's
- * export and as plain lines otherwise.
+ * `extractRawText`, then read with each paragraph a line, by the layout the caller names, or by Otter's headers when
+ * it is laid out as Otter's export and as plain lines otherwise.
  * This module imports no package, so the entry that holds it stays free of one; a page passes mammoth's browser build,
  * which opens `{ arrayBuffer }`.
  * @module agentos/cognition/library/transcripts/word
@@ -28,10 +28,21 @@ export interface ReadWordTranscriptOptions {
 }
 
 /**
+ * A Word file's text with each paragraph on a line of its own, as the text the file is laid out from holds them.
+ * mammoth's text follows each paragraph with a blank line, so there a paragraph ends with a blank line and an empty
+ * paragraph adds a second; here a paragraph ends with its line and an empty paragraph is a blank line. The line
+ * straight after an Otter header is then the paragraph after it, as it is in Otter's text.
+ */
+function paragraphLines(text: string): string {
+  return text.replace(/\n\n/g, '\n');
+}
+
+/**
  * Reads a Word transcript. The extractor is handed a copy of the file's own bytes (a view such as a Node `Buffer` may
- * share its memory with other data). The text it answers is read by the caller's `layout`, or, without one, by Otter's
- * headers when it is laid out as Otter's export (a header and its words in paragraphs of their own) and otherwise as
- * plain lines, `Name: words` naming the speakers by the shared rule. A Word file with no text reads as no turns.
+ * share its memory with other data). The text it answers is read with each paragraph a line, by the caller's
+ * `layout`, or, without one, by Otter's headers when it is laid out as Otter's export (a header and its words in
+ * paragraphs of their own) and otherwise as plain lines, `Name: words` naming the speakers by the shared rule. A Word
+ * file with no text reads as no turns.
  *
  * @param bytes - The Word file's bytes.
  * @param options - The extractor, and the layout when the caller knows it.
@@ -47,7 +58,7 @@ export async function readWordTranscript(bytes: Uint8Array, options: ReadWordTra
     throw new TranscriptReadError('docx', 'the extractor could not read the file', error);
   }
   if (typeof extracted?.value !== 'string') throw new TranscriptReadError('docx', 'the extractor answered no text');
-  const text = textOf(extracted.value);
+  const text = paragraphLines(textOf(extracted.value));
   const otter = options.layout === undefined ? isOtterLayout(text) : options.layout === 'otter';
   return otter ? readOtter(text, 'docx') : readLines(text, 'docx');
 }
