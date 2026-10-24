@@ -120,8 +120,9 @@
  * contiguous prefix of such segments is the played text, and each time it
  * grows the line is written as an interim holding it. `agent_done` writes the
  * final with the reply's text, or, when the transport's wait for the reply's
- * playout failed (a track that stalled), a pause held the track during the
- * reply, or the message carries no text, as the session sends it for a reply
+ * playout failed (a track that stalled), the publisher refused a chunk of the
+ * reply (a capture that failed), a pause held the track during the reply, or
+ * the message carries no text, as the session sends it for a reply
  * some of which may never have played, with the played text alone, as the
  * session's own item of that reply counts none of the rest heard. A `barge_in` `cancel` or a `clearPlayback()`
  * cuts the reply, and its final holds the played text alone, as LiveKit
