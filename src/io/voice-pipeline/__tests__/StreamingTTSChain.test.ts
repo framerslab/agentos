@@ -461,6 +461,62 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(closes).not.toHaveBeenCalled();
   });
 
+  it('sends the backup the text pushed in the promise job after it took the replay, before the switch has ended', async () => {
+    const a = pushSession();
+    const b = pushSession();
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    session.pushTokens('One.');
+    // The caller's next text comes in the promise job after the backup took the replay, as the next token of a stream
+    // under way does, while the switch has yet to end.
+    b.pushTokens.mockImplementationOnce(() => {
+      queueMicrotask(() => session.pushTokens(' Two.'));
+    });
+    a.emit('error', new Error('socket hang up'));
+    await session.flush();
+    expect(failover).toHaveBeenCalledOnce();
+    // The backup takes that text as well, before its flush: the reply it speaks is the whole reply.
+    expect(b.pushTokens.mock.calls).toEqual([['One.'], [' Two.']]);
+    expect(b.flush).toHaveBeenCalledOnce();
+  });
+
+  it('counts a request as flushed by its own flush alone: the flush of a cut request that settles once the next one has begun leaves a close during the next one a failure, and the backup takes its text', async () => {
+    const a = pushSession();
+    // As a provider whose flush settles once its server has answered the cancel.
+    let settle!: () => void;
+    a.flush.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      settle = resolve;
+    }));
+    const b = pushSession();
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    const closes = vi.fn();
+    session.on('close', closes);
+    session.pushTokens('One.');
+    const cut = session.flush();
+    await vi.waitFor(() => expect(a.flush).toHaveBeenCalledOnce());
+    // A barge-in cuts the request, and the next one begins before the cut one's flush settles.
+    session.cancel();
+    session.pushTokens('Two.');
+    settle();
+    await cut;
+    // The provider's connection drops while the next request is under way, before its flush: a failure, not the end of
+    // a flushed request, so the facade goes on through the backup, which takes the next request's text.
+    a.emit('close');
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+    expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+    expect(b.pushTokens.mock.calls).toEqual([['Two.']]);
+    expect(closes).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['at once', false],
     ['after a timer, as a connection does', true],
