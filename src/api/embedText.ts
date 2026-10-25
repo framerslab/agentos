@@ -2,9 +2,12 @@
  * @file embedText.ts
  * Provider-agnostic text embedding generation for the AgentOS high-level API.
  *
- * Dispatches embedding requests to OpenAI-compatible, Ollama, OpenRouter, or
- * Gemini endpoints using the same provider resolution pipeline as
- * {@link generateText}.
+ * Dispatches embedding requests to the OpenAI-compatible embeddings endpoints
+ * of OpenAI, OpenRouter, Mistral and Requesty (or a base URL the caller sets),
+ * to Ollama, or to Gemini, using the same provider resolution pipeline as
+ * {@link generateText}. A provider's key goes only to that provider's endpoint
+ * or to a base URL the caller set; a provider with no embeddings is refused
+ * before its key is read.
  * Supports single and batch text inputs, optional dimensionality reduction,
  * and returns raw float vectors.
  *
@@ -113,7 +116,15 @@ export interface EmbedTextOptions {
   /** Override the API key instead of reading from environment variables. */
   apiKey?: string;
 
-  /** Override the provider base URL (useful for local proxies or Ollama). */
+  /**
+   * Override the provider base URL (useful for local proxies or Ollama). An
+   * OpenAI-compatible request goes to `<baseUrl>/embeddings` with the call's
+   * key. A provider agentos does not know (a gateway or proxy of your own)
+   * needs it, or a global default's `baseUrl`: without one the call is
+   * refused, since agentos knows no endpoint for its key. A provider with no
+   * embeddings (Anthropic, Groq, Together AI, xAI, MiniMax) is refused
+   * whatever the base URL.
+   */
   baseUrl?: string;
 
   /** Optional durable usage ledger configuration for helper-level accounting. */
@@ -209,7 +220,7 @@ interface OpenAIEmbeddingData {
 
 /**
  * Shape of the top-level response from the OpenAI `/v1/embeddings` endpoint
- * (also used by OpenRouter and compatible proxies).
+ * (also used by OpenRouter, Mistral, Requesty and compatible proxies).
  * @internal
  */
 interface OpenAIEmbeddingResponse {
@@ -243,12 +254,11 @@ interface OllamaEmbedResponse {
 // ---------------------------------------------------------------------------
 
 /**
- * Calls the OpenAI-compatible `/v1/embeddings` endpoint.
+ * Calls an OpenAI-compatible `/embeddings` endpoint: OpenAI's, OpenRouter's,
+ * Mistral's, Requesty's, or the one at a base URL the caller set.
  *
- * Works for OpenAI native, OpenRouter, and any API that follows the
- * same request/response contract.
- *
- * @param baseUrl - The API base URL (e.g. `https://api.openai.com/v1`).
+ * @param baseUrl - The API base URL (e.g. `https://api.openai.com/v1`): the
+ *   caller's, or the provider's own from {@link EMBEDDINGS_BASE_URLS}.
  * @param apiKey - Bearer token for the Authorization header.
  * @param modelId - The embedding model identifier.
  * @param input - Array of strings to embed.
@@ -542,9 +552,10 @@ function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
  * provider-agnostic `provider:model` string.
  *
  * Resolves credentials via the standard AgentOS provider pipeline, then
- * dispatches to the appropriate embedding endpoint (OpenAI, Ollama,
- * OpenRouter or Gemini). Returns raw float arrays suitable for vector
- * similarity search, clustering, or any downstream ML pipeline.
+ * dispatches to the provider's own embedding endpoint (OpenAI, OpenRouter,
+ * Mistral, Requesty, Ollama or Gemini) or to the base URL the caller set; a
+ * provider's key goes to no other host. Returns raw float arrays suitable for
+ * vector similarity search, clustering, or any downstream ML pipeline.
  *
  * @param opts - Embedding options including model, input text(s), and
  *   optional provider/key overrides.
@@ -557,6 +568,9 @@ function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
  *   embedText can send to (Anthropic, Groq, Together AI, xAI, MiniMax, the
  *   image providers and the CLIs), whatever its base URL; its key is not read
  *   and no request is sent.
+ * @throws {Error} When the call resolves to a provider agentos does not know
+ *   and no base URL is set, on the call or on the global default; no request
+ *   is sent.
  * @throws {Error} When the embedding API returns a non-2xx status.
  *
  * @example
@@ -681,9 +695,17 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             ...(result.usage.costUSD !== undefined ? { costUSD: result.usage.costUSD } : {}),
           };
         } else {
-          // The base URL the caller set, else the provider's own documented
-          // embeddings endpoint, else OpenAI's.
-          const baseUrl = resolved.baseUrl ?? EMBEDDINGS_BASE_URLS.get(resolved.providerId) ?? OPENAI_DEFAULT_BASE_URL;
+          // The base URL the caller set (the call's, the global default's or
+          // the provider's base-URL variable), else the provider's own
+          // documented embeddings endpoint. A provider agentos does not know
+          // has none, so its key goes only to a base URL the caller set.
+          const baseUrl = resolved.baseUrl ?? EMBEDDINGS_BASE_URLS.get(resolved.providerId);
+          if (baseUrl === undefined) {
+            throw new Error(
+              `No embeddings endpoint is known for provider "${resolved.providerId}"; pass baseUrl, the ` +
+                `OpenAI-compatible endpoint its key is for, or embed with ${embeddingProviderList()}.`,
+            );
+          }
 
           if (!resolved.apiKey) {
             throw new Error(`No API key available for embedding provider "${resolved.providerId}".`);
