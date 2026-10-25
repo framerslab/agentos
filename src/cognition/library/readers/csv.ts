@@ -1,7 +1,8 @@
 /**
  * @fileoverview A CSV or TSV text read into one Markdown table of pipe lines: RFC 4180's fields (a quoted field may hold
- * the separator, line breaks and doubled quotes; a CRLF ends a record), the separator found on the first line when none
- * is named, the first row as the header, and each cell one line. Pure: it imports nothing outside the readers.
+ * the separator, line breaks and doubled quotes; a CRLF ends a record), the separator named by Excel's first line of
+ * `sep=` or found on the first line when none is named, the first row as the header, and each cell one line. Pure: it
+ * imports nothing outside the readers.
  * @module agentos/cognition/library/readers/csv
  */
 
@@ -14,8 +15,10 @@ export type CsvSeparator = ',' | ';' | '\t';
 /** How `readCsv` reads a text. */
 export interface ReadCsvOptions {
   /**
-   * The separator. Left out, the text's first line that holds more than white space names it: a tab, else a semicolon
-   * with no comma, else a comma.
+   * The separator. Left out, Excel's line naming a sheet's separator, `sep=` and a comma, a semicolon or a tab alone on
+   * the text's first line, names it; with no such line, the text's first line that holds more than white space names
+   * it: a tab, else a semicolon with no comma, else a comma. The `sep=` line is no row of the table, also when this
+   * names the separator, which wins over it.
    */
   separator?: CsvSeparator;
   /**
@@ -57,6 +60,25 @@ const SEPARATORS: readonly string[] = [',', ';', '\t'];
 
 /** A line break inside a field with the spaces and tabs beside it, made one space in a cell. */
 const BREAK = /[ \t]*(?:\r\n|\r|\n)[ \t]*/g;
+
+/**
+ * Excel's line naming a sheet's separator: `sep=` and one of the separators the reader takes, alone on the text's first
+ * line. Excel splits the rows on the character it names and does not show the line, as an answer on Microsoft's
+ * community forum describes it (https://techcommunity.microsoft.com/discussions/excelgeneral/csv-formatting/326905/replies/484952).
+ */
+const SEPARATOR_LINE = /^sep=([,;\t])(?:\r\n|\r|\n|$)/;
+
+/** Whether a character is a separator the reader takes. */
+function isSeparator(character: string | undefined): character is CsvSeparator {
+  return character === ',' || character === ';' || character === '\t';
+}
+
+/** The separator Excel's first line of `sep=` names and where the rows start after it; `null` for a text with none. */
+function separatorLine(text: string): { separator: CsvSeparator; next: number } | null {
+  const line = SEPARATOR_LINE.exec(text);
+  const separator = line?.[1];
+  return line !== null && isSeparator(separator) ? { separator, next: line[0].length } : null;
+}
 
 /** The text's first line that holds more than white space, which names the separator when none is given. */
 function firstLine(text: string): string {
@@ -130,10 +152,11 @@ function readRecord(text: string, from: number, separator: string): CsvRecord {
 }
 
 /**
- * Reads a CSV or TSV text into one Markdown table. A byte order mark at the start is dropped, a row whose every cell is
- * empty (a blank line among them) is skipped, a short row is filled with empty cells, and the columns after the last
- * that holds a word are left out. A cell is read as one line: a line break inside a quoted cell, with the spaces beside
- * it, is made one space, a bar is made a slash, and the cell's ends are trimmed.
+ * Reads a CSV or TSV text into one Markdown table. A byte order mark at the start is dropped, and so is Excel's first
+ * line of `sep=` and a separator, which names the separator unless the options do. A row whose every cell is empty (a
+ * blank line among them) is skipped, a short row is filled with empty cells, and the columns after the last that holds
+ * a word are left out. A cell is read as one line: a line break inside a quoted cell, with the spaces beside it, is made
+ * one space, a bar is made a slash, and the cell's ends are trimmed.
  *
  * @param text - The file's text.
  * @param options - The separator and the bounds.
@@ -149,12 +172,14 @@ export function readCsv(text: string, options?: ReadCsvOptions): CsvRead {
   const maxRows = boundOf('readCsv', 'maxRows', given.maxRows, 500, true);
   const maxColumns = boundOf('readCsv', 'maxColumns', given.maxColumns, 30, true);
   const body = text.startsWith('\uFEFF') ? text.slice(1) : text;
-  const separator = given.separator ?? separatorOf(body);
+  const line = separatorLine(body);
+  const separator = given.separator ?? line?.separator ?? separatorOf(body);
 
   const rows: string[][] = [];
   const broken: boolean[][] = [];
   let cut = false;
-  let at = 0;
+  // Excel's line naming the separator is no row, whichever separator the text is read with
+  let at = line?.next ?? 0;
   while (at < body.length) {
     const record = readRecord(body, at, separator);
     at = record.next;
