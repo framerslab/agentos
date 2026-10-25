@@ -277,11 +277,10 @@ export interface StreamObjectResult<T, E = unknown> {
   usage: Promise<TokenUsage>;
 
   /**
-   * Resolves, when the stream ends, to the usage the provider reported, or to
-   * `undefined` when the stream failed, was aborted or was not read to its
-   * end, or ended without the provider reporting a token count or a cost
-   * above zero (a report of zeros reads as none). A
-   * caller never reads usage it never received as zero, as it would from
+   * Resolves, when the stream ends, to the usage the provider reported, a
+   * report of zero tokens included, or to `undefined` when the stream failed,
+   * was aborted or was not read to its end, or ended with no usage reported.
+   * A caller never reads usage it never received as zero, as it would from
    * {@link StreamObjectResult.usage}.
    */
   reportedUsage: Promise<TokenUsage | undefined>;
@@ -524,23 +523,6 @@ function arrayElementSchema(schema: ZodType, field: unknown): ZodType {
   return fieldDef.element as ZodType;
 }
 
-/**
- * True when the provider reported usage: a token count or a cost above zero.
- * The aggregated usage of a stream starts at zero and only adds what was
- * reported, so a usage with nothing above zero says nothing was.
- */
-function usageWasReported(usage: TokenUsage): boolean {
-  return (
-    usage.promptTokens > 0 ||
-    usage.completionTokens > 0 ||
-    usage.totalTokens > 0 ||
-    (usage.cacheReadTokens ?? 0) > 0 ||
-    (usage.cacheCreationTokens ?? 0) > 0 ||
-    (usage.inclusiveInputTokens ?? 0) > 0 ||
-    (usage.costUSD ?? 0) > 0
-  );
-}
-
 /** `err` as an Error: itself when it is one, otherwise an Error naming it. */
 function asError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
@@ -707,6 +689,9 @@ export function streamObject<T extends ZodType, K extends string = never>(
   let partsOpen = false;
   // True when reading `parts` threw: that stream's usage then resolves to zero.
   let partsThrew = false;
+  // True once streamText counted usage a provider reported. Its summed usage
+  // starts at zero, so a report of zero tokens and no report read alike there.
+  let usageReported = false;
   let reading: Promise<void> | undefined;
   let ending: StreamEnding | undefined;
   let settled: Promise<void> = Promise.resolve();
@@ -743,6 +728,9 @@ export function streamObject<T extends ZodType, K extends string = never>(
           ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
           ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
           ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
+          __onUsageReport: () => {
+            usageReported = true;
+          },
         });
         parts = stream.fullStream[Symbol.asyncIterator]();
         partsOpen = true;
@@ -903,7 +891,8 @@ export function streamObject<T extends ZodType, K extends string = never>(
         ? await stream.usage
         : { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     resolveUsage(usage);
-    resolveReportedUsage(end.kind === 'done' && usageWasReported(usage) ? usage : undefined);
+    // The provider's report, zeros included, of a stream that ended on its own.
+    resolveReportedUsage(end.kind === 'done' && usageReported ? usage : undefined);
   }
 
   /** Settles `object` from the parse of the whole text: the validated value, or the error that kept it from one. */
