@@ -105,6 +105,8 @@ interface Reading {
   firstH1: string | undefined;
   readonly maxTableRows: number;
   readonly maxTableColumns: number;
+  /** The page's own header, footer and asides, which no article or section holds, left out with all they hold. */
+  readonly pageOwn: ReadonlySet<HtmlNodeLike>;
 }
 
 /** No marks. */
@@ -114,9 +116,11 @@ const PLAIN: Marks = { bold: false, italic: false, strike: false };
 const WHITE = /[\t\n\f\r \u00a0]+/g;
 
 /**
- * The elements never read, with all they hold: the head and its title, scripts, styles, templates, the page's
- * navigation, header, footer and asides, frames, forms and their controls, embedded media and drawings, and the
- * annotations of ruby text.
+ * The elements never read, with all they hold: the head and its title, scripts, styles, templates, navigation, frames,
+ * the controls of a form that hold words of their own (a button, a select with its options, a textarea) and a datalist
+ * with its choices, which HTML renders as nothing, embedded media and drawings, and the annotations of ruby text. A form
+ * is read as the blocks it holds, so a page whose whole body sits in one form, as an ASP.NET Web Forms page's does,
+ * reads whole.
  */
 const DROPPED = new Set([
   'head',
@@ -126,16 +130,13 @@ const DROPPED = new Set([
   'noscript',
   'template',
   'nav',
-  'header',
-  'footer',
-  'aside',
   'iframe',
   'frame',
   'frameset',
-  'form',
   'button',
   'select',
   'textarea',
+  'datalist',
   'svg',
   'math',
   'canvas',
@@ -147,13 +148,31 @@ const DROPPED = new Set([
   'rp',
 ]);
 
-/** The elements that hold blocks or stand as one: each starts a paragraph of its own. */
+/**
+ * The elements HTML scopes to the article or section that holds them
+ * (https://html.spec.whatwg.org/multipage/dom.html#sectioning-content): one that no article or section holds is the
+ * page's own header, footer or aside, left out with all it holds; one inside an article or a section is that part's,
+ * read with it, as a header there usually holds the part's heading.
+ */
+const SCOPED = new Set(['header', 'footer', 'aside']);
+
+/** The elements that hold their own header, footer and asides, which are read with them. */
+const SECTIONS = new Set(['article', 'section']);
+
+/**
+ * The elements that hold blocks or stand as one: each starts a paragraph of its own. A header, footer or aside is one
+ * when it is read.
+ */
 const CONTAINERS = new Set([
   'html',
   'body',
   'main',
   'article',
   'section',
+  'header',
+  'footer',
+  'aside',
+  'form',
   'div',
   'p',
   'address',
@@ -211,10 +230,31 @@ const BLOCK_LEVEL = new Set([
   'h5',
   'h6',
   'nav',
-  'header',
-  'footer',
-  'aside',
-  'form',
+]);
+
+/**
+ * The elements a page draws in a line as a box, whose words are not read: HTML's embedded content
+ * (https://html.spec.whatwg.org/multipage/dom.html#embedded-content-2), images, frames, media, drawings and formulas
+ * among it, and a form's controls (https://html.spec.whatwg.org/multipage/rendering.html#widgets). Each, read or left
+ * out, is a space between the words on either side of it, as a block's edges are, so
+ * `<label>Name</label><input><label>Email</label>` reads `Name Email`. An input of type hidden and an audio element with
+ * no controls, which a page draws as nothing, are a space as well, as a hidden block's edges are. Code keeps its
+ * characters as written, with nothing added for one.
+ */
+const BOXES = new Set([
+  'audio',
+  'canvas',
+  'embed',
+  'iframe',
+  'img',
+  'math',
+  'object',
+  'svg',
+  'video',
+  'button',
+  'input',
+  'select',
+  'textarea',
 ]);
 
 /** What a cell of a table holds that marks the table as one laid out for the page, not a table of data. */
@@ -260,9 +300,29 @@ function hidden(node: HtmlNodeLike): boolean {
   return /(?:^|;)\s*display\s*:\s*none\s*(?:!\s*important\s*)?(?:;|$)/i.test(node.getAttribute?.('style') ?? '');
 }
 
-/** Whether an element and all it holds are left unread. */
-function skipped(node: HtmlNodeLike, name: string): boolean {
-  return DROPPED.has(name) || hidden(node);
+/** Whether an element and all it holds are left unread: by its name, as the page's own header, footer or aside, or hidden. */
+function skipped(node: HtmlNodeLike, name: string, reading: Reading): boolean {
+  return DROPPED.has(name) || reading.pageOwn.has(node) || hidden(node);
+}
+
+/**
+ * The page's own header, footer and asides: those that no article or section holds, between them and the node handed
+ * over, which holds none of its own when it is an article or a section itself. The walk stops at an article or a
+ * section and at an element left out with all it holds, since nothing inside either is the page's own or is read.
+ */
+function pageOwnOf(root: HtmlNodeLike): Set<HtmlNodeLike> {
+  const found = new Set<HtmlNodeLike>();
+  const holders: HtmlNodeLike[] = root.nodeType === ELEMENT_NODE && SECTIONS.has(nameOf(root)) ? [] : [root];
+  for (let holder = holders.pop(); holder !== undefined; holder = holders.pop()) {
+    for (const child of childrenOf(holder)) {
+      if (child.nodeType !== ELEMENT_NODE) continue;
+      const name = nameOf(child);
+      if (SECTIONS.has(name) || DROPPED.has(name) || hidden(child)) continue;
+      if (SCOPED.has(name)) found.add(child);
+      else holders.push(child);
+    }
+  }
+  return found;
 }
 
 /** The marks inside an element, from the marks outside it. */
@@ -321,7 +381,7 @@ function textOf(node: HtmlNodeLike, reading: Reading): string {
     if (child.nodeType !== ELEMENT_NODE) continue;
     const name = nameOf(child);
     const block = BLOCK_LEVEL.has(name);
-    if (skipped(child, name)) {
+    if (skipped(child, name, reading)) {
       // a block left out still parts the lines on either side of it
       if (block && text !== '' && !text.endsWith('\n')) text += '\n';
       continue;
@@ -351,10 +411,10 @@ interface LineHooks {
 }
 
 /**
- * An element's content read as one line of words: a line break, and a block's edges, those of a code block, of a list
- * handed to `hooks.list`, of a block left out and of a first `h1` whose words gave the title among them, as one space;
- * code as inline code; images counted. A list inside it goes to `hooks.list` where given, with the marks of the elements
- * around it, and is read into the line otherwise.
+ * An element's content read as one line of words: a line break, a box of `BOXES`, and a block's edges, those of a code
+ * block, of a list handed to `hooks.list`, of a block left out and of a first `h1` whose words gave the title among
+ * them, as one space; code as inline code; images counted. A list inside it goes to `hooks.list` where given, with the
+ * marks of the elements around it, and is read into the line otherwise.
  */
 function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineHooks = {}): MarkedRun[] {
   const line: MarkedRun[] = [];
@@ -365,13 +425,14 @@ function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineH
     }
     if (current.nodeType !== ELEMENT_NODE) return;
     const name = nameOf(current);
-    if (skipped(current, name)) {
-      // a block left out still keeps the words on either side of it a space apart
-      if (BLOCK_LEVEL.has(name)) addWords(line, ' ', at, false);
+    if (skipped(current, name, reading)) {
+      // a block or a box left out still keeps the words on either side of it a space apart
+      if (BLOCK_LEVEL.has(name) || BOXES.has(name)) addWords(line, ' ', at, false);
       return;
     }
     if (name === 'img') {
       reading.images += 1;
+      addWords(line, ' ', at, false);
       return;
     }
     if (name === 'br') {
@@ -380,6 +441,7 @@ function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineH
     }
     if (name === 'input') {
       hooks.checkbox?.(current, line.length === 0);
+      addWords(line, ' ', at, false);
       return;
     }
     if (hooks.list !== undefined && LISTS.has(name)) {
@@ -534,7 +596,7 @@ function listOf(node: HtmlNodeLike, ordered: boolean, marks: Marks, reading: Rea
     }
     if (child.nodeType !== ELEMENT_NODE) continue;
     const name = nameOf(child);
-    if (skipped(child, name)) continue;
+    if (skipped(child, name, reading)) continue;
     if (LISTS.has(name)) {
       const nested = listOf(child, name === 'ol', marks, reading);
       if (nested === null) continue;
@@ -569,11 +631,11 @@ function codeOf(node: HtmlNodeLike, reading: Reading): Block | null {
 }
 
 /** An element's children that are elements of the names given and are read. */
-function childElements(node: HtmlNodeLike, names: ReadonlySet<string>): HtmlNodeLike[] {
+function childElements(node: HtmlNodeLike, names: ReadonlySet<string>, reading: Reading): HtmlNodeLike[] {
   return childrenOf(node).filter((child) => {
     if (child.nodeType !== ELEMENT_NODE) return false;
     const name = nameOf(child);
-    return names.has(name) && !skipped(child, name);
+    return names.has(name) && !skipped(child, name, reading);
   });
 }
 
@@ -581,7 +643,7 @@ function childElements(node: HtmlNodeLike, names: ReadonlySet<string>): HtmlNode
  * A table's row groups in reading order, each its rows: its head, then its bodies and each run of rows written straight
  * in the table, then its foot. A cell spans rows within its group alone.
  */
-function rowGroupsOf(table: HtmlNodeLike): HtmlNodeLike[][] {
+function rowGroupsOf(table: HtmlNodeLike, reading: Reading): HtmlNodeLike[][] {
   const head: HtmlNodeLike[][] = [];
   const body: HtmlNodeLike[][] = [];
   const foot: HtmlNodeLike[][] = [];
@@ -589,7 +651,7 @@ function rowGroupsOf(table: HtmlNodeLike): HtmlNodeLike[][] {
   for (const child of childrenOf(table)) {
     if (child.nodeType !== ELEMENT_NODE) continue;
     const name = nameOf(child);
-    if (skipped(child, name)) continue;
+    if (skipped(child, name, reading)) continue;
     if (name === 'tr') {
       if (loose === null) {
         loose = [];
@@ -598,19 +660,19 @@ function rowGroupsOf(table: HtmlNodeLike): HtmlNodeLike[][] {
       loose.push(child);
     } else if (name === 'thead' || name === 'tbody' || name === 'tfoot') {
       loose = null;
-      (name === 'thead' ? head : name === 'tfoot' ? foot : body).push(childElements(child, ROW));
+      (name === 'thead' ? head : name === 'tfoot' ? foot : body).push(childElements(child, ROW, reading));
     }
   }
   return [...head, ...body, ...foot];
 }
 
 /** Whether an element holds, at any depth, something that marks its table as laid out for the page. */
-function holdsLayout(node: HtmlNodeLike): boolean {
+function holdsLayout(node: HtmlNodeLike, reading: Reading): boolean {
   for (const child of childrenOf(node)) {
     if (child.nodeType !== ELEMENT_NODE) continue;
     const name = nameOf(child);
-    if (skipped(child, name)) continue;
-    if (LAYOUT.has(name) || holdsLayout(child)) return true;
+    if (skipped(child, name, reading)) continue;
+    if (LAYOUT.has(name) || holdsLayout(child, reading)) return true;
   }
   return false;
 }
@@ -693,13 +755,13 @@ function readApart(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Readin
 function readTable(table: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading): void {
   // the words before a table end at its edge, whatever it holds, a table that writes nothing among them
   flow.flush();
-  const [caption] = childElements(table, CAPTION);
+  const [caption] = childElements(table, CAPTION, reading);
   if (caption !== undefined) readApart(caption, flow, marks, reading);
-  const groups = rowGroupsOf(table).map((group) => group.map((row) => childElements(row, CELL)));
+  const groups = rowGroupsOf(table, reading).map((group) => group.map((row) => childElements(row, CELL, reading)));
   const role = (table.getAttribute?.('role') ?? '').trim().toLowerCase();
   const all = groups.flat(2);
   const placed = placedRows(groups, reading.maxTableColumns);
-  if (role === 'presentation' || role === 'none' || all.length === 1 || all.some(holdsLayout)) {
+  if (role === 'presentation' || role === 'none' || all.length === 1 || all.some((cell) => holdsLayout(cell, reading))) {
     let kept = 0;
     for (const row of placed) {
       const within = kept < reading.maxTableRows;
@@ -745,7 +807,7 @@ function readTable(table: HtmlNodeLike, flow: Flow, marks: Marks, reading: Readi
 
 /**
  * Reads a node into the flow of blocks: an element by what it is, text into the paragraph being gathered, which a block
- * left out ends as a block read does.
+ * left out ends as a block read does, and in which a box of `BOXES`, read or left out, is a space.
  */
 function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading, root = false): void {
   if (isText(node)) {
@@ -759,8 +821,9 @@ function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading
   if (node.nodeType !== ELEMENT_NODE) return;
   const name = nameOf(node);
   // the element a caller hands over is read whatever it is; only what it holds can be left out
-  if (!root && skipped(node, name)) {
+  if (!root && skipped(node, name, reading)) {
     if (BLOCK_LEVEL.has(name)) flow.flush();
+    else if (BOXES.has(name)) flow.text(' ', marks, false);
     return;
   }
   const level = headingLevel(name);
@@ -799,6 +862,11 @@ function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading
   }
   if (name === 'img') {
     reading.images += 1;
+    flow.text(' ', marks, false);
+    return;
+  }
+  if (name === 'input') {
+    flow.text(' ', marks, false);
     return;
   }
   if (CODE.has(name)) {
@@ -1145,10 +1213,15 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
 
 /**
  * Reads a parsed HTML page into its title and its body as Markdown. The body leaves out the head, scripts, styles,
- * templates, `noscript`, the page's `nav`, `header`, `footer` and `aside`, frames, forms and their controls, embedded
- * media, drawings in SVG and formulas in MathML, and any element marked `hidden`, `aria-hidden="true"` or styled
- * `display: none`. Comments are not read. An element handed over is read as a document is, whatever its own name, but
- * an `svg` or `math` element handed over takes no title from a `<title>` in it, which is the drawing's or the formula's.
+ * templates, `noscript`, `nav`, the page's own `header`, `footer` and `aside`, frames, the controls of a form that hold
+ * words of their own (`button`, `select`, `textarea`) and a `datalist` with its choices, embedded media, drawings in SVG
+ * and formulas in MathML, and any element marked `hidden`, `aria-hidden="true"` or styled `display: none`. A `header`,
+ * `footer` or `aside` is the page's own when no `article` or `section` holds it; inside one, it is that article's or
+ * section's and is read with it, and an `article` or `section` handed over holds its own the same way. A `form` is read
+ * as the blocks it holds. A form's control, an image and the rest of HTML's embedded content are each a space between
+ * the words on either side of them, outside code. Comments are not read. An element handed over is read as a document
+ * is, whatever its own name, but an `svg` or `math` element handed over takes no title from a `<title>` in it, which is
+ * the drawing's or the formula's.
  *
  * @param document - A parsed document, or an element, as a page's `DOMParser` gives it; nothing is fetched.
  * @param options - The bounds on the Markdown and on each table.
@@ -1166,6 +1239,7 @@ export function readHtml(document: HtmlDocumentLike, options?: ReadHtmlOptions):
     firstH1: undefined,
     maxTableRows: boundOf('readHtml', 'maxTableRows', given.maxTableRows, 500, true),
     maxTableColumns: boundOf('readHtml', 'maxTableColumns', given.maxTableColumns, 30, true),
+    pageOwn: pageOwnOf(document),
   };
   const flow = new Flow();
   readInto(document, flow, PLAIN, reading, true);
