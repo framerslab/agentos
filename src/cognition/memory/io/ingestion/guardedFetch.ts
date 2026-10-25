@@ -257,7 +257,7 @@ const IPV4_MAPPED = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/;
  * numbers are zero leaves one group (`64:ff9b::d70e` is `0.0.215.14`) and
  * `0.0.0.0` leaves none (`64:ff9b::`).
  */
-const NAT64_WELL_KNOWN = /^64:ff9b::(?:(?:([0-9a-f]{1,4}):)?([0-9a-f]{1,4}))?/;
+const NAT64_WELL_KNOWN = /^64:ff9b::(?:(?:([0-9a-f]{1,4}):)?([0-9a-f]{1,4}))?$/;
 
 /**
  * The host of `url` as a caller's `allowHost` sees it: {@link hostOf} with
