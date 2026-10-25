@@ -2,9 +2,12 @@
  * @file embedText.ts
  * Provider-agnostic text embedding generation for the AgentOS high-level API.
  *
- * Dispatches embedding requests to OpenAI-compatible, Ollama, OpenRouter, or
- * Gemini endpoints using the same provider resolution pipeline as
- * {@link generateText}.
+ * Dispatches embedding requests to the OpenAI-compatible embeddings endpoints
+ * of OpenAI, OpenRouter, Mistral and Requesty (or a base URL the caller sets),
+ * to Ollama, or to Gemini, using the same provider resolution pipeline as
+ * {@link generateText}. A provider's key goes only to that provider's endpoint
+ * or to a base URL the caller set; a provider with no embeddings is refused
+ * before its key is read.
  * Supports single and batch text inputs, optional dimensionality reduction,
  * and returns raw float vectors.
  *
@@ -14,9 +17,13 @@
 import { resolveModelOption, resolveProvider } from './model.js';
 import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { GeminiProvider } from '../core/llm/providers/implementations/GeminiProvider.js';
+import { MISTRAL_DEFAULT_BASE_URL } from '../core/llm/providers/implementations/MistralProvider.js';
+import { OPENAI_DEFAULT_BASE_URL } from '../core/llm/providers/implementations/OpenAIProvider.js';
+import { OPENROUTER_DEFAULT_BASE_URL } from '../core/llm/providers/implementations/OpenRouterProvider.js';
+import { REQUESTY_DEFAULT_BASE_URL } from '../core/llm/providers/implementations/RequestyProvider.js';
 import { GeminiProviderError } from '../core/llm/providers/errors/GeminiProviderError.js';
 import { getDefaultProvider } from './runtime/global-default.js';
-import { GEMINI_DEFAULT_EMBEDDING_MODEL } from './runtime/provider-defaults.js';
+import { GEMINI_DEFAULT_EMBEDDING_MODEL, PROVIDER_DEFAULTS } from './runtime/provider-defaults.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
@@ -56,7 +63,13 @@ export interface EmbedTextOptions {
    * Provider name. When supplied without `model`, the default embedding model
    * for the provider is resolved automatically from the built-in defaults.
    *
-   * @example `"openai"`, `"ollama"`, `"openrouter"`, `"gemini"`
+   * Embeds on `openai`, `openrouter`, `mistral` and `requesty` (each at its own
+   * OpenAI-compatible embeddings endpoint), `gemini` and `ollama`. Another
+   * provider agentos knows has no embeddings it can send to (Anthropic, Groq,
+   * Together AI, xAI, MiniMax, the image providers and the CLIs), and a call
+   * to one is refused before its key is read.
+   *
+   * @example `"openai"`, `"mistral"`, `"ollama"`, `"gemini"`
    */
   provider?: string;
 
@@ -85,7 +98,9 @@ export interface EmbedTextOptions {
   /**
    * Desired output dimensionality. Only honoured by models that support
    * dimension reduction (e.g. OpenAI `text-embedding-3-*` with `dimensions`).
-   * Ignored when the model has a fixed output size.
+   * Ignored when the model has a fixed output size. Sent as `dimensions` to an
+   * OpenAI-compatible endpoint, as `output_dimension` to Mistral, and as
+   * `outputDimensionality` to Gemini's own API; Ollama does not receive it.
    */
   dimensions?: number;
 
@@ -103,7 +118,15 @@ export interface EmbedTextOptions {
   /** Override the API key instead of reading from environment variables. */
   apiKey?: string;
 
-  /** Override the provider base URL (useful for local proxies or Ollama). */
+  /**
+   * Override the provider base URL (useful for local proxies or Ollama). An
+   * OpenAI-compatible request goes to `<baseUrl>/embeddings` with the call's
+   * key. A provider agentos does not know (a gateway or proxy of your own)
+   * needs it, or a global default's `baseUrl`: without one the call is
+   * refused, since agentos knows no endpoint for its key. A provider with no
+   * embeddings (Anthropic, Groq, Together AI, xAI, MiniMax) is refused
+   * whatever the base URL.
+   */
   baseUrl?: string;
 
   /** Optional durable usage ledger configuration for helper-level accounting. */
@@ -199,7 +222,7 @@ interface OpenAIEmbeddingData {
 
 /**
  * Shape of the top-level response from the OpenAI `/v1/embeddings` endpoint
- * (also used by OpenRouter and compatible proxies).
+ * (also used by OpenRouter, Mistral, Requesty and compatible proxies).
  * @internal
  */
 interface OpenAIEmbeddingResponse {
@@ -233,12 +256,11 @@ interface OllamaEmbedResponse {
 // ---------------------------------------------------------------------------
 
 /**
- * Calls the OpenAI-compatible `/v1/embeddings` endpoint.
+ * Calls an OpenAI-compatible `/embeddings` endpoint: OpenAI's, OpenRouter's,
+ * Mistral's, Requesty's, or the one at a base URL the caller set.
  *
- * Works for OpenAI native, OpenRouter, and any API that follows the
- * same request/response contract.
- *
- * @param baseUrl - The API base URL (e.g. `https://api.openai.com/v1`).
+ * @param baseUrl - The API base URL (e.g. `https://api.openai.com/v1`): the
+ *   caller's, or the provider's own from {@link EMBEDDINGS_BASE_URLS}.
  * @param apiKey - Bearer token for the Authorization header.
  * @param modelId - The embedding model identifier.
  * @param input - Array of strings to embed.
@@ -246,6 +268,8 @@ interface OllamaEmbedResponse {
  * @param abortSignal - The caller's signal, which cancels the request in flight.
  * @param onAttempt - The caller's report, told of the request once it is sent: attempt 1, with the HTTP status it
  *   answered, or null when no answer came (a network failure, or the caller's abort once the request had begun).
+ * @param dimensionsField - The body field `dimensions` is sent in: `dimensions`, OpenAI's, unless the endpoint
+ *   documents another ({@link DIMENSIONS_FIELDS}).
  * @returns Parsed {@link OpenAIEmbeddingResponse}.
  * @throws {Error} On non-2xx HTTP status or network failure, with base URL
  *   credentials and the API key masked out of the message; the signal's
@@ -259,12 +283,13 @@ async function callOpenAIEmbedding(
   dimensions?: number,
   abortSignal?: AbortSignal,
   onAttempt?: (outcome: AttemptOutcome) => void,
+  dimensionsField = 'dimensions',
 ): Promise<OpenAIEmbeddingResponse> {
-  // Construct the request body, omitting `dimensions` when not specified
+  // Construct the request body, omitting the output size when not specified
   // to avoid confusing models that don't support it.
   const body: Record<string, unknown> = { model: modelId, input };
   if (dimensions !== undefined) {
-    body.dimensions = dimensions;
+    body[dimensionsField] = dimensions;
   }
 
   const url = `${baseUrl.replace(/\/+$/, '')}/embeddings`;
@@ -395,6 +420,99 @@ async function callOllamaEmbed(
 // ---------------------------------------------------------------------------
 
 /**
+ * The providers whose own documentation names an OpenAI-compatible embeddings
+ * endpoint (`POST <base URL>/embeddings`, `model` and `input` in,
+ * `data[].embedding` out), each with that base URL as its provider
+ * implementation records it. A request for one of them goes there, or to the
+ * base URL the caller set (the call's `baseUrl`, the global default's, or the
+ * provider's base-URL variable), and never to another provider's host. Read on
+ * 2026-10-25:
+ *
+ * - OpenAI, `POST https://api.openai.com/v1/embeddings`:
+ *   https://developers.openai.com/api/reference/resources/embeddings/methods/create
+ * - OpenRouter, `POST https://openrouter.ai/api/v1/embeddings`:
+ *   https://openrouter.ai/docs/api/api-reference/embeddings/submit-an-embedding-request
+ * - Mistral, `POST https://api.mistral.ai/v1/embeddings`:
+ *   https://docs.mistral.ai/api/endpoint/embeddings
+ * - Requesty, `POST https://router.requesty.ai/v1/embeddings`:
+ *   https://docs.requesty.ai/api-reference/endpoint/embeddings-create
+ */
+const EMBEDDINGS_BASE_URLS: ReadonlyMap<string, string> = new Map([
+  ['openai', OPENAI_DEFAULT_BASE_URL],
+  ['openrouter', OPENROUTER_DEFAULT_BASE_URL],
+  ['mistral', MISTRAL_DEFAULT_BASE_URL],
+  ['requesty', REQUESTY_DEFAULT_BASE_URL],
+]);
+
+/**
+ * The body field an OpenAI-compatible embeddings endpoint reads the output
+ * size from, for a provider whose field is not OpenAI's `dimensions`.
+ * Mistral's embeddings schema has `output_dimension` and no `dimensions`
+ * (https://docs.mistral.ai/api/endpoint/embeddings, read 2026-10-25).
+ * OpenRouter and Requesty document `dimensions`.
+ */
+const DIMENSIONS_FIELDS: ReadonlyMap<string, string> = new Map([['mistral', 'output_dimension']]);
+
+/**
+ * Why embedText refuses a provider agentos knows that has no embeddings it
+ * can send to, as the provider's own documentation says (read 2026-10-25):
+ *
+ * - Anthropic: "Anthropic does not offer its own embedding model."
+ *   https://platform.claude.com/docs/en/build-with-claude/embeddings
+ * - Groq: its API reference lists no embeddings endpoint.
+ *   https://console.groq.com/docs/api-reference
+ * - Together AI: "There are currently no embedding models offered via
+ *   serverless." https://docs.together.ai/docs/serverless-models
+ * - xAI: its REST API reference lists no embeddings endpoint.
+ *   https://docs.x.ai/llms.txt
+ * - MiniMax: its API reference names no embedding model.
+ *   https://platform.minimax.io/docs/api-reference
+ *
+ * Third-party listings name an xAI `POST /v1/embeddings` and a MiniMax
+ * `embo-01` endpoint with its own request shape; neither provider's reference
+ * lists them (UNVERIFIED), so neither is sent to.
+ *
+ * Every other provider agentos knows that is not in
+ * {@link EMBEDDINGS_BASE_URLS} and is not Gemini or Ollama (an image
+ * provider, a CLI) is refused as well.
+ */
+const NO_EMBEDDINGS_REASONS: ReadonlyMap<string, string> = new Map([
+  ['anthropic', 'Anthropic publishes no embedding model'],
+  ['groq', 'Groq publishes no embeddings endpoint'],
+  ['together', 'Together AI serves no embedding model'],
+  ['xai', 'xAI publishes no embeddings endpoint'],
+  ['minimax', 'MiniMax publishes no embedding model'],
+]);
+
+/**
+ * The providers embedText embeds with, for its refusals to name: Gemini,
+ * Ollama and those in {@link EMBEDDINGS_BASE_URLS}.
+ */
+function embeddingProviderList(): string {
+  const ids = ['gemini', 'ollama', ...EMBEDDINGS_BASE_URLS.keys()].sort();
+  return `${ids.slice(0, -1).join(', ')} or ${ids[ids.length - 1]}`;
+}
+
+/**
+ * Refuses a provider agentos knows (a key of {@link PROVIDER_DEFAULTS}) that
+ * has no embeddings embedText can send to. It runs before the provider's key
+ * is read or any request is built: the OpenAI-compatible branch would post the
+ * key to a host that is not its provider's (OpenAI's endpoint when no base URL
+ * is set), or post a request to an endpoint that cannot answer it. A provider
+ * agentos does not know is left to the base URL the caller sets.
+ *
+ * @param providerId The provider the call resolved to.
+ * @throws {Error} Saying why the provider has no embeddings, and naming the
+ *   providers that have them.
+ */
+function refuseProviderWithoutEmbeddings(providerId: string): void {
+  if (providerId === 'gemini' || providerId === 'ollama' || EMBEDDINGS_BASE_URLS.has(providerId)) return;
+  if (!Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, providerId)) return;
+  const reason = NO_EMBEDDINGS_REASONS.get(providerId) ?? `agentos knows no embeddings endpoint for provider "${providerId}"`;
+  throw new Error(`${reason}; embed with ${embeddingProviderList()}.`);
+}
+
+/**
  * Whether a `gemini` embedding call should use Gemini's native
  * batchEmbedContents protocol: with no base URL (GeminiProvider's default
  * endpoint) or with Google's own native endpoint. Any other base URL, such as
@@ -448,9 +566,10 @@ function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
  * provider-agnostic `provider:model` string.
  *
  * Resolves credentials via the standard AgentOS provider pipeline, then
- * dispatches to the appropriate embedding endpoint (OpenAI, Ollama,
- * OpenRouter or Gemini). Returns raw float arrays suitable for vector
- * similarity search, clustering, or any downstream ML pipeline.
+ * dispatches to the provider's own embedding endpoint (OpenAI, OpenRouter,
+ * Mistral, Requesty, Ollama or Gemini) or to the base URL the caller set; a
+ * provider's key goes to no other host. Returns raw float arrays suitable for
+ * vector similarity search, clustering, or any downstream ML pipeline.
  *
  * @param opts - Embedding options including model, input text(s), and
  *   optional provider/key overrides.
@@ -459,6 +578,13 @@ function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
  *
  * @throws {Error} When provider resolution fails (missing API key, unknown
  *   provider, etc.).
+ * @throws {Error} When the call resolves to a provider with no embeddings
+ *   embedText can send to (Anthropic, Groq, Together AI, xAI, MiniMax, the
+ *   image providers and the CLIs), whatever its base URL and with or without
+ *   a model; its key is not read and no request is sent.
+ * @throws {Error} When the call resolves to a provider agentos does not know
+ *   and no base URL is set, on the call or on the global default; no request
+ *   is sent.
  * @throws {Error} When the embedding API returns a non-2xx status.
  *
  * @example
@@ -507,7 +633,22 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
       async (span) => {
         // Resolve provider/model using the 'embedding' task type so the
         // correct default model is selected (e.g. text-embedding-3-small).
-        const { providerId, modelId } = resolveModelOption(withGeminiEmbeddingDefault(opts), 'embedding');
+        let parsed: ReturnType<typeof resolveModelOption>;
+        try {
+          parsed = resolveModelOption(withGeminiEmbeddingDefault(opts), 'embedding');
+        } catch (error) {
+          // A provider with no embeddings named without a model (inline, or as
+          // the global default) has no default embedding model to resolve to: it
+          // is refused for having no embeddings, not asked for a model.
+          if (!opts.model) {
+            const named = opts.provider ?? getDefaultProvider()?.provider;
+            if (named) refuseProviderWithoutEmbeddings(named);
+          }
+          throw error;
+        }
+        const { providerId, modelId } = parsed;
+        // A provider with no embeddings is refused before its key is read.
+        refuseProviderWithoutEmbeddings(providerId);
         const resolved = resolveProvider(providerId, modelId, {
           apiKey: opts.apiKey,
           baseUrl: opts.baseUrl,
@@ -581,12 +722,17 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             ...(result.usage.costUSD !== undefined ? { costUSD: result.usage.costUSD } : {}),
           };
         } else {
-          // OpenAI, OpenRouter, and any OpenAI-compatible provider
-          const baseUrl = resolved.baseUrl ?? (
-            resolved.providerId === 'openrouter'
-              ? 'https://openrouter.ai/api/v1'
-              : 'https://api.openai.com/v1'
-          );
+          // The base URL the caller set (the call's, the global default's or
+          // the provider's base-URL variable), else the provider's own
+          // documented embeddings endpoint. A provider agentos does not know
+          // has none, so its key goes only to a base URL the caller set.
+          const baseUrl = resolved.baseUrl ?? EMBEDDINGS_BASE_URLS.get(resolved.providerId);
+          if (baseUrl === undefined) {
+            throw new Error(
+              `No embeddings endpoint is known for provider "${resolved.providerId}"; pass baseUrl, the ` +
+                `OpenAI-compatible endpoint its key is for, or embed with ${embeddingProviderList()}.`,
+            );
+          }
 
           if (!resolved.apiKey) {
             throw new Error(`No API key available for embedding provider "${resolved.providerId}".`);
@@ -632,6 +778,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                 opts.dimensions,
                 opts.abortSignal,
                 opts.onAttempt,
+                DIMENSIONS_FIELDS.get(resolved.providerId),
               );
 
               // Each response's indices start at zero for its own batch.

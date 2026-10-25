@@ -782,6 +782,8 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 | Mistral | `mistral-embed` | 1024 | 512 |
 | Ollama | `nomic-embed-text`, `mxbai-embed-large` | 768–1024 | 512 |
 
+`embedText()` posts an OpenAI, OpenRouter, Mistral or Requesty call to that provider's own `/embeddings` endpoint, or to the base URL the caller set, so a key never goes to another provider's host. It refuses Anthropic, Groq, Together, xAI, MiniMax, the image providers and the CLIs before their key is read, and a provider id agentos does not know needs `baseUrl`. [embedText()](../orchestration/STRUCTURED_OUTPUT_API.md#embedtext) lists each provider's endpoint and the documentation it comes from.
+
 ---
 
 ## Related Documentation
