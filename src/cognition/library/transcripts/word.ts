@@ -31,7 +31,9 @@ export interface ReadWordTranscriptOptions {
  * A Word file's text with each paragraph on a line of its own, as the text the file is laid out from holds them.
  * mammoth's text follows each paragraph with a blank line, so there a paragraph ends with a blank line and an empty
  * paragraph adds a second; here a paragraph ends with its line and an empty paragraph is a blank line. The line
- * straight after an Otter header is then the paragraph after it, as it is in Otter's text.
+ * straight after an Otter header is then the paragraph after it, as it is in Otter's text. mammoth writes nothing for a
+ * manual line break, so a line break adds no line feed for this to read as a paragraph's end: the words on either side
+ * of it run together on one line.
  */
 function paragraphLines(text: string): string {
   return text.replace(/\n\n/g, '\n');
