@@ -155,6 +155,23 @@ describe('streamObject with elements', () => {
     await expect(result.object).rejects.toThrow(/Stream interrupted/);
   });
 
+  it("yields the elements before the next one when a chunk ends inside that one's first key, and keeps them when the stream is cut there", async () => {
+    // A provider that sends several tokens a chunk can end one inside the key of the element that follows.
+    const gated = gatedStream(['{"sentences":[{"text":"One","passage":1},{"text":"Two","passage":2},{"te', 'xt":"Three","passage":3}]}']);
+    hoisted.generateCompletionStream.mockReturnValue(gated.stream);
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'sentences', prompt: 'p' });
+    const seen: unknown[] = [];
+    const reading = (async () => {
+      for await (const element of result.elementStream) seen.push(element);
+    })();
+    await gated.feed();
+    expect(seen).toEqual([{ text: 'One', passage: 1 }, { text: 'Two', passage: 2 }]);
+    await gated.cut(new Error('socket hang up'));
+    await expect(reading).rejects.toThrow('socket hang up');
+    expect(seen).toEqual([{ text: 'One', passage: 1 }, { text: 'Two', passage: 2 }]);
+    await expect(result.object).rejects.toThrow(/Stream interrupted/);
+  });
+
   it('reads a stream that ended with no usage reported as unknown usage, never zero', async () => {
     const gated = gatedStream(['{"sentences":[]}']);
     hoisted.generateCompletionStream.mockReturnValue((async function* () {
