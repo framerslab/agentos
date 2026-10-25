@@ -4,7 +4,8 @@
  * names an OpenAI-compatible embeddings endpoint gets its key posted to that
  * endpoint, or to the base URL the caller set (the call's `baseUrl`, the
  * global default's, or the provider's base-URL variable); a provider with no
- * embeddings is refused before any request is built; no key goes to another
+ * embeddings is refused before any request is built; a provider agentos does
+ * not know goes only to the base URL the caller set. No key goes to another
  * provider's host.
  *
  * Drives the public embedText entry point with only fetch stubbed: the
@@ -295,5 +296,54 @@ describe('embedText refuses a provider with no embeddings before any request', (
     await expect(embedText({ input: 'hello' })).rejects.toThrow('Together AI serves no embedding model');
 
     expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('embedText sends a provider agentos does not know only to the base URL the caller set', () => {
+  it('refuses it with no base URL, before any request', async () => {
+    await expect(
+      embedText({ provider: 'embedding-gateway', model: 'embedding-model', apiKey: 'gateway-test-key', input: 'hello' }),
+    ).rejects.toThrow('No embeddings endpoint is known for provider "embedding-gateway"');
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses it with no base URL when the key is a global default for every provider', async () => {
+    setDefaultProvider({ apiKey: 'default-test-key' });
+
+    await expect(embedText({ provider: 'embedding-gateway', model: 'embedding-model', input: 'hello' })).rejects.toThrow(
+      'No embeddings endpoint is known for provider "embedding-gateway"',
+    );
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('posts its key to the base URL the call sets', async () => {
+    await embedText({
+      provider: 'embedding-gateway',
+      model: 'embedding-model',
+      apiKey: 'gateway-test-key',
+      baseUrl: 'https://gateway.example/v1',
+      input: 'hello',
+    });
+
+    expect(requestsSent()).toEqual([
+      { url: 'https://gateway.example/v1/embeddings', authorization: 'Bearer gateway-test-key' },
+    ]);
+  });
+
+  it("posts the global default's key to the global default's base URL", async () => {
+    setDefaultProvider({
+      provider: 'embedding-gateway',
+      model: 'embedding-model',
+      apiKey: 'gateway-default-key',
+      baseUrl: 'https://gateway.example/v1',
+    });
+
+    await embedText({ input: 'hello' });
+
+    expect(requestsSent()).toEqual([
+      { url: 'https://gateway.example/v1/embeddings', authorization: 'Bearer gateway-default-key' },
+    ]);
   });
 });
