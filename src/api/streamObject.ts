@@ -237,13 +237,15 @@ export interface StreamObjectResult<T, E = unknown> {
    *
    * When the stream fails, the iteration throws the stream's error after the
    * elements completed before it, so a failed answer never reads as a
-   * finished one. A reader that starts after every iterable that was read
+   * finished one. When the stream ends with text that does not parse, such
+   * as a reply cut off at the token limit, the iteration throws the
+   * {@link ObjectGenerationError} `object` rejects with
+   * (`Failed to parse streamed JSON: ...`) after the elements completed
+   * before the end; an empty reply ends it with nothing yielded, and `object`
+   * rejects. A reader that starts after every iterable that was read
    * stopped before the end throws {@link ObjectGenerationError}
    * (`Stream interrupted: ...`) after the elements completed before the stop.
-   * A reply whose text does not parse when the stream ends, such as one cut
-   * off at the token limit, ends the iteration without an error, and `object`
-   * rejects: await `object` to know the answer arrived whole. When
-   * `abortSignal` aborts, the iteration ends.
+   * When `abortSignal` aborts, the iteration ends.
    *
    * @example
    * ```ts
@@ -548,8 +550,11 @@ function asError(err: unknown): Error {
 // Main function
 // ---------------------------------------------------------------------------
 
-/** How the whole text of a stream parsed when it ended: the value, or the parse error. */
-type FinalParse = { ok: true; value: unknown } | { ok: false; error: unknown };
+/**
+ * How the whole text of a stream parsed when it ended: the value, or the
+ * error `object` rejects with, which `elementStream` throws too.
+ */
+type FinalParse = { ok: true; value: unknown } | { ok: false; error: ObjectGenerationError };
 
 /**
  * What ended a {@link streamObject} stream: its own end (with the parse of
@@ -827,7 +832,10 @@ export function streamObject<T extends ZodType, K extends string = never>(
     try {
       parsed = { ok: true, value: extractJson(buffer) };
     } catch (error) {
-      parsed = { ok: false, error };
+      parsed = {
+        ok: false,
+        error: new ObjectGenerationError(`Failed to parse streamed JSON: ${asError(error).message}`, buffer),
+      };
     }
     if (parsed.ok) collectElements(parsed.value, true);
     void finish({ kind: 'done', parsed });
@@ -901,9 +909,7 @@ export function streamObject<T extends ZodType, K extends string = never>(
   /** Settles `object` from the parse of the whole text: the validated value, or the error that kept it from one. */
   function settleObject(parsed: FinalParse): void {
     if (!parsed.ok) {
-      rejectObject(
-        new ObjectGenerationError(`Failed to parse streamed JSON: ${asError(parsed.error).message}`, buffer)
-      );
+      rejectObject(parsed.error);
       return;
     }
     const validation = opts.schema.safeParse(parsed.value) as
@@ -980,6 +986,11 @@ export function streamObject<T extends ZodType, K extends string = never>(
           ended = true;
           // A failed answer never reads as a finished one.
           if (ending.kind === 'failed') throw ending.error;
+          // Nor does one whose text does not parse at its end, such as a reply
+          // the token limit cut off: the iteration throws the error `object`
+          // rejects with. An empty reply (whitespace at most, as the parsers
+          // read it) yielded nothing, and ends the iteration.
+          if (ending.kind === 'done' && !ending.parsed.ok && buffer.trim() !== '') throw ending.parsed.error;
           // Nor does one whose request was closed because every reader
           // stopped before the end: this reader started after them.
           if (ending.kind === 'abandoned') {
