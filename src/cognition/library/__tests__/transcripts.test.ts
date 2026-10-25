@@ -753,6 +753,36 @@ describe('readTranscript', () => {
     expect(texts('Hello.\n\nWe meet at 10:30\n\nGood.\n\nTranscribed by https://otter.ai\n')).toEqual(['Hello.', 'We meet at 10:30', 'Good.']);
   });
 
+  it('reads an Otter export made with neither names nor times into its paragraphs when the first is a line of words that ends in a time, or a time alone', async () => {
+    // A line of words can take the form of a voice note's header, `We start at 9:30`, and of a time with no spaces after
+    // it, `9:30`. Otter writes a header's words on the line straight after it, and each paragraph of an export made with
+    // neither with a blank line after it, so a first paragraph of such a form opens no export of those headers: the
+    // paragraph is no header, and the paragraphs after it are neither its words nor headers with no words.
+    const neither = 'We start at 9:30\n\nGood morning, everyone.\n\nThe venue opens at 10:30\n\nTranscribed by https://otter.ai\n';
+    const want = {
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: null, endMs: null, text: 'We start at 9:30' },
+        { seq: 2, startMs: null, endMs: null, text: 'Good morning, everyone.' },
+        { seq: 3, startMs: null, endMs: null, text: 'The venue opens at 10:30' },
+      ],
+      labels: [],
+      durationMs: null,
+    };
+    expect(transcriptFormatOf('call.txt', new TextEncoder().encode(neither))).toBe('otter');
+    expect(readTranscript(neither, 'otter')).toEqual(want);
+    // A Word file of the export's every line holds an empty paragraph where the export holds a blank line, and reads the
+    // same.
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    expect(await readWordTranscript(wordFileOf(neither.trimEnd().split('\n')), { extractRawText })).toEqual({ ...want, format: 'docx' });
+
+    expect(readTranscript('9:30\n\nGood morning.\n\nShall we start?\n\nTranscribed by https://otter.ai\n', 'otter').turns).toEqual([
+      { seq: 1, startMs: null, endMs: null, text: '9:30' },
+      { seq: 2, startMs: null, endMs: null, text: 'Good morning.' },
+      { seq: 3, startMs: null, endMs: null, text: 'Shall we start?' },
+    ]);
+  });
+
   it('reads Fireflies\'s sentences from a list at the top, with times given as text, and a sentence with no speaker', () => {
     const read = readTranscript(
       JSON.stringify([
