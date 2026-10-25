@@ -259,6 +259,27 @@ describe('streamObject with elements', () => {
     expect(await result.skipped).toBe(0);
   });
 
+  it('yields the whole last element of a fenced reply whose closing bracket and fence arrive in one chunk', async () => {
+    // The fence after the bracket keeps the text from parsing, so the elements are read from the text cut back to its
+    // last comma, inside the last element: that text holds no closing bracket, and the part of the element in it is
+    // not taken as the element.
+    const gated = gatedStream(['```json\n{"sentences":[{"text":"One","passage":1},', '{"text":"Two","passage":2}', ']}\n```']);
+    hoisted.generateCompletionStream.mockReturnValue(gated.stream);
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'sentences', prompt: 'p' });
+    const seen: unknown[] = [];
+    const reading = (async () => {
+      for await (const element of result.elementStream) seen.push(element);
+    })();
+    await gated.feed();
+    expect(seen).toEqual([]);
+    await gated.feed();
+    expect(seen).toEqual([{ text: 'One', passage: 1 }]);
+    await gated.feed();
+    await reading;
+    expect(seen).toEqual([{ text: 'One', passage: 1 }, { text: 'Two', passage: 2 }]);
+    expect(await result.skipped).toBe(0);
+  });
+
   it('reads a stream that ended with no usage reported as unknown usage, never zero', async () => {
     const gated = gatedStream(['{"sentences":[]}']);
     hoisted.generateCompletionStream.mockReturnValue((async function* () {

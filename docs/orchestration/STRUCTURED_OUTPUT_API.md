@@ -140,7 +140,7 @@ for await (const sentence of elementStream) {
 console.log(await skipped, await reportedUsage);
 ```
 
-- An element is complete once the next element begins, and the last one when the stream ends with text that parses, so a reply cut off at the token limit never yields its unfinished last element. A field the schema puts after the array holds the last element back until the stream ends.
+- An element is complete once the next element begins, and the last one once the array's closing bracket arrives, while any field the schema puts after the array is still streaming, or at the latest when the stream ends with text that parses. A reply cut off at the token limit never yields its unfinished last element.
 - When the stream ends with text that does not parse, such as a reply cut off at the token limit, `elementStream` throws the `ObjectGenerationError` that `object` rejects with (`Failed to parse streamed JSON: ...`) after the elements completed before the end, so a cut answer never reads as a finished one. An empty reply ends the iteration with nothing yielded, and `object` rejects.
 - Each element is parsed by the array's element schema and yielded as the value the schema parses it to. An element that fails the schema is skipped, and `skipped` resolves to the number skipped when the stream ends.
 - `elements` names a top-level field of the schema that holds an array; an optional, nullable or default array counts, and one behind a transform, a pipe or `z.lazy()` does not. Any other name throws a `TypeError` at the call, before a request is sent.

@@ -112,14 +112,15 @@ export interface StreamObjectOptions<T extends ZodType, K extends string = strin
   /**
    * The name of one top-level array field of `schema`, whose elements
    * {@link StreamObjectResult.elementStream} yields one at a time as each is
-   * completed: an element once the next one begins, and the last one when the
-   * stream ends with text that parses. Each is parsed by the array's element
-   * schema; an element that fails it is skipped and counted in
-   * {@link StreamObjectResult.skipped}. A name that is not a field of the
-   * schema holding an array (optional, nullable or with a default included;
-   * one behind a transform, a pipe or `z.lazy()` is not) throws a `TypeError`
-   * at the call, before any request is sent. A field the schema puts after
-   * the array holds the last element back until the stream ends.
+   * completed: an element once the next one begins, and the last one once the
+   * array's closing bracket arrives, while any field the schema puts after the
+   * array is still streaming, or at the latest when the stream ends with text
+   * that parses. Each is parsed by the array's element schema; an element
+   * that fails it is skipped and counted in {@link StreamObjectResult.skipped}.
+   * A name that is not a field of the schema holding an array (optional,
+   * nullable or with a default included; one behind a transform, a pipe or
+   * `z.lazy()` is not) throws a `TypeError` at the call, before any request
+   * is sent.
    *
    * @example `"sentences"` for `z.object({ sentences: z.array(Sentence) })`
    */
@@ -228,12 +229,12 @@ export interface StreamObjectResult<T, E = unknown> {
   /**
    * Async iterable yielding each element of the array field named by
    * {@link StreamObjectOptions.elements}, in order, as soon as it is complete:
-   * an element once the next one begins, and the last one when the stream
-   * ends with text that parses, so a reply cut off at the token limit never
-   * yields its unfinished last element. Each is the value the array's element
-   * schema parses it to; an element that fails the schema is skipped and
-   * counted in {@link StreamObjectResult.skipped}. Without `elements` it
-   * yields nothing.
+   * an element once the next one begins, and the last one once the array's
+   * closing bracket arrives or, at the latest, when the stream ends with text
+   * that parses, so a reply cut off at the token limit never yields its
+   * unfinished last element. Each is the value the array's element schema
+   * parses it to; an element that fails the schema is skipped and counted in
+   * {@link StreamObjectResult.skipped}. Without `elements` it yields nothing.
    *
    * When the stream fails, the iteration throws the stream's error after the
    * elements completed before it, so a failed answer never reads as a
@@ -414,19 +415,20 @@ function tryParsePartialJson(buffer: string): unknown | undefined {
 }
 
 /**
- * Parses the text cut back to just after its last comma, opening brace or
- * opening bracket outside a string, as {@link tryParsePartialJson} parses it.
+ * The text cut back to just after its last comma, opening brace or opening
+ * bracket outside a string, for {@link tryParsePartialJson} to parse.
  *
  * Text that ends inside a member that cannot be closed yet (an object key, a
  * key without its value, a number or literal still being written) does not
  * parse with its open strings and brackets closed, but the members before
  * that one do: when a chunk ends inside the first key of the next element of
- * an array, `[A,B,{"te` is read as `[A,B,{}]`, so `A` and `B` are complete.
+ * an array, `[A,B,{"te` is cut to `[A,B,{`, which parses as `[A,B,{}]`, so
+ * `A` and `B` are complete.
  *
  * @param buffer - The accumulated JSON text so far.
- * @returns The parsed value, or `undefined` when the cut text does not parse either.
+ * @returns The cut text, or `undefined` when the text holds no comma, brace or bracket outside a string.
  */
-function tryParseBeforeOpenMember(buffer: string): unknown | undefined {
+function textBeforeOpenMember(buffer: string): string | undefined {
   let inString = false;
   let escaped = false;
   let cut = 0;
@@ -442,7 +444,77 @@ function tryParseBeforeOpenMember(buffer: string): unknown | undefined {
       cut = at + 1;
     }
   }
-  return cut === 0 ? undefined : tryParsePartialJson(buffer.slice(0, cut));
+  return cut === 0 ? undefined : buffer.slice(0, cut);
+}
+
+/**
+ * True when `text`, a JSON object or the start of one, holds the closing
+ * bracket of the array that its top-level field `field` holds, so every
+ * element of that array has arrived, the last one included. Strings and
+ * their escapes are read as {@link tryParsePartialJson} reads them, and a
+ * key is compared as `JSON.parse` decodes it. When the field appears twice,
+ * the array of its last appearance counts, as `JSON.parse` keeps it.
+ *
+ * @param text - The text a partial object was parsed from.
+ * @param field - The field {@link StreamObjectOptions.elements} names.
+ */
+function arrayFieldClosed(text: string, field: string): boolean {
+  // The brackets and braces open at this point, outermost first.
+  const open: string[] = [];
+  let inString = false;
+  let escaped = false;
+  let stringStart = 0;
+  // In the top-level object: whether the next string is a key, and the key
+  // of the member whose value is being read.
+  let keyNext = false;
+  let key: string | undefined;
+  let inArray = false;
+  let closed = false;
+  for (let at = 0; at < text.length; at += 1) {
+    const ch = text[at];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      if (!inString) {
+        stringStart = at;
+      } else if (keyNext && open.length === 1) {
+        keyNext = false;
+        try {
+          key = JSON.parse(text.slice(stringStart, at + 1)) as string;
+        } catch {
+          key = undefined;
+        }
+      }
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') {
+      open.push(ch);
+      if (open.length === 1) {
+        keyNext = ch === '{';
+      } else if (open.length === 2 && ch === '[' && open[0] === '{' && key === field) {
+        inArray = true;
+        closed = false;
+      }
+    } else if (ch === '}' || ch === ']') {
+      open.pop();
+      if (inArray && open.length === 1) {
+        inArray = false;
+        closed = true;
+      }
+    } else if (ch === ',' && open.length === 1) {
+      keyNext = open[0] === '{';
+      key = undefined;
+    }
+  }
+  return closed;
 }
 
 /**
@@ -794,21 +866,26 @@ export function streamObject<T extends ZodType, K extends string = never>(
     if (partial === undefined || typeof partial !== 'object' || partial === null) {
       // The text ends inside a member that cannot be closed yet, such as the
       // first key of the next element: the elements before it are complete,
-      // and a stream cut here keeps them.
-      if (elementSchema !== undefined) collectElements(tryParseBeforeOpenMember(buffer), false);
+      // and a stream cut here keeps them. The cut text alone says whether the
+      // array closed, since the elements are read from it.
+      const cut = elementSchema === undefined ? undefined : textBeforeOpenMember(buffer);
+      if (cut !== undefined) collectElements(tryParsePartialJson(cut), cut);
       return;
     }
-    // Only act when the parsed shape has actually changed
+    // A partial object is yielded only when the parsed shape has changed.
     const serialized = JSON.stringify(partial);
-    if (serialized === lastPartialJson) return;
-    lastPartialJson = serialized;
-    latestPartial = partial as DeepPartial<Output>;
-    if (partialReader === 'reading') partials.push(latestPartial);
-    // Every element before the last one is complete: the next one has begun.
-    collectElements(partial, false);
+    if (serialized !== lastPartialJson) {
+      lastPartialJson = serialized;
+      latestPartial = partial as DeepPartial<Output>;
+      if (partialReader === 'reading') partials.push(latestPartial);
+    }
+    // Every element before the last one is complete, the next one having
+    // begun, and the last one once the array's closing bracket arrived, which
+    // can leave the shape unchanged: the elements are read on every chunk.
+    collectElements(partial, buffer);
   }
 
-  /** Acts on the end of the stream: the whole text is parsed, and its last element is complete when it parses. */
+  /** Acts on the end of the stream: the whole text is parsed, and every element is complete when it parses. */
   function onEnd(): void {
     // The caller's signal ended the call: the object rejects with the signal's
     // reason rather than with a parse error of the cut-off text.
@@ -825,20 +902,24 @@ export function streamObject<T extends ZodType, K extends string = never>(
         error: new ObjectGenerationError(`Failed to parse streamed JSON: ${asError(error).message}`, buffer),
       };
     }
-    if (parsed.ok) collectElements(parsed.value, true);
+    if (parsed.ok) collectElements(parsed.value);
     void finish({ kind: 'done', parsed });
   }
 
   /**
    * Parses each element of the array field in `value` that is complete and
-   * not yet examined: every element at the end, every one but the last before it.
+   * not yet examined. While the stream runs, `parsedFrom` is the text `value`
+   * was parsed from: every element but the last is complete, and the last
+   * one too once that text holds the array's closing bracket. Without
+   * `parsedFrom`, the whole text once the stream ended, every element is.
    */
-  function collectElements(value: unknown, atEnd: boolean): void {
+  function collectElements(value: unknown, parsedFrom?: string): void {
     if (elementSchema === undefined || elementField === undefined) return;
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return;
     const list = (value as Record<string, unknown>)[elementField];
-    if (!Array.isArray(list)) return;
-    const complete = atEnd ? list.length : list.length - 1;
+    if (!Array.isArray(list) || examined >= list.length) return;
+    const complete =
+      parsedFrom === undefined || arrayFieldClosed(parsedFrom, elementField) ? list.length : list.length - 1;
     for (; examined < complete; examined += 1) {
       const checked = elementSchema.safeParse(list[examined]);
       if (!checked.success) skippedCount += 1;
