@@ -98,7 +98,9 @@ export interface EmbedTextOptions {
   /**
    * Desired output dimensionality. Only honoured by models that support
    * dimension reduction (e.g. OpenAI `text-embedding-3-*` with `dimensions`).
-   * Ignored when the model has a fixed output size.
+   * Ignored when the model has a fixed output size. Sent as `dimensions` to an
+   * OpenAI-compatible endpoint, as `output_dimension` to Mistral, and as
+   * `outputDimensionality` to Gemini's own API; Ollama does not receive it.
    */
   dimensions?: number;
 
@@ -266,6 +268,8 @@ interface OllamaEmbedResponse {
  * @param abortSignal - The caller's signal, which cancels the request in flight.
  * @param onAttempt - The caller's report, told of the request once it is sent: attempt 1, with the HTTP status it
  *   answered, or null when no answer came (a network failure, or the caller's abort once the request had begun).
+ * @param dimensionsField - The body field `dimensions` is sent in: `dimensions`, OpenAI's, unless the endpoint
+ *   documents another ({@link DIMENSIONS_FIELDS}).
  * @returns Parsed {@link OpenAIEmbeddingResponse}.
  * @throws {Error} On non-2xx HTTP status or network failure, with base URL
  *   credentials and the API key masked out of the message; the signal's
@@ -279,12 +283,13 @@ async function callOpenAIEmbedding(
   dimensions?: number,
   abortSignal?: AbortSignal,
   onAttempt?: (outcome: AttemptOutcome) => void,
+  dimensionsField = 'dimensions',
 ): Promise<OpenAIEmbeddingResponse> {
-  // Construct the request body, omitting `dimensions` when not specified
+  // Construct the request body, omitting the output size when not specified
   // to avoid confusing models that don't support it.
   const body: Record<string, unknown> = { model: modelId, input };
   if (dimensions !== undefined) {
-    body.dimensions = dimensions;
+    body[dimensionsField] = dimensions;
   }
 
   const url = `${baseUrl.replace(/\/+$/, '')}/embeddings`;
@@ -438,6 +443,15 @@ const EMBEDDINGS_BASE_URLS: ReadonlyMap<string, string> = new Map([
   ['mistral', MISTRAL_DEFAULT_BASE_URL],
   ['requesty', REQUESTY_DEFAULT_BASE_URL],
 ]);
+
+/**
+ * The body field an OpenAI-compatible embeddings endpoint reads the output
+ * size from, for a provider whose field is not OpenAI's `dimensions`.
+ * Mistral's embeddings schema has `output_dimension` and no `dimensions`
+ * (https://docs.mistral.ai/api/endpoint/embeddings, read 2026-10-25).
+ * OpenRouter and Requesty document `dimensions`.
+ */
+const DIMENSIONS_FIELDS: ReadonlyMap<string, string> = new Map([['mistral', 'output_dimension']]);
 
 /**
  * Why embedText refuses a provider agentos knows that has no embeddings it
@@ -764,6 +778,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                 opts.dimensions,
                 opts.abortSignal,
                 opts.onAttempt,
+                DIMENSIONS_FIELDS.get(resolved.providerId),
               );
 
               // Each response's indices start at zero for its own batch.
