@@ -36,14 +36,21 @@ export interface GlobalDefaultProvider {
    * which case the provider's default model for the task applies. With a
    * custom endpoint, and for `embedText` on Ollama, it is always used. The
    * endpoint is the base URL the call is sent to: the call's own `baseUrl`,
-   * else `baseUrl` here, else the provider's base-URL env var. MiniMax's two
-   * API roots, `https://api.minimax.io/v1` and the China root
+   * else `baseUrl` here, else the provider's base-URL env var. An empty
+   * string from the call or here is that URL, so the env var is not read,
+   * and it names the provider's own endpoint. MiniMax's two API roots,
+   * `https://api.minimax.io/v1` and the China root
    * `https://api.minimaxi.com/v1`, are its own endpoint, not a custom one.
    */
   model?: string;
   /** API key used when no inline override is supplied. */
   apiKey?: string;
-  /** Base URL override (useful for proxies, local Ollama, etc.). */
+  /**
+   * Base URL override (useful for proxies, local Ollama, etc.). An empty
+   * string is a value, not unset: the provider's base-URL env var is then not
+   * read, and text and image calls go to the provider's own endpoint (Ollama
+   * and `stable-diffusion-local`, which have none, refuse them).
+   */
   baseUrl?: string;
 }
 
