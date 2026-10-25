@@ -338,10 +338,17 @@ describe('guardedFetch', () => {
         'http://[64:ff9b::0.0.215.14]/page',
         'http://[64:ff9b::0.0.0.0]/page',
         // In hex like any other IPv6 address: the local-use prefix
-        // 64:ff9b:1::/48, and a NAT64 prefix of the network's own, which the
-        // fetch learns from the resolver after the rule has answered.
+        // 64:ff9b:1::/48; the rest of 64:ff9b::/32, which the parser can
+        // write beginning `64:ff9b::` with three groups after it
+        // (64:ff9b:0:0:0:5db8:d70e:1); and a NAT64 prefix of the network's
+        // own, which the rule never reads.
         'http://[64:ff9b:1::5db8:d70e]/page',
+        'http://[64:ff9b::5db8:d70e:1]/page',
         'http://[2600:1f14:abcd::5db8:d70e]/page',
+        // 6to4 (2002::/16): the IPv4 address it carries is the router's of a
+        // 6to4 site, and the connection ends at a host of that site.
+        'http://[2002:5db8:d70e::5db8:d70e]/page',
+        'http://[2002:5DB8:D70E:0:0:0:93.184.215.14]/page',
       ];
       for (const address of addresses) {
         expect(await reasonOf(guardedFetch(address, reach({ resolve: lookup.resolve, allowHost: refusingAll }))), address).toBe('host');
@@ -358,7 +365,10 @@ describe('guardedFetch', () => {
         '0.0.215.14',
         '0.0.0.0',
         '64:ff9b:1::5db8:d70e',
+        '64:ff9b::5db8:d70e:1',
         '2600:1f14:abcd::5db8:d70e',
+        '2002:5db8:d70e::5db8:d70e',
+        '2002:5db8:d70e::5db8:d70e',
       ]);
       expect(lookup.lookups()).toBe(0);
     });
@@ -382,6 +392,32 @@ describe('guardedFetch', () => {
         // passes, and the connection, blocked here, is the next step.
         const onlyThatAddress = (host: string): boolean => host === '93.184.215.14';
         expect(await reasonOf(guardedFetch(address, reach({ allowHost: onlyThatAddress, allowPorts: [80] })))).toBe('network');
+        expect(connect).toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
+    });
+
+    it('asks about a 6to4 address in hex, not as the IPv4 address of the 6to4 router it carries', async () => {
+      // Blocked, so no case reaches past this machine if the check regresses.
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        // A host of the 6to4 site 2002:5db8:d70e::/48, whose router is at
+        // 93.184.215.14 (RFC 3056, sections 2 and 5.3).
+        const address = 'http://[2002:5db8:d70e::5db8:d70e]/page';
+        const lookup = counting();
+        // An allow-list of the router's address does not reach the hosts of its site.
+        const onlyThatAddress = (host: string): boolean => host === '93.184.215.14';
+        expect(await reasonOf(guardedFetch(address, reach({ resolve: lookup.resolve, allowHost: onlyThatAddress, allowPorts: [80] })))).toBe('host');
+        expect(lookup.lookups()).toBe(0);
+        expect(connect).not.toHaveBeenCalled();
+        // Nor does a blocklist of it refuse them: the address check passes the
+        // address by the public IPv4 address it carries, and the connection,
+        // blocked here, is the next step.
+        const notThatAddress = (host: string): boolean => host !== '93.184.215.14';
+        expect(await reasonOf(guardedFetch(address, reach({ allowHost: notThatAddress, allowPorts: [80] })))).toBe('network');
         expect(connect).toHaveBeenCalled();
       } finally {
         connect.mockRestore();
@@ -725,6 +761,18 @@ describe('guardedFetch', () => {
       } finally {
         connect.mockRestore();
       }
+    });
+
+    it('is refused by its own range first: a prefix the resolver reveals adds refusals and clears nothing', async () => {
+      const before = connections;
+      // A resolver that reveals 64:ff9b:1::/96, under the local-use prefix
+      // 64:ff9b:1::/48 (RFC 8215), and answers the host with 93.184.215.14
+      // under it. The address is outside 2000::/3, so it is refused whatever
+      // it carries.
+      const resolve = async (host: string) =>
+        host === 'ipv4only.arpa' ? [{ address: '64:ff9b:1::c000:aa', family: 6 }] : [{ address: '64:ff9b:1::5db8:d70e', family: 6 }];
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve })))).toBe('address');
+      expect(connections).toBe(before);
     });
 
     it.each(['EAI_AGAIN', 'ENOTFOUND'])('is refused when the lookup of the prefixes fails with %s', async (code) => {
