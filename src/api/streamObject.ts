@@ -116,8 +116,10 @@ export interface StreamObjectOptions<T extends ZodType, K extends string = strin
    * stream ends with text that parses. Each is parsed by the array's element
    * schema; an element that fails it is skipped and counted in
    * {@link StreamObjectResult.skipped}. A name that is not a field of the
-   * schema holding an array (optional, nullable or with a default included)
-   * throws a `TypeError` at the call, before any request is sent.
+   * schema holding an array (optional, nullable or with a default included;
+   * one behind a transform, a pipe or `z.lazy()` is not) throws a `TypeError`
+   * at the call, before any request is sent. A field the schema puts after
+   * the array holds the last element back until the stream ends.
    *
    * @example `"sentences"` for `z.object({ sentences: z.array(Sentence) })`
    */
@@ -238,7 +240,10 @@ export interface StreamObjectResult<T, E = unknown> {
    * finished one. A reader that starts after every iterable that was read
    * stopped before the end throws {@link ObjectGenerationError}
    * (`Stream interrupted: ...`) after the elements completed before the stop.
-   * When `abortSignal` aborts, the iteration ends.
+   * A reply whose text does not parse when the stream ends, such as one cut
+   * off at the token limit, ends the iteration without an error, and `object`
+   * rejects: await `object` to know the answer arrived whole. When
+   * `abortSignal` aborts, the iteration ends.
    *
    * @example
    * ```ts
@@ -272,7 +277,8 @@ export interface StreamObjectResult<T, E = unknown> {
   /**
    * Resolves, when the stream ends, to the usage the provider reported, or to
    * `undefined` when the stream failed, was aborted or was not read to its
-   * end, or ended without the provider reporting a token count or a cost. A
+   * end, or ended without the provider reporting a token count or a cost
+   * above zero (a report of zeros reads as none). A
    * caller never reads usage it never received as zero, as it would from
    * {@link StreamObjectResult.usage}.
    */
