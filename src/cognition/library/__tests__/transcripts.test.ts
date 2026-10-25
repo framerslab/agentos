@@ -56,7 +56,10 @@ function xml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-/** A Word file of one paragraph a line: its content types, its package relationships and its main document part. */
+/**
+ * A Word file of one paragraph a line, a line feed inside a line written as a manual line break (`w:br`): its content
+ * types, its package relationships and its main document part.
+ */
 function wordFileOf(lines: readonly string[]): Buffer {
   return zipOf([
     {
@@ -89,7 +92,7 @@ function wordFileOf(lines: readonly string[]): Buffer {
       data: Buffer.from(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
-          lines.map((line) => `<w:p><w:r><w:t>${xml(line)}</w:t></w:r></w:p>`).join('') +
+          lines.map((line) => `<w:p><w:r>${line.split('\n').map((part) => `<w:t>${xml(part)}</w:t>`).join('<w:br/>')}</w:r></w:p>`).join('') +
           '</w:body></w:document>',
         'utf8',
       ),
@@ -823,6 +826,41 @@ describe('readTranscript', () => {
         { seq: 2, label: 'Unknown' },
       ],
       durationMs: null,
+    });
+  });
+
+  it('reads a Word paragraph\'s manual line breaks as mammoth\'s text holds them, as nothing, so a pair of line feeds in that text is a paragraph\'s end', async () => {
+    // mammoth writes nothing for a manual line break: the words on either side of two in a row run together, and the
+    // only pairs of line feeds in its text are the ones it writes after each paragraph. A line of a voice note's header
+    // form parted from the rest of its paragraph by two line breaks stays on that paragraph's line and heads no turn,
+    // and a header parted so from its words runs into them and reads as words.
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    const closing = 'Transcribed by https://otter.ai';
+
+    const words = wordFileOf(['Unknown 0:00', 'Good morning.', 'We meet at 10:30\n\nin the hall.', 'Unknown 0:09', 'Shall we start?', closing]);
+    expect((await mammoth.extractRawText({ buffer: words })).value).toBe(
+      'Unknown 0:00\n\nGood morning.\n\nWe meet at 10:30in the hall.\n\nUnknown 0:09\n\nShall we start?\n\nTranscribed by https://otter.ai\n\n',
+    );
+    expect(await readWordTranscript(words, { extractRawText })).toEqual({
+      format: 'docx',
+      turns: [
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning. We meet at 10:30in the hall.' },
+        { seq: 2, startMs: 9_000, endMs: null, text: 'Shall we start?' },
+      ],
+      labels: [
+        { seq: 1, label: 'Unknown' },
+        { seq: 2, label: 'Unknown' },
+      ],
+      durationMs: null,
+    });
+
+    const header = wordFileOf(['Unknown 0:00', 'Good morning.', 'Unknown 0:09\n\nShall we start?', closing]);
+    expect((await mammoth.extractRawText({ buffer: header })).value).toBe(
+      'Unknown 0:00\n\nGood morning.\n\nUnknown 0:09Shall we start?\n\nTranscribed by https://otter.ai\n\n',
+    );
+    expect(await readWordTranscript(header, { extractRawText })).toMatchObject({
+      turns: [{ seq: 1, startMs: 0, text: 'Good morning. Unknown 0:09Shall we start?' }],
+      labels: [{ seq: 1, label: 'Unknown' }],
     });
   });
 
