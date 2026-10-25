@@ -60,7 +60,11 @@ export class GuardedFetchError extends Error {
    * What the caller's host rule threw, when the refusal is that rule's
    * failure; absent otherwise. The message keeps its details out, and so do
    * `Object.keys`, `JSON.stringify` and a spread of the error: as on a native
-   * error, the property is not enumerable.
+   * error, the property is not enumerable. Error serializers and
+   * `util.inspect` read it by name, as they read a native error's. Pino's
+   * default `err` serializer folds a cause that is an error into the message
+   * and the stack, and `console.error` prints any cause as `[cause]`, so a
+   * host that logs these errors decides what its rule throws.
    */
   declare readonly cause?: unknown;
 
@@ -78,10 +82,15 @@ export class GuardedFetchError extends Error {
   ) {
     super(message);
     this.name = 'GuardedFetchError';
-    // Defined as a native error defines its cause, so a log line that
-    // serializes or spreads the error leaves out what the rule threw. The
-    // property is declared with `declare` above, so no class field puts an
-    // enumerable `cause` on every error first.
+    // Defined as a native error defines its cause, not enumerable, so
+    // `Object.keys`, a spread and `JSON.stringify` leave out what the rule
+    // threw. Error serializers and `util.inspect` read `cause` by name, as
+    // they read a native error's. Pino's default `err` serializer folds a
+    // cause that is an error into the message and the stack, and
+    // `console.error` prints any cause as `[cause]`, so a host that logs
+    // these errors decides what its rule throws. The property is declared
+    // with `declare` above, so no class field puts an enumerable `cause` on
+    // every error first.
     if (cause !== undefined) {
       Object.defineProperty(this, 'cause', { value: cause, writable: true, enumerable: false, configurable: true });
     }
@@ -114,16 +123,25 @@ export interface GuardedFetchOptions {
    * IPv6 address, without a trailing dot. An international name comes in its
    * ASCII form (`bücher.example` as `xn--bcher-kva.example`), an IPv4
    * address in dotted decimal however the address wrote it, an IPv4-mapped
-   * IPv6 address included (`0x5db8d70e` and `[::ffff:93.184.215.14]` as
-   * `93.184.215.14`), and any other IPv6 address in compressed hex
+   * IPv6 address and one under the well-known NAT64 prefix `64:ff9b::/96`
+   * (RFC 6052) included, since a connection to either goes to the IPv4
+   * address it carries, through a NAT64 gateway for the second
+   * (`0x5db8d70e`, `[::ffff:93.184.215.14]` and `[64:ff9b::93.184.215.14]`
+   * as `93.184.215.14`), and any other IPv6 address in compressed hex
    * (`[2606:4700:4700:0:0:0:0:1111]` as `2606:4700:4700::1111`). A
    * subdomain is a host of its own, so a rule for a site and its subdomains
    * compares on a dot boundary:
    * `host === 'example.com' || host.endsWith('.example.com')`, since
    * `notexample.com` also ends with `example.com`. The rule judges the host
-   * the address names. A name is not resolved for it, so a rule that refuses
-   * an address does not refuse a name that resolves to that address. A host
-   * it allows is still resolved and checked as every host is: the rule
+   * the address names, before any lookup. A name is not resolved for it, so
+   * a rule that refuses an address does not refuse a name that resolves to
+   * that address. The fetch learns a NAT64 prefix of the network's own from
+   * the resolver (RFC 7050) after the rule has answered, so an address under
+   * one comes in hex, and a rule that refuses an IPv4 address does not refuse
+   * it under such a prefix either. The address check judges every address a
+   * host resolves to, an address under the well-known NAT64 prefix or under
+   * a prefix the resolver reveals by the IPv4 address it carries. A host the
+   * rule allows is still resolved and checked as every host is: the rule
    * narrows what the fetch reads and never widens it. A rule that
    * throws refuses as one that answers `false`, with what it threw as the
    * refusal's `cause`; a value that is not a function is a `TypeError`
@@ -231,22 +249,36 @@ function hostOf(url: URL): string {
 const IPV4_MAPPED = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/;
 
 /**
+ * An address under the well-known NAT64 prefix, `64:ff9b::/96`
+ * (https://www.rfc-editor.org/rfc/rfc6052#section-2.1), as the URL parser
+ * writes it, whatever spelling the address used: `64:ff9b::` and the IPv4
+ * address it carries in two groups of lower-case hex. The parser folds the
+ * longest run of zero groups into `::`, so an IPv4 address whose first two
+ * numbers are zero leaves one group (`64:ff9b::d70e` is `0.0.215.14`) and
+ * `0.0.0.0` leaves none (`64:ff9b::`).
+ */
+const NAT64_WELL_KNOWN = /^64:ff9b::(?:(?:([0-9a-f]{1,4}):)?([0-9a-f]{1,4}))?$/;
+
+/**
  * The host of `url` as a caller's `allowHost` sees it: {@link hostOf} with
  * any trailing dot removed, since `example.com.` names the same host as
  * `example.com` and a rule that refuses one must refuse the other; and an
- * IPv4-mapped IPv6 address as the IPv4 address it carries, since a
- * connection to `[::ffff:93.184.215.14]` goes to `93.184.215.14` and a rule
- * that refuses one must refuse the other. The URL parser has already
- * lower-cased a name, put an international one in its ASCII form, written
- * an IPv4 address in dotted decimal and an IPv6 one in compressed hex. The
- * request itself goes to the host as written.
+ * IPv4-mapped IPv6 address or one under the well-known NAT64 prefix as the
+ * IPv4 address it carries, since a connection to `[::ffff:93.184.215.14]`
+ * goes to `93.184.215.14`, as one to `[64:ff9b::93.184.215.14]` does
+ * through a NAT64 gateway, and a rule that refuses one must refuse the
+ * others. The URL parser has already lower-cased a name, put an
+ * international one in its ASCII form, written an IPv4 address in dotted
+ * decimal and an IPv6 one in compressed hex. The request itself goes to the
+ * host as written.
  */
 function ruleHostOf(url: URL): string {
   const host = hostOf(url);
-  const mapped = IPV4_MAPPED.exec(host);
-  if (mapped !== null) {
-    const high = parseInt(mapped[1], 16);
-    const low = parseInt(mapped[2], 16);
+  const carried = IPV4_MAPPED.exec(host) ?? NAT64_WELL_KNOWN.exec(host);
+  if (carried !== null) {
+    // A group the parser folded into `::` is zero.
+    const high = parseInt(carried[1] ?? '0', 16);
+    const low = parseInt(carried[2] ?? '0', 16);
     return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
   }
   return host.replace(/\.+$/, '');
