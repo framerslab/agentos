@@ -101,6 +101,11 @@ function requestsSent(): Array<{ url: string; authorization: string | undefined 
   }));
 }
 
+/** The JSON body of each request embedText sent. */
+function bodiesSent(): Array<Record<string, unknown>> {
+  return vi.mocked(globalThis.fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
+}
+
 function setEnv(env: Record<string, string>): void {
   for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
 }
@@ -192,6 +197,26 @@ describe("embedText posts a key to its provider's own embeddings endpoint", () =
     await embedText({ ...target, input: 'hello' });
 
     expect(requestsSent()).toEqual([{ url, authorization: `Bearer ${key}` }]);
+  });
+
+  it("sends Mistral the output size as output_dimension, the field Mistral's embeddings take", async () => {
+    setEnv({ MISTRAL_API_KEY: 'mistral-test-key' });
+
+    await embedText({ provider: 'mistral', model: 'codestral-embed', input: 'hello', dimensions: 512 });
+
+    const [body] = bodiesSent();
+    expect(body.output_dimension).toBe(512);
+    expect(body).not.toHaveProperty('dimensions');
+  });
+
+  it('sends OpenAI the output size as dimensions', async () => {
+    setEnv({ OPENAI_API_KEY: 'openai-test-key' });
+
+    await embedText({ provider: 'openai', input: 'hello', dimensions: 256 });
+
+    const [body] = bodiesSent();
+    expect(body.dimensions).toBe(256);
+    expect(body).not.toHaveProperty('output_dimension');
   });
 });
 
