@@ -147,6 +147,22 @@ describe("MiniMax image API integration", () => {
     expect(JSON.parse(String(init?.body)).model).toBe("image-01");
   });
 
+  it("generates with image-01 on the global root when MINIMAX_BASE_URL holds only whitespace", async () => {
+    // The image provider trims the base URL and, with nothing left, sends to
+    // MiniMax's global root; a value of whitespace alone names no endpoint.
+    vi.stubEnv("MINIMAX_BASE_URL", " \n");
+    setDefaultProvider({
+      provider: "minimax",
+      model: "MiniMax-M3.1-Flash",
+      apiKey: "default-key",
+    });
+    const result = await generateImage({ prompt: "A lighthouse" });
+    expect(result.model).toBe("image-01");
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("https://api.minimax.io/v1/image_generation");
+    expect(JSON.parse(String(init?.body)).model).toBe("image-01");
+  });
+
   it("keeps the default's model on the custom endpoint the default names when MINIMAX_BASE_URL is the China root", async () => {
     // The call goes to the default's custom endpoint, ahead of the root in the
     // environment, and a custom endpoint may serve any model under any name.
