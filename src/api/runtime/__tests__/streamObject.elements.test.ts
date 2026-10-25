@@ -23,6 +23,7 @@ vi.mock('../../model.js', () => ({
 }));
 
 import { streamObject } from '../../streamObject.js';
+import { ObjectGenerationError } from '../../generateObject.js';
 
 /** One text delta chunk, as the provider manager yields it; the last carries the usage. */
 function chunk(text: string, last = false) {
@@ -36,6 +37,12 @@ function chunk(text: string, last = false) {
     isFinal: last,
     ...(last ? { usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 } } : {}),
   };
+}
+
+/** The chunk that ends a reply the token limit cut off: no text, the finish reason 'length', and the usage. */
+function limitReached() {
+  const last = chunk('', true);
+  return { ...last, choices: [{ ...last.choices[0], finishReason: 'length' }] };
 }
 
 /** A stream the test feeds piece by piece: `feed` releases the next piece, `cut` throws inside the stream. */
@@ -153,6 +160,24 @@ describe('streamObject with elements', () => {
     expect(seen).toEqual([{ text: 'One', passage: 1 }]);
     expect(await result.reportedUsage).toBeUndefined();
     await expect(result.object).rejects.toThrow(/Stream interrupted/);
+  });
+
+  it('throws the error the object rejects with from elementStream, after the elements before it, when the text does not parse at the end', async () => {
+    // The token limit cut the reply off inside its second element, and the stream ended normally.
+    hoisted.generateCompletionStream.mockReturnValue((async function* () {
+      yield chunk('{"sentences":[{"text":"One","passage":1},{"text":"Tw');
+      yield limitReached();
+    })());
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'sentences', prompt: 'p' });
+    const seen: unknown[] = [];
+    const thrown = await (async () => {
+      for await (const element of result.elementStream) seen.push(element);
+    })().then(() => undefined, (error: unknown) => error);
+    expect(seen).toEqual([{ text: 'One', passage: 1 }]);
+    const rejection = await result.object.then(() => undefined, (error: unknown) => error);
+    expect(rejection).toBeInstanceOf(ObjectGenerationError);
+    expect((rejection as Error).message).toMatch(/^Failed to parse streamed JSON/);
+    expect(thrown).toBe(rejection);
   });
 
   it("yields the elements before the next one when a chunk ends inside that one's first key, and keeps them when the stream is cut there", async () => {
