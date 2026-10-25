@@ -20,7 +20,7 @@ import { OPENROUTER_DEFAULT_BASE_URL } from '../core/llm/providers/implementatio
 import { REQUESTY_DEFAULT_BASE_URL } from '../core/llm/providers/implementations/RequestyProvider.js';
 import { GeminiProviderError } from '../core/llm/providers/errors/GeminiProviderError.js';
 import { getDefaultProvider } from './runtime/global-default.js';
-import { GEMINI_DEFAULT_EMBEDDING_MODEL } from './runtime/provider-defaults.js';
+import { GEMINI_DEFAULT_EMBEDDING_MODEL, PROVIDER_DEFAULTS } from './runtime/provider-defaults.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
@@ -60,7 +60,13 @@ export interface EmbedTextOptions {
    * Provider name. When supplied without `model`, the default embedding model
    * for the provider is resolved automatically from the built-in defaults.
    *
-   * @example `"openai"`, `"ollama"`, `"openrouter"`, `"gemini"`
+   * Embeds on `openai`, `openrouter`, `mistral` and `requesty` (each at its own
+   * OpenAI-compatible embeddings endpoint), `gemini` and `ollama`. Another
+   * provider agentos knows has no embeddings it can send to (Anthropic, Groq,
+   * Together AI, xAI, MiniMax, the image providers and the CLIs), and a call
+   * to one is refused before its key is read.
+   *
+   * @example `"openai"`, `"mistral"`, `"ollama"`, `"gemini"`
    */
   provider?: string;
 
@@ -424,6 +430,65 @@ const EMBEDDINGS_BASE_URLS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
+ * Why embedText refuses a provider agentos knows that has no embeddings it
+ * can send to, as the provider's own documentation says (read 2026-10-25):
+ *
+ * - Anthropic: "Anthropic does not offer its own embedding model."
+ *   https://platform.claude.com/docs/en/build-with-claude/embeddings
+ * - Groq: its API reference lists no embeddings endpoint.
+ *   https://console.groq.com/docs/api-reference
+ * - Together AI: "There are currently no embedding models offered via
+ *   serverless." https://docs.together.ai/docs/serverless-models
+ * - xAI: its REST API reference lists no embeddings endpoint.
+ *   https://docs.x.ai/llms.txt
+ * - MiniMax: its API reference names no embedding model.
+ *   https://platform.minimax.io/docs/api-reference
+ *
+ * Third-party listings name an xAI `POST /v1/embeddings` and a MiniMax
+ * `embo-01` endpoint with its own request shape; neither provider's reference
+ * lists them (UNVERIFIED), so neither is sent to.
+ *
+ * Every other provider agentos knows that is not in
+ * {@link EMBEDDINGS_BASE_URLS} and is not Gemini or Ollama (an image
+ * provider, a CLI) is refused as well.
+ */
+const NO_EMBEDDINGS_REASONS: ReadonlyMap<string, string> = new Map([
+  ['anthropic', 'Anthropic publishes no embedding model'],
+  ['groq', 'Groq publishes no embeddings endpoint'],
+  ['together', 'Together AI serves no embedding model'],
+  ['xai', 'xAI publishes no embeddings endpoint'],
+  ['minimax', 'MiniMax publishes no embedding model'],
+]);
+
+/**
+ * The providers embedText embeds with, for its refusals to name: Gemini,
+ * Ollama and those in {@link EMBEDDINGS_BASE_URLS}.
+ */
+function embeddingProviderList(): string {
+  const ids = ['gemini', 'ollama', ...EMBEDDINGS_BASE_URLS.keys()].sort();
+  return `${ids.slice(0, -1).join(', ')} or ${ids[ids.length - 1]}`;
+}
+
+/**
+ * Refuses a provider agentos knows (a key of {@link PROVIDER_DEFAULTS}) that
+ * has no embeddings embedText can send to. It runs before the provider's key
+ * is read or any request is built: the OpenAI-compatible branch would post the
+ * key to a host that is not its provider's (OpenAI's endpoint when no base URL
+ * is set), or post a request to an endpoint that cannot answer it. A provider
+ * agentos does not know is left to the base URL the caller sets.
+ *
+ * @param providerId The provider the call resolved to.
+ * @throws {Error} Saying why the provider has no embeddings, and naming the
+ *   providers that have them.
+ */
+function refuseProviderWithoutEmbeddings(providerId: string): void {
+  if (providerId === 'gemini' || providerId === 'ollama' || EMBEDDINGS_BASE_URLS.has(providerId)) return;
+  if (!Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, providerId)) return;
+  const reason = NO_EMBEDDINGS_REASONS.get(providerId) ?? `agentos knows no embeddings endpoint for provider "${providerId}"`;
+  throw new Error(`${reason}; embed with ${embeddingProviderList()}.`);
+}
+
+/**
  * Whether a `gemini` embedding call should use Gemini's native
  * batchEmbedContents protocol: with no base URL (GeminiProvider's default
  * endpoint) or with Google's own native endpoint. Any other base URL, such as
@@ -488,6 +553,10 @@ function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
  *
  * @throws {Error} When provider resolution fails (missing API key, unknown
  *   provider, etc.).
+ * @throws {Error} When the call resolves to a provider with no embeddings
+ *   embedText can send to (Anthropic, Groq, Together AI, xAI, MiniMax, the
+ *   image providers and the CLIs), whatever its base URL; its key is not read
+ *   and no request is sent.
  * @throws {Error} When the embedding API returns a non-2xx status.
  *
  * @example
@@ -537,6 +606,8 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         // Resolve provider/model using the 'embedding' task type so the
         // correct default model is selected (e.g. text-embedding-3-small).
         const { providerId, modelId } = resolveModelOption(withGeminiEmbeddingDefault(opts), 'embedding');
+        // A provider with no embeddings is refused before its key is read.
+        refuseProviderWithoutEmbeddings(providerId);
         const resolved = resolveProvider(providerId, modelId, {
           apiKey: opts.apiKey,
           baseUrl: opts.baseUrl,
