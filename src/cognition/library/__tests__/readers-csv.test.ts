@@ -40,6 +40,26 @@ describe('readCsv', () => {
     expect(read.breaksMadeSpaces).toBe(false);
   });
 
+  it("reads Excel's first line of sep= and a separator as the separator, and not as a row", () => {
+    const sheet = lines('| Name | Amount |', '| ---- | ------ |', '| Ann  | 12     |');
+    expect(readCsv('sep=;\r\nName;Amount\r\nAnn;12')).toEqual({
+      markdown: sheet,
+      rows: 2,
+      columns: 2,
+      separator: ';',
+      cut: false,
+      breaksMadeSpaces: false,
+      empty: false,
+    });
+    // after a byte order mark, naming a tab, and beside a separator the options name, which wins
+    expect(readCsv('\uFEFFsep=;\nName;Amount\nAnn;12\n')).toMatchObject({ markdown: sheet, separator: ';' });
+    expect(readCsv('sep=\t\nName\tAmount\nAnn\t12')).toMatchObject({ markdown: sheet, separator: '\t' });
+    expect(readCsv('sep=;\nName,Amount\nAnn,12', { separator: ',' })).toMatchObject({ markdown: sheet, rows: 2, separator: ',' });
+    // a text of the line alone has no row, and a line naming a separator the reader does not take is a row
+    expect(readCsv('sep=;\r\n')).toMatchObject({ markdown: '', rows: 0, separator: ';', empty: true });
+    expect(readCsv('sep=|\nName|Amount\n')).toMatchObject({ rows: 2, columns: 1, separator: ',' });
+  });
+
   it('reads tabs, found on the first line or named, and drops a byte order mark', () => {
     const table = lines('| a   | b   |', '| --- | --- |', '| 1   | 2   |');
     const found = readCsv('\uFEFFa\tb\n1\t2\n');
