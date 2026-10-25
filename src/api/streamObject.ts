@@ -404,6 +404,38 @@ function tryParsePartialJson(buffer: string): unknown | undefined {
 }
 
 /**
+ * Parses the text cut back to just after its last comma, opening brace or
+ * opening bracket outside a string, as {@link tryParsePartialJson} parses it.
+ *
+ * Text that ends inside a member that cannot be closed yet (an object key, a
+ * key without its value, a number or literal still being written) does not
+ * parse with its open strings and brackets closed, but the members before
+ * that one do: when a chunk ends inside the first key of the next element of
+ * an array, `[A,B,{"te` is read as `[A,B,{}]`, so `A` and `B` are complete.
+ *
+ * @param buffer - The accumulated JSON text so far.
+ * @returns The parsed value, or `undefined` when the cut text does not parse either.
+ */
+function tryParseBeforeOpenMember(buffer: string): unknown | undefined {
+  let inString = false;
+  let escaped = false;
+  let cut = 0;
+  for (let at = 0; at < buffer.length; at += 1) {
+    const ch = buffer[at];
+    if (escaped) {
+      escaped = false;
+    } else if (ch === '\\') {
+      escaped = true;
+    } else if (ch === '"') {
+      inString = !inString;
+    } else if (!inString && (ch === ',' || ch === '{' || ch === '[')) {
+      cut = at + 1;
+    }
+  }
+  return cut === 0 ? undefined : tryParsePartialJson(buffer.slice(0, cut));
+}
+
+/**
  * Extracts a JSON object from raw text, handling code fences and brace extraction.
  *
  * @param text - The complete raw text to parse.
@@ -754,7 +786,13 @@ export function streamObject<T extends ZodType, K extends string = never>(
 
     // Attempt incremental parse on each token arrival
     const partial = tryParsePartialJson(buffer);
-    if (partial === undefined || typeof partial !== 'object' || partial === null) return;
+    if (partial === undefined || typeof partial !== 'object' || partial === null) {
+      // The text ends inside a member that cannot be closed yet, such as the
+      // first key of the next element: the elements before it are complete,
+      // and a stream cut here keeps them.
+      if (elementSchema !== undefined) collectElements(tryParseBeforeOpenMember(buffer), false);
+      return;
+    }
     // Only act when the parsed shape has actually changed
     const serialized = JSON.stringify(partial);
     if (serialized === lastPartialJson) return;
