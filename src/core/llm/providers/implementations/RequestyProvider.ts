@@ -31,6 +31,13 @@ import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream } 
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 
 /**
+ * Requesty's router base URL, which requests go to when the config names no `baseURL`. `embedText` posts Requesty
+ * embeddings under it too: Requesty serves `POST https://router.requesty.ai/v1/embeddings`
+ * (https://docs.requesty.ai/api-reference/endpoint/embeddings-create, read 2026-10-25).
+ */
+export const REQUESTY_DEFAULT_BASE_URL = 'https://router.requesty.ai/v1';
+
+/**
  * Configuration specific to the RequestyProvider.
  */
 export interface RequestyProviderConfig {
@@ -206,7 +213,7 @@ export class RequestyProvider implements IProvider {
     // by providing defaults for optional fields before freezing.
     this.config = Object.freeze({
       apiKey: config.apiKey,
-      baseURL: config.baseURL || 'https://router.requesty.ai/v1',
+      baseURL: config.baseURL || REQUESTY_DEFAULT_BASE_URL,
       defaultModelId: config.defaultModelId, // Can be undefined, but this.defaultModelId will store it
       siteUrl: config.siteUrl, // Can be undefined
       appName: config.appName, // Can be undefined

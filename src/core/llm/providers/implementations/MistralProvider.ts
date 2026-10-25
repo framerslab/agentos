@@ -62,6 +62,13 @@ function withMistralToolCallIds(messages: ChatMessage[]): ChatMessage[] {
 // ---------------------------------------------------------------------------
 
 /**
+ * Mistral's API base URL, which requests go to when the config names no `baseURL`. `embedText` posts Mistral
+ * embeddings under it too: Mistral serves `POST https://api.mistral.ai/v1/embeddings`
+ * (https://docs.mistral.ai/api/endpoint/embeddings, read 2026-10-25).
+ */
+export const MISTRAL_DEFAULT_BASE_URL = 'https://api.mistral.ai/v1';
+
+/**
  * Configuration for the MistralProvider.
  *
  * @example
@@ -192,7 +199,7 @@ export class MistralProvider implements IProvider {
     // Delegate to OpenAI provider with Mistral's endpoint
     await this.delegate.initialize({
       apiKey: config.apiKey,
-      baseURL: config.baseURL ?? 'https://api.mistral.ai/v1',
+      baseURL: config.baseURL ?? MISTRAL_DEFAULT_BASE_URL,
       defaultModelId: this.defaultModelId,
       requestTimeout: config.requestTimeout ?? 60000,
       // The host's pool options reach the delegate's pool, with this provider's own strategy variable: the strategy
