@@ -230,7 +230,10 @@ function turnsOf(lines: readonly string[], layout: Layout, cut = -1): HeadedTurn
   let afterHeader = false;
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at];
-    const placed = blocks ? !holdsWords(lines[at - 1]) && holdsWords(lines[at + 1]) : !(layout.loose && afterHeader);
+    // Typed: the compiler reads `afterHeader` here from `header` below, which reads `placed`.
+    const placed: boolean = blocks
+      ? !holdsWords(lines[at - 1]) && holdsWords(lines[at + 1])
+      : !(layout.loose && afterHeader);
     const header: Header | null = at === cut || !placed ? null : layout.headerOf(line);
     afterHeader = header !== null;
     if (header !== null) turns.push({ ...header, words: [] });
