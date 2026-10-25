@@ -99,8 +99,8 @@ are forwarded through the Chat Completions API. See the
 MiniMax image generation uses `image-01`, also when `setDefaultProvider()` names a MiniMax text
 model such as `MiniMax-M3.1-Flash`: on the global root and on the China root, an image call drops
 the chat model the default names and takes the provider's image model. MiniMax publishes no
-embedding model, so the `minimax` provider refuses an embedding request before sending it; embed
-with another provider.
+embedding model, so the `minimax` provider and `embedText()` refuse an embedding request before
+sending it; embed with another provider.
 
 ### Inline API Keys
 

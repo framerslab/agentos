@@ -459,6 +459,8 @@ function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
  *
  * @throws {Error} When provider resolution fails (missing API key, unknown
  *   provider, etc.).
+ * @throws {Error} When the call resolves to MiniMax, which publishes no
+ *   embedding model; no request is sent.
  * @throws {Error} When the embedding API returns a non-2xx status.
  *
  * @example
@@ -508,6 +510,14 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         // Resolve provider/model using the 'embedding' task type so the
         // correct default model is selected (e.g. text-embedding-3-small).
         const { providerId, modelId } = resolveModelOption(withGeminiEmbeddingDefault(opts), 'embedding');
+        // MiniMax publishes no embedding model, and MiniMaxProvider refuses an
+        // embedding request whatever its base URL. The call is refused here
+        // too, before its key is read: the OpenAI-compatible branch below would
+        // send the MiniMax key to OpenAI's endpoint, its default, or to the
+        // endpoint a MiniMax global default names.
+        if (providerId === 'minimax') {
+          throw new Error('MiniMax publishes no embedding model; use a dedicated embedding provider.');
+        }
         const resolved = resolveProvider(providerId, modelId, {
           apiKey: opts.apiKey,
           baseUrl: opts.baseUrl,
