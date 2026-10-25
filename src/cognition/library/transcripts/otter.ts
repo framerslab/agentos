@@ -6,7 +6,8 @@
  * Otter writing two spaces after each part of a header. A text whose lines lost the spaces at their ends holds a time
  * alone without them (`0:01`). An export made with neither holds its paragraphs alone. Otter's export of a voice note
  * writes each header as the name, one space and the time, with nothing after it (`Unknown 0:00`). A Word file laid out
- * the same way, each header and paragraph a paragraph of its own, reads by the same headers.
+ * the same way, each header and paragraph a paragraph of its own, reads by the same headers. Otter writes a blank line
+ * after each turn's words, and where a line of words can take a header's form, the blank lines tell the two apart.
  * @module agentos/cognition/library/transcripts/otter
  */
 
@@ -136,10 +137,12 @@ interface Layout {
   opens: boolean;
   /**
    * Whether a line of words can take the header's form, as it can a time with no spaces after it (`2:30`) and a name,
-   * one space and a time (`We meet at 10:30`). The line straight after such a header is that header's words whatever
-   * it holds, since Otter writes a header's words on the line after it. A header of the other layouts heads a turn
-   * wherever it stands, straight after a header too: a name, two spaces and a time, and a time or a name alone with
-   * the two spaces after it, since Otter ends a paragraph's line with one space at most.
+   * one space and a time (`We meet at 10:30`). Such a header heads a turn only where Otter writes one. In a text laid
+   * out in blocks, as {@link inBlocks} reads it, that is the start of a block, with the header's words on the line
+   * straight after it. In a text that is not, it is any line but the one straight after a header, which is that
+   * header's words whatever it holds, since Otter writes a header's words on the line after it. A header of the other
+   * layouts heads a turn wherever it stands, straight after a header too: a name, two spaces and a time, and a time or
+   * a name alone with the two spaces after it, since Otter ends a paragraph's line with one space at most.
    */
   loose: boolean;
   /** Whether the header heads turns only in a text that closes with Otter's closing line. */
@@ -174,11 +177,47 @@ function bodyOf(text: string): { lines: string[]; closed: boolean } {
   return { lines: lines.slice(0, closed ? end - 1 : end), closed };
 }
 
+/** Whether a line holds more than white space; `false` for a place before a text's first line or past its last. */
+function holdsWords(line: string | undefined): boolean {
+  return line !== undefined && line.trim() !== '';
+}
+
+/**
+ * Whether a text is laid out in blocks, as Otter's text is, for a layout whose header a line of words can take. Otter
+ * writes a header's words on the line straight after it and a blank line after each turn's words, the last turn's
+ * before the closing line, so each of its headers after the first stands straight after a blank line. Weighed are the
+ * lines of the header's form after the text's first line that holds words, each with words on the line straight after
+ * it: the text is laid out in blocks when as many of them stand straight after a blank line as straight after a line
+ * that holds words, or more, and one does, a blank line before the closing line counting as one more that does. A
+ * Word file with no empty paragraphs holds no blank line and is not, and neither is one in which fewer of those lines
+ * stand after an empty paragraph than after a paragraph of words.
+ *
+ * @param lines - The text's lines, as {@link bodyOf} keeps them, so a blank line at their end stood before the closing
+ * line.
+ * @param layout - The layout whose headers are weighed.
+ */
+function inBlocks(lines: readonly string[], layout: Layout): boolean {
+  const first = lines.findIndex(holdsWords);
+  if (first === -1) return false;
+  let afterBlank = holdsWords(lines[lines.length - 1]) ? 0 : 1;
+  let afterWords = 0;
+  for (let at = first + 1; at + 1 < lines.length; at += 1) {
+    if (!holdsWords(lines[at + 1]) || layout.headerOf(lines[at]) === null) continue;
+    if (holdsWords(lines[at - 1])) afterWords += 1;
+    else afterBlank += 1;
+  }
+  return afterBlank > 0 && afterBlank >= afterWords;
+}
+
 /**
  * A text's turns by the headers of one layout: each header with its words, the lines after it up to the next header;
- * the lines before the first header are no turn's. In a layout whose header a line of words can take, the line
- * straight after a header is that header's words whatever it holds, and heads no turn; in the others a header heads a
- * turn wherever it stands.
+ * the lines before the first header are no turn's. A header of a layout whose header a line of words can take heads a
+ * turn only where Otter writes one. In a text laid out in blocks, as {@link inBlocks} reads it, that is the start of a
+ * block, the text's first line or one straight after a blank line, with words on the line straight after it, so a
+ * later line of a turn's words heads no turn whatever it holds, and a line of the header's form with a blank line
+ * after it is a paragraph. In a text that is not, as a Word file with no empty paragraphs is not, nothing but its
+ * place tells such a line from a header: the line straight after a header is that header's words, and any other line
+ * of the header's form heads a turn. A header of the other layouts heads a turn wherever it stands.
  *
  * @param lines - The text's lines.
  * @param layout - The layout whose headers are read.
@@ -186,11 +225,13 @@ function bodyOf(text: string): { lines: string[]; closed: boolean } {
  * `-1` for none.
  */
 function turnsOf(lines: readonly string[], layout: Layout, cut = -1): HeadedTurn[] {
+  const blocks = layout.loose && inBlocks(lines, layout);
   const turns: HeadedTurn[] = [];
   let afterHeader = false;
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at];
-    const header: Header | null = at === cut || (layout.loose && afterHeader) ? null : layout.headerOf(line);
+    const placed = blocks ? !holdsWords(lines[at - 1]) && holdsWords(lines[at + 1]) : !(layout.loose && afterHeader);
+    const header: Header | null = at === cut || !placed ? null : layout.headerOf(line);
     afterHeader = header !== null;
     if (header !== null) turns.push({ ...header, words: [] });
     else if (turns.length > 0) turns[turns.length - 1].words.push(line);
@@ -268,6 +309,16 @@ export function isOtterLayout(text: string, options: { cutLastLine?: boolean } =
  * file. A header gives a start and no end, so `durationMs` is `null`. A text with no header, as an export made with
  * neither the names nor the times is, reads as plain lines, one turn a paragraph as Otter writes each on a line of its
  * own, without the closing line; so does a voice note's export without the closing line.
+ *
+ * A line of words can end as a voice note's header does (`We meet at 10:30`). Otter writes a blank line after each
+ * turn's words, so in a text laid out so, its headers standing after a blank line at least as often as after a line of
+ * words, such a line inside a turn, or at the turn's end, is that turn's words. A Word file with no empty paragraphs
+ * holds no blank line, and there such a line straight before the next header reads as a header whose words are that
+ * next header's line: the paragraphs `Unknown 0:00`, `Good morning.`, `We meet at 10:30`, `Unknown 0:09`,
+ * `Shall we start?` and the closing line read as a turn by `Unknown` at 0 ms, `Good morning.`, and one by `We meet at`
+ * at 630,000 ms, `Unknown 0:09 Shall we start?`. Nothing in such a file tells the two apart, and the order of the times
+ * does not either, since a header's words can end in an earlier time: `Unknown 10:30` with the words
+ * `The bus left at 9:09` and `Shall we start?` has the same layout, its times in the same order.
  *
  * @param text - The file's text, its line ends already line feeds.
  * @param format - The format to answer with: `otter`, or `docx` for a Word file's text.

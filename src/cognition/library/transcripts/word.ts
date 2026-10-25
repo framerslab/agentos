@@ -42,7 +42,9 @@ function paragraphLines(text: string): string {
  * share its memory with other data). The text it answers is read with each paragraph a line, by the caller's
  * `layout`, or, without one, by Otter's headers when it is laid out as Otter's export (a header and its words in
  * paragraphs of their own) and otherwise as plain lines, `Name: words` naming the speakers by the shared rule. A Word
- * file with no text reads as no turns.
+ * file with no text reads as no turns. A voice note's export in a Word file with no empty paragraphs holds no blank
+ * line between its turns, so a turn's later paragraph that ends in a time, straight before the next header, reads as a
+ * header, as {@link readOtter} sets out with the input.
  *
  * @param bytes - The Word file's bytes.
  * @param options - The extractor, and the layout when the caller knows it.
