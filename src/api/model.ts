@@ -541,23 +541,52 @@ const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|au
 /**
  * API roots a provider documents for its own service, each serving the
  * provider's own model names: a base URL among them picks a region, not a
- * custom endpoint. MiniMax documents its global root and its China root.
+ * custom endpoint. MiniMax's global root is https://api.minimax.io/v1
+ * (https://platform.minimax.io/docs/api-reference/text-openai-api; images at
+ * https://platform.minimax.io/docs/api-reference/image-generation-t2i). Its
+ * China root here, https://api.minimaxi.com/v1, is UNVERIFIED: MiniMax's China
+ * documentation names https://api.minimax.cn/v1
+ * (https://platform.minimax.cn/docs/api-reference/text-openai-api).
  */
 const PROVIDER_API_ROOTS: Record<string, readonly string[]> = {
   minimax: ['https://api.minimax.io/v1', 'https://api.minimaxi.com/v1'],
 };
 
 /**
+ * `url` as a request built on it is sent: surrounding whitespace and every
+ * trailing slash removed, as MiniMax's image provider removes them before it
+ * appends a path, then parsed as fetch parses a URL, which lowercases the
+ * scheme and the host and drops a default port
+ * (https://url.spec.whatwg.org/#scheme-state,
+ * https://url.spec.whatwg.org/#concept-domain-to-ascii,
+ * https://url.spec.whatwg.org/#port-state). Undefined when nothing is left
+ * or the URL does not parse.
+ */
+function normalizedBaseUrl(url: string): string | undefined {
+  const trimmed = url.trim().replace(/\/+$/, '');
+  if (!trimmed) return undefined;
+  try {
+    return new URL(trimmed).href;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Whether `url` is a base URL other than an API root `provider` documents for
- * its own service (see {@link PROVIDER_API_ROOTS}). Surrounding whitespace and
- * trailing slashes are ignored, as MiniMax's image provider ignores them when
- * it sends. An unset URL, or one that is empty once its whitespace is removed,
- * is not custom: the image providers then send to their own endpoint.
+ * its own service (see {@link PROVIDER_API_ROOTS}). The two are compared as
+ * the request is sent (see {@link normalizedBaseUrl}): the letter case of the
+ * scheme and the host, a default port, surrounding whitespace and trailing
+ * slashes make no difference. An unset URL, or one that is empty once its
+ * whitespace is removed, is not custom: the image providers then send to
+ * their own endpoint. A URL that does not parse is custom, as any other is.
  */
 function isCustomBaseUrl(provider: string | undefined, url: unknown): boolean {
   if (typeof url !== 'string' || !url.trim()) return false;
   const roots = provider ? PROVIDER_API_ROOTS[provider] : undefined;
-  return !roots?.includes(url.trim().replace(/\/+$/, ''));
+  if (!roots) return true;
+  const sent = normalizedBaseUrl(url);
+  return sent === undefined || !roots.some((root) => normalizedBaseUrl(root) === sent);
 }
 
 /**

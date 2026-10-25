@@ -40,7 +40,10 @@ export interface GlobalDefaultProvider {
    * string from the call or here is that URL, so the env var is not read,
    * and it names the provider's own endpoint. MiniMax's two API roots,
    * `https://api.minimax.io/v1` and the China root
-   * `https://api.minimaxi.com/v1`, are its own endpoint, not a custom one.
+   * `https://api.minimaxi.com/v1`, are its own endpoint, not a custom one,
+   * compared as fetch sends the URL: the letter case of the scheme and the
+   * host, a default port, surrounding whitespace and trailing slashes make
+   * no difference.
    */
   model?: string;
   /** API key used when no inline override is supplied. */

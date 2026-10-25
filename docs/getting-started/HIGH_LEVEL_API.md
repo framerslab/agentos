@@ -98,7 +98,8 @@ are forwarded through the Chat Completions API. See the
 [MiniMax OpenAI API reference](https://platform.minimax.io/docs/api-reference/text-openai-api).
 MiniMax image generation uses `image-01`, also when `setDefaultProvider()` names a MiniMax text
 model such as `MiniMax-M3.1-Flash`: on the global root and on the China root, an image call drops
-the chat model the default names and takes the provider's image model. An empty `baseUrl` on the
+the chat model the default names and takes the provider's image model. A root counts as one in any
+letter case of its scheme and host, as fetch lowercases them. An empty `baseUrl` on the
 call or the default is the URL the call is sent with, ahead of `MINIMAX_BASE_URL`, so the call goes
 to the global root and takes `image-01` there too. MiniMax publishes no
 embedding model, so the `minimax` provider and `embedText()` refuse an embedding request before
