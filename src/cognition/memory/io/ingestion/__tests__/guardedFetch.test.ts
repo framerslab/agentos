@@ -483,7 +483,10 @@ describe('guardedFetch', () => {
 
     it("keeps what a failing rule threw out of the error's enumerable keys, as a native error's cause is", async () => {
       // What a rule throws can name an internal address. The message leaves
-      // it out, and so must a log line that serializes or spreads the error.
+      // it out, and so do `Object.keys`, a spread and `JSON.stringify`. Error
+      // serializers and `util.inspect` read `cause` by name, as they read a
+      // native error's, so a host that logs these errors decides what its
+      // rule throws.
       const thrown = 'blocklist at 10.0.0.53 timed out';
       const failing = (): boolean => {
         throw thrown;
@@ -496,6 +499,7 @@ describe('guardedFetch', () => {
       const refusal = outcome as GuardedFetchError;
       expect(refusal.cause).toBe(thrown);
       expect(Object.keys(refusal)).not.toContain('cause');
+      expect({ ...refusal }).not.toHaveProperty('cause');
       expect(JSON.parse(JSON.stringify(refusal))).not.toHaveProperty('cause');
       expect(Object.getOwnPropertyDescriptor(refusal, 'cause')).toEqual({ value: thrown, writable: true, enumerable: false, configurable: true });
       // A refusal for any other reason has no cause at all.
