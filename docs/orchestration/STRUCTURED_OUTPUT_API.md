@@ -143,7 +143,7 @@ console.log(await skipped, await reportedUsage);
 - An element is complete once the next element begins, and the last one when the stream ends with text that parses, so a reply cut off at the token limit never yields its unfinished last element.
 - Each element is parsed by the array's element schema and yielded as the value the schema parses it to. An element that fails the schema is skipped, and `skipped` resolves to the number skipped when the stream ends.
 - `elements` names a top-level field of the schema that holds an array; an optional, nullable or default array counts. Any other name throws a `TypeError` at the call, before a request is sent.
-- When the stream fails, `elementStream` throws the stream's error after the elements completed before it, so a failed answer never reads as a finished one. When `abortSignal` aborts, the iteration ends.
+- When the stream fails, `elementStream` throws the stream's error after the elements completed before it, so a failed answer never reads as a finished one. A reader of `elementStream` that starts after every iterable that was read stopped before the end throws `ObjectGenerationError` (`Stream interrupted: ...`) after the elements completed before the stop. When `abortSignal` aborts, the iteration ends.
 - Without `elements`, `elementStream` yields nothing and `skipped` resolves to 0.
 
 ---

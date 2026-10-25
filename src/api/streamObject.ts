@@ -235,7 +235,10 @@ export interface StreamObjectResult<T, E = unknown> {
    *
    * When the stream fails, the iteration throws the stream's error after the
    * elements completed before it, so a failed answer never reads as a
-   * finished one. When `abortSignal` aborts, the iteration ends.
+   * finished one. A reader that starts after every iterable that was read
+   * stopped before the end throws {@link ObjectGenerationError}
+   * (`Stream interrupted: ...`) after the elements completed before the stop.
+   * When `abortSignal` aborts, the iteration ends.
    *
    * @example
    * ```ts
@@ -556,6 +559,9 @@ type StreamEnding =
 /** Where the reader of one of the result's iterables is: not started, reading, or stopped before the end. */
 type ReaderState = 'unread' | 'reading' | 'stopped';
 
+/** What `Stream interrupted: ` names when every reader stopped before the stream ended. */
+const STOPPED_READING = 'reading stopped before the stream ended';
+
 /**
  * Streams a structured object by incrementally parsing JSON as the LLM
  * produces tokens, then validates the final result against a Zod schema.
@@ -863,7 +869,7 @@ export function streamObject<T extends ZodType, K extends string = never>(
           end.kind === 'aborted'
             ? opts.abortSignal?.reason
             : new ObjectGenerationError(
-                `Stream interrupted: ${end.kind === 'failed' ? end.error.message : 'reading stopped before the stream ended'}`,
+                `Stream interrupted: ${end.kind === 'failed' ? end.error.message : STOPPED_READING}`,
                 buffer
               )
         );
@@ -968,6 +974,11 @@ export function streamObject<T extends ZodType, K extends string = never>(
           ended = true;
           // A failed answer never reads as a finished one.
           if (ending.kind === 'failed') throw ending.error;
+          // Nor does one whose request was closed because every reader
+          // stopped before the end: this reader started after them.
+          if (ending.kind === 'abandoned') {
+            throw new ObjectGenerationError(`Stream interrupted: ${STOPPED_READING}`, buffer);
+          }
           return;
         }
         await advance();
