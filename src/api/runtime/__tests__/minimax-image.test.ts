@@ -190,6 +190,48 @@ describe("MiniMax image API integration", () => {
     },
   );
 
+  const rootSpellings: Array<[string, string]> = [
+    ["HTTPS://API.MINIMAX.IO/v1", "https://api.minimax.io/v1/image_generation"],
+    ["HTTPS://API.MINIMAXI.COM/v1", "https://api.minimaxi.com/v1/image_generation"],
+    ["https://Api.MiniMax.io:443/v1/", "https://api.minimax.io/v1/image_generation"],
+  ];
+
+  it.each(rootSpellings)(
+    "generates with image-01 when MINIMAX_BASE_URL is %s, which fetch sends to %s",
+    async (baseUrl, sentTo) => {
+      // fetch parses the URL as the URL Standard does: it lowercases the
+      // scheme and the host and drops the default port, so the request
+      // reaches MiniMax's own API, where the chat model cannot make images.
+      vi.stubEnv("MINIMAX_BASE_URL", baseUrl);
+      setDefaultProvider({
+        provider: "minimax",
+        model: "MiniMax-M3.1-Flash",
+        apiKey: "default-key",
+      });
+      const result = await generateImage({ prompt: "A lighthouse" });
+      expect(result.model).toBe("image-01");
+      const [url, init] = vi.mocked(fetch).mock.calls[0];
+      expect(new URL(String(url)).href).toBe(sentTo);
+      expect(JSON.parse(String(init?.body)).model).toBe("image-01");
+    },
+  );
+
+  it("keeps the default's model on a host that only begins with MiniMax's", async () => {
+    // A host in capitals is MiniMax's own only when it is MiniMax's host; a
+    // longer one is a custom endpoint, which may serve any model under any name.
+    vi.stubEnv("MINIMAX_BASE_URL", "HTTPS://API.MINIMAX.IO.GATEWAY.TEST/v1");
+    setDefaultProvider({
+      provider: "minimax",
+      model: "MiniMax-M3.1-Flash",
+      apiKey: "default-key",
+    });
+    const result = await generateImage({ prompt: "A lighthouse" });
+    expect(result.model).toBe("MiniMax-M3.1-Flash");
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(new URL(String(url)).href).toBe("https://api.minimax.io.gateway.test/v1/image_generation");
+    expect(JSON.parse(String(init?.body)).model).toBe("MiniMax-M3.1-Flash");
+  });
+
   it("keeps the default's model on the custom endpoint the default names when MINIMAX_BASE_URL is the China root", async () => {
     // The call goes to the default's custom endpoint, ahead of the root in the
     // environment, and a custom endpoint may serve any model under any name.
