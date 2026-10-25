@@ -77,6 +77,11 @@ function answer(request: IncomingMessage, response: ServerResponse): void {
     // A page that sends its reader on to a provider's own site.
     response.writeHead(302, { location: 'https://docs.google.com/document/d/x/edit' });
     response.end();
+  } else if (path === '/to-nat64') {
+    // A page that sends its reader on to a public IPv4 address written under
+    // the well-known NAT64 prefix, on the default port.
+    response.writeHead(302, { location: 'http://[64:ff9b::93.184.215.14]/page' });
+    response.end();
   } else if (path === '/untyped') {
     // No Content-Type at all, as some file servers answer.
     response.writeHead(200);
@@ -325,6 +330,18 @@ describe('guardedFetch', () => {
         // IPv4-mapped: a connection to it goes to the IPv4 address it carries.
         'http://[::ffff:93.184.215.14]/page',
         'http://[::FFFF:5DB8:D70E]/page',
+        // Under the well-known NAT64 prefix: a NAT64 gateway connects it to
+        // the IPv4 address it carries.
+        'http://[64:ff9b::93.184.215.14]/page',
+        'http://[64:FF9B:0:0:0:0:5DB8:D70E]/page',
+        // The parser folds zero groups into `::`, leaving one group or none.
+        'http://[64:ff9b::0.0.215.14]/page',
+        'http://[64:ff9b::0.0.0.0]/page',
+        // In hex like any other IPv6 address: the local-use prefix
+        // 64:ff9b:1::/48, and a NAT64 prefix of the network's own, which the
+        // fetch learns from the resolver after the rule has answered.
+        'http://[64:ff9b:1::5db8:d70e]/page',
+        'http://[2600:1f14:abcd::5db8:d70e]/page',
       ];
       for (const address of addresses) {
         expect(await reasonOf(guardedFetch(address, reach({ resolve: lookup.resolve, allowHost: refusingAll }))), address).toBe('host');
@@ -336,31 +353,51 @@ describe('guardedFetch', () => {
         '93.184.215.14',
         '93.184.215.14',
         '93.184.215.14',
+        '93.184.215.14',
+        '93.184.215.14',
+        '0.0.215.14',
+        '0.0.0.0',
+        '64:ff9b:1::5db8:d70e',
+        '2600:1f14:abcd::5db8:d70e',
       ]);
       expect(lookup.lookups()).toBe(0);
     });
 
-    it('refuses an IPv4 address the rule refuses when the address writes it inside IPv6, before any lookup or connection', async () => {
+    it.each([
+      ['IPv4-mapped', 'http://[::ffff:93.184.215.14]/page'],
+      ['under the well-known NAT64 prefix', 'http://[64:ff9b::93.184.215.14]/page'],
+    ])('refuses an IPv4 address the rule refuses when the address writes it inside IPv6, %s, before any lookup or connection', async (_form, address) => {
       // Blocked, so no case reaches past this machine if the check regresses.
       const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
         throw new Error('unexpected connection');
       });
       try {
         const lookup = counting();
-        const mapped = 'http://[::ffff:93.184.215.14]/page';
         /** A caller's blocklist of one public address. */
         const notThatAddress = (host: string): boolean => host !== '93.184.215.14';
-        expect(await reasonOf(guardedFetch(mapped, reach({ resolve: lookup.resolve, allowHost: notThatAddress, allowPorts: [80] })))).toBe('host');
+        expect(await reasonOf(guardedFetch(address, reach({ resolve: lookup.resolve, allowHost: notThatAddress, allowPorts: [80] })))).toBe('host');
         expect(lookup.lookups()).toBe(0);
         expect(connect).not.toHaveBeenCalled();
         // An allow-list of the same address reads it: the address check
         // passes, and the connection, blocked here, is the next step.
         const onlyThatAddress = (host: string): boolean => host === '93.184.215.14';
-        expect(await reasonOf(guardedFetch(mapped, reach({ allowHost: onlyThatAddress, allowPorts: [80] })))).toBe('network');
+        expect(await reasonOf(guardedFetch(address, reach({ allowHost: onlyThatAddress, allowPorts: [80] })))).toBe('network');
         expect(connect).toHaveBeenCalled();
       } finally {
         connect.mockRestore();
       }
+    });
+
+    it('asks about a redirect to an address under the well-known NAT64 prefix as the IPv4 address it carries', async () => {
+      const seen: string[] = [];
+      /** A caller's blocklist of one public address, recording each host it is asked about. */
+      const notThatAddress = (host: string): boolean => {
+        seen.push(host);
+        return host !== '93.184.215.14';
+      };
+      // Refused at the redirect, before its port is checked or its address connected to.
+      expect(await reasonOf(guardedFetch(at('/to-nat64'), reach({ allowHost: notThatAddress })))).toBe('host');
+      expect(seen).toEqual(['pages.test', '93.184.215.14']);
     });
 
     it('refuses a redirect to such a host at the redirect: the first request made, the second not', async () => {
@@ -399,17 +436,18 @@ describe('guardedFetch', () => {
         expect(await reasonOf(guardedFetch(address, reach({ allowHost: everything, allowAddresses: [] }))), address).toBe('address');
       }
       // An IPv6 literal reaches the rule without its brackets, an IPv4-mapped
-      // one as the IPv4 address it carries, and each is still refused by its address.
+      // one and one under the well-known NAT64 prefix as the IPv4 address it
+      // carries, and each is still refused by its address.
       const seen: string[] = [];
       const recording = (host: string) => {
         seen.push(host);
         return true;
       };
-      for (const host of ['[fd00::1]', '[::ffff:7f00:1]']) {
+      for (const host of ['[fd00::1]', '[::ffff:7f00:1]', '[64:ff9b::7f00:1]']) {
         const address = `http://${host}:${port}/page`;
         expect(await reasonOf(guardedFetch(address, reach({ allowHost: recording, allowAddresses: [] }))), address).toBe('address');
       }
-      expect(seen).toEqual(['fd00::1', '127.0.0.1']);
+      expect(seen).toEqual(['fd00::1', '127.0.0.1', '127.0.0.1']);
       // The scheme and the port hold too.
       expect(await reasonOf(guardedFetch('ftp://pages.test/notes', reach({ allowHost: everything })))).toBe('scheme');
       expect(await reasonOf(guardedFetch('http://pages.test:8080/', reach({ allowHost: everything })))).toBe('port');
@@ -445,7 +483,10 @@ describe('guardedFetch', () => {
 
     it("keeps what a failing rule threw out of the error's enumerable keys, as a native error's cause is", async () => {
       // What a rule throws can name an internal address. The message leaves
-      // it out, and so must a log line that serializes or spreads the error.
+      // it out, and so do `Object.keys`, a spread and `JSON.stringify`. Error
+      // serializers and `util.inspect` read `cause` by name, as they read a
+      // native error's, so a host that logs these errors decides what its
+      // rule throws.
       const thrown = 'blocklist at 10.0.0.53 timed out';
       const failing = (): boolean => {
         throw thrown;
@@ -458,6 +499,7 @@ describe('guardedFetch', () => {
       const refusal = outcome as GuardedFetchError;
       expect(refusal.cause).toBe(thrown);
       expect(Object.keys(refusal)).not.toContain('cause');
+      expect({ ...refusal }).not.toHaveProperty('cause');
       expect(JSON.parse(JSON.stringify(refusal))).not.toHaveProperty('cause');
       expect(Object.getOwnPropertyDescriptor(refusal, 'cause')).toEqual({ value: thrown, writable: true, enumerable: false, configurable: true });
       // A refusal for any other reason has no cause at all.
