@@ -14,6 +14,10 @@
 import { resolveModelOption, resolveProvider } from './model.js';
 import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { GeminiProvider } from '../core/llm/providers/implementations/GeminiProvider.js';
+import { MISTRAL_DEFAULT_BASE_URL } from '../core/llm/providers/implementations/MistralProvider.js';
+import { OPENAI_DEFAULT_BASE_URL } from '../core/llm/providers/implementations/OpenAIProvider.js';
+import { OPENROUTER_DEFAULT_BASE_URL } from '../core/llm/providers/implementations/OpenRouterProvider.js';
+import { REQUESTY_DEFAULT_BASE_URL } from '../core/llm/providers/implementations/RequestyProvider.js';
 import { GeminiProviderError } from '../core/llm/providers/errors/GeminiProviderError.js';
 import { getDefaultProvider } from './runtime/global-default.js';
 import { GEMINI_DEFAULT_EMBEDDING_MODEL } from './runtime/provider-defaults.js';
@@ -395,6 +399,31 @@ async function callOllamaEmbed(
 // ---------------------------------------------------------------------------
 
 /**
+ * The providers whose own documentation names an OpenAI-compatible embeddings
+ * endpoint (`POST <base URL>/embeddings`, `model` and `input` in,
+ * `data[].embedding` out), each with that base URL as its provider
+ * implementation records it. A request for one of them goes there, or to the
+ * base URL the caller set (the call's `baseUrl`, the global default's, or the
+ * provider's base-URL variable), and never to another provider's host. Read on
+ * 2026-10-25:
+ *
+ * - OpenAI, `POST https://api.openai.com/v1/embeddings`:
+ *   https://developers.openai.com/api/reference/resources/embeddings/methods/create
+ * - OpenRouter, `POST https://openrouter.ai/api/v1/embeddings`:
+ *   https://openrouter.ai/docs/api/api-reference/embeddings/submit-an-embedding-request
+ * - Mistral, `POST https://api.mistral.ai/v1/embeddings`:
+ *   https://docs.mistral.ai/api/endpoint/embeddings
+ * - Requesty, `POST https://router.requesty.ai/v1/embeddings`:
+ *   https://docs.requesty.ai/api-reference/endpoint/embeddings-create
+ */
+const EMBEDDINGS_BASE_URLS: ReadonlyMap<string, string> = new Map([
+  ['openai', OPENAI_DEFAULT_BASE_URL],
+  ['openrouter', OPENROUTER_DEFAULT_BASE_URL],
+  ['mistral', MISTRAL_DEFAULT_BASE_URL],
+  ['requesty', REQUESTY_DEFAULT_BASE_URL],
+]);
+
+/**
  * Whether a `gemini` embedding call should use Gemini's native
  * batchEmbedContents protocol: with no base URL (GeminiProvider's default
  * endpoint) or with Google's own native endpoint. Any other base URL, such as
@@ -581,12 +610,9 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             ...(result.usage.costUSD !== undefined ? { costUSD: result.usage.costUSD } : {}),
           };
         } else {
-          // OpenAI, OpenRouter, and any OpenAI-compatible provider
-          const baseUrl = resolved.baseUrl ?? (
-            resolved.providerId === 'openrouter'
-              ? 'https://openrouter.ai/api/v1'
-              : 'https://api.openai.com/v1'
-          );
+          // The base URL the caller set, else the provider's own documented
+          // embeddings endpoint, else OpenAI's.
+          const baseUrl = resolved.baseUrl ?? EMBEDDINGS_BASE_URLS.get(resolved.providerId) ?? OPENAI_DEFAULT_BASE_URL;
 
           if (!resolved.apiKey) {
             throw new Error(`No API key available for embedding provider "${resolved.providerId}".`);
