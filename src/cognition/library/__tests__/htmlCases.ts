@@ -610,6 +610,30 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: "a form's controls keep the words on either side of them a space apart, labels written with no white space between them among them",
+    html: lines(
+      '<form><label>Name</label><input><label>Email</label><input></form>',
+      '<p>Size<select><option>Small</option></select>Color<button type="button">Pick</button>Note<textarea>Typed</textarea>End</p>',
+      '<ul><li>Agree<input type="checkbox">today</li></ul>',
+    ),
+    title: null,
+    markdown: lines('Name Email', '', 'Size Color Note End', '', '- Agree today'),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: 'an image, a frame, media, a drawing or a formula keeps the words on either side of it a space apart, and none of its own words is read',
+    html: lines(
+      '<p>See<img src="map.png" alt="the map">below<iframe src="map.html"></iframe>or<svg viewBox="0 0 1 1"><text x="0" y="1">Pin</text></svg>' +
+        'call<math><mi>x</mi></math>us<video src="tour.mp4">No video</video>today</p>',
+      '<ul><li>Step<img src="step.png">one<canvas>Chart</canvas>done</li></ul>',
+    ),
+    title: null,
+    markdown: lines('See below or call us today', '', '- Step one done'),
+    images: 2,
+    cut: false,
+  },
+  {
     name: "a header inside an article is the article's, and the heading it holds is read",
     html: '<title>Blog</title><article><header><h1>Ten days in Lyon</h1><p>By Ann</p></header><p>We arrived.</p></article>',
     title: 'Blog',
