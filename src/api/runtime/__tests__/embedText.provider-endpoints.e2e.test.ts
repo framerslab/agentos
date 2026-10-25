@@ -3,8 +3,9 @@
  * Where embedText sends a provider's key. A provider whose own documentation
  * names an OpenAI-compatible embeddings endpoint gets its key posted to that
  * endpoint, or to the base URL the caller set (the call's `baseUrl`, the
- * global default's, or the provider's base-URL variable); no key goes to
- * another provider's host.
+ * global default's, or the provider's base-URL variable); a provider with no
+ * embeddings is refused before any request is built; no key goes to another
+ * provider's host.
  *
  * Drives the public embedText entry point with only fetch stubbed: the
  * provider, its key and its base URL resolve from the call, the global
@@ -13,7 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { embedText, type EmbedTextOptions } from '../../embedText.js';
-import { clearDefaultProvider } from '../global-default.js';
+import { clearDefaultProvider, setDefaultProvider } from '../global-default.js';
 
 /** Every key and base-URL variable a case could read; each case sets the ones it needs. */
 const PROVIDER_VARIABLES = [
@@ -57,6 +58,18 @@ interface SentTo {
   url: string;
   /** The key its Authorization header must carry. */
   key: string;
+}
+
+/** A call embedText must refuse before it builds any request. */
+interface Refused {
+  /** What the case shows, for its title. */
+  label: string;
+  /** The call's options. */
+  target: Target;
+  /** The variables set for the call. */
+  env: Record<string, string>;
+  /** Part of the error the call must reject with. */
+  error: string;
 }
 
 /** An OpenAI-shaped embeddings answer for the model the request named. */
@@ -172,5 +185,115 @@ describe("embedText posts a key to its provider's own embeddings endpoint", () =
     await embedText({ ...target, input: 'hello' });
 
     expect(requestsSent()).toEqual([{ url, authorization: `Bearer ${key}` }]);
+  });
+});
+
+describe('embedText refuses a provider with no embeddings before any request', () => {
+  it.each<Refused>([
+    {
+      label: 'Anthropic with its key set',
+      target: { provider: 'anthropic', model: 'embedding-model' },
+      env: { ANTHROPIC_API_KEY: 'anthropic-test-key' },
+      error: 'Anthropic publishes no embedding model',
+    },
+    {
+      // Text calls on Anthropic fall back to OpenRouter without an Anthropic key.
+      label: 'Anthropic when only an OpenRouter key is set',
+      target: { provider: 'anthropic', model: 'embedding-model' },
+      env: { OPENROUTER_API_KEY: 'openrouter-test-key' },
+      error: 'Anthropic publishes no embedding model',
+    },
+    {
+      label: 'Groq',
+      target: { provider: 'groq', model: 'embedding-model' },
+      env: { GROQ_API_KEY: 'groq-test-key' },
+      error: 'Groq publishes no embeddings endpoint',
+    },
+    {
+      label: 'Groq at the base URL the call sets',
+      target: { provider: 'groq', model: 'embedding-model', baseUrl: 'https://api.groq.com/openai/v1' },
+      env: { GROQ_API_KEY: 'groq-test-key' },
+      error: 'Groq publishes no embeddings endpoint',
+    },
+    {
+      label: 'Together AI',
+      target: { provider: 'together', model: 'embedding-model' },
+      env: { TOGETHER_API_KEY: 'together-test-key' },
+      error: 'Together AI serves no embedding model',
+    },
+    {
+      label: 'xAI',
+      target: { provider: 'xai', model: 'embedding-model' },
+      env: { XAI_API_KEY: 'xai-test-key' },
+      error: 'xAI publishes no embeddings endpoint',
+    },
+    {
+      label: 'MiniMax',
+      target: { provider: 'minimax', model: 'embedding-model' },
+      env: { MINIMAX_API_KEY: 'minimax-test-key' },
+      error: 'MiniMax publishes no embedding model',
+    },
+    {
+      label: 'a minimax: model id',
+      target: { model: 'minimax:embedding-model' },
+      env: { MINIMAX_API_KEY: 'minimax-test-key' },
+      error: 'MiniMax publishes no embedding model',
+    },
+    {
+      label: 'Stability AI',
+      target: { provider: 'stability', model: 'embedding-model' },
+      env: { STABILITY_API_KEY: 'stability-test-key' },
+      error: 'agentos knows no embeddings endpoint for provider "stability"',
+    },
+    {
+      label: 'Replicate',
+      target: { provider: 'replicate', model: 'embedding-model' },
+      env: { REPLICATE_API_TOKEN: 'replicate-test-token' },
+      error: 'agentos knows no embeddings endpoint for provider "replicate"',
+    },
+    {
+      label: 'fal',
+      target: { provider: 'fal', model: 'embedding-model' },
+      env: { FAL_API_KEY: 'fal-test-key' },
+      error: 'agentos knows no embeddings endpoint for provider "fal"',
+    },
+    {
+      label: 'Black Forest Labs',
+      target: { provider: 'bfl', model: 'embedding-model' },
+      env: { BFL_API_KEY: 'bfl-test-key' },
+      error: 'agentos knows no embeddings endpoint for provider "bfl"',
+    },
+    {
+      label: 'a local Stable Diffusion server, given a key',
+      target: { provider: 'stable-diffusion-local', model: 'embedding-model', apiKey: 'sd-local-test-key' },
+      env: {},
+      error: 'agentos knows no embeddings endpoint for provider "stable-diffusion-local"',
+    },
+    {
+      label: 'the Claude Code CLI',
+      target: { provider: 'claude-code-cli', model: 'embedding-model' },
+      env: {},
+      error: 'agentos knows no embeddings endpoint for provider "claude-code-cli"',
+    },
+    {
+      label: 'the Gemini CLI',
+      target: { provider: 'gemini-cli', model: 'embedding-model' },
+      env: {},
+      error: 'agentos knows no embeddings endpoint for provider "gemini-cli"',
+    },
+  ])('refuses $label', async ({ target, env, error }) => {
+    setEnv(env);
+
+    await expect(embedText({ ...target, input: 'hello' })).rejects.toThrow(error);
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses a global default that names a provider with no embeddings', async () => {
+    setDefaultProvider({ provider: 'together', model: 'embedding-model', apiKey: 'together-default-key' });
+
+    await expect(embedText({ input: 'hello' })).rejects.toThrow('Together AI serves no embedding model');
+
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
