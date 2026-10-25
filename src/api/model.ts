@@ -533,10 +533,11 @@ const PROVIDER_API_ROOTS: Record<string, readonly string[]> = {
  * Whether `url` is a base URL other than an API root `provider` documents for
  * its own service (see {@link PROVIDER_API_ROOTS}). Surrounding whitespace and
  * trailing slashes are ignored, as MiniMax's image provider ignores them when
- * it sends. An unset or empty URL is not custom.
+ * it sends. An unset URL, or one that is empty once its whitespace is removed,
+ * is not custom: the image providers then send to their own endpoint.
  */
 function isCustomBaseUrl(provider: string | undefined, url: unknown): boolean {
-  if (typeof url !== 'string' || !url) return false;
+  if (typeof url !== 'string' || !url.trim()) return false;
   const roots = provider ? PROVIDER_API_ROOTS[provider] : undefined;
   return !roots?.includes(url.trim().replace(/\/+$/, ''));
 }
