@@ -17,8 +17,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { embedText, type EmbedTextOptions } from '../../embedText.js';
 import { clearDefaultProvider, setDefaultProvider } from '../global-default.js';
 
-/** Every key and base-URL variable a case could read; each case sets the ones it needs. */
+/**
+ * Every key and base-URL variable a case could read, each case setting the ones
+ * it needs, and the usage-ledger paths, so the calls these cases make record
+ * nothing in a ledger the environment names.
+ */
 const PROVIDER_VARIABLES = [
+  'AGENTOS_USAGE_LEDGER_PATH',
+  'WUNDERLAND_USAGE_LEDGER_PATH',
   'OPENAI_API_KEY',
   'OPENAI_BASE_URL',
   'OPENROUTER_API_KEY',
