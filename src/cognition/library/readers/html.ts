@@ -232,6 +232,31 @@ const BLOCK_LEVEL = new Set([
   'nav',
 ]);
 
+/**
+ * The elements a page draws in a line as a box, whose words are not read: HTML's embedded content
+ * (https://html.spec.whatwg.org/multipage/dom.html#embedded-content-2), images, frames, media, drawings and formulas
+ * among it, and a form's controls (https://html.spec.whatwg.org/multipage/rendering.html#widgets). Each, read or left
+ * out, is a space between the words on either side of it, as a block's edges are, so
+ * `<label>Name</label><input><label>Email</label>` reads `Name Email`. An input of type hidden and an audio element with
+ * no controls, which a page draws as nothing, are a space as well, as a hidden block's edges are. Code keeps its
+ * characters as written, with nothing added for one.
+ */
+const BOXES = new Set([
+  'audio',
+  'canvas',
+  'embed',
+  'iframe',
+  'img',
+  'math',
+  'object',
+  'svg',
+  'video',
+  'button',
+  'input',
+  'select',
+  'textarea',
+]);
+
 /** What a cell of a table holds that marks the table as one laid out for the page, not a table of data. */
 const LAYOUT = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'blockquote', 'hr', ...PREFORMATTED]);
 
@@ -386,10 +411,10 @@ interface LineHooks {
 }
 
 /**
- * An element's content read as one line of words: a line break, and a block's edges, those of a code block, of a list
- * handed to `hooks.list`, of a block left out and of a first `h1` whose words gave the title among them, as one space;
- * code as inline code; images counted. A list inside it goes to `hooks.list` where given, with the marks of the elements
- * around it, and is read into the line otherwise.
+ * An element's content read as one line of words: a line break, a box of `BOXES`, and a block's edges, those of a code
+ * block, of a list handed to `hooks.list`, of a block left out and of a first `h1` whose words gave the title among
+ * them, as one space; code as inline code; images counted. A list inside it goes to `hooks.list` where given, with the
+ * marks of the elements around it, and is read into the line otherwise.
  */
 function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineHooks = {}): MarkedRun[] {
   const line: MarkedRun[] = [];
@@ -401,12 +426,13 @@ function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineH
     if (current.nodeType !== ELEMENT_NODE) return;
     const name = nameOf(current);
     if (skipped(current, name, reading)) {
-      // a block left out still keeps the words on either side of it a space apart
-      if (BLOCK_LEVEL.has(name)) addWords(line, ' ', at, false);
+      // a block or a box left out still keeps the words on either side of it a space apart
+      if (BLOCK_LEVEL.has(name) || BOXES.has(name)) addWords(line, ' ', at, false);
       return;
     }
     if (name === 'img') {
       reading.images += 1;
+      addWords(line, ' ', at, false);
       return;
     }
     if (name === 'br') {
@@ -415,6 +441,7 @@ function lineOf(node: HtmlNodeLike, marks: Marks, reading: Reading, hooks: LineH
     }
     if (name === 'input') {
       hooks.checkbox?.(current, line.length === 0);
+      addWords(line, ' ', at, false);
       return;
     }
     if (hooks.list !== undefined && LISTS.has(name)) {
@@ -780,7 +807,7 @@ function readTable(table: HtmlNodeLike, flow: Flow, marks: Marks, reading: Readi
 
 /**
  * Reads a node into the flow of blocks: an element by what it is, text into the paragraph being gathered, which a block
- * left out ends as a block read does.
+ * left out ends as a block read does, and in which a box of `BOXES`, read or left out, is a space.
  */
 function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading, root = false): void {
   if (isText(node)) {
@@ -796,6 +823,7 @@ function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading
   // the element a caller hands over is read whatever it is; only what it holds can be left out
   if (!root && skipped(node, name, reading)) {
     if (BLOCK_LEVEL.has(name)) flow.flush();
+    else if (BOXES.has(name)) flow.text(' ', marks, false);
     return;
   }
   const level = headingLevel(name);
@@ -834,6 +862,11 @@ function readInto(node: HtmlNodeLike, flow: Flow, marks: Marks, reading: Reading
   }
   if (name === 'img') {
     reading.images += 1;
+    flow.text(' ', marks, false);
+    return;
+  }
+  if (name === 'input') {
+    flow.text(' ', marks, false);
     return;
   }
   if (CODE.has(name)) {
@@ -1185,9 +1218,10 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
  * and formulas in MathML, and any element marked `hidden`, `aria-hidden="true"` or styled `display: none`. A `header`,
  * `footer` or `aside` is the page's own when no `article` or `section` holds it; inside one, it is that article's or
  * section's and is read with it, and an `article` or `section` handed over holds its own the same way. A `form` is read
- * as the blocks it holds. Comments are not read. An element handed over is read as a document is, whatever its own
- * name, but an `svg` or `math` element handed over takes no title from a `<title>` in it, which is the drawing's or the
- * formula's.
+ * as the blocks it holds. A form's control, an image and the rest of HTML's embedded content are each a space between
+ * the words on either side of them, outside code. Comments are not read. An element handed over is read as a document
+ * is, whatever its own name, but an `svg` or `math` element handed over takes no title from a `<title>` in it, which is
+ * the drawing's or the formula's.
  *
  * @param document - A parsed document, or an element, as a page's `DOMParser` gives it; nothing is fetched.
  * @param options - The bounds on the Markdown and on each table.
