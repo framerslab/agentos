@@ -131,7 +131,7 @@ interface Layout {
   headerOf: (line: string) => Header | null;
   /**
    * Whether the header is a weaker sign than a name, two spaces and a time, as a time alone, a name alone and a voice
-   * note's header are. Such a header heads turns only in an export that opens with one.
+   * note's header are. Such a header heads turns only in an export that opens with one, as {@link opensWith} reads it.
    */
   opens: boolean;
   /**
@@ -199,23 +199,39 @@ function turnsOf(lines: readonly string[], layout: Layout, cut = -1): HeadedTurn
 }
 
 /**
+ * Whether a text opens with a header of one layout: the first of its lines that holds more than white space is such a
+ * header, and, in a layout whose header a line of words can take, the line straight after it holds that header's
+ * words, as Otter writes a header's words. Each paragraph of an export made with neither the names nor the times has a
+ * blank line after it, so a first paragraph that takes the form of such a header, `We meet at 10:30` or `2:30`, opens
+ * no export of those headers.
+ *
+ * @param lines - The text's lines, as {@link bodyOf} keeps them.
+ * @param layout - The layout whose header is read.
+ */
+function opensWith(lines: readonly string[], layout: Layout): boolean {
+  const first = lines.findIndex((line) => line.trim() !== '');
+  if (first === -1 || layout.headerOf(lines[first]) === null) return false;
+  return !layout.loose || (first + 1 < lines.length && lines[first + 1].trim() !== '');
+}
+
+/**
  * The turns of an export by its own headers, or `null` when it holds none, as an export made with neither the names
  * nor the times does. An export has one layout of header, the one most of its headers are, a tie settled by the order
  * of {@link LAYOUTS}, so a paragraph that is a time alone in an export of names, or of names and times, is words. A
  * header weaker than a name, two spaces and a time heads turns only in an export that opens with one, so in an export
  * of paragraphs a paragraph further down that is a time alone is words, and the paragraphs before it are turns, not
- * lines before a first header. A voice note's header heads turns only in a text that closes with Otter's closing line,
- * since a line of words can end as it does.
+ * lines before a first header; a first paragraph that takes the form of a voice note's header or of a time with no
+ * spaces after it, with a blank line after it, is a paragraph too. A voice note's header heads turns only in a text
+ * that closes with Otter's closing line, since a line of words can end as it does.
  *
  * @param lines - The text's lines, as {@link bodyOf} keeps them.
  * @param closed - Whether the text closes with Otter's closing line.
  */
 function exportTurns(lines: readonly string[], closed: boolean): HeadedTurn[] | null {
-  const first = lines.find((line) => line.trim() !== '');
   let chosen: HeadedTurn[] | null = null;
   for (const layout of LAYOUTS) {
     if (layout.closed && !closed) continue;
-    if (layout.opens && (first === undefined || layout.headerOf(first) === null)) continue;
+    if (layout.opens && !opensWith(lines, layout)) continue;
     const turns = turnsOf(lines, layout);
     if (turns.length > (chosen === null ? 0 : chosen.length)) chosen = turns;
   }
