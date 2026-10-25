@@ -73,6 +73,8 @@ function gatedStream(pieces: string[]) {
 
 const Answer = z.object({ sentences: z.array(z.object({ text: z.string().min(1), passage: z.number().int().min(1) })).max(6) });
 const PIECES = ['{"sentences":[{"text":"One","passage":1},', '{"text":"Two","passage":2},', '{"text":"Three","passage":3}', ']}'];
+/** An answer whose schema puts a field after the array. */
+const Summarized = z.object({ sentences: Answer.shape.sentences, summary: z.string() });
 
 describe('streamObject with elements', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -206,6 +208,55 @@ describe('streamObject with elements', () => {
     await expect(reading).rejects.toThrow('socket hang up');
     expect(seen).toEqual([{ text: 'One', passage: 1 }, { text: 'Two', passage: 2 }]);
     await expect(result.object).rejects.toThrow(/Stream interrupted/);
+  });
+
+  it("yields the last element once the array's closing bracket arrives, when the schema puts a field after the array", async () => {
+    const gated = gatedStream([
+      '{"sentences":[{"text":"One","passage":1},{"text":"Two","passage":2}',
+      ']',
+      ',"summary":"Two sentences',
+      '."}',
+    ]);
+    hoisted.generateCompletionStream.mockReturnValue(gated.stream);
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Summarized, elements: 'sentences', prompt: 'p' });
+    const seen: unknown[] = [];
+    const reading = (async () => {
+      for await (const element of result.elementStream) seen.push(element);
+    })();
+    await gated.feed();
+    expect(seen).toEqual([{ text: 'One', passage: 1 }]);
+    await gated.feed();
+    expect(seen).toEqual([{ text: 'One', passage: 1 }, { text: 'Two', passage: 2 }]);
+    await gated.feed();
+    await gated.feed();
+    await reading;
+    expect(seen).toHaveLength(2);
+    await expect(result.object).resolves.toEqual({
+      sentences: [{ text: 'One', passage: 1 }, { text: 'Two', passage: 2 }],
+      summary: 'Two sentences.',
+    });
+  });
+
+  it('yields the last element when the chunk that closes the array ends inside the key of the field after it', async () => {
+    const gated = gatedStream([
+      '{"sentences":[{"text":"One","passage":1},{"text":"Two","passage":2}',
+      '],"summ',
+      'ary":"Two sentences."}',
+    ]);
+    hoisted.generateCompletionStream.mockReturnValue(gated.stream);
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Summarized, elements: 'sentences', prompt: 'p' });
+    const seen: unknown[] = [];
+    const reading = (async () => {
+      for await (const element of result.elementStream) seen.push(element);
+    })();
+    await gated.feed();
+    expect(seen).toEqual([{ text: 'One', passage: 1 }]);
+    await gated.feed();
+    expect(seen).toEqual([{ text: 'One', passage: 1 }, { text: 'Two', passage: 2 }]);
+    await gated.feed();
+    await reading;
+    expect(seen).toHaveLength(2);
+    expect(await result.skipped).toBe(0);
   });
 
   it('reads a stream that ended with no usage reported as unknown usage, never zero', async () => {
