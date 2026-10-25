@@ -734,7 +734,7 @@ describe('readTranscript', () => {
     const text = vector(file);
     expect(readTranscript(text, 'otter')).toEqual(expected(file));
     expect(transcriptFormatOf(file, bytes(text))).toBe('otter');
-    expect(readTranscript(bytes(`﻿${text.replace(/\n/g, '\r\n')}`), 'otter')).toEqual(expected(file));
+    expect(readTranscript(bytes(`\ufeff${text.replace(/\n/g, '\r\n')}`), 'otter')).toEqual(expected(file));
     const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
     const paragraphs = text.split('\n').filter((line) => line.length > 0);
     expect(await readWordTranscript(wordFileOf(paragraphs), { extractRawText })).toEqual({ ...expected(file), format: 'docx' });
