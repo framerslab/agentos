@@ -479,9 +479,9 @@ export const HTML_CASES: readonly HtmlCase[] = [
   },
   {
     name: 'a block left out inside an item keeps the words on either side of it a space apart',
-    html: '<ul><li>One<nav>Menu</nav>Two</li><li>Three<footer>Footer</footer>Four</li></ul>',
+    html: '<ul><li>One<nav>Menu</nav>Two</li><li>Three<footer>Footer</footer>Four</li><li>Five<form><label>Name</label><input></form>Six</li></ul>',
     title: null,
-    markdown: lines('- One Two', '- Three Four'),
+    markdown: lines('- One Two', '- Three Four', '- Five Six'),
     images: 0,
     cut: false,
   },
@@ -590,6 +590,42 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: "a form of notes, labels and controls with no heading, as a blog post's comment form is, is left out with all it holds",
+    html:
+      '<title>Ten days in Lyon</title><article><h1>Ten days in Lyon</h1><p>We arrived.</p></article>' +
+      '<form id="commentform" class="comment-form"><p class="comment-notes">Your email address will not be published.</p>' +
+      '<p class="comment-form-comment"><label for="comment">Comment</label> <textarea id="comment"></textarea></p>' +
+      '<p class="comment-form-author"><label for="author">Name</label> <input id="author"></p>' +
+      '<p class="form-submit"><input type="submit" value="Post Comment"></p></form>',
+    title: 'Ten days in Lyon',
+    markdown: 'We arrived.',
+    images: 0,
+    cut: false,
+  },
+  {
+    name: 'a search element is left out with all it holds, as a nav is, and so is a search form of a label and its controls',
+    html: lines(
+      '<search><form><label for="q">Search the docs</label> <input id="q" type="search"><button>Search</button></form></search><p>Install with npm.</p>',
+      '<search><h2>Find a store</h2><p>Enter a town.</p></search>',
+      '<form role="search"><label for="site">Search this site</label> <input id="site" type="search"></form>',
+    ),
+    title: null,
+    markdown: 'Install with npm.',
+    images: 0,
+    cut: false,
+  },
+  {
+    name: "a form that holds the page's main content or a section is read as the blocks it holds, with no heading in it",
+    html: lines(
+      '<form id="aspnetForm"><div role="main"><p>Ask your manager.</p></div></form>',
+      '<form id="booking"><section><p>Book the days.</p></section></form>',
+    ),
+    title: null,
+    markdown: lines('Ask your manager.', '', 'Book the days.'),
+    images: 0,
+    cut: false,
+  },
+  {
     name: "a form's controls are left out by name and the words around them are read: a hidden input's value, a select's options, a textarea, a datalist's choices and a button's words",
     html: lines(
       '<title>Staff handbook</title>',
@@ -612,12 +648,12 @@ export const HTML_CASES: readonly HtmlCase[] = [
   {
     name: "a form's controls keep the words on either side of them a space apart, labels written with no white space between them among them",
     html: lines(
-      '<form><label>Name</label><input><label>Email</label><input></form>',
+      '<form><h2>Sign up</h2><label>Name</label><input><label>Email</label><input></form>',
       '<p>Size<select><option>Small</option></select>Color<button type="button">Pick</button>Note<textarea>Typed</textarea>End</p>',
       '<ul><li>Agree<input type="checkbox">today</li></ul>',
     ),
     title: null,
-    markdown: lines('Name Email', '', 'Size Color Note End', '', '- Agree today'),
+    markdown: lines('## Sign up', '', 'Name Email', '', 'Size Color Note End', '', '- Agree today'),
     images: 0,
     cut: false,
   },
@@ -678,6 +714,79 @@ export const HTML_CASES: readonly HtmlCase[] = [
       '',
       'Two comments',
     ),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: "a footer inside a section that wraps the page's main content, as the Read the Docs theme's does, is the page's own and is left out",
+    html:
+      '<title>Install - Acme documentation</title><div class="wy-grid-for-nav"><nav class="wy-nav-side">Contents</nav>' +
+      '<section class="wy-nav-content-wrap"><div role="main" class="document"><section id="install"><h1>Install</h1><p>Run the installer.</p></section></div>' +
+      '<footer><div class="rst-footer-buttons" role="navigation"><a href="usage.html" rel="next">Next</a></div><hr>' +
+      '<div role="contentinfo"><p>&#169; Copyright 2026, Acme.</p></div>Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a ' +
+      '<a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.</footer></section></div>',
+    title: 'Install - Acme documentation',
+    markdown: lines('# Install', '', 'Run the installer.'),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: "the header, footer and aside of a section that holds the main element are the page's own, while a section inside main keeps its own",
+    html: lines(
+      '<title>Notes</title>',
+      '<section class="page">',
+      '<header><p>Site name</p></header>',
+      '<main><section><h2>Day one</h2><p>We walked.</p><footer><p>Filed under travel</p></footer></section></main>',
+      '<aside><p>Related posts</p></aside>',
+      '<footer><p>Site footer</p></footer>',
+      '</section>',
+    ),
+    title: 'Notes',
+    markdown: lines('## Day one', '', 'We walked.', '', 'Filed under travel'),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: "a heading whose words all sit in its one button, as an accordion's header does, is read for the button's words, and a heading with words of its own leaves its button out",
+    html: lines(
+      '<h2 class="accordion-header"><button class="accordion-button" type="button">What does it cost?</button></h2>',
+      '<div class="accordion-collapse collapse show"><div class="accordion-body">Nothing to start.</div></div>',
+      '<h3><button type="button" aria-expanded="true" class="accordion-trigger" aria-controls="sect1" id="accordion1id">' +
+        '<span class="accordion-title">Personal Information<span class="accordion-icon"></span></span></button></h3>',
+      '<div id="sect1" role="region" aria-labelledby="accordion1id" class="accordion-panel"><p>Name and email.</p></div>',
+      '<ul><li><h4><button type="button">Shipping</button></h4>Two days.</li></ul>',
+      '<h2>Comments <button type="button">Hide</button></h2>',
+      '<p>Two comments.</p>',
+    ),
+    title: null,
+    markdown: lines(
+      '## What does it cost?',
+      '',
+      'Nothing to start.',
+      '',
+      '### Personal Information',
+      '',
+      'Name and email.',
+      '',
+      '- Shipping Two days.',
+      '',
+      '## Comments',
+      '',
+      'Two comments.',
+    ),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: 'a dialog that is not open is left out with all it holds, its form among it, and its edges keep the words on either side of it apart, while an open one is read',
+    html: lines(
+      '<p>Your notes are saved.</p><dialog id="confirm"><form method="dialog"><p>Delete this note?</p><button value="yes">Delete</button></form></dialog>',
+      '<dialog id="help"><h2>Shortcuts</h2><p>Press N for a new note.</p></dialog>',
+      '<div>Before<dialog id="tip">Tip</dialog>After</div>',
+      '<dialog open><p>Saved just now.</p></dialog>',
+    ),
+    title: null,
+    markdown: lines('Your notes are saved.', '', 'Before', '', 'After', '', 'Saved just now.'),
     images: 0,
     cut: false,
   },
