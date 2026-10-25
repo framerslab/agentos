@@ -198,6 +198,13 @@ describe('embedText refuses a provider with no embeddings before any request', (
       error: 'Anthropic publishes no embedding model',
     },
     {
+      // With no model, resolution has no default embedding model to give it.
+      label: 'Anthropic named without a model',
+      target: { provider: 'anthropic' },
+      env: { ANTHROPIC_API_KEY: 'anthropic-test-key' },
+      error: 'Anthropic publishes no embedding model',
+    },
+    {
       // Text calls on Anthropic fall back to OpenRouter without an Anthropic key.
       label: 'Anthropic when only an OpenRouter key is set',
       target: { provider: 'anthropic', model: 'embedding-model' },
@@ -294,6 +301,15 @@ describe('embedText refuses a provider with no embeddings before any request', (
     setDefaultProvider({ provider: 'together', model: 'embedding-model', apiKey: 'together-default-key' });
 
     await expect(embedText({ input: 'hello' })).rejects.toThrow('Together AI serves no embedding model');
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses a global default whose chat model an embedding call drops', async () => {
+    // The chat model is dropped for the embedding call, which leaves no model.
+    setDefaultProvider({ provider: 'groq', model: 'llama-3.3-70b-versatile', apiKey: 'groq-default-key' });
+
+    await expect(embedText({ input: 'hello' })).rejects.toThrow('Groq publishes no embeddings endpoint');
 
     expect(fetch).not.toHaveBeenCalled();
   });
