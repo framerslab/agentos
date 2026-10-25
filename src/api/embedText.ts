@@ -566,8 +566,8 @@ function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
  *   provider, etc.).
  * @throws {Error} When the call resolves to a provider with no embeddings
  *   embedText can send to (Anthropic, Groq, Together AI, xAI, MiniMax, the
- *   image providers and the CLIs), whatever its base URL; its key is not read
- *   and no request is sent.
+ *   image providers and the CLIs), whatever its base URL and with or without
+ *   a model; its key is not read and no request is sent.
  * @throws {Error} When the call resolves to a provider agentos does not know
  *   and no base URL is set, on the call or on the global default; no request
  *   is sent.
@@ -619,7 +619,20 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
       async (span) => {
         // Resolve provider/model using the 'embedding' task type so the
         // correct default model is selected (e.g. text-embedding-3-small).
-        const { providerId, modelId } = resolveModelOption(withGeminiEmbeddingDefault(opts), 'embedding');
+        let parsed: ReturnType<typeof resolveModelOption>;
+        try {
+          parsed = resolveModelOption(withGeminiEmbeddingDefault(opts), 'embedding');
+        } catch (error) {
+          // A provider with no embeddings named without a model (inline, or as
+          // the global default) has no default embedding model to resolve to: it
+          // is refused for having no embeddings, not asked for a model.
+          if (!opts.model) {
+            const named = opts.provider ?? getDefaultProvider()?.provider;
+            if (named) refuseProviderWithoutEmbeddings(named);
+          }
+          throw error;
+        }
+        const { providerId, modelId } = parsed;
         // A provider with no embeddings is refused before its key is read.
         refuseProviderWithoutEmbeddings(providerId);
         const resolved = resolveProvider(providerId, modelId, {
