@@ -213,6 +213,27 @@ describe('streamObject with elements', () => {
     await expect(result.object).rejects.toThrow(/Stream interrupted/);
   });
 
+  it('throws from an elementStream read after the only reader stopped the stream, once it yields the elements completed before the stop', async () => {
+    const gated = gatedStream(PIECES);
+    hoisted.generateCompletionStream.mockReturnValue(gated.stream);
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'sentences', prompt: 'p' });
+    const watching = (async () => {
+      for await (const partial of result.partialObjectStream) {
+        if ((partial.sentences?.length ?? 0) > 1) break;
+      }
+    })();
+    await gated.feed();
+    await gated.feed();
+    await watching;
+    const seen: unknown[] = [];
+    const reading = (async () => {
+      for await (const element of result.elementStream) seen.push(element);
+    })();
+    await expect(reading).rejects.toThrow(/Stream interrupted/);
+    expect(seen).toEqual([{ text: 'One', passage: 1 }]);
+    await expect(result.object).rejects.toThrow(/Stream interrupted/);
+  });
+
   it("rejects the object with the signal's reason when the reader stops after the signal aborted", async () => {
     const gated = gatedStream(PIECES);
     hoisted.generateCompletionStream.mockReturnValue(gated.stream);
