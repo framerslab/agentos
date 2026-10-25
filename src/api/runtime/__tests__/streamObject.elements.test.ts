@@ -222,6 +222,15 @@ describe('streamObject with elements', () => {
     expect(await result.reportedUsage).toBeUndefined();
   });
 
+  it("keeps a provider's report of zero tokens as the reported usage", async () => {
+    hoisted.generateCompletionStream.mockReturnValue((async function* () {
+      yield { ...chunk('{"sentences":[]}', true), usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } };
+    })());
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'sentences', prompt: 'p' });
+    for await (const element of result.elementStream) void element;
+    expect(await result.reportedUsage).toEqual({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+  });
+
   it('passes requestTimeout to the provider', async () => {
     hoisted.generateCompletionStream.mockReturnValue(gatedStream([]).stream);
     const result = streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'sentences', prompt: 'p', requestTimeout: 4321 });
