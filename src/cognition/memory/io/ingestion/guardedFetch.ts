@@ -258,7 +258,10 @@ function hostOf(url: URL): string {
 /**
  * An IPv4-mapped IPv6 address as the URL parser writes it, whatever spelling
  * the address used: `::ffff:` and two groups of lower-case hex
- * (https://url.spec.whatwg.org/#concept-ipv6-serializer).
+ * (https://url.spec.whatwg.org/#concept-ipv6-serializer), and nothing more.
+ * `2600::ffff:5db8:d70e` is a global unicast address the address check
+ * passes, and read as `93.184.215.14` it would reach an allow-list of that
+ * address.
  */
 const IPV4_MAPPED = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/;
 
@@ -269,7 +272,10 @@ const IPV4_MAPPED = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/;
  * address it carries in two groups of lower-case hex. The parser folds the
  * longest run of zero groups into `::`, so an IPv4 address whose first two
  * numbers are zero leaves one group (`64:ff9b::d70e` is `0.0.215.14`) and
- * `0.0.0.0` leaves none (`64:ff9b::`).
+ * `0.0.0.0` leaves none (`64:ff9b::`). Nothing comes before the prefix:
+ * `2600:64:ff9b::5db8:d70e` is a global unicast address the address check
+ * passes, and read as `93.184.215.14` it would reach an allow-list of that
+ * address.
  */
 const NAT64_WELL_KNOWN = /^64:ff9b::(?:(?:([0-9a-f]{1,4}):)?([0-9a-f]{1,4}))?$/;
 
