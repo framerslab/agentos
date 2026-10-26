@@ -961,4 +961,20 @@ export const HTML_CASES: readonly HtmlCase[] = [
     images: 0,
     cut: false,
   },
+  {
+    name: "a form laid out in a table whose rows each put a label's header cell beside a control's cell, as a contact form often is, is still left out with all it holds",
+    html: lines(
+      '<title>Contact | O3 Project</title>',
+      '<article><h2>Contact</h2><p>Fill in the form below and press the confirm button.</p>',
+      '<div id="formWrap"><form method="post" action="http://o3project.github.io/ja/contact/mail.php"><table class="formTable"><tbody>',
+      '<tr><th>Name (required)</th><td><input size="30" type="text" name="name"></td></tr>',
+      '<tr><th>Email (required)</th><td><input size="30" type="text" name="email"></td></tr>',
+      '<tr><th>Message (required)<br></th><td><textarea name="message" cols="50" rows="5"></textarea></td></tr>',
+      '</tbody></table><p align="center"><input type="submit" value="Confirm"> <input type="reset" value="Reset"></p></form></div></article>',
+    ),
+    title: 'Contact | O3 Project',
+    markdown: lines('## Contact', '', 'Fill in the form below and press the confirm button.'),
+    images: 0,
+    cut: false,
+  },
 ];
