@@ -322,6 +322,21 @@ describe('assertEmbeddingAvailable', () => {
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'gemini', model: 'gemini-embedding-001' } }, env)).not.toThrow();
   });
 
+  it('refuses MiniMax, whose provider refuses every embedding request, when the agent is built', () => {
+    // MiniMax publishes no embedding model. Without a model, a model and a
+    // dimension, or as a minimax: id under another provider, the check names
+    // MiniMax, rather than asking for a model or passing the agent through
+    // to a memory build that cannot embed.
+    const env = {};
+    expect(() => assertEmbeddingAvailable({ embedding: { provider: 'minimax' } }, env)).toThrow(/MiniMax has no embedding models/);
+    expect(() =>
+      assertEmbeddingAvailable({ embedding: { provider: 'minimax', model: 'MiniMax-M3', dimension: 1024 } }, env),
+    ).toThrow(/MiniMax has no embedding models/);
+    expect(() =>
+      assertEmbeddingAvailable({ embedding: { provider: 'openai', model: 'minimax:MiniMax-M3', dimension: 1024 } }, env),
+    ).toThrow(/MiniMax has no embedding models/);
+  });
+
   it('refuses Together AI, which serves no embedding model, before the memory is built', () => {
     // With a model and its size the provider passed, and the memory's first build
     // sent a test embedding to Together that no model there can answer.

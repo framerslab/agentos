@@ -88,6 +88,7 @@ namespace OpenAIAPITypes {
   export interface ChatMessage {
     role: string;
     content: string | null;
+    reasoning_content?: string;
     tool_calls?: ToolCall[];
   }
   export interface ChatChoice {
@@ -113,6 +114,7 @@ namespace OpenAIAPITypes {
   export interface StreamDelta {
     role?: string;
     content?: string | null;
+    reasoning_content?: string;
     tool_calls?: ToolCallDelta[];
   }
   export interface StreamChoice {
@@ -1017,7 +1019,7 @@ export class OpenAIProvider implements IProvider {
    * @private
    * @throws {OpenAIProviderError} If fetching or parsing models fails.
    */
-  private async refreshAvailableModels(): Promise<void> {
+  protected async refreshAvailableModels(): Promise<void> {
     const apiKey = await this.getApiKey();
     const response = await this.makeApiRequest<OpenAIAPITypes.ListModelsResponse>(
       '/models',
@@ -1853,7 +1855,7 @@ export class OpenAIProvider implements IProvider {
    * Builds the payload for OpenAI's Chat Completions API.
    * @private
    */
-  private buildChatCompletionPayload(
+  protected buildChatCompletionPayload(
     modelId: string,
     messages: ChatMessage[],
     options: ModelCompletionOptions,
@@ -2391,6 +2393,8 @@ export class OpenAIProvider implements IProvider {
         message: {
           role: c.message.role as ModelCompletionChoice['message']['role'],
           content: c.message.content,
+          ...(this.providerId === 'minimax' && c.message.reasoning_content !== undefined
+            ? { reasoningText: c.message.reasoning_content } : {}),
           tool_calls: c.message.tool_calls,
         },
         finishReason: c.finish_reason,
@@ -2519,6 +2523,8 @@ export class OpenAIProvider implements IProvider {
             modelId: apiChunk.model,
             choices: [responseChoice],
             responseTextDelta,
+            ...(this.providerId === 'minimax' && choice.delta.reasoning_content !== undefined
+              ? { reasoningTextDelta: choice.delta.reasoning_content } : {}),
             toolCallsDeltas,
             isFinal,
             usage: finalUsage, // Only on the very final message from the stream

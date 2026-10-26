@@ -450,7 +450,14 @@ export interface QueryRouterConfig {
   /** Maximum tier the classifier may assign. @default 3 */
   maxTier?: QueryTier;
 
-  /** Embedding provider name. @default 'openai' */
+  /**
+   * Embedding provider name. Without one, the router takes the provider of
+   * the first provider key set, as for the classifier, except MiniMax: it
+   * publishes no embedding model, so a MiniMax key alone leaves embeddings on
+   * `openai`. A provider other than OpenAI that has a key variable of its own
+   * embeds with that key alone (see `embeddingApiKey`).
+   * @default 'openai'
+   */
   embeddingProvider?: string;
 
   /** Embedding model identifier. @default 'text-embedding-3-small' */
@@ -569,8 +576,12 @@ export interface QueryRouterConfig {
   /**
    * Optional API key override for classifier and generator LLM calls.
    *
-   * When omitted, QueryRouter prefers `OPENAI_API_KEY` and falls back to
-   * `OPENROUTER_API_KEY` with the OpenRouter compatibility base URL.
+   * When omitted, a classifier or generator whose provider is not OpenAI
+   * takes that provider's own key variable (`MINIMAX_API_KEY` for
+   * `minimax`), and none when it is unset, so `generateText` resolves the
+   * provider's credentials and no other vendor's key reaches it. An OpenAI
+   * one prefers `OPENAI_API_KEY` and falls back to `OPENROUTER_API_KEY` with
+   * the OpenRouter compatibility base URL.
    */
   apiKey?: string;
 
@@ -578,15 +589,23 @@ export interface QueryRouterConfig {
    * Optional base URL override for classifier and generator LLM providers.
    *
    * When omitted, QueryRouter auto-selects the OpenRouter compatibility URL
-   * only when `OPENROUTER_API_KEY` is being used implicitly.
+   * only when `OPENROUTER_API_KEY` is being used implicitly for an OpenAI
+   * classifier or generator. Any other provider takes the endpoint
+   * `generateText` resolves for it (`MINIMAX_BASE_URL`, or MiniMax's default).
    */
   baseUrl?: string;
 
   /**
    * Optional API key override for embeddings only.
    *
-   * When omitted, embeddings fall back to `apiKey`, then `OPENAI_API_KEY`,
-   * then `OPENROUTER_API_KEY`.
+   * When omitted, embeddings fall back to `apiKey` when they use the
+   * classifier's or the generator's provider, and never take it for another
+   * vendor's. Without that, an embedding provider other than OpenAI that has
+   * a key variable of its own takes that key (`GEMINI_API_KEY` for `gemini`,
+   * `MINIMAX_API_KEY` for `minimax`), or none when it is unset, so another
+   * vendor's key never reaches it; an OpenAI one, or one without a key
+   * variable such as Ollama, takes the first provider key set,
+   * `OPENAI_API_KEY` first and `OPENROUTER_API_KEY` last.
    * This is useful when generation uses an OpenAI-compatible endpoint like
    * OpenRouter but embeddings should stay on a direct OpenAI key.
    */
@@ -595,9 +614,11 @@ export interface QueryRouterConfig {
   /**
    * Optional base URL override for embeddings only.
    *
-   * When omitted, embeddings inherit `baseUrl` unless `embeddingApiKey` is
-   * explicitly set, in which case the embedding path assumes the provider's
-   * default endpoint. If neither override is set and QueryRouter falls back to
+   * When omitted, embeddings inherit `baseUrl` when they use the classifier's
+   * or the generator's provider, unless `embeddingApiKey` is explicitly set,
+   * in which case the embedding path assumes the provider's default endpoint.
+   * An embedding provider other than OpenAI otherwise gets no URL from the
+   * router and uses its own endpoint. If neither override is set and QueryRouter falls back to
    * `OPENROUTER_API_KEY`, it automatically uses the OpenRouter compatibility
    * URL for embeddings as well.
    */
@@ -781,6 +802,12 @@ export const DEFAULT_STRATEGY_CONFIG: Required<Omit<QueryRouterStrategyConfig, '
  * a real source of 401s — the provider would be `openrouter` while the
  * resolved api key was the OpenAI one).
  *
+ * A MiniMax key comes last, after OpenRouter's: `generateText`'s
+ * auto-detection ranks it after every key listed here, and the provider
+ * manager makes MiniMax its default only when no OpenAI, OpenRouter or
+ * Requesty key is set. A MiniMax route then takes `MINIMAX_API_KEY`
+ * through {@link QueryRouter.getLlmApiKey}'s lookup by provider.
+ *
  * Falls back to `openai` when no provider key is present (CLI providers
  * still work because they don't require a key).
  */
@@ -795,6 +822,7 @@ function resolveDefaultProvider(): string {
       ['MISTRAL_API_KEY', 'mistral'],
       ['XAI_API_KEY', 'xai'],
       ['OPENROUTER_API_KEY', 'openrouter'],
+      ['MINIMAX_API_KEY', 'minimax'],
     ];
     for (const [envKey, id] of envMap) {
       if (process.env[envKey]) return id;
@@ -803,6 +831,19 @@ function resolveDefaultProvider(): string {
     // Browser or restricted env — fall back
   }
   return 'openai';
+}
+
+/**
+ * Resolve the default embedding provider: {@link resolveDefaultProvider}'s
+ * choice, except MiniMax. MiniMax publishes no embedding model and its
+ * provider refuses an embedding request, so a MiniMax key alone leaves
+ * embeddings on `openai`: an `embeddingApiKey` given for the default
+ * `text-embedding-3-small` reaches OpenAI, and without one the router finds
+ * no embedding key and stays on keyword retrieval.
+ */
+function resolveDefaultEmbeddingProvider(): string {
+  const provider = resolveDefaultProvider();
+  return provider === 'minimax' ? 'openai' : provider;
 }
 
 /** Provider → cheap model mapping for classifier/T0-T1 generation. */
@@ -817,6 +858,7 @@ const CHEAP_MODELS: Record<string, string> = {
   mistral: 'mistral-small-latest',
   xai: 'grok-2-mini',
   ollama: 'llama3.2',
+  minimax: 'MiniMax-M3.1-Flash',
   'claude-code-cli': 'claude-haiku-4-5-20251001',
   'gemini-cli': 'gemini-2.5-flash-lite',
 };
@@ -832,6 +874,8 @@ const STRONG_MODELS: Record<string, string> = {
   mistral: 'mistral-large-latest',
   xai: 'grok-2',
   ollama: 'llama3.2',
+  // MiniMax's default text model, as in PROVIDER_DEFAULTS and the mission planner.
+  minimax: 'MiniMax-M3.1-Flash',
   'claude-code-cli': 'claude-sonnet-4-6',
   'gemini-cli': 'gemini-3.5-flash',
 };
@@ -841,7 +885,7 @@ export const DEFAULT_QUERY_ROUTER_CONFIG = {
   classifierModel: CHEAP_MODELS[resolveDefaultProvider()] ?? 'gpt-4o-mini',
   classifierProvider: resolveDefaultProvider(),
   maxTier: 3 as QueryTier,
-  embeddingProvider: resolveDefaultProvider(),
+  embeddingProvider: resolveDefaultEmbeddingProvider(),
   embeddingModel: 'text-embedding-3-small',
   generationModel: CHEAP_MODELS[resolveDefaultProvider()] ?? 'gpt-4o-mini',
   generationModelDeep: STRONG_MODELS[resolveDefaultProvider()] ?? 'gpt-4o',
