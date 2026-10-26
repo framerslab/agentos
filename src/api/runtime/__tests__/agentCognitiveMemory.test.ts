@@ -184,7 +184,8 @@ describe('createAgentCognitiveMemory', () => {
 
     const forBob = await mem.manager.assembleForPrompt('where is the deploy key', 1600, neutral, {
       scopes: [{ scope: 'user', scopeId: 'bob' }, { scope: 'persona', scopeId: 'memo' }],
-      // Only Bob's own memory is recalled directly, so the shared one can arrive by association alone.
+      // Only one of the two memories in scope is recalled directly, so the other can arrive by association alone. The
+      // association walk reaches Alice's too, over its link from Bob's.
       topK: 1,
     });
     expect(forBob.contextText).toContain('vault');
