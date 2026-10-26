@@ -53,10 +53,15 @@ const KNOWN_EMBEDDING_DIMENSIONS: ReadonlyMap<string, number> = new Map([
   ['gemini-embedding-2', 3072],
 ]);
 
-/** Providers whose agentos implementation has no embeddings: their `generateEmbeddings` always throws. */
+/**
+ * Providers with no embeddings: their agentos implementation's `generateEmbeddings` always throws, or, for
+ * Together AI, the provider serves no embedding model ("There are currently no embedding models offered via
+ * serverless": https://docs.together.ai/docs/serverless-models, read 2026-10-25), so its probe could not answer.
+ */
 const PROVIDERS_WITHOUT_EMBEDDINGS: ReadonlyMap<string, string> = new Map([
   ['anthropic', 'Anthropic'],
   ['groq', 'Groq'],
+  ['together', 'Together AI'],
   ['xai', 'xAI'],
   ['minimax', 'MiniMax'],
   ['claude-code-cli', 'The Claude Code CLI'],
@@ -184,7 +189,7 @@ function resolveEmbeddingTarget(memory: MemoryConfig, env: Env): EmbeddingTarget
  * @param memory - The agent's memory config.
  * @param env - The environment to read OPENAI_API_KEY, GEMINI_API_KEY and OLLAMA_BASE_URL from (defaults to `process.env`).
  * @throws {Error} Naming `memory.embedding` when no provider is set or detected, when the
- *   provider has no embeddings (Anthropic, Groq, xAI, MiniMax, the Claude Code and Gemini CLIs), when the
+ *   provider has no embeddings (Anthropic, Groq, Together AI, xAI, MiniMax, the Claude Code and Gemini CLIs), when the
  *   model does not resolve, or when the model's output size is unknown and
  *   `memory.embedding.dimension` is unset or not a positive integer.
  */

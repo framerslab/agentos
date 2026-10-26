@@ -230,6 +230,12 @@ namespace OpenAIAPITypes {
 }
 
 /**
+ * The OpenAI API's base URL, which requests go to when the config names no `baseURL`. `embedText` posts OpenAI
+ * embeddings under it too.
+ */
+export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
+
+/**
  * Configuration specific to the OpenAIProvider.
  */
 export interface OpenAIProviderConfig {
@@ -962,7 +968,7 @@ export class OpenAIProvider implements IProvider {
     await this.keyPool?.close();
 
     this.config = {
-      baseURL: 'https://api.openai.com/v1',
+      baseURL: OPENAI_DEFAULT_BASE_URL,
       maxRetries: 3,
       requestTimeout: 60000, // 60 seconds
       ...config, // User-provided config overrides defaults

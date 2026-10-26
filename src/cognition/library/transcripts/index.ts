@@ -70,8 +70,9 @@ function isZip(head: Uint8Array): boolean {
  *
  * @param name - The file's name or path.
  * @param head - The file's bytes or its text, whole where it can be: a Word file, SubRip and WebVTT are named from their
- * first 4 KB, but Fireflies's JSON can hold its sentences, and Otter's export its second turn, past any head of the
- * file. A head's last line with no line feed after it may stop short, so it is read as words, never as a header.
+ * first 4 KB, but Fireflies's JSON can hold its sentences, and Otter's export its second turn or its closing line, past
+ * any head of the file. A head's last line with no line feed after it may stop short, so it is read as words, never as
+ * a header.
  */
 export function transcriptFormatOf(name: string, head: Uint8Array | string): TranscriptFormat | null {
   const dot = name.lastIndexOf('.');

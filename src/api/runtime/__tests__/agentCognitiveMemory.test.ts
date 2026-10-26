@@ -307,4 +307,14 @@ describe('assertEmbeddingAvailable', () => {
       assertEmbeddingAvailable({ embedding: { provider: 'openai', model: 'minimax:MiniMax-M3', dimension: 1024 } }, env),
     ).toThrow(/MiniMax has no embedding models/);
   });
+
+  it('refuses Together AI, which serves no embedding model, before the memory is built', () => {
+    // With a model and its size the provider passed, and the memory's first build
+    // sent a test embedding to Together that no model there can answer.
+    const env = {};
+    expect(() =>
+      assertEmbeddingAvailable({ embedding: { provider: 'together', model: 'embedding-model', dimension: 768 } }, env),
+    ).toThrow(/Together AI has no embedding models/);
+    expect(() => assertEmbeddingAvailable({ embedding: { provider: 'together' } }, env)).toThrow(/Together AI has no embedding models/);
+  });
 });

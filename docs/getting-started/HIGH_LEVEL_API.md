@@ -105,6 +105,8 @@ to the global root and takes `image-01` there too. MiniMax publishes no
 embedding model, so the `minimax` provider and `embedText()` refuse an embedding request before
 sending it; embed with another provider.
 
+`embedText()` embeds on `openai`, `openrouter`, `mistral`, `requesty`, `gemini` and `ollama`, each at its own endpoint or at the `baseUrl` you set, and sends a key to no other host. It refuses a provider with no embeddings (`anthropic`, `groq`, `together`, `xai`, `minimax`, the image providers and the CLIs) before reading its key, and needs `baseUrl` for a provider id agentos does not know ([embedText()](../orchestration/STRUCTURED_OUTPUT_API.md#embedtext)).
+
 ### Inline API Keys
 
 Every function accepts `apiKey` and `baseUrl` as top-level parameters, overriding the corresponding environment variable for that call:
