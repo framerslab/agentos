@@ -917,4 +917,48 @@ export const HTML_CASES: readonly HtmlCase[] = [
     images: 0,
     cut: false,
   },
+  {
+    name: "a form that holds a table of data, its header cells marked th, is read as the blocks it holds, as the list of a category's articles Joomla puts in one is",
+    html: lines(
+      '<title>News &amp; Events - Dibrugarh University</title>',
+      '<h2>News and Events</h2>',
+      '<form action="/index.php/news-events" method="post" name="adminForm" id="adminForm" class="form-inline"><input type="hidden" name="limitstart" value="">',
+      '<table class="category table table-striped table-bordered table-hover"><thead><tr><th id="categorylist_header_title"><a href="#">Title</a></th></tr></thead>',
+      '<tbody><tr class="cat-list-row0"><td headers="categorylist_header_title" class="list-title">' +
+        '<a href="/index.php/news-events/535-xiv-convocation-of-dibrugarh-university">XIV Convocation of Dibrugarh University</a></td></tr>',
+      '<tr class="cat-list-row1"><td headers="categorylist_header_title" class="list-title">' +
+        '<a href="/index.php/news-events/540-talk-by-prof-maitrayee-chaudhuri-in-d-u-colloquium">Talk by Prof. Maitrayee Chaudhuri in D.U. Colloquium</a></td></tr></tbody></table>',
+      '<div class="pagination"><p class="counter pull-right">Page 9 of 11</p></div>',
+      '</form>',
+    ),
+    title: 'News & Events - Dibrugarh University',
+    markdown: lines(
+      '## News and Events',
+      '',
+      `| ${'Title'.padEnd(40)} |`,
+      `| ${'-'.repeat(40)} |`,
+      `| ${'XIV Convocation of Dibrugarh University'.padEnd(40)} |`,
+      '| Talk by Prof. Maitrayee Chaudhuri in D.U. Colloquium |',
+      '',
+      'Page 9 of 11',
+    ),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: 'a form laid out in a table with no header cell, as a hotel search is, is still left out with all it holds',
+    html: lines(
+      '<title>Washington DC Events</title>',
+      '<h1>Events</h1>',
+      '<form name="hotelSearchForm" method="get" action="https://reservations.washington.org/2068_hotel-list.html" id="hotelSearchForm"><table cellpadding="0" cellspacing="0" border="0">',
+      '<tr><td id="aresHeading2" colspan="5">BOOK YOUR TRIP</td></tr>',
+      '<tr><td>Check in</td><td><input type="text" name="checkInDate" value="select a date"></td><td>Check out</td>' +
+        '<td><input type="text" name="checkOutDate" value="select a date"></td><td><input type="image" src="go_btn.png" name="find"></td></tr></table></form>',
+      '<p>Concerts this week.</p>',
+    ),
+    title: 'Washington DC Events',
+    markdown: lines('# Events', '', 'Concerts this week.'),
+    images: 0,
+    cut: false,
+  },
 ];
