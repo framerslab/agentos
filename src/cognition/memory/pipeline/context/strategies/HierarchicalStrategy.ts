@@ -21,6 +21,7 @@ import type {
   SummaryChainNode,
 } from '../../../core/types.js';
 import { compactionSplitIndex } from './compactionSplit.js';
+import { extractiveSummary, summaryRoom } from './extractiveSummary.js';
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -42,7 +43,10 @@ export class HierarchicalStrategy implements ICompactionStrategy {
   /**
    * @param llmInvoker - Writes the summaries. Without one, or when it fails or
    *   answers nothing, a segment's summary is its user messages, cut to 80
-   *   characters each, and no levels are merged.
+   *   characters each, and no levels are merged. Either way the window's summary
+   *   message holds the newest summary whole, within the tokens the segment
+   *   held, and the older ones only as far as the window has room for them under
+   *   the compaction threshold.
    */
   constructor(llmInvoker?: (prompt: string) => Promise<string>) {
     this.llmInvoker = llmInvoker;
@@ -99,13 +103,21 @@ export class HierarchicalStrategy implements ICompactionStrategy {
     const activeNodes = [...summaryChain, ...allNewNodes].filter(
       (n) => !n.parentId,
     );
-    const summaryText = activeNodes
+    const parts = activeNodes
       .sort((a, b) => a.turnRange[0] - b.turnRange[0])
       .map((n) => {
         const levelTag = n.level > 0 ? ` (L${n.level} summary)` : '';
         return `[Turns ${n.turnRange[0]}–${n.turnRange[1]}${levelTag}]\n${n.summary}`;
-      })
-      .join('\n\n');
+      });
+    // The newest summary, which covers this segment, stays whole within the tokens the segment held; the older ones,
+    // cut from their end, take only the room left under the compaction threshold. Without a summarizer no level is
+    // merged, so the segment summaries would otherwise pile up in the window. The summary chain keeps them all.
+    const summaryText = extractiveSummary(
+      parts.slice(0, -1),
+      parts[parts.length - 1] ?? '',
+      Math.max(25, inputTokens - 20),
+      summaryRoom(input, config, toKeep.reduce((s, m) => s + m.tokenEstimate, 0), 20),
+    );
 
     const outputTokens = estimateTokens(summaryText);
 
