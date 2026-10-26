@@ -5,7 +5,8 @@
  * Intentionally hand-rolled to avoid adding `zod-to-json-schema` as a dependency.
  * Handles the subset of Zod types used in node input/output schemas across the codebase:
  * z.string, z.number, z.boolean, z.null, z.object, z.array, z.enum, z.optional, z.default,
- * z.nullable, z.union/z.discriminatedUnion, z.literal, z.record, z.tuple.
+ * z.nullable, z.union/z.discriminatedUnion, z.literal, z.record, z.tuple, and the wrappers that read
+ * the same JSON value as their inner schema: readonly, catch, prefault and nonoptional.
  *
  * Targets Zod v4 `_def` internals:
  * - Discriminant field: `_def.type` (string literal, e.g. `"string"`, `"object"`)
@@ -234,7 +235,7 @@ export function lowerZodToJsonSchema(
 
         // A field is required unless its outermost wrapper is optional or has a default.
         const fieldType = ((fieldSchema as any)._def as Record<string, unknown> | undefined)?.type as string | undefined;
-        if (fieldType !== 'optional' && fieldType !== 'default') {
+        if (fieldType !== 'optional' && fieldType !== 'default' && fieldType !== 'prefault') {
           required.push(key);
         }
       }
@@ -252,6 +253,13 @@ export function lowerZodToJsonSchema(
 
     case 'default':
       // Unwrap; defaults are runtime concerns, not JSON Schema concerns for our use case.
+      return lower(def.innerType as ZodType);
+
+    case 'prefault':
+    case 'readonly':
+    case 'catch':
+    case 'nonoptional':
+      // Unwrap; each reads the same JSON value as its inner schema (a prefault, like a default, makes its field optional).
       return lower(def.innerType as ZodType);
 
     case 'nullable': {
