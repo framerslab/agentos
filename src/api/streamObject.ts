@@ -215,7 +215,10 @@ export interface StreamObjectResult<T, E = unknown> {
    * but with all fields optional ({@link DeepPartial}). The iteration ends
    * without throwing when the stream fails, and `object` then rejects. A
    * reader that starts after `elementStream` began the stream receives the
-   * latest partial object first.
+   * latest partial object first, and a reader that falls behind while
+   * `elementStream` reads on receives the latest partial object when it reads
+   * again, since each holds the ones before it: at most one partial object
+   * waits for it.
    *
    * @example
    * ```ts
@@ -447,18 +450,30 @@ function textBeforeOpenMember(buffer: string): string | undefined {
   return cut === 0 ? undefined : buffer.slice(0, cut);
 }
 
+/** What {@link arrayFieldState} reads of the array field in a text. */
+interface ArrayFieldState {
+  /** The text holds the array's closing bracket: every element has arrived, the last one included. */
+  closed: boolean;
+  /** The text ends just after a comma between two elements of the array, outside any element. */
+  between: boolean;
+  /** How many times the top-level object names the field. */
+  appearances: number;
+}
+
 /**
- * True when `text`, a JSON object or the start of one, holds the closing
- * bracket of the array that its top-level field `field` holds, so every
- * element of that array has arrived, the last one included. Strings and
- * their escapes are read as {@link tryParsePartialJson} reads them, and a
- * key is compared as `JSON.parse` decodes it. When the field appears twice,
- * the array of its last appearance counts, as `JSON.parse` keeps it.
+ * Reads `text`, a JSON object or the start of one, for the array that its
+ * top-level field `field` holds: whether the text holds its closing bracket,
+ * so every element of that array has arrived, the last one included;
+ * whether it ends just after a comma between two of its elements; and how
+ * many times the object names the field. Strings and their escapes are read
+ * as {@link tryParsePartialJson} reads them, and a key is compared as
+ * `JSON.parse` decodes it. When the field appears twice, the array of its
+ * last appearance counts, as `JSON.parse` keeps it.
  *
  * @param text - The text a partial object was parsed from.
  * @param field - The field {@link StreamObjectOptions.elements} names.
  */
-function arrayFieldClosed(text: string, field: string): boolean {
+function arrayFieldState(text: string, field: string): ArrayFieldState {
   // The brackets and braces open at this point, outermost first.
   const open: string[] = [];
   let inString = false;
@@ -470,6 +485,9 @@ function arrayFieldClosed(text: string, field: string): boolean {
   let key: string | undefined;
   let inArray = false;
   let closed = false;
+  let appearances = 0;
+  // The last character outside a string that is not white space.
+  let last = '';
   for (let at = 0; at < text.length; at += 1) {
     const ch = text[at];
     if (escaped) {
@@ -490,11 +508,14 @@ function arrayFieldClosed(text: string, field: string): boolean {
         } catch {
           key = undefined;
         }
+        if (key === field) appearances += 1;
       }
       inString = !inString;
+      last = '"';
       continue;
     }
     if (inString) continue;
+    if (ch !== ' ' && ch !== '\t' && ch !== '\n' && ch !== '\r') last = ch;
     if (ch === '{' || ch === '[') {
       open.push(ch);
       if (open.length === 1) {
@@ -514,7 +535,7 @@ function arrayFieldClosed(text: string, field: string): boolean {
       key = undefined;
     }
   }
-  return closed;
+  return { closed, between: inArray && open.length === 2 && last === ',', appearances };
 }
 
 /**
@@ -775,8 +796,11 @@ export function streamObject<T extends ZodType, K extends string = never>(
   // How many elements of the array field were yielded or skipped.
   let examined = 0;
   let skippedCount = 0;
-  const partials: DeepPartial<Output>[] = [];
+  // The partial object the partial reader has yet to take: at most one waits, the latest.
+  let pendingPartial: DeepPartial<Output> | undefined;
+  // The elements the element reader has yet to take, from `elementsAt` on: each is taken in constant time.
   const elements: Item[] = [];
+  let elementsAt = 0;
   let partialReader: ReaderState = 'unread';
   let elementReader: ReaderState = 'unread';
 
@@ -868,8 +892,11 @@ export function streamObject<T extends ZodType, K extends string = never>(
       // first key of the next element: the elements before it are complete,
       // and a stream cut here keeps them. The cut text alone says whether the
       // array closed, since the elements are read from it.
+      // When the cut ends at a comma between two elements of the array, the
+      // element after it has begun, a number, true, false or null still being
+      // written (`[1,2e`), so the one before it is complete.
       const cut = elementSchema === undefined ? undefined : textBeforeOpenMember(buffer);
-      if (cut !== undefined) collectElements(tryParsePartialJson(cut), cut);
+      if (cut !== undefined) collectElements(tryParsePartialJson(cut), cut, true);
       return;
     }
     // A partial object is yielded only when the parsed shape has changed.
@@ -877,7 +904,8 @@ export function streamObject<T extends ZodType, K extends string = never>(
     if (serialized !== lastPartialJson) {
       lastPartialJson = serialized;
       latestPartial = partial as DeepPartial<Output>;
-      if (partialReader === 'reading') partials.push(latestPartial);
+      // A reader that has not taken the last one is handed this one instead: it holds the ones before it.
+      if (partialReader === 'reading') pendingPartial = latestPartial;
     }
     // Every element before the last one is complete, the next one having
     // begun, and the last one once the array's closing bracket arrived, which
@@ -910,16 +938,30 @@ export function streamObject<T extends ZodType, K extends string = never>(
    * Parses each element of the array field in `value` that is complete and
    * not yet examined. While the stream runs, `parsedFrom` is the text `value`
    * was parsed from: every element but the last is complete, and the last
-   * one too once that text holds the array's closing bracket. Without
-   * `parsedFrom`, the whole text once the stream ended, every element is.
+   * one too once that text holds the array's closing bracket, or when it was
+   * cut back to a comma between two elements (`cutAtMember`), the next one
+   * having begun. Without `parsedFrom`, the whole text once the stream ended,
+   * every element is. A text that names the field twice ends the stream as
+   * failed: the elements already yielded may be none of the array the object
+   * keeps, `JSON.parse` keeping the last.
    */
-  function collectElements(value: unknown, parsedFrom?: string): void {
+  function collectElements(value: unknown, parsedFrom?: string, cutAtMember = false): void {
     if (elementSchema === undefined || elementField === undefined) return;
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return;
+    const state = parsedFrom === undefined ? undefined : arrayFieldState(parsedFrom, elementField);
+    if (state !== undefined && state.appearances > 1) {
+      void finish({
+        kind: 'failed',
+        error: new ObjectGenerationError(
+          `Streamed JSON holds the field '${elementField}' twice: the elements yielded may be none of the array the object keeps`,
+          buffer
+        ),
+      });
+      return;
+    }
     const list = (value as Record<string, unknown>)[elementField];
     if (!Array.isArray(list) || examined >= list.length) return;
-    const complete =
-      parsedFrom === undefined || arrayFieldClosed(parsedFrom, elementField) ? list.length : list.length - 1;
+    const complete = state === undefined || state.closed || (cutAtMember && state.between) ? list.length : list.length - 1;
     for (; examined < complete; examined += 1) {
       const checked = elementSchema.safeParse(list[examined]);
       if (!checked.success) skippedCount += 1;
@@ -1008,10 +1050,11 @@ export function streamObject<T extends ZodType, K extends string = never>(
   function stopReading(reader: 'partial' | 'element'): Promise<void> {
     if (reader === 'partial') {
       partialReader = 'stopped';
-      partials.length = 0;
+      pendingPartial = undefined;
     } else {
       elementReader = 'stopped';
       elements.length = 0;
+      elementsAt = 0;
     }
     if (ending !== undefined || partialReader === 'reading' || elementReader === 'reading') return settled;
     // A reader that stops after the caller's signal aborted (an abort, then a
@@ -1023,12 +1066,14 @@ export function streamObject<T extends ZodType, K extends string = never>(
   async function* readPartials(): AsyncGenerator<DeepPartial<Output>> {
     partialReader = 'reading';
     // A reader that starts once the stream is under way begins with the latest partial object.
-    if (latestPartial !== undefined) partials.push(latestPartial);
+    if (latestPartial !== undefined) pendingPartial = latestPartial;
     let ended = false;
     try {
       while (true) {
-        if (partials.length > 0) {
-          yield partials.shift()!;
+        if (pendingPartial !== undefined) {
+          const next = pendingPartial;
+          pendingPartial = undefined;
+          yield next;
           continue;
         }
         if (ending !== undefined) {
@@ -1048,8 +1093,18 @@ export function streamObject<T extends ZodType, K extends string = never>(
     let ended = false;
     try {
       while (true) {
-        if (elements.length > 0) {
-          yield elements.shift()!;
+        if (elementsAt < elements.length) {
+          const next = elements[elementsAt]!;
+          elementsAt += 1;
+          // The taken elements are let go once all are taken, or once they are half the queue.
+          if (elementsAt === elements.length) {
+            elements.length = 0;
+            elementsAt = 0;
+          } else if (elementsAt >= 1024 && elementsAt * 2 >= elements.length) {
+            elements.splice(0, elementsAt);
+            elementsAt = 0;
+          }
+          yield next;
           continue;
         }
         if (ending !== undefined) {
