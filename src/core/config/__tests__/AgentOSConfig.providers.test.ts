@@ -51,6 +51,21 @@ describe('createAgentOSConfig provider defaults', () => {
     expect(provider.defaultModelId).toBe(modelId);
   });
 
+  it('makes MiniMax the manager default and the GMI default when its key is the only cloud key', async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('OPENROUTER_API_KEY', '');
+    vi.stubEnv('MINIMAX_API_KEY', 'test-minimax-key');
+    const config = await createAgentOSConfig();
+    expect(config.gmiManagerConfig.defaultGMIBaseConfigDefaults).toEqual({
+      defaultLlmProviderId: 'minimax',
+      defaultLlmModelId: 'MiniMax-M3.1-Flash',
+    });
+    await manager.initialize(config.modelProviderManagerConfig);
+    const provider = manager.getDefaultProvider();
+    expect(provider?.providerId).toBe('minimax');
+    expect(provider?.defaultModelId).toBe('MiniMax-M3.1-Flash');
+  });
+
   it('uses the longer local-model timeout for Ollama requests', async () => {
     const config = await createAgentOSConfig();
     await manager.initialize(config.modelProviderManagerConfig);
