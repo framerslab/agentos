@@ -202,7 +202,7 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     session.setAudioSink!(async () => {});
     await session.writeTokens!('Hello world.');
     a.emit('error', new Error('socket hang up'));
-    return { chain, breaker, failover, errors, third };
+    return { chain, session, breaker, failover, errors, third };
   }
 
   it.each(['error', 'close'] as const)('passes over a backup that reports %s while it takes the replayed text, for the next provider', async (event) => {
@@ -459,6 +459,67 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(chain.currentProviderId).toBe('b');
     expect(errors).not.toHaveBeenCalled();
     expect(closes).not.toHaveBeenCalled();
+  });
+
+  it('takes nothing from a backup once its failure is recorded during the switch: an error and a flush_complete it emits in one call, as it takes text pushed after the replay, leave the text to the next provider', async () => {
+    const a = pushSession();
+    const b = pushSession();
+    const c = pushSession();
+    const failover = vi.fn();
+    const completed = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts, provider('c', 30, c).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    session.on('flush_complete', completed);
+    session.pushTokens('One.');
+    // The backup takes the replay, and the caller's next text comes in the promise job after it, before the switch has
+    // ended. The backup fails as it takes that text: it reports the lost connection and completes its flush in one call.
+    b.pushTokens
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => session.pushTokens(' Two.'));
+      })
+      .mockImplementationOnce(() => {
+        b.emit('error', new Error('socket hang up'));
+        b.emit('flush_complete');
+      });
+    a.emit('error', new Error('socket hang up'));
+    await session.flush();
+    // The request is not ended as spoken: the next provider takes all of its text and is flushed in its place.
+    expect(completed).not.toHaveBeenCalled();
+    expect(failover).toHaveBeenCalledTimes(2);
+    expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+    expect(failover.mock.calls[1]![0]).toMatchObject({ from: 'b', to: 'c' });
+    expect(c.pushTokens.mock.calls).toEqual([['One.'], [' Two.']]);
+    expect(c.flush).toHaveBeenCalledOnce();
+  });
+
+  it("takes an error the backup reports after a cancel() during the switch as the cut request's, though the next request's text has come: the backup takes that text and is not passed over", async () => {
+    const b = pullSession();
+    let release: () => void = () => {};
+    // The replay's write of the cut request is under way when the cancel comes, and settles only after the backup has
+    // reported the cut as an error, once the next request's text has come.
+    b.writeTokens.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const c = pullSession();
+    const f = await switchingFacade(b, c);
+    await vi.waitFor(() => expect(b.writeTokens).toHaveBeenCalledWith('Hello world.'));
+    f.session.cancel();
+    f.session.pushTokens('Next one.');
+    b.emit('error', new Error('request cancelled'));
+    release();
+    await vi.waitFor(() => expect(f.failover).toHaveBeenCalledOnce());
+    expect(f.failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+    expect(b.writeTokens.mock.calls).toEqual([['Hello world.'], ['Next one.']]);
+    expect(f.third.startSession).not.toHaveBeenCalled();
+    expect(f.chain.currentProviderId).toBe('b');
+    expect(f.breaker.isAvailable('b')).toBe(true);
+    expect(f.errors).not.toHaveBeenCalled();
   });
 
   it('sends the backup the text pushed in the promise job after it took the replay, before the switch has ended', async () => {
