@@ -394,14 +394,51 @@ function noteParts(node: HtmlNodeLike, parts: Parts): number {
 }
 
 /**
+ * What introduces the content a header heads: its headings and paragraphs. HTML's header holds "a group of introductory
+ * or navigational aids" (https://html.spec.whatwg.org/multipage/sections.html#the-header-element), usually a heading
+ * or an `hgroup`, and may hold a table of contents, a search form or a logo beside them.
+ */
+const INTRODUCTION = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'p']);
+
+/**
+ * Whether a part of a header holds an element of `INTRODUCTION`, with the elements under it that hold none: the
+ * header's navigational aids, each to be left out with all it holds. The words a part holds beside its elements are
+ * read with it. The parts never read, by their name or as hidden, are not looked in.
+ */
+function introductionOf(node: HtmlNodeLike): { holds: boolean; aids: HtmlNodeLike[] } {
+  let holds = false;
+  const aids: HtmlNodeLike[] = [];
+  for (const child of childrenOf(node)) {
+    if (child.nodeType !== ELEMENT_NODE) continue;
+    const name = nameOf(child);
+    if (DROPPED.has(name) || hidden(child)) continue;
+    if (INTRODUCTION.has(name)) {
+      holds = true;
+      continue;
+    }
+    const inner = introductionOf(child);
+    if (inner.holds) {
+      holds = true;
+      for (const aid of inner.aids) aids.push(aid);
+    } else {
+      // a part that holds no introduction is an aid, left out whole with what its own walk found
+      aids.push(child);
+    }
+  }
+  return { holds, aids };
+}
+
+/**
  * The page's own header, footer and asides: those that no article or section holds, between them and the node handed
  * over, but one that wraps the page. A section that holds the page's main content wraps the page, as the Read the Docs
  * theme's section around its content column and footer does, so it holds no header, footer or aside of its own; an
  * article, and any other section, holds its own, and so does the node handed over when it is one. A header inside the
  * page's main content, a `main` element or one whose role is `main`, introduces that content, as the title of an
- * archive or of a search page does, and is read; a footer or an aside there is still the page's. The walk stops at an
- * article or a section that holds its own and at an element left out with all it holds, since nothing inside either is
- * the page's own or is read.
+ * archive or of a search page does: its headings and paragraphs are read, and the rest of it, its navigational aids,
+ * is the page's own, as the menu of other languages Wikipedia's title bar holds beside an article's title is; one that
+ * holds no heading or paragraph is the page's own whole. A footer or an aside there is still the page's. The walk stops
+ * at an article or a section that holds its own and at an element left out with all it holds, since nothing inside
+ * either is the page's own or is read.
  *
  * @param wrappers - The sections that hold the page's main content, as `noteParts` notes them.
  */
@@ -417,8 +454,13 @@ function pageOwnOf(root: HtmlNodeLike, wrappers: ReadonlySet<HtmlNodeLike>): Set
       if (child.nodeType !== ELEMENT_NODE) continue;
       const name = nameOf(child);
       if (holdsOwn(child, name) || DROPPED.has(name) || hidden(child)) continue;
-      // a header inside the page's main content introduces it and is read with all it holds
-      if (name === 'header' && holder.inMain) continue;
+      if (name === 'header' && holder.inMain) {
+        // a header inside the page's main content introduces it: what introduces it is read, its aids are the page's
+        const introduction = introductionOf(child);
+        if (!introduction.holds) found.add(child);
+        else for (const aid of introduction.aids) found.add(aid);
+        continue;
+      }
       if (SCOPED.has(name)) found.add(child);
       else holders.push({ node: child, inMain: holder.inMain || isMain(child, name) });
     }
@@ -1360,7 +1402,8 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
  * `article` or `section` holds it but a section that holds the page's main content, a `main` element or an element whose
  * role is `main`, and so wraps the page; inside an article or any other section, it is that part's and is read with it,
  * and an `article` or `section` handed over holds its own the same way. A `header` inside the page's main content
- * introduces that content and is read. A `form` is read as the blocks it holds when it holds a page: a heading, an
+ * introduces that content: its headings, `hgroup`s and paragraphs are read, and the rest of it, a menu or a list of
+ * links beside them, is the page's own. A `form` is read as the blocks it holds when it holds a page: a heading, an
  * `article`, `aside`, `nav` or `section`, the page's main content, a `header` or a `footer`; when it is the page's main
  * content itself; or when it is the one element the body holds, as a page whose whole body sits in one form does. A
  * heading whose words all sit in its one `button`, as an accordion's
