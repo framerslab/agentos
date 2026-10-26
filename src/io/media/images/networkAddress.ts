@@ -94,7 +94,7 @@ function isNonPublicIPv6(groups: readonly number[]): boolean {
   const zeros = (from: number, to: number) => groups.slice(from, to).every((group) => group === 0);
   const carried = (high: number, low: number) => isNonPublicIPv4([high >> 8, high & 255, low >> 8, low & 255]);
   if (zeros(0, 5) && g5 === 0xffff) return carried(g6, g7);
-  if (g0 === 0x64 && g1 === 0xff9b && zeros(2, 5)) return carried(g6, g7);
+  if (g0 === 0x64 && g1 === 0xff9b && zeros(2, 6)) return carried(g6, g7);
   if ((g0 & 0xe000) !== 0x2000) return true;
   if (g0 === 0x2002) return carried(g1, groups[2]);
   if (g0 === 0x2001 && (g1 <= 0x01ff || g1 === 0xdb8)) return true;
