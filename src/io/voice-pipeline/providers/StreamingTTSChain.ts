@@ -96,7 +96,13 @@ export interface StreamingTTSChainOptions {
    * `DeepgramAuraStreamingTTS` does, does not end the request, and the backup
    * takes its text. A backup that fails as it takes the
    * text (an `'error'` or a `'close'`, or a write it refuses) is recorded as
-   * failed and closed, and the next provider is tried. Text pushed during a
+   * failed and closed, and the next provider is tried; from the moment its
+   * failure is recorded, nothing it emits is forwarded but its `'usage'`, so a
+   * backup that reports a lost connection and completes its flush in one call
+   * leaves the text to the next provider. An `'error'` the backup reports after
+   * a `cancel()` during the switch is the cut request's, though the next
+   * request's text has come: the backup is passed over only when it refuses a
+   * write of that text or closes. Text pushed during a
    * switch goes to the backup: the replay sends what comes before the backup
    * has taken it, and what comes after goes straight to it. A `cancel()` cuts
    * the request and not a switch under way, since the facade still needs a
@@ -255,9 +261,20 @@ export class StreamingTTSChain implements IStreamingTTS {
     // completes its flush, as DeepgramAuraStreamingTTS does, would end the request as spoken, and the backup would take
     // none of its text.
     let failed: StreamingTTSSession | undefined;
-    const failedNow = (session: StreamingTTSSession): boolean => switching !== undefined && session === failed;
     // An error or close of the backup a switch has attached, reported before the switch ended; the switch passes over it.
     let lost: Error | undefined;
+    // A session is out of use from the moment its failure is recorded: the one whose failure began the switch under way,
+    // and the backup that switch attached once a failure of its own is recorded in `lost`, though it is still `current`
+    // until the switch passes over it. A backup that reports a lost connection and completes its flush in one call, as it
+    // takes text pushed after the replay, would otherwise end the request as spoken and clear the text the next provider
+    // takes.
+    const failedNow = (session: StreamingTTSSession): boolean =>
+      switching !== undefined && (session === failed || (lost !== undefined && session === current));
+    // Set when cancel() comes during a switch, once its backup is attached: until the switch ends or attaches another
+    // backup, an error that backup reports is the cut request's, as a write the cancel cut reports it, though the next
+    // request's text has come. The replay finds a backup that has really failed when it refuses that text's write, or
+    // closes.
+    let cutInSwitch = false;
     let sink: ((chunk: EncodedAudioChunk) => Promise<void>) | undefined;
     // A promise the facade settles itself.
     const deferred = (): { promise: Promise<void>; resolve: () => void } => {
@@ -341,8 +358,9 @@ export class StreamingTTSChain implements IStreamingTTS {
       // During a switch the active session is the backup taking the replay: its failure is left for the switch.
       session.on('error', (error: Error) => {
         if (closed || cancelled || current !== session) return;
-        if (switching) lost ??= error;
-        else begin(error);
+        if (switching) {
+          if (!cutInSwitch) lost ??= error;
+        } else begin(error);
       });
       session.on('close', () => {
         if (closed || current !== session) return;
@@ -405,6 +423,8 @@ export class StreamingTTSChain implements IStreamingTTS {
           continue;
         }
         current = next;
+        // a backup attached after the cut never took its text, so an error it reports is its own
+        cutInSwitch = false;
         provider = backup;
         remaining = remaining.filter((p) => p !== backup);
         attach(next);
@@ -461,8 +481,10 @@ export class StreamingTTSChain implements IStreamingTTS {
     };
     const start = (error: Error): void => {
       failed = current;
+      cutInSwitch = false;
       switching = Promise.resolve().then(() => failover(error)).catch((error: unknown) => fatal(error instanceof Error ? error : new Error('TTS failed'))).finally(() => {
         switching = undefined;
+        cutInSwitch = false;
         // The backup failed after its replay, before the switch ended: the next switch starts from it, whatever was cut
         // since, as a backup that fails as it takes the text is passed over. Returned here, that switch keeps this one
         // unsettled until it settles, so flush() and writeTokens(), which wait on the switch, resume only once none is
@@ -559,6 +581,8 @@ export class StreamingTTSChain implements IStreamingTTS {
       cancel: (): void => {
         if (closed) return;
         cancelled = true;
+        // only a backup the switch has attached can have taken text of the request cut here and report its cut
+        if (switching && current !== undefined && current !== failed) cutInSwitch = true;
         // The cut request's audio is no request's any more: a switch under way sends none of its text again, so under a
         // ProviderPolicy it repeats nothing the listener heard.
         emittedAudio = false;
