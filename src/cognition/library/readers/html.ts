@@ -164,16 +164,18 @@ const DROPPED = new Set([
 const SCOPED = new Set(['header', 'footer', 'aside']);
 
 /**
- * The elements that hold their own header, footer and asides, which are read with them, but one that holds the page's
- * main content: that one wraps the page, as a `div` would, and the header, footer and asides it holds are the page's.
+ * The elements that hold their own header, footer and asides, which are read with them, but a section that holds the
+ * page's main content: that one wraps the page, as a `div` would, and the header, footer and asides it holds are the
+ * page's. An article is a composition of its own, so one that holds the main element still holds its own.
  */
 const SECTIONS = new Set(['article', 'section']);
 
 /**
  * What marks a form as holding a page rather than a set of controls, with the page's main content: a heading, HTML's
  * sectioning content (https://html.spec.whatwg.org/multipage/dom.html#sectioning-content), a header or a footer. A page
- * whose whole body sits in one form, as an ASP.NET Web Forms page's does, holds one; a blog post's comment form or a
- * search box, a set of notes, labels and controls, holds none.
+ * whose whole body sits in one form, as an ASP.NET Web Forms page's does, usually holds one, and `noteParts` takes the
+ * body's one form as a page whatever it holds; a blog post's comment form or a search box, a set of notes, labels and
+ * controls beside the page, holds none.
  */
 const PAGE_PARTS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'article', 'aside', 'nav', 'section', 'header', 'footer']);
 
@@ -346,58 +348,79 @@ function isMain(node: HtmlNodeLike, name: string): boolean {
 const HOLDS_MAIN = 1;
 const HOLDS_PAGE = 2;
 
-/** The forms that hold a page, and the articles and sections that hold the page's main content and so wrap the page. */
+/** The forms that hold a page, and the sections that hold the page's main content and so wrap the page. */
 interface Parts {
   readonly forms: Set<HtmlNodeLike>;
   readonly wrappers: Set<HtmlNodeLike>;
 }
 
 /**
- * Notes, in one walk of what a node holds, the forms that hold a page and the articles and sections that hold the page's
- * main content, and answers what the node holds as `HOLDS_MAIN` and `HOLDS_PAGE` bits. A form holds a page when it holds
- * the page's main content or an element of `PAGE_PARTS`, a `nav` among them, though a nav is never read. A hidden
- * element marks nothing, and neither does anything inside it or inside an element left out by its name.
+ * Notes, in one walk of what a node holds, the forms that hold a page and the sections that hold the page's main content,
+ * and answers what the node holds as `HOLDS_MAIN` and `HOLDS_PAGE` bits. A form holds a page when it holds the page's
+ * main content or an element of `PAGE_PARTS`, a `nav` among them, though a nav is never read; when it is the page's main
+ * content itself, its role `main`; or when it is the one element the body holds that is read, with no words of the
+ * body's own beside it, as an ASP.NET Web Forms page's form is, headings or none. A hidden element marks nothing, and
+ * neither does anything inside it or inside an element left out by its name.
  */
 function noteParts(node: HtmlNodeLike, parts: Parts): number {
   let holds = 0;
+  // the elements the node holds that are read, and whether it holds words of its own beside them, for the body's one form
+  const read: HtmlNodeLike[] = [];
+  let words = false;
   for (const child of childrenOf(node)) {
+    if (isText(child)) {
+      if ((child.textContent ?? '').replace(WHITE, '') !== '') words = true;
+      continue;
+    }
     if (child.nodeType !== ELEMENT_NODE || hidden(child)) continue;
     const name = nameOf(child);
     if (DROPPED.has(name)) {
       if (PAGE_PARTS.has(name)) holds |= HOLDS_PAGE;
       continue;
     }
-    if (isMain(child, name)) holds |= HOLDS_MAIN | HOLDS_PAGE;
+    read.push(child);
+    const main = isMain(child, name);
+    if (main) holds |= HOLDS_MAIN | HOLDS_PAGE;
     else if (PAGE_PARTS.has(name)) holds |= HOLDS_PAGE;
     const inner = noteParts(child, parts);
-    if (name === 'form' && (inner & HOLDS_PAGE) !== 0) parts.forms.add(child);
-    if (SECTIONS.has(name) && (inner & HOLDS_MAIN) !== 0) parts.wrappers.add(child);
+    if (name === 'form' && (main || (inner & HOLDS_PAGE) !== 0)) parts.forms.add(child);
+    if (name === 'section' && (inner & HOLDS_MAIN) !== 0) parts.wrappers.add(child);
     holds |= inner;
   }
+  const [only] = read;
+  const body = node.nodeType === ELEMENT_NODE && nameOf(node) === 'body';
+  if (body && !words && read.length === 1 && only !== undefined && nameOf(only) === 'form') parts.forms.add(only);
   return holds;
 }
 
 /**
  * The page's own header, footer and asides: those that no article or section holds, between them and the node handed
- * over, but one that wraps the page. An article or a section that holds the page's main content wraps the page, as the
- * Read the Docs theme's section around its content column and footer does, so it holds no header, footer or aside of
- * its own; any other holds its own, and so does the node handed over when it is one. The walk stops at an article or a
- * section that holds its own and at an element left out with all it holds, since nothing inside either is the page's own
- * or is read.
+ * over, but one that wraps the page. A section that holds the page's main content wraps the page, as the Read the Docs
+ * theme's section around its content column and footer does, so it holds no header, footer or aside of its own; an
+ * article, and any other section, holds its own, and so does the node handed over when it is one. A header inside the
+ * page's main content, a `main` element or one whose role is `main`, introduces that content, as the title of an
+ * archive or of a search page does, and is read; a footer or an aside there is still the page's. The walk stops at an
+ * article or a section that holds its own and at an element left out with all it holds, since nothing inside either is
+ * the page's own or is read.
  *
- * @param wrappers - The articles and sections that hold the page's main content, as `noteParts` notes them.
+ * @param wrappers - The sections that hold the page's main content, as `noteParts` notes them.
  */
 function pageOwnOf(root: HtmlNodeLike, wrappers: ReadonlySet<HtmlNodeLike>): Set<HtmlNodeLike> {
   const found = new Set<HtmlNodeLike>();
   const holdsOwn = (node: HtmlNodeLike, name: string): boolean => SECTIONS.has(name) && !wrappers.has(node);
-  const holders: HtmlNodeLike[] = root.nodeType === ELEMENT_NODE && holdsOwn(root, nameOf(root)) ? [] : [root];
+  const isElement = root.nodeType === ELEMENT_NODE;
+  const rootName = isElement ? nameOf(root) : '';
+  const holders: Array<{ node: HtmlNodeLike; inMain: boolean }> =
+    isElement && holdsOwn(root, rootName) ? [] : [{ node: root, inMain: isElement && isMain(root, rootName) }];
   for (let holder = holders.pop(); holder !== undefined; holder = holders.pop()) {
-    for (const child of childrenOf(holder)) {
+    for (const child of childrenOf(holder.node)) {
       if (child.nodeType !== ELEMENT_NODE) continue;
       const name = nameOf(child);
       if (holdsOwn(child, name) || DROPPED.has(name) || hidden(child)) continue;
+      // a header inside the page's main content introduces it and is read with all it holds
+      if (name === 'header' && holder.inMain) continue;
       if (SCOPED.has(name)) found.add(child);
-      else holders.push(child);
+      else holders.push({ node: child, inMain: holder.inMain || isMain(child, name) });
     }
   }
   return found;
@@ -1334,11 +1357,13 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
  * page, the controls of a form that hold words of their own (`button`, `select`, `textarea`) and a `datalist` with its
  * choices, embedded media, drawings in SVG and formulas in MathML, a `dialog` that is not open, and any element marked
  * `hidden`, `aria-hidden="true"` or styled `display: none`. A `header`, `footer` or `aside` is the page's own when no
- * `article` or `section` holds it but one that holds the page's main content, a `main` element or an element whose role
- * is `main`, and so wraps the page; inside any other article or section, it is that part's and is read with it, and an
- * `article` or `section` handed over holds its own the same way. A `form` is read as the blocks it holds when it holds a
- * page: a heading, an `article`, `aside`, `nav` or `section`, the page's main content, a `header` or a `footer`, as a
- * page whose whole body sits in one form does. A heading whose words all sit in its one `button`, as an accordion's
+ * `article` or `section` holds it but a section that holds the page's main content, a `main` element or an element whose
+ * role is `main`, and so wraps the page; inside an article or any other section, it is that part's and is read with it,
+ * and an `article` or `section` handed over holds its own the same way. A `header` inside the page's main content
+ * introduces that content and is read. A `form` is read as the blocks it holds when it holds a page: a heading, an
+ * `article`, `aside`, `nav` or `section`, the page's main content, a `header` or a `footer`; when it is the page's main
+ * content itself; or when it is the one element the body holds, as a page whose whole body sits in one form does. A
+ * heading whose words all sit in its one `button`, as an accordion's
  * header's do, is read for that button's words. A form's control, an image and the rest of HTML's embedded content are
  * each a space between the words on either side of them, outside code. Comments are not read. An element handed over is
  * read as a document is, whatever its own name, but an `svg` or `math` element handed over takes no title from a
@@ -1355,8 +1380,8 @@ export function readHtml(document: HtmlDocumentLike, options?: ReadHtmlOptions):
   const named = element === null ? '' : textWithin(element).replace(WHITE, ' ').trim();
   const parts: Parts = { forms: new Set(), wrappers: new Set() };
   const holds = noteParts(document, parts);
-  // an article or a section handed over that holds the page's main content wraps the page, as one inside it does
-  if (document.nodeType === ELEMENT_NODE && SECTIONS.has(nameOf(document)) && (holds & HOLDS_MAIN) !== 0) parts.wrappers.add(document);
+  // a section handed over that holds the page's main content wraps the page, as one inside it does
+  if (document.nodeType === ELEMENT_NODE && nameOf(document) === 'section' && (holds & HOLDS_MAIN) !== 0) parts.wrappers.add(document);
   const reading: Reading = {
     images: 0,
     cut: false,
