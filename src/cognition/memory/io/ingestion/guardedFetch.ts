@@ -260,7 +260,7 @@ function hostOf(url: URL): string {
  * the address used: `::ffff:` and two groups of lower-case hex
  * (https://url.spec.whatwg.org/#concept-ipv6-serializer).
  */
-const IPV4_MAPPED = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/;
+const IPV4_MAPPED = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})/;
 
 /**
  * An address under the well-known NAT64 prefix, `64:ff9b::/96`
