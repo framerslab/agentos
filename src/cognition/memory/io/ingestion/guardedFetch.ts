@@ -2,8 +2,9 @@
  * @fileoverview A fetch for a server that reads an address a person gave it.
  * The host is resolved first and refused when any of its addresses is not
  * public ({@link isPublicAddress}: private, loopback, link-local,
- * unique-local, multicast, reserved or unspecified, IPv4 and IPv6, an IPv4
- * address inside IPv6 read as IPv4); the connection is made to the address
+ * unique-local, multicast, reserved or unspecified, IPv4 and IPv6, with an
+ * IPv4-mapped, NAT64 or 6to4 address judged by the IPv4 address it carries
+ * too); the connection is made to the address
  * that was checked, on a connection of its own, so a second lookup cannot
  * point it elsewhere; at most `maxRedirects` redirects, each checked the same
  * way; a caller's rule over the host (`allowHost`), asked about the first
@@ -62,9 +63,11 @@ export class GuardedFetchError extends Error {
    * `Object.keys`, `JSON.stringify` and a spread of the error: as on a native
    * error, the property is not enumerable. Error serializers and
    * `util.inspect` read it by name, as they read a native error's. Pino's
-   * default `err` serializer folds a cause that is an error into the message
-   * and the stack, and `console.error` prints any cause as `[cause]`, so a
-   * host that logs these errors decides what its rule throws.
+   * default `err` serializer folds any cause with a string `message`, an
+   * error or a plain object, into the logged message, and the cause's stack,
+   * when it has one, into the logged stack. `console.error` prints any cause
+   * as `[cause]`. So a host that logs these errors decides what its rule
+   * throws.
    */
   declare readonly cause?: unknown;
 
@@ -85,10 +88,11 @@ export class GuardedFetchError extends Error {
     // Defined as a native error defines its cause, not enumerable, so
     // `Object.keys`, a spread and `JSON.stringify` leave out what the rule
     // threw. Error serializers and `util.inspect` read `cause` by name, as
-    // they read a native error's. Pino's default `err` serializer folds a
-    // cause that is an error into the message and the stack, and
-    // `console.error` prints any cause as `[cause]`, so a host that logs
-    // these errors decides what its rule throws. The property is declared
+    // they read a native error's. Pino's default `err` serializer folds any
+    // cause with a string `message` into the logged message, and the cause's
+    // stack, when it has one, into the logged stack. `console.error` prints
+    // any cause as `[cause]`. So a host that logs these errors decides what
+    // its rule throws. The property is declared
     // with `declare` above, so no class field puts an enumerable `cause` on
     // every error first.
     if (cause !== undefined) {
@@ -135,13 +139,22 @@ export interface GuardedFetchOptions {
    * `notexample.com` also ends with `example.com`. The rule judges the host
    * the address names, before any lookup. A name is not resolved for it, so
    * a rule that refuses an address does not refuse a name that resolves to
-   * that address. The fetch learns a NAT64 prefix of the network's own from
-   * the resolver (RFC 7050) after the rule has answered, so an address under
-   * one comes in hex, and a rule that refuses an IPv4 address does not refuse
-   * it under such a prefix either. The address check judges every address a
-   * host resolves to, an address under the well-known NAT64 prefix or under
-   * a prefix the resolver reveals by the IPv4 address it carries. A host the
-   * rule allows is still resolved and checked as every host is: the rule
+   * that address. The rule never reads the NAT64 prefixes the fetch learns
+   * from the resolver (RFC 7050), at the first address or at a redirect, so
+   * an address under a prefix of the network's own comes in hex, and a rule
+   * that refuses an IPv4 address does not refuse it under such a prefix
+   * either. A 6to4 address (`2002::/16`, RFC 3056) comes in hex too. The
+   * IPv4 address it carries is the address of the 6to4 router of a site,
+   * and the connection ends at a host of that site, so a rule that refuses
+   * that IPv4 address does not refuse the site's hosts, and one that allows
+   * it does not allow them. The address check judges every address a host
+   * resolves to by its own range, and an IPv4-mapped address, one under the
+   * well-known NAT64 prefix or a 6to4 one by the IPv4 address it carries. A
+   * prefix the resolver reveals only adds refusals: an address under one is
+   * refused when the IPv4 address it carries is not public, and an address
+   * its own range refuses, such as one under the local-use prefix
+   * `64:ff9b:1::/48` (RFC 8215), stays refused whatever it carries. A host
+   * the rule allows is still resolved and checked as every host is: the rule
    * narrows what the fetch reads and never widens it. A rule that
    * throws refuses as one that answers `false`, with what it threw as the
    * refusal's `cause`; a value that is not a function is a `TypeError`
@@ -211,8 +224,9 @@ const CONNECT_ATTEMPT_MS = 2_000;
  * address: not unspecified, loopback, private, carrier-grade NAT, link-local,
  * unique-local, site-local, multicast, documentation, benchmarking or
  * otherwise reserved, and, for an IPv6 address that carries an IPv4 one
- * (IPv4-mapped, IPv4-compatible, NAT64, 6to4), not one whose IPv4 address is
- * any of those. Text that is not an IP address is not public. It is the rule
+ * (IPv4-mapped, NAT64, 6to4), not one whose IPv4 address is any of those.
+ * The deprecated IPv4-compatible form (`::/96`) is not public whatever it
+ * carries. Text that is not an IP address is not public. It is the rule
  * {@link guardedFetch} applies to every address a host resolves to, the same
  * rule as `isPublicNetworkAddress` in `@framers/agentos/io/media/images`,
  * which it calls.
@@ -267,7 +281,11 @@ const NAT64_WELL_KNOWN = /^64:ff9b::(?:(?:([0-9a-f]{1,4}):)?([0-9a-f]{1,4}))?$/;
  * IPv4 address it carries, since a connection to `[::ffff:93.184.215.14]`
  * goes to `93.184.215.14`, as one to `[64:ff9b::93.184.215.14]` does
  * through a NAT64 gateway, and a rule that refuses one must refuse the
- * others. The URL parser has already lower-cased a name, put an
+ * others. A 6to4 address keeps its hex: the IPv4 address it carries is the
+ * address of the 6to4 router of a site (RFC 3056, sections 2, 5.1 and
+ * 5.3), the connection ends at a host of that site, and handing the rule
+ * the router's address would let an allow-list of it reach every host
+ * behind it. The URL parser has already lower-cased a name, put an
  * international one in its ASCII form, written an IPv4 address in dotted
  * decimal and an IPv6 one in compressed hex. The request itself goes to the
  * host as written.

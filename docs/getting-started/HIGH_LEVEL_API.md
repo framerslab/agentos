@@ -79,6 +79,8 @@ for the requested task automatically:
 When neither `provider` nor `model` is given, AgentOS checks configured runtimes in order
 (`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
 
+`embedText()` embeds on `openai`, `openrouter`, `mistral`, `requesty`, `gemini` and `ollama`, each at its own endpoint or at the `baseUrl` you set, and sends a key to no other host. It refuses a provider with no embeddings (`anthropic`, `groq`, `together`, `xai`, `minimax`, the image providers and the CLIs) before reading its key, and needs `baseUrl` for a provider id agentos does not know ([embedText()](../orchestration/STRUCTURED_OUTPUT_API.md#embedtext)).
+
 ### Inline API Keys
 
 Every function accepts `apiKey` and `baseUrl` as top-level parameters, overriding the corresponding environment variable for that call:
