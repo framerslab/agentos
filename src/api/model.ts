@@ -544,12 +544,19 @@ const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|au
  * custom endpoint. MiniMax's global root is https://api.minimax.io/v1
  * (https://platform.minimax.io/docs/api-reference/text-openai-api; images at
  * https://platform.minimax.io/docs/api-reference/image-generation-t2i). Its
- * China root here, https://api.minimaxi.com/v1, is UNVERIFIED: MiniMax's China
- * documentation names https://api.minimax.cn/v1
- * (https://platform.minimax.cn/docs/api-reference/text-openai-api).
+ * China root is https://api.minimax.cn/v1
+ * (https://platform.minimax.cn/docs/api-reference/text-openai-api; images at
+ * https://platform.minimax.cn/docs/api-reference/image-generation-t2i), where
+ * MiniMax's CLI moved its China region on 28 Sep 2026
+ * (https://github.com/MiniMax-AI/cli/commit/8746d48fa6e8c5ae9872a0baac8ed1ae5efd42d4).
+ * https://api.minimaxi.com/v1 is the older China root. MiniMax's documentation
+ * does not name it, but it answers as MiniMax's API (a request without a key
+ * gets MiniMax's own authentication error, as on api.minimax.cn; checked
+ * 2026-10-26), so it stays a root and a configuration that sends to it keeps
+ * working.
  */
 const PROVIDER_API_ROOTS: Record<string, readonly string[]> = {
-  minimax: ['https://api.minimax.io/v1', 'https://api.minimaxi.com/v1'],
+  minimax: ['https://api.minimax.io/v1', 'https://api.minimax.cn/v1', 'https://api.minimaxi.com/v1'],
 };
 
 /**

@@ -38,8 +38,9 @@ export interface GlobalDefaultProvider {
    * endpoint is the base URL the call is sent to: the call's own `baseUrl`,
    * else `baseUrl` here, else the provider's base-URL env var. An empty
    * string from the call or here is that URL, so the env var is not read,
-   * and it names the provider's own endpoint. MiniMax's two API roots,
-   * `https://api.minimax.io/v1` and the China root
+   * and it names the provider's own endpoint. MiniMax's API roots,
+   * `https://api.minimax.io/v1`, the China root `https://api.minimax.cn/v1`
+   * that MiniMax's China documentation names and the older China root
    * `https://api.minimaxi.com/v1`, are its own endpoint, not a custom one,
    * compared as fetch sends the URL: the letter case of the scheme and the
    * host, a default port, surrounding whitespace and trailing slashes make

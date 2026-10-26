@@ -90,8 +90,10 @@ describe("MiniMaxTextToSpeechProvider", () => {
       providerSpecificOptions: { outputFormat: "url" },
     });
 
+    // MiniMax's China documentation sends speech to api.minimax.cn
+    // (https://platform.minimax.cn/docs/api-reference/speech-t2a-http).
     expect(fetchImpl.mock.calls[0][0]).toBe(
-      "https://api.minimaxi.com/v1/t2a_v2",
+      "https://api.minimax.cn/v1/t2a_v2",
     );
     expect(result.audioBuffer.toString()).toBe("audio");
     expect(result.mimeType).toBe("audio/wav");
