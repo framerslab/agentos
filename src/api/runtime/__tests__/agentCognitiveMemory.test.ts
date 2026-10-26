@@ -126,6 +126,25 @@ const persona = {
 } as never;
 const neutral = { valence: 0, arousal: 0, dominance: 0 };
 const FACT = 'The deploy key lives in the vault under ops/deploy.';
+/** A memory of Alice's, which no context assembled for Bob may carry. */
+const ALICES_MEMORY = "Alice's door code is 4471.";
+/**
+ * A UUID in its text form, 8-4-4-4-12 hex digits in either case (RFC 9562
+ * section 4, https://www.rfc-editor.org/rfc/rfc9562#section-4). A context lists
+ * the trace ids in working memory, each `mt_` and a random v4 UUID
+ * (generateTraceId in CognitiveMemoryManager.ts), and a UUID can hold any four
+ * hex digits, 4471 among them.
+ */
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+/**
+ * The parts of Alice's memory (her sentence, its words "door code" and the
+ * code) that a context carries outside its ids.
+ */
+function textOfAlicesMemoryIn(contextText: string): string[] {
+  const text = contextText.replace(UUID, '[id]').toLowerCase();
+  return [ALICES_MEMORY, 'door code', '4471'].filter((part) => text.includes(part.toLowerCase()));
+}
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -155,7 +174,7 @@ describe('createAgentCognitiveMemory', () => {
 
   it("a memory context assembled for some scopes carries no associated memory of another scope, whatever the graph links", async () => {
     const mem = await createAgentCognitiveMemory({ persona, memory: {}, embeddingManager: makeEmbedder() as never });
-    const alices = await mem.manager.encode("Alice's door code is 4471.", neutral, 'neutral', { type: 'semantic', scope: 'user', scopeId: 'alice' });
+    const alices = await mem.manager.encode(ALICES_MEMORY, neutral, 'neutral', { type: 'semantic', scope: 'user', scopeId: 'alice' });
     const bobs = await mem.manager.encode('Bob keeps the deploy key in the vault.', neutral, 'neutral', { type: 'semantic', scope: 'user', scopeId: 'bob' });
     const shared = await mem.manager.encode('The deploy key rotates every month.', neutral, 'neutral', { type: 'semantic', scope: 'persona', scopeId: 'memo' });
     // The links a caller that reads every scope leaves behind when it recalls these together.
@@ -165,14 +184,24 @@ describe('createAgentCognitiveMemory', () => {
 
     const forBob = await mem.manager.assembleForPrompt('where is the deploy key', 1600, neutral, {
       scopes: [{ scope: 'user', scopeId: 'bob' }, { scope: 'persona', scopeId: 'memo' }],
-      // Only Bob's own memory is recalled directly, so the shared one can arrive by association alone.
+      // Only one of the two memories in scope is recalled directly, so the other can arrive by association alone. The
+      // association walk reaches Alice's too, over its link from Bob's.
       topK: 1,
     });
     expect(forBob.contextText).toContain('vault');
     expect(forBob.contextText).toContain('[associated');
     expect(forBob.contextText).toContain('rotates every month');
-    expect(forBob.contextText).not.toContain('4471');
+    expect(textOfAlicesMemoryIn(forBob.contextText), forBob.contextText).toEqual([]);
     await mem.close();
+  });
+
+  it("the check for Alice's memory passes a context that lists a trace id holding 4471 and fails one that carries her sentence", () => {
+    // Bob's active context on attempt 1 of CI run 40228806208 listed this trace id, a random UUID that holds 4471.
+    const listing = '## Active Context (in focus — reference directly)\n- [weak] mt_377f1b30-f9f5-4471-a0d6-9040d2bdd969 (activation: 0.39)';
+    expect(textOfAlicesMemoryIn(listing)).toEqual([]);
+    expect(textOfAlicesMemoryIn(`${listing}\n\n## Related Context (connected memories — use for depth)\n- [associated, activation=0.25] ${ALICES_MEMORY}`)).toEqual([ALICES_MEMORY, 'door code', '4471']);
+    // The code written beside an id, outside it, is still hers.
+    expect(textOfAlicesMemoryIn('- [weak] mt_377f1b30-f9f5-4471-a0d6-9040d2bdd969 4471')).toEqual(['4471']);
   });
 
   it('close shuts the manager down once and leaves an embedding manager it was given running', async () => {
