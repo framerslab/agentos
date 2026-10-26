@@ -1,0 +1,19 @@
+{
+  "about": "What otter-names.txt reads into. The file is a real export made without the times, cut from a published transcript: five turns and its closing line (SOURCES.md). Each header is the speaker's name with two spaces after it, so the turns have labels and no times; a paragraph line ends with one space at most.",
+  "format": "otter",
+  "turns": [
+    { "seq": 1, "startMs": null, "endMs": null, "text": "We seem to last you for a second there Julia." },
+    { "seq": 2, "startMs": null, "endMs": null, "text": "Yeah. Am I back?" },
+    { "seq": 3, "startMs": null, "endMs": null, "text": "You're back." },
+    { "seq": 4, "startMs": null, "endMs": null, "text": "Okay. And you can still see my screen. Cuz I can still see your screen." },
+    { "seq": 5, "startMs": null, "endMs": null, "text": "Yes." }
+  ],
+  "labels": [
+    { "seq": 1, "label": "Sam" },
+    { "seq": 2, "label": "Julia Kasmire" },
+    { "seq": 3, "label": "Sam" },
+    { "seq": 4, "label": "Julia Kasmire" },
+    { "seq": 5, "label": "Sam" }
+  ],
+  "durationMs": null
+}
