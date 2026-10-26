@@ -101,6 +101,8 @@ const bot = agent({
 });
 ```
 
+A `baseUrl` that is an empty or whitespace-only string is unset: the call reads the global default's URL, then the provider's base-URL variable, as it does with no `baseUrl`, and with none it goes to the provider's own endpoint. The same reading applies to the default's `baseUrl` and to the variable (`OPENAI_BASE_URL=` leaves OpenAI's own endpoint), so no request is built on a blank base, whose relative URL (`/chat/completions`) Node's fetch rejects and a browser's would resolve against the page's own origin, with the key.
+
 ### Local Providers
 
 Local providers don't require API keys — just a `baseUrl` (or the corresponding env var):

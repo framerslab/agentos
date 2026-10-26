@@ -121,11 +121,14 @@ export interface EmbedTextOptions {
   /**
    * Override the provider base URL (useful for local proxies or Ollama). An
    * OpenAI-compatible request goes to `<baseUrl>/embeddings` with the call's
-   * key. A provider agentos does not know (a gateway or proxy of your own)
-   * needs it, or a global default's `baseUrl`: without one the call is
-   * refused, since agentos knows no endpoint for its key. A provider with no
-   * embeddings (Anthropic, Groq, Together AI, xAI, MiniMax) is refused
-   * whatever the base URL.
+   * key. An empty or whitespace-only value is unset: the global default's URL,
+   * then the provider's base-URL variable, apply as with no `baseUrl`, and
+   * with none the request goes to the provider's own endpoint; no request is
+   * built on a relative `/embeddings`. A provider agentos does not know (a
+   * gateway or proxy of your own) needs it, or a global default's `baseUrl`:
+   * without one the call is refused, since agentos knows no endpoint for its
+   * key. A provider with no embeddings (Anthropic, Groq, Together AI, xAI,
+   * MiniMax) is refused whatever the base URL.
    */
   baseUrl?: string;
 
@@ -724,8 +727,10 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         } else {
           // The base URL the caller set (the call's, the global default's or
           // the provider's base-URL variable), else the provider's own
-          // documented embeddings endpoint. A provider agentos does not know
-          // has none, so its key goes only to a base URL the caller set.
+          // documented embeddings endpoint. resolveProvider gives none for an
+          // empty or whitespace-only one, so no request is built on a relative
+          // `/embeddings`. A provider agentos does not know has no endpoint of
+          // its own, so its key goes only to a base URL the caller set.
           const baseUrl = resolved.baseUrl ?? EMBEDDINGS_BASE_URLS.get(resolved.providerId);
           if (baseUrl === undefined) {
             throw new Error(

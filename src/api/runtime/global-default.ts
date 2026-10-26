@@ -34,13 +34,18 @@ export interface GlobalDefaultProvider {
    * too unless it is recognizably a chat model (GPT, Claude, Gemini, Llama and
    * similar families) sent to the provider's own endpoint, in which case the
    * provider's default model for the task applies. With a custom endpoint
-   * (`baseUrl` here, inline, or the provider's base-URL env var), and for
-   * `embedText` on Ollama, it is always used.
+   * (`baseUrl` here, inline, or the provider's base-URL env var; an empty or
+   * whitespace-only one counts as none), and for `embedText` on Ollama, it is
+   * always used.
    */
   model?: string;
   /** API key used when no inline override is supplied. */
   apiKey?: string;
-  /** Base URL override (useful for proxies, local Ollama, etc.). */
+  /**
+   * Base URL override (useful for proxies, local Ollama, etc.). An empty or
+   * whitespace-only value is unset: the provider's base-URL variable applies,
+   * and with none the provider's own endpoint.
+   */
   baseUrl?: string;
 }
 

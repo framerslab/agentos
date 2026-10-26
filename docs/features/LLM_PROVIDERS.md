@@ -660,7 +660,10 @@ does not cover:
    ```
 
    The endpoint must answer `GET /models`: the provider lists the models when
-   it initializes, and a listing that fails fails the call.
+   it initializes, and a listing that fails fails the call. A `baseUrl` that
+   is empty or whitespace alone is unset: `OPENAI_BASE_URL` applies, and with
+   neither the request goes to `https://api.openai.com/v1`; no request is
+   built on a blank base.
 
 2. **A gateway.** [OpenRouter](#openrouter), [Requesty](#requesty) and a
    self-hosted [LiteLLM](#litellm) proxy each put many vendors behind one
