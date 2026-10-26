@@ -105,8 +105,8 @@ const ignoredStrategyLogged = new Set<string>();
 /**
  * The pool strategy the environment asks for when a provider's config names
  * none: `AGENTOS_KEY_POOL_STRATEGY_<PROVIDER>` (ANTHROPIC, OPENAI, GEMINI,
- * OPENROUTER, REQUESTY, and GROQ, MISTRAL, TOGETHER, XAI and LITELLM, which
- * send through an OpenAIProvider) for one provider, else `AGENTOS_KEY_POOL_STRATEGY` for
+ * OPENROUTER, REQUESTY, and GROQ, MISTRAL, TOGETHER, XAI, LITELLM and MINIMAX,
+ * which send through an OpenAIProvider) for one provider, else `AGENTOS_KEY_POOL_STRATEGY` for
  * every provider; `ordered` prefers the earliest usable key (a cost order:
  * credited keys first, the paid key last), `round-robin` spreads load. A
  * variable that names neither strategy is skipped, so a typo in a provider's

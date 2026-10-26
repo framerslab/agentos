@@ -107,13 +107,18 @@ interface DefaultImageModel {
  *
  * @param inline - The call's own key and base URL. Pass them only for the
  *   primary: a custom endpoint keeps the default's model whatever its name,
- *   and a fallback runs on its own endpoint with its own key.
+ *   and a fallback runs on its own endpoint with its own key. The model is
+ *   chosen for the base URL resolveMediaProvider sends with, so an empty
+ *   `baseUrl` goes to both: it names the provider's own endpoint.
  */
 function globalDefaultImageModel(inline: { apiKey?: string; baseUrl?: string }): DefaultImageModel | undefined {
   const providerId = getDefaultProvider()?.provider;
   if (!providerId || !hasImageProviderFactory(providerId)) return undefined;
   try {
-    const resolved = resolveModelOption({ ...(inline.baseUrl ? { baseUrl: inline.baseUrl } : {}) } as ModelOption, 'image');
+    const resolved = resolveModelOption(
+      { ...(inline.baseUrl !== undefined ? { baseUrl: inline.baseUrl } : {}) } as ModelOption,
+      'image',
+    );
     if (resolved.providerId !== providerId || !resolved.modelId) return undefined;
     // Throws when a built-in provider has no key in the default, the call or
     // the environment, or stable-diffusion-local has no base URL.

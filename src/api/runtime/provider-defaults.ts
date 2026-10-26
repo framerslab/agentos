@@ -37,7 +37,9 @@ export type ProviderDefaultTask = 'text' | 'image' | 'embedding';
  */
 export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   minimax: {
+    text: 'MiniMax-M3.1-Flash',
     image: 'image-01',
+    cheap: 'MiniMax-M3.1-Flash',
   },
   openai: {
     text: 'gpt-4o',
@@ -128,9 +130,12 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
  */
 export const GEMINI_DEFAULT_EMBEDDING_MODEL = 'gemini-embedding-2';
 
-/** Runtime probes checked for auto-detection, in priority order. */
+/**
+ * Runtime probes checked for auto-detection, in priority order. A probe with
+ * `tasks` is checked only for those tasks and for a call that names none.
+ */
 type AutoDetectProbe =
-  | { provider: string; envKey: string }
+  | { provider: string; envKey: string; tasks?: readonly ProviderDefaultTask[] }
   | { provider: string; binaryName: string };
 
 /**
@@ -160,6 +165,10 @@ const AUTO_DETECT_ORDER: AutoDetectProbe[] = [
   { envKey: 'MISTRAL_API_KEY', provider: 'mistral' },
   { envKey: 'XAI_API_KEY', provider: 'xai' },
   { envKey: 'REQUESTY_API_KEY', provider: 'requesty' },
+  // A MiniMax key is an API key: for text it comes before the CLI binaries
+  // and Ollama, as the documented order puts API keys first. For images it
+  // keeps its place after the other image providers, at the end of the list.
+  { envKey: 'MINIMAX_API_KEY', provider: 'minimax', tasks: ['text'] },
   { binaryName: 'claude', provider: 'claude-code-cli' },
   { binaryName: 'gemini', provider: 'gemini-cli' },
   { envKey: 'OLLAMA_BASE_URL', provider: 'ollama' },
@@ -196,9 +205,10 @@ export function isBinaryOnPathCached(binaryName: string): boolean {
 
 // Provider-id → probe lookup so a custom priority list (just provider
 // ids) can be resolved back to its env-var or CLI-binary probe. Stays
-// in sync automatically with `AUTO_DETECT_ORDER`.
+// in sync automatically with `AUTO_DETECT_ORDER`. A provider in a custom
+// list is checked for every task, so its task-scoped probe is left out.
 const PROBE_BY_PROVIDER: Record<string, AutoDetectProbe> = Object.fromEntries(
-  AUTO_DETECT_ORDER.map((probe) => [probe.provider, probe])
+  AUTO_DETECT_ORDER.filter((probe) => !('envKey' in probe && probe.tasks)).map((probe) => [probe.provider, probe])
 );
 
 /**
@@ -208,7 +218,8 @@ const PROBE_BY_PROVIDER: Record<string, AutoDetectProbe> = Object.fromEntries(
  * Returns the identifier of the first provider whose key/URL env var is non-empty
  * or whose CLI binary is on PATH, or `undefined` when no recognisable runtime is present.
  *
- * Default priority: openrouter → openai → anthropic → gemini → claude-code-cli → gemini-cli → ollama → …
+ * Default priority: openrouter → openai → anthropic → gemini → groq → together → mistral → xai → requesty →
+ * minimax (text only) → claude-code-cli → gemini-cli → ollama → the image providers, minimax last among them.
  *
  * The order can be overridden process-wide via `setProviderPriority(['anthropic', 'openai', ...])`.
  * When a custom list is installed, only the providers in that list are
@@ -224,6 +235,8 @@ export function autoDetectProvider(task?: ProviderDefaultTask): string | undefin
     : AUTO_DETECT_ORDER;
 
   for (const probe of order) {
+    const scopedTasks = 'envKey' in probe ? probe.tasks : undefined;
+    if (task && scopedTasks && !scopedTasks.includes(task)) continue;
     const available = 'envKey' in probe
       ? Boolean(process.env[probe.envKey])
       : isBinaryOnPath(probe.binaryName);
