@@ -371,6 +371,59 @@ describe('streamObject with elements', () => {
     expect(await result.reportedUsage).toBeUndefined();
   });
 
+  it('yields an element completed before a chunk that ends inside the next one, a number, true, false or null still being written, and keeps it when the stream is cut there', async () => {
+    const Values = z.object({ values: z.array(z.union([z.number(), z.boolean(), z.null()])) });
+    for (const piece of ['{"values":[1,2e', '{"values":[1,tr', '{"values":[1,fal', '{"values":[1,nu']) {
+      const gated = gatedStream([piece, '3]}']);
+      hoisted.generateCompletionStream.mockReturnValue(gated.stream);
+      const result = streamObject({ model: 'openai:gpt-4o', schema: Values, elements: 'values', prompt: 'p' });
+      const seen: unknown[] = [];
+      const reading = (async () => {
+        for await (const value of result.elementStream) seen.push(value);
+      })();
+      await gated.feed();
+      // The next element has begun, so 1 is complete, though the text does not parse with it closed.
+      expect(seen, piece).toEqual([1]);
+      await gated.cut(new Error('socket hang up'));
+      await expect(reading, piece).rejects.toThrow('socket hang up');
+      expect(seen, piece).toEqual([1]);
+      await expect(result.object, piece).rejects.toThrow(/Stream interrupted/);
+    }
+  });
+
+  it('throws from elementStream and rejects the object when the reply holds the array field twice, since the elements yielded may be none of the array the object keeps', async () => {
+    hoisted.generateCompletionStream.mockReturnValue((async function* () {
+      yield chunk('{"sentences":[{"text":"One","passage":1}],');
+      yield chunk('"sentences":[{"text":"Two","passage":2}]}', true);
+    })());
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'sentences', prompt: 'p' });
+    const seen: unknown[] = [];
+    const thrown = await (async () => {
+      for await (const element of result.elementStream) seen.push(element);
+    })().then(() => undefined, (error: unknown) => error);
+    expect(seen).toEqual([{ text: 'One', passage: 1 }]);
+    expect(thrown).toBeInstanceOf(ObjectGenerationError);
+    expect((thrown as Error).message).toMatch(/holds the field 'sentences' twice/);
+    await expect(result.object).rejects.toThrow(/holds the field 'sentences' twice/);
+  });
+
+  it('keeps only the latest partial object for a partialObjectStream that falls behind, as each holds the ones before it', async () => {
+    hoisted.generateCompletionStream.mockReturnValue((async function* () {
+      for (const [at, piece] of PIECES.entries()) yield chunk(piece, at === PIECES.length - 1);
+    })());
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'sentences', prompt: 'p' });
+    const partials = result.partialObjectStream[Symbol.asyncIterator]();
+    const first = await partials.next();
+    expect(first.value).toEqual({ sentences: [{ text: 'One', passage: 1 }] });
+    // The element reader takes the rest of the reply while the partial reader waits.
+    const elements: unknown[] = [];
+    for await (const element of result.elementStream) elements.push(element);
+    expect(elements).toHaveLength(3);
+    const rest: unknown[] = [];
+    for (let next = await partials.next(); next.done !== true; next = await partials.next()) rest.push(next.value);
+    expect(rest).toEqual([{ sentences: [{ text: 'One', passage: 1 }, { text: 'Two', passage: 2 }, { text: 'Three', passage: 3 }] }]);
+  });
+
   it('throws at the call, before any request, when elements names no array field of the schema', () => {
     expect(() => streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'answer', prompt: 'p' })).toThrow(TypeError);
     expect(hoisted.generateCompletionStream).not.toHaveBeenCalled();
