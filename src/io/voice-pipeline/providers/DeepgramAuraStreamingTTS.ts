@@ -66,14 +66,17 @@
  * nothing: the next reply's first segment opens a fresh socket, the reply's one
  * try, and a reply that follows a cut one takes the socket still opening. A
  * socket the session gave up for a response it did not send in time is
- * followed the same way, by the next segment's fresh socket. A
+ * followed the same way, by the next segment's fresh socket, and so is one
+ * Deepgram closes while the next segment waits for such a response: that
+ * response cannot come any more, and nothing of the waiting segment was sent
+ * on the socket. A
  * socket that fails to open for a reply (refused, closed or failed before it
  * opens, or not open within eight seconds) is a `'warning'` naming the cause,
  * one console warning line when nothing listens for it, never `'error'`, and
  * the reply ends unplayed: its segments are dropped, the rest of its text is
  * not spoken, and its `flush()` completes with `flush_complete`; the reply after
- * it tries again. A socket Deepgram closes while a segment is in flight or a
- * flush waits is the reply's failure: `'error'` (`deepgram aura ws closed`,
+ * it tries again. A socket Deepgram closes while a segment is in flight, sent
+ * on it, is the reply's failure: `'error'` (`deepgram aura ws closed`,
  * with the close code and the cause when known), the segments end without a
  * boundary, a flush under way completes with `flush_complete`, and the session
  * closes. An error the socket reports once open is the cause of the close that
@@ -381,18 +384,21 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   }
 
   /**
-   * The current socket closed at Deepgram's hand. With a segment in flight or
-   * a flush waiting, the reply has lost its audio: `'error'` names the close,
-   * the segments end without a boundary, a flush under way completes with
-   * `flush_complete`, and the session closes. Between replies it closes
-   * nothing: the next reply opens a fresh socket, and a late response the
-   * next segment waited for cannot come any more.
+   * The current socket closed at Deepgram's hand. With a segment in flight,
+   * sent on that socket, the reply has lost its audio: `'error'` names the
+   * close, the segments end without a boundary, a flush under way completes
+   * with `flush_complete`, and the session closes. With none in flight it
+   * closes nothing, between replies or while the next segment waits for a
+   * stale response (the late `Flushed` of a timed-out segment, the `Cleared`
+   * that answers a `Clear`): nothing was sent on the socket that the session
+   * still waits to hear, the response waited for cannot come any more, and the
+   * next segment starts on a fresh socket.
    *
    * @param message - The loss, with the close code and the cause when known.
    */
   private socketClosed(message: string): void {
     this.unanswered.length = 0;
-    if (!this.segments.busy) {
+    if (!this.segments.hasInFlight) {
       this.release();
       return;
     }

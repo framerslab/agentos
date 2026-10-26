@@ -416,6 +416,43 @@ describe('session events under a call profile', () => {
     expect(f.log.filter((line) => line === 'session_error agent true')).toHaveLength(1);
   });
 
+  it('reports a typed text it drops because the call detached while the text interrupted the reply', async () => {
+    const f = await call({ abortGraceMs: 50 });
+    const errors: Error[] = [];
+    f.runtime.on('error', (error: Error) => errors.push(error));
+    // The agent's stream stalls after its first token, so the interruption the text makes waits abortGraceMs for it.
+    let stalled!: () => void;
+    const stalling = new Promise<void>((resolve) => {
+      stalled = resolve;
+    });
+    f.agent.sendText.mockImplementation(async function* () {
+      yield 'hello';
+      stalled();
+      await new Promise<void>(() => undefined);
+    });
+
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await stalling;
+    f.transport.emit('message', { type: 'text_input', text: 'typed' });
+    await vi.waitFor(() => expect(f.log).toContain('barge_in cancel'));
+    // The media path is lost while the text's interruption waits for the stalled stream: the call detaches.
+    await f.runtime.detach('media_lost', 1);
+
+    // The text found the call detached once its interruption ended, and was dropped: the drop says why and names none of
+    // the text.
+    expect(f.agent.sendText).toHaveBeenCalledOnce();
+    expect(errors.map((error) => error.message)).toEqual([
+      'the agent stream of the cut reply did not end within abortGraceMs of abort(); the call goes on without it',
+      'a text_input message was dropped: the call is detached',
+    ]);
+    expect(f.log.filter((line) => line.startsWith('session_error'))).toEqual(['session_error agent true', 'session_error session true']);
+    expect(f.log.filter((line) => line.startsWith('item user'))).toEqual(['item user speech hello']);
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    await f.runtime.stopSession();
+  });
+
   it("reports no reply's text when speech interrupts a turn the agent has yet to answer", async () => {
     const f = await call();
     const cut: string[] = [];

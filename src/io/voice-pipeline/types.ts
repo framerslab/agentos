@@ -1849,7 +1849,7 @@ export type PipelineState =
  * | `'user_input_transcribed'` | `{ transcript, isFinal, ... }`            | A transcript of the user's speech arrived.   |
  * | `'conversation_item_added'`| `{ item, createdAt }`                     | A user turn or an agent reply joined the conversation. |
  * | `'speech_created'`         | `{ source, userInitiated, createdAt }`    | A reply or a host prompt began to speak.     |
- * | `'barge_in'`               | `{ speechDurationMs, action, ... }`       | The user's speech paused, resumed or cut the reply. |
+ * | `'barge_in'`               | `{ speechDurationMs, action, ... }`       | The user's speech paused, resumed or cut the reply, or typed text cut it. |
  * | `'error'`                  | `Error`                                   | The session ended on a failure (content-free). |
  * | `'session_error'`          | `{ error, recoverable, source, createdAt }` | A failure, with where it came from and whether the session goes on. |
  * | `'close'`                  | `{ reason, error?, createdAt }`           | The session closed.                          |
@@ -1965,14 +1965,19 @@ export type VoiceConversationItem =
       text: string;
       /**
        * The part of `text` the session knows was heard: all of it for a reply whose audio played out, and, for a reply
-       * a barge-in cut, the prefix the transport has acknowledged as played, which is empty while no transport reports
-       * which text it played. A partly played reply's heard extent is then unknown, and `text` is not cut to a guess;
-       * so is that of a reply whose transport's playout wait (`IStreamTransport.waitForPlayout()`) rejected.
+       * a barge-in or typed text cut, the prefix the transport has acknowledged as played, which is empty while no
+       * transport reports which text it played. A partly played reply's heard extent is then unknown, and `text` is not
+       * cut to a guess; so is that of a reply whose transport's playout wait (`IStreamTransport.waitForPlayout()`)
+       * rejected, and, without a call profile, of one some of whose audio may never have played: a pause held it on a
+       * transport that plays the audio itself, which discards what its track held, or its TTS session warned while it
+       * spoke.
        */
       playedText: string;
       /**
-       * Whether a barge-in or another interruption cut the reply, or its audio did not play out: the transport's playout
-       * wait rejected, as a stalled LiveKit track's does once it has discarded what it had not played.
+       * Whether a barge-in, typed text or another interruption cut the reply, or its audio did not play out: the
+       * transport's playout wait rejected, as a stalled LiveKit track's does once it has discarded what it had not
+       * played, or, without a call profile, a pause held it on a transport that plays the audio itself or its TTS session
+       * warned while it spoke.
        */
       interrupted: boolean;
     };
@@ -2041,11 +2046,12 @@ export interface VoiceSessionEventMap {
   };
   /**
    * The user's speech acted on the reply: a `'pause'` held it, a `'resume'` let it go on after a false interruption,
-   * a `'cancel'` cut it. Each matches the `barge_in` message the transport is sent; under a call profile, speech that
-   * interrupts the agent is a `'cancel'`.
+   * a `'cancel'` cut it; or the user's typed text cut it, a `'cancel'` with no speech. Each matches the `barge_in`
+   * message the transport is sent; under a call profile, speech that interrupts the agent is a `'cancel'`, and so is
+   * typed text that cuts a reply or a prompt being spoken.
    */
   barge_in: {
-    /** The user's speech over the reply so far, in milliseconds. */
+    /** The user's speech over the reply so far, in milliseconds; 0 when typed text cut the reply. */
     speechDurationMs: number;
     /** The reply's text so far. */
     interruptedText: string;

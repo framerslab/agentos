@@ -67,7 +67,9 @@
  *   while the agent speaks it cancels the reply as a cancel barge-in does, with no speech, and the agent receives the
  *   text once the cut reply's request has ended, as AgentSessionVoiceAdapter needs; while the session listens it drops
  *   the speech the detector holds and starts a turn; a text the check refuses is dropped; and it is no speech, so a
- *   session that takes its speech from audio or from client transcripts takes it all the same
+ *   session that takes its speech from audio or from client transcripts takes it all the same; a text that cuts the
+ *   reply while the session's StreamingTTSChain switches to its next provider, the one in use having failed mid-reply,
+ *   is answered through that provider, and its reply ends as it played
  * - The floor until playout: a reply stays speaking until a transport that reports its playout says the audio played,
  *   or, on one that cannot, for the sent audio's duration, at most maxPlayoutWaitMs; a barge-in or a stop ends the wait
  */
@@ -79,6 +81,8 @@ import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
 import { HardCutBargeinHandler } from '../HardCutBargeinHandler.js';
 import { SoftFadeBargeinHandler } from '../SoftFadeBargeinHandler.js';
 import { AgentSessionVoiceAdapter } from '../providers/AgentSessionVoiceAdapter.js';
+import { StreamingTTSChain } from '../providers/StreamingTTSChain.js';
+import { defaultCapabilities, type HealthyProvider } from '../HealthyProvider.js';
 import { recordSessionEvents } from './session-event-log.js';
 import type {
   AudioFrame,
@@ -2464,6 +2468,83 @@ describe('VoicePipelineOrchestrator session events', () => {
     expect(ttsSession.flush).toHaveBeenCalledOnce();
     expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'Booked for two.', durationMs: 0 });
     expect(orchestrator.state).toBe('listening');
+  });
+
+  it('speaks the reply to typed text through the provider a StreamingTTSChain switches to, when the text cuts a reply during the switch', async () => {
+    // The developer's chain: two providers in their priority order, with mid-synthesis failover. The first one's
+    // connection drops mid-reply, and the second one's takes a while to open.
+    const dropped = createMockTTSSession();
+    const next = createMockTTSSession();
+    // The next provider completes a flush with one frame, as a provider does.
+    vi.mocked(next.flush).mockImplementation(async () => {
+      next.emit('audio', makeAudioChunk());
+      next.emit('flush_complete');
+    });
+    let opened!: () => void;
+    const provider = (providerId: string, priority: number, startSession: () => Promise<StreamingTTSSession>): IStreamingTTS & HealthyProvider => ({
+      providerId,
+      priority,
+      capabilities: defaultCapabilities({ streaming: true }),
+      startSession,
+      healthCheck: async () => ({ ok: true }),
+    });
+    const chain = new StreamingTTSChain(
+      [
+        provider('first', 10, async () => dropped),
+        provider(
+          'second',
+          20,
+          () =>
+            new Promise<StreamingTTSSession>((resolve) => {
+              opened = () => resolve(next);
+            })
+        ),
+      ],
+      { enableMidSynthesisFailover: true }
+    );
+    agentSession = {
+      sendText: vi.fn((text: string) => ({
+        [Symbol.asyncIterator]: async function* () {
+          yield text === 'Book a table.' ? 'A table for two.' : 'Hello world';
+        },
+      })),
+      abort: vi.fn(),
+    };
+    const session = await orchestrator.startSession(transport, agentSession, {
+      streamingSTT: createMockSTT(sttSession),
+      streamingTTS: chain,
+      endpointDetector: endpoint,
+      bargeinHandler: createMockBargeinHandler(),
+    });
+    const items: VoiceConversationItem[] = [];
+    session.on('conversation_item_added', ({ item }) => items.push(item));
+    const errors: unknown[] = [];
+    orchestrator.on('error', (error: unknown) => errors.push(error));
+
+    await takeTurn();
+    expect(orchestrator.state).toBe('speaking');
+    dropped.emit('error', new Error('socket hang up'));
+    await vi.advanceTimersByTimeAsync(0);
+    // The user types while the next provider opens: the text cuts the reply, and the agent answers it.
+    await typeText('Book a table.');
+    expect(orchestrator.state).toBe('speaking');
+    opened();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The next provider takes the text's reply and none of the cut one's, and speaks it; the reply ends once its audio
+    // has played.
+    expect(vi.mocked(next.pushTokens).mock.calls).toEqual([['A table for two.']]);
+    expect(transport.sendAudio).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'A table for two.', durationMs: 100 });
+    expect(items).toEqual([
+      { role: 'user', text: 'Hello there', source: 'speech', endpointReason: 'silence_timeout' },
+      { role: 'assistant', text: 'Hello world', playedText: '', interrupted: true },
+      { role: 'user', text: 'Book a table.', source: 'text', endpointReason: 'manual' },
+      { role: 'assistant', text: 'A table for two.', playedText: 'A table for two.', interrupted: false },
+    ]);
+    expect(orchestrator.state).toBe('listening');
+    expect(errors).toEqual([]);
   });
 
   it('preserves Error on error and emits metadata on session_error before close', async () => {

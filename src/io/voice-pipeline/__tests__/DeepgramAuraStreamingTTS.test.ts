@@ -14,11 +14,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   EncodedAudioChunk,
   IEndpointDetector,
+  IStreamingTTS,
   IStreamTransport,
   StreamingSTTSession,
   StreamingTTSConfig,
   StreamingTTSSession,
 } from '../types.js';
+import { defaultCapabilities, type HealthyProvider } from '../HealthyProvider.js';
 
 vi.mock('ws', () => {
   const { EventEmitter: EE } = require('node:events');
@@ -1055,6 +1057,47 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(closes).not.toHaveBeenCalled();
   });
 
+  it("speaks the next reply on a fresh socket, reporting nothing, when Deepgram closes the socket while that reply waits for the Cleared of the reply it cut", async () => {
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const chunks = recorded(session);
+    const errors = vi.fn();
+    const closes = vi.fn();
+    const flushes = vi.fn();
+    session.on('error', errors);
+    session.on('close', closes);
+    session.on('flush_complete', flushes);
+    ws.send.mockClear();
+
+    // A reply is cut while its sentence is in flight: Clear goes out, and the next reply's sentence waits for the Cleared.
+    session.pushTokens('Hello there. ');
+    frame(ws, 1);
+    session.cancel();
+    session.pushTokens('Next one. ');
+    const flushed = session.flush();
+    expect(sent(ws)).toEqual([{ type: 'Speak', text: 'Hello there.' }, { type: 'Flush' }, { type: 'Clear' }]);
+    // Deepgram closes the socket before it answers the Clear. Nothing of the next reply went out on it: the session
+    // reports nothing, stays open, and sends the sentence on a fresh socket.
+    (ws as unknown as { readyState: number }).readyState = 3;
+    ws.emit('close', 1011, Buffer.from(''));
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+    let fresh!: MockSocket;
+    await vi.waitFor(() => {
+      fresh = socketOf(session);
+      expect(fresh).toBeTruthy();
+      expect(fresh).not.toBe(ws);
+      expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
+    });
+    frame(fresh, 2);
+    control(fresh, { type: 'Flushed', sequence_id: 0 });
+    await flushed;
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([[2, 'Next one.']]);
+    expect(flushes).toHaveBeenCalledOnce();
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+  });
+
   it('reports an error the socket reports mid-reply once, as the cause of the close that follows it', async () => {
     const session = await tts.startSession({ format: 'pcm' });
     const ws = socketOf(session);
@@ -1507,5 +1550,94 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(done.map((message) => message.text)).toEqual(['One.', '']);
     expect(sessionErrors).toEqual([{ recoverable: true, source: 'tts' }]);
     expect(errors.map((error) => error.message)).toEqual([expect.stringContaining('deepgram aura ws failed to open for a reply')]);
+  });
+
+  it("leaves a reply whose socket Deepgram closes mid-reply to the backup of a StreamingTTSChain's failover facade, as createVoiceProvidersFromEnv() builds it, which speaks it before the reply ends", async () => {
+    const transport = Object.assign(new EventEmitter(), {
+      id: 'transport-1',
+      state: 'open' as const,
+      sendAudio: vi.fn(async (_chunk: EncodedAudioChunk) => undefined),
+      sendControl: vi.fn(async (_message: unknown) => undefined),
+      close: vi.fn(),
+    });
+    const stt = Object.assign(new EventEmitter(), { pushAudio: vi.fn(), flush: vi.fn(async () => undefined), close: vi.fn() });
+    const endpoint = Object.assign(new EventEmitter(), { mode: 'heuristic' as const, pushVadEvent: vi.fn(), pushTranscript: vi.fn(), reset: vi.fn() });
+    // The reply's text comes in one token, so its flush waits while its first sentence is in flight.
+    const agent = {
+      sendText: vi.fn(() =>
+        (async function* () {
+          yield 'One. Two.';
+        })()
+      ),
+      abort: vi.fn(),
+    };
+    let session!: StreamingTTSSession;
+    vi.spyOn(tts, 'startSession').mockImplementation(async (config?: StreamingTTSConfig) => {
+      session = await DeepgramAuraStreamingTTS.prototype.startSession.call(tts, config);
+      return session;
+    });
+    // The chain's backup: its session takes the text the facade sends it and, at its flush, sends one frame.
+    const taken: string[] = [];
+    const backup: IStreamingTTS & HealthyProvider = {
+      providerId: 'backup',
+      priority: 20,
+      capabilities: defaultCapabilities({ streaming: true }),
+      async startSession() {
+        const emitter = new EventEmitter();
+        const own = Object.assign(emitter, {
+          pushTokens: (text: string): void => {
+            taken.push(text);
+          },
+          flush: async (): Promise<void> => {
+            emitter.emit('audio', { audio: Buffer.from([9, 9]), format: 'pcm', sampleRate: 24_000, durationMs: 0, text: '' });
+            emitter.emit('flush_complete');
+          },
+          cancel: (): void => undefined,
+          close: (): void => undefined,
+        });
+        return own as unknown as StreamingTTSSession;
+      },
+      async healthCheck() {
+        return { ok: true };
+      },
+    };
+    const chain = new StreamingTTSChain([tts, backup], { enableMidSynthesisFailover: true });
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: chain.providerId, format: 'pcm' });
+    const items: unknown[] = [];
+    const errors: Error[] = [];
+    orchestrator.on('conversation_item_added', (event: { item: { role: string } }) => {
+      if (event.item.role === 'assistant') items.push(event.item);
+    });
+    orchestrator.on('error', (error: Error) => errors.push(error));
+    await orchestrator.startSession(transport as unknown as IStreamTransport, agent, {
+      streamingSTT: { providerId: 'fake-stt', isStreaming: true, startSession: async () => stt as unknown as StreamingSTTSession },
+      streamingTTS: chain,
+      endpointDetector: endpoint as unknown as IEndpointDetector,
+      bargeinHandler: { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) },
+    });
+    const ws = socketOf(session);
+    const flushes = vi.spyOn(session, 'flush');
+    /** The frames the transport was sent, by the value the server gave each. */
+    const heard = (): number[] => transport.sendAudio.mock.calls.map(([chunk]) => chunk.audio[0]!);
+
+    try {
+      endpoint.emit('turn_complete', { transcript: 'Where is my order?', confidence: 0.9, durationMs: 800, reason: 'silence_timeout' });
+      await vi.waitFor(() => expect(sent(ws)).toEqual([{ type: 'Speak', text: 'One.' }, { type: 'Flush' }]));
+      await vi.waitFor(() => expect(flushes).toHaveBeenCalledOnce());
+      frame(ws, 1);
+      // Deepgram closes the socket while the first sentence is in flight: the adapter reports it, ends that sentence and
+      // completes its flush in the same call, and the facade switches to the backup.
+      (ws as unknown as { readyState: number }).readyState = 3;
+      ws.emit('close', 1011, Buffer.from(''));
+      await vi.waitFor(() => expect(items).toHaveLength(1));
+      await vi.waitFor(() => expect(orchestrator.state).toBe('listening'));
+    } finally {
+      await orchestrator.stopSession('done');
+    }
+    // The backup took the reply's text and spoke it, and the reply ended on the backup's flush, not on the lost socket's.
+    expect(taken.join('')).toBe('One. Two.');
+    expect(heard()).toEqual([9]);
+    expect(items).toEqual([{ role: 'assistant', text: 'One. Two.', playedText: 'One. Two.', interrupted: false }]);
+    expect(errors).toEqual([]);
   });
 });
