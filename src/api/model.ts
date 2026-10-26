@@ -118,11 +118,15 @@ export function baseUrlIfSet(value: string | undefined): string | undefined {
  * global default's (when the default applies to the provider), else the
  * provider's base-URL variable, each read with {@link baseUrlIfSet} so a blank
  * one is passed over; undefined when every source is unset, which sends the
- * call to the provider's own endpoint. resolveProvider and resolveMediaProvider
- * send with this URL, withGlobalDefault decides by it whether a global
- * default's model goes to a custom endpoint, and importAgent decides by it
- * whether a redacted base URL can be dropped, so the three agree on where a
- * call goes.
+ * call to the provider's own endpoint. This is the one reading of a base URL:
+ * resolveProvider and resolveMediaProvider send with this URL, withGlobalDefault
+ * decides by it whether a global default's model goes to a custom endpoint (a
+ * root the provider documents for its own service is not one; see
+ * {@link PROVIDER_API_ROOTS}), generateImage chooses the global default's
+ * image model by it, importAgent decides by it whether a redacted base URL can
+ * be dropped, and the model pool reads a seat's URL sources with
+ * {@link baseUrlIfSet}, so every decision follows the endpoint the call is
+ * sent to.
  *
  * @param providerId - The provider the call is sent to.
  * @param inline - The call's own `baseUrl`.
@@ -560,13 +564,72 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
 /**
  * Chat model families, optionally behind a provider prefix such as `openai:`
  * and a gateway prefix such as `openai/` or `meta-llama/`
- * (`openrouter:openai/gpt-4o`).
+ * (`openrouter:openai/gpt-4o`). MiniMax's text models are `MiniMax-` names
+ * (`MiniMax-M3.1-Flash`); the hyphen keeps a bare `minimax:` provider prefix
+ * or `minimax/` gateway prefix from reading as the family.
  */
 const CHAT_MODEL_FAMILY =
-  /^(?:[\w.-]+:)?(?:[\w.-]+\/)?(?:gpt-|chatgpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|codestral|ministral|magistral|grok|deepseek|qwen|command|phi-|sonar|kimi|glm)/i;
+  /^(?:[\w.-]+:)?(?:[\w.-]+\/)?(?:gpt-|chatgpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|codestral|ministral|magistral|grok|deepseek|qwen|command|phi-|sonar|kimi|glm|minimax-)/i;
 
 /** Names that mark a non-chat model inside a chat family (gpt-image-2.5-flare, gemini-embedding-2). */
 const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|audio|realtime|moderation/i;
+
+/**
+ * API roots a provider documents for its own service, each serving the
+ * provider's own model names: a base URL among them picks a region, not a
+ * custom endpoint. The base URL compared with them is the one
+ * {@link resolveBaseUrl} gives, the first set source of the call's, the global
+ * default's and the provider's base-URL variable, so an empty or
+ * whitespace-only value at the call or the default never reaches the
+ * comparison: the next source does. MiniMax's global root is https://api.minimax.io/v1
+ * (https://platform.minimax.io/docs/api-reference/text-openai-api; images at
+ * https://platform.minimax.io/docs/api-reference/image-generation-t2i). Its
+ * China root here, https://api.minimaxi.com/v1, is UNVERIFIED: MiniMax's China
+ * documentation names https://api.minimax.cn/v1
+ * (https://platform.minimax.cn/docs/api-reference/text-openai-api).
+ */
+const PROVIDER_API_ROOTS: Record<string, readonly string[]> = {
+  minimax: ['https://api.minimax.io/v1', 'https://api.minimaxi.com/v1'],
+};
+
+/**
+ * `url` as a request built on it is sent: surrounding whitespace and every
+ * trailing slash removed, as MiniMax's image provider removes them before it
+ * appends a path, then parsed as fetch parses a URL, which lowercases the
+ * scheme and the host and drops a default port
+ * (https://url.spec.whatwg.org/#scheme-state,
+ * https://url.spec.whatwg.org/#concept-domain-to-ascii,
+ * https://url.spec.whatwg.org/#port-state). Undefined when nothing is left
+ * or the URL does not parse.
+ */
+function normalizedBaseUrl(url: string): string | undefined {
+  const trimmed = url.trim().replace(/\/+$/, '');
+  if (!trimmed) return undefined;
+  try {
+    return new URL(trimmed).href;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether `url`, the base URL {@link resolveBaseUrl} gives, is one other than
+ * an API root `provider` documents for its own service (see
+ * {@link PROVIDER_API_ROOTS}). The two are compared as the request is sent
+ * (see {@link normalizedBaseUrl}): the letter case of the scheme and the host,
+ * a default port, surrounding whitespace and trailing slashes make no
+ * difference. An unset URL is not custom: the call then goes to the provider's
+ * own endpoint. An empty or whitespace-only URL never reaches here, since
+ * resolveBaseUrl reads it as unset and the next source applies. A URL that
+ * does not parse is custom, as any other is.
+ */
+function isCustomBaseUrl(provider: string, url: string | undefined): boolean {
+  if (url === undefined) return false;
+  const roots = PROVIDER_API_ROOTS[provider];
+  if (!roots) return true;
+  const sent = normalizedBaseUrl(url);
+  return sent === undefined || !roots.some((root) => normalizedBaseUrl(root) === sent);
+}
 
 /**
  * `opts` with the global default's `provider` and `model` filled in when the
@@ -579,20 +642,26 @@ const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|au
 function withGlobalDefault(opts: ModelOption, task: TaskType): ModelOption {
   if (opts.provider || opts.model) return opts;
   const def = getDefaultProvider();
-  if (!def?.provider) return opts;
+  const provider = def?.provider;
+  if (!def || !provider) return opts;
   // A custom endpoint may serve any model under any name, so the default's
-  // model stays. The endpoint is the base URL the call is sent with, read as
-  // resolveProvider and resolveMediaProvider read it: an inline baseUrl on
-  // callers such as embedText, else the default's baseUrl, else the provider's
-  // base-URL env var, a blank one passed over; with none the call goes to the
-  // provider's own endpoint, and the default's model is kept only for a task
-  // it can serve there.
+  // model stays. The endpoint is the base URL the call is sent with, which
+  // resolveBaseUrl gives here as it gives resolveProvider and
+  // resolveMediaProvider the URL they send with: an inline baseUrl on callers
+  // such as embedText, else the default's baseUrl, else the provider's
+  // base-URL env var, an empty or whitespace-only one passed over; with none
+  // the call goes to the provider's own endpoint, and the default's model is
+  // kept only for a task it can serve there. A regional root the provider
+  // documents serves the provider's own names and is not custom, even when a
+  // setting the call does not use names a custom endpoint.
   const inlineBaseUrl = (opts as { baseUrl?: unknown }).baseUrl;
-  const customEndpoint =
-    resolveBaseUrl(def.provider, typeof inlineBaseUrl === 'string' ? inlineBaseUrl : undefined, def.baseUrl) !== undefined;
+  const customEndpoint = isCustomBaseUrl(
+    provider,
+    resolveBaseUrl(provider, typeof inlineBaseUrl === 'string' ? inlineBaseUrl : undefined, def.baseUrl),
+  );
   return {
     ...opts,
-    provider: def.provider,
+    provider,
     model: customEndpoint ? def.model : globalModelForTask(def, task),
   };
 }

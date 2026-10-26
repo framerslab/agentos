@@ -63,6 +63,7 @@ const PROVIDERS_WITHOUT_EMBEDDINGS: ReadonlyMap<string, string> = new Map([
   ['groq', 'Groq'],
   ['together', 'Together AI'],
   ['xai', 'xAI'],
+  ['minimax', 'MiniMax'],
   ['claude-code-cli', 'The Claude Code CLI'],
   ['gemini-cli', 'The Gemini CLI'],
 ]);
@@ -188,7 +189,7 @@ function resolveEmbeddingTarget(memory: MemoryConfig, env: Env): EmbeddingTarget
  * @param memory - The agent's memory config.
  * @param env - The environment to read OPENAI_API_KEY, GEMINI_API_KEY and OLLAMA_BASE_URL from (defaults to `process.env`).
  * @throws {Error} Naming `memory.embedding` when no provider is set or detected, when the
- *   provider has no embeddings (Anthropic, Groq, Together AI, xAI, the Claude Code and Gemini CLIs), when the
+ *   provider has no embeddings (Anthropic, Groq, Together AI, xAI, MiniMax, the Claude Code and Gemini CLIs), when the
  *   model does not resolve, or when the model's output size is unknown and
  *   `memory.embedding.dimension` is unset or not a positive integer.
  */

@@ -106,8 +106,9 @@ export interface ChatMessage {
   /**
    * The model's reasoning summary for this assistant turn, as plain text,
    * when the provider returns one (Gemini returns thought summaries only with
-   * `customModelParams.thinkingConfig.includeThoughts`). Output only: no
-   * provider sends it back. It is separate from `thinkingBlocks`, which carry
+   * `customModelParams.thinkingConfig.includeThoughts`). MiniMax also uses
+   * this field for its full reasoning content and replays it in tool history.
+   * It is separate from `thinkingBlocks`, which carry
    * Anthropic's signed blocks for replay.
    */
   reasoningText?: string;

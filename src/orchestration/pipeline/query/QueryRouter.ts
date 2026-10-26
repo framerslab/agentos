@@ -58,6 +58,7 @@ import { QueryGenerator } from './QueryGenerator.js';
 import { TopicExtractor } from './TopicExtractor.js';
 import { KeywordFallback } from './KeywordFallback.js';
 import { CitationVerifier } from '../../../cognition/rag/citation/CitationVerifier.js';
+import { providerEnvVars } from '../../../api/model.js';
 import {
   DEFAULT_QUERY_ROUTER_CONFIG,
   DEFAULT_STRATEGY_CONFIG,
@@ -431,8 +432,8 @@ export class QueryRouter {
       model: this.config.generationModel,
       modelDeep: this.config.generationModelDeep,
       provider: this.config.generationProvider,
-      apiKey: this.getLlmApiKey(),
-      baseUrl: this.getLlmBaseUrl(),
+      apiKey: this.getLlmApiKey(this.config.generationProvider),
+      baseUrl: this.getLlmBaseUrl(this.config.generationProvider),
       maxContextTokens: this.config.maxContextTokens,
     });
 
@@ -1422,8 +1423,8 @@ export class QueryRouter {
       maxTier: this.config.maxTier,
       topicList,
       toolList: this.formatToolList(this.config.availableTools),
-      apiKey: this.getLlmApiKey(),
-      baseUrl: this.getLlmBaseUrl(),
+      apiKey: this.getLlmApiKey(this.config.classifierProvider),
+      baseUrl: this.getLlmBaseUrl(this.config.classifierProvider),
     });
 
     if (this.capabilityDiscoveryEngine) {
@@ -1563,13 +1564,36 @@ export class QueryRouter {
   }
 
   /**
+   * Whether embeddings go to a provider the classifier or the generator uses,
+   * so the router's `apiKey` and `baseUrl`, which configure those calls,
+   * apply to embeddings too. A key given for one vendor's classifier never
+   * reaches another vendor's embedding endpoint.
+   */
+  private embeddingSharesLlmCredentials(): boolean {
+    const provider = this.config.embeddingProvider;
+    return !provider || provider === this.config.classifierProvider || provider === this.config.generationProvider;
+  }
+
+  /**
    * Resolve API key for embedding calls.
-   * Falls back through embedding-specific → global → env var scan.
+   *
+   * The embedding-specific key comes first, then the global `apiKey` when
+   * embeddings use the classifier's or the generator's provider. An embedding
+   * provider other than OpenAI that has a key variable of its own then takes
+   * that key alone, or none when it is unset, so another vendor's key never
+   * reaches it (an OpenAI key sent to Gemini or MiniMax). An OpenAI embedding
+   * provider, and one without a key variable (Ollama), scans the provider env
+   * vars in priority order.
    */
   private getEmbeddingApiKey(): string {
     if (this.config.embeddingApiKey) return this.config.embeddingApiKey;
-    // Fall through to general LLM key resolver
-    return this.getLlmApiKey();
+    if (this.config.apiKey && this.embeddingSharesLlmCredentials()) return this.config.apiKey;
+    const provider = this.config.embeddingProvider;
+    if (provider && provider !== 'openai') {
+      const ownKey = providerEnvVars(provider).key;
+      if (ownKey) return process.env[ownKey] || '';
+    }
+    return this.scanProviderEnvKeys();
   }
 
   private getEmbeddingBaseUrl(): string | undefined {
@@ -1581,11 +1605,24 @@ export class QueryRouter {
       return undefined;
     }
 
-    if (this.config.baseUrl !== undefined) {
-      return this.config.baseUrl as string;
+    // The router's baseUrl and apiKey configure the classifier and the
+    // generator; they reach embeddings only when embeddings use one of those
+    // providers.
+    if (this.embeddingSharesLlmCredentials()) {
+      if (this.config.baseUrl !== undefined) {
+        return this.config.baseUrl as string;
+      }
+
+      if (this.config.apiKey !== undefined) {
+        return undefined;
+      }
     }
 
-    if (this.config.apiKey !== undefined) {
+    // OpenRouter's compatibility URL belongs to an OpenAI embedding provider
+    // on the OpenRouter key; any other provider uses its own endpoint, so no
+    // other vendor's URL carries its key.
+    const provider = this.config.embeddingProvider;
+    if (provider && provider !== 'openai') {
       return undefined;
     }
 
@@ -1603,17 +1640,35 @@ export class QueryRouter {
   /**
    * Resolve API key for LLM calls.
    *
-   * Checks config override first, then scans all provider env vars in priority
-   * order. Returns empty string for keyless providers (claude-code-cli, gemini-cli)
-   * which is fine — generateText() handles them via CLISubprocessBridge.
+   * Checks config override first. A call to a provider other than OpenAI
+   * then takes that provider's own key variable, or no key when it is unset
+   * or the provider has none (Ollama, the CLIs), so `generateText` resolves
+   * the provider's credentials and one vendor's key never reaches another.
+   * An OpenAI call, and one that names no provider (the embedding check),
+   * scans the provider env vars in priority order. Returns an empty string
+   * when that scan finds none, which is fine for keyless providers
+   * (claude-code-cli, gemini-cli): generateText() handles them via
+   * CLISubprocessBridge.
+   *
+   * @param provider - The provider the call goes to, when it names one.
    */
-  private getLlmApiKey(): string {
+  private getLlmApiKey(provider?: string): string | undefined {
     if (this.config.apiKey) return this.config.apiKey;
+    if (provider !== undefined && provider !== 'openai') {
+      const ownKey = providerEnvVars(provider).key;
+      return (ownKey && process.env[ownKey]) || undefined;
+    }
+    return this.scanProviderEnvKeys();
+  }
 
-    // Check all providers in priority order.
-    // Direct provider keys (OpenAI, Anthropic, etc.) take precedence over
-    // aggregator keys (OpenRouter) so that the native endpoint is used when
-    // both are configured.
+  /**
+   * The first provider key variable that is set, in priority order. Direct
+   * provider keys (OpenAI, Anthropic, etc.) take precedence over aggregator
+   * keys (OpenRouter) so that the native endpoint is used when both are
+   * configured. Returns an empty string when none is set: keyless providers
+   * (CLI) don't need an API key.
+   */
+  private scanProviderEnvKeys(): string {
     const envKeys = [
       'OPENAI_API_KEY',
       'ANTHROPIC_API_KEY',
@@ -1629,7 +1684,6 @@ export class QueryRouter {
       if (process.env[key]) return process.env[key]!;
     }
 
-    // Keyless providers (CLI) don't need an API key — empty string is fine
     return '';
   }
 
@@ -1638,14 +1692,24 @@ export class QueryRouter {
    *
    * Only OpenRouter and Ollama need custom base URLs. All other providers
    * (including CLI) use their default endpoints via generateText() resolution.
+   * A call to a provider other than OpenAI gets none here: generateText()
+   * reads that provider's own URL variable (`MINIMAX_BASE_URL`,
+   * `OPENROUTER_BASE_URL`, `OLLAMA_BASE_URL`) or uses its default, so an
+   * OpenRouter or Ollama URL meant for another key never carries its key.
+   *
+   * @param provider - The provider the call goes to, when it names one.
    */
-  private getLlmBaseUrl(): string | undefined {
+  private getLlmBaseUrl(provider?: string): string | undefined {
     if (this.config.baseUrl !== undefined) {
       return this.config.baseUrl as string;
     }
 
     // If user provided an explicit API key, don't override the URL
     if (this.config.apiKey !== undefined) {
+      return undefined;
+    }
+
+    if (provider !== undefined && provider !== 'openai') {
       return undefined;
     }
 

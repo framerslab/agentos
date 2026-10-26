@@ -105,7 +105,7 @@ export interface MemoryConfig {
    * Default: the global default provider (`setDefaultProvider`) when agentos has an
    * embedding model for it, else the first of OpenAI, Gemini and Ollama whose
    * OPENAI_API_KEY, GEMINI_API_KEY or OLLAMA_BASE_URL is set, with that provider's
-   * default embedding model. Anthropic, Groq, Together AI, xAI and the Claude Code and
+   * default embedding model. Anthropic, Groq, Together AI, xAI, MiniMax and the Claude Code and
    * Gemini CLIs have no embedding models in agentos. `dimension` is required for a model whose
    * dimension agentos does not know.
    */
