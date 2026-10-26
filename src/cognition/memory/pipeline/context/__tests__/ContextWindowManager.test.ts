@@ -182,6 +182,18 @@ describe('ContextWindowManager', () => {
     expect(second.content).toContain('user 9 asks about item 9');
   });
 
+  it.each(['sliding', 'hybrid'] as const)('keeps the window within its threshold over a hundred turns with the %s strategy and no summarizer', async (strategy) => {
+    const window = manager({ strategy });
+    for (let turn = 1; turn <= 100; turn++) {
+      talk(window, turn, turn);
+      const messages = await window.beforeTurn(0, 0);
+      // 500 tokens, half the 1,000-token window: the earlier summary is carried forward only as far as that leaves room.
+      expect(messages.reduce((sum, m) => sum + m.tokenEstimate, 0), `turn ${turn}`).toBeLessThanOrEqual(500);
+    }
+    // The start of the conversation, from the first summary, is still in the window.
+    expect(window.getMessages()[0].content).toContain('user 1 asks about item 1');
+  });
+
   it('keeps the summary from the observation notes within the segment it replaces when the hybrid strategy has no summarizer', async () => {
     // Ten long notes: joined whole, they would take more tokens than the turns they summarize.
     const long = (n: number): string => JSON.stringify({ type: 'fact', content: sized(`note ${n}`, 2_000), importance: 0.5 });
