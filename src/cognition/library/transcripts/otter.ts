@@ -190,7 +190,10 @@ function holdsWords(line: string | undefined): boolean {
  * it: the text is laid out in blocks when as many of them stand straight after a blank line as straight after a line
  * that holds words, or more, and one does, a blank line before the closing line counting as one more that does. A
  * Word file with no empty paragraphs holds no blank line and is not, and neither is one in which fewer of those lines
- * stand after an empty paragraph than after a paragraph of words.
+ * stand after an empty paragraph than after a paragraph of words. A text in which no blank line parts two lines of
+ * words is one block when it holds the blank line Otter writes before the closing line, however many of its later
+ * lines take the header's form, as Otter's export of one turn whose words run over several lines does: those lines
+ * stand after lines of words in a block and a Word file alike, and only that blank line tells the two apart.
  *
  * @param lines - The text's lines, as {@link bodyOf} keeps them, so a blank line at their end stood before the closing
  * line.
@@ -199,13 +202,19 @@ function holdsWords(line: string | undefined): boolean {
 function inBlocks(lines: readonly string[], layout: Layout): boolean {
   const first = lines.findIndex(holdsWords);
   if (first === -1) return false;
-  let afterBlank = holdsWords(lines[lines.length - 1]) ? 0 : 1;
+  const closingBlank = !holdsWords(lines[lines.length - 1]);
+  let afterBlank = closingBlank ? 1 : 0;
   let afterWords = 0;
-  for (let at = first + 1; at + 1 < lines.length; at += 1) {
+  // Whether a blank line parts two lines of words, the first line that holds words and a later one.
+  let parted = false;
+  for (let at = first + 1; at < lines.length; at += 1) {
+    if (!holdsWords(lines[at])) continue;
+    if (!holdsWords(lines[at - 1])) parted = true;
     if (!holdsWords(lines[at + 1]) || layout.headerOf(lines[at]) === null) continue;
     if (holdsWords(lines[at - 1])) afterWords += 1;
     else afterBlank += 1;
   }
+  if (!parted) return closingBlank;
   return afterBlank > 0 && afterBlank >= afterWords;
 }
 
@@ -315,7 +324,8 @@ export function isOtterLayout(text: string, options: { cutLastLine?: boolean } =
  *
  * A line of words can end as a voice note's header does (`We meet at 10:30`). Otter writes a blank line after each
  * turn's words, so in a text laid out so, its headers standing after a blank line at least as often as after a line of
- * words, such a line inside a turn, or at the turn's end, is that turn's words. A Word file with no empty paragraphs
+ * words, such a line inside a turn, or at the turn's end, is that turn's words; so is every later line of the one turn
+ * of a text whose only blank line is the one before the closing line. A Word file with no empty paragraphs
  * holds no blank line, and there such a line straight before the next header reads as a header whose words are that
  * next header's line: the paragraphs `Unknown 0:00`, `Good morning.`, `We meet at 10:30`, `Unknown 0:09`,
  * `Shall we start?` and the closing line read as a turn by `Unknown` at 0 ms, `Good morning.`, and one by `We meet at`
