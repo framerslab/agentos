@@ -345,6 +345,16 @@ describe('guardedFetch', () => {
         'http://[64:ff9b:1::5db8:d70e]/page',
         'http://[64:ff9b::5db8:d70e:1]/page',
         'http://[2600:1f14:abcd::5db8:d70e]/page',
+        // In hex too: only a host that begins `::ffff:` or `64:ff9b::` and
+        // ends two groups after it is read for the IPv4 address it carries.
+        // The first two have `64:ff9b::` or `::ffff:` after a first group:
+        // global unicast addresses the address check passes, which an
+        // allow-list of 93.184.215.14 must not reach. The third begins
+        // `::ffff:` with three groups after it (::ffff:0:0:0/96,
+        // IPv4-translated).
+        'http://[2600:64:ff9b::5db8:d70e]/page',
+        'http://[2600::ffff:5db8:d70e]/page',
+        'http://[::ffff:0:5db8:d70e]/page',
         // 6to4 (2002::/16): the IPv4 address it carries is the router's of a
         // 6to4 site, and the connection ends at a host of that site.
         'http://[2002:5db8:d70e::5db8:d70e]/page',
@@ -367,6 +377,9 @@ describe('guardedFetch', () => {
         '64:ff9b:1::5db8:d70e',
         '64:ff9b::5db8:d70e:1',
         '2600:1f14:abcd::5db8:d70e',
+        '2600:64:ff9b::5db8:d70e',
+        '2600::ffff:5db8:d70e',
+        '::ffff:0:5db8:d70e',
         '2002:5db8:d70e::5db8:d70e',
         '2002:5db8:d70e::5db8:d70e',
       ]);
@@ -767,11 +780,17 @@ describe('guardedFetch', () => {
       const before = connections;
       // A resolver that reveals 64:ff9b:1::/96, under the local-use prefix
       // 64:ff9b:1::/48 (RFC 8215), and answers the host with 93.184.215.14
-      // under it. The address is outside 2000::/3, so it is refused whatever
-      // it carries.
-      const resolve = async (host: string) =>
-        host === 'ipv4only.arpa' ? [{ address: '64:ff9b:1::c000:aa', family: 6 }] : [{ address: '64:ff9b:1::5db8:d70e', family: 6 }];
+      // under it, recording each name it is asked about. The address is
+      // outside 2000::/3, so it is refused whatever it carries, and by its
+      // own range, before the prefixes are asked for.
+      const asked: string[] = [];
+      const resolve = async (host: string) => {
+        asked.push(host);
+        return host === 'ipv4only.arpa' ? [{ address: '64:ff9b:1::c000:aa', family: 6 }] : [{ address: '64:ff9b:1::5db8:d70e', family: 6 }];
+      };
       expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve })))).toBe('address');
+      // The host alone was looked up: ipv4only.arpa never was.
+      expect(asked).toEqual(['pages.test']);
       expect(connections).toBe(before);
     });
 

@@ -34,6 +34,9 @@ describe('isPublicNetworkAddress', () => {
     '64:ff9b::a9fe:a9fe',
     '64:ff9b:1::1',
     '64:ff9b:0:1::808:808',
+    // Begins `64:ff9b::` as the /96 form does, written as a URL parser
+    // writes it, yet its sixth group is not zero: outside 64:ff9b::/96.
+    '64:ff9b::5db8:d70e:1',
     '2002:c0a8:101::',
     '100::1',
     '2001:db8::1',
