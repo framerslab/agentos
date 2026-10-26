@@ -15,6 +15,7 @@ import type {
   SummaryChainNode,
 } from '../../../core/types.js';
 import { compactionSplitIndex } from './compactionSplit.js';
+import { earlierSummaries, withinTokens } from './extractiveSummary.js';
 
 /** ~4 chars per token. */
 function estimateTokens(text: string): number {
@@ -98,9 +99,10 @@ export class SlidingSummaryStrategy implements ICompactionStrategy {
         // The extractive summary below.
       }
     }
-    // No summarizer, a failed call or an empty answer: the first and last
-    // user messages stand for the segment.
-    summary ??= this.fallbackSummary(toCompact);
+    // No summarizer, a failed call or an empty answer: an earlier summary in
+    // the segment and its first and last user messages stand for it, within the
+    // tokens the segment held, less the summary message's header.
+    summary ??= this.fallbackSummary(toCompact, Math.max(25, inputTokens - 20));
     const entities = this.extractEntities(summary);
 
     const outputTokens = estimateTokens(summary);
@@ -220,18 +222,20 @@ export class SlidingSummaryStrategy implements ICompactionStrategy {
   }
 
   /** Crude fallback when LLM is unavailable. */
-  private fallbackSummary(messages: ContextMessage[]): string {
+  private fallbackSummary(messages: ContextMessage[], maxTokens: number): string {
+    // A summary an earlier compaction left in the segment is carried forward, first.
+    const earlier = earlierSummaries(messages);
     const userMsgs = messages.filter((m) => m.role === 'user');
-    if (userMsgs.length === 0) return 'Previous conversation context.';
-
-    // Take first and last user messages as anchors.
-    const first = userMsgs[0].content.slice(0, 200);
-    const last = userMsgs[userMsgs.length - 1].content.slice(0, 200);
-
-    if (userMsgs.length === 1) {
-      return `User discussed: ${first}`;
+    let anchors = '';
+    if (userMsgs.length === 0) {
+      if (earlier.length === 0) anchors = 'Previous conversation context.';
+    } else {
+      // Take first and last user messages as anchors.
+      const first = userMsgs[0].content.slice(0, 200);
+      const last = userMsgs[userMsgs.length - 1].content.slice(0, 200);
+      anchors = userMsgs.length === 1 ? `User discussed: ${first}` : `Conversation started with: ${first}\n\nMost recently discussed: ${last}`;
     }
-    return `Conversation started with: ${first}\n\nMost recently discussed: ${last}`;
+    return withinTokens([...earlier, anchors].filter((part) => part !== '').join('\n\n'), maxTokens);
   }
 
   /** No-op result when nothing needs compaction. */

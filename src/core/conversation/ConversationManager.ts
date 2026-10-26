@@ -18,7 +18,7 @@ import { uuidv4 } from '../utils/uuid.js';
 import { GMIError, GMIErrorCode } from '../utils/errors.js';
 import { createLogger } from '../logging/index.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
-import { ensureConversationTables, isPostgresAdapter } from './conversationTables.js';
+import { ensureConversationTables, isPostgresAdapter } from './conversationTables';
 import {
   INSERT_MESSAGE_SQL,
   REPLACE_MESSAGE_SQL,
@@ -29,7 +29,7 @@ import {
   readNumber,
   updateMessageValues,
   type ConversationMessageRow,
-} from './conversationRows.js';
+} from './conversationRows';
 
 /**
  * Configuration for the ConversationManager.

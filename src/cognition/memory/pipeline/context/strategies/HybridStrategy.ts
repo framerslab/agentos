@@ -23,6 +23,7 @@ import type {
   SummaryChainNode,
 } from '../../../core/types.js';
 import { compactionSplitIndex } from './compactionSplit.js';
+import { earlierSummaries, withinTokens } from './extractiveSummary.js';
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -40,8 +41,10 @@ export class HybridStrategy implements ICompactionStrategy {
 
   /**
    * @param llmInvoker - Writes the narrative summary. Without one, or when it
-   *   fails or answers nothing, the summary is the ten most important observation
-   *   notes, or without notes the segment's first three user messages.
+   *   fails or answers nothing, the summary is an earlier summary in the segment,
+   *   carried forward, and the ten most important observation notes, or without
+   *   notes the segment's first three user messages, cut to the tokens the
+   *   segment held less the summary message's header.
    * @param observer - Extracts observation notes from the segment.
    * @param reflector - Consolidates the notes into memory traces.
    */
@@ -138,6 +141,8 @@ export class HybridStrategy implements ICompactionStrategy {
       observationNotes,
       tracesToEncode,
       config,
+      // An extractive summary takes no more tokens than the segment, less the summary message's header.
+      Math.max(25, inputTokens - 30),
     );
 
     const outputTokens = estimateTokens(summary);
@@ -209,6 +214,7 @@ export class HybridStrategy implements ICompactionStrategy {
     notes: ObservationNote[],
     traces: Partial<MemoryTrace>[],
     config: InfiniteContextConfig,
+    maxFallbackTokens: number,
   ): Promise<string> {
     const conversationText = messages
       .map((m) => `[${m.role}] ${m.content}`)
@@ -264,20 +270,25 @@ export class HybridStrategy implements ICompactionStrategy {
         // The extractive summary below.
       }
     }
-    // No summarizer, a failed call or an empty answer: the most important
-    // observation notes stand for the segment, or its first user messages.
-    if (notes.length > 0) {
-      return [...notes]
-        .sort((a, b) => b.importance - a.importance)
-        .slice(0, 10)
-        .map((n) => `[${n.type}] ${n.content}`)
-        .join('\n');
-    }
-    return `Conversation turns ${messages[0].turnIndex}–${messages[messages.length - 1].turnIndex}: ${messages
-      .filter((m) => m.role === 'user')
-      .slice(0, 3)
-      .map((m) => m.content.slice(0, 100))
-      .join('; ')}`;
+    // No summarizer, a failed call or an empty answer: an earlier summary in
+    // the segment, carried forward, and the most important observation notes
+    // or the segment's first user messages stand for it, within
+    // `maxFallbackTokens`, so the summary never takes more of the window than
+    // the turns it replaces.
+    const earlier = earlierSummaries(messages);
+    const own =
+      notes.length > 0
+        ? [...notes]
+            .sort((a, b) => b.importance - a.importance)
+            .slice(0, 10)
+            .map((n) => `[${n.type}] ${n.content}`)
+            .join('\n')
+        : `Conversation turns ${messages[0].turnIndex}–${messages[messages.length - 1].turnIndex}: ${messages
+            .filter((m) => m.role === 'user')
+            .slice(0, 3)
+            .map((m) => m.content.slice(0, 100))
+            .join('; ')}`;
+    return withinTokens([...earlier, own].join('\n\n'), maxFallbackTokens);
   }
 
   // ── Helpers ────────────────────────────────────────────────────────

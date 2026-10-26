@@ -194,8 +194,8 @@ export class SqlStorageAdapter implements IStorageAdapter {
       return;
     }
 
-    // Resolve the appropriate storage adapter for the platform
-    this.adapter = await resolveStorageAdapter(this.config);
+    // Resolve the appropriate storage adapter for the platform; a retry after a failed setup reuses it.
+    this.adapter ??= await resolveStorageAdapter(this.config);
 
     if (this.config.enableAutoMigration === false) {
       this.log().debug?.('Schema left to the host', { enableAutoMigration: false });
@@ -206,8 +206,9 @@ export class SqlStorageAdapter implements IStorageAdapter {
       }
     }
 
-    this.initialized = true;
+    // Ready only once the expired messages are gone: a failure here rejects, and the next initialize() tries again.
     await this.deleteExpiredMessages();
+    this.initialized = true;
   }
 
   /**
@@ -223,6 +224,8 @@ export class SqlStorageAdapter implements IStorageAdapter {
   async close(): Promise<void> {
     // Before initialize() has resolved a database there is nothing to close.
     if (this.adapter) await this.adapter.close();
+    // The closed connection is let go, so an initialize() after close() opens a fresh one rather than reusing it.
+    this.adapter = undefined as unknown as StorageAdapter;
     this.initialized = false;
   }
 

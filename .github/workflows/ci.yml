@@ -332,17 +332,19 @@ jobs:
       # Codecov keeps master's figure, which the coverage badge in the README reads,
       # and compares a pull request opened from a branch of this repository with its
       # base. A pull request from a fork gets no token and uploads nothing, and a
-      # dispatched run reads no secret (see the note on workflow_dispatch above). On a
-      # push to master a failed upload fails the job, so the badge never goes stale
-      # unnoticed; on a pull request it is reported in the step's log and the job goes on.
+      # dispatched run reads no secret (see the note on workflow_dispatch above). It runs
+      # after a test step that failed too, so a push whose coverage fell under the
+      # thresholds still sends its lower figure and the badge shows it. On a push to
+      # master a failed upload fails the job, so the badge never goes stale unnoticed; on
+      # any other push and on a pull request it is reported in the step's log.
       - name: Upload coverage to Codecov
-        if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        if: ${{ !cancelled() && hashFiles('coverage/lcov.info') != '' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
           disable_search: true
-          fail_ci_if_error: ${{ github.event_name == 'push' }}
+          fail_ci_if_error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
   browser:
     name: Browser tests

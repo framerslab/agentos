@@ -2,7 +2,8 @@
  * @fileoverview SqlStorageAdapter's own options: `messageRetentionDays` deletes
  * the messages older than its cutoff after each stored message and when the
  * adapter opens a database, and `enableAutoMigration: false` leaves the schema
- * to the host.
+ * to the host. A setup that fails leaves the adapter uninitialized, and
+ * `close()` lets its connection go, so a later `initialize()` opens a fresh one.
  */
 
 import fs from 'node:fs';
@@ -84,6 +85,23 @@ describe('SqlStorageAdapter options', () => {
     try {
       await expect(storage.initialize()).rejects.toThrow();
       await expect(storage.getMessage('m')).rejects.toThrow(/not initialized/);
+    } finally {
+      await storage.close();
+    }
+  });
+
+  it('opens the database again when initialize() follows close()', async () => {
+    // A retry after a failed setup reuses the connection it opened; close() lets it go, so this one is fresh.
+    const file = databaseFile();
+    const now = Date.now();
+    const storage = new SqlStorageAdapter({ filePath: file, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    await storage.initialize();
+    await storage.createConversation({ id: 'c', userId: 'u', createdAt: now, lastActivity: now });
+    await storage.close();
+
+    await storage.initialize();
+    try {
+      expect(await storage.getConversation('c')).not.toBeNull();
     } finally {
       await storage.close();
     }
