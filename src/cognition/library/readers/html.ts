@@ -401,6 +401,20 @@ function noteParts(node: HtmlNodeLike, parts: Parts): number {
 const INTRODUCTION = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'p']);
 
 /**
+ * Whether a node holds an `h1`, the title of the content a header inside the page's main content introduces. The parts
+ * never read, by their name or as hidden, are not looked in.
+ */
+function holdsH1(node: HtmlNodeLike): boolean {
+  for (const child of childrenOf(node)) {
+    if (child.nodeType !== ELEMENT_NODE) continue;
+    const name = nameOf(child);
+    if (DROPPED.has(name) || hidden(child)) continue;
+    if (name === 'h1' || holdsH1(child)) return true;
+  }
+  return false;
+}
+
+/**
  * Whether a part of a header holds an element of `INTRODUCTION`, with the elements under it that hold none: the
  * header's navigational aids, each to be left out with all it holds. The words a part holds beside its elements are
  * read with it. The parts never read, by their name or as hidden, are not looked in.
@@ -433,12 +447,12 @@ function introductionOf(node: HtmlNodeLike): { holds: boolean; aids: HtmlNodeLik
  * over, but one that wraps the page. A section that holds the page's main content wraps the page, as the Read the Docs
  * theme's section around its content column and footer does, so it holds no header, footer or aside of its own; an
  * article, and any other section, holds its own, and so does the node handed over when it is one. A header inside the
- * page's main content, a `main` element or one whose role is `main`, introduces that content, as the title of an
- * archive or of a search page does: its headings and paragraphs are read, and the rest of it, its navigational aids,
- * is the page's own, as the menu of other languages Wikipedia's title bar holds beside an article's title is; one that
- * holds no heading or paragraph is the page's own whole. A footer or an aside there is still the page's. The walk stops
- * at an article or a section that holds its own and at an element left out with all it holds, since nothing inside
- * either is the page's own or is read.
+ * page's main content, a `main` element or one whose role is `main`, that holds an `h1` introduces that content, as the
+ * title of an archive or of a search page does: its headings and paragraphs are read, and the rest of it, its
+ * navigational aids, is the page's own, as the menu of other languages Wikipedia's title bar holds beside an article's
+ * title is. A header there that holds no `h1` is the page's own whole, as a GitHub repository page's bar of tabs and its
+ * title bar are. A footer or an aside there is still the page's. The walk stops at an article or a section that holds
+ * its own and at an element left out with all it holds, since nothing inside either is the page's own or is read.
  *
  * @param wrappers - The sections that hold the page's main content, as `noteParts` notes them.
  */
@@ -455,10 +469,10 @@ function pageOwnOf(root: HtmlNodeLike, wrappers: ReadonlySet<HtmlNodeLike>): Set
       const name = nameOf(child);
       if (holdsOwn(child, name) || DROPPED.has(name) || hidden(child)) continue;
       if (name === 'header' && holder.inMain) {
-        // a header inside the page's main content introduces it: what introduces it is read, its aids are the page's
-        const introduction = introductionOf(child);
-        if (!introduction.holds) found.add(child);
-        else for (const aid of introduction.aids) found.add(aid);
+        // a header inside the page's main content that holds its title introduces it: what introduces it is read, and
+        // its aids are the page's; one that holds no h1 is the page's whole
+        if (holdsH1(child)) for (const aid of introductionOf(child).aids) found.add(aid);
+        else found.add(child);
         continue;
       }
       if (SCOPED.has(name)) found.add(child);
@@ -1401,16 +1415,16 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
  * `hidden`, `aria-hidden="true"` or styled `display: none`. A `header`, `footer` or `aside` is the page's own when no
  * `article` or `section` holds it but a section that holds the page's main content, a `main` element or an element whose
  * role is `main`, and so wraps the page; inside an article or any other section, it is that part's and is read with it,
- * and an `article` or `section` handed over holds its own the same way. A `header` inside the page's main content
- * introduces that content: its headings, `hgroup`s and paragraphs are read, and the rest of it, a menu or a list of
- * links beside them, is the page's own. A `form` is read as the blocks it holds when it holds a page: a heading, an
- * `article`, `aside`, `nav` or `section`, the page's main content, a `header` or a `footer`; when it is the page's main
- * content itself; or when it is the one element the body holds, as a page whose whole body sits in one form does. A
- * heading whose words all sit in its one `button`, as an accordion's
- * header's do, is read for that button's words. A form's control, an image and the rest of HTML's embedded content are
- * each a space between the words on either side of them, outside code. Comments are not read. An element handed over is
- * read as a document is, whatever its own name, but an `svg` or `math` element handed over takes no title from a
- * `<title>` in it, which is the drawing's or the formula's.
+ * and an `article` or `section` handed over holds its own the same way. A `header` inside the page's main content that
+ * holds an `h1` introduces that content: its headings, `hgroup`s and paragraphs are read, and the rest of it, a menu or
+ * a list of links beside them, is the page's own; one that holds no `h1` is the page's own whole. A `form` is read as
+ * the blocks it holds when it holds a page: a heading, an `article`, `aside`, `nav` or `section`, the page's main
+ * content, a `header` or a `footer`; when it is the page's main content itself; or when it is the one element the body
+ * holds, as a page whose whole body sits in one form does. A heading whose words all sit in its one `button`, as an
+ * accordion's header's do, is read for that button's words. A form's control, an image and the rest of HTML's embedded
+ * content are each a space between the words on either side of them, outside code. Comments are not read. An element
+ * handed over is read as a document is, whatever its own name, but an `svg` or `math` element handed over takes no
+ * title from a `<title>` in it, which is the drawing's or the formula's.
  *
  * @param document - A parsed document, or an element, as a page's `DOMParser` gives it; nothing is fetched.
  * @param options - The bounds on the Markdown and on each table.
