@@ -34,6 +34,13 @@ import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
 
 /**
+ * OpenRouter's API base URL, which requests go to when the config names no `baseURL`. `embedText` posts OpenRouter
+ * embeddings under it too: OpenRouter serves `POST https://openrouter.ai/api/v1/embeddings`
+ * (https://openrouter.ai/docs/api/api-reference/embeddings/submit-an-embedding-request, read 2026-10-25).
+ */
+export const OPENROUTER_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
+
+/**
  * Configuration specific to the OpenRouterProvider.
  */
 export interface OpenRouterProviderConfig {
@@ -383,7 +390,7 @@ export class OpenRouterProvider implements IProvider {
     // by providing defaults for optional fields before freezing.
     this.config = Object.freeze({
       apiKey: config.apiKey,
-      baseURL: config.baseURL || 'https://openrouter.ai/api/v1',
+      baseURL: config.baseURL || OPENROUTER_DEFAULT_BASE_URL,
       defaultModelId: config.defaultModelId, // Can be undefined, but this.defaultModelId will store it
       siteUrl: config.siteUrl, // Can be undefined
       appName: config.appName, // Can be undefined

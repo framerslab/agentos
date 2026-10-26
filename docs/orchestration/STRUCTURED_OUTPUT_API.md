@@ -173,12 +173,16 @@ OpenAI-compatible calls send inputs in order in requests of at most 2,048 inputs
 | `openai` | `text-embedding-3-small` | `/embeddings` at `https://api.openai.com/v1` or `OPENAI_BASE_URL` |
 | `gemini` | `gemini-embedding-2` | Gemini's own embedding API through `GeminiProvider`; a `baseUrl` other than Google's native endpoint uses `/embeddings` |
 | `ollama` | `nomic-embed-text` | `/api/embed` at `OLLAMA_BASE_URL` (or `baseUrl`); usage is reported as 0 |
-| `openrouter` | None: pass `model` | `/embeddings` at `https://openrouter.ai/api/v1` |
-| Any other provider | None: pass `model` | `/embeddings` at `baseUrl`, or at `https://api.openai.com/v1` when no `baseUrl` is passed |
+| `openrouter` | None: pass `model` | `/embeddings` at `https://openrouter.ai/api/v1` or `OPENROUTER_BASE_URL` |
+| `mistral` | None: pass `model`, such as `mistral-embed` | `/embeddings` at `https://api.mistral.ai/v1` |
+| `requesty` | None: pass `model` | `/embeddings` at `https://router.requesty.ai/v1` or `REQUESTY_BASE_URL` |
+| `anthropic`, `groq`, `together`, `xai`, `minimax`, the image providers and the CLIs | None | None: the call is refused before its key is read, whatever the base URL |
+| A provider id agentos does not know | None: pass `model` | `/embeddings` at the call's or the global default's `baseUrl`; the call is refused without one |
 
 - With neither `provider` nor `model`, the global default provider (`setDefaultProvider()`) is used when one is set, with the default's model when that is not a chat model and the provider's default embedding model otherwise; a provider without one throws. Without a global default, the first of OpenAI (`OPENAI_API_KEY`) and Ollama (`OLLAMA_BASE_URL`) found in the environment is used.
-- A vendor with its own OpenAI-compatible embeddings endpoint, such as Mistral, needs `baseUrl` (for example `https://api.mistral.ai/v1`) as well as `model`; without it the request goes to OpenAI's URL with the vendor's key.
-- `dimensions` is sent as the `dimensions` field on `/embeddings` and to Gemini as `outputDimensionality`; Ollama does not receive it. Vectors are returned as the provider sends them, with no normalisation.
+- A provider's key goes only to its own endpoint in the table or to a base URL the caller set: the call's `baseUrl`, the global default's, or the provider's base-URL variable. Each endpoint is the one the provider documents: [OpenAI](https://developers.openai.com/api/reference/resources/embeddings/methods/create), [OpenRouter](https://openrouter.ai/docs/api/api-reference/embeddings/submit-an-embedding-request), [Mistral](https://docs.mistral.ai/api/endpoint/embeddings) and [Requesty](https://docs.requesty.ai/api-reference/endpoint/embeddings-create) (read 2026-10-25). An OpenAI-compatible server of your own takes a provider id of your own with `baseUrl` and `apiKey`.
+- [Anthropic offers no embedding model](https://platform.claude.com/docs/en/build-with-claude/embeddings), the API references of [Groq](https://console.groq.com/docs/api-reference) and [xAI](https://docs.x.ai/llms.txt) list no embeddings endpoint, [Together AI serves no embedding model on serverless](https://docs.together.ai/docs/serverless-models) and [MiniMax's API reference](https://platform.minimax.io/docs/api-reference) names none (read 2026-10-25). agentos has no embeddings for `stability`, `replicate`, `fal`, `bfl`, `stable-diffusion-local`, `claude-code-cli` or `gemini-cli` either. A call to any of them rejects with an error that says why and names the providers that embed, and no request is sent; an Anthropic call is not sent on to OpenRouter.
+- `dimensions` is sent as the `dimensions` field on `/embeddings`, to Mistral as `output_dimension` (the field [Mistral's embeddings](https://docs.mistral.ai/api/endpoint/embeddings) take) and to Gemini as `outputDimensionality`; Ollama does not receive it. Vectors are returned as the provider sends them, with no normalisation.
 
 ### Storing the vectors
 
