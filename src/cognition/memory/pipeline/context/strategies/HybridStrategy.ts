@@ -23,7 +23,7 @@ import type {
   SummaryChainNode,
 } from '../../../core/types.js';
 import { compactionSplitIndex } from './compactionSplit.js';
-import { earlierSummaries, withinTokens } from './extractiveSummary.js';
+import { earlierSummaries, extractiveSummary, summaryRoom } from './extractiveSummary.js';
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -41,10 +41,11 @@ export class HybridStrategy implements ICompactionStrategy {
 
   /**
    * @param llmInvoker - Writes the narrative summary. Without one, or when it
-   *   fails or answers nothing, the summary is an earlier summary in the segment,
-   *   carried forward, and the ten most important observation notes, or without
-   *   notes the segment's first three user messages, cut to the tokens the
-   *   segment held less the summary message's header.
+   *   fails or answers nothing, the summary is the ten most important
+   *   observation notes, or without notes the segment's first three user
+   *   messages, cut to the tokens the segment held less the summary message's
+   *   header, after an earlier summary in the segment, carried forward as far as
+   *   the window has room for it under the compaction threshold.
    * @param observer - Extracts observation notes from the segment.
    * @param reflector - Consolidates the notes into memory traces.
    */
@@ -141,8 +142,10 @@ export class HybridStrategy implements ICompactionStrategy {
       observationNotes,
       tracesToEncode,
       config,
-      // An extractive summary takes no more tokens than the segment, less the summary message's header.
+      // An extractive summary takes no more tokens than the segment, less the summary message's header, and carries
+      // an earlier summary forward only as far as the window has room for it.
       Math.max(25, inputTokens - 30),
+      summaryRoom(input, config, toKeep.reduce((s, m) => s + m.tokenEstimate, 0), 30),
     );
 
     const outputTokens = estimateTokens(summary);
@@ -215,6 +218,7 @@ export class HybridStrategy implements ICompactionStrategy {
     traces: Partial<MemoryTrace>[],
     config: InfiniteContextConfig,
     maxFallbackTokens: number,
+    roomTokens: number,
   ): Promise<string> {
     const conversationText = messages
       .map((m) => `[${m.role}] ${m.content}`)
@@ -270,11 +274,11 @@ export class HybridStrategy implements ICompactionStrategy {
         // The extractive summary below.
       }
     }
-    // No summarizer, a failed call or an empty answer: an earlier summary in
-    // the segment, carried forward, and the most important observation notes
-    // or the segment's first user messages stand for it, within
-    // `maxFallbackTokens`, so the summary never takes more of the window than
-    // the turns it replaces.
+    // No summarizer, a failed call or an empty answer: the most important
+    // observation notes or the segment's first user messages stand for it,
+    // within `maxFallbackTokens`, so the summary takes no more of the window
+    // than the turns it replaces, after an earlier summary in the segment,
+    // carried forward as far as `roomTokens` leaves room for it.
     const earlier = earlierSummaries(messages);
     const own =
       notes.length > 0
@@ -288,7 +292,7 @@ export class HybridStrategy implements ICompactionStrategy {
             .slice(0, 3)
             .map((m) => m.content.slice(0, 100))
             .join('; ')}`;
-    return withinTokens([...earlier, own].join('\n\n'), maxFallbackTokens);
+    return extractiveSummary(earlier, own, maxFallbackTokens, roomTokens);
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
