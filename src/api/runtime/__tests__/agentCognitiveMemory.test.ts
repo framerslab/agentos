@@ -128,10 +128,21 @@ const neutral = { valence: 0, arousal: 0, dominance: 0 };
 const FACT = 'The deploy key lives in the vault under ops/deploy.';
 /** A memory of Alice's, which no context assembled for Bob may carry. */
 const ALICES_MEMORY = "Alice's door code is 4471.";
+/**
+ * A UUID in its text form, 8-4-4-4-12 hex digits in either case (RFC 9562
+ * section 4, https://www.rfc-editor.org/rfc/rfc9562#section-4). A context lists
+ * the trace ids in working memory, each `mt_` and a random v4 UUID
+ * (generateTraceId in CognitiveMemoryManager.ts), and a UUID can hold any four
+ * hex digits, 4471 among them.
+ */
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
-/** What a context carries of Alice's memory: her sentence, its words "door code", or the code. */
+/**
+ * The parts of Alice's memory (her sentence, its words "door code" and the
+ * code) that a context carries outside its ids.
+ */
 function textOfAlicesMemoryIn(contextText: string): string[] {
-  const text = contextText.toLowerCase();
+  const text = contextText.replace(UUID, '[id]').toLowerCase();
   return [ALICES_MEMORY, 'door code', '4471'].filter((part) => text.includes(part.toLowerCase()));
 }
 
