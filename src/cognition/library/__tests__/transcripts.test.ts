@@ -791,6 +791,26 @@ describe('readTranscript', () => {
     ]);
   });
 
+  it('reads a one-turn voice note whose later lines end in times as one turn, by the blank line Otter writes before the closing line', () => {
+    // Otter writes a blank line after each turn's words, the last turn's before the closing line. A text whose only blank
+    // line is that one is one block, so every later line of its turn is words, however many of them end in a time.
+    // Weighed against that one blank line, two such lines would read the text as having no blocks and head a turn said
+    // by `We meet at` at 10:30.
+    const note = 'Unknown 0:00\nGood morning.\nWe meet at 10:30\nThen leave at 11:30\nSee you there.\n\nTranscribed by https://otter.ai\n';
+    expect(readTranscript(note, 'otter')).toEqual({
+      format: 'otter',
+      turns: [{ seq: 1, startMs: 0, endMs: null, text: 'Good morning. We meet at 10:30 Then leave at 11:30 See you there.' }],
+      labels: [{ seq: 1, label: 'Unknown' }],
+      durationMs: null,
+    });
+
+    // So is a time alone on two later lines of a turn, in an export made without names whose lines lost the spaces at
+    // their ends.
+    expect(readTranscript('0:04\nWhat time?\n2:30\n3:30\nGood.\n\nTranscribed by https://otter.ai\n', 'otter').turns).toEqual([
+      { seq: 1, startMs: 4_000, endMs: null, text: 'What time? 2:30 3:30 Good.' },
+    ]);
+  });
+
   it('reads a voice note\'s export in a Word file with no empty paragraphs by the paragraph straight after each header, a later paragraph that ends in a time straight before a header as a header', async () => {
     // With no blank line between the turns, a line of a header's form heads a turn unless it stands straight after a
     // header, where it is that header's words. Nothing in the file tells a turn's later paragraph that ends in a time,
