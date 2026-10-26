@@ -318,6 +318,40 @@ describe("generateText reads an empty or whitespace-only baseUrl as unset and se
       { url: 'https://openai-proxy.example/v1/chat/completions', authorization: 'Bearer openai-env-key' },
     ]);
   });
+
+  it("sends MiniMax's key to MiniMax's own endpoint for a whitespace-only baseUrl", async () => {
+    // MiniMax's text provider runs on OpenAI's transport, whose request URL a
+    // whitespace-only base left relative; the key goes to MiniMax's own root.
+    const result = await generateText({
+      provider: 'minimax',
+      model: 'MiniMax-M3.1-Flash',
+      apiKey: 'minimax-test-key',
+      baseUrl: ' \t',
+      prompt: 'hi',
+    });
+
+    expect(result.text).toBe('ok');
+    const sent = requestsSent();
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.every(({ url }) => url.startsWith('https://api.minimax.io/v1/'))).toBe(true);
+    expect(postsTo(/\/chat\/completions$/)).toEqual([
+      { url: 'https://api.minimax.io/v1/chat/completions', authorization: 'Bearer minimax-test-key' },
+    ]);
+  });
+
+  it("sends MiniMax's key to MINIMAX_BASE_URL for an empty baseUrl", async () => {
+    setEnv({ MINIMAX_API_KEY: 'minimax-env-key', MINIMAX_BASE_URL: 'https://minimax-proxy.example/v1' });
+
+    const result = await generateText({ provider: 'minimax', model: 'MiniMax-M3.1-Flash', baseUrl: '', prompt: 'hi' });
+
+    expect(result.text).toBe('ok');
+    const sent = requestsSent();
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.every(({ url }) => url.startsWith('https://minimax-proxy.example/v1/'))).toBe(true);
+    expect(postsTo(/\/chat\/completions$/)).toEqual([
+      { url: 'https://minimax-proxy.example/v1/chat/completions', authorization: 'Bearer minimax-env-key' },
+    ]);
+  });
 });
 
 describe('generateImage reads an empty or whitespace-only baseUrl as unset', () => {
