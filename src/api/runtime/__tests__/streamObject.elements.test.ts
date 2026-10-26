@@ -371,23 +371,23 @@ describe('streamObject with elements', () => {
     expect(await result.reportedUsage).toBeUndefined();
   });
 
-  it('yields an element completed before a chunk that ends inside the next one, a number, true, false or null still being written, and keeps it when the stream is cut there', async () => {
+  it('yields an element completed before a chunk that ends inside the next one, a number, true, false or null still being written, and keeps it when the reply ends there', async () => {
     const Values = z.object({ values: z.array(z.union([z.number(), z.boolean(), z.null()])) });
     for (const piece of ['{"values":[1,2e', '{"values":[1,tr', '{"values":[1,fal', '{"values":[1,nu']) {
-      const gated = gatedStream([piece, '3]}']);
-      hoisted.generateCompletionStream.mockReturnValue(gated.stream);
+      // The token limit cut the reply off inside the second element, and the stream ended normally.
+      hoisted.generateCompletionStream.mockReturnValue((async function* () {
+        yield chunk(piece);
+        yield limitReached();
+      })());
       const result = streamObject({ model: 'openai:gpt-4o', schema: Values, elements: 'values', prompt: 'p' });
       const seen: unknown[] = [];
-      const reading = (async () => {
+      const thrown = await (async () => {
         for await (const value of result.elementStream) seen.push(value);
-      })();
-      await gated.feed();
+      })().then(() => undefined, (error: unknown) => error);
       // The next element has begun, so 1 is complete, though the text does not parse with it closed.
       expect(seen, piece).toEqual([1]);
-      await gated.cut(new Error('socket hang up'));
-      await expect(reading, piece).rejects.toThrow('socket hang up');
-      expect(seen, piece).toEqual([1]);
-      await expect(result.object, piece).rejects.toThrow(/Stream interrupted/);
+      expect(thrown, piece).toBeInstanceOf(ObjectGenerationError);
+      await expect(result.object, piece).rejects.toThrow(/^Failed to parse streamed JSON/);
     }
   });
 
