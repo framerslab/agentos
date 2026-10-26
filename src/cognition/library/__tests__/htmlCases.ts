@@ -894,4 +894,27 @@ export const HTML_CASES: readonly HtmlCase[] = [
     images: 0,
     cut: false,
   },
+  {
+    name: "a header inside the main element that holds no h1 is the page's own and left out whole, as a GitHub repository page's bar of tabs and its title bar, which holds the narrow layout's About box, are",
+    html: lines(
+      '<title>GitHub - framerslab/agentos: TypeScript AI agent framework</title>',
+      '<header class="HeaderMktg header-logged-out" role="banner"><p>Sign in</p></header>',
+      '<main id="js-repo-pjax-container">',
+      '<header aria-label="Global navigation menu" class="GlobalNav"><nav aria-label="Breadcrumbs"><a href="/framerslab">framerslab</a> / <a href="/framerslab/agentos">agentos</a></nav>',
+      '<h2 class="sr-only">Repository navigation</h2><nav aria-label="Repository"><ul role="list"><li><a href="/framerslab/agentos">Code</a></li>' +
+        '<li><a href="/framerslab/agentos/issues">Issues</a></li></ul></nav></header>',
+      '<header class="prc-PageLayout-Header"><div id="repo-title-component"><div title="agentos"><strong><a href="/framerslab/agentos">agentos</a></strong></div>' +
+        '<span class="prc-Label-Label">Public</span></div>',
+      '<ul class="list-style-none"><li><a type="button" aria-label="You must be signed in to fork a repository">Fork<span aria-hidden="true">100</span></a></li></ul>',
+      '<div class="NarrowOnly"><div class="sidebarSection"><h2>About</h2><p class="description">TypeScript AI agent framework</p>',
+      '<h3 class="sr-only">Topics</h3><div><a href="/topics/agent-framework">agent-framework</a><a href="/topics/rag">rag</a></div>',
+      '<h3 class="sr-only">Stars</h3><div><span><strong>681</strong> stars</span></div></div></div></header>',
+      '<div class="prc-PageLayout-Content"><article class="markdown-body entry-content"><h1>AgentOS</h1><p>An agent runtime.</p></article></div>',
+      '</main>',
+    ),
+    title: 'GitHub - framerslab/agentos: TypeScript AI agent framework',
+    markdown: lines('# AgentOS', '', 'An agent runtime.'),
+    images: 0,
+    cut: false,
+  },
 ];
