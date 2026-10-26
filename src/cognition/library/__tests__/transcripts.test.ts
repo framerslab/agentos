@@ -791,11 +791,11 @@ describe('readTranscript', () => {
     ]);
   });
 
-  it('reads a one-turn voice note whose later lines end in times as one turn, by the blank line Otter writes before the closing line', () => {
-    // Otter writes a blank line after each turn's words, the last turn's before the closing line. A text whose only blank
-    // line is that one is one block, so every later line of its turn is words, however many of them end in a time.
-    // Weighed against that one blank line, two such lines would read the text as having no blocks and head a turn said
-    // by `We meet at` at 10:30.
+  it('reads the later lines of a voice note\'s turn that end in times as words, however many the turn holds, since no header gives their labels', () => {
+    // A voice note's header heads a turn where a block starts, or where it gives the label a header that starts a block
+    // gives, as every header of a voice note gives `Unknown`. A later line of a turn that ends in a time gives a label no
+    // header gives, so it is words however many such lines the turn holds. Read by a count of such lines against the
+    // blank lines, the three in the second note would head turns said by `We meet at` and `Back by`.
     const note = 'Unknown 0:00\nGood morning.\nWe meet at 10:30\nThen leave at 11:30\nSee you there.\n\nTranscribed by https://otter.ai\n';
     expect(readTranscript(note, 'otter')).toEqual({
       format: 'otter',
@@ -803,20 +803,89 @@ describe('readTranscript', () => {
       labels: [{ seq: 1, label: 'Unknown' }],
       durationMs: null,
     });
+    const two =
+      'Unknown 0:00\nGood morning.\nWe meet at 10:30\nThen leave at 11:30\nBack by 12:30\nSee you there.\n\nUnknown 0:20\nGood.\n\nTranscribed by https://otter.ai\n';
+    expect(readTranscript(two, 'otter')).toEqual({
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning. We meet at 10:30 Then leave at 11:30 Back by 12:30 See you there.' },
+        { seq: 2, startMs: 20_000, endMs: null, text: 'Good.' },
+      ],
+      labels: [
+        { seq: 1, label: 'Unknown' },
+        { seq: 2, label: 'Unknown' },
+      ],
+      durationMs: null,
+    });
 
-    // So is a time alone on two later lines of a turn, in an export made without names whose lines lost the spaces at
-    // their ends.
+    // A time alone gives no label, so a text of times alone is told by its blank lines: one whose only blank line is the
+    // one Otter writes before the closing line is one block, as Otter's export of one turn is, and a time alone on two
+    // later lines of its turn, in an export made without names whose lines lost the spaces at their ends, is words.
     expect(readTranscript('0:04\nWhat time?\n2:30\n3:30\nGood.\n\nTranscribed by https://otter.ai\n', 'otter').turns).toEqual([
       { seq: 1, startMs: 4_000, endMs: null, text: 'What time? 2:30 3:30 Good.' },
     ]);
   });
 
-  it('reads a voice note\'s export in a Word file with no empty paragraphs by the paragraph straight after each header, a later paragraph that ends in a time straight before a header as a header', async () => {
-    // With no blank line between the turns, a line of a header's form heads a turn unless it stands straight after a
-    // header, where it is that header's words. Nothing in the file tells a turn's later paragraph that ends in a time,
-    // straight before the next header, from a header whose words open with the next header's line, and the order of the
-    // times does not either: the second file has the same layout, its times in the same order, a header at 10:30 whose
-    // words end in an earlier time, and reads right by the same rule.
+  it('reads a voice note\'s header whose blank line before it is missing by the label it gives, and a line of words in the same place as words', async () => {
+    // The Word file's only empty paragraph stands before the closing line, as the only blank line of the one-turn export
+    // below does, so the two hold their lines alike. `Unknown 0:09` gives the label of the header that opens the file and
+    // heads its turn; `We meet at 10:30` gives a label no header gives, and is words.
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    const closing = 'Transcribed by https://otter.ai';
+
+    const header = ['Unknown 0:00', 'Good morning.', 'Unknown 0:09', 'Shall we start?', '', closing];
+    const two = {
+      format: 'docx',
+      turns: [
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning.' },
+        { seq: 2, startMs: 9_000, endMs: null, text: 'Shall we start?' },
+      ],
+      labels: [
+        { seq: 1, label: 'Unknown' },
+        { seq: 2, label: 'Unknown' },
+      ],
+      durationMs: null,
+    };
+    expect(await readWordTranscript(wordFileOf(header), { extractRawText })).toEqual(two);
+    expect(readTranscript(`${header.join('\n')}\n`, 'otter')).toEqual({ ...two, format: 'otter' });
+
+    const words = ['Unknown 0:00', 'Good morning.', 'We meet at 10:30', 'in the hall.', '', closing];
+    const one = {
+      format: 'docx',
+      turns: [{ seq: 1, startMs: 0, endMs: null, text: 'Good morning. We meet at 10:30 in the hall.' }],
+      labels: [{ seq: 1, label: 'Unknown' }],
+      durationMs: null,
+    };
+    expect(await readWordTranscript(wordFileOf(words), { extractRawText })).toEqual(one);
+    expect(readTranscript(`${words.join('\n')}\n`, 'otter')).toEqual({ ...one, format: 'otter' });
+
+    // Otter labels a speaker it tells apart but cannot name `Speaker 1`, `Speaker 2`, and each header that starts a block
+    // heads its turn, whatever label it gives, so a line of words with a later speaker's header form is words still.
+    const speakers =
+      'Speaker 1 0:00\nGood morning.\n\nSpeaker 2 0:05\nWe meet at 10:30\nin the hall.\n\nSpeaker 1 0:09\nShall we start?\n\nTranscribed by https://otter.ai\n';
+    const three = {
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning.' },
+        { seq: 2, startMs: 5_000, endMs: null, text: 'We meet at 10:30 in the hall.' },
+        { seq: 3, startMs: 9_000, endMs: null, text: 'Shall we start?' },
+      ],
+      labels: [
+        { seq: 1, label: 'Speaker 1' },
+        { seq: 2, label: 'Speaker 2' },
+        { seq: 3, label: 'Speaker 1' },
+      ],
+      durationMs: null,
+    };
+    expect(readTranscript(speakers, 'otter')).toEqual(three);
+    expect(await readWordTranscript(wordFileOf(speakers.trimEnd().split('\n')), { extractRawText })).toEqual({ ...three, format: 'docx' });
+  });
+
+  it('reads a voice note\'s export in a Word file with no empty paragraphs by the label each header gives, a later paragraph that ends in a time straight before a header as words', async () => {
+    // With no blank line between the turns, the first header alone starts a block. A line of a voice note's header form
+    // heads a turn when it gives that header's label, unless it stands straight after a header, where it is that header's
+    // words. `We meet at 10:30` gives a label no header gives and is words, and `Unknown 0:09` heads its turn. The order
+    // of the times tells nothing: in the second file `Unknown 10:30` heads a turn whose words end in an earlier time.
     const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
     const closing = 'Transcribed by https://otter.ai';
 
@@ -824,12 +893,12 @@ describe('readTranscript', () => {
     expect(await readWordTranscript(meet, { extractRawText })).toEqual({
       format: 'docx',
       turns: [
-        { seq: 1, startMs: 0, endMs: null, text: 'Good morning.' },
-        { seq: 2, startMs: 630_000, endMs: null, text: 'Unknown 0:09 Shall we start?' },
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning. We meet at 10:30' },
+        { seq: 2, startMs: 9_000, endMs: null, text: 'Shall we start?' },
       ],
       labels: [
         { seq: 1, label: 'Unknown' },
-        { seq: 2, label: 'We meet at' },
+        { seq: 2, label: 'Unknown' },
       ],
       durationMs: null,
     });
@@ -846,6 +915,23 @@ describe('readTranscript', () => {
         { seq: 2, label: 'Unknown' },
       ],
       durationMs: null,
+    });
+
+    // A one-turn note with no empty paragraph before the closing line either: every later line is words.
+    const leave = wordFileOf(['Unknown 0:00', 'Good morning.', 'We meet at 10:30', 'Then leave at 11:30', 'See you there.', closing]);
+    expect(await readWordTranscript(leave, { extractRawText })).toEqual({
+      format: 'docx',
+      turns: [{ seq: 1, startMs: 0, endMs: null, text: 'Good morning. We meet at 10:30 Then leave at 11:30 See you there.' }],
+      labels: [{ seq: 1, label: 'Unknown' }],
+      durationMs: null,
+    });
+
+    // The limit: a header that starts no block and gives a label the first header does not give is not told from a line
+    // of words, so here a second speaker's header, `Speaker 2 0:05`, reads as words of the first turn.
+    const speakers = wordFileOf(['Speaker 1 0:00', 'Good morning.', 'Speaker 2 0:05', 'Hello.', closing]);
+    expect(await readWordTranscript(speakers, { extractRawText })).toMatchObject({
+      turns: [{ seq: 1, startMs: 0, text: 'Good morning. Speaker 2 0:05 Hello.' }],
+      labels: [{ seq: 1, label: 'Speaker 1' }],
     });
   });
 
