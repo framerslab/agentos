@@ -1,5 +1,5 @@
 {
-  "about": "What otter.txt reads into. The file is written by hand in the layout of Otter's TXT export as Otter's help centre shows it in its article on exporting conversations: a header line of a name, two spaces and a time, with two spaces after the time; the paragraph; a blank line; and the closing line Otter adds. It is not an export: replace it with a real one when one is at hand.",
+  "about": "What otter.txt reads into. The file is written by hand: the meeting every vector holds, in the layout of Otter's TXT export made with the speakers' names and the times, as the real export otter-names-times.txt has it (SOURCES.md): a header line of a name, two spaces and a time, with two spaces after the time; the paragraph; a blank line; and the closing line Otter adds.",
   "format": "otter",
   "turns": [
     { "seq": 1, "startMs": 1000, "endMs": null, "text": "Good morning. Shall we start with the budget?" },
