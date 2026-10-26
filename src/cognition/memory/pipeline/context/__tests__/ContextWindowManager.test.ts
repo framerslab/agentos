@@ -182,12 +182,12 @@ describe('ContextWindowManager', () => {
     expect(second.content).toContain('user 9 asks about item 9');
   });
 
-  it.each(['sliding', 'hybrid'] as const)('keeps the window within its threshold over a hundred turns with the %s strategy and no summarizer', async (strategy) => {
+  it.each(['sliding', 'hybrid', 'hierarchical'] as const)('keeps the window within its threshold over a hundred turns with the %s strategy and no summarizer', async (strategy) => {
     const window = manager({ strategy });
     for (let turn = 1; turn <= 100; turn++) {
       talk(window, turn, turn);
       const messages = await window.beforeTurn(0, 0);
-      // 500 tokens, half the 1,000-token window: the earlier summary is carried forward only as far as that leaves room.
+      // 500 tokens, half the 1,000-token window: earlier summaries are kept in the window only as far as that leaves room.
       expect(messages.reduce((sum, m) => sum + m.tokenEstimate, 0), `turn ${turn}`).toBeLessThanOrEqual(500);
     }
     // The start of the conversation, from the first summary, is still in the window.
