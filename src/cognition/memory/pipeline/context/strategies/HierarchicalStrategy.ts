@@ -174,9 +174,13 @@ export class HierarchicalStrategy implements ICompactionStrategy {
       80,
       Math.ceil(estimateTokens(text) / config.targetCompressionRatio),
     );
+    // The segment's own turns: the summary message an earlier compaction left at its head stands for other nodes,
+    // and its turn would give every later node the first turn of the conversation.
+    const own = messages.filter((m) => !m.compacted);
+    const span = own.length > 0 ? own : messages;
     const turnRange: [number, number] = [
-      messages[0].turnIndex,
-      messages[messages.length - 1].turnIndex,
+      span[0].turnIndex,
+      span[span.length - 1].turnIndex,
     ];
 
     const prompt = [
