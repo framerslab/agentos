@@ -18,11 +18,12 @@ const FLASH_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
  * MiniMax's text models over its OpenAI-compatible Chat Completions API.
  *
  * It sends to `https://api.minimax.io/v1` unless `baseURL` names another
- * endpoint (`https://api.minimaxi.com/v1` for China) and defaults to
- * `MiniMax-M3.1-Flash`. It lists MiniMax's published catalog without calling
- * a model API, replays separate reasoning content in tool history, and
- * refuses an embedding request before sending it, since MiniMax publishes no
- * embedding model.
+ * endpoint (`https://api.minimax.cn/v1` for China, the root MiniMax's China
+ * documentation names; the older China root `https://api.minimaxi.com/v1`
+ * answers too) and defaults to `MiniMax-M3.1-Flash`. It lists MiniMax's
+ * published catalog without calling a model API, replays separate reasoning
+ * content in tool history, and refuses an embedding request before sending
+ * it, since MiniMax publishes no embedding model.
  */
 export class MiniMaxProvider extends OpenAIProvider {
   public readonly providerId = 'minimax';
