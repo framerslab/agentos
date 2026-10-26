@@ -390,6 +390,7 @@ async function checkedAddresses(
   const literal = isIP(host);
   const answers = literal !== 0 ? [{ address: host, family: literal }] : await untilAborted(() => resolve(host), signal);
   if (answers.length === 0) throw new GuardedFetchError('network', `${host} has no address`);
+  if (answers.some((answer) => isIP(answer.address) === 6)) await nat64();
   for (const answer of answers) {
     if (!allowed.has(answer.address) && !isPublicAddress(answer.address)) {
       throw new GuardedFetchError('address', `${host} resolves to an address that is not public`);
