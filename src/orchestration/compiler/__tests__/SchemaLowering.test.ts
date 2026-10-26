@@ -286,3 +286,17 @@ describe('lowerZodToJsonSchema — size constraints (prompt-only structured outp
     });
   });
 });
+
+describe('lowerZodToJsonSchema — readonly and catch', () => {
+  // A readonly or a catch wrapper reads the same JSON value as its inner schema; it fell through to `{}`, so a
+  // streamObject() call whose elements named such an array field sent the model an untyped property.
+  it('lowers the schema inside a readonly or a catch wrapper, as inside an optional one', () => {
+    expect(lowerZodToJsonSchema(z.array(z.number()).readonly())).toEqual({ type: 'array', items: { type: 'number' } });
+    expect(lowerZodToJsonSchema(z.array(z.number()).catch([]))).toEqual({ type: 'array', items: { type: 'number' } });
+    expect(lowerZodToJsonSchema(z.object({ values: z.array(z.string()).readonly() }))).toEqual({
+      type: 'object',
+      properties: { values: { type: 'array', items: { type: 'string' } } },
+      required: ['values'],
+    });
+  });
+});
