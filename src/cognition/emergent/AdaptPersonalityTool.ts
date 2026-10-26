@@ -1,5 +1,5 @@
 /**
- * @fileoverview AdaptPersonalityTool — ITool implementation that enables agents
+ * @fileoverview AdaptPersonalityTool: the ITool implementation that enables agents
  * to mutate their own HEXACO personality traits at runtime with per-session
  * budget enforcement.
  *
@@ -18,9 +18,9 @@
  * The tool refuses before it changes anything under `AGENTOS_LEARNING_FREEZE=1`
  * (`frozen`), and on a host with a learning layer (the call's
  * `sessionData.learning`) on a turn in mode `frozen` or `off` or with no learner
- * (`frozen`, `off`, `no_learner`). With a layer it also refuses `honesty` and
- * `emotionality` (`operator_only`), a step above {@link MAX_STEP_WITH_LEARNING}
- * (`step_bound`) and a call after the session's
+ * (`frozen`, `off`, `no_learner`). Every host refuses `honesty` and
+ * `emotionality` (`operator_only`). With a layer it also refuses a step above
+ * {@link MAX_STEP_WITH_LEARNING} (`step_bound`) and a call after the session's
  * {@link MAX_CALLS_PER_SESSION_WITH_LEARNING} accepted ones (`call_limit`).
  */
 
@@ -31,6 +31,7 @@ import type {
   JSONSchemaObject,
 } from '../../core/tools/ITool.js';
 import type { RecordMutationInput } from './PersonalityMutationStore.js';
+import { OPERATOR_ONLY_TRAITS } from '../substrate/personas/personalityPrompt.js';
 import { resolveSelfImprovementSessionKey } from './sessionScope.js';
 import { readToolLearningContext, refusedSelfChange, selfChangeRefusal } from '../learning/toolContext.js';
 
@@ -39,15 +40,15 @@ import { readToolLearningContext, refusedSelfChange, selfChangeRefusal } from '.
 // ============================================================================
 
 /**
- * The six HEXACO personality dimensions that agents may self-modify.
+ * The six valid HEXACO trait names. Only traits outside OPERATOR_ONLY_TRAITS may be self-modified.
  *
  * Each trait is a continuous value in the range [0, 1]:
- * - `openness`          — curiosity, creativity, willingness to explore
- * - `conscientiousness` — discipline, thoroughness, reliability
- * - `emotionality`      — emotional reactivity, empathy, anxiety
- * - `extraversion`      — sociability, energy, assertiveness
- * - `agreeableness`     — patience, tolerance, cooperation
- * - `honesty`           — sincerity, fairness, modesty
+ * - `openness`: curiosity, creativity, willingness to explore
+ * - `conscientiousness`: discipline, thoroughness, reliability
+ * - `emotionality`: emotional reactivity, empathy, anxiety
+ * - `extraversion`: sociability, energy, assertiveness
+ * - `agreeableness`: patience, tolerance, cooperation
+ * - `honesty`: sincerity, fairness, modesty
  */
 export const VALID_TRAITS = [
   'openness',
@@ -67,13 +68,10 @@ export const MAX_STEP_WITH_LEARNING = 0.02;
 /** On a host with a learning layer: how many calls of one session the tool accepts. */
 export const MAX_CALLS_PER_SESSION_WITH_LEARNING = 3;
 
-/** On a host with a learning layer: the traits only the persona definition sets. */
-const OPERATOR_ONLY_TRAITS: readonly string[] = ['honesty', 'emotionality'];
-
 /**
  * Why the tool refused a call before it changed anything: `frozen`, `off` and `no_learner` as every
- * self-modification tool refuses (`selfChangeRefusal`); with a learning layer, `operator_only` (honesty or
- * emotionality), `step_bound` (a delta above {@link MAX_STEP_WITH_LEARNING}) and `call_limit` (the session already
+ * self-modification tool refuses (`selfChangeRefusal`); on every host, `operator_only` (honesty or
+ * emotionality); with a learning layer, `step_bound` (a delta above {@link MAX_STEP_WITH_LEARNING}) and `call_limit` (the session already
  * had {@link MAX_CALLS_PER_SESSION_WITH_LEARNING} calls accepted).
  */
 export type AdaptPersonalityRefusal = 'frozen' | 'off' | 'no_learner' | 'operator_only' | 'step_bound' | 'call_limit';
@@ -90,7 +88,7 @@ export interface PersonalityMutationStore {
   /** Persist a single mutation record. */
   record(mutation: RecordMutationInput): Promise<string> | string;
   /**
-   * Agent-scoped, idempotent strength aging (spec batch-1 C6). Optional —
+   * Agent-scoped, idempotent strength aging (spec batch-1 C6). Optional:
    * older store implementations without it skip decay-on-adapt with a
    * warning; the concrete SQLite store implements it transactionally.
    */
@@ -219,7 +217,8 @@ export class AdaptPersonalityTool
   /** @inheritdoc */
   readonly description =
     'Adjust a HEXACO personality trait by a bounded delta. Requires reasoning ' +
-    'for every mutation. Per-session budgets prevent runaway drift.';
+    'for every mutation. Honesty and emotionality are set only by the persona definition. ' +
+    'Per-session budgets prevent runaway drift.';
 
   /** @inheritdoc */
   readonly category = 'emergent';
@@ -312,13 +311,15 @@ export class AdaptPersonalityTool
       };
     }
 
-    // With a learning layer, the bounds the layer sets: no operator-only trait, one small step, three calls a session.
+    // Operator-only traits stay authored on every host, before a budget, a read or a mutation.
+    if (OPERATOR_ONLY_TRAITS.includes(trait as HEXACOTrait)) {
+      return refusedSelfChange(this.name, 'operator_only', `only the persona definition sets ${trait}`);
+    }
+
+    // The learning layer retains its existing step and call limits.
     const learning = readToolLearningContext(context.sessionData);
     const sessionKey = resolveSelfImprovementSessionKey(context);
     if (learning) {
-      if (OPERATOR_ONLY_TRAITS.includes(trait)) {
-        return refusedSelfChange(this.name, 'operator_only', `only the persona definition sets ${trait}`);
-      }
       if (Math.abs(delta) > MAX_STEP_WITH_LEARNING + 1e-9) {
         return refusedSelfChange(this.name, 'step_bound', `one call moves a trait by at most ${MAX_STEP_WITH_LEARNING}`);
       }
@@ -327,7 +328,7 @@ export class AdaptPersonalityTool
       }
     }
 
-    // 3. Check session budget — track total |delta| per trait
+    // 3. Check session budget: track total |delta| per trait
     const { maxDeltaPerSession } = this.deps.config;
     const sessionDeltas = this.getSessionDeltas(context);
     const currentSessionTotal = sessionDeltas.get(trait) ?? 0;
@@ -353,7 +354,7 @@ export class AdaptPersonalityTool
     const previousValue = personality[trait] ?? 0.5;
     let newValue = previousValue + effectiveDelta;
 
-    // Clamp to [0, 1] range — may further reduce the effective delta
+    // Clamp to [0, 1] range, which may further reduce the effective delta
     if (newValue < 0) {
       newValue = 0;
       effectiveDelta = newValue - previousValue;
@@ -436,6 +437,7 @@ export class AdaptPersonalityTool
     return { success: true, output };
   }
 
+  /** Returns the calling session's per-trait delta totals, creating the map on first use. */
   private getSessionDeltas(context: ToolExecutionContext): Map<string, number> {
     const sessionKey = resolveSelfImprovementSessionKey(context);
     const existing = this.sessionDeltas.get(sessionKey);

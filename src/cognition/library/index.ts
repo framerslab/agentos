@@ -1,12 +1,13 @@
 /**
  * @fileoverview The library module: an index of sources over any vector store, a transcript's chunker, the word
  * rule of the lexical legs with a search hit's snippet, a lexical index and a fuzzy index a device can hold, readers
- * of transcript files from other notetakers and the plan of an archive's entries, the delivery policy of results
- * derived from private sources, and their durable store with deletion fences on PostgreSQL.
+ * of transcript files from other notetakers, the plan of an archive's entries, readers of an HTML page and a CSV file
+ * into Markdown, the delivery policy of results derived from private sources, and their durable store with deletion
+ * fences on PostgreSQL.
  * @module agentos/cognition/library
  */
 
-export { lexicalTokens, snippetAround, type Snippet } from './tokens.js';
+export { countWords, foldText, lexicalTokens, snippetAround, type FoldedText, type Snippet } from './tokens.js';
 export { chunkTurns, type ChunkTurnsOptions, type LibraryTurn, type TurnChunk } from './chunkTurns.js';
 export {
   LibraryIndex,
@@ -60,6 +61,9 @@ export {
   type PlanRules,
   type PlanSkipReason,
 } from './planEntries.js';
+export { readHtml, type HtmlRead, type ReadHtmlOptions } from './readers/html.js';
+export type { HtmlDocumentLike, HtmlNodeLike } from './readers/dom.js';
+export { readCsv, type CsvRead, type CsvSeparator, type ReadCsvOptions } from './readers/csv.js';
 export {
   SqlSourceDerivationStore,
   type SourceOwnerScope,

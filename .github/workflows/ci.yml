@@ -81,9 +81,17 @@ jobs:
       # packages, which declare @framers/agentos as a peer. package.json's dev dependency on
       # "link:." resolves those peers to this checkout, so the tests that load them run this tree;
       # this fails when the lockfile or the install gives them a published AgentOS instead, or
-      # when the install lacks a curated package the lockfile lists.
+      # when the install lacks a curated package the lockfile lists. It also fails when the
+      # lockfile gives a curated package another first-party peer (account-sources, for the
+      # account-source connectors) at a version outside the range the package declares.
       - name: The curated extensions resolve AgentOS to this checkout
         run: node --test scripts/curated-extensions-peer.test.mjs
+
+      # release.yml publishes with this npm, and npm publish reruns the build and the package checks under it.
+      - name: Use the npm the release publishes with
+        run: |
+          npm install -g npm@11.20.0
+          test "$(npm --version)" = 11.20.0
 
       - name: Build
         run: pnpm run build

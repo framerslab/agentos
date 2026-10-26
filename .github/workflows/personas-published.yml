@@ -1,0 +1,61 @@
+name: Published persona package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact released version, without v
+        required: true
+        type: string
+      merge:
+        description: Part A merge commit that the release must contain
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  published:
+    name: Published persona package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Verify exact registry metadata, tag ancestry and tarball integrity
+        id: release
+        env:
+          PERSONAS_VERSION: ${{ inputs.version }}
+          PERSONAS_MERGE: ${{ inputs.merge }}
+          PERSONAS_PACKAGE_DIR: ${{ runner.temp }}/personas-package
+        run: node --experimental-strip-types scripts/personas/verify-release.ts
+      - name: Copy the public acceptance into an isolated consumer
+        run: |
+          cp scripts/personas-public-entry.acceptance.ts "$RUNNER_TEMP/personas-package/"
+          cp scripts/personas/published-lock.acceptance.ts "$RUNNER_TEMP/personas-package/"
+      - name: Install the verified tarball without lifecycle scripts
+        working-directory: ${{ runner.temp }}/personas-package
+        run: npm install --ignore-scripts --no-audit --no-fund --save-exact ./agentos.tgz @types/node@22 typescript@5.4.5
+      - name: Check the shipped declarations from the isolated consumer
+        working-directory: ${{ runner.temp }}/personas-package
+        run: >-
+          ./node_modules/.bin/tsc --noEmit --module NodeNext --moduleResolution NodeNext
+          --target ES2022 --skipLibCheck personas-public-entry.acceptance.ts published-lock.acceptance.ts
+      - name: Exercise the shipped persona exports and both host locks
+        working-directory: ${{ runner.temp }}/personas-package
+        env:
+          AGENTOS_LEARNING_FREEZE: '0'
+        run: node --experimental-strip-types --test personas-public-entry.acceptance.ts published-lock.acceptance.ts
+      - name: Preserve the pin handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: persona-release-${{ steps.release.outputs.version }}
+          path: ${{ runner.temp }}/personas-package/release.json
+          if-no-files-found: error
+          retention-days: 90

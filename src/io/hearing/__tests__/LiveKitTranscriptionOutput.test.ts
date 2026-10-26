@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { TranscriptLedger, transcriptEventFromLiveKit } from '../../voice-pipeline/transcriptLedger.js';
+import { readingOrder, TranscriptLedger, transcriptEventFromLiveKit } from '../../voice-pipeline/transcriptLedger.js';
 import { LiveKitTranscriptionOutput } from '../LiveKitTranscriptionOutput.js';
 import { FakeRoom } from './livekit-fakes.js';
+import type { TranscriptEvent } from '../../voice-pipeline/types.js';
 
 const final = (itemId: string, text: string) => ({ itemId, text, isFinal: true, confidence: 1, words: [] });
 const interim = (itemId: string, text: string) => ({ itemId, text, isFinal: false, confidence: 1, words: [] });
@@ -178,5 +179,97 @@ describe("LiveKitTranscriptionOutput: a final's times", () => {
       if (event) page.apply(event);
     }
     expect(page.items()).toEqual([{ itemId: 'i1', text: 'Hello.', isFinal: true, startMs: 0, endMs: 850 }]);
+  });
+});
+
+describe('LiveKit speaker attributes and split replay', () => {
+  /** A controlled event at the output boundary. */
+  function spoken(itemId: string, text: string, isFinal: boolean, speaker?: string | null): TranscriptEvent {
+    return { itemId, text, isFinal, confidence: 1, words: [], ...(speaker === undefined ? {} : { speaker }) };
+  }
+
+  /** The structural options accepted by the room fake. */
+  function streamAttributes(options: unknown): Record<string, string> | undefined {
+    return (options as { attributes?: Record<string, string> } | undefined)?.attributes;
+  }
+
+  it.each([false, true])('writes and reads label, null and absence on final=%s', async (isFinal) => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room });
+    await output.write(spoken('a', 'One', isFinal, 'connection:0'));
+    await output.write(spoken('b', 'Two', isFinal, null));
+    await output.write(spoken('c', 'Three', isFinal));
+    const streams = room.localParticipant.sendText.mock.calls;
+    expect(streams.map(([, options]) => streamAttributes(options)?.['agentos.speaker'])).toEqual([
+      'connection:0', '', undefined,
+    ]);
+    const read = streams.map(([text, options]) => transcriptEventFromLiveKit(text, streamAttributes(options)));
+    expect(read[0]?.speaker).toBe('connection:0');
+    expect(read[1]?.speaker).toBeNull();
+    expect(read[2]).not.toHaveProperty('speaker');
+    expect(read.map((event) => event?.isFinal)).toEqual([isFinal, isFinal, isFinal]);
+  });
+
+  it('honors an explicit null override and sends a label-only interim change', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room });
+    await output.write(spoken('a', 'One', false, 'connection:0'));
+    expect(await output.write(spoken('a', 'One', false, 'connection:0'), { speaker: null })).toBe(true);
+    expect(output.ledger.get('a')?.speaker).toBeNull();
+    expect(streamAttributes(room.localParticipant.sendText.mock.calls[1]?.[1])?.['agentos.speaker']).toBe('');
+    expect(await output.write(spoken('a', 'One', false))).toBe(true);
+    expect(output.ledger.get('a')).not.toHaveProperty('speaker');
+  });
+
+  it('replays the missing run after B while displaying the whole A family before B', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room });
+    const page = new TranscriptLedger();
+    /** Delivers the actual streams beginning at a recorded offset. */
+    const deliver = (from: number): void => {
+      for (const [text, options] of room.localParticipant.sendText.mock.calls.slice(from)) {
+        const event = transcriptEventFromLiveKit(text, streamAttributes(options));
+        if (event) page.apply(event);
+      }
+    };
+    await output.write(spoken('a', 'One two', false, null));
+    await output.write(spoken('b', 'Other', true));
+    await output.write(spoken('a', 'One', true, 'connection:0'));
+    deliver(0);
+    expect(page.items().map((item) => item.itemId)).toEqual(['a', 'b']);
+    expect(page.resumeAfterId()).toBe('b');
+    await output.write({ ...spoken('a.2', 'Two', true, 'connection:1'), runOf: 'a', startMs: 500, endMs: 900 });
+    expect(output.ledger.items().map((item) => item.itemId)).toEqual(['a', 'b', 'a.2']);
+    const away = room.localParticipant.sendText.mock.calls.length;
+    expect(await output.replayAfter(page.resumeAfterId(), 'reader')).toBe(1);
+    expect(room.localParticipant.sendText.mock.calls[away]?.[1]).toMatchObject({
+      destinationIdentities: ['reader'], attributes: { 'agentos.speaker': 'connection:1', 'agentos.run_of': 'a' },
+    });
+    deliver(away);
+    expect(page.get('a.2')).toMatchObject({ speaker: 'connection:1', runOf: 'a', startMs: 500, endMs: 900 });
+    expect(readingOrder(page.items()).map((item) => item.itemId)).toEqual(['a', 'a.2', 'b']);
+    expect(page.items().map((item) => item.itemId)).toEqual(['a', 'b', 'a.2']);
+    expect(TranscriptLedger.fromJSON(page.toJSON()).items()).toEqual(page.items());
+  });
+
+  it('replays a scoped retraction so a disconnected page drops its speculative line', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room });
+    const page = new TranscriptLedger();
+    const initial = spoken('a', 'Speculative', false, 'connection:0');
+    await output.write(initial);
+    const stream = room.localParticipant.sendText.mock.calls[0];
+    if (stream === undefined) throw new Error('missing initial stream');
+    const event = transcriptEventFromLiveKit(stream[0], streamAttributes(stream[1]));
+    if (event) page.apply(event);
+    await output.write(spoken('a', '', true, null));
+    room.localParticipant.sendText.mockClear();
+    expect(await output.replayAfter(page.resumeAfterId(), 'reader')).toBe(1);
+    for (const [text, options] of room.localParticipant.sendText.mock.calls) {
+      const replay = transcriptEventFromLiveKit(text, streamAttributes(options));
+      expect(replay?.speaker).toBeNull();
+      if (replay) page.apply(replay);
+    }
+    expect(page.items()).toEqual([]);
   });
 });

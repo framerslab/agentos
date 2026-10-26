@@ -5,6 +5,7 @@ import { CircuitBreaker } from '../CircuitBreaker.js';
 import { defaultCapabilities } from '../HealthyProvider.js';
 import type { EncodedAudioChunk, IStreamingTTS, StreamingTTSSession } from '../types.js';
 import type { HealthyProvider } from '../HealthyProvider.js';
+import type { ProviderPolicy } from '../ProviderPolicy.js';
 
 function mkSession(providerId: string) {
   const ee = new EventEmitter() as unknown as StreamingTTSSession & {
@@ -396,5 +397,84 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(b.flush).not.toHaveBeenCalled();
     expect(chain.currentProviderId).toBe('c');
     expect(errors).not.toHaveBeenCalled();
+  });
+});
+
+describe('StreamingTTSChain: warnings of the provider session in use', () => {
+  /** A provider whose sessions are kept as they open. */
+  function recording(id: string, priority: number) {
+    const sessions: Array<ReturnType<typeof mkSession>> = [];
+    const tts = {
+      providerId: id,
+      priority,
+      capabilities: defaultCapabilities({ streaming: true }),
+      async startSession() {
+        const session = mkSession(id);
+        sessions.push(session);
+        return session;
+      },
+      async healthCheck() {
+        return { ok: true };
+      },
+    } as IStreamingTTS & HealthyProvider;
+    return { tts, sessions };
+  }
+
+  it('carries a warning of the session in use to the facade whole, and none of a session the facade moved off', async () => {
+    const a = recording('a', 10);
+    const b = recording('b', 20);
+    const failover = vi.fn();
+    const facade = await new StreamingTTSChain([a.tts, b.tts], { enableMidSynthesisFailover: true, onProviderFailover: failover }).startSession();
+    const warnings: Error[] = [];
+    facade.on('warning', (warning: Error) => warnings.push(warning));
+    const first = a.sessions[0]! as unknown as EventEmitter;
+    const refused = new Error('a ws failed to open for a reply (HTTP 400); the reply ends unplayed');
+    first.emit('warning', refused);
+    expect(warnings).toEqual([refused]);
+
+    // The session in use fails and the backup takes over: what the failed session reports afterwards is not the facade's.
+    facade.pushTokens('Hello world.');
+    first.emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+    first.emit('warning', new Error('a late warning'));
+    (b.sessions[0]! as unknown as EventEmitter).emit('warning', new Error('b segment spoken again'));
+    expect(warnings.map((warning) => warning.message)).toEqual([refused.message, 'b segment spoken again']);
+    facade.close();
+  });
+
+  it('carries a warning as Error(provider warning) under a ProviderPolicy, without the provider text, and prints one nobody listens for only under the legacy policy', async () => {
+    const identity = { scopeId: 'scope-a', callId: 'call-a', turnId: 'turn-a', generation: { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 } };
+    const a = recording('a', 10);
+    const policy: ProviderPolicy = {
+      mode: 'hosted',
+      fallback: 'none',
+      identity,
+      purposes: ['tts'],
+      providers: [{ providerId: 'a', locality: 'remote', purposes: ['tts'], priceVersion: 'rate-a' }],
+      authorize: vi.fn(async () => {}),
+      onFallback: vi.fn(),
+    };
+    const strict = await new StreamingTTSChain([a.tts], { enableMidSynthesisFailover: true, policy }).startSession();
+    const warnings: Error[] = [];
+    strict.on('warning', (warning: Error) => warnings.push(warning));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      (a.sessions[0]! as unknown as EventEmitter).emit('warning', new Error('a ws rejected: HTTP 400: {"err_msg":"voice not found"}'));
+      expect(warnings.map((warning) => warning.message)).toEqual(['provider warning']);
+      // Nobody listens on the strict facade: nothing is printed.
+      strict.removeAllListeners('warning');
+      (a.sessions[0]! as unknown as EventEmitter).emit('warning', new Error('a ws rejected: HTTP 400'));
+      expect(warn).not.toHaveBeenCalled();
+
+      // Nobody listens on the legacy facade: one line names the provider and the warning, as the provider would.
+      const legacy = recording('b', 10);
+      const facade = await new StreamingTTSChain([legacy.tts], { enableMidSynthesisFailover: true }).startSession();
+      (legacy.sessions[0]! as unknown as EventEmitter).emit('warning', new Error('b ws failed to open for a reply'));
+      expect(warn.mock.calls).toEqual([['[b] b ws failed to open for a reply']]);
+      facade.close();
+    } finally {
+      warn.mockRestore();
+      strict.close();
+    }
   });
 });

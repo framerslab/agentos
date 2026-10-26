@@ -105,3 +105,56 @@ Every loaded set goes through `validatePersonas` in `GMIManager`: required field
 | Source resolution for a runtime | `src/api/runtime/personaLoaderResolution.ts` |
 | Validation | `src/cognition/substrate/personas/PersonaValidation.ts` |
 | Built-in definitions | `src/cognition/substrate/personas/definitions/` |
+
+## Notetaker traits and writing
+
+`NOTETAKER_PERSONA` is a frozen map of authored HEXACO scores, not an `IPersonaDefinition`. Import it and the renderer from the public substrate entry:
+
+```ts
+import {
+  NOTETAKER_PERSONA,
+  renderPersonalitySection,
+  type TraitBand,
+  type PersonalityRegister,
+} from '@framers/agentos/cognition/substrate';
+
+const rigour: TraitBand = 'low';
+const register: PersonalityRegister = 'writing';
+const section = renderPersonalitySection(NOTETAKER_PERSONA, {
+  bands: { conscientiousness: rigour },
+  register,
+});
+```
+
+| Trait | Score | Default band |
+|---|---|---|
+| honesty | 0.8 | high |
+| emotionality | 0.25 | low |
+| extraversion | 0.3 | low |
+| agreeableness | 0.55 | moderate |
+| conscientiousness | 0.85 | high |
+| openness | 0.5 | moderate |
+
+The `conversation` register is the default and preserves the existing directives. The `writing` register starts its rendered directives with the rule that style changes presentation only. A `register` other than these two throws a `TypeError` rather than rendering the conversation directives without that rule. A band may change length, order, tone or how stated open points are presented; it may not introduce content, facts or suggestions absent from the material. A prompt directive is not a guarantee that a model will comply. Hosts still validate generated content against their source material and their task's requirements.
+
+The preset's writing section is:
+
+```text
+## Personality & Communication Style
+
+Change only how grounded material is presented: its length, order, tone and stated open points; never change its meaning or introduce content, suggestions or facts absent from the material.
+State what was said and what is certain; mark what is inferred; no flattery and no softening
+Write plainly; no exclamation, no reassurance, no alarm
+Keep to the material; add nothing the speakers did not say
+Structure the text; complete lists; exact names, numbers and times as given
+```
+
+`bands` overrides the rendered band of each supplied trait; other traits use their scores. A moderate trait contributes no line. Low conscientiousness contributes a brief-writing directive, so it does not remove the trait's line. Setting conscientiousness to moderate removes that line. An entirely moderate trait map returns null in either register. The notetaker's authored honesty and emotionality keep its section present even when its other four bands are moderate.
+
+The public entry exports all nine required names: `NOTETAKER_PERSONA`, `renderPersonalitySection`, `TraitBand`, `OPERATOR_ONLY_TRAITS`, `HEXACO_TRAIT_KEYS`, `normalizeHexacoTraits`, `bandOf`, `HexacoTraitKey` and `IPersonaDefinition`. It also exports `PersonalityRegister`. Import the four type-only names, `TraitBand`, `PersonalityRegister`, `HexacoTraitKey` and `IPersonaDefinition`, as types, with `import type` or an inline `type` modifier as the sample above does; they have no runtime value. `bandOf(value, previous?)` computes the existing threshold and hysteresis bands; `HexacoTraitKey` types the canonical keys; `IPersonaDefinition` types a complete authored persona whose `personalityTraits` may contain the notetaker score map. The score map itself remains distinct from that definition. The normalizer retains the canonical spellings and the existing aliases. Render with `conversation` for dialogue and `writing` for written material; the choice belongs to the host call, not to a trait or a stored band. The renderer does not register or run adaptation tools.
+
+## Operator-only traits and host migration
+
+Honesty and emotionality are set by the authored persona definition. Role overlays already drop changes to them. `AdaptPersonalityTool` now imports that same `OPERATOR_ONLY_TRAITS` list and refuses either trait on every host, whether or not `sessionData.learning` is present. The result has `success: false` and `details.reason: 'operator_only'`. It reads no personality state, applies no mutation, records nothing, runs no decay and consumes no budget for that refusal. The exported list is frozen, so code in the same process cannot remove a trait from it and lift either guard: `splice` or `push` on it throws a `TypeError`.
+
+This changes hosts that previously adapted honesty or emotionality without a learning layer. Set those scores in the authored persona instead. Continue using adaptation for extraversion, agreeableness, conscientiousness and openness where the application permits it. Existing session budgets, clamping, decay, learning modes, step bounds and accepted-call limits remain unchanged. Process freeze and learning-mode refusals retain their existing precedence.

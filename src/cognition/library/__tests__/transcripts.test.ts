@@ -14,7 +14,7 @@ import {
   type TranscriptFormat,
 } from '../browser.js';
 
-/** A vector's text, as written by hand under `vectors/`. */
+/** A vector's text, as it is under `vectors/`: written for these tests, or a real export (`vectors/SOURCES.md`). */
 function vector(name: string): string {
   return readFileSync(new URL(`./vectors/${name}`, import.meta.url), 'utf8');
 }
@@ -56,7 +56,10 @@ function xml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-/** A Word file of one paragraph a line: its content types, its package relationships and its main document part. */
+/**
+ * A Word file of one paragraph a line, a line feed inside a line written as a manual line break (`w:br`): its content
+ * types, its package relationships and its main document part.
+ */
 function wordFileOf(lines: readonly string[]): Buffer {
   return zipOf([
     {
@@ -89,7 +92,7 @@ function wordFileOf(lines: readonly string[]): Buffer {
       data: Buffer.from(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
-          lines.map((line) => `<w:p><w:r><w:t>${xml(line)}</w:t></w:r></w:p>`).join('') +
+          lines.map((line) => `<w:p><w:r>${line.split('\n').map((part) => `<w:t>${xml(part)}</w:t>`).join('<w:br/>')}</w:r></w:p>`).join('') +
           '</w:body></w:document>',
         'utf8',
       ),
@@ -566,6 +569,349 @@ describe('readTranscript', () => {
       { seq: 1, startMs: 4_000, endMs: null, text: 'Hi.' },
     ]);
     expect(readTranscript('note: one\nnote: two\n', 'lines').labels).toEqual([]);
+  });
+
+  it('reads real Otter exports made with the names and the times, with the times alone and with the names alone', () => {
+    // Real exports, cut from transcripts published under open licences (vectors/SOURCES.md). Otter's export can leave
+    // out the speakers' names or the times, and each layout reads into the turns its headers give.
+    const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+    for (const file of ['otter-names-times.txt', 'otter-times.txt', 'otter-names.txt']) {
+      const text = vector(file);
+      const read = readTranscript(text, 'otter');
+
+      expect(read, file).toEqual(expected(file));
+      // Whole, each closes with Otter's line and is named Otter's; saved on Windows, it reads the same.
+      expect(transcriptFormatOf(file, bytes(text)), file).toBe('otter');
+      expect(readTranscript(bytes(`\ufeff${text.replace(/\n/g, '\r\n')}`), 'otter'), `${file} with a byte order mark and CRLF`).toEqual(read);
+    }
+  });
+
+  it('reads an Otter export made without times by the two spaces after each name, and one made without names by its times', () => {
+    const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+
+    // With no spaces after each header and no line feed at the file's end, a time alone still heads a turn.
+    const bare = vector('otter-times.txt')
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .join('\n')
+      .trimEnd();
+    expect(readTranscript(bare, 'otter')).toEqual(expected('otter-times.txt'));
+    expect(transcriptFormatOf('talk.txt', bytes(bare))).toBe('otter');
+
+    // Without the closing line, times or names on lines of their own are not told from an agenda or a page of
+    // headings, so such a file is named plain lines; read with `otter`, it reads by its headers all the same.
+    const unbranded = vector('otter-names.txt').replace(/Transcribed by https:\/\/otter\.ai\n$/, '');
+    expect(transcriptFormatOf('call.txt', bytes(unbranded))).toBe('lines');
+    expect(readTranscript(unbranded, 'otter')).toEqual(expected('otter-names.txt'));
+    expect(transcriptFormatOf('agenda.md', bytes('9:00\nWelcome\n\n9:30\nBudget review\n'))).toBe('lines');
+    expect(transcriptFormatOf('notes.md', bytes('Budget  \nTravel is over plan.\n\nVenue  \nIt holds forty.\n'))).toBe('lines');
+
+    // A name with no spaces after it is a paragraph, as Otter writes a speaker's next paragraph with no header.
+    expect(readTranscript('Ana Silva  \nI agree.\n\nLeo and Ana?\n\nLeo Park  \nYes.\n', 'otter')).toEqual({
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: null, endMs: null, text: 'I agree. Leo and Ana?' },
+        { seq: 2, startMs: null, endMs: null, text: 'Yes.' },
+      ],
+      labels: [
+        { seq: 1, label: 'Ana Silva' },
+        { seq: 2, label: 'Leo Park' },
+      ],
+      durationMs: null,
+    });
+
+    // An export has one kind of header, the kind most of its lines have, so a paragraph that is a time alone is words.
+    const texts = (text: string): string[] => readTranscript(text, 'otter').turns.map((turn) => turn.text);
+    expect(texts('Ana Silva  \nWhen?\n\nLeo Park  \nAt\n\n10:30\n\nAna Silva  \nGood.\n')).toEqual(['When?', 'At 10:30', 'Good.']);
+    expect(texts('Ana Silva  0:01\nWhen?\n\nLeo Park  0:04\nAt\n\n10:30\n\nAna Silva  0:09\nGood.\n')).toEqual(['When?', 'At 10:30', 'Good.']);
+  });
+
+  it('reads an Otter export made with neither names nor times into its paragraphs, a time alone among them as words, without the closing line', () => {
+    // Such an export is its paragraphs and Otter's closing line. A paragraph that is a time alone further down does not
+    // make it an export of times: the paragraphs before it are turns, not lines before a first header.
+    const neither = 'Hello.\n\nWhat time?\n\n2:30\n\nGood.\n\nTranscribed by https://otter.ai\n';
+    expect(transcriptFormatOf('call.txt', new TextEncoder().encode(neither))).toBe('otter');
+    expect(readTranscript(neither, 'otter')).toEqual({
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: null, endMs: null, text: 'Hello.' },
+        { seq: 2, startMs: null, endMs: null, text: 'What time?' },
+        { seq: 3, startMs: null, endMs: null, text: '2:30' },
+        { seq: 4, startMs: null, endMs: null, text: 'Good.' },
+      ],
+      labels: [],
+      durationMs: null,
+    });
+  });
+
+  it('reads the line straight after an Otter header as that turn\'s words, a time alone too', () => {
+    // Otter writes each header's words on the line after it, so a paragraph that is a time alone, in an export made
+    // without names, is the words of the header above it and heads no turn.
+    const said = '0:04  \nWhat time?\n\n0:09  \n2:30\n\n0:12  \nGood.\n\nTranscribed by https://otter.ai\n';
+    expect(readTranscript(said, 'otter').turns).toEqual([
+      { seq: 1, startMs: 4_000, endMs: null, text: 'What time?' },
+      { seq: 2, startMs: 9_000, endMs: null, text: '2:30' },
+      { seq: 3, startMs: 12_000, endMs: null, text: 'Good.' },
+    ]);
+  });
+
+  it('reads a Word file laid out as an Otter export made without names by its times', async () => {
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    const paragraphs = vector('otter-times.txt')
+      .split('\n')
+      .filter((line) => line.trim().length > 0);
+
+    expect(await readWordTranscript(wordFileOf(paragraphs), { extractRawText })).toEqual({ ...expected('otter-times.txt'), format: 'docx' });
+  });
+
+  it('reads the paragraph straight after an Otter header in a Word file as that turn\'s words, as Otter\'s text reads its line', async () => {
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    // mammoth's text follows each paragraph with a blank line, so the paragraph after a header that is a time alone,
+    // `2:30`, is read on the line straight after it only when the text is read a paragraph a line. An empty paragraph,
+    // as a Word file of the text's every line holds, is a blank line.
+    const said = '0:04  \nWhat time?\n\n0:09  \n2:30\n\n0:12  \nGood.\n\nTranscribed by https://otter.ai\n';
+    const want = { ...readTranscript(said, 'otter'), format: 'docx' };
+
+    expect(want.turns.map((turn) => turn.text)).toEqual(['What time?', '2:30', 'Good.']);
+    expect(await readWordTranscript(wordFileOf(said.split('\n').filter((line) => line.length > 0)), { extractRawText })).toEqual(want);
+    expect(await readWordTranscript(wordFileOf(said.trimEnd().split('\n')), { extractRawText })).toEqual(want);
+  });
+
+  it('reads an Otter header written with its two spaces as a header straight after a header with no words, in a Word file with no empty paragraphs too', async () => {
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    // Otter ends a paragraph's line with one space at most, so a time or a name with the two spaces after it is a header
+    // wherever it stands, and the header above it, with no words, is left out. A Word file with no empty paragraphs
+    // holds no blank line between the two headers.
+    const times = ['0:04  ', 'Hello.', '0:09  ', '0:12  ', 'Good.', 'Transcribed by https://otter.ai'];
+    const want = {
+      format: 'docx',
+      turns: [
+        { seq: 1, startMs: 4_000, endMs: null, text: 'Hello.' },
+        { seq: 2, startMs: 12_000, endMs: null, text: 'Good.' },
+      ],
+      labels: [],
+      durationMs: null,
+    };
+
+    expect(await readWordTranscript(wordFileOf(times), { extractRawText })).toEqual(want);
+    // The export's text reads the same, with or without the blank lines between its turns.
+    expect(readTranscript(`${times.join('\n')}\n`, 'otter')).toEqual({ ...want, format: 'otter' });
+    expect(readTranscript('0:04  \nHello.\n\n0:09  \n\n0:12  \nGood.\n\nTranscribed by https://otter.ai\n', 'otter')).toEqual({ ...want, format: 'otter' });
+
+    // A name with its two spaces is a header there too.
+    const names = ['Sam  ', 'Hello.', 'Julia Kasmire  ', 'Sam  ', 'Good.', 'Transcribed by https://otter.ai'];
+    expect(await readWordTranscript(wordFileOf(names), { extractRawText })).toEqual({
+      format: 'docx',
+      turns: [
+        { seq: 1, startMs: null, endMs: null, text: 'Hello.' },
+        { seq: 2, startMs: null, endMs: null, text: 'Good.' },
+      ],
+      labels: [
+        { seq: 1, label: 'Sam' },
+        { seq: 2, label: 'Sam' },
+      ],
+      durationMs: null,
+    });
+  });
+
+  it('reads a voice note\'s Otter export, the name, one space and the time, by its headers when it closes with Otter\'s line, and a line of words that ends in a time as words', async () => {
+    const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+    const note = 'Unknown 0:00\nGood morning.\n\nUnknown 0:09\nShall we start?\n\nTranscribed by https://otter.ai\n';
+    expect(readTranscript(note, 'otter')).toEqual({
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning.' },
+        { seq: 2, startMs: 9_000, endMs: null, text: 'Shall we start?' },
+      ],
+      labels: [
+        { seq: 1, label: 'Unknown' },
+        { seq: 2, label: 'Unknown' },
+      ],
+      durationMs: null,
+    });
+
+    // The vector is written in the layout of a voice note's export (vectors/SOURCES.md). The line straight after a header
+    // is that header's words, `The venue opens at 9:30` too. The file is named Otter's, and reads the same saved on
+    // Windows and as a Word file.
+    const file = 'otter-names-times-one-space.txt';
+    const text = vector(file);
+    expect(readTranscript(text, 'otter')).toEqual(expected(file));
+    expect(transcriptFormatOf(file, bytes(text))).toBe('otter');
+    expect(readTranscript(bytes(`\ufeff${text.replace(/\n/g, '\r\n')}`), 'otter')).toEqual(expected(file));
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    const paragraphs = text.split('\n').filter((line) => line.length > 0);
+    expect(await readWordTranscript(wordFileOf(paragraphs), { extractRawText })).toEqual({ ...expected(file), format: 'docx' });
+
+    // A line of words can end as such a header does, so the header heads turns only in a text that closes with Otter's
+    // line: without it the note reads as plain lines and is named plain lines. A line of words that ends in a time is
+    // words in an export of names and times, and in an export of paragraphs alone.
+    const unbranded = note.replace('Transcribed by https://otter.ai\n', '');
+    expect(transcriptFormatOf('note.txt', bytes(unbranded))).toBe('lines');
+    expect(readTranscript(unbranded, 'otter')).toMatchObject({
+      turns: [{ text: 'Unknown 0:00' }, { text: 'Good morning.' }, { text: 'Unknown 0:09' }, { text: 'Shall we start?' }],
+      labels: [],
+    });
+    const texts = (said: string): string[] => readTranscript(said, 'otter').turns.map((turn) => turn.text);
+    expect(texts('Ana Silva  0:01\nWhen?\n\nLeo Park  0:04\nWe meet at 10:30\n\nTranscribed by https://otter.ai\n')).toEqual(['When?', 'We meet at 10:30']);
+    expect(texts('Hello.\n\nWe meet at 10:30\n\nGood.\n\nTranscribed by https://otter.ai\n')).toEqual(['Hello.', 'We meet at 10:30', 'Good.']);
+  });
+
+  it('reads a later line of a voice note\'s turn that ends in a time as words, by the blank line Otter writes after each turn', async () => {
+    // Otter writes a blank line after each turn's words, so a header stands straight after a blank line, its words on
+    // the line straight after it. A later line of a turn's words that ends in a time, at the turn's end or inside it, is
+    // words: read as a header, it would drop those words, or head a turn said by `We meet at`.
+    const note = 'Unknown 0:00\nGood morning.\nWe meet at 10:30\n\nUnknown 0:09\nShall we start?\n\nTranscribed by https://otter.ai\n';
+    const want = {
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning. We meet at 10:30' },
+        { seq: 2, startMs: 9_000, endMs: null, text: 'Shall we start?' },
+      ],
+      labels: [
+        { seq: 1, label: 'Unknown' },
+        { seq: 2, label: 'Unknown' },
+      ],
+      durationMs: null,
+    };
+    expect(readTranscript(note, 'otter')).toEqual(want);
+    expect(readTranscript(note.replace('10:30\n', '10:30\nin the hall.\n'), 'otter')).toEqual({
+      ...want,
+      turns: [{ ...want.turns[0], text: 'Good morning. We meet at 10:30 in the hall.' }, want.turns[1]],
+    });
+
+    // A Word file of the export's every line holds an empty paragraph where the export holds a blank line, and reads the
+    // same.
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    expect(await readWordTranscript(wordFileOf(note.trimEnd().split('\n')), { extractRawText })).toEqual({ ...want, format: 'docx' });
+
+    // So is a time alone inside a turn of an export made without names whose lines lost the spaces at their ends.
+    expect(readTranscript('0:04\nWhat time?\n2:30\n\n0:09\nGood.\n\nTranscribed by https://otter.ai\n', 'otter').turns).toEqual([
+      { seq: 1, startMs: 4_000, endMs: null, text: 'What time? 2:30' },
+      { seq: 2, startMs: 9_000, endMs: null, text: 'Good.' },
+    ]);
+  });
+
+  it('reads a one-turn voice note whose later lines end in times as one turn, by the blank line Otter writes before the closing line', () => {
+    // Otter writes a blank line after each turn's words, the last turn's before the closing line. A text whose only blank
+    // line is that one is one block, so every later line of its turn is words, however many of them end in a time.
+    // Weighed against that one blank line, two such lines would read the text as having no blocks and head a turn said
+    // by `We meet at` at 10:30.
+    const note = 'Unknown 0:00\nGood morning.\nWe meet at 10:30\nThen leave at 11:30\nSee you there.\n\nTranscribed by https://otter.ai\n';
+    expect(readTranscript(note, 'otter')).toEqual({
+      format: 'otter',
+      turns: [{ seq: 1, startMs: 0, endMs: null, text: 'Good morning. We meet at 10:30 Then leave at 11:30 See you there.' }],
+      labels: [{ seq: 1, label: 'Unknown' }],
+      durationMs: null,
+    });
+
+    // So is a time alone on two later lines of a turn, in an export made without names whose lines lost the spaces at
+    // their ends.
+    expect(readTranscript('0:04\nWhat time?\n2:30\n3:30\nGood.\n\nTranscribed by https://otter.ai\n', 'otter').turns).toEqual([
+      { seq: 1, startMs: 4_000, endMs: null, text: 'What time? 2:30 3:30 Good.' },
+    ]);
+  });
+
+  it('reads a voice note\'s export in a Word file with no empty paragraphs by the paragraph straight after each header, a later paragraph that ends in a time straight before a header as a header', async () => {
+    // With no blank line between the turns, a line of a header's form heads a turn unless it stands straight after a
+    // header, where it is that header's words. Nothing in the file tells a turn's later paragraph that ends in a time,
+    // straight before the next header, from a header whose words open with the next header's line, and the order of the
+    // times does not either: the second file has the same layout, its times in the same order, a header at 10:30 whose
+    // words end in an earlier time, and reads right by the same rule.
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    const closing = 'Transcribed by https://otter.ai';
+
+    const meet = wordFileOf(['Unknown 0:00', 'Good morning.', 'We meet at 10:30', 'Unknown 0:09', 'Shall we start?', closing]);
+    expect(await readWordTranscript(meet, { extractRawText })).toEqual({
+      format: 'docx',
+      turns: [
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning.' },
+        { seq: 2, startMs: 630_000, endMs: null, text: 'Unknown 0:09 Shall we start?' },
+      ],
+      labels: [
+        { seq: 1, label: 'Unknown' },
+        { seq: 2, label: 'We meet at' },
+      ],
+      durationMs: null,
+    });
+
+    const bus = wordFileOf(['Unknown 0:00', 'Good morning.', 'Unknown 10:30', 'The bus left at 9:09', 'Shall we start?', closing]);
+    expect(await readWordTranscript(bus, { extractRawText })).toEqual({
+      format: 'docx',
+      turns: [
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning.' },
+        { seq: 2, startMs: 630_000, endMs: null, text: 'The bus left at 9:09 Shall we start?' },
+      ],
+      labels: [
+        { seq: 1, label: 'Unknown' },
+        { seq: 2, label: 'Unknown' },
+      ],
+      durationMs: null,
+    });
+  });
+
+  it('reads a Word paragraph\'s manual line breaks as mammoth\'s text holds them, as nothing, so a pair of line feeds in that text is a paragraph\'s end', async () => {
+    // mammoth writes nothing for a manual line break: the words on either side of two in a row run together, and the
+    // only pairs of line feeds in its text are the ones it writes after each paragraph. A line of a voice note's header
+    // form parted from the rest of its paragraph by two line breaks stays on that paragraph's line and heads no turn,
+    // and a header parted so from its words runs into them and reads as words.
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    const closing = 'Transcribed by https://otter.ai';
+
+    const words = wordFileOf(['Unknown 0:00', 'Good morning.', 'We meet at 10:30\n\nin the hall.', 'Unknown 0:09', 'Shall we start?', closing]);
+    expect((await mammoth.extractRawText({ buffer: words })).value).toBe(
+      'Unknown 0:00\n\nGood morning.\n\nWe meet at 10:30in the hall.\n\nUnknown 0:09\n\nShall we start?\n\nTranscribed by https://otter.ai\n\n',
+    );
+    expect(await readWordTranscript(words, { extractRawText })).toEqual({
+      format: 'docx',
+      turns: [
+        { seq: 1, startMs: 0, endMs: null, text: 'Good morning. We meet at 10:30in the hall.' },
+        { seq: 2, startMs: 9_000, endMs: null, text: 'Shall we start?' },
+      ],
+      labels: [
+        { seq: 1, label: 'Unknown' },
+        { seq: 2, label: 'Unknown' },
+      ],
+      durationMs: null,
+    });
+
+    const header = wordFileOf(['Unknown 0:00', 'Good morning.', 'Unknown 0:09\n\nShall we start?', closing]);
+    expect((await mammoth.extractRawText({ buffer: header })).value).toBe(
+      'Unknown 0:00\n\nGood morning.\n\nUnknown 0:09Shall we start?\n\nTranscribed by https://otter.ai\n\n',
+    );
+    expect(await readWordTranscript(header, { extractRawText })).toMatchObject({
+      turns: [{ seq: 1, startMs: 0, text: 'Good morning. Unknown 0:09Shall we start?' }],
+      labels: [{ seq: 1, label: 'Unknown' }],
+    });
+  });
+
+  it('reads an Otter export made with neither names nor times into its paragraphs when the first is a line of words that ends in a time, or a time alone', async () => {
+    // A line of words can take the form of a voice note's header, `We start at 9:30`, and of a time with no spaces after
+    // it, `9:30`. Otter writes a header's words on the line straight after it, and each paragraph of an export made with
+    // neither with a blank line after it, so a first paragraph of such a form opens no export of those headers: the
+    // paragraph is no header, and the paragraphs after it are neither its words nor headers with no words.
+    const neither = 'We start at 9:30\n\nGood morning, everyone.\n\nThe venue opens at 10:30\n\nTranscribed by https://otter.ai\n';
+    const want = {
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: null, endMs: null, text: 'We start at 9:30' },
+        { seq: 2, startMs: null, endMs: null, text: 'Good morning, everyone.' },
+        { seq: 3, startMs: null, endMs: null, text: 'The venue opens at 10:30' },
+      ],
+      labels: [],
+      durationMs: null,
+    };
+    expect(transcriptFormatOf('call.txt', new TextEncoder().encode(neither))).toBe('otter');
+    expect(readTranscript(neither, 'otter')).toEqual(want);
+    // A Word file of the export's every line holds an empty paragraph where the export holds a blank line, and reads the
+    // same.
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    expect(await readWordTranscript(wordFileOf(neither.trimEnd().split('\n')), { extractRawText })).toEqual({ ...want, format: 'docx' });
+
+    expect(readTranscript('9:30\n\nGood morning.\n\nShall we start?\n\nTranscribed by https://otter.ai\n', 'otter').turns).toEqual([
+      { seq: 1, startMs: null, endMs: null, text: '9:30' },
+      { seq: 2, startMs: null, endMs: null, text: 'Good morning.' },
+      { seq: 3, startMs: null, endMs: null, text: 'Shall we start?' },
+    ]);
   });
 
   it('reads Fireflies\'s sentences from a list at the top, with times given as text, and a sentence with no speaker', () => {

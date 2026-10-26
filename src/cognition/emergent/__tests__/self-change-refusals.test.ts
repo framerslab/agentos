@@ -5,7 +5,8 @@
  * call's `sessionData.learning` as a GMI with a learner session sets it. With a layer they refuse on a turn with no
  * learner (`no_learner`), in mode `off` (`off`) and in mode `frozen` (`frozen`); every one of them refuses under
  * AGENTOS_LEARNING_FREEZE=1, with a layer and without one; adapt_personality keeps a layer's bounds. Without a layer
- * and without the freeze each acts as before.
+ * and without the freeze each acts as before, except that adapt_personality refuses honesty and emotionality on every
+ * host (`operator_only`).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdaptPersonalityTool, type AdaptPersonalityDeps } from '../AdaptPersonalityTool';
@@ -106,11 +107,11 @@ describe("adapt_personality's bounds where a learning layer exists", () => {
     expect((await tool.execute({ trait: 'extraversion', delta: 0.01, reasoning: 'Adjust.' }, learnerTurn('s-2'))).success).toBe(true);
   });
 
-  it('keeps its rules without a layer: honesty and a step of 0.5 succeed, as on master', async () => {
+  it('keeps its rules without a layer: a step of 0.5 succeeds, and honesty stays operator-only', async () => {
     const { tool, traits } = make();
-    expect((await tool.execute({ trait: 'honesty', delta: 0.1, reasoning: 'State uncertainty plainly.' }, noLayer())).success).toBe(true);
+    expect((await tool.execute({ trait: 'honesty', delta: 0.1, reasoning: 'State uncertainty plainly.' }, noLayer())).details?.reason).toBe('operator_only');
     expect((await tool.execute({ trait: 'openness', delta: 0.5, reasoning: 'Explore.' }, noLayer())).success).toBe(true);
-    expect(traits.honesty).toBeCloseTo(0.6);
+    expect(traits.honesty).toBe(0.5);
   });
 });
 

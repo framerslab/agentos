@@ -577,20 +577,35 @@ for (const thread of THREADS) describe(`MoonshineBrowserSTT on the ${thread} thr
     expect(stream.starts).toBe(2);
   });
 
-  it('takes the confidence from the timed words, and their offsets from the line start', async () => {
+  it("takes the confidence from the timed words, and puts their times on the session clock, the clock of the line's startMs", async () => {
     const { session, stream, log } = await open();
+    // Moonshine times a line's words on the clock of the line's startTime; a word the model places a hair before its
+    // line is kept at the line's start.
     const words = [
-      { text: 'Hello', start: 1.2, end: 1.5, confidence: 0.8 },
+      { text: 'Hello', start: 1.15, end: 1.5, confidence: 0.8 },
       { text: 'there', start: 1.6, end: 1.9, confidence: 0.6 },
     ];
     stream.passes.push([line('w', 'Hello there', 1.2, 0.7, true, words)]);
     session.pushAudio(frame(500));
     await settle();
+    expect(log.transcripts[0]).toMatchObject({ startMs: 1200, endMs: 1900 });
     expect(log.transcripts[0].words).toEqual([
-      { word: 'Hello', start: 0, end: 300, confidence: 0.8 },
-      { word: 'there', start: 400, end: 700, confidence: 0.6 },
+      { word: 'Hello', start: 1200, end: 1500, confidence: 0.8 },
+      { word: 'there', start: 1600, end: 1900, confidence: 0.6 },
     ]);
     expect(log.transcripts[0].confidence).toBeCloseTo(0.7);
+    session.close();
+  });
+
+  it('keeps word times on the session clock after a flush starts the stream again', async () => {
+    const { session, stream, log } = await open();
+    session.pushAudio(frame(1000));
+    await session.flush();
+    stream.passes.push([line('b', 'After', 0.1, 0.3, true, [{ text: 'After', start: 0.1, end: 0.4, confidence: 0.9 }])]);
+    session.pushAudio(frame(500));
+    await settle();
+    expect(log.transcripts[0]).toMatchObject({ itemId: 'b', startMs: 1100, endMs: 1400 });
+    expect(log.transcripts[0].words).toEqual([{ word: 'After', start: 1100, end: 1400, confidence: 0.9 }]);
     session.close();
   });
 });

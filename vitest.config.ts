@@ -10,8 +10,15 @@ const srcDir = path.resolve(__dirname, 'src');
 // Use sibling source when running inside the monorepo, fall back to the
 // installed npm package when running in standalone CI.
 const sqlAdapterSibling = path.resolve(__dirname, '../sql-storage-adapter/src/index.ts');
+// The sibling's key-value module, which the browser storage entry imports as
+// `@framers/sql-storage-adapter/kv`: a string alias would send that subpath to
+// `.../src/index.ts/kv`, so the exact subpath is aliased first.
+const sqlAdapterKvSibling = path.resolve(__dirname, '../sql-storage-adapter/src/features/kv/index.ts');
 const sqlAdapterAlias = fs.existsSync(sqlAdapterSibling)
-  ? [{ find: '@framers/sql-storage-adapter', replacement: sqlAdapterSibling }]
+  ? [
+      { find: /^@framers\/sql-storage-adapter\/kv$/, replacement: sqlAdapterKvSibling },
+      { find: '@framers/sql-storage-adapter', replacement: sqlAdapterSibling },
+    ]
   : [];
 
 export default defineConfig({

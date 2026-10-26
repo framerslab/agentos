@@ -19,7 +19,13 @@
  * - a git push with no refspec that git sends there by its settings, given with git -c or set by an earlier git
  *   config in the job: push.default=matching (every branch both sides have), push.default=upstream (the branch the
  *   checked-out one tracks, which this check does not follow, so it is reported whatever it is) and a refspec set
- *   in remote.<name>.push;
+ *   in remote.<name>.push. git config sets them in the checkout it runs in, or with --global or --system in the
+ *   global or the system settings, which every checkout reads beneath its own; --unset (git config unset) removes
+ *   the one value its pattern matches and none where more than one does, and --unset-all (unset --all) every value
+ *   it matches, as git does: the pattern is an extended regular expression found anywhere in the value, one that
+ *   begins with ! matches the values it does not, and with --fixed-value it is the value itself. A form git refuses
+ *   (an operand too many, --all or --value without the unset subcommand) and an unset in a file named with --file
+ *   or --blob change nothing;
  * - a git push of the checked-out branch (no destination, HEAD) while that branch can be the default branch, and a
  *   push to the run's own branch (${{ github.ref_name }}, $GITHUB_REF) from a workflow that runs on it. A workflow
  *   runs on the default branch unless its triggers keep it off: pull_request, pull_request_review(_comment),
@@ -30,14 +36,32 @@
  *   them). A step that checks out a branch (actions/checkout with ref, git checkout, git switch) changes the
  *   checked-out branch: git checkout <branch> -- with no paths after it and git switch -- <branch> check a branch
  *   out, git checkout [<tree-ish>] -- <paths> restores files, and git switch - or git checkout - (@{-1}, @{-N})
- *   returns to the one checked out before it. A command after && or ||, a branch of an if or a case and a loop's
+ *   returns to the one checked out before it. Each checkout has a branch of its own: actions/checkout with a path
+ *   makes one in that directory (on another repository's default branch when it names no ref) and leaves the
+ *   root's as it was, and a checkout of another repository where one was starts with no settings and no earlier
+ *   branches. A git command runs in the checkout its directory is in: the step's working-directory, then where the
+ *   script's cd and pushd go (a subshell, a substitution, a command of a pipeline, a background job and a script fed
+ *   to a shell change directory for themselves alone, and a function's body where the function is called), env -C,
+ *   sudo -D and git -C, and from there --git-dir, else GIT_DIR: one before the command, else the one in the env: of
+ *   its step, its job or its workflow (the nearest), which env -i and env -u GIT_DIR remove and which sudo's
+ *   env_reset may drop unless -E or --preserve-env keeps it (through sudo the repository is then one this check
+ *   cannot tell); an action pushes from its directory input (git-auto-commit-action's repository, add-and-commit's
+ *   cwd, github-push-action's directory), with the GIT_DIR of the env: from there. A command whose directory this
+ *   check cannot tell (after cd $DIR, cd -, popd, a compound command that ends a pipeline, which shopt -s lastpipe
+ *   runs in the script's own shell, a call of a function the script defines or a script it sources, and within a
+ *   function's body) is read in each checkout, and each checkout is then as it leaves it there or as it was. A
+ *   command after && or ||, a branch of an if or a case and a loop's
  *   body may not run, so after them the checked-out branch is any branch they can leave checked out
  *   (git checkout master; false && git checkout feature can leave master); a command that runs is taken to do
  *   what it names (a checkout that fails is not followed), and a loop's body is read once. A step with an if:
  *   condition may not run either, unless the condition is true, success(), always() or !cancelled(), and a step
  *   with if: false never runs. A local composite action (uses: ./<path>) runs its steps in the job that calls it,
- *   so the branch it leaves checked out is the one the job's later steps push, and its own pushes are read on the
- *   job's branch; a push in it is reported on the action's file, once however many jobs call it;
+ *   with ${{ inputs.<name> }} as the calling step's with: gives it, else as the input's default, and with the
+ *   calling step's GIT_DIR, so the branch it leaves checked out is the one the job's later steps push, and its own
+ *   pushes are read on the job's branch; read
+ *   on its own, it takes its inputs' defaults. In a step's if: an input is a string, and any but '' is true there
+ *   (an input of false among them), so a step whose if: reads an input may run. A push in it is reported on the
+ *   action's file, once however many jobs call it;
  * - an action that pushes there: peaceiris/actions-gh-pages (publish_branch), JamesIves/github-pages-deploy-action
  *   (branch) and ad-m/github-push-action (branch; with none it pushes the default branch: the input defaulted to
  *   master through v0.6.0, and later versions look the repository's default branch up), each unless its repository
@@ -58,9 +82,12 @@
  * A word that is only printed (echo git push ...), a quoted heredoc fed to another program, a comment and a dry run
  * are not pushes. Not read: a branch held in a shell variable, a job's if: condition and what a step's if:
  * condition tests, a script a shell reads from a file, a variable or a download (curl ... | bash), a git
- * setting made through GIT_CONFIG_* variables, a config file or another repository's configuration, the repository a
- * remote URL or another checkout names (a git push there is read as one here), and a push made by a script file or
- * by an action not named above.
+ * setting made through GIT_CONFIG_* variables or a config file, a GIT_DIR a script sets, exports or unsets (and one
+ * env -i, env -u or sudo removes for a script fed to a shell), a CDPATH, a value pattern
+ * JavaScript reads apart from git (an equivalence class, a collating symbol, \< and \>, an escaped letter other
+ * than w, W, s, S, b and B: it unsets nothing here), the checkouts git clone and git worktree add make (their
+ * commands are read in the checkout their directory is in), the repository a remote URL or another checkout names
+ * (a git push there is read as one here), and a push made by a script file or by an action not named above.
  *
  * Usage: node .github/scripts/check-workflow-pushes.mjs [--root <dir>] [file ...]
  * DEFAULT_BRANCH names the default branch (master when unset); master and main are refused whatever it is. YQ names
@@ -90,18 +117,34 @@ import { pathToFileURL } from 'node:url';
  * @property {boolean} head whether the checked-out branch can be the default branch
  * @property {boolean[]} prev the same for each branch checked out before it, the newest last: git switch - and
  *   @{-N} return to them
- * @property {string} pushDefault push.default as git config set it in the job, lowercased; '' when unset
- * @property {string[]} pushRefspecs the refspecs git config set in remote.<name>.push in the job
+ * @property {string} pushDefault push.default as git config set it in the checkout, lowercased; '' when unset
+ * @property {string[]} pushRefspecs the refspecs git config set in remote.<name>.push in the checkout
+ * @property {Settings} global the push settings git config --global set in the job, which every checkout reads
+ *   beneath its own
+ * @property {Settings} system the same for git config --system
+ * @property {Record<string, Checkout>} trees the checkouts actions/checkout made in other directories, by their
+ *   directory relative to the root. head, prev, pushDefault and pushRefspecs are the root checkout's; while a command
+ *   runs in one of these they are that one's, and its entry holds the root's (exchange)
+ * @property {Record<string, string | null>} repos the repository each checkout holds, by its directory ('.' for the
+ *   root's): '' for this one, owner/name lowercased for another, null for one this check cannot tell
+ * @property {string | null} cwd the directory a run step's script is in, relative to the root, or null for one
+ *   this check cannot tell
  * @property {boolean} pullRequestOnly whether every trigger is pull_request or pull_request_target, the events that
  *   set github.head_ref
  * @property {string} dir the directory run steps start in, relative to the root
+ * @property {string | undefined} gitDir the GIT_DIR the env: of the job, else of its workflow, gives its steps (a
+ *   local composite action's steps, the calling step's), held; undefined when none does
  */
+/** @typedef {{ pushDefault: string, pushRefspecs: string[] }} Settings */
+/** @typedef {Settings & { head: boolean, prev: boolean[] }} Checkout a checkout's branches and push settings, as in State */
 /**
  * @typedef {object} Step
  * @property {State} state
  * @property {Context} ctx
  * @property {string} dir the step's directory, relative to the root
  * @property {(message: string) => void} report
+ * @property {Set<string>} defined the functions the step's script defines, a call of which can change directory
+ * @property {string | undefined} gitDir the GIT_DIR its commands run with: its env:'s, else State's, held
  */
 
 /** A file or a tool this check needs could not be read. */
@@ -202,19 +245,32 @@ const readsScript = (run) => {
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
- * The program a simple command runs and its arguments, past assignments and wrappers, or null when it runs none.
+ * The program a simple command runs and its arguments, past assignments and wrappers, or null when it runs none;
+ * with the directories env -C and sudo -D run it in, in turn, and the GIT_DIR it runs with: an assignment's, null
+ * when env -i or env -u GIT_DIR removed it, or undefined for the one it would have from its shell, which reset says
+ * sudo's env_reset may have dropped. An assignment before sudo may be dropped too: its GIT_DIR is $GIT_DIR, a
+ * repository this check cannot tell.
  * @param {string[]} words
- * @returns {{ name: string, args: string[] } | null}
+ * @returns {{ name: string, args: string[], dirs: string[], gitDir?: string | null, reset: boolean } | null}
  */
 export function invoked(words) {
   let i = 0;
+  /** @type {string[]} */
+  const dirs = [];
+  /** @type {string | null | undefined} */
+  let gitDir;
+  let reset = false;
   while (i < words.length && RESERVED.has(words[i])) i++;
   for (;;) {
-    while (i < words.length && isAssignment(words[i])) i++;
+    for (; i < words.length && isAssignment(words[i]); i++) if (words[i].startsWith('GIT_DIR=')) gitDir = words[i].slice('GIT_DIR='.length);
     if (i >= words.length) return null;
     const name = base(words[i]);
-    if (!Object.hasOwn(WRAPPERS, name)) return { name, args: words.slice(i + 1) };
+    if (!Object.hasOwn(WRAPPERS, name)) return { name, args: words.slice(i + 1), dirs, gitDir, reset };
     const valued = new Set(WRAPPERS[name]);
+    // env -C <dir> and sudo -D <dir> (--chdir both) run the command in a directory.
+    const chdir = name === 'env' ? 'C' : name === 'sudo' ? 'D' : '';
+    // sudo runs the command in an environment of its own (env_reset) unless -E or --preserve-env keeps the caller's.
+    let keeps = false;
     i++;
     while (i < words.length && words[i].startsWith('-')) {
       const option = words[i];
@@ -224,7 +280,17 @@ export function invoked(words) {
       }
       // command -v and -V print what would run instead of running it.
       if (name === 'command' && /^-[pvV]+$/.test(option) && /[vV]/.test(option)) return null;
+      if (chdir !== '' && (option === `-${chdir}` || option === '--chdir') && i + 1 < words.length) dirs.push(words[i + 1]);
+      else if (chdir !== '' && option.startsWith('--chdir=')) dirs.push(option.slice('--chdir='.length));
+      else if (chdir !== '' && option.startsWith(`-${chdir}`) && option.length > 2) dirs.push(option.slice(2));
+      // env -i (-, --ignore-environment) starts from an empty environment; env -u GIT_DIR (--unset) removes it.
+      if (name === 'env' && (option === '-' || option === '-i' || option === '--ignore-environment' || option === '-uGIT_DIR' || option === '--unset=GIT_DIR' || ((option === '-u' || option === '--unset') && words[i + 1] === 'GIT_DIR'))) gitDir = null;
+      if (name === 'sudo' && (option === '-E' || option === '--preserve-env' || (option.startsWith('--preserve-env=') && option.slice('--preserve-env='.length).split(',').includes('GIT_DIR')))) keeps = true;
       i += valued.has(option) ? 2 : 1;
+    }
+    if (name === 'sudo' && !keeps && gitDir !== null) {
+      if (gitDir === undefined) reset = true;
+      else gitDir = '$GIT_DIR';
     }
     if (name === 'timeout') i++; // its duration
   }
@@ -242,7 +308,9 @@ export function invoked(words) {
  * an else or a case a * pattern (so one of its branches always runs), head that a for's names are being read and
  * mode where a case stands.
  * @typedef {{ kind: 'list' | 'group' | 'subshell' | 'if' | 'loop' | 'case', open: number, begun?: boolean,
- *   otherwise?: boolean, head?: boolean, mode?: 'subject' | 'pattern' | 'arm' }} Frame
+ *   otherwise?: boolean, head?: boolean, mode?: 'subject' | 'pattern' | 'arm', own?: boolean, body?: boolean,
+ *   at?: number }} Frame own says a | feeds the compound command, body that it is a function's body, and at where
+ *   its items begin in the reading
  */
 
 /**
@@ -254,17 +322,36 @@ export function invoked(words) {
  */
 
 /**
+ * Where a shell of its own begins and ends (open, close: a subshell, a substitution, a command of a pipeline or a
+ * background job, a script fed to a shell), or past which the directory is one this check cannot tell (unknown); or
+ * the name of a function the script defines.
+ * @typedef {{ scope: 'open' | 'close' | 'unknown' } | { define: string }} Mark
+ */
+
+/**
  * The simple commands of a shell script, each as its words with quotes and escapes removed, in the order they end,
  * with the branch points of the lists and compound commands around them. A command substitution's commands come out
  * on their own and its text stays in its word; a heredoc's body is read as a script when it feeds a shell, directly
  * or through a cat piped into one, and otherwise its substitutions are read when its delimiter is unquoted. A
  * here-string fed so, and what an echo or a printf pipes into a shell, is read as a script too.
  * @param {string} src
- * @returns {(string[] | Branch)[]}
+ * @returns {(string[] | Branch | Mark)[]}
  */
 export function shellCommands(src) {
-  /** @type {(string[] | Branch)[]} */
+  /** @type {(string[] | Branch | Mark)[]} */
   const out = [];
+  /**
+   * Reads commands that run in a shell of their own, whose directory changes do not last past them.
+   * @template T
+   * @param {() => T} read
+   * @returns {T}
+   */
+  const apart = (read) => {
+    out.push({ scope: 'open' });
+    const result = read();
+    out.push({ scope: 'close' });
+    return result;
+  };
   const n = src.length;
   let i = 0;
 
@@ -287,7 +374,7 @@ export function shellCommands(src) {
         text += dollar();
       } else if (c === '`') {
         i++;
-        text += `\`${commandsUntil('`')}\``;
+        text += `\`${apart(() => commandsUntil('`'))}\``;
       } else {
         text += c;
         i++;
@@ -307,7 +394,7 @@ export function shellCommands(src) {
     }
     if (src.startsWith('$(', i)) {
       i += 2;
-      return `$(${commandsUntil(')')})`;
+      return `$(${apart(() => commandsUntil(')'))})`;
     }
     if (src.startsWith('${', i)) {
       i += 2;
@@ -321,7 +408,7 @@ export function shellCommands(src) {
           dollar();
         } else if (c === '`') {
           i++;
-          commandsUntil('`');
+          apart(() => commandsUntil('`'));
         } else {
           depth += c === '{' ? 1 : c === '}' ? -1 : 0;
           i++;
@@ -393,7 +480,7 @@ export function shellCommands(src) {
     const body = lines.join('\n');
     const run = invoked(heredoc.words);
     if (heredoc.script || readsScript(run)) {
-      out.push(...shellCommands(body));
+      apart(() => out.push(...shellCommands(body)));
     } else if (!heredoc.quoted) {
       // An unquoted delimiter leaves the body's $( ) and backticks to run before the program reads it, as within
       // double quotes. The body is read as one double-quoted word of a ':' command, which is dropped.
@@ -426,6 +513,13 @@ export function shellCommands(src) {
     let operand = false;
     // Whether the next word is the name in function <name> { ... }.
     let functionName = false;
+    // Whether the compound command that comes next is a function's body.
+    let functionBody = false;
+    // Whether a | waits for the command it feeds, and whether a compound command has just ended, and where its items
+    // begin.
+    let pipeNext = false;
+    let compoundEnded = false;
+    let compoundAt = 0;
     /** @type {Frame[]} the lists being read, the innermost last */
     const frames = [{ kind: 'list', open: 0 }];
     const top = () => frames[frames.length - 1];
@@ -442,6 +536,39 @@ export function shellCommands(src) {
       const f = /** @type {Frame} */ (frames.pop());
       // A loop's body, an if without an else and a case without a * pattern can also be passed by.
       if (f.begun) out.push({ branch: 'close', skip: !f.otherwise });
+      // A subshell's directory changes end with it. A compound command a | fed is a command of the pipeline: a |
+      // after it runs it in a shell of its own (apartCompound), but as the last one shopt -s lastpipe can run it in
+      // the script's own shell, so the directory after it is one this check cannot tell. A function's body changes
+      // directory where the function is called.
+      if (f.kind === 'subshell') out.push({ scope: 'close' });
+      else if (f.own) out.push({ scope: 'unknown' });
+      if (f.body) out.push({ scope: 'close' });
+      compoundEnded = f.kind !== 'subshell';
+      compoundAt = f.at ?? out.length;
+    };
+    /**
+     * Opens a group or a compound command: a function's body is read in a directory this check cannot tell, and a
+     * compound command after a | is a command of the pipeline.
+     * @param {Frame} frame
+     */
+    const openFrame = (frame) => {
+      frame.at = out.length;
+      if (functionBody) {
+        frame.body = true;
+        out.push({ scope: 'open' }, { scope: 'unknown' });
+      }
+      functionBody = false;
+      if (frame.kind !== 'subshell') frame.own = pipeNext;
+      pipeNext = false;
+      frames.push(frame);
+    };
+    /**
+     * Reads the compound command that has just ended as one that ran in a shell of its own (a | after it, or an &),
+     * so that its directory changes end with it.
+     */
+    const apartCompound = () => {
+      out.splice(compoundAt, 0, { scope: 'open' });
+      out.push({ scope: 'close' });
     };
     /**
      * Reads a word at command position that opens, divides or closes a group or a compound command.
@@ -451,13 +578,13 @@ export function shellCommands(src) {
     const reserved = (text) => {
       const f = top();
       if (text === '{') {
-        frames.push({ kind: 'group', open: 0 });
+        openFrame({ kind: 'group', open: 0 });
       } else if (text === 'if') {
-        frames.push({ kind: 'if', open: 0, begun: false, otherwise: false });
+        openFrame({ kind: 'if', open: 0, begun: false, otherwise: false });
       } else if (text === 'while' || text === 'until' || text === 'for' || text === 'select') {
-        frames.push({ kind: 'loop', open: 0, begun: false, otherwise: false, head: text === 'for' || text === 'select' });
+        openFrame({ kind: 'loop', open: 0, begun: false, otherwise: false, head: text === 'for' || text === 'select' });
       } else if (text === 'case') {
-        frames.push({ kind: 'case', open: 0, begun: false, otherwise: false, mode: 'subject' });
+        openFrame({ kind: 'case', open: 0, begun: false, otherwise: false, mode: 'subject' });
       } else if (text === 'function') {
         functionName = true;
       } else if ((text === '}' && f.kind === 'group') || (text === 'fi' && f.kind === 'if') || (text === 'done' && f.kind === 'loop') || (text === 'esac' && f.kind === 'case')) {
@@ -483,6 +610,7 @@ export function shellCommands(src) {
     const add = (text) => {
       word = (word ?? '') + text;
       operand = false;
+      compoundEnded = false;
     };
     const endWord = () => {
       const text = word;
@@ -493,6 +621,8 @@ export function shellCommands(src) {
       const f = top();
       if (functionName) {
         functionName = false;
+        out.push({ define: text });
+        functionBody = true;
       } else if (f.kind === 'case' && f.mode === 'subject') {
         // The word a case matches is not a command; in ends it.
         if (bare && text === 'in' && words.length > 0) {
@@ -521,15 +651,18 @@ export function shellCommands(src) {
       if (!from) return;
       if (from.name === 'cat' && from.args.every((a) => a.startsWith('-'))) {
         for (const heredoc of heredocs) if (heredoc.words === source) heredoc.script = true;
-        for (const s of strings) if (s.words === source) out.push(...shellCommands(s.text));
+        for (const s of strings) if (s.words === source) apart(() => out.push(...shellCommands(s.text)));
       } else if (from.name === 'echo' || from.name === 'printf') {
         let k = 0;
         if (from.name === 'echo') while (k < from.args.length && /^-[neE]+$/.test(from.args[k])) k++;
-        out.push(...shellCommands(from.args.slice(k).join(from.name === 'echo' ? ' ' : '\n').replace(/\\n/g, '\n')));
+        apart(() => out.push(...shellCommands(from.args.slice(k).join(from.name === 'echo' ? ' ' : '\n').replace(/\\n/g, '\n'))));
       }
     };
-    /** @param {boolean} [pipe] whether a | ends the command, feeding its output to the next one */
-    const endCommand = (pipe = false) => {
+    /**
+     * @param {boolean} [pipe] whether a | ends the command, feeding its output to the next one
+     * @param {boolean} [background] whether an & ends it
+     */
+    const endCommand = (pipe = false, background = false) => {
       endWord();
       const f = top();
       // A case's word and patterns, and a for's names, are not commands.
@@ -540,11 +673,17 @@ export function shellCommands(src) {
       }
       // An empty command (the & of |&, a line break after |) leaves a pipe as it is.
       if (words.length > 0) {
+        // A command of a pipeline or a background job runs in a shell of its own.
+        const own = pipe || background || pipeNext;
+        if (own) out.push({ scope: 'open' });
         out.push(words);
+        if (own) out.push({ scope: 'close' });
         // A here-string fed to a shell is its script: bash <<< "git push ...".
-        if (readsScript(invoked(words))) for (const s of strings) if (s.words === words) out.push(...shellCommands(s.text));
+        if (readsScript(invoked(words))) for (const s of strings) if (s.words === words) apart(() => out.push(...shellCommands(s.text)));
         if (piped) feed(piped, words);
         piped = pipe ? words : null;
+        pipeNext = false;
+        compoundEnded = false;
       }
       words = [];
     };
@@ -585,7 +724,7 @@ export function shellCommands(src) {
       } else if (c === '`') {
         i++;
         quoted = true;
-        add(`\`${commandsUntil('`')}\``);
+        add(`\`${apart(() => commandsUntil('`'))}\``);
       } else if (c === '#' && word === null) {
         while (i < n && src[i] !== '\n') i++;
       } else if (c === ' ' || c === '\t' || c === '\r') {
@@ -629,7 +768,12 @@ export function shellCommands(src) {
         operand = true;
         i += 2;
       } else if (c === '|') {
+        // A compound command that feeds a | runs in a shell of its own; the word before it may close it (}|).
+        endWord();
+        if (words.length === 0 && compoundEnded) apartCompound();
+        compoundEnded = false;
         endCommand(true);
+        pipeNext = true;
         operand = true;
         i++;
       } else if (c === '&' && src[i - 1] === '|') {
@@ -641,17 +785,36 @@ export function shellCommands(src) {
         top().mode = 'pattern';
         i += src.startsWith(';;&', i) ? 3 : 2;
       } else if (c === ';' || c === '&') {
-        endCommand();
+        // A background job runs in a shell of its own; the word before it may close it (}&).
+        endWord();
+        if (c === '&' && words.length === 0 && compoundEnded) apartCompound();
+        compoundEnded = false;
+        endCommand(false, c === '&');
+        pipeNext = false;
         endList();
         i++;
       } else if (c === '(') {
-        // A ( before a case's pattern is only punctuation.
-        if (!inPattern()) {
-          endCommand();
-          frames.push({ kind: 'subshell', open: 0 });
-          depth++;
+        // A ( before a case's pattern is only punctuation, and <name>() begins a function's definition.
+        const name = word !== null && words.length === 0 ? word : word === null && words.length === 1 && !functionName ? words[0] : null;
+        const close = /^\(\s*\)/.exec(src.slice(i));
+        if (!inPattern() && close && ((name !== null && !/[=$`]/.test(name)) || functionBody)) {
+          // function <name> () after its name was read leaves only the parens.
+          if (name !== null) out.push({ define: name });
+          word = null;
+          quoted = false;
+          words = [];
+          functionName = false;
+          functionBody = true;
+          i += close[0].length;
+        } else {
+          if (!inPattern()) {
+            endCommand();
+            openFrame({ kind: 'subshell', open: 0 });
+            out.push({ scope: 'open' });
+            depth++;
+          }
+          i++;
         }
-        i++;
       } else if (c === ')') {
         if (inPattern()) {
           // The patterns end and their arm begins, an alternative to the other arms.
@@ -900,8 +1063,9 @@ function checkPush(args, { state, ctx, report }, given = {}) {
   let via = '';
   if (refspecs.length === 0) {
     if (tags) return;
-    const configured = [...state.pushRefspecs, ...(given.pushRefspecs ?? [])];
-    const mode = given.pushDefault ?? state.pushDefault;
+    const configured = [...state.system.pushRefspecs, ...state.global.pushRefspecs, ...state.pushRefspecs, ...(given.pushRefspecs ?? [])];
+    // The checkout's own push.default overrides the global one, which overrides the system one; git -c all three.
+    const mode = given.pushDefault ?? pushMode(state, state);
     if (configured.length > 0) {
       refspecs.push(...configured);
       via = ' (remote.<name>.push)';
@@ -943,21 +1107,123 @@ function pushSetting(name) {
   return /^remote\..+\.push$/.test(key) ? 'refspec' : '';
 }
 
+/** The POSIX character classes of a bracket expression, as the inside of a JavaScript one. */
+const POSIX_CLASSES = new Map([
+  ['alnum', 'A-Za-z0-9'],
+  ['alpha', 'A-Za-z'],
+  ['blank', ' \\t'],
+  ['cntrl', '\\x00-\\x1f\\x7f'],
+  ['digit', '0-9'],
+  ['graph', '\\x21-\\x7e'],
+  ['lower', 'a-z'],
+  ['print', '\\x20-\\x7e'],
+  ['punct', '!-\\/:-@\\[-`{-~'],
+  ['space', ' \\t\\n\\v\\f\\r'],
+  ['upper', 'A-Z'],
+  ['xdigit', '0-9A-Fa-f'],
+]);
+
 /**
- * Follows git config where it sets push.default or remote.<name>.push for the pushes after it in the job.
+ * An extended regular expression (regcomp with REG_EXTENDED, which git config's value patterns are) as a
+ * JavaScript one: a bracket expression keeps a ] that opens it and a \ as characters and reads its POSIX classes,
+ * and an escape outside one reads the character after it, as both read it. null where the two read it apart (an
+ * equivalence class or a collating symbol, an escaped letter or digit other than w, W, s, S, b and B, \< or \>, ( ?
+ * and {,n}) or it does not compile.
+ * @param {string} pattern
+ * @returns {RegExp | null}
+ */
+function extendedRegExp(pattern) {
+  let source = '';
+  for (let k = 0; k < pattern.length; k++) {
+    const c = pattern[k];
+    if (c === '\\') {
+      const d = pattern[k + 1];
+      if (d === undefined || (/[A-Za-z0-9]/.test(d) && !/[wWsSbB]/.test(d)) || "<>`'".includes(d)) return null;
+      source += `\\${d}`;
+      k++;
+    } else if (c === '[') {
+      let j = k + 1;
+      let set = '';
+      if (pattern[j] === '^') {
+        set += '^';
+        j++;
+      }
+      if (pattern[j] === ']') {
+        set += '\\]';
+        j++;
+      }
+      for (; j < pattern.length && pattern[j] !== ']'; j++) {
+        const e = pattern[j];
+        if (e === '[' && pattern[j + 1] === ':') {
+          const end = pattern.indexOf(':]', j + 2);
+          const named = end < 0 ? undefined : POSIX_CLASSES.get(pattern.slice(j + 2, end));
+          if (named === undefined) return null;
+          set += named;
+          j = end + 1;
+        } else if (e === '[' && (pattern[j + 1] === '=' || pattern[j + 1] === '.')) {
+          return null;
+        } else {
+          set += '\\[^'.includes(e) ? `\\${e}` : e;
+        }
+      }
+      if (j >= pattern.length) return null;
+      source += `[${set}]`;
+      k = j;
+    } else if ((c === '(' && pattern[k + 1] === '?') || (c === '{' && pattern[k + 1] === ',')) {
+      return null;
+    } else {
+      source += c;
+    }
+  }
+  try {
+    return new RegExp(source);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether git config's value pattern matches a value (config.c, matches): an extended regular expression found
+ * anywhere in it, one that begins with ! matching the values it does not, or with --fixed-value the value itself.
+ * A pattern this check cannot read as git does matches nothing, so nothing is unset by it here.
+ * @param {string} value
+ * @param {string | undefined} pattern none matches every value
+ * @param {boolean} fixed
+ */
+function valueMatches(value, pattern, fixed) {
+  if (pattern === undefined) return true;
+  if (fixed) return value === pattern;
+  const negated = pattern.startsWith('!');
+  const regExp = extendedRegExp(negated ? pattern.slice(1) : pattern);
+  return regExp !== null && regExp.test(value) !== negated;
+}
+
+/**
+ * Follows git config where it sets push.default or remote.<name>.push for the pushes after it: in the checkout it
+ * runs in, or with --global or --system in the settings every checkout reads beneath its own.
  * @param {string[]} args
  * @param {State} state
  */
 function gitConfig(args, state) {
-  const valued = new Set(['-f', '--file', '--blob', '--type', '--default', '--comment', '--value']);
+  const valued = new Set(['--type', '--default', '--comment']);
   const reads = /^(?:-l|-e|--list|--edit|--get|--get-all|--get-regexp|--get-urlmatch|--get-color|--get-colorbool|--rename-section|--remove-section)$/;
   let k = 0;
   let unset = false;
+  let all = false;
+  let fixed = false;
+  /** @type {Settings} */
+  let settings = state;
+  // An option git refuses in the form given (--unset in git config unset, --all or --value without it) makes the
+  // command change nothing, and so does an unset in a file of its own.
+  let refused = false;
+  let file = false;
+  /** @type {string | undefined} */
+  let pattern;
   // git config set and unset (git 2.46) name what they change; get, list and edit only read, and the section
   // subcommands set no value.
-  if (args[0] === 'set') k = 1;
-  else if (args[0] === 'unset') {
-    unset = true;
+  const subcommand = args[0] === 'set' || args[0] === 'unset';
+  if (subcommand) {
+    unset = args[0] === 'unset';
     k = 1;
   } else if (/^(?:get|list|edit|rename-section|remove-section)$/.test(args[0] ?? '')) {
     return;
@@ -966,7 +1232,21 @@ function gitConfig(args, state) {
   const positional = [];
   for (; k < args.length; k++) {
     const a = args[k];
-    if (a === '--unset' || a === '--unset-all') unset = true;
+    if (a === '--unset' || a === '--unset-all') {
+      unset = true;
+      all ||= a === '--unset-all';
+      refused ||= subcommand;
+    } else if (a === '--all' || a === '--value' || a.startsWith('--value=')) {
+      if (a === '--all') all = true;
+      else pattern = a === '--value' ? args[++k] : a.slice('--value='.length);
+      refused ||= !subcommand;
+    } else if (a === '--fixed-value') fixed = true;
+    else if (a === '--global') settings = state.global;
+    else if (a === '--system') settings = state.system;
+    else if (a === '-f' || a === '--file' || a === '--blob') {
+      file = true;
+      k++;
+    } else if (a.startsWith('--file=') || a.startsWith('--blob=')) file = true;
     else if (reads.test(a)) return;
     else if (valued.has(a)) k++;
     else if (!a.startsWith('-')) positional.push(a);
@@ -974,11 +1254,21 @@ function gitConfig(args, state) {
   const setting = pushSetting(positional[0] ?? '');
   if (setting === '') return;
   if (unset) {
-    if (setting === 'default') state.pushDefault = '';
-    else state.pushRefspecs = [];
+    // git config --unset <name> [<value-pattern>]; git config unset [--all] [--value=<pattern>] <name>. git refuses
+    // an operand more, and --fixed-value with no pattern.
+    if (!subcommand) pattern = positional[1];
+    if (refused || file || positional.length > (subcommand ? 1 : 2) || (fixed && pattern === undefined)) return;
+    if (setting === 'default') {
+      if (valueMatches(settings.pushDefault, pattern, fixed)) settings.pushDefault = '';
+      return;
+    }
+    // git unsets the one value that matches, and none where more than one does unless it is told all (config.c:
+    // "if nothing to unset, or too many matches, error out").
+    const matched = settings.pushRefspecs.filter((value) => valueMatches(value, pattern, fixed));
+    if (all || matched.length === 1) settings.pushRefspecs = settings.pushRefspecs.filter((value) => !matched.includes(value));
   } else if (positional.length >= 2) {
-    if (setting === 'default') state.pushDefault = positional[1].toLowerCase();
-    else state.pushRefspecs.push(positional[1]);
+    if (setting === 'default') settings.pushDefault = positional[1].toLowerCase();
+    else settings.pushRefspecs.push(positional[1]);
   }
 }
 
@@ -1169,39 +1459,322 @@ function gitPluginConfig(dir, ctx) {
 }
 
 /**
+ * A copy of a checkout's branches and push settings.
+ * @param {Checkout} c
+ * @returns {Checkout}
+ */
+const copyCheckout = (c) => ({ head: c.head, prev: [...c.prev], pushDefault: c.pushDefault, pushRefspecs: [...c.pushRefspecs] });
+
+/**
  * A copy of a state, to come back to or to merge.
  * @param {State} s
  * @returns {State}
  */
-const copyState = (s) => ({ ...s, prev: [...s.prev], pushRefspecs: [...s.pushRefspecs] });
+const copyState = (s) => ({
+  ...s,
+  ...copyCheckout(s),
+  global: { pushDefault: s.global.pushDefault, pushRefspecs: [...s.global.pushRefspecs] },
+  system: { pushDefault: s.system.pushDefault, pushRefspecs: [...s.system.pushRefspecs] },
+  trees: Object.fromEntries(Object.entries(s.trees).map(([path, c]) => [path, copyCheckout(c)])),
+  repos: { ...s.repos },
+});
+
+/**
+ * A job's state before its first step: one checkout, on the run's own branch, nothing set.
+ * @param {boolean} run
+ * @param {boolean} pullRequestOnly
+ * @param {string} dir
+ * @param {string} [gitDir]
+ * @returns {State}
+ */
+const startState = (run, pullRequestOnly, dir, gitDir) => ({
+  run,
+  head: run,
+  prev: [],
+  pushDefault: '',
+  pushRefspecs: [],
+  global: { pushDefault: '', pushRefspecs: [] },
+  system: { pushDefault: '', pushRefspecs: [] },
+  trees: {},
+  repos: {},
+  pullRequestOnly,
+  dir,
+  gitDir,
+  cwd: workspaceDir(dir),
+});
+
+/** @param {string} mode */
+const reach = (mode) => PUSH_DEFAULT_REACH.get(mode) ?? 1;
+
+/**
+ * The push.default a checkout's push reads: its own, else the global one, else the system one.
+ * @param {Checkout} c
+ * @param {State} s the state whose global and system settings it reads
+ */
+const pushMode = (c, s) => c.pushDefault || s.global.pushDefault || s.system.pushDefault;
+
+/**
+ * Push settings that cover two: a push with no refspec reaches as far as it does under either. An unset push.default
+ * reads the one beneath it (the system one beneath a global one), so each side is compared by what it reads.
+ * @param {Settings} a
+ * @param {Settings} b
+ * @param {string} [beneathA] the push.default beneath a's
+ * @param {string} [beneathB] the same for b
+ * @returns {Settings}
+ */
+function mergeSettings(a, b, beneathA = '', beneathB = '') {
+  return {
+    pushDefault: reach(b.pushDefault || beneathB) > reach(a.pushDefault || beneathA) ? b.pushDefault : a.pushDefault,
+    pushRefspecs: [...new Set([...a.pushRefspecs, ...b.pushRefspecs])],
+  };
+}
+
+/**
+ * A checkout that covers two: its branch can be the default branch when it can in either, and its push.default is
+ * the side's that reaches further, an unset one reading as the global or the system one beneath it.
+ * @param {Checkout} a
+ * @param {Checkout} b
+ * @param {State} sa the state a is in, for the job's starting branch and the settings beneath a
+ * @param {State} sb the same for b
+ * @returns {Checkout}
+ */
+function mergeCheckouts(a, b, sa, sb) {
+  /** @type {boolean[]} */
+  const prev = [];
+  // The earlier branches line up from the newest; where one has none, the job's starting branch stands in.
+  for (let k = Math.max(a.prev.length, b.prev.length); k >= 1; k--) prev.push((a.prev[a.prev.length - k] ?? sa.run) || (b.prev[b.prev.length - k] ?? sb.run));
+  return {
+    head: a.head || b.head,
+    prev,
+    pushDefault: reach(pushMode(b, sb)) > reach(pushMode(a, sa)) ? b.pushDefault : a.pushDefault,
+    pushRefspecs: [...new Set([...a.pushRefspecs, ...b.pushRefspecs])],
+  };
+}
 
 /**
  * The state that covers two: a branch can be the default branch after them when it can after either, and a push with
- * no refspec reaches as far as it does after either.
+ * no refspec reaches as far as it does after either. A checkout one has and the other lacks (a step that may not run
+ * made it) is, on the side that lacks it, a directory of the root's checkout.
  * @param {State | null} a
  * @param {State} b
  * @returns {State}
  */
 function mergeStates(a, b) {
   if (a === null) return copyState(b);
-  const reach = (/** @type {string} */ mode) => PUSH_DEFAULT_REACH.get(mode) ?? 1;
-  /** @type {boolean[]} */
-  const prev = [];
-  // The earlier branches line up from the newest; where one has none, the job's starting branch stands in.
-  for (let k = Math.max(a.prev.length, b.prev.length); k >= 1; k--) prev.push((a.prev[a.prev.length - k] ?? a.run) || (b.prev[b.prev.length - k] ?? b.run));
+  /** @type {Record<string, Checkout>} */
+  const trees = {};
+  for (const path of new Set([...Object.keys(a.trees), ...Object.keys(b.trees)])) trees[path] = mergeCheckouts(a.trees[path] ?? a, b.trees[path] ?? b, a, b);
+  /** @type {Record<string, string | null>} */
+  const repos = {};
+  for (const path of new Set([...Object.keys(a.repos), ...Object.keys(b.repos)])) repos[path] = a.repos[path] === b.repos[path] ? a.repos[path] : null;
   return {
     ...a,
-    head: a.head || b.head,
-    prev,
-    pushDefault: reach(b.pushDefault) > reach(a.pushDefault) ? b.pushDefault : a.pushDefault,
-    pushRefspecs: [...new Set([...a.pushRefspecs, ...b.pushRefspecs])],
+    ...mergeCheckouts(a, b, a, b),
+    global: mergeSettings(a.global, b.global, a.system.pushDefault, b.system.pushDefault),
+    system: mergeSettings(a.system, b.system),
+    trees,
+    repos,
+    cwd: a.cwd === b.cwd ? a.cwd : null,
   };
 }
+
+/** ${{ github.workspace }} or $GITHUB_WORKSPACE at the start of a path: the root. */
+const WORKSPACE = /^(?:\$\{\{\s*github\.workspace\s*\}\}|\$\{GITHUB_WORKSPACE\}|\$GITHUB_WORKSPACE(?![A-Za-z0-9_]))/;
+
+/**
+ * A directory of the workspace, relative to the root ('.' for the root), or null when an expression, a variable or
+ * a pattern leaves it unknown or it is outside the workspace.
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function workspaceDir(value) {
+  const text = String(value ?? '').trim().replace(WORKSPACE, '.');
+  if (/[$`*?[]/.test(text) || /^[/~]/.test(text)) return null;
+  /** @type {string[]} */
+  const parts = [];
+  for (const part of text.split('/')) {
+    if (part === '..') {
+      if (parts.pop() === undefined) return null;
+    } else if (part !== '' && part !== '.') {
+      parts.push(part);
+    }
+  }
+  return parts.length === 0 ? '.' : parts.join('/');
+}
+
+/**
+ * The directory git -C <to> runs in, from the directory before it, or null when either is unknown.
+ * @param {string | null} from
+ * @param {string} to
+ * @returns {string | null}
+ */
+function within(from, to) {
+  if (to === '') return from;
+  if (WORKSPACE.test(to)) return workspaceDir(to);
+  return from === null || /^[/~]/.test(to) ? null : workspaceDir(`${from}/${to}`);
+}
+
+/**
+ * The checkout a --git-dir names, from the directory git runs in: the directory its .git is in, or null for a
+ * repository directory of another name.
+ * @param {string | null} from
+ * @param {string} gitDir
+ * @returns {string | null}
+ */
+function repositoryDir(from, gitDir) {
+  const dir = within(from, gitDir);
+  if (dir === '.git') return '.';
+  return dir !== null && dir.endsWith('/.git') ? dir.slice(0, -'/.git'.length) : null;
+}
+
+/**
+ * The checkout a directory is in: the deepest other checkout that holds it, '' for the root's, or null for a
+ * directory this check cannot tell.
+ * @param {State} state
+ * @param {string | null} dir relative to the root
+ * @returns {string | null}
+ */
+function checkoutAt(state, dir) {
+  if (dir === null) return null;
+  let found = '';
+  for (const path of Object.keys(state.trees)) if ((dir === path || dir.startsWith(`${path}/`)) && path.length > found.length) found = path;
+  return found;
+}
+
+/**
+ * Exchanges the branches and push settings in a state's own fields with another checkout's entry, so that the
+ * commands read after it read and change that checkout; a second exchange puts them back.
+ * @param {State} state
+ * @param {string} path the checkout's directory; '' leaves the state as it is
+ */
+function exchange(state, path) {
+  if (path === '') return;
+  const other = state.trees[path];
+  state.trees[path] = { head: state.head, prev: state.prev, pushDefault: state.pushDefault, pushRefspecs: state.pushRefspecs };
+  Object.assign(state, other);
+}
+
+/**
+ * Reads one git command, or an action, in the checkout a directory is in. Where that cannot be told it is read in
+ * each checkout in turn, as if it ran there: each checkout is then as it leaves it there or as it was, and a push it
+ * makes in more than one is reported once.
+ * @param {Step} step
+ * @param {string | null} dir relative to the root
+ * @param {(step: Step) => void} fn
+ */
+function inCheckoutAt(step, dir, fn) {
+  const { state } = step;
+  const tree = Object.keys(state.trees).length === 0 ? '' : checkoutAt(state, dir);
+  if (tree === '') {
+    fn(step);
+  } else if (tree !== null) {
+    exchange(state, tree);
+    try {
+      fn(step);
+    } finally {
+      exchange(state, tree);
+    }
+  } else {
+    /** @type {Set<string>} */
+    const seen = new Set();
+    /** @param {string} message */
+    const report = (message) => {
+      if (seen.has(message)) return;
+      seen.add(message);
+      step.report(message);
+    };
+    /** @type {[string, Checkout, State][]} */
+    const ends = [];
+    // '' stands for the root's checkout, in the state's own fields.
+    for (const path of ['', ...Object.keys(state.trees)]) {
+      const sim = copyState(state);
+      exchange(sim, path);
+      fn({ ...step, state: sim, report });
+      exchange(sim, path);
+      ends.push([path, path === '' ? copyCheckout(sim) : sim.trees[path], sim]);
+    }
+    for (const [path, end, sim] of ends) {
+      if (path === '') Object.assign(state, mergeCheckouts(state, end, state, sim));
+      else state.trees[path] = mergeCheckouts(state.trees[path], end, state, sim);
+    }
+    for (const [, , sim] of ends) {
+      state.global = mergeSettings(state.global, sim.global, state.system.pushDefault, sim.system.pushDefault);
+      state.system = mergeSettings(state.system, sim.system);
+    }
+  }
+}
+
+/**
+ * The directory cd or pushd leaves the shell in: its operand, from the one before; null for one this check cannot
+ * tell (none, which is $HOME, - for the one before, a place in pushd's stack, an expression or a variable).
+ * @param {string | null} cwd
+ * @param {string[]} args
+ * @returns {string | null}
+ */
+function changeDirectory(cwd, args) {
+  let k = 0;
+  while (k < args.length && /^-[LPe@n]+$/.test(args[k])) k++;
+  if (args[k] === '--') k++;
+  const to = args[k];
+  if (to === undefined || to === '-' || /^[+-]\d+$/.test(to)) return null;
+  return within(cwd, to);
+}
+
+/**
+ * The action a uses: names, lowercased, without its version or a path inside it.
+ * @param {string} uses
+ */
+const actionName = (uses) => uses.trim().toLowerCase().split('@')[0].split('/').slice(0, 2).join('/');
+
+/** The input that names the directory of the checkout an action pushes from. */
+const ACTION_DIRECTORY = new Map([
+  ['stefanzweifel/git-auto-commit-action', 'repository'],
+  ['endbug/add-and-commit', 'cwd'],
+  ['ad-m/github-push-action', 'directory'],
+]);
+
+/**
+ * The directory, relative to the root, an action step's git commands run in: the directory input of an action that
+ * pushes from a checkout, or the checkout the GIT_DIR of its env: names from there, else the root.
+ * @param {string} uses
+ * @param {unknown} inputs
+ * @param {string} [gitDir] the GIT_DIR its env: gives, held
+ * @returns {string | null}
+ */
+function actionDirectory(uses, inputs, gitDir) {
+  const key = ACTION_DIRECTORY.get(actionName(uses));
+  const given = inputs && typeof inputs === 'object' ? /** @type {Record<string, unknown>} */ (inputs) : {};
+  const value = key === undefined || given[key] == null ? '' : String(given[key]).trim();
+  const dir = workspaceDir(value === '' ? '.' : value);
+  return key === undefined || gitDir === undefined ? dir : repositoryDir(dir, unhold(gitDir));
+}
+
+/**
+ * The GIT_DIR an env: sets, held as a script is, or undefined when it sets none.
+ * @param {unknown} env
+ * @returns {string | undefined}
+ */
+const envGitDir = (env) => {
+  const value = env && typeof env === 'object' && !Array.isArray(env) ? /** @type {Record<string, unknown>} */ (env).GIT_DIR : undefined;
+  return value == null ? undefined : hold(String(value));
+};
+
+/**
+ * The GIT_DIR a command runs with: one set before it, none after env -i or env -u GIT_DIR, else its shell's
+ * (step.gitDir), which through sudo is one this check cannot tell.
+ * @param {{ gitDir?: string | null, reset: boolean }} run
+ * @param {Step} step
+ * @returns {string | undefined}
+ */
+const commandGitDir = (run, step) => {
+  if (run.gitDir !== undefined) return run.gitDir ?? undefined;
+  return run.reset && step.gitDir !== undefined ? '$GIT_DIR' : step.gitDir;
+};
 
 /**
  * Checks a script's commands in order through its branch points: a part that may not run leaves the job where it
  * began as well as where it ends, and each alternative of an if or a case starts from where the first one did.
- * @param {(string[] | Branch)[]} items
+ * @param {(string[] | Branch | Mark)[]} items
  * @param {Step} step
  * @param {number} depth
  */
@@ -1209,9 +1782,16 @@ function runCommands(items, step, depth) {
   const { state } = step;
   /** @type {{ start: State, end: State | null }[]} */
   const parts = [];
+  /** @type {(string | null)[]} the directories each shell of its own began in */
+  const dirs = [];
   for (const item of items) {
     if (Array.isArray(item)) {
       checkCommand(item, step, depth);
+    } else if ('define' in item) {
+      step.defined.add(item.define);
+    } else if ('scope' in item) {
+      if (item.scope === 'open') dirs.push(state.cwd);
+      else state.cwd = item.scope === 'close' && dirs.length > 0 ? /** @type {string | null} */ (dirs.pop()) : null;
     } else if (item.branch === 'open') {
       parts.push({ start: copyState(state), end: null });
     } else if (parts.length > 0) {
@@ -1237,18 +1817,46 @@ function runCommands(items, step, depth) {
  */
 function checkCommand(words, step, depth) {
   const run = invoked(words);
-  if (!run || depth > 4) return;
+  if (!run) return;
+  const { state } = step;
   const { name, args } = run;
+  // A call of a function the script defined, a script it sources and a change of directory past what this check
+  // reads can leave the shell in any directory.
+  if (step.defined.has(name) || name === 'source' || name === '.') state.cwd = null;
+  if (depth > 4) {
+    if (['eval', 'cd', 'pushd', 'popd'].includes(name)) state.cwd = null;
+    return;
+  }
+  // env -C and sudo -D run the command in a directory of their own.
+  const start = run.dirs.reduce((/** @type {string | null} */ at, dir) => within(at, unhold(dir)), state.cwd);
   if (SHELLS.has(name)) {
-    // -c runs the first operand, after every option and its value (bash -co pipefail 'git push ...').
+    // -c runs the first operand, after every option and its value (bash -co pipefail 'git push ...'), in a shell of
+    // its own.
     const { options, operands } = shellArgs(args);
-    if (options.some(isCommandOption) && operands.length > 0) runCommands(shellCommands(operands[0]), step, depth + 1);
+    if (options.some(isCommandOption) && operands.length > 0) {
+      // Its commands run with its directory and its GIT_DIR.
+      const { cwd } = state;
+      const { gitDir } = step;
+      state.cwd = start;
+      step.gitDir = commandGitDir(run, step);
+      runCommands(shellCommands(operands[0]), step, depth + 1);
+      state.cwd = cwd;
+      step.gitDir = gitDir;
+    }
   } else if (name === 'eval') {
     runCommands(shellCommands(args.join(' ')), step, depth + 1);
+  } else if (name === 'cd' || name === 'pushd') {
+    state.cwd = changeDirectory(state.cwd, args.map(unhold));
+  } else if (name === 'popd') {
+    state.cwd = null;
   } else if (name === 'git') {
     let k = 0;
     /** @type {{ pushDefault?: string, pushRefspecs: string[] }} */
     const given = { pushRefspecs: [] };
+    // git -C <path> runs as if started there, each from where the one before it left (-C '' stays); --git-dir, or
+    // the GIT_DIR it runs with, names the repository from the directory every -C leaves, whatever their order.
+    let at = start;
+    let gitDir = commandGitDir(run, step);
     while (k < args.length && args[k].startsWith('-')) {
       if (args[k] === '-c' && k + 1 < args.length) {
         const pair = args[k + 1];
@@ -1257,12 +1865,19 @@ function checkCommand(words, step, depth) {
         const value = eq < 0 ? '' : pair.slice(eq + 1);
         if (setting === 'default') given.pushDefault = value.toLowerCase();
         else if (setting === 'refspec' && value !== '') given.pushRefspecs.push(value);
+      } else if (args[k] === '-C' && k + 1 < args.length) {
+        at = within(at, unhold(args[k + 1]));
+      } else if (args[k] === '--git-dir' || args[k].startsWith('--git-dir=')) {
+        gitDir = args[k] === '--git-dir' ? args[k + 1] ?? '' : args[k].slice('--git-dir='.length);
       }
       k += GIT_VALUED.has(args[k]) ? 2 : 1;
     }
-    if (args[k] === 'push') checkPush(args.slice(k + 1), step, given);
-    else if (args[k] === 'checkout' || args[k] === 'switch') checkout(args[k], args.slice(k + 1), step);
-    else if (args[k] === 'config') gitConfig(args.slice(k + 1), step.state);
+    if (gitDir !== undefined) at = repositoryDir(at, unhold(gitDir));
+    const sub = args[k];
+    const rest = args.slice(k + 1);
+    if (sub === 'push') inCheckoutAt(step, at, (s) => checkPush(rest, s, given));
+    else if (sub === 'checkout' || sub === 'switch') inCheckoutAt(step, at, (s) => checkout(sub, rest, s));
+    else if (sub === 'config') inCheckoutAt(step, at, (s) => gitConfig(rest, s.state));
   } else if (step.state.run) {
     const dir = join(step.ctx.root, step.dir);
     if (runsSemanticRelease(run, dir, step.ctx, 0)) {
@@ -1296,7 +1911,7 @@ function releaseAtLeast(uses, major, minor) {
  */
 function checkAction(uses, inputs, step) {
   const { state, ctx, report } = step;
-  const action = uses.trim().toLowerCase().split('@')[0].split('/').slice(0, 2).join('/');
+  const action = actionName(uses);
   const given = inputs && typeof inputs === 'object' ? /** @type {Record<string, unknown>} */ (inputs) : {};
   /** @param {string} key */
   const input = (key) => (given[key] == null ? '' : String(given[key]).trim());
@@ -1324,9 +1939,40 @@ function checkAction(uses, inputs, step) {
     return ctx.repository !== '' && value.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '').toLowerCase() === ctx.repository.toLowerCase();
   };
   if (action === 'actions/checkout') {
+    // With no ref it checks out the run's own commit, or another repository's default branch.
     const ref = input('ref');
-    const kind = ref === '' ? 'run' : classify(ref, ctx);
-    moveHead(state, kind === 'protected' || (kind !== 'other' && state.run));
+    const kind = ref === '' ? (ownRepository('repository') ? 'run' : 'protected') : classify(ref, ctx);
+    const head = kind === 'protected' || (kind !== 'other' && state.run);
+    const path = input('path') === '' ? '.' : workspaceDir(input('path'));
+    const named = input('repository');
+    const repo = ownRepository('repository') ? '' : /[$`]/.test(named) ? null : named.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '').toLowerCase();
+    /**
+     * The checkout a step of actions/checkout leaves where one was: another repository's starts again (checkout
+     * deletes a directory whose fetch URL differs), and one this check cannot tell may do either.
+     * @param {Checkout} was
+     * @param {string | null | undefined} before the repository there, undefined for none
+     */
+    const checkedOut = (was, before) => {
+      const kept = { ...copyCheckout(was), prev: [...was.prev, was.head], head };
+      const fresh = { head, prev: [], pushDefault: '', pushRefspecs: [] };
+      if (before === undefined || (before === repo && repo !== null)) return kept;
+      return before !== null && repo !== null ? fresh : mergeCheckouts(kept, fresh, state, state);
+    };
+    if (path !== null) {
+      const before = Object.hasOwn(state.repos, path) ? state.repos[path] : undefined;
+      if (path === '.') Object.assign(state, checkedOut(state, before));
+      else state.trees[path] = state.trees[path] ? checkedOut(state.trees[path], before) : { head, prev: [], pushDefault: '', pushRefspecs: [] };
+      state.repos[path] = repo;
+    } else {
+      // A path this check cannot tell may be the root's, or another checkout's.
+      for (const key of ['.', ...Object.keys(state.trees)]) {
+        const was = key === '.' ? copyCheckout(state) : state.trees[key];
+        const moved = mergeCheckouts(was, checkedOut(was, Object.hasOwn(state.repos, key) ? state.repos[key] : undefined), state, state);
+        if (key === '.') Object.assign(state, moved);
+        else state.trees[key] = moved;
+        state.repos[key] = null;
+      }
+    }
   } else if (action === 'peaceiris/actions-gh-pages') {
     if (ownRepository('external_repository')) destination(input('publish_branch') || 'gh-pages', 'peaceiris/actions-gh-pages publishes to');
   } else if (action === 'jamesives/github-pages-deploy-action') {
@@ -1386,12 +2032,19 @@ function checkSteps(file, steps, path, state, ctx, findings, depth = 0) {
       ctx,
       dir: s['working-directory'] == null ? state.dir : String(s['working-directory']),
       report: (message) => findings.push({ file, path: at, line: 0, message: `${label}: ${message}`, called: depth > 0 }),
+      defined: new Set(),
+      gitDir: envGitDir(s.env) ?? state.gitDir,
     };
     // A step whose condition may not hold leaves the job where it was as well as where the step leaves it.
     const before = runs === 'maybe' ? copyState(state) : null;
-    if (typeof s.uses === 'string' && s.uses.trim().startsWith('./')) localAction(s.uses.trim(), step, findings, depth);
-    else if (typeof s.uses === 'string') checkAction(s.uses, s.with, step);
-    if (s.run != null) runCommands(shellCommands(hold(String(s.run))), step, 0);
+    const uses = typeof s.uses === 'string' ? s.uses.trim() : '';
+    if (uses.startsWith('./')) localAction(uses, s.with, step, findings, depth);
+    else if (uses !== '') inCheckoutAt(step, actionDirectory(uses, s.with, step.gitDir), (inside) => checkAction(uses, s.with, inside));
+    if (s.run != null) {
+      // Its script starts in its working directory, and each git command runs in the checkout it is in then.
+      state.cwd = workspaceDir(step.dir);
+      runCommands(shellCommands(hold(String(s.run))), step, 0);
+    }
     if (before) Object.assign(state, mergeStates(before, state));
   });
 }
@@ -1410,16 +2063,113 @@ function stepRuns(condition) {
   return text === 'false' ? 'never' : 'maybe';
 }
 
+/** inputs.<name> or inputs['<name>'] in an expression, and not the end of a longer name (github.event.inputs.x). */
+const INPUT = /(?<![\w.-])inputs(?:\.([A-Za-z_][\w-]*)|\[\s*'([^']*)'\s*\])/g;
+
+/**
+ * A composite action's inputs as its steps read them, by name whatever its case: what the calling step's with:
+ * gives, else the input's default.
+ * @param {unknown} declared the action's inputs
+ * @param {unknown} given the calling step's with:
+ * @returns {Map<string, string>}
+ */
+function actionInputs(declared, given) {
+  /** @type {Map<string, string>} */
+  const values = new Map();
+  if (declared && typeof declared === 'object') {
+    for (const [name, spec] of Object.entries(declared)) {
+      const value = spec && typeof spec === 'object' ? /** @type {Record<string, unknown>} */ (spec).default : undefined;
+      if (value != null) values.set(name.toLowerCase(), String(value));
+    }
+  }
+  if (given && typeof given === 'object') for (const [name, value] of Object.entries(given)) if (value != null) values.set(name.toLowerCase(), String(value));
+  return values;
+}
+
+/**
+ * One expression of a composite action with its inputs in place, as GitHub puts them before a step runs: an
+ * expression that is one input becomes the input's text (which may hold the caller's own expressions), and an input
+ * inside a longer expression a string literal, the caller's expression in parentheses, or a format() of a value that
+ * mixes text and expressions. An input with no value and no default leaves it as it is.
+ * @param {string} whole the expression as written
+ * @param {string} inner its text inside ${{ }}
+ * @param {Map<string, string>} inputs
+ */
+function inputExpression(whole, inner, inputs) {
+  const only = new RegExp(`^${INPUT.source}$`).exec(inner);
+  if (only) return inputs.get((only[1] ?? only[2]).toLowerCase()) ?? whole;
+  const text = inner.replace(INPUT, (ref, name, quoted) => {
+    const value = inputs.get(String(name ?? quoted).toLowerCase());
+    if (value === undefined) return ref;
+    const one = /^\$\{\{([\s\S]*)\}\}$/.exec(value.trim());
+    if (one && !one[1].includes('}}')) return `(${one[1].trim()})`;
+    return value.includes('${{') ? formatOf(value) : `'${value.replaceAll("'", "''")}'`;
+  });
+  return text === inner ? whole : `\${{ ${text} }}`;
+}
+
+/**
+ * A value that mixes text and expressions as one expression, as GitHub reads it: refs/heads/${{ github.ref_name }}
+ * is format('refs/heads/{0}', (github.ref_name)).
+ * @param {string} value
+ */
+function formatOf(value) {
+  /** @type {string[]} */
+  const args = [];
+  let template = '';
+  let last = 0;
+  const literal = (/** @type {string} */ text) => text.replace(/[{}]/g, (brace) => brace + brace);
+  for (const m of value.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+    template += `${literal(value.slice(last, m.index))}{${args.length}}`;
+    args.push(`(${m[1].trim()})`);
+    last = (m.index ?? 0) + m[0].length;
+  }
+  template += literal(value.slice(last));
+  return `format('${template.replaceAll("'", "''")}'${args.map((a) => `, ${a}`).join('')})`;
+}
+
+/**
+ * A composite action's steps with its inputs in place in every string they hold.
+ * @param {unknown} value
+ * @param {Map<string, string>} inputs
+ * @returns {unknown}
+ */
+function withInputs(value, inputs) {
+  if (typeof value === 'string') return value.replace(EXPRESSION, (whole, inner) => inputExpression(whole, String(inner).trim(), inputs));
+  if (Array.isArray(value)) return value.map((item) => withInputs(item, inputs));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, withInputs(item, inputs)]));
+  return value;
+}
+
+/**
+ * A composite action's steps with its inputs in place, each step's if: left as written: an input is a string there,
+ * and a string other than '' is true in a condition ('false' among them), so an input never makes a step read as one
+ * that does not run, and the step is read as one that may.
+ * @param {unknown} steps
+ * @param {Map<string, string>} inputs
+ * @returns {unknown}
+ */
+function stepsWithInputs(steps, inputs) {
+  if (!Array.isArray(steps)) return withInputs(steps, inputs);
+  return steps.map((s) => {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) return withInputs(s, inputs);
+    const out = /** @type {Record<string, unknown>} */ (withInputs(s, inputs));
+    if ('if' in s) out.if = /** @type {Record<string, unknown>} */ (s).if;
+    return out;
+  });
+}
+
 /**
  * Follows a local composite action (uses: ./<path>, from the repository's root) in the job that calls it: its steps
- * run there, on the job's checked-out branch, and leave the job on the branch they check out. An action that calls
- * itself is followed four calls deep.
+ * run there, on the job's checked-out branch, with the inputs the calling step gives, and leave the job on the
+ * branch they check out. An action that calls itself is followed four calls deep.
  * @param {string} uses
+ * @param {unknown} inputs the calling step's with:
  * @param {Step} step
  * @param {Found[]} findings
  * @param {number} depth
  */
-function localAction(uses, step, findings, depth) {
+function localAction(uses, inputs, step, findings, depth) {
   const { state, ctx } = step;
   if (depth >= 4) return;
   const dir = join(ctx.root, uses.slice(2));
@@ -1429,11 +2179,13 @@ function localAction(uses, step, findings, depth) {
   const d = doc && typeof doc === 'object' && !Array.isArray(doc) ? /** @type {Record<string, unknown>} */ (doc) : null;
   const runs = d && d.runs && typeof d.runs === 'object' ? /** @type {Record<string, unknown>} */ (d.runs) : null;
   if (!runs || runs.using !== 'composite') return;
-  // Its run steps are read from the repository's root, as its own reading reads them.
-  const jobDir = state.dir;
+  // Its run steps are read from the repository's root, as its own reading reads them, with the calling step's GIT_DIR.
+  const { dir: jobDir, gitDir: jobGitDir } = state;
   state.dir = '.';
-  checkSteps(file, runs.steps, '.runs', state, ctx, findings, depth + 1);
+  state.gitDir = step.gitDir;
+  checkSteps(file, stepsWithInputs(runs.steps, actionInputs(d ? d.inputs : undefined, inputs)), '.runs', state, ctx, findings, depth + 1);
   state.dir = jobDir;
+  state.gitDir = jobGitDir;
 }
 
 /** @param {unknown} defaults */
@@ -1455,8 +2207,9 @@ function checkDocument(file, doc, ctx, findings) {
   const d = /** @type {Record<string, unknown>} */ (doc);
   const runs = d.runs && typeof d.runs === 'object' ? /** @type {Record<string, unknown>} */ (d.runs) : null;
   if (runs && runs.using === 'composite') {
-    // A composite action runs in the job that calls it, which may be on the default branch.
-    checkSteps(file, runs.steps, '.runs', { run: true, head: true, prev: [], pushDefault: '', pushRefspecs: [], pullRequestOnly: false, dir: '.' }, ctx, findings);
+    // A composite action runs in the job that calls it, which may be on the default branch, and with no input given
+    // it takes its inputs' defaults.
+    checkSteps(file, stepsWithInputs(runs.steps, actionInputs(d.inputs, {})), '.runs', startState(true, false, '.'), ctx, findings);
     return;
   }
   if (!d.jobs || typeof d.jobs !== 'object') return;
@@ -1471,7 +2224,8 @@ function checkDocument(file, doc, ctx, findings) {
     if (!job || typeof job !== 'object') continue;
     const j = /** @type {Record<string, unknown>} */ (job);
     const dir = workingDirectory(j.defaults) || workingDirectory(d.defaults) || '.';
-    checkSteps(file, j.steps, `.jobs[${JSON.stringify(id)}]`, { run, head: run, prev: [], pushDefault: '', pushRefspecs: [], pullRequestOnly, dir }, ctx, findings);
+    const gitDir = envGitDir(j.env) ?? envGitDir(d.env);
+    checkSteps(file, j.steps, `.jobs[${JSON.stringify(id)}]`, startState(run, pullRequestOnly, dir, gitDir), ctx, findings);
   }
 }
 

@@ -182,11 +182,6 @@ type Raced<T> =
   | { timedOut: false; value: T }
   | { timedOut: false; error: unknown };
 
-/**
- * Races `work` against a deadline and an abort signal; with neither, waits for
- * it. A signal that has already aborted ends the race at once. A late
- * settlement is swallowed.
- */
 /** The members an abort signal is read and listened to by, whatever realm or polyfill built it. */
 type AbortSignalLike = Pick<AbortSignal, 'aborted' | 'reason'> & {
   addEventListener(type: 'abort', listener: () => void): void;
@@ -213,6 +208,11 @@ function linkAbort(signal: AbortSignalLike | undefined, stop: AbortController): 
   return () => signal.removeEventListener('abort', relay);
 }
 
+/**
+ * Races `work` against a deadline and an abort signal; with neither, waits for
+ * it. A signal that has already aborted ends the race at once. A late
+ * settlement is swallowed.
+ */
 async function withDeadline<T>(work: Promise<T>, ms: number | undefined, signal?: AbortSignal): Promise<Raced<T>> {
   const settled = work.then(
     (value): Raced<T> => ({ timedOut: false, value }),

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEEPGRAM_PRE_RECORDED_PRICING,
+  DEEPGRAM_STREAMING_ADDONS,
   DEEPGRAM_STREAMING_PRICING,
   deepgramPreRecordedPricing,
   deepgramStreamingPricing,
@@ -41,5 +42,32 @@ describe('dated transcription prices', () => {
     expect(Reflect.set(DEEPGRAM_PRE_RECORDED_PRICING, 'nova-3', 0)).toBe(false);
     expect(deepgramStreamingPricing('nova-3')).toBe(0.0077);
     expect(deepgramPreRecordedPricing('nova-3')).toBe(0.0043);
+  });
+});
+
+describe('optional streaming diarization price', () => {
+  it('adds only the Deepgram streaming add-on and preserves the ordinary call', () => {
+    expect(DEEPGRAM_STREAMING_ADDONS.diarization).toBe(0.0020);
+    expect(sttEntryPricePerMinute('deepgram:nova-3', { diarize: true })).toBeCloseTo(0.0097, 8);
+    expect(sttEntryPricePerMinute('deepgram:nova-3', { diarize: false })).toBe(0.0077);
+    expect(sttEntryPricePerMinute('deepgram:nova-3', {})).toBe(0.0077);
+    expect(sttEntryPricePerMinute('deepgram:nova-3')).toBe(0.0077);
+    expect(sttEntryPricePerMinute('openai:gpt-4o-mini-transcribe', { diarize: true })).toBe(0.003);
+    expect(deepgramPreRecordedPricing('nova-3')).toBe(0.0043);
+  });
+
+  it('leaves unknown rows unknown and rejects unsupported entry syntax', () => {
+    for (const entry of ['deepgram:nova-2', 'deepgram:constructor', 'openai:no-such-model', 'elevenlabs:scribe_v1']) {
+      expect(sttEntryPricePerMinute(entry, { diarize: true })).toBeUndefined();
+    }
+    expect(() => sttEntryPricePerMinute('device:moonshine-auto', { diarize: true })).toThrow(RangeError);
+  });
+
+  it('keeps the add-on frozen and converts the combined reference tariff to microdollars', () => {
+    expect(Object.isFrozen(DEEPGRAM_STREAMING_ADDONS)).toBe(true);
+    expect(Reflect.set(DEEPGRAM_STREAMING_ADDONS, 'diarization', 0)).toBe(false);
+    const rate = sttEntryPricePerMinute('deepgram:nova-3', { diarize: true });
+    if (rate === undefined) throw new Error('missing reference tariff');
+    expect(minutesMicro(60, toMicro(rate))).toBe(9_700);
   });
 });

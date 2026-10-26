@@ -40,7 +40,7 @@ flowchart LR
 
 | Part | Import | Runs in | Calls a model |
 |---|---|---|---|
-| `LexicalIndex`, `FuzzyIndex`, `lexicalTokens`, `snippetAround`, `chunkTurns` | `@framers/agentos/cognition/library/browser` | A browser or Node | No |
+| `LexicalIndex`, `FuzzyIndex`, `lexicalTokens`, `snippetAround`, `countWords`, `foldText`, `chunkTurns` | `@framers/agentos/cognition/library/browser` | A browser or Node | No |
 | Text pipeline and presets | `@framers/agentos/cognition/nlp` | Node: it loads `natural` through `node:module` | No |
 | `StatisticalUtilityAI` | The package root, `@framers/agentos/cognition/nlp`, `@framers/agentos/cognition/nlp/ai_utilities` | Node | No |
 | `LLMUtilityAI` | The package root, `@framers/agentos/cognition/nlp`, `@framers/agentos/cognition/nlp/ai_utilities` | Node | Yes: a provider's key or a local model server |

@@ -28,12 +28,18 @@ export {
   LIVEKIT_TRANSCRIPTION_TOPIC,
   TRANSCRIPTION_FAILED_ATTRIBUTE,
   TRANSCRIPTION_TIME_ATTRIBUTES,
+  TRANSCRIPTION_SPEAKER_ATTRIBUTE,
+  TRANSCRIPTION_RUN_OF_ATTRIBUTE,
+  readingOrder,
   TranscriptLedger,
   transcriptEventFromLiveKit,
   type LedgerEvent,
   type LedgerItem,
   type TranscriptLedgerOptions,
 } from './transcriptLedger.js';
+
+// A line's single speaker and a final split into its speakers' runs; transcriptSpeakers.ts imports types alone.
+export { lineSpeaker, splitFinalBySpeaker } from './transcriptSpeakers.js';
 
 // An input's level and the watch for an input that carries no sound; inputLevel.ts imports nothing.
 export { InputSilenceWatch, inputLevelDb, type InputSilenceWatchOptions } from './inputLevel.js';
@@ -125,3 +131,5 @@ export {
   isClientTranscriptMessage,
   transcriptEventFromClient,
 } from './clientTranscript.js';
+// The text input message's check: a user who types sends text in place of speech.
+export { isClientTextInputMessage, MAX_TEXT_INPUT_LENGTH } from './clientTextInput.js';

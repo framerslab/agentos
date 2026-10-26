@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { MemoryKeyValueStore } from '../KeyValueStore.js';
+import { MemoryKeyValueStore } from '../index.js';
 import { Outbox, type OutboxEntry } from '../Outbox.js';
 
 describe('Outbox', () => {
