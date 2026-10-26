@@ -803,6 +803,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
             ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
             ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
+            // The planning call's usage report counts into `usage` too.
+            ...(opts.__onUsageReport ? { onUsageReport: opts.__onUsageReport } : {}),
           },
           usage,
           budget ? { budget, providerId: resolved.providerId, what: 'stream_text.plan' } : undefined,
@@ -915,6 +917,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // earlier rounds consumed. The loop's own {totalTokens} sum is
             // left unused, or it would count twice.
             if (r.usage) {
+              opts.__onUsageReport?.();
               if (typeof r.usage.totalTokens === 'number') usage.totalTokens += r.usage.totalTokens;
               if (typeof r.usage.promptTokens === 'number') usage.promptTokens += r.usage.promptTokens;
               if (typeof r.usage.completionTokens === 'number') usage.completionTokens += r.usage.completionTokens;
@@ -1115,6 +1118,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             }
 
             if (chunk.isFinal && chunk.usage) {
+              // A report of zero tokens is a report: the caller that asked is told one came.
+              opts.__onUsageReport?.();
               addModelUsage(stepUsage, chunk.usage);
               usage.promptTokens += chunk.usage.promptTokens ?? 0;
               usage.completionTokens += chunk.usage.completionTokens ?? 0;
@@ -1574,6 +1579,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // earlier final chunks already reported is left out.
       const unreported = usageBeyond(usageOfError(err), stepUsage);
       if (unreported) {
+        opts.__onUsageReport?.();
         addTokenUsage(usage, unreported);
         // The spend budget is charged it too: the step's stream charged only
         // what its chunks reported.
