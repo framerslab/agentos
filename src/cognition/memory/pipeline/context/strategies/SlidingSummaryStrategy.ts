@@ -14,6 +14,8 @@ import type {
   InfiniteContextConfig,
   SummaryChainNode,
 } from '../../../core/types.js';
+import { compactionSplitIndex } from './compactionSplit.js';
+import { earlierSummaries, extractiveSummary, summaryRoom } from './extractiveSummary.js';
 
 /** ~4 chars per token. */
 function estimateTokens(text: string): number {
@@ -26,9 +28,13 @@ function generateId(): string {
 
 export class SlidingSummaryStrategy implements ICompactionStrategy {
   readonly name = 'sliding' as const;
-  private readonly llmInvoker: (prompt: string) => Promise<string>;
+  private readonly llmInvoker?: (prompt: string) => Promise<string>;
 
-  constructor(llmInvoker: (prompt: string) => Promise<string>) {
+  /**
+   * @param llmInvoker - Writes the summary. Without one, or when it fails or
+   *   answers nothing, the summary is the segment's first and last user messages.
+   */
+  constructor(llmInvoker?: (prompt: string) => Promise<string>) {
     this.llmInvoker = llmInvoker;
   }
 
@@ -37,14 +43,10 @@ export class SlidingSummaryStrategy implements ICompactionStrategy {
     config: InfiniteContextConfig,
   ): Promise<CompactionResult> {
     const startTime = Date.now();
-    const { messages, maxContextTokens } = input;
+    const { messages } = input;
 
-    // Determine how many messages to keep raw.
-    const preserveCount = Math.min(
-      config.preserveRecentTurns * 2, // turns → messages (user+assistant)
-      messages.length - 2, // must compact at least 2 messages
-    );
-    const splitIdx = messages.length - preserveCount;
+    // The newest turns stay as they are; see compactionSplitIndex.
+    const splitIdx = compactionSplitIndex(messages.length, config.preserveRecentTurns);
     if (splitIdx <= 0) {
       // Nothing to compact.
       return this.noopResult(messages, startTime);
@@ -83,20 +85,30 @@ export class SlidingSummaryStrategy implements ICompactionStrategy {
       'Summary:',
     ].join('\n');
 
-    let summary: string;
-    let entities: string[];
+    let summary: string | undefined;
     let droppedContent: string[] = [];
 
-    try {
-      const raw = await this.llmInvoker(prompt);
-      summary = raw.trim();
-      entities = this.extractEntities(summary);
-      droppedContent = this.detectDropped(toCompact, summary);
-    } catch {
-      // Fallback: take first and last messages as crude summary.
-      summary = this.fallbackSummary(toCompact);
-      entities = this.extractEntities(summary);
+    if (this.llmInvoker) {
+      try {
+        const written = (await this.llmInvoker(prompt)).trim();
+        if (written) {
+          summary = written;
+          droppedContent = this.detectDropped(toCompact, written);
+        }
+      } catch {
+        // The extractive summary below.
+      }
     }
+    // No summarizer, a failed call or an empty answer: the segment's first and
+    // last user messages stand for it, within the tokens it held less the
+    // summary message's header, after an earlier summary in it, carried forward
+    // as far as the window has room for it.
+    summary ??= this.fallbackSummary(
+      toCompact,
+      Math.max(25, inputTokens - 20),
+      summaryRoom(input, config, toKeep.reduce((s, m) => s + m.tokenEstimate, 0), 20),
+    );
+    const entities = this.extractEntities(summary);
 
     const outputTokens = estimateTokens(summary);
     const turnRange: [number, number] = [
@@ -214,19 +226,22 @@ export class SlidingSummaryStrategy implements ICompactionStrategy {
     return dropped.slice(0, 20); // cap
   }
 
-  /** Crude fallback when LLM is unavailable. */
-  private fallbackSummary(messages: ContextMessage[]): string {
+  /**
+   * Crude fallback when LLM is unavailable: the first and last user messages,
+   * within `maxTokens`, after a summary an earlier compaction left in the
+   * segment, carried forward as far as `roomTokens` leaves room for it.
+   */
+  private fallbackSummary(messages: ContextMessage[], maxTokens: number, roomTokens: number): string {
+    const earlier = earlierSummaries(messages);
     const userMsgs = messages.filter((m) => m.role === 'user');
-    if (userMsgs.length === 0) return 'Previous conversation context.';
-
-    // Take first and last user messages as anchors.
-    const first = userMsgs[0].content.slice(0, 200);
-    const last = userMsgs[userMsgs.length - 1].content.slice(0, 200);
-
-    if (userMsgs.length === 1) {
-      return `User discussed: ${first}`;
+    let anchors = '';
+    if (userMsgs.length > 0) {
+      // Take first and last user messages as anchors.
+      const first = userMsgs[0].content.slice(0, 200);
+      const last = userMsgs[userMsgs.length - 1].content.slice(0, 200);
+      anchors = userMsgs.length === 1 ? `User discussed: ${first}` : `Conversation started with: ${first}\n\nMost recently discussed: ${last}`;
     }
-    return `Conversation started with: ${first}\n\nMost recently discussed: ${last}`;
+    return extractiveSummary(earlier, anchors, maxTokens, roomTokens) || 'Previous conversation context.';
   }
 
   /** No-op result when nothing needs compaction. */

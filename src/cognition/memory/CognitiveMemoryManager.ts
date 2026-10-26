@@ -67,6 +67,7 @@ import {
 
 // Batch 3: Infinite Context
 import { ContextWindowManager } from './pipeline/context/ContextWindowManager.js';
+import { createLogger } from '../../core/logging/index.js';
 import type { ContextMessage, CompactionEntry } from './pipeline/context/types.js';
 import type { ContextWindowStats } from './pipeline/context/ContextWindowManager.js';
 import {
@@ -451,43 +452,54 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
     // --- Batch 3: Infinite Context Window ---
     if (config.infiniteContext?.enabled && config.maxContextTokens) {
-      const llmInvoker = config.infiniteContext.llmInvoker
-        ?? config.reflector?.llmInvoker
+      // The summarizer: infiniteContext's own single-prompt invoker, else a
+      // (system, user) invoker of the reflector, the observer or feature
+      // detection. Without one, compaction writes extractive summaries from the
+      // conversation itself, so the window is managed offline too.
+      const twoPartInvoker = config.reflector?.llmInvoker
         ?? config.observer?.llmInvoker
         ?? config.featureDetectionLlmInvoker;
-
-      if (llmInvoker) {
-        // Wrap the (system, user) invoker into a single-prompt invoker.
-        const singlePromptInvoker = (prompt: string) =>
-          llmInvoker('You are a conversation summarizer.', prompt);
-
-        this.contextWindow = new ContextWindowManager({
-          maxContextTokens: config.maxContextTokens,
-          infiniteContext: config.infiniteContext,
-          llmInvoker: singlePromptInvoker,
-          observer: this.observer ?? undefined,
-          reflector: this.reflector ?? undefined,
-          onTracesCreated: async (traces) => {
-            for (const partial of traces) {
-              if (partial.content) {
-                const mood = config.moodProvider();
-                await this.encode(
-                  partial.content,
-                  mood,
-                  'neutral',
-                  {
-                    type: partial.type ?? 'semantic',
-                    scope: partial.scope ?? 'user',
-                    sourceType: 'reflection',
-                    tags: partial.tags,
-                    entities: partial.entities,
-                  },
-                );
-              }
-            }
-          },
-        });
+      const summarizer: ((prompt: string) => Promise<string>) | undefined =
+        config.infiniteContext.llmInvoker
+        ?? (twoPartInvoker
+          ? (prompt: string) => twoPartInvoker('You are a conversation summarizer.', prompt)
+          : undefined);
+      if (!summarizer) {
+        createLogger('CognitiveMemoryManager').info(
+          'Infinite context compacts with extractive summaries: no summarizer is configured',
+          { strategy: config.infiniteContext.strategy ?? 'sliding' },
+        );
       }
+
+      this.contextWindow = new ContextWindowManager({
+        maxContextTokens: config.maxContextTokens,
+        infiniteContext: config.infiniteContext,
+        llmInvoker: summarizer,
+        observer: this.observer ?? undefined,
+        reflector: this.reflector ?? undefined,
+        onTracesCreated: async (traces) => {
+          const encoded: string[] = [];
+          for (const partial of traces) {
+            if (partial.content) {
+              const mood = config.moodProvider();
+              const trace = await this.encode(
+                partial.content,
+                mood,
+                'neutral',
+                {
+                  type: partial.type ?? 'semantic',
+                  scope: partial.scope ?? 'user',
+                  sourceType: 'reflection',
+                  tags: partial.tags,
+                  entities: partial.entities,
+                },
+              );
+              encoded.push(trace.id);
+            }
+          }
+          return encoded;
+        },
+      });
     }
 
     // --- HyDE Retriever (auto-attached when any LLM invoker is available) ---

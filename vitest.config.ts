@@ -92,53 +92,30 @@ export default defineConfig({
         external: ['better-sqlite3', 'sharp'],
       },
     },
+    // `pnpm run test:coverage` (CI's "Test with coverage" step) turns this on.
     coverage: {
-      reporter: ['text', 'html', 'lcov', 'json-summary'],
+      provider: 'v8',
+      // text-summary prints the totals to the log; json-summary writes the totals and
+      // each file's figures to coverage/coverage-summary.json; lcovonly writes
+      // coverage/lcov.info, which CI uploads to Codecov. For the HTML report, add
+      // `--coverage.reporter=html`.
+      reporter: ['text-summary', 'json-summary', 'lcovonly'],
       reportsDirectory: 'coverage',
-      // Vitest 4 removed `all`; `include` keeps every source file in the
-      // report, covered or not, and `exclude` is applied within it.
+      // Every source file is in the report, tested or not. Vitest leaves the test
+      // files (test.include) out by itself; the helpers, fixtures and contract
+      // suites beside them in __tests__ are test code too. Declaration files hold
+      // no code.
       include: ['src/**/*.ts'],
-      exclude: [
-        'src/stubs/**',
-        'src/server/**',
-        'src/services/user_auth/**',
-        'src/extensions/builtin/**',
-        'src/core/memory_lifecycle/**',
-        'src/core/language/**',
-        'src/core/storage/**',
-        'src/core/ai_utilities/**',
-        'src/core/llm/routing/**',
-        'src/core/llm/streaming/**',
-        'src/core/llm/providers/implementations/**',
-        'src/core/llm/providers/AIModelProviderManager.ts',
-        'src/core/llm/providers/errors/**',
-        'src/core/agents/**',
-        'src/core/usage/**',
-        'src/core/workflows/storage/**',
-        'src/core/workflows/runtime/**',
-        'src/core/evaluation/LLMJudge.ts',
-        'src/core/sandbox/**',
-        'src/core/cognitive_substrate/**',
-        'src/extensions/RegistryLoader.ts',
-        'src/extensions/RegistryConfig.ts',
-        'src/rag/implementations/**',
-        'src/rag/RetrievalAugmentor.ts',
-        'src/rag/EmbeddingManager.ts',
-        'src/config/AgentOSConfig.ts',
-        'src/utils/uuid.ts',
-        'src/api/AgentOS.ts',
-        'src/types/**',
-        '**/*.d.ts',
-        '**/index.ts',
-        'scripts/**',
-        'drizzle.config.js',
-        'node_modules/**',
-      ],
+      exclude: ['**/__tests__/**', '**/*.d.ts'],
+      // Two points below the figures CI measured when these were last raised (run
+      // 39112738248: lines 80.65, statements 78.91, functions 81.72, branches
+      // 70.62 percent), so a change that takes more than that away fails the run.
+      // Raise them as coverage grows; never lower them.
       thresholds: {
-        statements: 65,
-        branches: 65,
-        functions: 69,
-        lines: 65,
+        lines: 78.65,
+        statements: 76.91,
+        functions: 79.72,
+        branches: 68.62,
       },
     },
   },
