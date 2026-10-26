@@ -169,6 +169,33 @@ describe('ContextWindowManager', () => {
     expect(entry).toMatchObject({ strategy: 'sliding', turnRange: [1, 8], droppedContent: [] });
   });
 
+  it.each(['sliding', 'hybrid'] as const)('carries the earlier summary into the next one with the %s strategy and no summarizer', async (strategy) => {
+    const window = manager({ strategy });
+    talk(window, 1, 10);
+    const [first] = await window.beforeTurn(0, 0);
+    talk(window, 11, 20);
+    const [second] = await window.beforeTurn(0, 0);
+
+    // The first summary stands for turns 1 to 8; the second, which replaces it in the window, still holds it.
+    expect(first.content).toContain('user 1 asks about item 1');
+    expect(second.content).toContain('user 1 asks about item 1');
+    expect(second.content).toContain('user 9 asks about item 9');
+  });
+
+  it('keeps the summary from the observation notes within the segment it replaces when the hybrid strategy has no summarizer', async () => {
+    // Ten long notes: joined whole, they would take more tokens than the turns they summarize.
+    const long = (n: number): string => JSON.stringify({ type: 'fact', content: sized(`note ${n}`, 2_000), importance: 0.5 });
+    const observer = new MemoryObserver({}, { llmInvoker: async () => Array.from({ length: 10 }, (_, n) => long(n)).join('\n') });
+    const window = manager({ strategy: 'hybrid' }, { observer });
+    talk(window, 1, 10);
+
+    const [summary] = await window.beforeTurn(0, 0);
+    const [entry] = window.getCompactionHistory();
+    expect(entry.outputTokens).toBeLessThanOrEqual(entry.inputTokens);
+    expect(summary.tokenEstimate).toBeLessThanOrEqual(entry.inputTokens);
+    expect(summary.content).toContain('[fact] note');
+  });
+
   it('never summarizes the newest message, and logs no compaction when nothing older is left', async () => {
     const summarize = vi.fn(async () => SUMMARY);
     const window = new ContextWindowManager({

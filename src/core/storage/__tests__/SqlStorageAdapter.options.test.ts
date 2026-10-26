@@ -72,6 +72,23 @@ describe('SqlStorageAdapter options', () => {
     }
   });
 
+  it('stays uninitialized when it cannot delete the expired messages as it opens, so no call runs on that failure', async () => {
+    // With the schema left to the host and not yet made, deleting the expired messages fails.
+    const storage = new SqlStorageAdapter({
+      filePath: ':memory:',
+      priority: ['sqljs'],
+      quiet: true,
+      messageRetentionDays: 7,
+      enableAutoMigration: false,
+    });
+    try {
+      await expect(storage.initialize()).rejects.toThrow();
+      await expect(storage.getMessage('m')).rejects.toThrow(/not initialized/);
+    } finally {
+      await storage.close();
+    }
+  });
+
   it('keeps every message when messageRetentionDays is 0, the default', async () => {
     const storage = new SqlStorageAdapter({ filePath: ':memory:', priority: ['sqljs'], quiet: true });
     await storage.initialize();
