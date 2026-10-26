@@ -210,11 +210,11 @@ type AddressCheck = (addresses: readonly string[]) => Promise<string | undefined
 function addressCheck(resolve: LookupFunction, allowAddress?: (address: string) => boolean): AddressCheck {
   if (allowAddress) return async (addresses) => addresses.find((address) => !allowAddress(address));
   return async (addresses) => {
-    const overIPv6 = addresses.filter((address) => isIPv6(address));
-    const prefixes = overIPv6.length === 0 ? [] : await nat64Prefixes(resolve);
     const refused = addresses.find((address) => !isPublicNetworkAddress(address));
     if (refused !== undefined) return refused;
+    const overIPv6 = addresses.filter((address) => isIPv6(address));
     if (overIPv6.length === 0) return undefined;
+    const prefixes = await nat64Prefixes(resolve);
     if (prefixes === undefined) {
       throw new Error("the resolver did not say whether the network has a NAT64 prefix, so an IPv6 address cannot be cleared");
     }
