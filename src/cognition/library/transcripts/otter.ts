@@ -7,7 +7,8 @@
  * alone without them (`0:01`). An export made with neither holds its paragraphs alone. Otter's export of a voice note
  * writes each header as the name, one space and the time, with nothing after it (`Unknown 0:00`). A Word file laid out
  * the same way, each header and paragraph a paragraph of its own, reads by the same headers. Otter writes a blank line
- * after each turn's words, and where a line of words can take a header's form, the blank lines tell the two apart.
+ * after each turn's words, and where a line of words can take a header's form, the blank lines tell the two apart, and
+ * in a voice note's export so does the label each header gives.
  * @module agentos/cognition/library/transcripts/otter
  */
 
@@ -136,21 +137,23 @@ interface Layout {
    */
   opens: boolean;
   /**
-   * Whether a line of words can take the header's form, as it can a time with no spaces after it (`2:30`) and a name,
-   * one space and a time (`We meet at 10:30`). Such a header heads a turn only where Otter writes one. In a text laid
-   * out in blocks, as {@link inBlocks} reads it, that is the start of a block, with the header's words on the line
-   * straight after it. In a text that is not, it is any line but the one straight after a header, which is that
-   * header's words whatever it holds, since Otter writes a header's words on the line after it. A header of the other
-   * layouts heads a turn wherever it stands, straight after a header too: a name, two spaces and a time, and a time or
-   * a name alone with the two spaces after it, since Otter ends a paragraph's line with one space at most.
+   * What tells the header from a line of words that takes its form, for a layout whose header a line of words can
+   * take, as it can a time with no spaces after it (`2:30`) and a name, one space and a time (`We meet at 10:30`). Such
+   * a header heads a turn only where Otter writes one, as {@link turnsOf} reads it, and never on the line straight
+   * after a header, which is that header's words whatever it holds, since Otter writes a header's words on the line
+   * after it. `place`: where the line stands, alone, as for a time, which gives no label. `label`: where the line
+   * stands, or the label it gives, as for a voice note's header. `null` for a layout whose header no line of words
+   * takes, as none takes a name, two spaces and a time, or a time or a name alone with the two spaces after it, since
+   * Otter ends a paragraph's line with one space at most: such a header heads a turn wherever it stands, straight after
+   * a header too.
    */
-  loose: boolean;
+  loose: 'place' | 'label' | null;
   /** Whether the header heads turns only in a text that closes with Otter's closing line. */
   closed: boolean;
 }
 
 /** The header of an export made with the names and the times. */
-const NAMES_AND_TIMES: Layout = { headerOf: otterHeader, opens: false, loose: false, closed: false };
+const NAMES_AND_TIMES: Layout = { headerOf: otterHeader, opens: false, loose: null, closed: false };
 
 /**
  * The layouts of a header, one for each way an export is made but with neither the names nor the times, in the order
@@ -159,10 +162,10 @@ const NAMES_AND_TIMES: Layout = { headerOf: otterHeader, opens: false, loose: fa
  */
 const LAYOUTS: readonly Layout[] = [
   NAMES_AND_TIMES,
-  { headerOf: voiceNoteHeader, opens: true, loose: true, closed: true },
-  { headerOf: timeHeader, opens: true, loose: false, closed: false },
-  { headerOf: bareTimeHeader, opens: true, loose: true, closed: false },
-  { headerOf: nameHeader, opens: true, loose: false, closed: false },
+  { headerOf: voiceNoteHeader, opens: true, loose: 'label', closed: true },
+  { headerOf: timeHeader, opens: true, loose: null, closed: false },
+  { headerOf: bareTimeHeader, opens: true, loose: 'place', closed: false },
+  { headerOf: nameHeader, opens: true, loose: null, closed: false },
 ];
 
 /**
@@ -183,17 +186,29 @@ function holdsWords(line: string | undefined): boolean {
 }
 
 /**
- * Whether a text is laid out in blocks, as Otter's text is, for a layout whose header a line of words can take. Otter
- * writes a header's words on the line straight after it and a blank line after each turn's words, the last turn's
- * before the closing line, so each of its headers after the first stands straight after a blank line. Weighed are the
- * lines of the header's form after the text's first line that holds words, each with words on the line straight after
- * it: the text is laid out in blocks when as many of them stand straight after a blank line as straight after a line
- * that holds words, or more, and one does, a blank line before the closing line counting as one more that does. A
- * Word file with no empty paragraphs holds no blank line and is not, and neither is one in which fewer of those lines
- * stand after an empty paragraph than after a paragraph of words. A text in which no blank line parts two lines of
- * words is one block when it holds the blank line Otter writes before the closing line, however many of its later
- * lines take the header's form, as Otter's export of one turn whose words run over several lines does: those lines
- * stand after lines of words in a block and a Word file alike, and only that blank line tells the two apart.
+ * Whether the line at a place starts a block, where Otter writes each header: the text's first line or one straight
+ * after a blank line, with words on the line straight after it.
+ *
+ * @param lines - The text's lines.
+ * @param at - The line's place.
+ */
+function startsBlock(lines: readonly string[], at: number): boolean {
+  return !holdsWords(lines[at - 1]) && holdsWords(lines[at + 1]);
+}
+
+/**
+ * Whether a text is laid out in blocks, as Otter's text is, for a layout whose header a line of words can take and only
+ * its place tells from one, as a time alone gives no label. Otter writes a header's words on the line straight after it
+ * and a blank line after each turn's words, the last turn's before the closing line, so each of its headers after the
+ * first stands straight after a blank line. Weighed are the lines of the header's form after the text's first line that
+ * holds words, each with words on the line straight after it: the text is laid out in blocks when as many of them stand
+ * straight after a blank line as straight after a line that holds words, or more, and one does, a blank line before the
+ * closing line counting as one more that does. A Word file with no empty paragraphs holds no blank line and is not, and
+ * neither is one in which fewer of those lines stand after an empty paragraph than after a paragraph of words. A text
+ * in which no blank line parts two lines of words is one block when it holds the blank line Otter writes before the
+ * closing line, however many of its later lines take the header's form, as Otter's export of one turn whose words run
+ * over several lines does: those lines stand after lines of words in a block and a Word file alike, and only that blank
+ * line tells the two apart.
  *
  * @param lines - The text's lines, as {@link bodyOf} keeps them, so a blank line at their end stood before the closing
  * line.
@@ -219,14 +234,41 @@ function inBlocks(lines: readonly string[], layout: Layout): boolean {
 }
 
 /**
+ * The labels the headers of one layout give where they start a block, as {@link startsBlock} reads it: the first
+ * header's, and each other header's that stands after a blank line. Otter gives every header of a voice note the same
+ * label. Each public export of one found gives `Unknown` on every header, a talk between two people's too, as the
+ * exports at https://github.com/IceMan56/MET/tree/672354c9d21e730db6c8c632895138a82156e2bf and
+ * https://github.com/Freda32/TalkMemo/tree/d76a57c792eaa7ca5f9df34aef75dd34998f14d6 do. So a voice note's header whose
+ * blank line before it is missing gives a label these give, and a line of words that ends in a time gives one none of
+ * them gives, as `We meet at 10:30` does. A speaker Otter tells apart but cannot name is labelled by a number,
+ * `Speaker 1` or `Speaker 2` (https://help.otter.ai/hc/en-us/articles/21665587209367-Speaker-Identification-Overview),
+ * and the header of each such speaker that starts a block gives its label here.
+ *
+ * @param lines - The text's lines.
+ * @param layout - The layout whose headers are read.
+ */
+function blockLabels(lines: readonly string[], layout: Layout): Set<string> {
+  const labels = new Set<string>();
+  for (let at = 0; at < lines.length; at += 1) {
+    const label = startsBlock(lines, at) ? layout.headerOf(lines[at])?.label : null;
+    if (label !== undefined && label !== null) labels.add(label);
+  }
+  return labels;
+}
+
+/**
  * A text's turns by the headers of one layout: each header with its words, the lines after it up to the next header;
  * the lines before the first header are no turn's. A header of a layout whose header a line of words can take heads a
- * turn only where Otter writes one. In a text laid out in blocks, as {@link inBlocks} reads it, that is the start of a
- * block, the text's first line or one straight after a blank line, with words on the line straight after it, so a
- * later line of a turn's words heads no turn whatever it holds, and a line of the header's form with a blank line
- * after it is a paragraph. In a text that is not, as a Word file with no empty paragraphs is not, nothing but its
- * place tells such a line from a header: the line straight after a header is that header's words, and any other line
- * of the header's form heads a turn. A header of the other layouts heads a turn wherever it stands.
+ * turn only where Otter writes one, and the line straight after a header is that header's words whatever it holds.
+ * Otter writes each header where a block starts, as {@link startsBlock} reads it. A time alone gives no label, so its
+ * place alone tells it: in a text laid out in blocks, as {@link inBlocks} reads it, it heads a turn only where a block
+ * starts, so a later line of a turn's words is words whatever it holds and a line of its form with a blank line after
+ * it is a paragraph; in a text that is not, as a Word file with no empty paragraphs is not, nothing else tells such a
+ * line from a header, and any line of its form but the one straight after a header heads a turn. A voice note's header
+ * heads a turn where a block starts, and elsewhere, with words on the line straight after it, when it gives a label a
+ * header that starts a block gives, as {@link blockLabels} reads them: a header whose blank line before it is missing
+ * heads its turn, and a later line of a turn that ends in a time is words, whether the blank lines between the turns
+ * are there or not. A header of the other layouts heads a turn wherever it stands.
  *
  * @param lines - The text's lines.
  * @param layout - The layout whose headers are read.
@@ -234,16 +276,23 @@ function inBlocks(lines: readonly string[], layout: Layout): boolean {
  * `-1` for none.
  */
 function turnsOf(lines: readonly string[], layout: Layout, cut = -1): HeadedTurn[] {
-  const blocks = layout.loose && inBlocks(lines, layout);
+  const labels = layout.loose === 'label' ? blockLabels(lines, layout) : null;
+  const blocks = layout.loose === 'place' && inBlocks(lines, layout);
   const turns: HeadedTurn[] = [];
   let afterHeader = false;
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at];
+    const found: Header | null = at === cut ? null : layout.headerOf(line);
     // Typed: the compiler reads `afterHeader` here from `header` below, which reads `placed`.
-    const placed: boolean = blocks
-      ? !holdsWords(lines[at - 1]) && holdsWords(lines[at + 1])
-      : !(layout.loose && afterHeader);
-    const header: Header | null = at === cut || !placed ? null : layout.headerOf(line);
+    const placed: boolean =
+      layout.loose === null ||
+      (found !== null &&
+        !afterHeader &&
+        (labels === null
+          ? !blocks || startsBlock(lines, at)
+          : holdsWords(lines[at + 1]) &&
+            (startsBlock(lines, at) || (found.label !== null && labels.has(found.label)))));
+    const header: Header | null = placed ? found : null;
     afterHeader = header !== null;
     if (header !== null) turns.push({ ...header, words: [] });
     else if (turns.length > 0) turns[turns.length - 1].words.push(line);
@@ -264,7 +313,7 @@ function turnsOf(lines: readonly string[], layout: Layout, cut = -1): HeadedTurn
 function opensWith(lines: readonly string[], layout: Layout): boolean {
   const first = lines.findIndex((line) => line.trim() !== '');
   if (first === -1 || layout.headerOf(lines[first]) === null) return false;
-  return !layout.loose || (first + 1 < lines.length && lines[first + 1].trim() !== '');
+  return layout.loose === null || (first + 1 < lines.length && lines[first + 1].trim() !== '');
 }
 
 /**
@@ -323,15 +372,18 @@ export function isOtterLayout(text: string, options: { cutLastLine?: boolean } =
  * own, without the closing line; so does a voice note's export without the closing line.
  *
  * A line of words can end as a voice note's header does (`We meet at 10:30`). Otter writes a blank line after each
- * turn's words, so in a text laid out so, its headers standing after a blank line at least as often as after a line of
- * words, such a line inside a turn, or at the turn's end, is that turn's words; so is every later line of the one turn
- * of a text whose only blank line is the one before the closing line. A Word file with no empty paragraphs
- * holds no blank line, and there such a line straight before the next header reads as a header whose words are that
- * next header's line: the paragraphs `Unknown 0:00`, `Good morning.`, `We meet at 10:30`, `Unknown 0:09`,
- * `Shall we start?` and the closing line read as a turn by `Unknown` at 0 ms, `Good morning.`, and one by `We meet at`
- * at 630,000 ms, `Unknown 0:09 Shall we start?`. Nothing in such a file tells the two apart, and the order of the times
- * does not either, since a header's words can end in an earlier time: `Unknown 10:30` with the words
- * `The bus left at 9:09` and `Shall we start?` has the same layout, its times in the same order.
+ * turn's words and gives every header of a voice note the same label, so a voice note's header heads a turn where a
+ * block starts, with its words on the line straight after it, and elsewhere only when it gives a label a header that
+ * starts a block gives. A later line of a turn that ends in a time is then words, however many such lines the turn
+ * holds and whether the blank lines between the turns are there or not, and a header whose blank line before it is
+ * missing heads its turn: the paragraphs `Unknown 0:00`, `Good morning.`, `Unknown 0:09`, `Shall we start?`, an empty
+ * one and the closing line read as two turns, and `Unknown 0:00`, `Good morning.`, `We meet at 10:30`, `in the hall.`,
+ * an empty one and the closing line, which stand alike, as one. A header that starts no block and gives a label no
+ * header that starts a block gives is not told from such a line, and reads as words: in a Word file with no empty
+ * paragraphs, `Speaker 1 0:00`, `Good morning.`, `Speaker 2 0:05`, `Hello.` and the closing line read as one turn by
+ * `Speaker 1`. A time alone gives no label, so a text of times alone is read by its blank lines alone: a Word file of
+ * `0:04`, `Hello.`, `0:09`, `Good.`, an empty paragraph and the closing line reads as one turn, as a one-turn export of
+ * the same lines does.
  *
  * @param text - The file's text, its line ends already line feeds.
  * @param format - The format to answer with: `otter`, or `docx` for a Word file's text.
