@@ -269,6 +269,65 @@ describe("MiniMax image API integration", () => {
     },
   );
 
+  // MiniMax's China documentation gives https://api.minimax.cn/v1 as the API
+  // root (https://platform.minimax.cn/docs/api-reference/text-openai-api) and
+  // https://api.minimax.cn/v1/image_generation for images
+  // (https://platform.minimax.cn/docs/api-reference/image-generation-t2i).
+  const minimaxCnSpellings = [
+    "https://api.minimax.cn/v1",
+    "https://api.minimax.cn/v1/",
+    "https://api.minimax.cn/v1///",
+    "HTTPS://API.MINIMAX.CN/v1",
+    "https://Api.MiniMax.Cn:443/v1/",
+  ];
+
+  it.each(minimaxCnSpellings)(
+    "generates with image-01 when MINIMAX_BASE_URL is MiniMax's China root api.minimax.cn, spelled %s",
+    async (baseUrl) => {
+      // api.minimax.cn is a region of MiniMax's own API, which serves MiniMax's
+      // model names, so the chat model the default names is not posted to
+      // /image_generation there.
+      vi.stubEnv("MINIMAX_BASE_URL", baseUrl);
+      setDefaultProvider({
+        provider: "minimax",
+        model: "MiniMax-M3.1-Flash",
+        apiKey: "default-key",
+      });
+      const result = await generateImage({ prompt: "A lighthouse" });
+      expect(result.provider).toBe("minimax");
+      expect(result.model).toBe("image-01");
+      const [url, init] = vi.mocked(fetch).mock.calls[0];
+      expect(new URL(String(url)).href).toBe("https://api.minimax.cn/v1/image_generation");
+      expect(JSON.parse(String(init?.body)).model).toBe("image-01");
+    },
+  );
+
+  const minimaxCnSources: Array<[string, { baseUrl?: string }, { baseUrl?: string }]> = [
+    ["the default's baseUrl", { baseUrl: "https://api.minimax.cn/v1" }, {}],
+    ["the call's baseUrl", {}, { baseUrl: "HTTPS://API.MINIMAX.CN/v1/" }],
+  ];
+
+  it.each(minimaxCnSources)(
+    "generates with image-01 on api.minimax.cn when %s names it and MINIMAX_BASE_URL names a custom endpoint",
+    async (_label, defaultBaseUrl, callBaseUrl) => {
+      // The call's and the default's base URL go ahead of MINIMAX_BASE_URL, so
+      // the call is sent to MiniMax's own China API, where the chat model
+      // cannot make images, and not to the gateway in the environment.
+      vi.stubEnv("MINIMAX_BASE_URL", "http://gateway.test/v1");
+      setDefaultProvider({
+        provider: "minimax",
+        model: "MiniMax-M3.1-Flash",
+        apiKey: "default-key",
+        ...defaultBaseUrl,
+      });
+      const result = await generateImage({ prompt: "A lighthouse", ...callBaseUrl });
+      expect(result.model).toBe("image-01");
+      const [url, init] = vi.mocked(fetch).mock.calls[0];
+      expect(new URL(String(url)).href).toBe("https://api.minimax.cn/v1/image_generation");
+      expect(JSON.parse(String(init?.body)).model).toBe("image-01");
+    },
+  );
+
   it("keeps the default's model on a host that only begins with MiniMax's", async () => {
     // A host in capitals is MiniMax's own only when it is MiniMax's host; a
     // longer one is a custom endpoint, which may serve any model under any name.

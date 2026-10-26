@@ -20,9 +20,19 @@ export const MINIMAX_SPEECH_MODELS = [
   "speech-01-turbo",
 ] as const;
 
+/**
+ * The API host of each region. MiniMax's China speech reference sends HTTP,
+ * async and WebSocket speech to api.minimax.cn
+ * (https://platform.minimax.cn/docs/api-reference/speech-t2a-http,
+ * https://platform.minimax.cn/docs/api-reference/speech-t2a-websocket,
+ * https://platform.minimax.cn/docs/api-reference/speech-t2a-async-create,
+ * https://platform.minimax.cn/docs/api-reference/speech-t2a-async-query).
+ * The older China host, api.minimaxi.com, answers as MiniMax's API too
+ * (checked 2026-10-26); `baseUrl` and `webSocketUrl` reach it.
+ */
 const REGION_HOSTS: Record<MiniMaxSpeechRegion, string> = {
   global: "api.minimax.io",
-  china: "api.minimaxi.com",
+  china: "api.minimax.cn",
 };
 
 const MIME_TYPES: Record<MiniMaxSpeechAudioFormat, string> = {
@@ -40,6 +50,14 @@ const DEFAULT_MAX_AUDIO_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
 export interface MiniMaxTextToSpeechProviderConfig {
   apiKey: string;
+  /**
+   * The region whose API host requests go to: `"global"` (the default) sends
+   * to `api.minimax.io`, `"china"` to `api.minimax.cn`, the host MiniMax's
+   * China documentation names. `baseUrl` (the HTTP origin) and `webSocketUrl`
+   * (the whole WebSocket URL) override it, for example
+   * `https://api.minimaxi.com` and `wss://api.minimaxi.com/ws/v1/t2a_v2` for
+   * the older China host.
+   */
   region?: MiniMaxSpeechRegion;
   model?: string;
   voice?: string;

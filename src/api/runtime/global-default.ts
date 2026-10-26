@@ -39,8 +39,9 @@ export interface GlobalDefaultProvider {
    * else `baseUrl` here, else the provider's base-URL env var, each read as
    * `resolveBaseUrl` in `model.ts` reads it: an empty or whitespace-only one
    * is unset and the next source applies, and with none the call goes to the
-   * provider's own endpoint. MiniMax's two API roots,
-   * `https://api.minimax.io/v1` and the China root
+   * provider's own endpoint. MiniMax's API roots,
+   * `https://api.minimax.io/v1`, the China root `https://api.minimax.cn/v1`
+   * that MiniMax's China documentation names and the older China root
    * `https://api.minimaxi.com/v1`, are its own endpoint, not a custom one,
    * compared as fetch sends the URL: the letter case of the scheme and the
    * host, a default port, surrounding whitespace and trailing slashes make

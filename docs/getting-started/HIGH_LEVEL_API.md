@@ -82,8 +82,9 @@ When neither `provider` nor `model` is given, AgentOS checks configured runtimes
 MiniMax text requests default to `MiniMax-M3.1-Flash`; the current catalog also includes
 `MiniMax-M3`. Both accept image input and tools. Explicit model IDs, including saved
 legacy or custom IDs, remain unchanged. Set `MINIMAX_API_KEY` and optionally
-`MINIMAX_BASE_URL` (`https://api.minimax.io/v1` by default, or
-`https://api.minimaxi.com/v1` for China). For example:
+`MINIMAX_BASE_URL` (`https://api.minimax.io/v1` by default, or `https://api.minimax.cn/v1` for
+China, the root [MiniMax's China documentation](https://platform.minimax.cn/docs/api-reference/text-openai-api)
+names; the older China root `https://api.minimaxi.com/v1` is accepted too). For example:
 
 ```ts
 await generateText({ provider: 'minimax', prompt: 'Explain this briefly.', effort: 'high' });
@@ -97,7 +98,7 @@ Tool continuations preserve separate reasoning content, and image URL/data-URL p
 are forwarded through the Chat Completions API. See the
 [MiniMax OpenAI API reference](https://platform.minimax.io/docs/api-reference/text-openai-api).
 MiniMax image generation uses `image-01`, also when `setDefaultProvider()` names a MiniMax text
-model such as `MiniMax-M3.1-Flash`: on the global root and on the China root, an image call drops
+model such as `MiniMax-M3.1-Flash`: on the global root and on either China root, an image call drops
 the chat model the default names and takes the provider's image model. A root counts as one in any
 letter case of its scheme and host, as fetch lowercases them. An empty or whitespace-only `baseUrl`
 on the call or the default is unset, so `MINIMAX_BASE_URL` applies as it does for a call with no

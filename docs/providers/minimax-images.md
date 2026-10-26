@@ -21,8 +21,11 @@ that model explicitly. A configured key also enables automatic image-provider
 detection and fallback.
 
 Requests use `https://api.minimax.io/v1/image_generation` by default. For China, set `MINIMAX_BASE_URL` to
-`https://api.minimaxi.com/v1`, or pass that API root
-as `baseUrl` together with its regional API key. Direct provider initialization
+`https://api.minimax.cn/v1`, the root
+[MiniMax's China documentation](https://platform.minimax.cn/docs/api-reference/image-generation-t2i)
+names, or pass that API root as `baseUrl` together with its regional API key. The older China root
+`https://api.minimaxi.com/v1` is accepted too. On any of these roots, a global default that names a
+MiniMax text model makes images with `image-01`. Direct provider initialization
 accepts `apiKey`, `baseURL`, and `defaultModelId`.
 
 Use `responseFormat: 'b64_json'` for inline base64 data. Otherwise, image URLs
