@@ -172,12 +172,14 @@ const SECTIONS = new Set(['article', 'section']);
 
 /**
  * What marks a form as holding a page rather than a set of controls, with the page's main content: a heading, HTML's
- * sectioning content (https://html.spec.whatwg.org/multipage/dom.html#sectioning-content), a header or a footer. A page
- * whose whole body sits in one form, as an ASP.NET Web Forms page's does, usually holds one, and `noteParts` takes the
- * body's one form as a page whatever it holds; a blog post's comment form or a search box, a set of notes, labels and
- * controls beside the page, holds none.
+ * sectioning content (https://html.spec.whatwg.org/multipage/dom.html#sectioning-content), a header or a footer, and a
+ * table's header cell (https://html.spec.whatwg.org/multipage/tables.html#the-th-element), which a table of data holds,
+ * as the list of a category's articles Joomla writes in a form does. A page whose whole body sits in one form, as an
+ * ASP.NET Web Forms page's does, usually holds one, and `noteParts` takes the body's one form as a page whatever it
+ * holds; a blog post's comment form or a search box, a set of notes, labels and controls beside the page, holds none,
+ * and neither does a form laid out in a table of plain cells, as a hotel search is.
  */
-const PAGE_PARTS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'article', 'aside', 'nav', 'section', 'header', 'footer']);
+const PAGE_PARTS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'article', 'aside', 'nav', 'section', 'header', 'footer', 'th']);
 
 /**
  * The elements that hold blocks or stand as one: each starts a paragraph of its own. A header, footer or aside is one
@@ -1419,8 +1421,8 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
  * holds an `h1` introduces that content: its headings, `hgroup`s and paragraphs are read, and the rest of it, a menu or
  * a list of links beside them, is the page's own; one that holds no `h1` is the page's own whole. A `form` is read as
  * the blocks it holds when it holds a page: a heading, an `article`, `aside`, `nav` or `section`, the page's main
- * content, a `header` or a `footer`; when it is the page's main content itself; or when it is the one element the body
- * holds, as a page whose whole body sits in one form does. A heading whose words all sit in its one `button`, as an
+ * content, a `header`, a `footer` or a table's header cell (`th`), as a table of data holds; when it is the page's main
+ * content itself; or when it is the one element the body holds, as a page whose whole body sits in one form does. A heading whose words all sit in its one `button`, as an
  * accordion's header's do, is read for that button's words. A form's control, an image and the rest of HTML's embedded
  * content are each a space between the words on either side of them, outside code. Comments are not read. An element
  * handed over is read as a document is, whatever its own name, but an `svg` or `math` element handed over takes no
