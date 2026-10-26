@@ -23,6 +23,8 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   budget: 'allow', hookErrors: 'allow', abortSignal: 'allow',
   // Added on master later, and allowed: maxAttempts caps a seat's requests, onAttempt reports each; neither moves a seat off its seating.
   maxAttempts: 'allow', onAttempt: 'allow',
+  // Added later, and denied: streamObject sets it on its own streamText call; a panel call would hand every seat one callback.
+  __onUsageReport: 'deny',
 };
 
 describe('the pooled guard (deny list, presence not value)', () => {
