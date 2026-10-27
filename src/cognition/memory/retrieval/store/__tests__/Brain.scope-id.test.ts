@@ -4,8 +4,8 @@
  * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds; a
  * row a release without the column writes to a brain already at version 3 is filled at the next open; a
  * fresh Brain has it; the index a per-scope read uses exists; every writer this file reaches sets it; and the importers
- * file by it and deduplicate inside one scope id. Real SQLite files through `@framers/sql-storage-adapter`, as the store
- * opens them in production.
+ * file by it and deduplicate inside one scope id, where a trace such a release wrote counts under the scope id its
+ * metadata names. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -21,6 +21,7 @@ import { JsonImporter } from '../../../io/JsonImporter.js';
 import { SqliteImporter } from '../../../io/SqliteImporter.js';
 import { CsvImporter } from '../../../io/CsvImporter.js';
 import { MarkdownImporter } from '../../../io/MarkdownImporter.js';
+import { ChatGptImporter } from '../../../io/ChatGptImporter.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
 import type { IKnowledgeGraph } from '../../graph/knowledge/IKnowledgeGraph.js';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager.js';
@@ -280,10 +281,12 @@ describe('the importers file by scope id and deduplicate inside one', () => {
     ]);
   });
 
+  /** A CSV holding one row of `user:<scopeId>` with the text 'Same words.'. */
+  const csv = (scopeId: string) =>
+    `content,scope,metadata\n"Same words.",user,"${JSON.stringify({ scopeId }).replace(/"/g, '""')}"\n`;
+
   it('CSV: the scope id comes from the metadata column, and dedup reads only that scope id', async () => {
     const brain = await open(tempFile(), 'csv');
-    const csv = (scopeId: string) =>
-      `content,scope,metadata\n"Same words.",user,"${JSON.stringify({ scopeId }).replace(/"/g, '""')}"\n`;
     await new CsvImporter(brain).importFromString(csv('A%2F42'));
     expect((await new CsvImporter(brain).importFromString(csv('B%2F42'))).imported).toBe(1);
     expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['A%2F42', 'B%2F42']);
@@ -299,5 +302,67 @@ describe('the importers file by scope id and deduplicate inside one', () => {
     expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['', 'A%2F42']);
     // A second import finds the trace the first filed under ''.
     expect((await new MarkdownImporter(brain).import(dir)).skipped).toBe(1);
+  });
+
+  describe("a trace a release without scope_id wrote holds '', and is read under the scope id its metadata names", () => {
+    /** A release without the column writes its default, '', whatever scope id the metadata names. */
+    const asOlderRelease = (brain: Brain) => brain.run(`UPDATE memory_traces SET scope_id = ''`);
+
+    it('JSON: a record of that scope id is its duplicate', async () => {
+      const brain = await open(tempFile(), 'json-older');
+      const importer = new JsonImporter(brain);
+      await importer.importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+      await asOlderRelease(brain);
+      expect((await importer.importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100))).skipped).toBe(1);
+      expect(await tracesOf(brain)).toEqual([{ scope_id: 'A%2F42', tags: '["a"]', created_at: 100 }]);
+    });
+
+    it("SQLite: a record filed under '' is imported, and no tags or time are merged into that trace", async () => {
+      const target = await open(tempFile(), 'sqlite-older-target');
+      await new JsonImporter(target).importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+      await asOlderRelease(target);
+      const sourcePath = tempFile();
+      const source = await open(sourcePath, 'sqlite-older-source');
+      await new JsonImporter(source).importFromString(exportOf('', 'Same words.', ['b'], 200));
+      expect((await new SqliteImporter(target).import(sourcePath)).imported).toBe(1);
+      expect(await tracesOf(target)).toEqual([
+        { scope_id: '', tags: '["b"]', created_at: 200 },
+        { scope_id: 'A%2F42', tags: '["a"]', created_at: 100 },
+      ]);
+    });
+
+    it('CSV: a row of that scope id is its duplicate', async () => {
+      const brain = await open(tempFile(), 'csv-older');
+      await new CsvImporter(brain).importFromString(csv('A%2F42'));
+      await asOlderRelease(brain);
+      expect((await new CsvImporter(brain).importFromString(csv('A%2F42'))).skipped).toBe(1);
+      expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['A%2F42']);
+    });
+
+    it("Markdown: a file with that text is imported under ''", async () => {
+      const brain = await open(tempFile(), 'markdown-older');
+      await new JsonImporter(brain).importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+      await asOlderRelease(brain);
+      const dir = path.join(path.dirname(tempFile()), 'notes');
+      await fsp.mkdir(dir);
+      await fsp.writeFile(path.join(dir, 'same.md'), '---\nscope: user\n---\nSame words.\n', 'utf8');
+      expect((await new MarkdownImporter(brain).import(dir)).imported).toBe(1);
+      expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['', 'A%2F42']);
+    });
+
+    it("ChatGPT: a message with that text is imported under ''", async () => {
+      const brain = await open(tempFile(), 'chatgpt-older');
+      await new JsonImporter(brain).importFromString(exportOf('A%2F42', '[user]: Same words.', ['a'], 100));
+      await asOlderRelease(brain);
+      const filePath = path.join(path.dirname(tempFile()), 'conversations.json');
+      const message = { author: { role: 'user' }, content: { parts: ['Same words.'] }, create_time: 1 };
+      await fsp.writeFile(
+        filePath,
+        JSON.stringify([{ title: 'Same', create_time: 1, mapping: { m1: { id: 'm1', parent: null, children: [], message } } }]),
+        'utf8',
+      );
+      expect((await new ChatGptImporter(brain).import(filePath)).imported).toBe(1);
+      expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['', 'A%2F42']);
+    });
   });
 });
