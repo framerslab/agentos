@@ -145,6 +145,8 @@ wunderland chat \
 
 `createVoiceProvidersFromEnv()` builds STT and TTS providers from the API keys in the environment. Hume ends its TTS API on 13 November 2026 ([Hume's changelog](https://dev.hume.ai/voice/changelog)), so `HumeStreamingTTS` joins the TTS chain only with `ttsPreference: 'hume'`, as the first try, and never from `HUME_API_KEY` alone.
 
+`DeepgramStreamingSTT` sends Deepgram's `KeepAlive` ([Audio Keep Alive](https://developers.deepgram.com/docs/audio-keep-alive)) as a text frame after every 3 seconds that send it no audio, and only then: each frame a source pushes restarts the idle clock, and a session that has ended (closed, cut by the server, or draining after its `CloseStream`) sends nothing. Deepgram closes a socket whose audio pauses for 10 seconds without a `KeepAlive` (`NET-0001`), so a source whose capture pauses, such as a LiveKit track unpublished and published again, keeps its session instead of losing the socket and paying for the reconnect ([#585](https://github.com/framerslab/agentos/issues/585)). A `KeepAlive` alone does not keep a socket that has received no audio at all ([STT troubleshooting](https://developers.deepgram.com/docs/stt-troubleshooting-websocket-data-and-net-errors)), so when no audio has gone out 3 seconds after the socket opened, the session sends 20 ms of silence first, metered as audio, and `KeepAlive` frames after it.
+
 ## Endpointing
 
 | Detector | The turn ends when | Text sent to the agent |
