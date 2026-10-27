@@ -47,11 +47,14 @@ function folded(text: string): string {
 }
 
 /**
- * A tag without its hyphens, composed to NFC again: joining two runs can set a Hangul syllable beside a final jamo (the
- * syllable U+AC00 and the jamo U+11A8 compose to U+AC01), so the key is NFC, and every key is itself a tag.
+ * A tag without its hyphens, made a key. Lower case writes a Greek capital sigma by its place in the text: final (ς)
+ * before a separator, medial (σ) inside a word. Joined runs could carry a final sigma into the middle of a key, and the
+ * form a person typed would decide it, so every sigma is lower-cased again by its place in the key: `ΟΣ-Α`, `ΟΣΑ` and
+ * `ος α` all give `οσα`, and `λογοσ` gives `λογος`. The key is then composed to NFC again, since joining two runs can
+ * set a Hangul syllable beside a final jamo (U+AC00 and U+11A8 compose to U+AC01). So every key is itself a tag.
  */
 function keyOf(tag: string): string {
-  return tag.replace(/-/g, '').normalize('NFC');
+  return tag.replace(/-/g, '').replace(/[\u03C2\u03C3]/g, '\u03A3').toLowerCase().normalize('NFC');
 }
 
 /** Whether a text is a tag as stored or typed: NFC, lower case, runs with single hyphens between them, 1 to 40 code points. */
@@ -70,7 +73,7 @@ export function normalizeTag(input: string): string | null {
   return codePoints(tag) <= TAG_MAX_CHARS ? tag : null;
 }
 
-/** A tag's key: `normalizeTag`'s answer without its hyphens, in NFC; null where that is null. */
+/** A tag's key: `normalizeTag`'s answer without its hyphens, each sigma lower-cased by its place, in NFC; null where that is null. */
 export function tagKey(input: string): string | null {
   const tag = normalizeTag(input);
   return tag === null ? null : keyOf(tag);
@@ -120,7 +123,10 @@ export interface TagDocument {
   text: string;
   /** A note's keywords; none for a session. */
   keywords: readonly string[];
-  /** Its tags; each is read through `canonicalTag`, and one with no key is left out. */
+  /**
+   * Its tags; each is read through `classifyLegacyTag`: a tag or an alias counts under its key, and a label left
+   * unresolved (`C++`, `budget.`) or with no key is left out, never counted under its candidate key.
+   */
   tags: readonly string[];
   /** When it last changed (a note's latest change, a session's start), in milliseconds since 1970, or null. */
   changedAt: number | null;
@@ -135,12 +141,15 @@ export interface TagUse {
   lastUsed: number | null;
 }
 
-/** A document's keys, each once, in the order it holds them. */
+/**
+ * A document's keys, each once, in the order it holds them: a tag or an alias gives its key, and a label
+ * `classifyLegacyTag` leaves unresolved gives none, so `C++` is never counted as `c`.
+ */
 export function tagKeysOf(document: Pick<TagDocument, 'tags'>): string[] {
   const keys: string[] = [];
-  for (const tag of document.tags) {
-    const key = canonicalTag(tag);
-    if (key !== null && !keys.includes(key)) keys.push(key);
+  for (const label of document.tags) {
+    const { state, key } = classifyLegacyTag(label);
+    if (state === 'alias' && key !== null && !keys.includes(key)) keys.push(key);
   }
   return keys;
 }
