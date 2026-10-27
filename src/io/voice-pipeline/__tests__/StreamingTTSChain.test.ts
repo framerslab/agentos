@@ -461,6 +461,54 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(closes).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['once the switch has ended', false],
+    ['while the backup still opens', true],
+  ] as const)("ends a writeTokens() that waited on the switch with the cancel() that came meanwhile: the backup takes the next request's text alone, written %s, and a later switch replays none of the cut one's", async (_when, early) => {
+    const a = pullSession();
+    const b = pullSession();
+    const c = pullSession();
+    const second = provider('b', 20, b);
+    // The backup's connection takes a while to open, as a socket's does: the cancel and the next request come meanwhile.
+    let opened!: () => void;
+    second.startSession.mockImplementation(() => new Promise<StreamingTTSSession>((resolve) => {
+      opened = () => resolve(b);
+    }));
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts, provider('c', 30, c).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    const errors = vi.fn();
+    session.on('error', errors);
+    session.setAudioSink!(async () => {});
+    await session.writeTokens!('Hello world. ');
+    // The provider in use fails, and the reply's next write waits on the switch while the backup opens.
+    a.emit('error', new Error('socket hang up'));
+    const cut = session.writeTokens!('How are you?');
+    await vi.waitFor(() => expect(second.startSession).toHaveBeenCalledOnce());
+    // A barge-in cuts the request before the backup has opened: the write that waited was issued before it and is the
+    // cut request's. The next request's text comes once the switch has ended, or while the backup still opens.
+    session.cancel();
+    const next = early ? session.writeTokens!('Sure.') : undefined;
+    opened();
+    // A write the cancel cut resolves, as one cut in flight does, and admits nothing.
+    await expect(cut).resolves.toBeUndefined();
+    if (next) await next;
+    else await session.writeTokens!('Sure.');
+    expect(failover).toHaveBeenCalledWith(expect.objectContaining({ from: 'a', to: 'b' }));
+    expect(b.writeTokens.mock.calls).toEqual([['Sure.']]);
+    // The backup fails during the next request: the next provider takes that request's text and none of the cut one's,
+    // which the facade never kept.
+    b.emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledTimes(2));
+    expect(failover.mock.calls[1]![0]).toMatchObject({ from: 'b', to: 'c' });
+    expect(c.writeTokens.mock.calls).toEqual([['Sure.']]);
+    expect(chain.currentProviderId).toBe('c');
+    expect(errors).not.toHaveBeenCalled();
+  });
+
   it('takes nothing from a backup once its failure is recorded during the switch: an error and a flush_complete it emits in one call, as it takes text pushed after the replay, leave the text to the next provider', async () => {
     const a = pushSession();
     const b = pushSession();
