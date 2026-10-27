@@ -6,9 +6,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+import { agent } from '../agent';
 import { gmi } from '../gmi';
 import type { GenerateTextResult } from '../generateText';
 import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
+import { getCapabilitySupport } from '../runtime/capabilityContract';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
@@ -107,5 +109,41 @@ describe('launch_agency on gmi()', () => {
     // No seat ran: the parent's two steps are the only model calls, and the turn finished.
     expect(s.seen).toHaveLength(2);
     expect(result.text).toBe('No team ran.');
+  });
+
+  it('with agencies.launch off the tool is not on the table; a legacy agent() refuses launch and warns about agencies; the contract row', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Off.'), reply.text('On.')] });
+    const search = { description: 'Search.', parameters: { type: 'object', properties: {} }, execute: async () => 'hit' };
+    const off = gmi({ ...route(k), instructions: 'Answer.', tools: { search }, agencies: { maxDepth: 3 } });
+    await off.session('a').send('Hi.');
+    // The table is offered (the precondition), without launch_agency.
+    expect(offered(s.seen[0])).toEqual(['search']);
+    const on = gmi({ ...route(k), instructions: 'Answer.', tools: { search }, agencies: { launch: true } });
+    await on.session('b').send('Hi.');
+    expect([...offered(s.seen[1])].sort()).toEqual(['launch_agency', 'search']);
+    // A bound outside its range fails at construction, launch on or off.
+    expect(() => gmi({ ...route(k), agencies: { maxDepth: 9 } })).toThrow('agencies.maxDepth');
+
+    // A legacy agent() has no GMI tool loop to run launch_agency in, so it refuses launch at construction;
+    // the other fields it accepts and applies nowhere, and its one warning says where they apply.
+    expect(() => agent({ provider: 'openai', model: 'stub-model', apiKey: k, agencies: { launch: true } })).toThrow('agencies.launch runs on the GMI path');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    agent({ provider: 'openai', model: 'stub-model', apiKey: k, agencies: { maxDepth: 3 } });
+    expect(warn).toHaveBeenCalledTimes(1);
+    const legacyWarning = String(warn.mock.calls[0]?.[0]);
+    expect(legacyWarning).toContain("agent() launches teams only with runtime: 'gmi'");
+    // Not among the fields the warning sends to the full runtime or agency(): only a GMI launches teams.
+    expect(legacyWarning).not.toMatch(/requires the full AgentOS runtime[^.]*agencies/);
+    // gmi() enforces it: the warning that names the fields it defers (rag here, the precondition) leaves it out.
+    warn.mockClear();
+    gmi({ ...route(k), agencies: { launch: true }, rag: { topK: 3 } });
+    const gmiWarning = warn.mock.calls.map(([message]) => String(message)).join('\n');
+    expect(gmiWarning).toContain('gmi() accepted config it does not enforce yet: rag.');
+    expect(gmiWarning).not.toContain('agencies');
+    expect(getCapabilitySupport('gmi', 'agencies')).toBe('enforced');
+    expect(getCapabilitySupport('runtime', 'agencies')).toBe('enforced');
+    expect(getCapabilitySupport('agent', 'agencies')).toBe('accepted_but_deferred');
+    expect(getCapabilitySupport('generation', 'agencies')).toBe('runtime_only');
   });
 });
