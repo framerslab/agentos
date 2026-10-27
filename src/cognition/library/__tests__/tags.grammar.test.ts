@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalTag, classifyLegacyTag, compareCodePoints, isTag, normalizeTag, resolveTag, tagKey, tagVocabulary, type TagDocument, type TagUse } from '../tags.js';
+import { canonicalTag, classifyLegacyTag, compareCodePoints, isTag, normalizeTag, resolveTag, tagKey, tagKeysOf, tagVocabulary, type TagDocument, type TagUse } from '../tags.js';
 
 const doc = (id: string, kind: TagDocument['kind'], tags: string[], changedAt: number | null): TagDocument => ({ id, kind, title: id, text: '', keywords: [], tags, changedAt });
 const use = (tag: string, uses: number, lastUsed: number | null): TagUse => ({ tag, uses, notes: uses, sessions: 0, lastUsed });
@@ -32,9 +32,15 @@ describe('the tag grammar (U1)', () => {
     for (const typed of ['Q3 Planning!', '\uFF22udget', 'Cafe\u0301', '\u0915\u093F\u0924\u093E\u092C', '\uAC00 \u11A8', '\u1100-\u1161']) expect(isTag(canonicalTag(typed) ?? ''), typed).toBe(true);
   });
 
+  it('writes a sigma by its place in the key, so separators and the typed form of a sigma give one key', () => {
+    for (const typed of ['\u039F\u03A3-\u0391', '\u039F\u03A3\u0391', '\u03BF\u03C2 \u03B1', '\u03BF\u03C3\u03B1', '\u039F\u03C2_\u03B1']) expect(canonicalTag(typed), typed).toBe('\u03BF\u03C3\u03B1');
+    for (const typed of ['\u039B\u039F\u0393\u039F\u03A3', '\u03BB\u03BF\u03B3\u03BF\u03C2', '\u03BB\u03BF\u03B3\u03BF\u03C3']) expect(canonicalTag(typed), typed).toBe('\u03BB\u03BF\u03B3\u03BF\u03C2');
+    expect(normalizeTag('\u039F\u03A3-\u0391')).toBe('\u03BF\u03C2-\u03B1');
+  });
+
   it('reads a tag as stored or typed', () => {
     for (const tag of ['budget', 'q3-planning', 'q3planning', 'caf\u00e9', 'किताब'.normalize('NFC'), 'r', '\u{20000}']) expect(isTag(tag), tag).toBe(true);
-    for (const text of ['', 'Budget', 'q3--planning', '-budget', 'budget-', 'cafe\u0301', '\u0301a', 'a b', 'a'.repeat(41), 'c++']) expect(isTag(text), text).toBe(false);
+    for (const text of ['', 'Budget', 'q3--planning', '-budget', 'budget-', 'cafe\u0301', '\u0301a', 'a b', 'a'.repeat(41), 'c++', 'budget\n']) expect(isTag(text), text).toBe(false);
   });
 
   it('classifies a stored label without losing it: an alias only by case, normalization and separators', () => {
@@ -74,6 +80,11 @@ describe('tagVocabulary', () => {
       { tag: 'q3planning', uses: 2, notes: 1, sessions: 1, lastUsed: 20 },
       { tag: 'roadmap', uses: 1, notes: 0, sessions: 1, lastUsed: 20 },
     ]);
+  });
+
+  it('counts an alias under its key and leaves out a label the legacy classification keeps unresolved', () => {
+    expect(tagKeysOf({ tags: ['Budget', 'q3-planning', 'C++', 'budget', 'q3 Planning'] })).toEqual(['budget', 'q3planning']);
+    expect(tagVocabulary([doc('a', 'note', ['C++', 'C#'], 10), doc('b', 'note', ['c'], 20)])).toEqual([{ tag: 'c', uses: 1, notes: 1, sessions: 0, lastUsed: 20 }]);
   });
 });
 
