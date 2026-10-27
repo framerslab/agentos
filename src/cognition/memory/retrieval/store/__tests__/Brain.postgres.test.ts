@@ -147,6 +147,28 @@ describeIfPostgres('Brain.openPostgres', () => {
     expect(await brain2.getMeta('schema_version')).toBe('3');
   });
 
+  it('files at the next open a trace a release without scope_id wrote to a brain at version 3', async () => {
+    const brainId = uniqueBrainId();
+    const brain1 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain1);
+    // A release without the column writes its default, '', whatever scope id the metadata names.
+    await brain1.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [brainId, 'late-trace', 'episodic', 'user', 'late', Date.now(), JSON.stringify({ scopeId: 'cy' })],
+    );
+    await brain1.close();
+    openedBrains.pop();
+
+    const brain2 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain2);
+    const row = await brain2.get<{ scope_id: string }>(
+      `SELECT scope_id FROM memory_traces WHERE brain_id = $1 AND id = $2`,
+      [brainId, 'late-trace'],
+    );
+    expect(row?.scope_id).toBe('cy');
+  });
+
   it('serializes concurrent first-opens against the same brainId', async () => {
     const brainId = uniqueBrainId();
     // Two parallel opens against the same brainId.

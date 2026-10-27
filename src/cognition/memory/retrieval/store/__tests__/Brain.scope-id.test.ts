@@ -2,6 +2,7 @@
  * @file Brain.scope-id.test.ts
  * `memory_traces.scope_id`: the scope id of a trace as a column of its own. A Brain at schema version 2 gains the
  * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds; a
+ * row a release without the column writes to a brain already at version 3 is filled at the next open; a
  * fresh Brain has it; the index a per-scope read uses exists; every writer this file reaches sets it; and the importers
  * file by it and deduplicate inside one scope id. Real SQLite files through `@framers/sql-storage-adapter`, as the store
  * opens them in production.
@@ -111,6 +112,21 @@ describe('memory_traces.scope_id', () => {
     const b2 = await open(filePath, 'b2');
     expect(await b2.getMeta('schema_version')).toBe('3');
     expect((await scopeIdsOf(b2))['t-late']).toBe('cy');
+  });
+
+  it('is filled at the next open for a row an older writer added after its own brain migrated', async () => {
+    const filePath = await schema2File();
+    await (await open(filePath, 'b1')).close();
+    brains.length = 0;
+    const raw = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    // b1 is at schema version 3 now, and a release without the column still writes the column's default.
+    await raw.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata) VALUES ('b1', 't-late', 'episodic', 'user', 'late', 2, ?)`,
+      [JSON.stringify({ scopeId: 'cy' })],
+    );
+    await raw.close();
+    const b1 = await open(filePath, 'b1');
+    expect((await scopeIdsOf(b1))['t-late']).toBe('cy');
   });
 
   it('is part of a fresh Brain, which seeds schema version 3', async () => {
