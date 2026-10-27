@@ -1,8 +1,9 @@
 /**
  * @file Brain.scope-id.test.ts
  * `memory_traces.scope_id`: the scope id of a trace as a column of its own. A Brain at schema version 2 gains the
- * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds; a
- * row a release without the column writes to a brain already at version 3 is filled at the next open; a
+ * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds, with
+ * one read of each row; a row a release without the column writes to a brain already at version 3 is filled at the
+ * next open; a
  * fresh Brain has it; the index a per-scope read uses exists; every writer this file reaches sets it; and the importers
  * file by it and deduplicate inside one scope id, where a trace such a release wrote counts under the scope id its
  * metadata names. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them in production.
@@ -12,8 +13,9 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import { createStorageFeatures, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
+import { v2ToV3 } from '../migrations/v2-to-v3.js';
 import { MemoryStore } from '../MemoryStore.js';
 import { Memory } from '../../../io/facade/Memory.js';
 import { MemoryAddTool } from '../../../io/tools/MemoryAddTool.js';
@@ -128,6 +130,31 @@ describe('memory_traces.scope_id', () => {
     await raw.close();
     const b1 = await open(filePath, 'b1');
     expect((await scopeIdsOf(b1))['t-late']).toBe('cy');
+  });
+
+  it('is filled with one read of each row when the migration of the brain opened adds it', async () => {
+    const raw = await resolveStorageAdapter({ filePath: await schema2File(), priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    // How often each row comes back from the fill's reads, the statements on memory_traces that ask for scope_id ''.
+    const reads: Record<string, number> = {};
+    const counting = {
+      kind: raw.kind,
+      get: raw.get.bind(raw),
+      run: raw.run.bind(raw),
+      exec: raw.exec.bind(raw),
+      all: async (sql: string, params?: Parameters<StorageAdapter['all']>[1]) => {
+        const rows = await raw.all<{ id?: string }>(sql, params);
+        if (sql.includes('FROM memory_traces') && sql.includes("scope_id = ''")) {
+          for (const { id } of rows) if (id) reads[id] = (reads[id] ?? 0) + 1;
+        }
+        return rows;
+      },
+    } as unknown as StorageAdapter;
+    try {
+      await v2ToV3.up(counting, createStorageFeatures(raw), 'b1');
+    } finally {
+      await raw.close();
+    }
+    expect(reads).toEqual({ 't-bad': 1, 't-none': 1, 't-other': 1, 't-persona': 1, 't-user': 1 });
   });
 
   it('is part of a fresh Brain, which seeds schema version 3', async () => {
