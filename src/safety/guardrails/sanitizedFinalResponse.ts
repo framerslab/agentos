@@ -1,10 +1,32 @@
 /**
  * @fileoverview The final response a guardrail's `SANITIZE` leaves: every field that carries the reply reads the
- * guardrail's text. The output guardrails and the cross-agent guardrails rewrite a final response with it.
+ * guardrail's text, and no value parsed from the replaced reply stays. The output guardrails and the cross-agent
+ * guardrails rewrite a final response with it.
  * @module backend/agentos/safety/guardrails/sanitizedFinalResponse
  */
 
+import type { StructuredReplyOutput } from '../../api/runtime/structuredReply';
 import type { AgentOSFinalResponseChunk } from '../../api/types/AgentOSResponse';
+
+/** The issue a withdrawn structured value records (`structured.meta.issues`). */
+export const STRUCTURED_REPLY_WITHDRAWN_ISSUE =
+  'A guardrail rewrote the reply after it was parsed, so the value parsed from the reply as the model wrote it was withdrawn.';
+
+/**
+ * The structured value a rewritten final response carries in place of the one parsed from the reply it replaced: no
+ * value, marked invalid at the `post_guardrail` stage. `processRequest()` holds the turn's schema and checks the
+ * rewritten reply against it, which replaces this value; a stream that holds no schema (a tool-result continuation, a
+ * cross-agent supervisor's) hands it to the host as it is, so no value parsed from the replaced reply reaches the host.
+ *
+ * @param structured - The value parsed from the reply the guardrail replaced.
+ * @returns The withdrawn value, which keeps the schema's name, the attempts and the enforcement.
+ */
+export function withdrawnStructuredReply(structured: StructuredReplyOutput): StructuredReplyOutput {
+  return {
+    value: null,
+    meta: { ...structured.meta, valid: false, stage: 'post_guardrail', issues: [STRUCTURED_REPLY_WITHDRAWN_ISSUE] },
+  };
+}
 
 /**
  * A copy of a serialized conversation (a final chunk's `updatedConversationContext`) in which the newest assistant
@@ -35,7 +57,8 @@ export function withReplyRewritten<T>(context: T, from: string | null, to: strin
 
 /**
  * The final response with its reply replaced by a guardrail's text: the reply, its plain text and the reply in the
- * serialized conversation the chunk carries all read `text`, so no field keeps the reply the guardrail rewrote.
+ * serialized conversation the chunk carries all read `text`, and a structured value parsed from the replaced reply is
+ * withdrawn (`withdrawnStructuredReply()`), so no field keeps the reply the guardrail rewrote.
  *
  * @param chunk - The final response the guardrail sanitized.
  * @param text - The guardrail's text (`GuardrailEvaluationResult.modifiedText`).
@@ -48,5 +71,6 @@ export function sanitizedFinalResponse(chunk: AgentOSFinalResponseChunk, text: s
     finalResponseTextPlain: text,
     // the serialized conversation the chunk carries holds the reply as the model wrote it: it reads the rewrite too
     updatedConversationContext: withReplyRewritten(chunk.updatedConversationContext, chunk.finalResponseText ?? null, text),
+    ...(chunk.structured ? { structured: withdrawnStructuredReply(chunk.structured) } : {}),
   };
 }
