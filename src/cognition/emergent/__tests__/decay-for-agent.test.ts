@@ -10,7 +10,7 @@
  * transactions, so the decay unit's all-or-nothing behavior is observable
  * without a native sqlite dependency.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { PersonalityMutationStore } from '../PersonalityMutationStore.js';
 
 interface Row { id: string; agentId: string; strength: number }
@@ -121,6 +121,30 @@ describe('PersonalityMutationStore.decayForAgent', () => {
 
     expect(replay).toEqual({ decayed: 0, pruned: 0, skipped: true });
     expect(adapter.rows.get('m1')!.strength).toBeCloseTo(0.95);
+  });
+
+  it('a replay in the same millisecond is refused: Date.now() 1793194099407 with the Math.random() draws 0.5 and 0.50006103515625', async () => {
+    // Near 1.8e12 adjacent doubles are 2^-12 apart: these two draws added to
+    // one millisecond give one number, and any two draws do about 1 time in
+    // 4096.
+    const now = 1_793_194_099_407;
+    const draws = [0.5, 0.5 + 2 ** -14];
+    expect(draws[0]).not.toBe(draws[1]);
+    expect(now + draws[0]!).toBe(now + draws[1]!);
+    adapter.seed('m1', 'a1', 1.0);
+    let draw = 0;
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    vi.spyOn(Math, 'random').mockImplementation(() => draws[draw++ % 2]!);
+    try {
+      const first = await store.decayForAgent('a1', 0.05, 'day:2026-07-20');
+      const replay = await store.decayForAgent('a1', 0.05, 'day:2026-07-20');
+
+      expect(first).toEqual({ decayed: 1, pruned: 0 });
+      expect(replay).toEqual({ decayed: 0, pruned: 0, skipped: true });
+      expect(adapter.rows.get('m1')!.strength).toBeCloseTo(0.95);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it('a new cycle id decays again; another agent has independent cycles', async () => {
