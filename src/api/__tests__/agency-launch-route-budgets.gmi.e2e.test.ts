@@ -10,6 +10,7 @@ import { gmi } from '../gmi';
 import type { GenerateTextResult } from '../generateText';
 import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
 import { clearProviderPriority, setProviderPriority } from '../runtime/provider-priority';
+import { SpendBudget } from '../runtime/spendBudget';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
@@ -31,6 +32,8 @@ const launchOf = (result: GenerateTextResult, i = 0): LaunchAgencyResult => {
   expect(call?.error).toBeUndefined();
   return call.result as LaunchAgencyResult;
 };
+/** An agent's route under a key of its own; no fallback, so a failed hop ends the turn. */
+const route = (k: string) => ({ provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [] });
 
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
@@ -75,5 +78,46 @@ describe('launch_agency on gmi(): the coordinator route and the budgets of a sea
     expect(new Set(s.seen.map((call) => call.modelId))).toEqual(new Set([s.seen[0].modelId]));
     expect(lastUserText(s.seen[3])).toContain('Synthesize these into a single coherent response.');
     expect(result.text).toBe('Two colours.');
+  });
+
+  it("a persistent member's own budget holds on its seat's turns: each call is checked against it and charged to it, once, beside the launch's budget", async () => {
+    const k = key();
+    const kr = key();
+    const kt = key();
+    script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Review the plan.', seats: [{ role: 'reader', agentKey: 'roomy' }, { role: 'checker', agentKey: 'tight' }] }),
+        reply.text('Reviewed.'),
+      ],
+    });
+    const roomyCalls = script('openai', kr, { replies: [reply.text('The plan holds.')] });
+    const tightCalls = script('openai', kt, { replies: [reply.text('Never sent.')] });
+    // The host's budget, which the launching agent runs under, and the members' own: one draws on the host's, the
+    // other caps its tokens below one call.
+    const host = new SpendBudget({ maxCostUSD: 1, unpriced: 'allow' });
+    const roomyOwn = new SpendBudget({ maxCostUSD: 1, unpriced: 'allow', parent: host });
+    const tightOwn = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 1_000, unpriced: 'allow' });
+    const roomy = gmi({ ...route(kr), instructions: 'Read the plan.', budget: roomyOwn });
+    const tight = gmi({ ...route(kt), instructions: 'Check the plan.', budget: tightOwn });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', budget: host, agencies: { launch: true, members: { roomy, tight } } });
+
+    const result = await parent.session('p1').send('Have the plan reviewed.');
+    const out = launchOf(result);
+    // The roomy member's own budget is charged for its seat's call (15 tokens).
+    expect(roomyCalls.seen).toHaveLength(1);
+    expect(roomyOwn.tokensUsed()).toBe(15);
+    // The host's budget, which the launch and the roomy member's own budget both draw on, counts that call once:
+    // the parent's two steps (14 and 15 tokens) and the seat's 15.
+    expect(host.tokensUsed()).toBe(44);
+    // The tight member's own cap refuses its seat's call before it is sent, though the launch's budget has room.
+    expect(tightCalls.seen).toHaveLength(0);
+    expect(tightOwn.tokensUsed()).toBe(0);
+    expect(out.seats.map((r) => [r.role, r.status])).toEqual([['reader', 'completed'], ['checker', 'failed']]);
+    expect(out.seats[1].error?.code).toBe('LLM_PROVIDER_ERROR');
+    // A member's own cap is not the launch's: the launch failed with that seat, and its budget counted the one call.
+    expect(out.status).toBe('failed');
+    expect(out.reason).toContain("seat 'checker' failed");
+    expect(out.provenance.budget.tokensUsed).toBe(15);
+    expect(result.text).toBe('Reviewed.');
   });
 });
