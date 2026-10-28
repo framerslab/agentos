@@ -26,6 +26,8 @@ import {
   type GuardrailOutputPayload,
   type IGuardrailService,
 } from '../../src/safety/guardrails/IGuardrailService';
+import type { ICrossAgentGuardrailService } from '../../src/safety/guardrails/ICrossAgentGuardrailService';
+import { wrapWithCrossAgentGuardrails } from '../../src/safety/guardrails/crossAgentGuardrailDispatcher';
 
 /**
  * Tool-result continuations on the real path: AgentOS.initialize(), the orchestrator, its tool-result handler, the
@@ -340,6 +342,30 @@ function mixedToolsGmi() {
         interactionId: 'interaction-mixed-tools',
         timestamp: new Date(),
         metadata: { executionMode: 'internal', requiresExternalToolResult: false },
+      };
+      return { isFinal: false, responseText: 'I need the notes file first.', toolCalls: [READ_CALL] };
+    },
+    hydrateConversationHistory: vi.fn(),
+    handleToolResult: vi.fn(async (): Promise<GMIOutput> => ({ isFinal: true, responseText: 'Done.' })),
+  };
+}
+
+/**
+ * A GMI that streams a request for host calls that names no call, and then stops the user's turn for READ_CALL
+ * without streaming that call.
+ */
+function emptyRequestGmi() {
+  return {
+    getCurrentPrimaryPersonaId: () => 'test-persona',
+    getGMIId: () => 'gmi-empty-request',
+    getPersona: () => PERSONA,
+    processTurnStream: async function* (): AsyncGenerator<any, GMIOutput, undefined> {
+      yield {
+        type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+        content: [],
+        interactionId: 'interaction-empty-request',
+        timestamp: new Date(),
+        metadata: { executionMode: 'external', requiresExternalToolResult: true },
       };
       return { isFinal: false, responseText: 'I need the notes file first.', toolCalls: [READ_CALL] };
     },
@@ -669,6 +695,21 @@ describe('AgentOS tool-result continuations', () => {
     expect((await rt.pending())?.toolCalls).toEqual([READ_CALL]);
   });
 
+  it('a turn that streams a request naming no call and then stops for a host call hands the host that call', async () => {
+    const rt = await runtime('conv-empty-request');
+    rt.useGmi(emptyRequestGmi());
+
+    const responses = await collectWithin(rt.agentos.processRequest(rt.input), 'the turn');
+
+    // a request that names no call gives the host nothing to run, and the host stops reading at a request
+    const requests = responses.filter(
+      (r): r is AgentOSToolCallRequestChunk => r.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST,
+    );
+    expect(requests.map((r) => r.toolCalls)).toEqual([[READ_CALL]]);
+    expect(isActionableToolCallRequestChunk(responses.at(-1))).toBe(true);
+    expect((await rt.pending())?.toolCalls).toEqual([READ_CALL]);
+  });
+
   it.each([
     ['an output that lists the calls the GMI ran', 'conv-final-calls', [LOOKUP_CALL]],
     ['an output with no calls', 'conv-final-plain', undefined],
@@ -706,6 +747,39 @@ describe('AgentOS tool-result continuations', () => {
     expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
     expect(final.finalResponseText).toBe('**Standup** moved to 10:00.');
     expect(final.finalResponseTextPlain).toBe('Standup moved to 10:00.');
+  });
+
+  it("a supervisor's rewrite of a final response leaves the original reply in none of its fields", async () => {
+    const rt = await runtime('conv-supervised');
+    const { gmi } = await rt.shippedGmi([{ text: '**Standup** moved to 10:00, in room 4B.' }]);
+    rt.useGmi(gmi);
+    const supervisor: ICrossAgentGuardrailService = {
+      id: 'room-redactor',
+      canInterruptOthers: true,
+      async evaluateCrossAgentOutput({ chunk }) {
+        return chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE
+          ? { action: GuardrailAction.SANITIZE, modifiedText: 'Standup moved to 10:00.' }
+          : null;
+      },
+    };
+
+    const supervised = await collect(
+      wrapWithCrossAgentGuardrails(
+        [supervisor],
+        { sourceAgentId: 'notes-agent', observerAgentId: 'supervisor' },
+        { userId: 'user-1', sessionId: rt.input.sessionId, personaId: 'test-persona', conversationId: 'conv-supervised' },
+        rt.agentos.processRequest(rt.input),
+        { streamId: 'supervised-notes-agent' },
+      ),
+    );
+
+    const final = supervised.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe('Standup moved to 10:00.');
+    // the plain text a voice host speaks, and the conversation the chunk carries, read the rewrite too
+    expect(final.finalResponseTextPlain).toBe('Standup moved to 10:00.');
+    const carried = (final.updatedConversationContext as unknown as { messages: Array<{ role: string; content: unknown }> }).messages;
+    expect(carried.filter((m) => m.role === 'assistant').map((m) => m.content)).toEqual(['Standup moved to 10:00.']);
   });
 
   it("every output guard evaluation of a continuation's reply reads the sources the GMI used", async () => {
