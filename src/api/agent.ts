@@ -344,7 +344,8 @@ export interface AgentOptions extends BaseAgentConfig {
    * `launch_agency` tool, which runs an `agency()` team on one goal and returns its answer as the call's result, and
    * the other fields bound every launch (depth, seats, launches in flight, budget share and pool, deadline, `members`
    * a launch may seat by key, `hitl`). Every bound is checked at construction. Off unless `launch` is true; the legacy
-   * runtime throws when it is.
+   * runtime throws when it is, and its construction warning names `agencies` when another field is set, since it
+   * applies none of them.
    */
   agencies?: AgencyLaunchOptions;
   /** Explicit runtime binding. No provider is discovered from the process environment for this path. */

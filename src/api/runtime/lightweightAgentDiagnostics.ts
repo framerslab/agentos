@@ -8,6 +8,12 @@ import {
 } from './capabilityContract.js';
 
 /**
+ * A config the capability contract is read against: the fields of {@link BaseAgentConfig}, and `agencies`, which
+ * `agent()` and `gmi()` declare on their own options.
+ */
+export type CapabilityConfig = Partial<BaseAgentConfig> & { agencies?: unknown };
+
+/**
  * Whether a config value sets anything. `undefined`, `null`, `false`, a blank
  * string, an empty Map or Set and an array of unset entries are unset; an
  * object is set when its `enabled` is true, whatever its other entries are, or
@@ -34,7 +40,7 @@ export function isMeaningfullyConfigured(value: unknown): boolean {
  * configured `voice.session`, the one voice binding it applies).
  */
 export function getDeferredCapabilities(
-  config: Partial<BaseAgentConfig>,
+  config: CapabilityConfig,
   surface: CapabilitySurface,
 ): CapabilityKey[] {
   return CAPABILITY_KEYS.filter((key) => {
@@ -60,7 +66,7 @@ export function getDeferredCapabilities(
  * surface.
  */
 export function getDeferredLightweightAgentCapabilities(
-  config: Partial<BaseAgentConfig>,
+  config: CapabilityConfig,
 ): CapabilityKey[] {
   return getDeferredCapabilities(config, 'agent');
 }
@@ -88,12 +94,13 @@ const APPLIED_BY_AGENCY: ReadonlySet<CapabilityKey> = new Set<CapabilityKey>(['h
  * it points to `voice.session` with `voiceSession()` or to
  * `VoiceSessionFactory`, the fields it points to the full runtime or
  * `agency()`, those it points to the full runtime alone, the memory settings
- * other than the working callback, and `security` and `permissions`, which no
- * surface enforces. `agent()` without
- * `runtime: 'gmi'` calls it once at construction.
+ * other than the working callback, `agencies`, which only `runtime: 'gmi'`
+ * applies on `agent()`, and `security` and `permissions`, which no surface
+ * enforces. `agent()` without `runtime: 'gmi'` calls it once at construction,
+ * after the check that refuses `agencies.launch`.
  */
 export function warnOnDeferredLightweightAgentCapabilities(
-  config: Partial<BaseAgentConfig>,
+  config: CapabilityConfig,
   warn: (message: string) => void = console.warn,
 ): CapabilityKey[] {
   const deferredCapabilities = getDeferredLightweightAgentCapabilities(config);
@@ -103,7 +110,9 @@ export function warnOnDeferredLightweightAgentCapabilities(
 
   const parts: string[] = [];
   const enforcedNowhere = deferredCapabilities.filter((key) => ENFORCED_ON_NO_SURFACE.has(key));
-  const others = deferredCapabilities.filter((key) => key !== 'memory' && key !== 'voice' && !ENFORCED_ON_NO_SURFACE.has(key));
+  const others = deferredCapabilities.filter(
+    (key) => key !== 'memory' && key !== 'voice' && key !== 'agencies' && !ENFORCED_ON_NO_SURFACE.has(key),
+  );
   if (deferredCapabilities.includes('voice')) {
     parts.push('agent() accepts legacy voice fields without starting audio. Configure voice.session and call voiceSession(), or construct VoiceSessionFactory directly.');
   }
@@ -121,6 +130,11 @@ export function warnOnDeferredLightweightAgentCapabilities(
   // The default runtime consumes only the working callback, filtered above.
   if (deferredCapabilities.includes('memory')) {
     parts.push("agent() applies memory settings other than the working callback only with runtime: 'gmi'; these settings are not applied here.");
+  }
+  // Only a GMI launches teams (gmi(), agent({ runtime: 'gmi' }), or a persona on the full runtime), so the parts
+  // above, which name the full runtime or agency(), leave agencies out.
+  if (deferredCapabilities.includes('agencies')) {
+    parts.push("agent() launches teams only with runtime: 'gmi' (agencies.launch); this agent does not apply agencies.");
   }
   if (enforcedNowhere.length > 0) {
     parts.push(

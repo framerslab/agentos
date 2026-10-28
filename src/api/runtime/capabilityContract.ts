@@ -27,6 +27,7 @@ export const CAPABILITY_KEYS = [
   'provenance',
   'observability',
   'controls',
+  'agencies',
 ] as const;
 
 export type CapabilityKey = (typeof CAPABILITY_KEYS)[number];
@@ -54,6 +55,10 @@ export const BASE_AGENT_CONFIG_CAPABILITY_CONTRACT = {
   provenance: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   observability: { agent: 'partially_enforced', generation: 'partially_enforced', runtime: 'enforced', gmi: 'partially_enforced' },
   controls: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'enforced', gmi: 'partially_enforced' },
+  // A GMI launches teams through launch_agency: on gmi() and agent({ runtime: 'gmi' }), and on the full runtime for a
+  // persona granted agency:launch. agent() on its legacy runtime throws on `launch` and applies none of the other
+  // fields; generateText and streamText launch nothing.
+  agencies: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'enforced' },
 } as const satisfies Record<CapabilityKey, Record<CapabilitySurface, CapabilitySupport>>;
 
 export function getCapabilitySupport(
