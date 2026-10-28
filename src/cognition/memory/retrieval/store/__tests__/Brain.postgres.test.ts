@@ -15,8 +15,9 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { PostgresAdapter } from '@framers/sql-storage-adapter';
+import { PostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
+import { fillScopeIds } from '../migrations/v2-to-v3.js';
 import { PORTABLE_TABLES } from '../portable-tables.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -145,6 +146,99 @@ describeIfPostgres('Brain.openPostgres', () => {
     const brain2 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
     openedBrains.push(brain2);
     expect(await brain2.getMeta('schema_version')).toBe('3');
+  });
+
+  it('files at the next open a trace a release without scope_id wrote to a brain at version 3', async () => {
+    const brainId = uniqueBrainId();
+    const brain1 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain1);
+    // A release without the column writes its default, '', whatever scope id the metadata names.
+    await brain1.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [brainId, 'late-trace', 'episodic', 'user', 'late', Date.now(), JSON.stringify({ scopeId: 'cy' })],
+    );
+    await brain1.close();
+    openedBrains.pop();
+
+    const brain2 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain2);
+    const row = await brain2.get<{ scope_id: string }>(
+      `SELECT scope_id FROM memory_traces WHERE brain_id = $1 AND id = $2`,
+      [brainId, 'late-trace'],
+    );
+    expect(row?.scope_id).toBe('cy');
+  });
+
+  it('files at the next open a trace whose metadata spells the scopeId key with a JSON escape', async () => {
+    const brainId = uniqueBrainId();
+    const brain1 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain1);
+    // JSON.parse reads the key "\u0073copeId" as scopeId: a writer may escape any letter of a key.
+    await brain1.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [brainId, 'escaped-trace', 'episodic', 'user', 'escaped', Date.now(), '{"\\u0073copeId":"cy"}'],
+    );
+    await brain1.close();
+    openedBrains.pop();
+
+    const brain2 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain2);
+    const row = await brain2.get<{ scope_id: string }>(
+      `SELECT scope_id FROM memory_traces WHERE brain_id = $1 AND id = $2`,
+      [brainId, 'escaped-trace'],
+    );
+    expect(row?.scope_id).toBe('cy');
+  });
+
+  it('files the traces of an open by a read of an index that leaves out the traces filed under a scope id', async () => {
+    const brainId = uniqueBrainId();
+    const brain = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain);
+    // Traces filed under a scope id, which the fill never reads; then fresh statistics.
+    await brain.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, scope_id)
+         SELECT $1, 'scoped-' || g, 'episodic', 'user', 'scoped', 1, '{"scopeId":"cy"}', 'cy' FROM generate_series(1, 200) AS g`,
+      [brainId],
+    );
+    await brain.exec('ANALYZE memory_traces');
+
+    const statements: Array<{ sql: string; params?: Parameters<StorageAdapter['all']>[1] }> = [];
+    const reading = {
+      all: (sql: string, params?: Parameters<StorageAdapter['all']>[1]) => {
+        statements.push({ sql, params });
+        return brain.adapter.all(sql, params);
+      },
+      run: (sql: string, params?: Parameters<StorageAdapter['run']>[1]) => brain.adapter.run(sql, params),
+    } as unknown as StorageAdapter;
+    await fillScopeIds(reading, brainId);
+    expect(statements).toHaveLength(1);
+
+    // With sequential scans priced out, the brain's other indexes would walk all 200 rows; the index the fill reads holds none.
+    const plan = await brain.transaction(async (trx) => {
+      await trx.exec('SET LOCAL enable_seqscan = off');
+      return trx.all<Record<string, string>>(`EXPLAIN ${statements[0]!.sql}`, statements[0]!.params);
+    });
+    expect(plan.map((step) => Object.values(step)[0]).join('\n')).toContain('idx_memory_traces_unfiled_scope_id');
+  });
+
+  it("keeps metadata out of every index of memory_traces, so a write of a trace's metadata stays a heap-only update", async () => {
+    const brain = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(brain);
+    // Postgres updates a row without a new entry in any index only when the update changes no column an index reads,
+    // in its key, an expression or its predicate. A recall writes the metadata of every trace it returns.
+    const readers = await brain.all<{ name: string }>(
+      `SELECT i.relname AS name
+         FROM pg_index x
+         JOIN pg_class i ON i.oid = x.indexrelid
+         JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attname = 'metadata'
+        WHERE x.indrelid = to_regclass('memory_traces')
+          AND (a.attnum = ANY (x.indkey::int2[])
+            OR coalesce(pg_get_expr(x.indexprs, x.indrelid), '') LIKE '%metadata%'
+            OR coalesce(pg_get_expr(x.indpred, x.indrelid), '') LIKE '%metadata%')`,
+    );
+    expect(readers.map((row) => row.name)).toEqual([]);
   });
 
   it('serializes concurrent first-opens against the same brainId', async () => {

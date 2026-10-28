@@ -18,7 +18,10 @@
  * - `metadata` (JSON object; its `scopeId` names the trace's scope id)
  *
  * Deduplication uses SHA-256 of the `content` field, inside the row's scope
- * and scope id, and stores the hash in `metadata.import_hash`.
+ * and scope id, and stores the hash in `metadata.import_hash`. A trace a
+ * release older than `memory_traces.scope_id` wrote holds `''` in that column
+ * whatever scope id its metadata names; the import files such traces under
+ * that scope id before its first duplicate check (`fillScopeIds`).
  *
  * @module memory/io/CsvImporter
  */
@@ -28,6 +31,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { importedScopeId } from './importScope.js';
+import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 
 /**
  * Imports a flat CSV file into a `Brain`.
@@ -124,6 +128,8 @@ export class CsvImporter {
        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, '{}', ?, ?, ?)`;
 
     await this.brain.transaction(async (trx) => {
+      // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
+      if (options?.dedup ?? true) await fillScopeIds(trx, brainId);
       for (const row of dataRows) {
         try {
           const content = (row[contentIndex] ?? '').trim();
