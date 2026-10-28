@@ -290,6 +290,13 @@ export class GMI implements IGMI {
    */
   private turnToolCallGate: GMIToolCallGate | undefined;
 
+  /**
+   * The sources the user turn retrieved, when it retrieved any. Cleared when a
+   * user turn starts; a tool continuation retrieves nothing of its own, so the
+   * tool-call gate is asked about its calls with these.
+   */
+  private turnRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
+
   /** The learner session the host passed (`GMIBaseConfig.learning`), when its learning option is on. */
   private learnerSession: ILearnerSession | undefined;
 
@@ -1189,10 +1196,14 @@ export class GMI implements IGMI {
       this.turnMemoryScope = memoryScopeOf(turnInput);
       this.turnLearning = undefined;
       this.turnToolCallGate = toolCallGateOf(turnInput);
+      this.turnRagSources = undefined;
     }
     // The gate this turn's tool round asks before each call: the one the input names; a continuation that names none
     // asks the gate of the turn it continues.
     const toolCallGate = toolCallGateOf(turnInput) ?? this.turnToolCallGate;
+    // A continuation retrieves nothing of its own: the gate is asked about its calls with the sources the turn it
+    // continues retrieved.
+    const continuedTurnSources = turnInput.metadata?.isToolContinuation === true ? this.turnRagSources : undefined;
     this.stateOwnerTurn = turnNumber;
     // False once a newer turn has started; lifecycle writes below check it.
     const ownsState = (): boolean => this.stateOwnerTurn === turnNumber;
@@ -1398,6 +1409,7 @@ export class GMI implements IGMI {
             const ragResult = await this.retrievalAugmentor.retrieveContext(currentQueryForRag, retrievalOptions);
             augmentedContextFromRAG = ragResult.augmentedContext;
             lastRagSources = ragResult.retrievedChunks;
+            if (ownsState()) this.turnRagSources = ragResult.retrievedChunks;
             this.addTraceEntry(ReasoningEntryType.RAG_QUERY_RESULT, 'RAG context retrieved.', {
               length: augmentedContextFromRAG.length,
               chunkCount: ragResult.retrievedChunks?.length ?? 0,
@@ -1987,7 +1999,7 @@ export class GMI implements IGMI {
             // The gate is asked about every call of the step before any of them runs, as the stream's chunk for the
             // step holds them all.
             const refusals = toolCallGate
-              ? await this.askToolCallGateForStep(toolCallGate, currentIterationToolCallRequests, lastRagSources)
+              ? await this.askToolCallGateForStep(toolCallGate, currentIterationToolCallRequests, lastRagSources ?? continuedTurnSources)
               : [];
             for (const [callIndex, toolCallReq] of currentIterationToolCallRequests.entries()) {
               const requestDetails: ToolExecutionRequestDetails = {

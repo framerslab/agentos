@@ -135,7 +135,10 @@ export interface GMIToolCallGateContext {
    * a gate can judge the calls together as well as one by one.
    */
   stepCalls?: readonly ToolCallRequest[];
-  /** The sources the turn retrieved for the model, when it retrieved any. */
+  /**
+   * The sources the turn retrieved for the model, when it retrieved any. A tool continuation retrieves nothing of
+   * its own and passes the sources of the user turn it continues.
+   */
   ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
 }
 
