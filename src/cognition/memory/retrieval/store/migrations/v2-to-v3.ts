@@ -14,10 +14,10 @@
  * An older release goes on writing `''` to a brain that is already at version 3, where its migration never runs
  * again. `Brain` runs {@link fillScopeIds} for the brain it opens, at every open, and each importer runs it before it
  * looks for duplicates, so such a row is filed under the scope id its metadata names before an import reads the column.
- * Its read goes through `idx_memory_traces_unfiled_scope_id`, the partial index of the rows that hold `''` while their
- * metadata text can name a scope id. The fill files each such row whose JSON names one. A row whose JSON names none
- * other than `''` (JSON that cannot be read, a `null` scope id, a nested `scopeId` key) stays in the index and is
- * read again by the next fill.
+ * Its read goes through `idx_memory_traces_unfiled_scope_id`, a partial index of the rows that hold `''` (on SQLite,
+ * only those whose metadata text can name a scope id), and returns the rows whose metadata text can name one. The fill
+ * files each such row whose JSON names one. A row whose JSON names none other than `''` (JSON that cannot be read, a
+ * `null` scope id, a nested `scopeId` key) keeps `''` and is read again by the next fill.
  *
  * A row's JSON is read in code, not with a SQL JSON function: `json_extract` (SQLite) and the `::jsonb` cast
  * (Postgres) raise on a malformed row, which would stop the migration for the whole Brain. A row whose JSON cannot be
@@ -106,28 +106,42 @@ const NAMES_SCOPE_ID =
   ` OR metadata LIKE '%\\u%' ESCAPE '!'`;
 
 /**
- * The partial index of the rows a fill can give a scope id: the rows that hold `scope_id` `''` while their metadata
- * text can name one ({@link NAMES_SCOPE_ID}). The fill that runs at every open and before every import reads through
- * it, so it walks none of a brain's other rows: a brain whose traces all hold their scope id has no entry here. SQLite
- * and Postgres use a partial index only for a query whose `WHERE` holds the index's own terms, so the fill's read
- * holds `scope_id = ''` and `(NAMES_SCOPE_ID)` as written here.
+ * The partial index the fill that runs at every open and before every import reads through, so it walks none of a
+ * brain's rows that hold a scope id: a brain whose traces all hold their scope id has no entry here.
+ *
+ * On SQLite it holds the rows that hold `scope_id` `''` while their metadata text can name a scope id
+ * ({@link NAMES_SCOPE_ID}), so the traces a brain holds under no scope id have no entry either. SQLite uses a partial
+ * index only for a query whose `WHERE` holds each of the index's terms, so the fill's read holds `scope_id = ''` and
+ * `(NAMES_SCOPE_ID)` as written here.
+ *
+ * On Postgres it holds every row that holds `scope_id` `''`, and the fill's read tests each one's metadata on the
+ * server. Postgres can update a row without writing any of the table's indexes (a heap-only update) only when the
+ * update changes no column that an index reads, in its key, an expression or its predicate. A recall writes the
+ * metadata of each trace it returns, so a predicate that read `metadata` would make each of those writes add an entry
+ * to every index of `memory_traces`, the full-text GIN index among them.
+ *
+ * @param postgres - Whether the index is made on Postgres.
  */
-const UNFILED_SCOPE_ID_INDEX_DDL =
-  `CREATE INDEX IF NOT EXISTS idx_memory_traces_unfiled_scope_id ON memory_traces (brain_id, id) WHERE scope_id = '' AND (${NAMES_SCOPE_ID})`;
+function unfiledScopeIdIndexDdl(postgres: boolean): string {
+  const rows = postgres ? `scope_id = ''` : `scope_id = '' AND (${NAMES_SCOPE_ID})`;
+  return `CREATE INDEX IF NOT EXISTS idx_memory_traces_unfiled_scope_id ON memory_traces (brain_id, id) WHERE ${rows}`;
+}
 
-/** The indexes {@link ensureScopeIdColumn} gives `memory_traces`, each with its name. */
-const SCOPE_ID_INDEXES: ReadonlyArray<{ name: string; ddl: string }> = [
-  { name: 'idx_memory_traces_brain_scope_id', ddl: SCOPE_ID_INDEX_DDL },
-  { name: 'idx_memory_traces_unfiled_scope_id', ddl: UNFILED_SCOPE_ID_INDEX_DDL },
-];
+/** The indexes {@link ensureScopeIdColumn} gives `memory_traces` on `adapter`, each with its name. */
+function scopeIdIndexes(adapter: StorageAdapter): ReadonlyArray<{ name: string; ddl: string }> {
+  return [
+    { name: 'idx_memory_traces_brain_scope_id', ddl: SCOPE_ID_INDEX_DDL },
+    { name: 'idx_memory_traces_unfiled_scope_id', ddl: unfiledScopeIdIndexDdl(isPostgres(adapter)) },
+  ];
+}
 
 /**
  * Fills one brain's `scope_id` from the metadata JSON for its rows that hold `''`. Pages by `id` inside the brain, so
  * each page is a range read of the primary key, and writes each page's values in one statement, to the rows that
  * still hold `''`.
  *
- * @param named - Read only the rows whose metadata text can name a scope id other than `''`, through the index of
- *   those rows ({@link UNFILED_SCOPE_ID_INDEX_DDL}) where the table has it.
+ * @param named - Read only the rows whose metadata text can name a scope id other than `''`, through the partial index
+ *   of the rows that hold `''` ({@link unfiledScopeIdIndexDdl}) where the table has it.
  */
 async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: string, named = false): Promise<void> {
   const filter = named ? ` AND (${NAMES_SCOPE_ID})` : '';
@@ -159,10 +173,11 @@ async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: s
 /**
  * Files the traces of one brain that hold `scope_id` `''` while their metadata names a scope id: the rows a release
  * older than the column writes, with the column's default, to a brain that is already at schema version 3. Only the
- * rows whose metadata text can name a scope id other than `''` are read, through the index that holds those rows
- * alone, so a brain with no such row costs one probe of that index. A row whose JSON gives no scope id other than
- * `''` (JSON that cannot be read, a `scopeId` that is not a string, a nested `scopeId` key) keeps `''`, stays in
- * that index and is read again by the next fill. A row that holds a scope id is never written.
+ * rows whose metadata text can name a scope id other than `''` are read back, through the partial index of the rows
+ * that hold `''` ({@link unfiledScopeIdIndexDdl}): on SQLite it holds those rows alone, so a brain with none costs one
+ * probe of it; on Postgres it holds every row that holds `''`, whose metadata the read tests on the server. A row
+ * whose JSON gives no scope id other than `''` (JSON that cannot be read, a `scopeId` that is not a string, a nested
+ * `scopeId` key) keeps `''` and is read again by the next fill. A row that holds a scope id is never written.
  *
  * `Brain` runs it for the brain it opens, at every open. Each importer runs it before its first duplicate check,
  * inside the import's transaction where it has one: an older release can write to a brain while this process holds
@@ -206,7 +221,7 @@ export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<bool
   }
   // Postgres takes the table's SHARE lock before it checks IF NOT EXISTS, so an existing index is skipped by name:
   // otherwise every open would wait for a long write transaction on memory_traces and hold up the writers behind it.
-  for (const { name, ddl } of SCOPE_ID_INDEXES) {
+  for (const { name, ddl } of scopeIdIndexes(adapter)) {
     if (isPostgres(adapter) && (await postgresIndexExists(adapter, name, 'memory_traces'))) continue;
     await adapter.exec(ddl);
   }
