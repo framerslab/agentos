@@ -260,6 +260,10 @@ export class StreamingTTSChain implements IStreamingTTS {
     let characters = 0;
     let emittedAudio = false;
     let closed = false;
+    // Set by close() alone. The facade also closes on a failure (fatal()), which advances no epoch: a write that waited on
+    // a switch throws when close() came, as any write after it does, and resolves when a cancel() cut it, even when the
+    // switch then ends the facade.
+    let closedByClose = false;
     // The facade ended on a failure (fatal), not on a close the caller asked for or one after a completed flush.
     let faulted = false;
     let cancelled = false;
@@ -610,6 +614,7 @@ export class StreamingTTSChain implements IStreamingTTS {
       },
       close: (): void => {
         if (closed) return;
+        closedByClose = true;
         epoch++;
         const old = current;
         current = undefined;
@@ -623,11 +628,12 @@ export class StreamingTTSChain implements IStreamingTTS {
         if (current) bindSink(current);
       },
       // A write that waited on a switch was issued before any cancel() that came meanwhile, so it is the cut request's:
-      // it admits nothing and resolves, as a write the cancel cut in flight does; after close() it throws, as any write.
+      // it admits nothing and resolves, as a write the cancel cut in flight does, also when the switch then finds no
+      // provider and ends the facade; after close() it throws, as any write.
       writeTokens: async (text: string): Promise<void> => {
         const request = epoch;
         await switching;
-        if (!closed && epoch !== request) return;
+        if (!closedByClose && epoch !== request) return;
         admit(text);
         if (!current) throw new Error('synthesis unavailable');
         try {
