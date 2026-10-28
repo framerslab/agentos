@@ -125,6 +125,7 @@ describe('AgentOSOrchestrator (API layer)', () => {
     // Create mock Conversation Manager
     mockConversationManager = {
       getOrCreateContext: vi.fn().mockResolvedValue(mockConversationContext),
+      getConversation: vi.fn().mockResolvedValue(null),
       saveContext: vi.fn().mockResolvedValue(undefined),
       saveConversation: vi.fn().mockResolvedValue(undefined),
     } as unknown as ConversationManager;
@@ -1560,6 +1561,8 @@ describe('AgentOSOrchestrator (API layer)', () => {
         gmi: resumeGmi,
         conversationContext: statefulConversationContext,
       });
+      // the stored conversation, which holds the pause the resume takes
+      vi.mocked(mockConversationManager.getConversation).mockResolvedValue(statefulConversationContext);
 
       const streamId = await orchestrator.orchestrateResumedToolResults(pendingRequest, [
         {
@@ -1684,6 +1687,8 @@ describe('AgentOSOrchestrator (API layer)', () => {
         gmi: resumeGmi,
         conversationContext: statefulConversationContext,
       });
+      // the stored conversation, which holds the pause the resume takes
+      vi.mocked(mockConversationManager.getConversation).mockResolvedValue(statefulConversationContext);
 
       await orchestrator.orchestrateResumedToolResults(
         pendingRequest,
