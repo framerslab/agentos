@@ -53,20 +53,22 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** The host's embedding model, fixed. */
-const embeddingManager = {
-  generateEmbeddings: async (request: { texts: string | string[] }) => ({
-    embeddings: (Array.isArray(request.texts) ? request.texts : [request.texts]).map(() => {
-      const vector = new Array<number>(DIMENSION).fill(0);
-      vector[0] = 1;
-      return vector;
+/** The host's embedding model, fixed, returning vectors of `size` values. */
+function embedder(size: number): CognitiveMemoryConfig['embeddingManager'] {
+  return {
+    generateEmbeddings: async (request: { texts: string | string[] }) => ({
+      embeddings: (Array.isArray(request.texts) ? request.texts : [request.texts]).map(() => {
+        const vector = new Array<number>(size).fill(0);
+        vector[0] = 1;
+        return vector;
+      }),
+      modelId: 'fixed',
+      providerId: 'fixed',
+      usage: { totalTokens: 0 },
     }),
-    modelId: 'fixed',
-    providerId: 'fixed',
-    usage: { totalTokens: 0 },
-  }),
-  getEmbeddingDimension: async () => DIMENSION,
-} as unknown as CognitiveMemoryConfig['embeddingManager'];
+    getEmbeddingDimension: async () => size,
+  } as unknown as CognitiveMemoryConfig['embeddingManager'];
+}
 
 /** A working memory a host supplies: the manager's contract, kept in a map. */
 function workingMemory(): CognitiveMemoryConfig['workingMemory'] {
@@ -91,24 +93,27 @@ function workingMemory(): CognitiveMemoryConfig['workingMemory'] {
 }
 
 /** An empty in-process vector index. A second manager built over the same one stands for a restart over a durable index. */
-async function vectorIndex(): Promise<InMemoryVectorStore> {
+async function vectorIndex(dimension = DIMENSION): Promise<InMemoryVectorStore> {
   const index = new InMemoryVectorStore();
-  const config = { id: `qa-index-${++serial}`, type: 'in_memory', similarityMetric: 'cosine', defaultEmbeddingDimension: DIMENSION };
+  const config = { id: `qa-index-${++serial}`, type: 'in_memory', similarityMetric: 'cosine', defaultEmbeddingDimension: dimension };
   await index.initialize(config);
   return index;
 }
 
-/** A memory manager as a host builds one: its own knowledge graph, the given index (a new one by default), the given Brain. */
+/**
+ * A memory manager as a host builds one: its own knowledge graph, the given index (a new one by default), the given
+ * Brain, and an embedding model of the given size (1536 by default).
+ */
 async function manager(
-  options: { brain?: Brain; index?: InMemoryVectorStore; persistAccessState?: boolean } = {},
+  options: { brain?: Brain; index?: InMemoryVectorStore; persistAccessState?: boolean; dimension?: number } = {},
 ): Promise<CognitiveMemoryManager> {
   const knowledgeGraph = new KnowledgeGraph();
   await knowledgeGraph.initialize();
   const config: CognitiveMemoryConfig = {
     workingMemory: workingMemory(),
     knowledgeGraph,
-    vectorStore: options.index ?? (await vectorIndex()),
-    embeddingManager,
+    vectorStore: options.index ?? (await vectorIndex(options.dimension)),
+    embeddingManager: embedder(options.dimension ?? DIMENSION),
     agentId: 'qa-agent',
     traits: { honesty: 0.5, emotionality: 0.5, extraversion: 0.5, agreeableness: 0.5, conscientiousness: 0.5, openness: 0.5 },
     moodProvider: () => ({ ...NEUTRAL }),
@@ -542,6 +547,26 @@ describe('a trace keeps its reinforcement schedule across a restart, with no Bra
     const recalling = await manager({ index });
     const [recalled] = (await recall(recalling)).retrieved;
     expect(recalled).toMatchObject(schedule);
+  });
+
+  it("restores them through getByScope when the host's embedding model returns 768 values, as nomic-embed-text does", async () => {
+    const index = await vectorIndex(768);
+    const first = await manager({ index, dimension: 768 });
+    const id = (await tell(first)).id;
+    await recall(first);
+    const accessed = structuredClone(first.getStore().getTrace(id)!);
+    await stop(first);
+
+    const listing = await manager({ index, dimension: 768 });
+    const [listed] = await listing.getStore().getByScope('user', 'ana');
+    expect(listed).toMatchObject({
+      id,
+      content: "Ana's sister is Vera.",
+      stability: accessed.stability,
+      accessCount: 1,
+      reinforcementInterval: TWO_HOURS,
+      nextReinforcementAt: accessed.nextReinforcementAt,
+    });
   });
 
   it('restores a trace whose index entry holds no schedule with a one-hour interval, which its next recall doubles', async () => {
