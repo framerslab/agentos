@@ -451,6 +451,12 @@ describe('what the guest hands the host', () => {
         }`,
         {},
         {
+          // The budget is under test, not the deadline. The guest makes the JSON of four million
+          // characters for each call and the host copies eight of them out, which took 1.2 to 2.1
+          // seconds on CI runners: under direct()'s two-second default a slow runner ended the call
+          // 'timeout' before the ninth call was refused. A minute is far past that work and inside
+          // vitest's two-minute test timeout.
+          timeoutMs: 60_000,
           globals: {
             fs: {
               readFile: async (filePath: unknown) => {
