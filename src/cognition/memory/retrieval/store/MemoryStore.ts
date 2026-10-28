@@ -2207,11 +2207,14 @@ export class MemoryStore {
   /**
    * Deletes the given traces for good: each is soft-deleted in this process (cache, vector index, sibling stores
    * and its knowledge-graph copy), then its Brain row is deleted, so no reload, in this process or another, brings
-   * it back (a store that finds a row gone reads it as deleted). On SQLite the full-text index is rebuilt from the
-   * rows that remain, as every hard delete must; a rebuild that fails is repaired when the Brain next opens.
+   * it back (a store that finds a row gone reads it as deleted). The rows that name a trace go first, as the Brain's
+   * foreign keys require: its retrieval feedback (with the query that recalled it) is deleted, and the document chunk
+   * it was filed from lets go of it and keeps its text, which belongs to the document. On SQLite the full-text index
+   * is rebuilt from the rows that remain, as every hard delete must; a rebuild that fails is repaired when the Brain
+   * next opens.
    *
    * @param traceIds - Trace ids; unknown ids are skipped.
-   * @returns How many of them had a cached trace or a Brain row.
+   * @returns How many of them had a Brain row or a live cached trace, so a second call for the same ids counts none.
    * @throws When the Brain cannot be read or a row cannot be deleted.
    */
   async deleteTraces(traceIds: readonly string[]): Promise<number> {
@@ -2219,25 +2222,35 @@ export class MemoryStore {
     const ids = [...new Set(traceIds)];
     if (ids.length === 0) return 0;
     const brain = this.brain;
-    const existing = new Set(ids.filter((id) => this.traceCache.has(id)));
+    // A trace an earlier delete ended stays cached, inactive: it is evicted again, so a call made again retries an
+    // eviction that failed, and it counts only when it still has a row.
+    const counted = new Set(ids.filter((id) => this.traceCache.get(id)?.isActive === true));
+    const known = new Set(ids.filter((id) => this.traceCache.has(id)));
+    let rowIds: string[] = [];
     if (brain) {
       const durable = await this.getDurableTraceRows(ids, brain);
       if (!durable.ok) throw new Error('MemoryStore.deleteTraces: the Brain could not be read');
-      for (const id of durable.rows.keys()) existing.add(id);
+      rowIds = [...durable.rows.keys()];
+      for (const id of rowIds) {
+        counted.add(id);
+        known.add(id);
+      }
     }
-    for (const id of existing) {
+    for (const id of known) {
       try {
         await this.softDelete(id);
       } catch {
         // The row delete below removes what the tombstone could not mark.
       }
     }
-    if (brain && existing.size > 0) {
-      const list = [...existing];
-      for (let offset = 0; offset < list.length; offset += 400) {
-        const chunk = list.slice(offset, offset + 400);
+    if (brain && rowIds.length > 0) {
+      for (let offset = 0; offset < rowIds.length; offset += 400) {
+        const chunk = rowIds.slice(offset, offset + 400);
         const placeholders = chunk.map(() => '?').join(', ');
-        await brain.run(`DELETE FROM memory_traces WHERE brain_id = ? AND id IN (${placeholders})`, [brain.brainId, ...chunk]);
+        const params = [brain.brainId, ...chunk];
+        await brain.run(`DELETE FROM retrieval_feedback WHERE brain_id = ? AND trace_id IN (${placeholders})`, params);
+        await brain.run(`UPDATE document_chunks SET trace_id = NULL WHERE brain_id = ? AND trace_id IN (${placeholders})`, params);
+        await brain.run(`DELETE FROM memory_traces WHERE brain_id = ? AND id IN (${placeholders})`, params);
       }
       if (brain.features.dialect.name !== 'postgres') {
         try {
@@ -2247,14 +2260,14 @@ export class MemoryStore {
           // A database the index was never created in has nothing to rebuild.
           if (!fullTextIndexMissing(message)) {
             console.warn(
-              `[MemoryStore] full-text index rebuild after deleting ${list.length} traces failed; ` +
-                `their words match until the Brain next opens and repairs the index: ${message}`,
+              `[MemoryStore] full-text index rebuild after deleting ${rowIds.length} traces failed; ` +
+                `their words stay in the index until the Brain next opens and repairs it: ${message}`,
             );
           }
         }
       }
     }
-    return existing.size;
+    return counted.size;
   }
 
   /**

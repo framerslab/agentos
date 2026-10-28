@@ -98,7 +98,7 @@ export interface FlushReflectionResult {
 
 /** What {@link ICognitiveMemoryManager.deleteScope} and `deleteTraces` did. */
 export interface MemoryDeletion {
-  /** Traces deleted: a cached trace or a Brain row. */
+  /** Traces deleted: those with a Brain row or a live cached trace, so a call made again counts none. */
   deleted: number;
   /** Whether the knowledge graph's episodic copies were deleted with them (`IKnowledgeGraph.deleteMemories`). */
   graph: 'reached' | 'not_supported';
