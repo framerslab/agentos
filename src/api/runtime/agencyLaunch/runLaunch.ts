@@ -392,11 +392,14 @@ function reasonOf(status: LaunchStatus, launch: AdmittedLaunch, seats: LaunchSea
       return undefined;
     case 'budget_exhausted': {
       const refusal = state.refusal;
+      const used = launch.child.tokensUsed();
       // A budget the launch draws on (its parent's, its pool) or one a seat's call draws on (a persistent member's own)
-      // names the cap that refused; the launch's own token cap reads from the launch's count.
+      // names the cap that refused. The launch's own token cap reads from the launch's count once its calls have used it
+      // up; a call whose estimate alone would pass what the cap has left is told in the refusal's own words, as every
+      // other cap's refusal is.
       if (refusal && refusal.budgetId !== launch.child.id) return `a budget the team draws on refused a call: ${refusal.reason}`;
-      if (refusal && refusal.capType !== 'tokens') return `the launch's budget refused a call: ${refusal.reason}`;
-      return `the launch's budget is spent: ${launch.child.tokensUsed()} of ${launch.caps.maxTotalTokens} tokens`;
+      if (refusal && (refusal.capType !== 'tokens' || used < launch.caps.maxTotalTokens)) return `the launch's budget refused a call: ${refusal.reason}`;
+      return `the launch's budget is spent: ${used} of ${launch.caps.maxTotalTokens} tokens`;
     }
     case 'timed_out':
       return `the deadline of ${launch.deadlineMs} ms passed`;
@@ -472,6 +475,7 @@ function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome
 /**
  * Steps 6 to 10. One real-time timer per launch (never the learning layer's clock): at the deadline, or when the
  * parent turn stops, the launch signal aborts, which every seat's turn and the coordinator's calls run under. The
+ * parent's stop ends the timer, so a deadline that passes while the team settles leaves the launch cancelled. The
  * launch then waits one grace for the run to settle and the team to close, together, and returns; a run that resolved
  * before any abort gets the whole grace for its close. Once the run has settled the signal aborts in any case, before
  * the seats close, so no seat's call runs on past its launch.
@@ -494,6 +498,8 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
   }, launch.deadlineMs);
   const onParentStop = (): void => {
     state.cancelled = true;
+    // The parent stopped first: the deadline no longer runs, however long the team takes to settle.
+    clearTimeout(timer);
     controller.abort(parent.signal?.reason);
   };
   if (parent.signal?.aborted) onParentStop();
@@ -512,8 +518,14 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
       const building = host.buildSeat(seat, entry, parent, frameFor(entry, seat.role), cutWhen);
       const raced = await untilAborted(building, controller.signal);
       if (raced.kind === 'aborted') {
-        // A seat whose build settles after the abort is released at once.
-        void hold(building.then((late) => (isRefusal(late) ? undefined : late.close())));
+        // A seat whose build settles after the abort is released at once, a close that rejects logged as every other
+        // close's is; a build that rejects after the abort is logged too.
+        void hold(
+          building.then(
+            (late) => (isRefusal(late) ? undefined : closeAll([late], host)),
+            (error: unknown) => logSafely(host, error, 'launch_agency'),
+          ),
+        );
         break;
       }
       if (isRefusal(raced.value)) {

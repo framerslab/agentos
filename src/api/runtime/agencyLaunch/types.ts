@@ -152,9 +152,10 @@ export interface LaunchAgencyArgs {
 
 /**
  * How a launch that started ended, the first that holds: `budget_exhausted` (the launch's budget, a budget it draws on,
- * or a persistent member's own budget on its seat's call, refused a call), `timed_out` (its deadline passed),
- * `cancelled` (the launching turn stopped), `completed` (the team answered) or `failed` (the team or a seat failed, no
- * seat ran, or the launch failed before its team ran).
+ * or a persistent member's own budget on its seat's call, refused a call), `timed_out` (its deadline passed before the
+ * launching turn stopped), `cancelled` (the launching turn stopped first: a deadline that passes while the team settles
+ * changes nothing), `completed` (the team answered) or `failed` (the team or a seat failed, no seat ran, or the launch
+ * failed before its team ran).
  */
 export type LaunchStatus = 'completed' | 'timed_out' | 'budget_exhausted' | 'cancelled' | 'failed';
 
@@ -214,7 +215,8 @@ export interface LaunchSeatRecord {
   member?: string;
   /**
    * 'cut': the deadline, a budget the call drew on (the launch's, or a persistent member's own) or the parent's stop
-   * ended the seat's last call.
+   * ended the seat's last call, or that call was still running when the launch returned without its answer. 'not_run':
+   * none of the seat's calls has ended; in a launch's result, the seat was never called.
    */
   status: 'completed' | 'cut' | 'failed' | 'not_run';
   calls: number;
@@ -242,7 +244,9 @@ export interface LaunchAgencyResult {
   durationMs: number;
   /**
    * For every status but 'completed'. For 'budget_exhausted' it says whose budget refused (the launch's, or one the team
-   * draws on) and why: the launch's own token cap as its count of the cap, any other cap in its own words.
+   * draws on) and why: the launch's own token cap, once the launch's calls have used it up, as its count of the cap;
+   * any other refusal, a call whose estimate alone would pass what the cap has left among them, in the refusing cap's
+   * own words.
    */
   reason?: string;
   provenance: {
