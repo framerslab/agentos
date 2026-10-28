@@ -12,6 +12,7 @@ import type { AgentOptions } from '../../agent.js';
 import type { Agent } from '../../types.js';
 import type { ITool, JSONSchemaObject, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import { contentSafeConsole as console } from '../../../core/logging/contentSafeConsole.js';
+import { resolveModelOption } from '../../model.js';
 import { outputEstimateTokens } from '../spendBudget.js';
 import { adaptTools } from '../toolAdapter.js';
 import type { AgentOSUsageLedgerOptions } from '../usageLedger.js';
@@ -76,6 +77,26 @@ function temporarySeatOptions(parent: AgentOptions, role: string, instructions: 
     cognition: 'light',
     ...(ledger ? { usageLedger: { ...ledger, source: LAUNCH_AGENCY_TOOL_NAME } } : {}),
   };
+}
+
+/**
+ * The provider and model a launched team's manager and synthesizers run on: the launching agent's own. Those its options
+ * name, else the pair its persona resolved on its first call, resolved here the same way (`resolveModelOption`, which
+ * reads the environment), since `agency()` refuses a parallel, debate or hierarchical team without a route. When that
+ * pair does not resolve, the error is logged and the team gets neither.
+ */
+function teamRoute(opts: AgentOptions, logError: (error: unknown, where: string) => void): { provider?: string; model?: string } {
+  if (opts.provider || opts.model) {
+    return { ...(opts.provider ? { provider: opts.provider } : {}), ...(opts.model ? { model: opts.model } : {}) };
+  }
+  try {
+    // The call gmi()'s persona makes on the agent's first call, with no provider and no model named.
+    const { providerId, modelId } = resolveModelOption({ baseUrl: opts.baseUrl }, 'text');
+    return { provider: providerId, model: modelId };
+  } catch (error) {
+    logError(error, 'launch_agency route');
+    return {};
+  }
 }
 
 /** The tool names a persistent member's own turns can run: its tools, and launch_agency when it launches teams itself. */
@@ -244,8 +265,7 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
 
     async agencyRoute() {
       return {
-        ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
-        ...(opts.model !== undefined ? { model: opts.model } : {}),
+        ...teamRoute(opts, logError),
         ...(opts.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
         ...(opts.baseUrl !== undefined ? { baseUrl: opts.baseUrl } : {}),
       };
