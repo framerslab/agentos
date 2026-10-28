@@ -163,8 +163,9 @@ function skippedCall(req: ToolCallRequest, reason: string): ToolCallResult {
  * exact approval skips the tool, and the model is told why. Every call passed on carries `callerTurn`: the gate, the
  * budget, the explicit user, the names, the hooks (the carried ones, then the agent's) and this view's own
  * `processToolCall`, through which the step gate runs each step of a composed tool. It carries the turn's stop too, so
- * a call whose turn stopped while its hooks or its approval ran is refused (`STEP_ABORTED`) and nothing runs, and a
- * seat's call carries the seat's frame (`sessionData.agencyLaunch`), which a launch from it nests under.
+ * a call whose turn stopped while its hooks or its approval ran is refused (`STEP_ABORTED`) and nothing runs. A seat's
+ * call keeps the session data the GMI gave it, the frozen copy of the seat's frame (`sessionData.agencyLaunch`) among
+ * it, which a launch from that call nests under.
  */
 function hookTools(
   base: IToolOrchestrator,
@@ -215,7 +216,6 @@ function hookTools(
       ...details,
       toolCallRequest: { ...req, arguments: args },
       ...(signal ? { signal } : {}),
-      ...(turn.launchFrame ? { sessionData: { ...(details.sessionData ?? {}), agencyLaunch: turn.launchFrame } } : {}),
       callerTurn,
     });
   };

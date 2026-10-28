@@ -56,6 +56,7 @@ import { ChatMessage, ModelCompletionOptions, ModelCompletionResponse, ModelUsag
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 import { checkStructuredReply, resolveStructuredReply, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
+import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types.js';
 
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI';
@@ -196,6 +197,16 @@ function toolCallGateOf(turnInput: GMITurnInput): GMIToolCallGate | undefined {
   return typeof gate === 'function' ? gate : undefined;
 }
 
+/**
+ * The launched team a turn names in `metadata.agencyLaunch`, copied; undefined when it names none, or one without a
+ * string launch id, a string role and a numeric depth.
+ */
+function launchFrameOf(turnInput: GMITurnInput): AgencyLaunchFrame | undefined {
+  const frame = turnInput.metadata?.agencyLaunch as Partial<AgencyLaunchFrame> | undefined;
+  if (!frame || typeof frame.launchId !== 'string' || typeof frame.role !== 'string' || typeof frame.depth !== 'number') return undefined;
+  return { launchId: frame.launchId, role: frame.role, depth: frame.depth };
+}
+
 /** Adds one provider usage report to the turn's total. */
 function addUsage(total: CostAggregator, usage: ModelUsage): void {
   total.promptTokens += usage.promptTokens || 0;
@@ -289,6 +300,12 @@ export class GMI implements IGMI {
    * continuation that names no gate asks this one.
    */
   private turnToolCallGate: GMIToolCallGate | undefined;
+
+  /**
+   * The launched team the turn sits in, when the turn named one (`metadata.agencyLaunch`). Set when a user turn starts;
+   * a tool continuation that names none sits in this one.
+   */
+  private turnLaunchFrame: AgencyLaunchFrame | undefined;
 
   /** The learner session the host passed (`GMIBaseConfig.learning`), when its learning option is on. */
   private learnerSession: ILearnerSession | undefined;
@@ -872,7 +889,7 @@ export class GMI implements IGMI {
     return { sessionId, conversationId: namedConversation || sessionId, organizationId };
   }
 
-  private buildToolSessionData(turnInput: GMITurnInput): Record<string, any> | undefined {
+  private buildToolSessionData(turnInput: GMITurnInput, launchFrame?: AgencyLaunchFrame): Record<string, any> | undefined {
     const sessionId = typeof turnInput.sessionId === 'string' ? turnInput.sessionId.trim() : '';
     const conversationId = this.getConversationIdForTurn(turnInput);
     const organizationId = this.getOrganizationIdForTurn(turnInput);
@@ -886,6 +903,12 @@ export class GMI implements IGMI {
     }
     if (organizationId) {
       sessionData.organizationId = organizationId;
+    }
+
+    // The launched team the turn sits in, where a launch from this call reads its parent: a frozen copy for each call,
+    // so no tool changes the frame a later call is handed.
+    if (launchFrame) {
+      sessionData.agencyLaunch = Object.freeze({ launchId: launchFrame.launchId, role: launchFrame.role, depth: launchFrame.depth });
     }
 
     // The turn's learner and mode, on a GMI with a learner session: a self-modification tool reads them before it acts.
@@ -1165,10 +1188,13 @@ export class GMI implements IGMI {
       this.turnMemoryScope = memoryScopeOf(turnInput);
       this.turnLearning = undefined;
       this.turnToolCallGate = toolCallGateOf(turnInput);
+      this.turnLaunchFrame = launchFrameOf(turnInput);
     }
     // The gate this turn's tool round asks before each call: the one the input names; a continuation that names none
     // asks the gate of the turn it continues.
     const toolCallGate = toolCallGateOf(turnInput) ?? this.turnToolCallGate;
+    // The launched team this turn's tool calls sit in, likewise: a continuation that names none sits in its turn's.
+    const launchFrame = launchFrameOf(turnInput) ?? this.turnLaunchFrame;
     this.stateOwnerTurn = turnNumber;
     // False once a newer turn has started; lifecycle writes below check it.
     const ownsState = (): boolean => this.stateOwnerTurn === turnNumber;
@@ -1966,7 +1992,7 @@ export class GMI implements IGMI {
                 gmiId: this.gmiId, personaId: this.activePersona.id,
                 personaCapabilities: this.activePersona.allowedCapabilities || [],
                 userContext: this.currentUserContext, correlationId: turnId,
-                sessionData: this.buildToolSessionData(turnInput),
+                sessionData: this.buildToolSessionData(turnInput, launchFrame),
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;
