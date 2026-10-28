@@ -180,6 +180,17 @@ export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<bool
   return added;
 }
 
+/**
+ * Schema version 3: `memory_traces.scope_id`, each trace's scope id as a column of its own, and the index
+ * `idx_memory_traces_brain_scope_id` a per-scope read uses. `MigrationRunner` runs it for a brain whose
+ * `schema_version` is below 3, inside the migration's transaction (`BEGIN IMMEDIATE` on SQLite, a transaction that
+ * holds the brain's advisory lock on Postgres), and then records version 3 for that brain.
+ *
+ * The first brain of a table to migrate adds the column ({@link ensureScopeIdColumn}), which fills it for every brain
+ * the table holds from each row's metadata JSON. A brain that migrates after that fills its own rows that hold `''`:
+ * a release older than the column may have written them since. A store with no `memory_traces` is left to the schema
+ * step that follows, which creates the table with the column.
+ */
 export const v2ToV3: Migration = {
   version: 3,
   async up(adapter: StorageAdapter, _features: StorageFeatures, brainId: string): Promise<void> {
