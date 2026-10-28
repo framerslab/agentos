@@ -26,7 +26,7 @@ import type {
   KnowledgeSource,
   MemoryCopyFilter,
 } from './IKnowledgeGraph';
-import { isEmptyCopyFilter, isMemoryCopyOf } from './memoryCopies.js';
+import { copiedTraceId, copyKey, filterTraceIds, isEmptyCopyFilter, isMemoryCopyOf } from './memoryCopies.js';
 import type { ILogger } from '../../../../../core/logging/ILogger';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager';
 
@@ -284,10 +284,13 @@ export class KnowledgeGraph implements IKnowledgeGraph {
     memoryInput: Omit<EpisodicMemory, 'id' | 'createdAt' | 'accessCount' | 'lastAccessedAt'>
   ): Promise<EpisodicMemory> {
     const now = new Date().toISOString();
+    const traceId = copiedTraceId(memoryInput.context);
 
     const memory: EpisodicMemory = {
       ...memoryInput,
-      id: `mem-${uuidv4()}`,
+      // A memory trace's copy is keyed by its trace: recording the trace again replaces the copy, and a delete by
+      // trace id finds it by key.
+      id: traceId === undefined ? `mem-${uuidv4()}` : copyKey(traceId),
       createdAt: now,
       accessCount: 0,
       lastAccessedAt: now,
@@ -393,14 +396,23 @@ export class KnowledgeGraph implements IKnowledgeGraph {
     return results;
   }
 
-  /** Delete the episodic records that copy the filter's traces or scopes. */
+  /**
+   * Delete the episodic records that copy the filter's traces or scopes: a trace's copy by its key, a scope's copies
+   * by the scope their stored context names.
+   */
   async deleteMemories(filter: MemoryCopyFilter): Promise<number> {
     if (isEmptyCopyFilter(filter)) return 0;
     let deleted = 0;
-    for (const [id, memory] of this.memories) {
-      if (isMemoryCopyOf(memory.context, filter)) {
-        this.memories.delete(id);
-        deleted += 1;
+    for (const traceId of filterTraceIds(filter)) {
+      if (this.memories.delete(copyKey(traceId))) deleted += 1;
+    }
+    if (filter.scopes?.length) {
+      const byScope: MemoryCopyFilter = { scopes: filter.scopes };
+      for (const [id, memory] of this.memories) {
+        if (isMemoryCopyOf(memory.context, byScope)) {
+          this.memories.delete(id);
+          deleted += 1;
+        }
       }
     }
     return deleted;

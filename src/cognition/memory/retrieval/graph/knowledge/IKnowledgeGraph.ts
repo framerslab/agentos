@@ -353,7 +353,9 @@ export interface IKnowledgeGraph {
   // ============ Episodic Memory Operations ============
   
   /**
-   * Record an episodic memory
+   * Record an episodic memory. A record whose context names a memory trace (`memoryTraceId`, as `MemoryStore.store`
+   * writes it) is the trace's copy; the in-memory, SQL and Neo4j graphs keep one copy per trace, so recording the
+   * trace again replaces it.
    */
   recordMemory(memory: Omit<EpisodicMemory, 'id' | 'createdAt' | 'accessCount' | 'lastAccessedAt'>): Promise<EpisodicMemory>;
 

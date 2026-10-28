@@ -84,7 +84,7 @@ An FTS5 index over `content` and `tags`, with `memory_traces` as its external co
 | Table | Holds |
 |-------|-------|
 | `brain_meta` | Key-value pairs per brain: `schema_version`, `created_at`, `embedding_dimensions` |
-| `knowledge_nodes` | Entities: `type`, `label`, JSON `properties`, optional `embedding`, `confidence`, JSON `source` |
+| `knowledge_nodes` | Entities: `type`, `label`, JSON `properties`, optional `embedding`, `confidence`, JSON `source`. Rows of type `memory` are the memory graph's node of each trace (node id: the trace id) and episodic memories; `MemoryStore.store()` records each trace's episodic copy under the node id `trace:<traceId>` ([Deleting traces](./COGNITIVE_MEMORY.md#deleting-traces) says which delete removes which) |
 | `knowledge_edges` | Typed edges between nodes: `source_id`, `target_id`, `type`, `weight`, `bidirectional`, JSON `metadata` |
 | `documents` | Ingested documents: `path`, `format`, `title`, `content_hash`, `chunk_count`, JSON `metadata`, `ingested_at` |
 | `document_chunks` | Chunks of a document: `document_id`, `trace_id`, `content`, `chunk_index`, `page_number`, `embedding` |
