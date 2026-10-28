@@ -13,6 +13,7 @@ import { clearProviderPriority, setProviderPriority } from '../runtime/provider-
 import { SpendBudget } from '../runtime/spendBudget';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { CostGuard } from '../../safety/runtime/CostGuard';
 
 let n = 0;
 const key = () => `k-launch-route-${++n}`;
@@ -155,5 +156,36 @@ describe('launch_agency on gmi(): the coordinator route and the budgets of a sea
     // steps (14 and 15), the member's two (14 and 15) and the nested seat's (15).
     expect(host.tokensUsed()).toBe(73);
     expect(result.text).toBe('Planned.');
+  });
+
+  it("a seat's call is charged once to a spending total the host's budget and the member's own share by guard and id", async () => {
+    const k = key();
+    const km = key();
+    script('openai', k, {
+      replies: [launchStep({ goal: 'Price the plan.', seats: [{ role: 'pricer', agentKey: 'pricer' }] }), reply.text('Priced.')],
+    });
+    // The seat's call reports what it cost.
+    const billed = { promptTokens: 12, completionTokens: 3, totalTokens: 15, costUSD: 0.3 };
+    const pricerCalls = script('openai', km, { replies: [reply.text('Thirty cents.', 'stub-model', billed)] });
+    // Two budgets on one guard and one id keep one spending total: the host's, which the launch draws on, and the
+    // member's own.
+    const guard = new CostGuard({ maxDailyCostUsd: 100, maxSingleOperationCostUsd: 100 });
+    const host = new SpendBudget({ maxCostUSD: 5, guard, budgetId: 'account', unpriced: 'allow' });
+    const pricerOwn = new SpendBudget({ maxCostUSD: 5, guard, budgetId: 'account', unpriced: 'allow' });
+    const pricer = gmi({ ...route(km), instructions: 'Price the plan.', budget: pricerOwn });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', budget: host, agencies: { launch: true, members: { pricer } } });
+
+    const result = await parent.session('p1').send('Have the plan priced.');
+    const out = launchOf(result);
+    expect(out.status).toBe('completed');
+    expect(pricerCalls.seen).toHaveLength(1);
+    // The one call cost 0.3, and the total the two budgets share holds it once.
+    expect(guard.getSnapshot('account').sessionCostUsd).toBeCloseTo(0.3, 10);
+    expect(host.spentUSD()).toBeCloseTo(0.3, 10);
+    // Each budget still counts the call's tokens: the member's own its 15; the host's the parent's two steps (14 and
+    // 15) and the seat's 15.
+    expect(pricerOwn.tokensUsed()).toBe(15);
+    expect(host.tokensUsed()).toBe(44);
+    expect(result.text).toBe('Priced.');
   });
 });
