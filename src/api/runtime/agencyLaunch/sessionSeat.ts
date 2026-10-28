@@ -69,7 +69,8 @@ export interface InternalSeatOptions extends SessionSeatOptions {
   /**
    * A launch's seat: the launch's own budget, charged whatever budget the per-call options carry (those carry the
    * coordinator's). The member's own budget, when it has one, is checked and charged beside it (gmi()), on the seat's
-   * calls and on those of a team the seat launches.
+   * calls and on those of a team the seat launches; its refusal of a seat's call reaches the launch as a refusal by the
+   * launch's budget does, so the seat is cut and the launch reports `budget_exhausted`.
    */
   budget?: SpendBudget;
   /** A launch's seat: the hooks the launching turn ran under, run before the member's own. */
@@ -149,7 +150,8 @@ async function streamErrorOf(result: StreamTextResult): Promise<unknown> {
  * config, through a session of its own handle. The session opens on the seat's first call and runs every call of the
  * run, so a manager that delegates twice to the seat finds the first exchange. The session's memory is scoped to the
  * seat session and it has no learner: a team turn's input is a manager's or a sibling's text. Each call of the session
- * is checked against, and charged to, the member's own `budget` beside the budget the agency's call carries.
+ * is checked against, and charged to, the member's own `budget` beside the budget the agency's call carries, and a refusal
+ * by the member's own runs the carried budget's `onLimitReached` function, as a refusal by that budget's parent does.
  * `agency().close()` closes the seat's session and leaves the member serving its own users.
  *
  * @param member - A gmi() handle (gmi() or agent({ runtime: 'gmi' })).

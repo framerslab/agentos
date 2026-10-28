@@ -150,9 +150,10 @@ export interface LaunchAgencyArgs {
 }
 
 /**
- * How a launch that started ended, the first that holds: `budget_exhausted` (the launch's budget, or a budget it draws
- * on, refused a call), `timed_out` (its deadline passed), `cancelled` (the launching turn stopped), `completed` (the team
- * answered) or `failed` (the team or a seat failed, no seat ran, or the launch failed before its team ran).
+ * How a launch that started ended, the first that holds: `budget_exhausted` (the launch's budget, a budget it draws on,
+ * or a persistent member's own budget on its seat's call, refused a call), `timed_out` (its deadline passed),
+ * `cancelled` (the launching turn stopped), `completed` (the team answered) or `failed` (the team or a seat failed, no
+ * seat ran, or the launch failed before its team ran).
  */
 export type LaunchStatus = 'completed' | 'timed_out' | 'budget_exhausted' | 'cancelled' | 'failed';
 
@@ -210,7 +211,10 @@ export interface LaunchSeatRecord {
   form: 'temporary' | 'persistent';
   /** The agentKey or personaId of a persistent member. */
   member?: string;
-  /** 'cut': the deadline, the budget or the parent's stop ended the seat's last call. */
+  /**
+   * 'cut': the deadline, a budget the call drew on (the launch's, or a persistent member's own) or the parent's stop
+   * ended the seat's last call.
+   */
   status: 'completed' | 'cut' | 'failed' | 'not_run';
   calls: number;
   /** The seat's last output, at most SEAT_SUMMARY_CHARS characters. */
@@ -235,7 +239,10 @@ export interface LaunchAgencyResult {
   /** The coordinator's calls (the manager's and the synthesizers'), from its sub-budget. */
   coordinatorUsage: { totalTokens: number; costUSD: number };
   durationMs: number;
-  /** For every status but 'completed'. */
+  /**
+   * For every status but 'completed'. For 'budget_exhausted' it says whose budget refused (the launch's, or one the team
+   * draws on) and why: the launch's own token cap as its count of the cap, any other cap in its own words.
+   */
   reason?: string;
   provenance: {
     agencyId: string;

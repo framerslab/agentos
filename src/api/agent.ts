@@ -173,7 +173,8 @@ export interface AgentOptions extends BaseAgentConfig {
    * With `runtime: 'gmi'` every completion call a GMI makes is checked against it before it is sent, metaprompts and
    * self-reflection included; its cognitive memory's embeddings and the learning layer's own calls are not counted.
    * A seat's turn (`sessionSeat()`, or a member a launched team seats) is checked against it and charged to it beside the
-   * budget its team's call carries, and so is a team the seat's turn launches.
+   * budget its team's call carries, and so is a team the seat's turn launches; its refusal of a seat's call runs the
+   * carried budget's `onLimitReached` function, as a refusal by that budget's parent does.
    */
   budget?: SpendBudget | SpendBudgetOptions;
   /**

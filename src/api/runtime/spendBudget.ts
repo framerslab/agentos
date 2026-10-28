@@ -88,6 +88,13 @@ export function outputEstimateTokens(modelId: string, maxOutputTokens: number | 
 /** The info of the budget that refused, by the error it threw, so a child learns of an ancestor's refusal. */
 const refusalInfo = new WeakMap<object, SpendLimitInfo>();
 
+/** Runs `budget`'s own `onLimitReached` function, when it is one, with the info of the budget that refused with `error`. */
+function hearRefusal(budget: SpendBudget, error: unknown): void {
+  const info = typeof error === 'object' && error !== null ? refusalInfo.get(error) : undefined;
+  const on = budget.options.onLimitReached;
+  if (info && typeof on === 'function') on(info);
+}
+
 let budgets = 0;
 
 /** What the check, or the record, of a call held to two budgets ({@link bothBudgets}) has reached so far. */
@@ -222,9 +229,7 @@ export class SpendBudget {
         parent.assertCanSpend(estimateUSD, estimateTokens, what, model);
       } catch (error) {
         // An ancestor refused: this budget's own function hears of it, with that budget's info, before it goes on.
-        const info = typeof error === 'object' && error !== null ? refusalInfo.get(error) : undefined;
-        const on = this.options.onLimitReached;
-        if (info && typeof on === 'function') on(info);
+        hearRefusal(this, error);
         throw error;
       }
     }
@@ -317,7 +322,8 @@ export class SpendBudget {
 
 /**
  * A budget that holds each call to two budgets: a call is checked against the first, then the second, and refused when
- * either refuses it, and a finished call or an outside cost is recorded in both. A budget both draw on is checked and
+ * either refuses it, a refusal by the second (or a budget above it) running the first's own `onLimitReached` function as
+ * a refusal by the first's parent does; a finished call or an outside cost is recorded in both. A budget both draw on is checked and
  * charged once, and so is the one total that budgets on one guard and one id keep, each of them still counting the
  * call's tokens. What is left is the lesser of what each has left under its own caps; what it has spent, and the tokens
  * it has counted, are the first's.
@@ -350,7 +356,13 @@ class BothBudgets extends SpendBudget {
   override assertCanSpend(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
     reachOnce('check', () => {
       this.first.assertCanSpend(estimateUSD, estimateTokens, what, model);
-      this.second.assertCanSpend(estimateUSD, estimateTokens, what, model);
+      try {
+        this.second.assertCanSpend(estimateUSD, estimateTokens, what, model);
+      } catch (error) {
+        // The first draws on the second as on a parent: its own function hears of the second's refusal before it goes on.
+        hearRefusal(this.first, error);
+        throw error;
+      }
     });
   }
 
@@ -370,8 +382,9 @@ class BothBudgets extends SpendBudget {
 }
 
 /**
- * A budget that holds each call to `first` and to `second`: checked against both, recorded in both, a budget both draw
- * on checked and charged once, and a total that budgets on one guard and one id keep charged once. `first` itself when
+ * A budget that holds each call to `first` and to `second`: checked against both (`first`'s own `onLimitReached`
+ * function hearing of a refusal by `second`, as of one by its parent), recorded in both, a budget both draw on checked
+ * and charged once, and a total that budgets on one guard and one id keep charged once. `first` itself when
  * the two are one budget. A seat's turn runs under one: the budget its team's call carries, and the member's own
  * (gmi.ts).
  *

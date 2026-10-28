@@ -846,7 +846,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       /**
        * A turn's budget: the one its send carries (settings make a new one) in place of the agent's. A seat's turn
        * (sessionSeat(), launch_agency) is held to the agent's own as well: each call is checked against both and charged
-       * to both, a budget both draw on once, so a member's cap holds on the turns it serves in a team.
+       * to both, a budget both draw on once, so a member's cap holds on the turns it serves in a team; a refusal by the
+       * agent's own reaches the carried budget's `onLimitReached` function, as a launch's budget hears of it.
        */
       const turnBudget = (carried: SpendBudget | SpendBudgetOptions | undefined): SpendBudget | undefined => {
         const budget = asSpendBudget(carried);
