@@ -34,11 +34,11 @@ import {
   IGMI,
   GMIOutput,
   GMIOutputChunkType,
+  type GMIOutputChunk,
   type GMIToolCallRefusal,
 } from '../../cognition/substrate/IGMI';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { ConversationContext } from '../../core/conversation/ConversationContext';
-import { MessageRole } from '../../core/conversation/ConversationMessage';
 // IToolOrchestrator — referenced via AgentOSOrchestratorDependencies
 // uuidv4 — now used by GMIChunkTransformer
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
@@ -69,7 +69,8 @@ import { ExternalToolResultHandler } from './ExternalToolResultHandler';
 import { GMIChunkTransformer } from './GMIChunkTransformer';
 import { TurnExecutionPipeline } from './TurnExecutionPipeline';
 import { gmiToolCallGateFor } from './toolCallGate';
-import { externalToolPauseCalls } from './externalToolPause';
+import { externalToolPauseCalls, streamedRequestForPause, streamsActionableToolCalls } from './externalToolPause';
+import { addReplyToConversation, finalResponseFieldsOf } from './turnFinalResponse';
 
 // Public config types extracted to types/OrchestratorConfig.ts
 export type {
@@ -144,36 +145,6 @@ const RECALL_PROFILE_DEFAULTS: Record<
     topKByScope: { user: 4, persona: 4, organization: 4 },
   },
 };
-
-function renderPlainText(markdown: string): string {
-  let text = String(markdown ?? '');
-  if (!text.trim()) return '';
-
-  text = text.replace(/\r\n/g, '\n');
-  // Fenced code blocks: keep inner content, drop fences.
-  text = text.replace(/```[a-zA-Z0-9_-]*\n([\s\S]*?)```/g, '$1');
-  // Inline code.
-  text = text.replace(/`([^`]+)`/g, '$1');
-  // Images + links.
-  text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
-  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-  // Headings + blockquotes.
-  text = text.replace(/^\s{0,3}#{1,6}\s+/gm, '');
-  text = text.replace(/^\s{0,3}>\s?/gm, '');
-  // Emphasis / strike-through.
-  text = text.replace(/(\*\*|__)(.*?)\1/g, '$2');
-  text = text.replace(/(\*|_)(.*?)\1/g, '$2');
-  text = text.replace(/~~(.*?)~~/g, '$1');
-  // Horizontal rules.
-  text = text.replace(/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/gm, '');
-  // Basic HTML tags.
-  text = text.replace(/<\/?[^>]+>/g, '');
-
-  text = text.replace(/&nbsp;/g, ' ');
-  text = text.replace(/\n{3,}/g, '\n\n');
-
-  return text.trim();
-}
 
 // normalizeTaskOutcomeOverride, normalizeRequestedToolFailureMode
 // moved to TaskOutcomeTelemetryManager
@@ -804,7 +775,8 @@ export class AgentOSOrchestrator {
     let didForceTerminate = false;
     let lifecycleDegraded = false;
     let keepStreamContextActive = false;
-    let streamedToolCallRequest = false;
+    // the requests for host calls the GMI streamed: the host stops reading at the first, so they wait for the GMI's output
+    const streamedHostToolCallRequests: GMIOutputChunk[] = [];
     // the spend meter: processRequest reserved this turn under input.operationId; the turn keeps the lease alive and settles it
     const spendMeter = this.dependencies.spendMeter;
     const meteredOperationId = spendMeter && typeof input.operationId === 'string' && input.operationId.trim() ? input.operationId.trim() : undefined;
@@ -914,14 +886,14 @@ export class AgentOSOrchestrator {
             if (gmiChunk.type === GMIOutputChunkType.TEXT_DELTA && typeof gmiChunk.content === 'string' && gmiChunk.content.length > 0) {
               outputReached = true;
             }
-            if (
-              gmiChunk.type === GMIOutputChunkType.TOOL_CALL_REQUEST &&
-              Array.isArray(gmiChunk.content) &&
-              gmiChunk.content.length > 0
-            ) {
-              streamedToolCallRequest = true;
+            // A request for calls the host runs waits for the GMI's output, which names the calls the turn stops for:
+            // the host stops reading at the first such request and runs only its calls. A request for calls the GMI
+            // runs itself is informational, and the host reads on past it.
+            if (streamsActionableToolCalls(gmiChunk)) {
+              streamedHostToolCallRequests.push(gmiChunk);
+            } else {
+              await this.chunkTransformer.transformAndPushGMIChunk(agentOSStreamId, streamContext, gmiChunk);
             }
-            await this.chunkTransformer.transformAndPushGMIChunk(agentOSStreamId, streamContext, gmiChunk);
 
             // NOTE: Tool calls may be executed internally by the GMI/tool orchestrator. Do not stop
             // streaming on TOOL_CALL_REQUEST; treat it as informational for observers/UI.
@@ -980,7 +952,15 @@ export class AgentOSOrchestrator {
           );
         }
 
-        if (!streamedToolCallRequest) {
+        // One request reaches the host, after the pause is saved, naming the calls as the turn saved them: the GMI's
+        // own when it streamed one request for exactly these calls, and the turn's otherwise.
+        const streamedRequest = streamedRequestForPause(streamedHostToolCallRequests, pauseCalls);
+        if (streamedRequest) {
+          await this.chunkTransformer.transformAndPushGMIChunk(agentOSStreamId, streamContext, {
+            ...streamedRequest,
+            content: pauseCalls,
+          });
+        } else {
           await this.chunks.pushChunk(
             agentOSStreamId,
             AgentOSResponseChunkType.TOOL_CALL_REQUEST,
@@ -1000,6 +980,13 @@ export class AgentOSOrchestrator {
         }
 
         return;
+      }
+
+      if (streamedHostToolCallRequests.length > 0) {
+        // the turn waits on no call, and a request would stop the host's read before the reply
+        console.warn(
+          `AgentOSOrchestrator: the GMI streamed ${streamedHostToolCallRequests.length} request(s) for host calls on stream ${agentOSStreamId}, but its output does not stop the turn; they were not streamed.`
+        );
       }
 
       const normalizedUsage = normalizeUsage(finalGMIStateForResponse.usage);
@@ -1111,30 +1098,12 @@ export class AgentOSOrchestrator {
         }
       }
 
-      // Persist assistant output into ConversationContext for durable memory / prompt reconstruction.
+      // Persist assistant output into ConversationContext for durable memory / prompt reconstruction: the reply, as a
+      // continuation stores it, and never the calls of the GMI's own tool rounds, whose results only the GMI holds.
       if (this.config.enableConversationalPersistence && conversationContext) {
         const persistContext = conversationContext;
         try {
-          if (
-            typeof finalGMIStateForResponse.responseText === 'string' &&
-            finalGMIStateForResponse.responseText.trim()
-          ) {
-            conversationContext.addMessage({
-              role: MessageRole.ASSISTANT,
-              content: finalGMIStateForResponse.responseText,
-              metadata: { agentPersonaId: currentPersonaId, source: 'agentos_output' },
-            });
-          } else if (
-            finalGMIStateForResponse.toolCalls &&
-            finalGMIStateForResponse.toolCalls.length > 0
-          ) {
-            conversationContext.addMessage({
-              role: MessageRole.ASSISTANT,
-              content: null,
-              tool_calls: finalGMIStateForResponse.toolCalls as any,
-              metadata: { agentPersonaId: currentPersonaId, source: 'agentos_output_tool_calls' },
-            });
-          }
+          addReplyToConversation(conversationContext, finalGMIStateForResponse, currentPersonaId);
 
           await withAgentOSSpan('agentos.conversation.save', async (span) => {
             span?.setAttribute('agentos.stage', 'assistant_output');
@@ -1156,24 +1125,12 @@ export class AgentOSOrchestrator {
         currentPersonaId,
         true,
         {
-          finalResponseText: finalGMIStateForResponse.responseText ?? null,
-          finalResponseTextPlain:
-            typeof finalGMIStateForResponse.responseText === 'string'
-              ? renderPlainText(finalGMIStateForResponse.responseText)
-              : null,
-          finalToolCalls: finalGMIStateForResponse.toolCalls,
-          finalUiCommands: finalGMIStateForResponse.uiCommands,
-          audioOutput: finalGMIStateForResponse.audioOutput,
-          imageOutput: finalGMIStateForResponse.imageOutput,
-          usage: normalizedUsage,
-          reasoningTrace: finalGMIStateForResponse.reasoningTrace,
-          error: finalGMIStateForResponse.error,
+          // built from the output as a continuation's final response is
+          ...finalResponseFieldsOf(finalGMIStateForResponse),
           updatedConversationContext: conversationContext
             ? conversationContext.toJSON()
             : undefined,
           activePersonaDetails: snapshotPersonaDetails(gmi?.getPersona?.()),
-          ragSources: finalGMIStateForResponse.ragSources,
-          ...(finalGMIStateForResponse.structuredOutput ? { structured: finalGMIStateForResponse.structuredOutput } : {}),
         }
       );
       await this.dependencies.streamingManager.closeStream(agentOSStreamId, 'Processing complete.');

@@ -196,6 +196,7 @@ interface GuardrailEvaluationResult {
 
 - If `canSanitize: true` is set in your config, your guardrail runs in **Phase 1 (sequential)** and your `modifiedText` is applied before downstream guardrails see the content.
 - If your guardrail is in **Phase 2** (no `canSanitize` or `canSanitize: false`) and it returns SANITIZE, the action is **automatically downgraded to FLAG** with a warning logged. This prevents non-deterministic concurrent modifications.
+- On a `FINAL_RESPONSE`, `modifiedText` replaces the reply in every field that carries it: `finalResponseText`; `finalResponseTextPlain`, rendered as plain text as a turn renders its own reply; the reply in `updatedConversationContext`; and `audioOutput`, which keeps its voice settings, speaks the new text as plain text in `textToSpeak` and drops the `url` of the audio made from the replaced reply. A `null` `modifiedText` removes the reply, and the audio output with it. A structured value parsed from the replaced reply is withdrawn, as [Structured replies](../features/STRUCTURED_REPLY.md) (item 5) states. A `modifiedText` equal to the reply changes nothing: the parsed value and the audio output stay.
 
 ---
 
@@ -1086,7 +1087,7 @@ async evaluateOutput(
 
 ### When ragSources is available
 
-- `ragSources` comes with every evaluation after the turn's retrieval: the GMI's sources reach the stream as a `METADATA_UPDATE` before the first `TEXT_DELTA`, and the `FINAL_RESPONSE` carries them too.
+- `ragSources` comes with every evaluation after the turn's retrieval: the GMI's sources reach the stream as a `METADATA_UPDATE` before the first `TEXT_DELTA`, and the `FINAL_RESPONSE` carries them too. A tool-result continuation (`handleToolResult()`, `handleToolResults()`, `resumeExternalToolRequest()`) streams the sources of the GMI's output the same way, before its text.
 - It is `undefined` when the turn retrieved no sources.
 - Each [`RagRetrievedChunk`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/IRetrievalAugmentor.ts) contains `content`, `relevanceScore`, `metadata`, and source identifiers (`originalDocumentId`, `dataSourceId`, `source`).
 
