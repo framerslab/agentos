@@ -1179,7 +1179,9 @@ export class Brain {
     }
 
     // A table another path created without `scope_id` (a migration engine's copy) gains it here; a fresh table has it.
-    await retryLostCreate(() => ensureScopeIdColumn(adapter));
+    await retryLostCreate(async () => {
+      await ensureScopeIdColumn(adapter);
+    });
 
     // FTS index via feature abstraction (FTS5 on SQLite, tsvector/GIN on Postgres).
     // SQL.js builds may not include FTS5, so keep the core schema independent.

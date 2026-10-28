@@ -5,10 +5,11 @@
  * with an index on (brain_id, scope, scope_id, created_at).
  *
  * Idempotent. The column is added once per table: when this step adds it, every row of the table is filled, whatever
- * brain it belongs to. Each brain's own migration then fills that brain's rows that hold `''` again, which catches rows
- * an older release wrote after another brain's migration added the column (such a release writes the column's
- * default). `Brain` runs {@link ensureScopeIdColumn} on every open as well, for a table another path created without
- * the column (a migration engine's copy, a file an import reads).
+ * brain it belongs to, and the brain being migrated is not read again. When the column is already there, a brain's
+ * migration fills that brain's rows that hold `''`, which catches rows an older release wrote after another brain's
+ * migration added the column (such a release writes the column's default). `Brain` runs {@link ensureScopeIdColumn}
+ * on every open as well, for a table another path created without the column (a migration engine's copy, a file an
+ * import reads).
  *
  * An older release goes on writing `''` to a brain that is already at version 3, where its migration never runs
  * again. `Brain` runs {@link fillScopeIds} for the brain it opens, at every open, and each importer runs it before it
@@ -156,9 +157,11 @@ async function backfillEveryBrain(adapter: StorageAdapter): Promise<void> {
  * A store without the table is left alone: the schema step that follows creates it with the column.
  *
  * @param adapter - The store, or a migration's transaction.
+ * @returns Whether this call added the column, and so filled every row of the table.
  */
-export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<void> {
-  if (!(await tableExists(adapter, 'memory_traces'))) return;
+export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<boolean> {
+  if (!(await tableExists(adapter, 'memory_traces'))) return false;
+  let added = false;
   if (!(await hasColumn(adapter, 'memory_traces', 'scope_id'))) {
     // On Postgres the first opens of two brains can both find the column missing: the second ALTER waits for the
     // first's lock and then finds the column, which `IF NOT EXISTS` lets it pass. SQLite has no such clause; its
@@ -166,11 +169,15 @@ export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<void
     const ifNotExists = isPostgres(adapter) ? 'IF NOT EXISTS ' : '';
     await adapter.exec(`ALTER TABLE memory_traces ADD COLUMN ${ifNotExists}scope_id TEXT NOT NULL DEFAULT ''`);
     await backfillEveryBrain(adapter);
+    added = true;
   }
   // Postgres takes the table's SHARE lock before it checks IF NOT EXISTS, so an existing index is skipped by name:
   // otherwise every open would wait for a long write transaction on memory_traces and hold up the writers behind it.
-  if (isPostgres(adapter) && (await postgresIndexExists(adapter, 'idx_memory_traces_brain_scope_id', 'memory_traces'))) return;
+  if (isPostgres(adapter) && (await postgresIndexExists(adapter, 'idx_memory_traces_brain_scope_id', 'memory_traces'))) {
+    return added;
+  }
   await adapter.exec(SCOPE_ID_INDEX_DDL);
+  return added;
 }
 
 export const v2ToV3: Migration = {
@@ -178,7 +185,8 @@ export const v2ToV3: Migration = {
   async up(adapter: StorageAdapter, _features: StorageFeatures, brainId: string): Promise<void> {
     // A file with no `memory_traces` gets the table, with the column, from the schema step that follows.
     if (!(await tableExists(adapter, 'memory_traces'))) return;
-    await ensureScopeIdColumn(adapter);
+    // Adding the column filled every brain's rows, this brain's among them.
+    if (await ensureScopeIdColumn(adapter)) return;
     await backfill(adapter, brainId);
   },
 };
