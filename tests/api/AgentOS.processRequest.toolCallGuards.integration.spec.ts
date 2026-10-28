@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AgentOS, type AgentOSConfig } from '../../src/api/AgentOS';
+import {
+  AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY,
+  type AgentOSPendingExternalToolRequest,
+} from '../../src/api/types/AgentOSExternalToolRequest';
 import type { AgentOSInput } from '../../src/api/types/AgentOSInput';
 import {
   AgentOSResponseChunkType,
@@ -729,6 +733,60 @@ describe('AgentOS output guards that evaluate tool calls', () => {
       },
     );
 
+    it('while a turn whose delta was blocked runs on, the pause it saves is never offered, resumed or continued, and is dropped when the turn ends', async () => {
+      const conversationId = 'conv-later-pause-in-flight';
+      const gmi = pausingGmi(READ_CALL, undefined, [{ type: GMIOutputChunkType.TEXT_DELTA, content: 'Here is the vault code. ' }]);
+      const { agentos, context, input } = await runtimeWithHostTools(gmi, conversationId, streamedTextGuard('the vault code'));
+      // the store holds the save of the turn's pause until the test lets it go, so the turn is still running when the
+      // host's stream has ended with the block
+      let pauseSaving!: () => void;
+      const pauseSaveStarted = new Promise<void>((resolve) => {
+        pauseSaving = resolve;
+      });
+      let releaseSave!: () => void;
+      const saveReleased = new Promise<void>((resolve) => {
+        releaseSave = resolve;
+      });
+      vi.spyOn(agentos.getConversationManager(), 'saveConversation').mockImplementation(async (saved: ConversationContext) => {
+        if (saved.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY)) {
+          pauseSaving();
+          await saveReleased;
+        }
+      });
+
+      const responses = await collect(agentos.processRequest(input));
+      const last = responses.at(-1) as AgentOSErrorChunk;
+      expect(last.code).toBe('SECRET_TEXT');
+      await pauseSaveStarted;
+      try {
+        const saved = context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as AgentOSPendingExternalToolRequest;
+        expect(saved.toolCalls.map((call) => call.id)).toEqual([READ_CALL.id]);
+
+        // the turn has saved its pause and waits on the store: the pause is not offered
+        expect(await agentos.getPendingExternalToolRequest(conversationId, 'user-1')).toBeNull();
+        // nor resumed from the conversation
+        const resumed = await collect(
+          agentos.resumeExternalToolRequest(saved, [{ toolCallId: READ_CALL.id, toolName: READ_CALL.name, toolOutput: 'notes', isSuccess: true }]),
+        );
+        expect(resumed.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+        expect((resumed[0] as AgentOSErrorChunk).code).toBe('SYS_INVALID_STATE');
+        // nor continued on the blocked stream
+        const continued = await collect(agentos.handleToolResult(last.streamId, READ_CALL.id, READ_CALL.name, 'notes', true));
+        expect(continued.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+        expect(gmi.handleToolResult).not.toHaveBeenCalled();
+      } finally {
+        // the turn ends whatever the probes found
+        releaseSave();
+      }
+
+      // when the turn ends, the pause is dropped and the history answers the call with a refusal
+      await vi.waitFor(() => expect(resultFor(context, READ_CALL.id)).toBeDefined());
+      expect(String(resultFor(context, READ_CALL.id)?.content)).toContain('SECRET_TEXT');
+      expect(context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY)).toBeUndefined();
+      expect(await agentos.getPendingExternalToolRequest(conversationId, 'user-1')).toBeNull();
+      expect(gmi.handleToolResult).not.toHaveBeenCalled();
+    });
+
     it('a resume of a pause the conversation no longer holds is refused, and the GMI does not take its results', async () => {
       const gmi = pausingGmi(READ_CALL);
       const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-stale-pause', shellGuard(BLOCK_SHELL));
@@ -760,6 +818,44 @@ describe('AgentOS output guards that evaluate tool calls', () => {
       expect(context.getAllMessages()).toHaveLength(messagesAfterAnswer);
     });
 
+    it('a refused resume leaves the conversation as it was: the session GMI is not acquired, so the model and provider it names are not recorded', async () => {
+      const gmi = pausingGmi(READ_CALL);
+      const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-stale-preferences', shellGuard(BLOCK_SHELL));
+      // the GMI manager records the model and provider a request names on the conversation when it hands the session its GMI
+      const acquire = vi.mocked(GMIManager.prototype.getOrCreateGMIForSession).mockImplementation(
+        async (_userId, _sessionId, _personaId, _conversationId, preferredModelId, preferredProviderId) => {
+          if (preferredModelId) context.setMetadata('preferredModelId', preferredModelId);
+          if (preferredProviderId) context.setMetadata('preferredProviderId', preferredProviderId);
+          return { gmi, conversationContext: context } as any;
+        },
+      );
+
+      const first = await collect(agentos.processRequest(input));
+      const request = first.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk | undefined;
+      await vi.waitFor(() => expect(pauseMessageFor(context, READ_CALL.id)).toBeDefined());
+      const pending = await agentos.getPendingExternalToolRequest('conv-stale-preferences', 'user-1');
+      expect(pending?.toolCalls).toEqual([READ_CALL]);
+      // the host answers the call on the stream, so the snapshot it read before is stale
+      await collect(agentos.handleToolResult(request!.streamId, READ_CALL.id, READ_CALL.name, 'notes', true));
+      expect(gmi.handleToolResult).toHaveBeenCalledTimes(1);
+      const acquisitions = acquire.mock.calls.length;
+
+      const resumed = await collect(
+        agentos.resumeExternalToolRequest(
+          pending!,
+          [{ toolCallId: READ_CALL.id, toolName: READ_CALL.name, toolOutput: 'notes', isSuccess: true }],
+          { preferredModelId: 'other-model', preferredProviderId: 'other-provider' },
+        ),
+      );
+
+      expect(resumed.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+      expect((resumed[0] as AgentOSErrorChunk).code).toBe('SYS_INVALID_STATE');
+      expect(acquire.mock.calls.length).toBe(acquisitions);
+      expect(context.getMetadata('preferredModelId')).toBeUndefined();
+      expect(context.getMetadata('preferredProviderId')).toBeUndefined();
+      expect(gmi.handleToolResult).toHaveBeenCalledTimes(1);
+    });
+
     it('two resumes of one pause at once: one resumes it, the other is refused, and the GMI takes the results once', async () => {
       const gmi = pausingGmi(READ_CALL);
       const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-double-resume', shellGuard(BLOCK_SHELL));
@@ -774,11 +870,12 @@ describe('AgentOS output guards that evaluate tool calls', () => {
         releaseLoads = resolve;
       });
       let loads = 0;
-      vi.mocked(GMIManager.prototype.getOrCreateGMIForSession).mockImplementation(async () => {
+      const conversations = vi.mocked(agentos.getConversationManager().getConversation);
+      conversations.mockImplementation(async () => {
         loads += 1;
         if (loads === 2) releaseLoads();
         await bothLoading;
-        return { gmi, conversationContext: context } as any;
+        return context as any;
       });
 
       const result = { toolCallId: READ_CALL.id, toolName: READ_CALL.name, toolOutput: 'notes', isSuccess: true };
@@ -786,6 +883,7 @@ describe('AgentOS output guards that evaluate tool calls', () => {
         collect(agentos.resumeExternalToolRequest(pending!, [result])),
         collect(agentos.resumeExternalToolRequest(pending!, [result])),
       ]);
+      conversations.mockImplementation(async (id: string) => (id === 'conv-double-resume' ? (context as any) : null));
 
       const resumed = [first, second].filter((responses) => responses.at(-1)?.type === AgentOSResponseChunkType.FINAL_RESPONSE);
       const refused = [first, second].filter((responses) => responses.some((r) => r.type === AgentOSResponseChunkType.ERROR));
