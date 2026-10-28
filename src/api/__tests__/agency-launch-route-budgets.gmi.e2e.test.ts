@@ -120,4 +120,40 @@ describe('launch_agency on gmi(): the coordinator route and the budgets of a sea
     expect(out.provenance.budget.tokensUsed).toBe(15);
     expect(result.text).toBe('Reviewed.');
   });
+
+  it("a team a persistent member launches from its seat is charged to the member's own budget beside the launch's", async () => {
+    const k = key();
+    const km = key();
+    script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Draft the plan.', seats: [{ role: 'lead', agentKey: 'planner', tools: ['launch_agency'] }] }),
+        reply.text('Planned.'),
+      ],
+    });
+    // The member's two steps and, between them, the call of the seat its own launch builds on the member's route.
+    const memberCalls = script('openai', km, {
+      replies: [
+        launchStep({ goal: 'List the steps.', seats: [{ role: 'helper', instructions: 'List the steps.' }] }, 'l2'),
+        reply.text('Three steps.'),
+        reply.text('The plan has three steps.'),
+      ],
+    });
+    const host = new SpendBudget({ maxCostUSD: 1, unpriced: 'allow' });
+    const plannerOwn = new SpendBudget({ maxCostUSD: 1, unpriced: 'allow', parent: host });
+    const planner = gmi({ ...route(km), instructions: 'Plan.', budget: plannerOwn, agencies: { launch: true } });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', budget: host, agencies: { launch: true, members: { planner } } });
+
+    const result = await parent.session('p1').send('Have a plan drafted.');
+    const out = launchOf(result);
+    expect(out).toMatchObject({ status: 'completed', text: 'The plan has three steps.' });
+    expect(memberCalls.seen).toHaveLength(3);
+    // The member's own budget: its two steps (14 and 15 tokens) and the call of the team it launched (15).
+    expect(plannerOwn.tokensUsed()).toBe(44);
+    // The launch's budget counted the member's calls and its nested team's.
+    expect(out.provenance.budget.tokensUsed).toBe(44);
+    // The host's budget, which the launch and the member's own both draw on, counts every call once: the parent's two
+    // steps (14 and 15), the member's two (14 and 15) and the nested seat's (15).
+    expect(host.tokensUsed()).toBe(73);
+    expect(result.text).toBe('Planned.');
+  });
 });
