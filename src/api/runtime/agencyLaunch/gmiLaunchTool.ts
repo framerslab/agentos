@@ -100,7 +100,10 @@ function inputSchemaFor(limits: LaunchLimits, memberKeys: string[]): JSONSchemaO
             brief: { type: 'string', description: "A member's brief for this team, at most 1,000 characters; only with agentKey." },
           }
         : {}),
-      tools: { ...names, description: 'The names of your own tools this seat may use. A seat given none uses none.' },
+      tools: {
+        ...names,
+        description: `The names of your own tools this seat may use${memberKeys.length > 0 ? '; for a member, only those it also has' : ''}. A seat given none uses none.`,
+      },
       dependsOn: { ...names, description: 'For the graph strategy: the roles this seat waits for; their outputs are its input.' },
     },
     required: ['role'],
@@ -134,6 +137,7 @@ function descriptionFor(limits: LaunchLimits, memberKeys: string[]): string {
     'One seat makes a subagent.',
     "The team sees nothing of this conversation, so put everything it needs in the goal and each seat's instructions.",
     "A seat uses only the tools its tools list names, from your own tools.",
+    ...(memberKeys.length > 0 ? ["A member's seat may name only tools the member also has."] : []),
     `At most ${limits.maxSeats} seats; the team runs within a share of this turn's budget and a deadline.`,
     'A launch that is refused returns an error that starts with its code, such as too_many_seats or invalid_arguments.',
   ].join(' ');
@@ -150,7 +154,9 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
   // One id per agent: a root launch's scope is this agent and the launching session, so two agents' sessions of one
   // id are two scopes.
   const agentScope = randomUUID();
-  const members: Record<string, Agent> = opts.agencies?.members ?? {};
+  // The members record, copied once: resolveLaunchLimits checked these entries at construction, so a member the caller
+  // puts in its record later, under a new key or an old one, never takes a seat.
+  const members: Readonly<Record<string, Agent>> = Object.freeze({ ...opts.agencies?.members });
   const memberKeys = Object.keys(members);
   const learning = opts.learning;
   const namespace = typeof learning === 'object' && learning !== null && typeof learning.namespace === 'string' ? learning.namespace : '';
