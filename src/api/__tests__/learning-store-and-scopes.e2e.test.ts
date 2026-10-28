@@ -11,7 +11,9 @@
  * them. With no Brain, the vector index carries them. `persistAccessState: false` writes and loads as before.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({
+// The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
+vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai'),
 }));
 import fs from 'node:fs';
@@ -166,6 +168,42 @@ async function metadataOf(brain: Brain, id: string): Promise<Record<string, unkn
   return JSON.parse((await rowOf(brain, id)).metadata ?? '{}') as Record<string, unknown>;
 }
 
+/** How many reads of a trace's metadata another writer races, and how many writes it has made. */
+interface Races {
+  left: number;
+  written: number;
+}
+
+/**
+ * The Brain, with another writer (another process on the same database) that changes a trace's row right after
+ * a recall reads its metadata, while `races.left` is above zero. It keeps the row's keys and adds `otherWriter`.
+ */
+function contendedBy(brain: Brain, races: Races): Brain {
+  return new Proxy(brain, {
+    get(target, property) {
+      if (property === 'get') {
+        return async (sql: string, params?: Parameters<Brain['get']>[1]) => {
+          const read = await target.get(sql, params);
+          if (races.left > 0 && sql.startsWith('SELECT metadata FROM memory_traces')) {
+            races.left -= 1;
+            races.written += 1;
+            const id = (params as unknown as string[])[1]!;
+            const current = await metadataOf(target, id);
+            await target.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', [
+              JSON.stringify({ ...current, otherWriter: races.written }),
+              target.brainId,
+              id,
+            ]);
+          }
+          return read;
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 /** What the user tells the agent about Ana. */
 const tell = (memory: CognitiveMemoryManager) =>
   memory.encode("Ana's sister is Vera.", NEUTRAL, 'neutral', {
@@ -291,6 +329,25 @@ describe('a trace keeps its reinforcement across a restart, with a Brain file', 
     expect((await rowOf(brain, id)).retrieval_count).toBe(1);
   });
 
+  it("a recall that loses the row to another writer reads it again and keeps that writer's keys; after a second lost race it writes the access columns alone", async () => {
+    const brain = await openBrain(brainFile());
+    const races: Races = { left: 0, written: 0 };
+    const memory = await manager({ brain: contendedBy(brain, races) });
+    const id = (await tell(memory)).id;
+
+    races.left = 1;
+    await recall(memory);
+    expect(await metadataOf(brain, id)).toMatchObject({ otherWriter: 1, decay: { accessCount: 1, reinforcementInterval: TWO_HOURS } });
+    expect((await rowOf(brain, id)).retrieval_count).toBe(1);
+
+    races.left = 2;
+    await recall(memory);
+    expect(memory.getStore().getTrace(id)).toMatchObject({ accessCount: 2, reinforcementInterval: FOUR_HOURS });
+    // The other writer's row stands as it wrote it: its keys, and the decay state the first recall merged.
+    expect(await metadataOf(brain, id)).toMatchObject({ otherWriter: 3, decay: { accessCount: 1, reinforcementInterval: TWO_HOURS } });
+    expect((await rowOf(brain, id)).retrieval_count).toBe(2);
+  });
+
   it('leaves a row whose metadata is not a JSON object as it is, and writes the access columns', async () => {
     const brain = await openBrain(brainFile());
     const memory = await manager({ brain });
@@ -390,6 +447,53 @@ describe('a trace keeps its reinforcement across a restart, with a Brain file', 
       retrievalCount: 1,
     });
     expect(loaded!.nextReinforcementAt).toBeUndefined();
+  });
+});
+
+const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
+
+describe.skipIf(!POSTGRES_URL)('a trace keeps its reinforcement across a restart, with a Postgres Brain', () => {
+  it("a recall that loses the row to another writer merges its decay state on the second read and keeps that writer's keys, and a manager over a new connection loads it", async () => {
+    const brainId = `qa-access-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const firstBrain = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    brains.add(firstBrain);
+    try {
+      const races: Races = { left: 0, written: 0 };
+      const first = await manager({ brain: contendedBy(firstBrain, races) });
+      const id = (await tell(first)).id;
+      expect(await metadataOf(firstBrain, id)).toMatchObject({ decay: { accessCount: 0, reinforcementInterval: ONE_HOUR } });
+
+      races.left = 1;
+      await recall(first);
+      const accessed = structuredClone(first.getStore().getTrace(id)!);
+      expect(await metadataOf(firstBrain, id)).toMatchObject({
+        otherWriter: 1,
+        decay: {
+          stability: accessed.stability,
+          accessCount: 1,
+          reinforcementInterval: TWO_HOURS,
+          nextReinforcementAt: accessed.nextReinforcementAt,
+        },
+      });
+      await stop(first, firstBrain);
+
+      const secondBrain = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+      brains.add(secondBrain);
+      const second = await manager({ brain: secondBrain });
+      const [loaded] = (await recall(second)).retrieved;
+      expect(loaded).toMatchObject({
+        id,
+        stability: accessed.stability,
+        accessCount: 1,
+        reinforcementInterval: TWO_HOURS,
+        nextReinforcementAt: accessed.nextReinforcementAt,
+        entities: ['Vera', 'Ana'],
+      });
+    } finally {
+      const cleaner = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+      await cleaner.run('DELETE FROM memory_traces WHERE brain_id = ?', [brainId]);
+      await cleaner.close();
+    }
   });
 });
 
