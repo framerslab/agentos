@@ -15,6 +15,7 @@ import { getCapabilitySupport } from '../runtime/capabilityContract';
 import type { Agent } from '../types';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import type { ITool } from '../../core/tools/ITool';
 
 let n = 0;
 const key = () => `k-launch-${++n}`;
@@ -234,5 +235,126 @@ describe('launch_agency on gmi()', () => {
     expect(s.seen).toHaveLength(2);
     // The table was built from the same record: it offers no member form.
     expect(JSON.stringify(s.seen[0].options.tools)).not.toContain('agentKey');
+  });
+
+  it('a turn at the deepest level cannot launch, and its frame reaches its tools', async () => {
+    const k = key();
+    const frames: unknown[] = [];
+    // ITools, so `execute` receives the call's context.
+    const note = (record: boolean): ITool => ({
+      id: 'note-v1', name: 'note', displayName: 'Note', description: 'Note something.',
+      inputSchema: { type: 'object', properties: {} }, hasSideEffects: false,
+      execute: async (_args, context) => {
+        if (record) frames.push(context.sessionData?.agencyLaunch);
+        return { success: true, output: 'noted' };
+      },
+    });
+    const s = script('openai', k, {
+      replies: [
+        // The root's step: a level-1 team whose lead may note and launch.
+        launchStep({ goal: 'Check the claim.', seats: [{ role: 'lead', instructions: 'Lead the check.', tools: ['note', 'launch_agency'] }] }),
+        // The lead's step: a level-2 team whose member may launch (refused under maxDepth 2), then one whose member may note.
+        reply.tools([
+          { id: 'x', name: 'launch_agency', args: { goal: 'Verify.', seats: [{ role: 'checker', agentKey: 'tutor', tools: ['launch_agency'] }] } },
+          { id: 'y', name: 'launch_agency', args: { goal: 'Verify.', seats: [{ role: 'checker', agentKey: 'tutor', tools: ['note'] }] } },
+        ]),
+        // The member's level-2 turn: it notes, and calls launch_agency, which its own table has and its seat does not.
+        reply.tools([{ id: 'n', name: 'note', args: {} }, { id: 'z', name: 'launch_agency', args: { goal: 'Deeper.', seats: [{ role: 'deep', instructions: 'Go deeper.' }] } }]),
+        reply.text('Verified.'),
+        reply.text('Lead done.'),
+        reply.text('All done.'),
+      ],
+    });
+    const tutor = gmi({ ...route(k), name: 'Tutor', instructions: 'You are the tutor.', tools: { note: note(true) }, agencies: { launch: true } });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', tools: { note: note(false) }, agencies: { launch: true, maxDepth: 2, members: { tutor } } });
+
+    const result = await parent.session('p1').send('Check it.');
+    expect(launchOf(result).status).toBe('completed');
+    // The calls: root, lead, the member's two steps, lead, root.
+    expect(s.seen).toHaveLength(6);
+    expect(systemText(s.seen[2])).toContain('You are the tutor.');
+    // The lead's first launch was refused: a level-2 seat cannot launch under maxDepth 2.
+    expect(JSON.stringify(s.seen[4].messages)).toContain('tool_not_allowed');
+    // The member's level-2 turn: launch_agency is not offered, and its call is skipped.
+    expect(offered(s.seen[2])).toEqual(['note']);
+    expect(JSON.stringify(s.seen[3].messages)).toContain('not available in this seat');
+    // The frame reached the member's tool: the level-2 team, the seat's role.
+    expect(frames).toEqual([expect.objectContaining({ role: 'checker', depth: 2 })]);
+  });
+
+  it("a nested launch is bounded by its seat's names, not by its member's own table", async () => {
+    const k = key();
+    const search = vi.fn(async () => 'found');
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Scout.', seats: [{ role: 'scout', agentKey: 'scout', tools: ['launch_agency'] }] }),
+        // The member's seat turn: a team that asks for search, a tool of the member's own table but not of its seat.
+        launchStep({ goal: 'Find.', seats: [{ role: 'finder', instructions: 'Find.', tools: ['search'] }] }, 'n1'),
+        reply.text('Could not.'),
+        reply.text('Scouted.'),
+      ],
+    });
+    const scout = gmi({
+      ...route(k), name: 'Scout', instructions: 'You scout.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: {} }, execute: search } },
+      agencies: { launch: true },
+    });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', agencies: { launch: true, members: { scout } } });
+
+    const result = await parent.session('p1').send('Scout it.');
+    expect(launchOf(result).status).toBe('completed');
+    // The member's turn ran (the precondition) and its launch was refused: its seat's names hold launch_agency alone.
+    expect(systemText(s.seen[1])).toContain('You scout.');
+    expect(JSON.stringify(s.seen[2].messages)).toContain('unknown_tool');
+    // No finder seat ran: root, the member's two steps, root.
+    expect(s.seen).toHaveLength(4);
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it('a tool cannot change the frame a later call of its turn is handed', async () => {
+    const k = key();
+    // The launch the frame named once the tool had tried to point it at another.
+    const after: unknown[] = [];
+    const tamper: ITool = {
+      id: 'tamper-v1', name: 'tamper', displayName: 'Tamper', description: 'Point the launch frame elsewhere.',
+      inputSchema: { type: 'object', properties: {} }, hasSideEffects: false,
+      execute: async (_args, context) => {
+        const frame = context.sessionData?.agencyLaunch as { launchId: string } | undefined;
+        try {
+          if (frame) frame.launchId = 'agency-gone';
+        } catch {
+          // A frozen frame refuses the write.
+        }
+        after.push(frame?.launchId);
+        return { success: true, output: 'tried' };
+      },
+    };
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Scout.', seats: [{ role: 'scout', agentKey: 'scout', tools: ['tamper', 'launch_agency'] }] }),
+        // The member's seat turn: the tool rewrites its frame, then a team that asks for a tool the seat lacks.
+        reply.tools([
+          { id: 't', name: 'tamper', args: {} },
+          { id: 'n1', name: 'launch_agency', args: { goal: 'Find.', seats: [{ role: 'finder', instructions: 'Find.', tools: ['search'] }] } },
+        ]),
+        reply.text('Could not.'),
+        reply.text('Scouted.'),
+      ],
+    });
+    const search = { description: 'Search.', parameters: { type: 'object', properties: {} }, execute: async () => 'found' };
+    const scout = gmi({ ...route(k), name: 'Scout', instructions: 'You scout.', tools: { tamper, search }, agencies: { launch: true } });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', tools: { tamper }, agencies: { launch: true, members: { scout } } });
+
+    const result = await parent.session('p1').send('Scout it.');
+    const launch = launchOf(result);
+    expect(launch.status).toBe('completed');
+    // The tool ran in the member's seat turn (the precondition), and the frame it was handed still names the scout's team.
+    expect(after).toEqual([launch.agencyId]);
+    // The launch after it nested under that team, whose seat's names refused search; a frame that named no running
+    // launch would have answered parent_launch_closed.
+    const seatStep = JSON.stringify(s.seen[2].messages);
+    expect(seatStep).toContain('unknown_tool');
+    expect(seatStep).not.toContain('parent_launch_closed');
+    expect(s.seen).toHaveLength(4);
   });
 });
