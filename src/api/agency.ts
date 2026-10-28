@@ -606,11 +606,19 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     // not marked: no text of the approver's would be thrown away, so a text
     // that fails the schema is retried as after an approval without
     // modifications.
-    if (approvedResult !== finalized && approvedResult.text !== finalized.text) {
-      replacedByApproval.add(approvedResult);
-    }
+    const replacedText = approvedResult !== finalized && approvedResult.text !== finalized.text;
+    if (replacedText) replacedByApproval.add(approvedResult);
     if (opts.output) {
       approvedResult.parsed = parseStructuredOutput((approvedResult.text as string) ?? '', opts.output);
+      // A replacement that does not match is returned with parsed undefined
+      // and runs no validation retry; the line says why.
+      if (replacedText && approvedResult.parsed === undefined) {
+        agencyLogger.info('the approval replaced the final text with one the output schema does not match; parsed is undefined', {
+          event: 'agency_replacement_unparsed',
+          agency: agencyName,
+          strategy: chosenStrategy,
+        });
+      }
     }
 
     streamPartBuffer?.push({

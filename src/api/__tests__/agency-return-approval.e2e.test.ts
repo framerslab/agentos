@@ -241,7 +241,7 @@ describe('a beforeReturn approval and the output schema', () => {
     expect(handler.mock.calls.map(([request]) => request.details)).toEqual([{ output: ANSWER }, { output: ANSWER_JSON }]);
   });
 
-  it('a replacement that does not match the schema writes one line through the host logger, and one that matches writes none', async () => {
+  it('a replacement that does not match the schema writes one line through the host logger, and one that matches or hands the strategy text back writes none', async () => {
     const unparsed = (lines: LogLine[]): LogLine[] => lines.filter((line) => line.meta?.event === 'agency_replacement_unparsed');
     const failing = await logLines(async () => {
       const result = (await team(approve({ output: REWRITTEN }), {}, { output: ROTATION }).generate(PROMPT)) as Json;
@@ -255,6 +255,13 @@ describe('a beforeReturn approval and the output schema', () => {
       expect(result.parsed).toEqual({ rotate: 'every Sunday' });
     });
     expect(unparsed(matching)).toEqual([]);
+    // The strategy's own text handed back replaced nothing: the retry runs
+    // for it, so no line says it was skipped.
+    const handedBack = await logLines(async () => {
+      const result = (await team(approve({ output: ANSWER }), {}, { output: ROTATION }).generate(PROMPT)) as Json;
+      expect(result.parsed).toBeUndefined();
+    });
+    expect(unparsed(handedBack)).toEqual([]);
   });
 });
 
