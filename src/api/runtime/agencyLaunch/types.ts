@@ -53,7 +53,12 @@ export type ToolCallHook = NonNullable<AgentOptions['onBeforeToolExecution']>;
 
 /** `agencies` on an agent: whether it may launch temporary teams, and every launch's bounds. */
 export interface AgencyLaunchOptions {
-  /** Registers `launch_agency` on the agent's tool table. Default false. */
+  /**
+   * Registers `launch_agency` on the agent's tool table. Default false. On gmi(), a launched team's manager, synthesizers
+   * and temporary seats run on the provider and model the agent's first call resolved: those its options name, else the
+   * environment's pair at that call, whatever the environment names later. A call that names its own provider or model
+   * runs on that pair alone; a team it launches runs on the agent's.
+   */
   launch?: boolean;
   /** The deepest team level a launch tree reaches: an integer from 1 to 4, default 2. */
   maxDepth?: number;
@@ -148,8 +153,31 @@ export interface LaunchAgencyArgs {
   maxRounds?: number;
 }
 
+/**
+ * How a launch that started ended, the first that holds: `budget_exhausted` (the launch's budget, a budget it draws on,
+ * or a persistent member's own budget on its seat's call, refused a call), `timed_out` (its deadline passed),
+ * `cancelled` (the launching turn stopped), `completed` (the team answered) or `failed` (the team or a seat failed, no
+ * seat ran, or the launch failed before its team ran).
+ */
 export type LaunchStatus = 'completed' | 'timed_out' | 'budget_exhausted' | 'cancelled' | 'failed';
 
+/**
+ * Why a launch was refused before it started. A refusal is the tool call's error, `<code>: <reason>`.
+ *
+ * - `invalid_arguments`: the arguments break their own rules, or `agency()` refuses the team they describe.
+ * - `depth_exceeded`: the team would sit deeper than `maxDepth`.
+ * - `too_many_seats`: more seats than `maxSeats`.
+ * - `concurrency_exceeded`: `maxConcurrent` launches of the scope are in flight.
+ * - `unknown_tool`: a seat names a tool the launching agent, or the member it seats, does not have.
+ * - `tool_not_allowed`: a seat names a self-modification or memory tool, `launch_agency` at a level that cannot launch,
+ *   or a composed tool one of whose steps its allowlist leaves out.
+ * - `seat_form_unsupported`: a seat form the surface does not run (`personaId` on gmi(), `agentKey` on the full runtime).
+ * - `unknown_member`: a seat names a member the surface does not have.
+ * - `member_unavailable`: a member could not be seated.
+ * - `duplicate_member`: two seats name one member.
+ * - `budget_unavailable`: the launch's token cap cannot cover one call, or it has no dollars left.
+ * - `parent_launch_closed`: the team the calling seat sits in is closing or gone.
+ */
 export type LaunchRefusalCode =
   | 'invalid_arguments'
   | 'depth_exceeded'
@@ -164,24 +192,33 @@ export type LaunchRefusalCode =
   | 'budget_unavailable'
   | 'parent_launch_closed';
 
+/** A launch refused before it started. */
 export interface LaunchRefusal {
+  /** The rule that refused it. */
   code: LaunchRefusalCode;
+  /** What was refused, in one sentence: the seat, the tool, the member or the bound. */
   reason: string;
 }
 
+/** The tokens a seat's calls, or all of a launch's seats' calls, used, as their results reported them. */
 export interface LaunchUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** The cost the results reported, in US dollars; unset when none reported one. */
   costUSD?: number;
 }
 
+/** One seat of a launched team, as the launch's result reports it. */
 export interface LaunchSeatRecord {
   role: string;
   form: 'temporary' | 'persistent';
   /** The agentKey or personaId of a persistent member. */
   member?: string;
-  /** 'cut': the deadline, the budget or the parent's stop ended the seat's last call. */
+  /**
+   * 'cut': the deadline, a budget the call drew on (the launch's, or a persistent member's own) or the parent's stop
+   * ended the seat's last call.
+   */
   status: 'completed' | 'cut' | 'failed' | 'not_run';
   calls: number;
   /** The seat's last output, at most SEAT_SUMMARY_CHARS characters. */
@@ -206,7 +243,10 @@ export interface LaunchAgencyResult {
   /** The coordinator's calls (the manager's and the synthesizers'), from its sub-budget. */
   coordinatorUsage: { totalTokens: number; costUSD: number };
   durationMs: number;
-  /** For every status but 'completed'. */
+  /**
+   * For every status but 'completed'. For 'budget_exhausted' it says whose budget refused (the launch's, or one the team
+   * draws on) and why: the launch's own token cap as its count of the cap, any other cap in its own words.
+   */
   reason?: string;
   provenance: {
     agencyId: string;
