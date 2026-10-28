@@ -487,6 +487,38 @@ describe('AgentOS tool-result continuations', () => {
     expect(await rt.pending()).toBeNull();
   });
 
+  it('a continuation on the stream asks the gate before each call the GMI runs itself, and a refused call never runs', async () => {
+    const rt = await runtime('conv-continuation-gate', { guardrailService: shellGuard(false) });
+    const { gmi, provider, promptCalls } = await rt.shippedGmi([
+      { toolCalls: [SHELL_CALL] },
+      { text: 'The command was refused.' },
+    ]);
+    // the host's GMI stops the user's turn for READ_CALL; the shipped GMI takes the tool result and runs the rest
+    const host = hostToolGmi();
+    host.handleToolResult.mockImplementation((...args: any[]) =>
+      (gmi.handleToolResult as (...forwarded: any[]) => Promise<GMIOutput>)(...args),
+    );
+    const { request } = await rt.pauseOnRead(host);
+
+    const continuation = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    expect(host.handleToolResult).toHaveBeenCalledTimes(1);
+    expect(provider.generateCompletionStream).toHaveBeenCalledTimes(2);
+    expect(rt.shell).not.toHaveBeenCalled();
+    const refusal = promptCalls[1]?.find((m) => m.role === 'tool' && m.tool_call_id === SHELL_CALL.id);
+    expect(String(refusal?.content)).toContain('AUTH_PERMISSION_DENIED');
+    expect(String(refusal?.content)).toContain('A destructive shell command');
+
+    const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+    expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(last.finalResponseText).toBe('The command was refused.');
+    expect(last.finalToolCalls).toEqual([SHELL_CALL]);
+    expect(continuation.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+    expect(await rt.pending()).toBeNull();
+  });
+
   it('a turn with no continuation is unchanged: a call the GMI runs itself ends in FINAL_RESPONSE with no pause', async () => {
     const rt = await runtime('conv-turn-only');
     const { gmi, provider } = await rt.shippedGmi([{ toolCalls: [LOOKUP_CALL] }, { text: 'Standup moved to 10:00.' }]);
