@@ -131,6 +131,7 @@ function descriptionFor(limits: LaunchLimits, memberKeys: string[]): string {
   return [
     "Launches a temporary team of agents on one goal and returns the team's answer as this call's result.",
     `Each seat is an agent with the instructions you give it${members}.`,
+    'One seat makes a subagent.',
     "The team sees nothing of this conversation, so put everything it needs in the goal and each seat's instructions.",
     "A seat uses only the tools its tools list names, from your own tools.",
     `At most ${limits.maxSeats} seats; the team runs within a share of this turn's budget and a deadline.`,
