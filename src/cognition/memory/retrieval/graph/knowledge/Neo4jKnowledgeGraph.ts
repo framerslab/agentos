@@ -32,7 +32,9 @@ import type {
   SemanticSearchOptions,
   SemanticSearchResult,
   KnowledgeGraphStats,
+  MemoryCopyFilter,
 } from './IKnowledgeGraph.js';
+import { copyNeedles, isEmptyCopyFilter, isMemoryCopyOf } from './memoryCopies.js';
 import type { Neo4jConnectionManager } from '../neo4j/Neo4jConnectionManager.js';
 import { Neo4jCypherRunner } from '../neo4j/Neo4jCypherRunner.js';
 
@@ -423,6 +425,27 @@ export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
     );
 
     return this.nodeToMemory(results[0].m);
+  }
+
+  /**
+   * Delete the episodic memories that copy the filter's traces or scopes. The read is narrowed in Cypher by the
+   * needles the stored context JSON must hold (`CONTAINS`), and each node read is matched exactly in code, so a
+   * malformed `context_json` is skipped rather than failing the delete.
+   */
+  async deleteMemories(filter: MemoryCopyFilter): Promise<number> {
+    if (isEmptyCopyFilter(filter)) return 0;
+    const rows = await this.cypher.read<{ id: string; context: string | null }>(
+      `MATCH (m:${MEMORY_LABEL})
+       WHERE m.context_json IS NOT NULL AND any(needle IN $needles WHERE m.context_json CONTAINS needle)
+       RETURN m.memoryId AS id, m.context_json AS context`,
+      { needles: copyNeedles(filter) },
+    );
+    const ids = rows
+      .filter((row) => isMemoryCopyOf(this.safeParseJson(row.context, undefined), filter))
+      .map((row) => row.id);
+    if (ids.length === 0) return 0;
+    await this.cypher.writeVoid(`MATCH (m:${MEMORY_LABEL}) WHERE m.memoryId IN $ids DETACH DELETE m`, { ids });
+    return ids.length;
   }
 
   async queryMemories(options?: {

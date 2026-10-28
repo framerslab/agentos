@@ -24,7 +24,9 @@ import type {
   SemanticSearchResult,
   KnowledgeGraphStats,
   KnowledgeSource,
+  MemoryCopyFilter,
 } from './IKnowledgeGraph';
+import { isEmptyCopyFilter, isMemoryCopyOf } from './memoryCopies.js';
 import type { ILogger } from '../../../../../core/logging/ILogger';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager';
 
@@ -389,6 +391,19 @@ export class KnowledgeGraph implements IKnowledgeGraph {
     });
 
     return results;
+  }
+
+  /** Delete the episodic records that copy the filter's traces or scopes. */
+  async deleteMemories(filter: MemoryCopyFilter): Promise<number> {
+    if (isEmptyCopyFilter(filter)) return 0;
+    let deleted = 0;
+    for (const [id, memory] of this.memories) {
+      if (isMemoryCopyOf(memory.context, filter)) {
+        this.memories.delete(id);
+        deleted += 1;
+      }
+    }
+    return deleted;
   }
 
   // ============================================================================

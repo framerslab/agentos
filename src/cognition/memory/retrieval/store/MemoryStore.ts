@@ -2193,9 +2193,112 @@ export class MemoryStore {
           'the soft-deleted document may persist in a shared index until softDelete is retried',
       );
     }
+    // Every stored trace has an episodic copy in the knowledge graph, holding its full text; the delete takes it.
+    try {
+      await this.config.knowledgeGraph.deleteMemories?.({ traceIds: [traceId] });
+    } catch {
+      // Non-critical, as recording the copy is (store()).
+    }
     if (durableDeleteError) {
       throw new Error('MemoryStore.softDelete: durable tombstone write failed');
     }
+  }
+
+  /**
+   * Deletes the given traces for good: each is soft-deleted in this process (cache, vector index, sibling stores
+   * and its knowledge-graph copy), then its Brain row is deleted, so no reload, in this process or another, brings
+   * it back (a store that finds a row gone reads it as deleted). On SQLite the full-text index is rebuilt from the
+   * rows that remain, as every hard delete must; a rebuild that fails is repaired when the Brain next opens.
+   *
+   * @param traceIds - Trace ids; unknown ids are skipped.
+   * @returns How many of them had a cached trace or a Brain row.
+   * @throws When the Brain cannot be read or a row cannot be deleted.
+   */
+  async deleteTraces(traceIds: readonly string[]): Promise<number> {
+    this.beginOperation();
+    const ids = [...new Set(traceIds)];
+    if (ids.length === 0) return 0;
+    const brain = this.brain;
+    const existing = new Set(ids.filter((id) => this.traceCache.has(id)));
+    if (brain) {
+      const durable = await this.getDurableTraceRows(ids, brain);
+      if (!durable.ok) throw new Error('MemoryStore.deleteTraces: the Brain could not be read');
+      for (const id of durable.rows.keys()) existing.add(id);
+    }
+    for (const id of existing) {
+      try {
+        await this.softDelete(id);
+      } catch {
+        // The row delete below removes what the tombstone could not mark.
+      }
+    }
+    if (brain && existing.size > 0) {
+      const list = [...existing];
+      for (let offset = 0; offset < list.length; offset += 400) {
+        const chunk = list.slice(offset, offset + 400);
+        const placeholders = chunk.map(() => '?').join(', ');
+        await brain.run(`DELETE FROM memory_traces WHERE brain_id = ? AND id IN (${placeholders})`, [brain.brainId, ...chunk]);
+      }
+      if (brain.features.dialect.name !== 'postgres') {
+        try {
+          await brain.exec(brain.features.fts.rebuildCommand('memory_traces_fts'));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          // A database the index was never created in has nothing to rebuild.
+          if (!fullTextIndexMissing(message)) {
+            console.warn(
+              `[MemoryStore] full-text index rebuild after deleting ${list.length} traces failed; ` +
+                `their words match until the Brain next opens and repairs the index: ${message}`,
+            );
+          }
+        }
+      }
+    }
+    return existing.size;
+  }
+
+  /**
+   * The ids of every trace of one scope: the traces this store holds and every Brain row filed under the scope
+   * (`memory_traces.scope_id`), soft-deleted rows and another process's included.
+   */
+  async scopeTraceIds(scope: MemoryScope, scopeId: string): Promise<string[]> {
+    this.beginOperation();
+    const ids = new Set<string>();
+    for (const trace of this.traceCache.values()) {
+      if (trace.scope === scope && trace.scopeId === scopeId) ids.add(trace.id);
+    }
+    const brain = this.brain;
+    if (brain) {
+      const rows = await brain.all<{ id: string }>(
+        'SELECT id FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?',
+        [brain.brainId, scope, scopeId],
+      );
+      for (const row of rows) ids.add(row.id);
+    }
+    return [...ids];
+  }
+
+  /**
+   * Deletes every trace of one scope for good ({@link deleteTraces}): the traces this store holds and every Brain row
+   * filed under the scope ({@link scopeTraceIds}), then any knowledge-graph copy filed under it whose trace row was
+   * already gone.
+   *
+   * @returns The number of traces deleted.
+   */
+  async deleteScope(scope: MemoryScope, scopeId: string): Promise<number> {
+    this.beginOperation();
+    const deleted = await this.deleteTraces(await this.scopeTraceIds(scope, scopeId));
+    try {
+      await this.config.knowledgeGraph.deleteMemories?.({ scopes: [{ scope, scopeId }] });
+    } catch {
+      // Each trace's own copy went with it above.
+    }
+    return deleted;
+  }
+
+  /** Whether the knowledge graph can delete a trace's episodic copy (`IKnowledgeGraph.deleteMemories`). */
+  reachesGraphCopies(): boolean {
+    return typeof this.config.knowledgeGraph.deleteMemories === 'function';
   }
 
   /**

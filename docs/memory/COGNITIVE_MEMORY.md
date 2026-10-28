@@ -342,7 +342,7 @@ The [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognit
 - **Store**: Embeds content via [`IEmbeddingManager`](https://github.com/framerslab/agentos/blob/master/src/core/embeddings/IEmbeddingManager.ts), upserts into vector store, records as episodic memory in knowledge graph
 - **Query**: Vector search -> decay-aware scoring -> tip-of-the-tongue detection
 - **Access tracking**: Updates spaced repetition parameters on each retrieval
-- **Soft delete**: Sets `isActive = false` without removing from store
+- **Soft delete**: Sets `isActive = false` and keeps the Brain row as a tombstone; the trace leaves every vector index and its episodic copy leaves the knowledge graph ([Deleting traces](#deleting-traces))
 
 ### Access state across restarts
 
@@ -351,6 +351,12 @@ With a Brain attached (`CognitiveMemoryConfig.brain`), `store()` writes each tra
 With no Brain, the vector store is the store's only record. Each vector document's metadata carries the trace's stability, access count, reinforcement interval and next reinforcement time, and a store started later over the same vector store (a durable index after a restart) restores them with the trace, through `getByScope()` and through `query()`. A document that holds no interval restores with one hour, which the trace's next access doubles.
 
 `persistAccessState: false` (on `CognitiveMemoryConfig`, and `memory.persistAccessState` on `gmi()`) restores the earlier behaviour for one release of before-and-after measurement. An access then writes the three columns alone, and a load gives the access count 0, the reinforcement interval one hour and the stability `store()` wrote; with no Brain, the vector metadata carries no schedule, and a trace restored from it has no next reinforcement time and the interval 0 through `getByScope()` or one hour through `query()`.
+
+### Deleting traces
+
+`store()` records each trace in the knowledge graph as an episodic memory holding the trace's full text, with a context that names the trace (`memoryTraceId`), its scope and its scope id. A soft delete (`MemoryStore.softDelete`: a superseded trace, a pruned one, the loser of a conflict) marks the Brain row `deleted = 1` and keeps it as a tombstone, evicts the trace from every vector index on the same backing store, and deletes its episodic copy (`IKnowledgeGraph.deleteMemories`). The in-memory, SQL and Neo4j knowledge graphs implement `deleteMemories`; a graph without it keeps its copies.
+
+`CognitiveMemoryManager.deleteTraces(traceIds)` and `deleteScope(scope, scopeId)` delete for good. Each removes the memory graph's node of every trace it deletes, with the node's edges, then soft-deletes the trace and deletes its Brain row, so no store, in this process or another, loads it again. The nodes go first, so a call that fails can be made again and finds the same traces. `deleteScope` takes every trace of the scope the store holds and every Brain row filed under the scope (`memory_traces.scope_id`), soft-deleted rows and another process's included, then every episodic copy filed under the scope. On SQLite the full-text index is rebuilt from the rows that remain; a rebuild that fails is repaired when the Brain next opens. Both return `{ deleted, graph }`: `deleted` counts the traces that had a cached trace or a Brain row, and `graph` is `'not_supported'` when the knowledge graph has no `deleteMemories`.
 
 ### Collection Naming
 

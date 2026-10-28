@@ -35,7 +35,9 @@ import type {
   SemanticSearchResult,
   KnowledgeGraphStats,
   KnowledgeSource,
+  MemoryCopyFilter,
 } from '../graph/knowledge/IKnowledgeGraph.js';
+import { copyNeedles, isEmptyCopyFilter, isMemoryCopyOf } from '../graph/knowledge/memoryCopies.js';
 import type { Brain } from './Brain.js';
 import { uuid } from '../../core/util/crossPlatformCrypto.js';
 
@@ -596,6 +598,42 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
 
     if (!row) return undefined;
     return this._rowToMemory(row);
+  }
+
+  /**
+   * Delete the memory nodes that copy the filter's traces or scopes. The read is narrowed in SQL by the needles the
+   * stored JSON must hold (`LIKE`, a superset: `_` and `%` in an id match more), and each row read is matched
+   * exactly in code, so a malformed `properties` value is skipped rather than failing the delete.
+   */
+  async deleteMemories(filter: MemoryCopyFilter): Promise<number> {
+    if (isEmptyCopyFilter(filter)) return 0;
+    const brainId = this.brain.brainId;
+    const ids = new Set<string>();
+    for (const needle of copyNeedles(filter)) {
+      const rows = await this.brain.all<{ id: string; properties: string }>(
+        `SELECT id, properties FROM knowledge_nodes WHERE brain_id = ? AND type = 'memory' AND properties LIKE ?`,
+        [brainId, `%${needle}%`],
+      );
+      for (const row of rows) {
+        let context: unknown;
+        try {
+          context = (JSON.parse(row.properties) as { _context?: unknown })._context;
+        } catch {
+          continue;
+        }
+        if (isMemoryCopyOf(context, filter)) ids.add(row.id);
+      }
+    }
+    const list = [...ids];
+    for (let offset = 0; offset < list.length; offset += 400) {
+      const chunk = list.slice(offset, offset + 400);
+      const placeholders = chunk.map(() => '?').join(', ');
+      await this.brain.run(
+        `DELETE FROM knowledge_nodes WHERE brain_id = ? AND type = 'memory' AND id IN (${placeholders})`,
+        [brainId, ...chunk],
+      );
+    }
+    return list.length;
   }
 
   /**

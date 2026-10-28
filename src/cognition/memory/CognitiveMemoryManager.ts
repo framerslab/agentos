@@ -96,6 +96,14 @@ export interface FlushReflectionResult {
   compressionRatio: number;
 }
 
+/** What {@link ICognitiveMemoryManager.deleteScope} and `deleteTraces` did. */
+export interface MemoryDeletion {
+  /** Traces deleted: a cached trace or a Brain row. */
+  deleted: number;
+  /** Whether the knowledge graph's episodic copies were deleted with them (`IKnowledgeGraph.deleteMemories`). */
+  graph: 'reached' | 'not_supported';
+}
+
 export interface ICognitiveMemoryManager {
   initialize(config: CognitiveMemoryConfig): Promise<void>;
 
@@ -258,6 +266,16 @@ export interface ICognitiveMemoryManager {
    * @returns The original verbatim content, or `null`.
    */
   rehydrate?(traceId: string, requestContext?: string): Promise<string | null>;
+
+  /**
+   * Delete every trace of one scope for good, as an account deletion needs: its memory-graph node, then the trace in
+   * the cache, the vector index and the Brain, and the knowledge graph's episodic copy (`MemoryStore.deleteScope`).
+   * Optional, so a host's own implementation keeps compiling.
+   */
+  deleteScope?(scope: MemoryScope, scopeId: string): Promise<MemoryDeletion>;
+
+  /** Delete the given traces for good, as {@link deleteScope} does for a scope. Unknown ids are skipped. */
+  deleteTraces?(traceIds: readonly string[]): Promise<MemoryDeletion>;
 
   /** Shutdown and release resources. */
   shutdown(): Promise<void>;
@@ -1552,6 +1570,38 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
   getStore(): MemoryStore {
     return this.store;
+  }
+
+  /**
+   * Delete every trace of one scope for good. The memory graph's node of each goes first, then the traces
+   * (`MemoryStore.deleteScope`), so a call that fails part way can be made again and finds the same traces.
+   */
+  async deleteScope(scope: MemoryScope, scopeId: string): Promise<MemoryDeletion> {
+    this.ensureInitialized();
+    if (this.graph) await this.removeGraphNodes(await this.store.scopeTraceIds(scope, scopeId));
+    return this.deletionOf(await this.store.deleteScope(scope, scopeId));
+  }
+
+  /** Delete the given traces for good, their memory-graph nodes first, as {@link deleteScope} does for a scope. */
+  async deleteTraces(traceIds: readonly string[]): Promise<MemoryDeletion> {
+    this.ensureInitialized();
+    const ids = [...new Set(traceIds)];
+    await this.removeGraphNodes(ids);
+    return this.deletionOf(await this.store.deleteTraces(ids));
+  }
+
+  /**
+   * Remove the memory graph's node of each trace, with its edges: the node names the trace's scope id, and its
+   * Hebbian edges name the traces it was recalled with. A trace the graph never held is skipped.
+   */
+  private async removeGraphNodes(traceIds: readonly string[]): Promise<void> {
+    const graph = this.graph;
+    if (!graph) return;
+    for (const id of traceIds) await graph.removeNode(id);
+  }
+
+  private deletionOf(deleted: number): MemoryDeletion {
+    return { deleted, graph: this.store.reachesGraphCopies() ? 'reached' : 'not_supported' };
   }
 
   /**
