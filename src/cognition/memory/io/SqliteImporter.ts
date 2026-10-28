@@ -14,6 +14,11 @@
  *     - Merge `tags` arrays (union, dedup).
  *   - A trace of another scope id is not a duplicate: its tags and time are
  *     left as they are.
+ *   - A trace a release older than `memory_traces.scope_id` wrote to the
+ *     target holds `''` in that column whatever scope id its metadata names;
+ *     the import files such traces under that scope id before it merges
+ *     (`fillScopeIds`), so a source record of another scope id never merges
+ *     into one.
  *   - New traces are inserted wholesale.
  * - **knowledge_nodes**: deduplicated by `label` + `type`.
  *   - New nodes are inserted; existing nodes are left unchanged.
@@ -43,6 +48,7 @@ import type { Brain } from '../retrieval/store/Brain.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import { importedScopeId } from './importScope.js';
+import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 
 // ---------------------------------------------------------------------------
 // Internal row types (matched to Brain DDL)
@@ -158,6 +164,8 @@ export class SqliteImporter {
 
       let traces = { inserted: 0, retagged: 0 };
       await this.brain.transaction(async (trx) => {
+        // A trace an older release wrote holds scope_id '': filed under its scope id first, it is matched there.
+        if (options?.dedup ?? true) await fillScopeIds(trx, this.brain.brainId);
         traces = await this._mergeTraces(sourceAdapter, read, result, trx, options);
         await this._mergeNodes(sourceAdapter, read, result, trx);
         await this._mergeEdges(sourceAdapter, read, result, trx);
