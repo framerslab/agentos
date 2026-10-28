@@ -378,6 +378,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       mechanismsEngine: this.mechanismsEngine ?? undefined,
       moodProvider: config.moodProvider,
       enableGraphActivation: config.enableGraphActivation ?? false,
+      ...(config.persistAccessState === false ? { persistAccessState: false } : {}),
     });
 
     // Attach Brain for durable write-through when configured.

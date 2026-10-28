@@ -344,6 +344,12 @@ The [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognit
 - **Access tracking**: Updates spaced repetition parameters on each retrieval
 - **Soft delete**: Sets `isActive = false` without removing from store
 
+### Access state across restarts
+
+With a Brain attached (`CognitiveMemoryConfig.brain`), `store()` writes each trace's row and every access updates it. An access writes `last_accessed`, `retrieval_count` and `strength`, and merges the trace's stability, access count, reinforcement interval and next reinforcement time into the row's metadata JSON under `decay`, the object the `Memory` facade, its consolidation and the memory tools read and write; the row's other keys stay. A store that loads the row, after a restart or in another process, reads them back, so a trace keeps every reinforcement, and the consolidation's spaced-repetition sweep reinforces the traces whose next reinforcement time has passed. The merge is a compare-and-set on the JSON text the access read. When another writer changes the row in between, the access reads it again, and after a second lost race it writes the three columns alone; a row whose metadata is not a JSON object keeps it and gets the three columns.
+
+`persistAccessState: false` (on `CognitiveMemoryConfig`, and `memory.persistAccessState` on `gmi()`) restores the earlier behaviour for one release of before-and-after measurement. An access then writes the three columns alone, and a load gives the access count 0, the reinforcement interval one hour and the stability `store()` wrote.
+
 ### Collection Naming
 
 Collections follow the pattern `{prefix}_{scope}_{scopeId}`:
@@ -678,6 +684,7 @@ interface CognitiveMemoryConfig {
   maxContextTokens?: number;                   // required for infiniteContext
   enableGraphActivation?: boolean;
   brain?: Brain;
+  persistAccessState?: boolean;                // Default: true (see Access state across restarts)
 }
 ```
 

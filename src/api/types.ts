@@ -110,6 +110,14 @@ export interface MemoryConfig {
    * dimension agentos does not know.
    */
   embedding?: { provider: string; model?: string; dimension?: number };
+  /**
+   * On the GMI path, whether the memory manager keeps each trace's stability,
+   * access count, reinforcement interval and next reinforcement time across a
+   * restart where its store is durable (`CognitiveMemoryConfig.persistAccessState`).
+   * Default `true`; `false` writes and loads them as before, for one release of
+   * before-and-after measurement.
+   */
+  persistAccessState?: boolean;
 }
 
 /**

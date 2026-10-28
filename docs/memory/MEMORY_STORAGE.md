@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS memory_traces (
 
 `scope_id` holds the trace's scope id, the value `metadata.scopeId` holds, and `''` for a trace filed under no scope id. The index `idx_memory_traces_brain_scope_id` covers `(brain_id, scope, scope_id, created_at)`. A database written at schema version 2 gains the column at its first open at version 3, filled from each row's metadata JSON for every brain the table holds; a row whose JSON cannot be read, or names no scope id, keeps `''`.
 
+`metadata.decay` holds a trace's decay state: `stability` and `reinforcementInterval` in milliseconds, `accessCount`, and `nextReinforcementAt` (Unix ms) once a retrieval has set it. `Memory` writes it at `remember()`, at each recall and at each `feedback()`, the consolidation loop and `memory_merge` merge it, and the store of `CognitiveMemoryManager` writes it at `store()` and at every access ([Access state across restarts](./COGNITIVE_MEMORY.md#access-state-across-restarts)).
+
 ### `memory_traces_fts`
 
 An FTS5 index over `content` and `tags`, with `memory_traces` as its external content table and the `porter ascii` tokenizer. When the SQLite build has no FTS5 module, the brain opens without the index and `recall()` falls back to `LIKE` matching.

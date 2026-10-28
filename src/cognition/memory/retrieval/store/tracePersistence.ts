@@ -94,6 +94,30 @@ export function parseTraceMetadata(raw: string | null | undefined): Record<strin
 }
 
 /**
+ * Read the decay fields persisted under `metadata.decay`, each one only where
+ * it holds a finite number, so a reader with defaults of its own fills the
+ * rest (`MemoryStore` loads an absent access count as 0 and an absent
+ * interval as one hour, where {@link readPersistedDecayState} gives the
+ * retrieval count and one day).
+ */
+export function readPersistedDecayFields(
+  metadata: Record<string, unknown>,
+): Partial<PersistedDecayState> {
+  const decay = isRecord(metadata.decay) ? metadata.decay : {};
+  const stability = finiteNumber(decay.stability);
+  const accessCount = finiteNumber(decay.accessCount);
+  const reinforcementInterval = finiteNumber(decay.reinforcementInterval);
+  const nextReinforcementAt = finiteNumber(decay.nextReinforcementAt);
+
+  return {
+    ...(stability !== undefined ? { stability } : {}),
+    ...(accessCount !== undefined ? { accessCount } : {}),
+    ...(reinforcementInterval !== undefined ? { reinforcementInterval } : {}),
+    ...(nextReinforcementAt !== undefined ? { nextReinforcementAt } : {}),
+  };
+}
+
+/**
  * Read the persisted decay state from a metadata object, applying defaults
  * when fields are absent.
  */
@@ -101,15 +125,16 @@ export function readPersistedDecayState(
   metadata: Record<string, unknown>,
   retrievalCount = 0,
 ): PersistedDecayState {
-  const decay = isRecord(metadata.decay) ? metadata.decay : {};
-  const nextReinforcementAt = finiteNumber(decay.nextReinforcementAt);
+  const fields = readPersistedDecayFields(metadata);
 
   return {
-    stability: finiteNumber(decay.stability) ?? DEFAULT_TRACE_STABILITY_MS,
-    accessCount: finiteNumber(decay.accessCount) ?? retrievalCount,
+    stability: fields.stability ?? DEFAULT_TRACE_STABILITY_MS,
+    accessCount: fields.accessCount ?? retrievalCount,
     reinforcementInterval:
-      finiteNumber(decay.reinforcementInterval) ?? DEFAULT_TRACE_REINFORCEMENT_INTERVAL_MS,
-    ...(nextReinforcementAt !== undefined ? { nextReinforcementAt } : {}),
+      fields.reinforcementInterval ?? DEFAULT_TRACE_REINFORCEMENT_INTERVAL_MS,
+    ...(fields.nextReinforcementAt !== undefined
+      ? { nextReinforcementAt: fields.nextReinforcementAt }
+      : {}),
   };
 }
 

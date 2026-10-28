@@ -46,6 +46,11 @@ import {
   slugifyEntityId,
 } from '../graph/extraction/index.js';
 import { spreadActivation } from '../graph/SpreadingActivation.js';
+import {
+  readPersistedDecayFields,
+  withPersistedDecayState,
+  type PersistedDecayState,
+} from './tracePersistence.js';
 
 // ---------------------------------------------------------------------------
 // Embedding guard (CR4)
@@ -93,7 +98,23 @@ export interface MemoryStoreConfig {
    * candidates.
    */
   enableGraphActivation?: boolean;
+  /**
+   * Keeps a trace's stability, access count, reinforcement interval and next
+   * reinforcement time across a restart. With a Brain attached, `store()` and
+   * every access write them into the row's metadata JSON under `decay` (the
+   * object the `Memory` facade, its consolidation and the memory tools read
+   * and write; the row's other keys are kept), and a load reads them back.
+   * Default `true`.
+   * `false` writes and loads as before: an access writes the row's
+   * `last_accessed`, `retrieval_count` and `strength` alone, and a load
+   * gives the access count 0, the interval one hour and the stability as
+   * stored, for one release of before-and-after measurement.
+   */
+  persistAccessState?: boolean;
 }
+
+/** The reinforcement interval a trace loads with when none was persisted: one hour. */
+const DEFAULT_REINFORCEMENT_INTERVAL_MS = 3_600_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -148,6 +169,23 @@ function safeParseJson<T>(raw: string): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Whether a parsed JSON value is an object whose keys a merge can keep. */
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** A trace's decay state, as a Brain row's `metadata.decay` holds it. */
+function decayStateOf(trace: MemoryTrace): PersistedDecayState {
+  return {
+    stability: trace.stability,
+    accessCount: trace.accessCount,
+    reinforcementInterval: trace.reinforcementInterval,
+    ...(typeof trace.nextReinforcementAt === 'number'
+      ? { nextReinforcementAt: trace.nextReinforcementAt }
+      : {}),
+  };
 }
 
 function metadataToTracePartial(metadata: Record<string, any>): Partial<MemoryTrace> {
@@ -752,6 +790,11 @@ export class MemoryStore {
     );
   }
 
+  /** Whether access state is kept across restarts ({@link MemoryStoreConfig.persistAccessState}). */
+  private get persistsAccessState(): boolean {
+    return this.config.persistAccessState !== false;
+  }
+
   /**
    * Attach a Brain for durable write-through persistence.
    * Once attached, all store/softDelete/recordAccess operations also
@@ -1171,9 +1214,17 @@ export class MemoryStore {
     }
   }
 
-  /** Reconstruct a MemoryTrace from a durable Brain row (inverse of the store() write-through). */
+  /**
+   * Reconstruct a MemoryTrace from a durable Brain row (inverse of the store() write-through).
+   * With `persistAccessState` on, the stability, access count, reinforcement interval and next
+   * reinforcement time come from the row's `metadata.decay` (written by this store or by the
+   * `Memory` facade), and any of them it lacks from the store's own defaults.
+   */
   private rowToTrace(row: MemoryTraceRow): MemoryTrace {
     const meta = (row.metadata ? safeParseJson<Record<string, any>>(row.metadata) : undefined) ?? {};
+    const decay: Partial<PersistedDecayState> = this.persistsAccessState
+      ? readPersistedDecayFields(meta)
+      : {};
     const emotions =
       (row.emotions ? safeParseJson<MemoryTrace['emotionalContext']>(row.emotions) : undefined) ?? {
         valence: 0,
@@ -1199,11 +1250,14 @@ export class MemoryStore {
       },
       emotionalContext: emotions,
       encodingStrength: row.strength,
-      stability: typeof meta.stability === 'number' ? meta.stability : 0.5,
+      stability: decay.stability ?? (typeof meta.stability === 'number' ? meta.stability : 0.5),
       retrievalCount: row.retrieval_count ?? 0,
       lastAccessedAt: row.last_accessed ?? row.created_at,
-      accessCount: 0,
-      reinforcementInterval: 3_600_000,
+      accessCount: decay.accessCount ?? 0,
+      reinforcementInterval: decay.reinforcementInterval ?? DEFAULT_REINFORCEMENT_INTERVAL_MS,
+      ...(decay.nextReinforcementAt !== undefined
+        ? { nextReinforcementAt: decay.nextReinforcementAt }
+        : {}),
       associatedTraceIds: Array.isArray(meta.associatedTraceIds) ? (meta.associatedTraceIds as string[]) : [],
       createdAt: row.created_at,
       updatedAt: row.created_at,
@@ -1329,6 +1383,15 @@ export class MemoryStore {
           ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '0', '?', ...(tsv ? ['NULL'] : [])],
           'brain_id, id',
         );
+        const storedMetadata: Record<string, unknown> = {
+          scopeId: trace.scopeId,
+          provenance: trace.provenance,
+          entities: trace.entities,
+          stability: trace.stability,
+          importance: trace.importance,
+          associatedTraceIds: trace.associatedTraceIds,
+          structuredData: trace.structuredData,
+        };
         const insertParams = [
           brain.brainId,
           trace.id,
@@ -1342,15 +1405,11 @@ export class MemoryStore {
           trace.retrievalCount,
           JSON.stringify(trace.tags),
           JSON.stringify(trace.emotionalContext),
-          JSON.stringify({
-            scopeId: trace.scopeId,
-            provenance: trace.provenance,
-            entities: trace.entities,
-            stability: trace.stability,
-            importance: trace.importance,
-            associatedTraceIds: trace.associatedTraceIds,
-            structuredData: trace.structuredData,
-          }),
+          JSON.stringify(
+            this.persistsAccessState
+              ? withPersistedDecayState(storedMetadata, decayStateOf(trace))
+              : storedMetadata,
+          ),
           trace.scopeId ?? '',
         ];
         const result = await brain.run(insertSql, insertParams);
@@ -1770,16 +1829,57 @@ export class MemoryStore {
     // Write-through: update access metadata in the durable SQL store
     if (brain) {
       try {
-        await brain.run(
-          'UPDATE memory_traces SET last_accessed = ?, retrieval_count = ?, strength = ? WHERE brain_id = ? AND id = ? AND deleted = 0',
-          [trace.lastAccessedAt, trace.retrievalCount, trace.encodingStrength, brain.brainId, traceId]
-        );
+        await this.persistAccess(brain, trace);
       } catch {
         // Best-effort persistence
       }
     }
 
     return trace.isActive ? update : null;
+  }
+
+  /**
+   * Writes an accessed trace's state to its Brain row: `last_accessed`, `retrieval_count` and
+   * `strength`, and, with `persistAccessState` on, its decay state merged into the row's own
+   * metadata JSON under `decay`, every other key of the row kept. The merge is a compare-and-set
+   * on the JSON text it read, tried twice, so a key another writer set in between is not lost;
+   * after two lost races, and for a row whose metadata is not a JSON object, the columns alone
+   * are written and the metadata is left as it is.
+   */
+  private async persistAccess(brain: import('./Brain.js').Brain, trace: MemoryTrace): Promise<void> {
+    const columns = [trace.lastAccessedAt, trace.retrievalCount, trace.encodingStrength];
+    const writeColumns = () =>
+      brain.run(
+        'UPDATE memory_traces SET last_accessed = ?, retrieval_count = ?, strength = ? WHERE brain_id = ? AND id = ? AND deleted = 0',
+        [...columns, brain.brainId, trace.id],
+      );
+    if (!this.persistsAccessState) {
+      await writeColumns();
+      return;
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const row = await brain.get<{ metadata: string | null }>(
+        'SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0',
+        [brain.brainId, trace.id],
+      );
+      if (!row) return;
+      const meta: unknown = row.metadata ? safeParseJson<unknown>(row.metadata) : {};
+      if (!isJsonObject(meta)) break;
+      const next = JSON.stringify(withPersistedDecayState(meta, decayStateOf(trace)));
+      const result = row.metadata === null
+        ? await brain.run(
+            `UPDATE memory_traces SET last_accessed = ?, retrieval_count = ?, strength = ?, metadata = ?
+              WHERE brain_id = ? AND id = ? AND deleted = 0 AND metadata IS NULL`,
+            [...columns, next, brain.brainId, trace.id],
+          )
+        : await brain.run(
+            `UPDATE memory_traces SET last_accessed = ?, retrieval_count = ?, strength = ?, metadata = ?
+              WHERE brain_id = ? AND id = ? AND deleted = 0 AND metadata = ?`,
+            [...columns, next, brain.brainId, trace.id, row.metadata],
+          );
+      if (result.changes > 0) return;
+    }
+    await writeColumns();
   }
 
   // =========================================================================
