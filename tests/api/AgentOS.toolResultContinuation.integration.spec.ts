@@ -12,6 +12,8 @@ import {
 } from '../../src/api/types/AgentOSResponse';
 import { WorkflowFacade } from '../../src/api/runtime/WorkflowFacade';
 import { RagMemoryInitializer } from '../../src/api/runtime/RagMemoryInitializer';
+import type { StructuredReplyOutput } from '../../src/api/runtime/structuredReply';
+import type { RagRetrievedChunk } from '../../src/cognition/rag/IRetrievalAugmentor';
 import { GMI } from '../../src/cognition/substrate/GMI.js';
 import { GMIManager } from '../../src/cognition/substrate/GMIManager.js';
 import { GMIOutputChunkType, type GMIOutput, type ToolCallRequest } from '../../src/cognition/substrate/IGMI.js';
@@ -79,6 +81,35 @@ async function collect(stream: AsyncIterable<AgentOSResponse>): Promise<AgentOSR
   return responses;
 }
 
+/**
+ * The chunks a host reads from `stream`, as `collect()` returns them. A stream that neither ends nor stops for the host
+ * within `ms` fails the read, where a host reading it would wait for ever.
+ */
+async function collectWithin(stream: AsyncIterable<AgentOSResponse>, what: string, ms = 5000): Promise<AgentOSResponse[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} neither ended nor stopped for the host within ${ms} ms`)), ms);
+  });
+  try {
+    return await Promise.race([collect(stream), stalled]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The ids of the calls an assistant message of `messages` names and no tool message after it answers. */
+function unansweredToolCallIds(
+  messages: ReadonlyArray<{ role: string; tool_calls?: ReadonlyArray<{ id: string }> | null; tool_call_id?: string | null }>,
+): string[] {
+  return messages.flatMap((message, index) =>
+    message.role === 'assistant' && Array.isArray(message.tool_calls)
+      ? message.tool_calls
+          .filter((call) => !messages.slice(index + 1).some((later) => later.role === 'tool' && later.tool_call_id === call.id))
+          .map((call) => call.id)
+      : [],
+  );
+}
+
 /** The call the host's turn stops for: the host runs it and passes back its result. */
 const READ_CALL: ToolCallRequest = { id: 'call-read-1', name: 'read_file', arguments: { path: 'notes.txt' } };
 
@@ -87,6 +118,34 @@ const LOOKUP_CALL: ToolCallRequest = { id: 'call-lookup-1', name: 'lookup_notes'
 
 /** A call of a registered tool that the shell guard refuses. */
 const SHELL_CALL: ToolCallRequest = { id: 'call-shell-1', name: 'shell_execute', arguments: { command: 'rm -rf /' } };
+
+/** A second call the host runs. */
+const WRITE_CALL: ToolCallRequest = { id: 'call-write-1', name: 'write_file', arguments: { path: 'notes.txt' } };
+
+/** The sources a GMI's retrieval found for its reply. */
+const SOURCES: RagRetrievedChunk[] = [
+  { id: 'chunk-standup', content: 'Standup moved to 10:00.', originalDocumentId: 'doc-team-notes' },
+];
+
+/** The value a structured reply parsed to, with its check. */
+const STRUCTURED: StructuredReplyOutput = {
+  value: { standup: '10:00' },
+  meta: { schemaName: 'standup', valid: true, attempts: 1, enforcement: 'prompt_only', stage: 'model' },
+};
+
+/** An output guard that judges streamed text too, and keeps the chunk type and RAG sources of each evaluation. */
+function sourcesRecorder() {
+  const seen: Array<[AgentOSResponseChunkType, RagRetrievedChunk[] | undefined]> = [];
+  const guard: IGuardrailService = {
+    id: 'sources-recorder',
+    config: { evaluateStreamingChunks: true },
+    async evaluateOutput({ chunk, ragSources }: GuardrailOutputPayload) {
+      seen.push([chunk.type, ragSources]);
+      return null;
+    },
+  };
+  return { guard, seen };
+}
 
 /**
  * An output guard that evaluates tool calls and blocks a TOOL_CALL_REQUEST chunk that calls shell_execute: any such
@@ -265,6 +324,30 @@ function hostToolGmi(continuation: GMIOutput = { isFinal: true, responseText: 'D
   };
 }
 
+/**
+ * A GMI that runs LOOKUP_CALL itself, streaming it as a call the runtime runs, and then stops the user's turn for
+ * READ_CALL without streaming that call.
+ */
+function mixedToolsGmi() {
+  return {
+    getCurrentPrimaryPersonaId: () => 'test-persona',
+    getGMIId: () => 'gmi-mixed-tools',
+    getPersona: () => PERSONA,
+    processTurnStream: async function* (): AsyncGenerator<any, GMIOutput, undefined> {
+      yield {
+        type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+        content: [LOOKUP_CALL],
+        interactionId: 'interaction-mixed-tools',
+        timestamp: new Date(),
+        metadata: { executionMode: 'internal', requiresExternalToolResult: false },
+      };
+      return { isFinal: false, responseText: 'I need the notes file first.', toolCalls: [READ_CALL] };
+    },
+    hydrateConversationHistory: vi.fn(),
+    handleToolResult: vi.fn(async (): Promise<GMIOutput> => ({ isFinal: true, responseText: 'Done.' })),
+  };
+}
+
 describe('AgentOS tool-result continuations', () => {
   const openAgents: AgentOS[] = [];
   const openGmis: GMI[] = [];
@@ -339,12 +422,16 @@ describe('AgentOS tool-result continuations', () => {
       id === conversationId ? (context as any) : null,
     );
 
-    /** The shipped GMI on a provider that gives `replies`, with the runtime's tool orchestrator. */
-    async function shippedGmi(replies: ModelReply[]) {
+    /**
+     * The shipped GMI on a provider that gives `replies`, with the runtime's tool orchestrator and `gmiConfig` over
+     * its base config.
+     */
+    async function shippedGmi(replies: ModelReply[], gmiConfig: Record<string, unknown> = {}) {
       const { provider, promptCalls } = scriptedProvider(replies);
       const gmi = new GMI(`gmi-shipped-${conversationId}`);
       openGmis.push(gmi);
       await gmi.initialize(PERSONA as any, {
+        ...gmiConfig,
         workingMemory: new InMemoryWorkingMemory(),
         promptEngine: historyPromptEngine(),
         llmProviderManager: {
@@ -508,5 +595,133 @@ describe('AgentOS tool-result continuations', () => {
     expect(last.finalResponseText).toBe('Standup moved to 10:00.');
     expect(last.finalToolCalls).toEqual([LOOKUP_CALL]);
     expect(await rt.pending()).toBeNull();
+  });
+
+  it.each([
+    ['an output with isFinal: false and no calls', 'conv-not-final-no-calls', { isFinal: false, responseText: 'I am still reading the notes.' } as GMIOutput],
+    [
+      'an output that leaves isFinal out',
+      'conv-unmarked',
+      { responseText: 'Now I write the file.', toolCalls: [WRITE_CALL] } as unknown as GMIOutput,
+    ],
+  ])('%s ends the continuation with FINAL_RESPONSE, as it ends a turn, so the host never waits on an open stream', async (_label, conversationId, output) => {
+    const rt = await runtime(conversationId);
+    const { request } = await rt.pauseOnRead(hostToolGmi(output));
+
+    const continuation = await collectWithin(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      'the continuation',
+    );
+
+    const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+    expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(last.finalResponseText).toBe(output.responseText);
+    expect(continuation.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+    expect(await rt.pending()).toBeNull();
+  });
+
+  it.each([
+    ['a turn', 'conv-no-reply-turn', false],
+    ['a resumed turn', 'conv-no-reply-resumed', true],
+  ])('%s that ends with no reply after a tool round the GMI ran leaves the next turn no unanswered call', async (_label, conversationId, resumes) => {
+    const rt = await runtime(conversationId);
+    const saved = resumes ? (await rt.pauseOnRead(hostToolGmi())).saved : undefined;
+    // the GMI stops its tool loop after one round, as it does when the model keeps calling tools; the next turn answers
+    const { gmi, provider, promptCalls } = await rt.shippedGmi(
+      [{ toolCalls: [LOOKUP_CALL] }, { text: 'Standup moved to 10:00.' }],
+      { maxToolLoopIterations: 1 },
+    );
+    rt.useGmi(gmi);
+
+    const ended = saved
+      ? await collect(rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT]))
+      : await collect(rt.agentos.processRequest(rt.input));
+    const final = ended.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBeNull();
+    expect(final.finalToolCalls).toEqual([LOOKUP_CALL]);
+    expect(rt.lookup).toHaveBeenCalledTimes(1);
+    // the call's result lives in the GMI's history: the stored conversation names no call it does not answer
+    expect(unansweredToolCallIds(rt.context.getAllMessages())).toEqual([]);
+
+    const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: 'When is the standup now?' }));
+
+    expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('Standup moved to 10:00.');
+    expect(provider.generateCompletionStream).toHaveBeenCalledTimes(2);
+    // a provider refuses a request that holds a call with no result
+    expect(unansweredToolCallIds(promptCalls[1] ?? [])).toEqual([]);
+  });
+
+  it('a turn that streams a call the GMI runs itself and then stops for a host call hands the host that call', async () => {
+    const rt = await runtime('conv-mixed-turn');
+    rt.useGmi(mixedToolsGmi());
+
+    const responses = await collectWithin(rt.agentos.processRequest(rt.input), 'the turn');
+
+    const requests = responses.filter(
+      (r): r is AgentOSToolCallRequestChunk => r.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST,
+    );
+    expect(requests.map((r) => [r.executionMode, r.toolCalls])).toEqual([
+      ['internal', [LOOKUP_CALL]],
+      ['external', [READ_CALL]],
+    ]);
+    expect(isActionableToolCallRequestChunk(responses.at(-1))).toBe(true);
+    expect((await rt.pending())?.toolCalls).toEqual([READ_CALL]);
+  });
+
+  it.each([
+    ['an output that lists the calls the GMI ran', 'conv-final-calls', [LOOKUP_CALL]],
+    ['an output with no calls', 'conv-final-plain', undefined],
+  ])('%s: the continuation ends with a FINAL_RESPONSE that holds the reply, its sources and its structured value', async (_label, conversationId, toolCalls) => {
+    const rt = await runtime(conversationId);
+    const reply = '**Standup** moved to 10:00.';
+    const { request } = await rt.pauseOnRead(
+      hostToolGmi({ isFinal: true, responseText: reply, toolCalls, ragSources: SOURCES, structuredOutput: STRUCTURED }),
+    );
+
+    const continuation = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    const final = continuation.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe(reply);
+    expect(final.finalToolCalls).toEqual(toolCalls);
+    expect(final.ragSources).toEqual(SOURCES);
+    expect(final.structured).toEqual(STRUCTURED);
+    // the plain text a voice host speaks, as a turn's final response carries it
+    expect(final.finalResponseTextPlain).toBe('Standup moved to 10:00.');
+    const stored = (final.updatedConversationContext as unknown as { messages: Array<{ role: string; content: unknown }> }).messages;
+    expect(stored.at(-1)).toMatchObject({ role: 'assistant', content: reply });
+  });
+
+  it('a turn ends with a FINAL_RESPONSE that holds the reply as plain text', async () => {
+    const rt = await runtime('conv-plain-text');
+    const { gmi } = await rt.shippedGmi([{ text: '**Standup** moved to 10:00.' }]);
+    rt.useGmi(gmi);
+
+    const responses = await collect(rt.agentos.processRequest(rt.input));
+
+    const final = responses.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe('**Standup** moved to 10:00.');
+    expect(final.finalResponseTextPlain).toBe('Standup moved to 10:00.');
+  });
+
+  it("every output guard evaluation of a continuation's reply reads the sources the GMI used", async () => {
+    const recorder = sourcesRecorder();
+    const rt = await runtime('conv-guarded-sources', { guardrailService: recorder.guard });
+    const { request } = await rt.pauseOnRead(
+      hostToolGmi({ isFinal: true, responseText: 'Standup moved to 10:00.', ragSources: SOURCES }),
+    );
+    recorder.seen.length = 0;
+
+    await collect(rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true));
+
+    // as on a turn, where the sources reach the stream before the text
+    expect(recorder.seen).toEqual([
+      [AgentOSResponseChunkType.TEXT_DELTA, SOURCES],
+      [AgentOSResponseChunkType.FINAL_RESPONSE, SOURCES],
+    ]);
   });
 });
