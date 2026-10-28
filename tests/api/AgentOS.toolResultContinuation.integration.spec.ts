@@ -135,6 +135,37 @@ const STRUCTURED: StructuredReplyOutput = {
   meta: { schemaName: 'standup', valid: true, attempts: 1, enforcement: 'prompt_only', stage: 'model' },
 };
 
+/** A structured reply that names the room, and the value it parsed to. */
+const ROOM_REPLY = '{"standup":"10:00","room":"4B"}';
+const ROOM_STRUCTURED: StructuredReplyOutput = {
+  value: { standup: '10:00', room: '4B' },
+  meta: { schemaName: 'standup', valid: true, attempts: 1, enforcement: 'prompt_only', stage: 'model' },
+};
+
+/** The structured reply without the room, as a guard rewrites it. */
+const ROOMLESS_REPLY = '{"standup":"10:00"}';
+
+/** An output guard that rewrites every final response to `text`. */
+function finalRewriter(text: string): IGuardrailService {
+  return {
+    id: 'final-rewriter',
+    async evaluateOutput({ chunk }: GuardrailOutputPayload) {
+      return chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE ? { action: GuardrailAction.SANITIZE, modifiedText: text } : null;
+    },
+  };
+}
+
+/** A supervisor that rewrites every final response of the agents it observes to `text`. */
+function finalSupervisor(text: string): ICrossAgentGuardrailService {
+  return {
+    id: 'final-supervisor',
+    canInterruptOthers: true,
+    async evaluateCrossAgentOutput({ chunk }) {
+      return chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE ? { action: GuardrailAction.SANITIZE, modifiedText: text } : null;
+    },
+  };
+}
+
 /** An output guard that judges streamed text too, and keeps the chunk type and RAG sources of each evaluation. */
 function sourcesRecorder() {
   const seen: Array<[AgentOSResponseChunkType, RagRetrievedChunk[] | undefined]> = [];
@@ -371,6 +402,25 @@ function emptyRequestGmi() {
     },
     hydrateConversationHistory: vi.fn(),
     handleToolResult: vi.fn(async (): Promise<GMIOutput> => ({ isFinal: true, responseText: 'Done.' })),
+  };
+}
+
+/** A GMI whose turn ends with `reply` and the value a structured turn parsed from it. */
+function structuredReplyGmi(reply: string, structuredOutput: StructuredReplyOutput) {
+  return {
+    getCurrentPrimaryPersonaId: () => 'test-persona',
+    getGMIId: () => 'gmi-structured-reply',
+    getPersona: () => PERSONA,
+    processTurnStream: async function* (): AsyncGenerator<any, GMIOutput, undefined> {
+      yield {
+        type: GMIOutputChunkType.TEXT_DELTA,
+        content: reply,
+        interactionId: 'interaction-structured-reply',
+        timestamp: new Date(),
+      };
+      return { isFinal: true, responseText: reply, structuredOutput };
+    },
+    hydrateConversationHistory: vi.fn(),
   };
 }
 
@@ -780,6 +830,44 @@ describe('AgentOS tool-result continuations', () => {
     expect(final.finalResponseTextPlain).toBe('Standup moved to 10:00.');
     const carried = (final.updatedConversationContext as unknown as { messages: Array<{ role: string; content: unknown }> }).messages;
     expect(carried.filter((m) => m.role === 'assistant').map((m) => m.content)).toEqual(['Standup moved to 10:00.']);
+  });
+
+  it("a supervisor's rewrite of a structured reply withdraws the value parsed from the reply it replaced", async () => {
+    const rt = await runtime('conv-supervised-structured');
+    rt.useGmi(structuredReplyGmi(ROOM_REPLY, ROOM_STRUCTURED));
+
+    const supervised = await collect(
+      wrapWithCrossAgentGuardrails(
+        [finalSupervisor(ROOMLESS_REPLY)],
+        { sourceAgentId: 'notes-agent', observerAgentId: 'supervisor' },
+        { userId: 'user-1', sessionId: rt.input.sessionId, personaId: 'test-persona', conversationId: 'conv-supervised-structured' },
+        rt.agentos.processRequest(rt.input),
+        { streamId: 'supervised-structured' },
+      ),
+    );
+
+    const final = supervised.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe(ROOMLESS_REPLY);
+    // the wrapper holds no schema to check the rewrite against, so the value parsed from the original does not reach the host
+    expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'standup', valid: false, stage: 'post_guardrail' } });
+  });
+
+  it("an output guard's rewrite of a continuation's structured reply withdraws the value parsed from the reply it replaced", async () => {
+    const rt = await runtime('conv-guarded-structured', { guardrailService: finalRewriter(ROOMLESS_REPLY) });
+    const { request } = await rt.pauseOnRead(
+      hostToolGmi({ isFinal: true, responseText: ROOM_REPLY, structuredOutput: ROOM_STRUCTURED }),
+    );
+
+    const continuation = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    const final = continuation.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe(ROOMLESS_REPLY);
+    // a continuation holds no schema to check the rewrite against, so the value parsed from the original does not reach the host
+    expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'standup', valid: false, stage: 'post_guardrail' } });
   });
 
   it("every output guard evaluation of a continuation's reply reads the sources the GMI used", async () => {
