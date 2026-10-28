@@ -1,6 +1,6 @@
 # Record-mode pilot reports, 2026-10-28
 
-Record mode. A local stub answers every model, embedding, rerank and guard call with fixed, deterministic replies, so these reports measure the harness's mechanics (routing, call capture, the deadline and failure handling, the determinism gate, the report itself) and say nothing about how the arms compare. No vendor was called and no money was spent; the cost section reads "not run".
+Record mode. A local stub answers every model, embedding, rerank and guard call with fixed, deterministic replies, so these reports measure the harness's mechanics (routing, call capture, the deadline and failure handling, the report itself) and say nothing about how the arms compare. No vendor was called and no money was spent; the cost section reads "not run". The determinism gate's section reads "not run" as well: these reports carry no determinism record.
 
 - Rendered by CI run 40723979292 of the private runner (public copies, scanned before upload).
 - Runs: record-leg-1, record-leg-2, record-leg-3, record-leg-4, record-leg-5, record-leg-6, record-leg-7, record-leg-8, record-leg-9, record-leg-10.
