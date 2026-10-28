@@ -118,10 +118,12 @@ import type { RawData, WebSocket } from 'ws';
 const agencyLogger = lazyLogger('agency');
 
 /**
- * The finalized results whose text a `beforeReturn` approval replaced. The
- * validation retry in `generate()` reads it: a replacement that does not
- * match the output schema is the approver's answer, returned as it is and
- * never run again. Kept here so a result gains no field.
+ * The finalized results whose text a `beforeReturn` approval replaced with a
+ * different one. The validation retry in `generate()` reads it: a
+ * replacement that does not match the output schema is the approver's
+ * answer, returned as it is and never run again. A replacement equal to the
+ * strategy's text replaced nothing and is not kept here: the retry treats it
+ * as an approval without modifications. Kept here so a result gains no field.
  */
 const replacedByApproval = new WeakSet<object>();
 
@@ -598,7 +600,12 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     // The output schema is read from the text the caller receives: the
     // approval's replacement when it carries one, else the strategy's text
     // after the output guardrails. A text the approval replaced is marked
-    // for the validation retry in generate(), which returns it as it is.
+    // for the validation retry in generate(), which returns it as it is. A
+    // replacement equal to the strategy's text (an approver that sends the
+    // text back unedited; in a pooled agency, read after the mask above) is
+    // not marked: no text of the approver's would be thrown away, so a text
+    // that fails the schema is retried as after an approval without
+    // modifications.
     if (approvedResult !== finalized && approvedResult.text !== finalized.text) {
       replacedByApproval.add(approvedResult);
     }
@@ -712,10 +719,10 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         // Success path: no validation required, OR validation produced a
         // `parsed` value. A run no seat answered is returned as it is: its
         // empty text is no reply to correct, and a retry would ask every
-        // approver again. A text a beforeReturn approval replaced is returned
-        // as it is too, with `parsed` undefined when it does not match: a
-        // retry would throw the approver's text away and ask for the approval
-        // again.
+        // approver again. A text a beforeReturn approval replaced with a
+        // different one is returned as it is too, with `parsed` undefined
+        // when it does not match: a retry would throw the approver's text
+        // away and ask for the approval again.
         if (
           !hasValidation ||
           finalized.parsed !== undefined ||

@@ -9,11 +9,11 @@
  * read from the text the caller receives: a replacement that matches the
  * schema is parsed, one that does not is returned once with `parsed`
  * undefined, and an approval without modifications leaves the validation
- * retry as it was. A replacement that hands the strategy's own text back is
- * the approver's answer as any other is, and a replacement that does not
- * match writes one line through the host's logger. Without a schema, a
- * `parsed` a seat returned does not outlive a replacement that changes the
- * text.
+ * retry as it was. A replacement that hands the strategy's own text back
+ * replaced nothing, and the retry runs as after an approval without
+ * modifications; a replacement that does not match writes one line through
+ * the host's logger. Without a schema, a `parsed` a seat returned does not
+ * outlive a replacement that changes the text.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -224,15 +224,21 @@ describe('a beforeReturn approval and the output schema', () => {
     expect(handler.mock.calls.map(([request]) => request.details)).toEqual([{ output: ANSWER }, { output: ANSWER_JSON }]);
   });
 
-  it('a replacement that hands the strategy text back, which fails the schema, is returned once with parsed undefined: the strategy runs once and the approval is asked once', async () => {
+  it('a replacement that hands the strategy text back counts as an approval without modifications: the validation retry runs, and parsed comes from the second attempt', async () => {
     // An approver that always sends the text back, edited or not, here
-    // unedited: the replacement is the strategy's own text.
-    const handler = approve({ output: ANSWER });
+    // unedited: each replacement is the text it was asked to approve.
+    serveAnswer(ANSWER, ANSWER_JSON);
+    const handler = vi.fn(async (request: ApprovalRequest): Promise<ApprovalDecision> => ({
+      approved: true,
+      modifications: { output: String(request.details.output) },
+    }));
     const result = (await team(handler, {}, { output: ROTATION }).generate(PROMPT)) as Json;
-    expect(result.text).toBe(ANSWER);
-    expect(result.parsed).toBeUndefined();
-    expect(chatBodies()).toHaveLength(1);
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect(result.text).toBe(ANSWER_JSON);
+    expect(result.parsed).toEqual({ rotate: 'weekly' });
+    const bodies = chatBodies();
+    expect(bodies).toHaveLength(2);
+    expect(JSON.stringify(bodies[1].messages)).toContain(`Response was: ${ANSWER}`);
+    expect(handler.mock.calls.map(([request]) => request.details)).toEqual([{ output: ANSWER }, { output: ANSWER_JSON }]);
   });
 
   it('a replacement that does not match the schema writes one line through the host logger, and one that matches writes none', async () => {

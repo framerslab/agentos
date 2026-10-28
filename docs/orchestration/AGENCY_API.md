@@ -1380,7 +1380,10 @@ output guardrails and a `beforeReturn` approval. When the approval's
 `modifications.output` replaces the final text, `parsed` is read from the
 replacement. A replacement that does not match the schema is returned as it
 is, with `parsed` `undefined`, and the run is not repeated: a retry would
-throw the approver's text away and ask for the approval again.
+throw the approver's text away and ask for the approval again. A replacement
+equal to the strategy's text, an approver handing the text back unedited,
+replaces nothing and counts as an approval without modifications: a text that
+does not match is retried, and the approval is asked for the new attempt.
 
 ---
 

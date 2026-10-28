@@ -695,8 +695,10 @@ export interface ResourceControls {
    * that does not parse or validate against the schema, the agency will
    * retry the generation up to this many times, each time appending an
    * error feedback hint to the prompt so the model can self-correct. A final
-   * text that a `beforeReturn` approval replaced is not retried: the
-   * replacement is returned, with `parsed` undefined when it does not match.
+   * text that a `beforeReturn` approval replaced with a different one is not
+   * retried: the replacement is returned, with `parsed` undefined when it
+   * does not match. A replacement equal to the strategy's text counts as an
+   * approval without modifications, and is retried as that is.
    *
    * Defaults to `1` (one extra attempt = two total calls). Set to `0` to
    * disable retries entirely.
@@ -793,6 +795,9 @@ export interface ApprovalDecision {
      * With the agency's `output` schema, `parsed` is read from the
      * replacement; one that does not match the schema is returned with
      * `parsed` undefined, and `generate()` does not run the strategy again.
+     * A replacement equal to the strategy's text (the text handed back
+     * unedited) counts as an approval without modifications: a text that
+     * does not match is retried, and the approval is asked for the new one.
      */
     output?: string;
     /**
