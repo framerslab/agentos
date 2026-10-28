@@ -5,11 +5,22 @@
  * post-approval check, as the strategy's text did: a replacement the check
  * blocks is refused as a blocked final text is, under generate() and stream(),
  * a replacement it passes is returned, and an approval without modifications
- * returns the strategy's text as before.
+ * returns the strategy's text as before. With an output schema, `parsed` is
+ * read from the text the caller receives: a replacement that matches the
+ * schema is parsed, one that does not is returned once with `parsed`
+ * undefined, and an approval without modifications leaves the validation
+ * retry as it was. A replacement that hands the strategy's own text back
+ * replaced nothing, and the retry runs as after an approval without
+ * modifications; a replacement that does not match writes one line through
+ * the host's logger. stream() runs no validation retry: a text that does not
+ * match ends the stream with `parsed` undefined after one run. Without a
+ * schema, a `parsed` a seat returned does not outlive a replacement that
+ * changes the text.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
@@ -17,6 +28,7 @@ vi.stubGlobal('fetch', fetchMock);
 import { agency } from '../agency.js';
 import type { ApprovalDecision, ApprovalRequest } from '../types.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
+import { setLoggerFactory, resetLoggerFactory } from '../../core/logging/loggerFactory.js';
 
 type Json = Record<string, any>;
 const KEY = 'sk-return-approval-test-0001';
@@ -45,24 +57,44 @@ const REWRITTEN = 'Rotate the build logs every Sunday.';
 const OVERRIDDEN = /Guardrail overrode HITL approval for final output/;
 /** The agency's own output guardrail; agency() reports it once for each text it receives. */
 const OUTPUT_GUARD = 'grounding-guard';
+/** The output schema of the structured cases. ANSWER and REWRITTEN hold no JSON, so they do not match it. */
+const ROTATION = z.object({ rotate: z.string() });
+/** A strategy's final text that matches the schema. */
+const ANSWER_JSON = '{"rotate":"weekly"}';
+/** A replacement that matches the schema, with another value. */
+const REWRITTEN_JSON = '{"rotate":"every Sunday"}';
 
-/** Answers the model listing always, and every chat request with the strategy's final text. */
-function serveAnswer(): void {
+/**
+ * Answers the model listing always, and the chat requests in turn with
+ * `replies` (the strategy's final text when none is given); the last reply
+ * answers every request after it.
+ */
+function serveAnswer(...replies: string[]): void {
+  const answers = replies.length ? replies : [ANSWER];
+  let next = 0;
   fetchMock.mockImplementation(async (url: unknown, init?: { body?: unknown }) => {
     const u = String(url);
     if (/\/v1\/models/.test(u)) return listing();
     if (!/\/v1\/chat\/completions/.test(u)) throw new Error(`unexpected request ${u}`);
+    const content = answers[Math.min(next++, answers.length - 1)];
     const body = JSON.parse(String(init?.body)) as Json;
-    return body.stream ? textStream(ANSWER) : text(ANSWER);
+    return body.stream ? textStream(content) : text(content);
   });
 }
 
+/** The bodies of the chat requests the stub answered: one for each run of the strategy's one agent. */
+const chatBodies = (): Json[] =>
+  fetchMock.mock.calls
+    .filter(([url]) => /\/v1\/chat\/completions/.test(String(url)))
+    .map(([, init]) => JSON.parse(String((init as { body?: unknown }).body)) as Json);
+
 type Team = {
   generate: (prompt: string) => Promise<unknown>;
-  stream: (prompt: string) => { fullStream: AsyncIterable<Json>; text: Promise<string> };
+  stream: (prompt: string) => { fullStream: AsyncIterable<Json>; text: Promise<string>; parsed: Promise<unknown> };
 };
 
-function team(handler: (r: ApprovalRequest) => Promise<ApprovalDecision>, on: Json): Team {
+/** One agent under the sequential strategy, with the agency's output guardrail and a beforeReturn approval; `extra` adds agency options. */
+function team(handler: (r: ApprovalRequest) => Promise<ApprovalDecision>, on: Json, extra: Json = {}): Team {
   return agency({
     provider: 'openai', model: 'gpt-4.1', apiKey: KEY,
     agents: { worker: { instructions: 'You answer the operator.' } },
@@ -70,11 +102,25 @@ function team(handler: (r: ApprovalRequest) => Promise<ApprovalDecision>, on: Js
     guardrails: { output: [OUTPUT_GUARD] },
     hitl: { approvals: { beforeReturn: true }, handler },
     on,
+    ...extra,
   } as never) as unknown as Team;
 }
 
 const approve = (modifications?: ApprovalDecision['modifications']) =>
   vi.fn(async (_r: ApprovalRequest): Promise<ApprovalDecision> => ({ approved: true, ...(modifications ? { modifications } : {}) }));
+
+type LogLine = { level: string; message: unknown; meta: Json | undefined };
+/** Every line the host's logger (`setLoggerFactory`) is handed while `run` runs. */
+async function logLines(run: () => Promise<void>): Promise<LogLine[]> {
+  const lines: LogLine[] = [];
+  const make = (): unknown => {
+    const write = (level: string) => (message: unknown, meta?: Json) => { lines.push({ level, message, meta }); };
+    return { info: write('info'), warn: write('warn'), error: write('error'), debug: write('debug'), child: () => make() };
+  };
+  setLoggerFactory(() => make() as never);
+  try { await run(); } finally { resetLoggerFactory(); }
+  return lines;
+}
 
 /** The reports of the agency's own output guardrail: one for each text it received. */
 const outputGuardReports = (guardrailResult: ReturnType<typeof vi.fn>): unknown[] =>
@@ -126,5 +172,139 @@ describe('a beforeReturn approval with modifications.output', () => {
     expect(result.text).toBe(ANSWER);
     expect(guardrailHitlOverride).not.toHaveBeenCalled();
     expect(outputGuardReports(guardrailResult)).toHaveLength(1);
+  });
+});
+
+describe('a beforeReturn approval and the output schema', () => {
+  it('a replacement that matches the schema: generate() and stream() read parsed from it, and the strategy runs once for each', async () => {
+    serveAnswer(ANSWER_JSON);
+    const handler = approve({ output: REWRITTEN_JSON });
+    const withSchema = team(handler, {}, { output: ROTATION });
+
+    const result = (await withSchema.generate(PROMPT)) as Json;
+    expect(handler.mock.calls[0][0].details).toEqual({ output: ANSWER_JSON });
+    expect(result.text).toBe(REWRITTEN_JSON);
+    expect(result.parsed).toEqual({ rotate: 'every Sunday' });
+    expect(chatBodies()).toHaveLength(1);
+
+    const s = withSchema.stream(PROMPT);
+    const parts: Json[] = [];
+    for await (const part of s.fullStream) parts.push(part);
+    expect(parts.filter((part) => part.type === 'final-output')).toEqual([
+      expect.objectContaining({ text: REWRITTEN_JSON, parsed: { rotate: 'every Sunday' } }),
+    ]);
+    await expect(s.parsed).resolves.toEqual({ rotate: 'every Sunday' });
+    expect(chatBodies()).toHaveLength(2);
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it('a replacement that does not match the schema is returned once, with parsed undefined: the strategy runs once and the approval is asked once', async () => {
+    // The validation retry is at its default, one more attempt. The strategy's
+    // text fails the schema in the first case and matches it in the second;
+    // the replacement fails it in both.
+    for (const strategyText of [ANSWER, ANSWER_JSON]) {
+      fetchMock.mockClear();
+      serveAnswer(strategyText);
+      const handler = approve({ output: REWRITTEN });
+      const result = (await team(handler, {}, { output: ROTATION }).generate(PROMPT)) as Json;
+      expect(result.text).toBe(REWRITTEN);
+      expect(result.parsed).toBeUndefined();
+      expect(chatBodies()).toHaveLength(1);
+      expect(handler).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('an approval without modifications on a text that fails the schema: the validation retry runs as before, and parsed comes from the second attempt', async () => {
+    serveAnswer(ANSWER, ANSWER_JSON);
+    const handler = approve();
+    const result = (await team(handler, {}, { output: ROTATION }).generate(PROMPT)) as Json;
+    expect(result.text).toBe(ANSWER_JSON);
+    expect(result.parsed).toEqual({ rotate: 'weekly' });
+    const bodies = chatBodies();
+    expect(bodies).toHaveLength(2);
+    expect(JSON.stringify(bodies[1].messages)).toContain(`Response was: ${ANSWER}`);
+    expect(handler.mock.calls.map(([request]) => request.details)).toEqual([{ output: ANSWER }, { output: ANSWER_JSON }]);
+  });
+
+  it('a replacement that hands the strategy text back counts as an approval without modifications: the validation retry runs, and parsed comes from the second attempt', async () => {
+    // An approver that always sends the text back, edited or not, here
+    // unedited: each replacement is the text it was asked to approve.
+    serveAnswer(ANSWER, ANSWER_JSON);
+    const handler = vi.fn(async (request: ApprovalRequest): Promise<ApprovalDecision> => ({
+      approved: true,
+      modifications: { output: String(request.details.output) },
+    }));
+    const result = (await team(handler, {}, { output: ROTATION }).generate(PROMPT)) as Json;
+    expect(result.text).toBe(ANSWER_JSON);
+    expect(result.parsed).toEqual({ rotate: 'weekly' });
+    const bodies = chatBodies();
+    expect(bodies).toHaveLength(2);
+    expect(JSON.stringify(bodies[1].messages)).toContain(`Response was: ${ANSWER}`);
+    expect(handler.mock.calls.map(([request]) => request.details)).toEqual([{ output: ANSWER }, { output: ANSWER_JSON }]);
+  });
+
+  it('stream() runs no validation retry: after an approval without modifications, or one that hands the text back, a text that fails the schema ends the stream with parsed undefined after one run', async () => {
+    // generate() retries such a text (the two cases above). A stream
+    // finalizes the one run it streamed, so the second reply is never asked for.
+    const handBack = vi.fn(async (request: ApprovalRequest): Promise<ApprovalDecision> => ({
+      approved: true,
+      modifications: { output: String(request.details.output) },
+    }));
+    for (const handler of [approve(), handBack]) {
+      fetchMock.mockClear();
+      serveAnswer(ANSWER, ANSWER_JSON);
+      const s = team(handler, {}, { output: ROTATION }).stream(PROMPT);
+      const parts: Json[] = [];
+      for await (const part of s.fullStream) parts.push(part);
+      const finalOutputs = parts.filter((part) => part.type === 'final-output');
+      expect(finalOutputs.map((part) => [part.text, part.parsed])).toEqual([[ANSWER, undefined]]);
+      await expect(s.parsed).resolves.toBeUndefined();
+      expect(chatBodies()).toHaveLength(1);
+      expect(handler).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('a replacement that does not match the schema writes one line through the host logger, and one that matches or hands the strategy text back writes none', async () => {
+    const unparsed = (lines: LogLine[]): LogLine[] => lines.filter((line) => line.meta?.event === 'agency_replacement_unparsed');
+    const failing = await logLines(async () => {
+      const result = (await team(approve({ output: REWRITTEN }), {}, { output: ROTATION }).generate(PROMPT)) as Json;
+      expect(result.parsed).toBeUndefined();
+    });
+    expect(unparsed(failing)).toEqual([
+      { level: 'info', message: expect.any(String), meta: { event: 'agency_replacement_unparsed', agency: '__agency__', strategy: 'sequential' } },
+    ]);
+    const matching = await logLines(async () => {
+      const result = (await team(approve({ output: REWRITTEN_JSON }), {}, { output: ROTATION }).generate(PROMPT)) as Json;
+      expect(result.parsed).toEqual({ rotate: 'every Sunday' });
+    });
+    expect(unparsed(matching)).toEqual([]);
+    // The strategy's own text handed back replaced nothing: the retry runs
+    // for it, so no line says it was skipped.
+    const handedBack = await logLines(async () => {
+      const result = (await team(approve({ output: ANSWER }), {}, { output: ROTATION }).generate(PROMPT)) as Json;
+      expect(result.parsed).toBeUndefined();
+    });
+    expect(unparsed(handedBack)).toEqual([]);
+  });
+});
+
+describe('a beforeReturn approval in an agency without an output schema', () => {
+  it('a parsed the seat returned is kept beside the text it describes, and dropped when the replacement changes the text', async () => {
+    // The seat's own responseSchema gives its result a parsed value, which the
+    // sequential strategy returns with the seat's text.
+    serveAnswer(ANSWER_JSON);
+    const seatSchema = { agents: { worker: { instructions: 'You answer the operator.', responseSchema: ROTATION } } };
+
+    const unmodified = (await team(approve(), {}, seatSchema).generate(PROMPT)) as Json;
+    expect(unmodified.text).toBe(ANSWER_JSON);
+    expect(unmodified.parsed).toEqual({ rotate: 'weekly' });
+
+    const handedBack = (await team(approve({ output: ANSWER_JSON }), {}, seatSchema).generate(PROMPT)) as Json;
+    expect(handedBack.text).toBe(ANSWER_JSON);
+    expect(handedBack.parsed).toEqual({ rotate: 'weekly' });
+
+    const replaced = (await team(approve({ output: REWRITTEN_JSON }), {}, seatSchema).generate(PROMPT)) as Json;
+    expect(replaced.text).toBe(REWRITTEN_JSON);
+    expect(replaced.parsed).toBeUndefined();
   });
 });
