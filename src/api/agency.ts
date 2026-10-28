@@ -117,6 +117,16 @@ import type { RawData, WebSocket } from 'ws';
 /** The agency's own lines, to the host's logger factory whenever the host set it. */
 const agencyLogger = lazyLogger('agency');
 
+/**
+ * The finalized results whose text a `beforeReturn` approval replaced with a
+ * different one. The validation retry in `generate()` reads it: a
+ * replacement that does not match the output schema is the approver's
+ * answer, returned as it is and never run again. A replacement equal to the
+ * strategy's text replaced nothing and is not kept here: the retry treats it
+ * as an approval without modifications. Kept here so a result gains no field.
+ */
+const replacedByApproval = new WeakSet<object>();
+
 /** Every callback an agency fires, by name: a callback added to {@link AgencyCallbacks} must be listed here. */
 const CALLBACK_NAMES: Record<keyof AgencyCallbacks, true> = {
   agentStart: true,
@@ -484,6 +494,24 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     return preparedPrompt;
   };
 
+  /**
+   * Turns one run of the strategy into the result the caller receives, in
+   * order: an empty text for a run that returned none (and the
+   * `agency_no_seat_answered` line when no seat answered), this agency's own
+   * ledger, the pool's mask, the output guardrails, the usage bill and the
+   * limit check, the `beforeReturn` approval, the mask over a replacement it
+   * carries, the output schema's parse of the text the caller receives, the
+   * `final-output` part, `agentEnd` and the provenance record.
+   * `generate()` and a session's `send()` call it once for each attempt of
+   * the validation retry; `stream()` and a session's `stream()` call it once.
+   *
+   * @param result - The strategy's result for this run.
+   * @param start - When the call started, for `durationMs`.
+   * @param sessionId - The session whose usage totals the run adds to, on a session's call.
+   * @param streamPartBuffer - Under `stream()`, where the approval and final-output parts go.
+   * @param seated - This call's seating, in an agency with a pool or a panel.
+   * @returns The finalized result; a new object when the approval carries a replacement.
+   */
   const finalizeExecutionResult = async (
     result: Record<string, unknown>,
     start: number,
@@ -557,10 +585,6 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       finalized.text = await runGuardrails(finalized.text as string, outputGuards, 'output', opts.on);
     }
 
-    if (opts.output) {
-      finalized.parsed = parseStructuredOutput(finalized.text as string, opts.output);
-    }
-
     // A run's usage is counted before the limits are checked, so a run that
     // itself breaches a limit is billed and the next call's pre-check sees it.
     const resultUsage = normalizeUsage(finalized.usage);
@@ -585,10 +609,40 @@ export function agency(opts: AgencyOptions): AgencyInstance {
 
     // A replacement the approval carried is the handler's text, which no
     // seat's mask saw: in a pooled agency it passes the call's list as the
-    // strategy's text did, before the final-output part, agentEnd and the
-    // provenance record read it.
+    // strategy's text did, before the parse below, the final-output part,
+    // agentEnd and the provenance record read it.
     if (pooled && approvedResult !== finalized && typeof approvedResult.text === 'string') {
       approvedResult.text = mask.text(approvedResult.text);
+    }
+
+    // The output schema is read from the text the caller receives: the
+    // approval's replacement when it carries one, else the strategy's text
+    // after the output guardrails. A text the approval replaced is marked
+    // for the validation retry in generate(), which returns it as it is. A
+    // replacement equal to the strategy's text (an approver that sends the
+    // text back unedited; in a pooled agency, read after the mask above) is
+    // not marked: no text of the approver's would be thrown away, so a text
+    // that fails the schema is retried as after an approval without
+    // modifications.
+    const replacedText = approvedResult !== finalized && approvedResult.text !== finalized.text;
+    if (replacedText) replacedByApproval.add(approvedResult);
+    if (opts.output) {
+      approvedResult.parsed = parseStructuredOutput((approvedResult.text as string) ?? '', opts.output);
+      // A replacement that does not match is returned with parsed undefined
+      // and runs no validation retry; the line says why.
+      if (replacedText && approvedResult.parsed === undefined) {
+        agencyLogger.info('the approval replaced the final text with one the output schema does not match; parsed is undefined', {
+          event: 'agency_replacement_unparsed',
+          agency: agencyName,
+          strategy: chosenStrategy,
+        });
+      }
+    } else if (replacedText) {
+      // Without a schema, a parsed value the strategy's result carried (an
+      // agent's own, which sequential and graph pass on with their last
+      // seat's result under generate()) was read from the text the
+      // replacement changed, and nothing parsed the replacement.
+      delete approvedResult.parsed;
     }
 
     streamPartBuffer?.push({
@@ -697,8 +751,16 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         // Success path: no validation required, OR validation produced a
         // `parsed` value. A run no seat answered is returned as it is: its
         // empty text is no reply to correct, and a retry would ask every
-        // approver again.
-        if (!hasValidation || finalized.parsed !== undefined || noSeatAnswered(result)) {
+        // approver again. A text a beforeReturn approval replaced with a
+        // different one is returned as it is too, with `parsed` undefined
+        // when it does not match: a retry would throw the approver's text
+        // away and ask for the approval again.
+        if (
+          !hasValidation ||
+          finalized.parsed !== undefined ||
+          noSeatAnswered(result) ||
+          replacedByApproval.has(finalized)
+        ) {
           slot.settled = true;
           return finalized;
         }

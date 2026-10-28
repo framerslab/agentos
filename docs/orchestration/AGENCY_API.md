@@ -516,9 +516,12 @@ supported, `adaptive: true` is rejected, a seat named `chair` is rejected, and
 
 Through the host's logger factory (`setLoggerFactory`), with every message
 masked: `agency_no_seat_answered` (info; a run whose every seat was rejected
-returns `text: ''` and runs no validation retry), `parallel_seat_failed`
-(warn), `panel_seat_failed` (warn; a panel seat that failed, timed out or found
-no entry to sit on, with its `status`, written whether or not the run meets its
+returns `text: ''` and runs no validation retry), `agency_replacement_unparsed`
+(info; a `beforeReturn` approval's replacement that does not match `output` is
+returned with `parsed` `undefined` and runs no validation retry; the agency and
+the strategy, none of the text), `parallel_seat_failed` (warn),
+`panel_seat_failed` (warn; a panel seat that failed, timed out or found no
+entry to sit on, with its `status`, written whether or not the run meets its
 quorum), `panel_quorum_shortfall` and `parallel_quorum_shortfall` (warn; a
 shortfall the call goes on from under `onShortfall: 'proceed'`),
 `agency_callback_threw` (warn; the callback's name, its message masked), and
@@ -1370,10 +1373,32 @@ console.log(data?.title, data?.keyPoints);
 
 `agency()` appends a short JSON instruction to the prompt; for an object
 schema it names the top-level keys. It reads the reply as JSON, then from a fenced code block, then
-from the first `{ ... }` object in the text. When that fails, the run is
-repeated up to `controls.maxValidationRetries` times (default `1`) with the
-previous reply quoted in the prompt; when every attempt fails, `parsed` is
-`undefined` and no error is thrown. A member's own `output` is not read.
+from the first `{ ... }` object in the text. When that fails, `generate()` and
+a session's `send()` repeat the run up to `controls.maxValidationRetries`
+times (default `1`) with the previous reply quoted in the prompt; when every
+attempt fails, `parsed` is `undefined` and no error is thrown. `stream()` and
+a session's `stream()` finalize the one run they streamed and repeat nothing:
+a reply that does not match leaves `parsed` `undefined`. A member's own
+`output` is not read.
+
+The text parsed is the one the caller receives: the final text after the
+output guardrails and a `beforeReturn` approval. When the approval's
+`modifications.output` replaces the final text, `parsed` is read from the
+replacement. A replacement that does not match the schema is returned as it
+is, with `parsed` `undefined`, and `generate()` does not repeat the run: a
+retry would throw the approver's text away and ask for the approval again. A
+replacement equal to the strategy's text, an approver handing the text back
+unedited, replaces nothing and counts as an approval without modifications:
+under `generate()` a text that does not match is retried, and the approval is
+asked for the new attempt; under `stream()` it is returned with `parsed`
+`undefined`, as every reply that does not match is.
+
+In an agency without `output`, the `parsed` of `generate()`'s result is
+whatever the strategy's result carried: `sequential` returns its last seat's
+result and `graph` the last result of its final tier, so a seat with its own
+`responseSchema` passes on its `parsed`. A `beforeReturn` replacement that
+changes the text leaves `parsed` `undefined`, since nothing parsed the
+replacement.
 
 ---
 

@@ -694,7 +694,13 @@ export interface ResourceControls {
    * When `agent({ output: someZodSchema })` is set and the LLM returns text
    * that does not parse or validate against the schema, the agency will
    * retry the generation up to this many times, each time appending an
-   * error feedback hint to the prompt so the model can self-correct.
+   * error feedback hint to the prompt so the model can self-correct. The
+   * retry runs under `generate()` and a session's `send()`; `stream()` and a
+   * session's `stream()` finalize the one run they streamed. A final
+   * text that a `beforeReturn` approval replaced with a different one is not
+   * retried: the replacement is returned, with `parsed` undefined when it
+   * does not match. A replacement equal to the strategy's text counts as an
+   * approval without modifications, and is retried as that is.
    *
    * Defaults to `1` (one extra attempt = two total calls). Set to `0` to
    * disable retries entirely.
@@ -788,6 +794,15 @@ export interface ApprovalDecision {
      * Replaces the final text, on a `beforeReturn` approval. The replacement
      * goes through the agency's output guardrails and the post-approval check
      * first, and one the check blocks is refused as a blocked final text is.
+     * With the agency's `output` schema, `parsed` is read from the
+     * replacement; one that does not match the schema is returned with
+     * `parsed` undefined, and `generate()` does not run the strategy again.
+     * A replacement equal to the strategy's text (the text handed back
+     * unedited) counts as an approval without modifications: under
+     * `generate()` a text that does not match is retried, and the approval is
+     * asked for the new one; `stream()` runs no validation retry.
+     * Without the schema, a replacement that changes the text leaves
+     * `parsed` undefined.
      */
     output?: string;
     /**
@@ -1188,8 +1203,10 @@ export interface AgencyStreamResult<R extends AgencyResult = AgencyResult> {
   /** Final per-agent execution ledger for the streamed run. */
   agentCalls: Promise<AgentCallRecord[]>;
   /**
-   * Final structured payload; resolves to `undefined` when structured output
-   * was not configured for the run.
+   * Final structured payload, parsed from the finalized text (a
+   * `beforeReturn` approval's replacement when it carries one); resolves to
+   * `undefined` when structured output was not configured for the run or
+   * that text does not match the schema. A stream runs no validation retry.
    */
   parsed: Promise<unknown>;
   /**
@@ -2090,6 +2107,14 @@ export interface AgencyResult {
   text: string;
   usage: { promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number; cacheReadTokens?: number; cacheCreationTokens?: number };
   agentCalls: AgentCallRecord[];
+  /**
+   * With `output`, the value `text` parses to: after a `beforeReturn`
+   * approval that replaced the final text, the replacement's; `undefined`
+   * when that text does not match the schema. Without `output`, the value
+   * the strategy's result carried (an agent's own `parsed`, such as the last
+   * seat's under sequential), and `undefined` after a `beforeReturn`
+   * replacement that changed the text.
+   */
   parsed?: unknown;
   provenanceTrail?: import('./agency-provenance.js').AgencyProvenanceTrail;
   provider?: string;
