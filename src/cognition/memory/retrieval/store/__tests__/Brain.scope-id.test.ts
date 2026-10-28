@@ -164,7 +164,7 @@ describe('memory_traces.scope_id', () => {
     await (await open(filePath, 'b1')).close();
     brains.length = 0;
     const raw = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
-    // JSON.parse reads the key "scopeId" as scopeId: a writer may escape any letter of a key.
+    // JSON.parse reads the key "\u0073copeId" as scopeId: a writer may escape any letter of a key.
     await raw.run(
       `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata) VALUES ('b1', 't-escaped', 'episodic', 'user', 'x', 1, ?)`,
       ['{"\\u0073copeId":"cy"}'],

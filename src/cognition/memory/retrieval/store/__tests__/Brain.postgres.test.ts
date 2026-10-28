@@ -174,7 +174,7 @@ describeIfPostgres('Brain.openPostgres', () => {
     const brainId = uniqueBrainId();
     const brain1 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
     openedBrains.push(brain1);
-    // JSON.parse reads the key "scopeId" as scopeId: a writer may escape any letter of a key.
+    // JSON.parse reads the key "\u0073copeId" as scopeId: a writer may escape any letter of a key.
     await brain1.run(
       `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
