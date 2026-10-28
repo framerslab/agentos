@@ -55,10 +55,10 @@ export const BASE_AGENT_CONFIG_CAPABILITY_CONTRACT = {
   provenance: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   observability: { agent: 'partially_enforced', generation: 'partially_enforced', runtime: 'enforced', gmi: 'partially_enforced' },
   controls: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'enforced', gmi: 'partially_enforced' },
-  // A GMI launches teams through launch_agency: on gmi() and agent({ runtime: 'gmi' }), and on the full runtime for a
-  // persona granted agency:launch. agent() on its legacy runtime throws on `launch` and applies none of the other
-  // fields; generateText and streamText launch nothing.
-  agencies: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'enforced' },
+  // A GMI that gmi() or agent({ runtime: 'gmi' }) builds launches teams through launch_agency. The full runtime's
+  // AgentOSConfig declares no agencies option, so the runtime column is deferred, as security's is. agent() on its
+  // legacy runtime throws on `launch` and applies none of the other fields; generateText and streamText launch nothing.
+  agencies: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'accepted_but_deferred', gmi: 'enforced' },
 } as const satisfies Record<CapabilityKey, Record<CapabilitySurface, CapabilitySupport>>;
 
 export function getCapabilitySupport(

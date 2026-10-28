@@ -131,8 +131,8 @@ export function warnOnDeferredLightweightAgentCapabilities(
   if (deferredCapabilities.includes('memory')) {
     parts.push("agent() applies memory settings other than the working callback only with runtime: 'gmi'; these settings are not applied here.");
   }
-  // Only a GMI launches teams (gmi(), agent({ runtime: 'gmi' }), or a persona on the full runtime), so the parts
-  // above, which name the full runtime or agency(), leave agencies out.
+  // Only a GMI that gmi() or agent({ runtime: 'gmi' }) builds launches teams, so the parts above, which name the full
+  // runtime or agency(), leave agencies out.
   if (deferredCapabilities.includes('agencies')) {
     parts.push("agent() launches teams only with runtime: 'gmi' (agencies.launch); this agent does not apply agencies.");
   }
