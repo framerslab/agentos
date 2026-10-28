@@ -1,18 +1,22 @@
 /**
  * @file Brain.scope-id.test.ts
  * `memory_traces.scope_id`: the scope id of a trace as a column of its own. A Brain at schema version 2 gains the
- * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds; a
- * fresh Brain has it; the index a per-scope read uses exists; every writer this file reaches sets it; and the importers
- * file by it and deduplicate inside one scope id. Real SQLite files through `@framers/sql-storage-adapter`, as the store
- * opens them in production.
+ * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds, with
+ * one read of each row; a row a release without the column writes to a brain already at version 3 is filled at the
+ * next open, a key spelled with a JSON escape included, by a fill that reads only the rows whose metadata can name a
+ * scope id, through an index of those rows alone; a fresh Brain has it; the index a per-scope read uses exists; every
+ * writer this file reaches sets it; and the importers file by it and deduplicate inside one scope id, where a trace
+ * such a release wrote counts under the scope id its metadata names. Real SQLite files through
+ * `@framers/sql-storage-adapter`, as the store opens them in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import { createStorageFeatures, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
+import { fillScopeIds, v2ToV3 } from '../migrations/v2-to-v3.js';
 import { MemoryStore } from '../MemoryStore.js';
 import { Memory } from '../../../io/facade/Memory.js';
 import { MemoryAddTool } from '../../../io/tools/MemoryAddTool.js';
@@ -20,6 +24,7 @@ import { JsonImporter } from '../../../io/JsonImporter.js';
 import { SqliteImporter } from '../../../io/SqliteImporter.js';
 import { CsvImporter } from '../../../io/CsvImporter.js';
 import { MarkdownImporter } from '../../../io/MarkdownImporter.js';
+import { ChatGptImporter } from '../../../io/ChatGptImporter.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
 import type { IKnowledgeGraph } from '../../graph/knowledge/IKnowledgeGraph.js';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager.js';
@@ -80,6 +85,32 @@ async function schema2File(): Promise<string> {
   return filePath;
 }
 
+type Statement = { sql: string; params?: Parameters<StorageAdapter['all']>[1] };
+
+/**
+ * `raw`, counting how often each row comes back from the fill's reads, the statements on memory_traces that ask for
+ * scope_id '', and keeping each such statement.
+ */
+function countingReads(raw: StorageAdapter): { adapter: StorageAdapter; reads: Record<string, number>; statements: Statement[] } {
+  const reads: Record<string, number> = {};
+  const statements: Statement[] = [];
+  const adapter = {
+    kind: raw.kind,
+    get: raw.get.bind(raw),
+    run: raw.run.bind(raw),
+    exec: raw.exec.bind(raw),
+    all: async (sql: string, params?: Parameters<StorageAdapter['all']>[1]) => {
+      const rows = await raw.all<{ id?: string }>(sql, params);
+      if (sql.includes('FROM memory_traces') && sql.includes("scope_id = ''")) {
+        statements.push({ sql, params });
+        for (const { id } of rows) if (id) reads[id] = (reads[id] ?? 0) + 1;
+      }
+      return rows;
+    },
+  } as unknown as StorageAdapter;
+  return { adapter, reads, statements };
+}
+
 const scopeIdsOf = async (brain: Brain) =>
   Object.fromEntries(
     (await brain.all<{ id: string; scope_id: string }>('SELECT id, scope_id FROM memory_traces ORDER BY id')).map((r) => [r.id, r.scope_id]),
@@ -111,6 +142,98 @@ describe('memory_traces.scope_id', () => {
     const b2 = await open(filePath, 'b2');
     expect(await b2.getMeta('schema_version')).toBe('3');
     expect((await scopeIdsOf(b2))['t-late']).toBe('cy');
+  });
+
+  it('is filled at the next open for a row an older writer added after its own brain migrated', async () => {
+    const filePath = await schema2File();
+    await (await open(filePath, 'b1')).close();
+    brains.length = 0;
+    const raw = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    // b1 is at schema version 3 now, and a release without the column still writes the column's default.
+    await raw.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata) VALUES ('b1', 't-late', 'episodic', 'user', 'late', 2, ?)`,
+      [JSON.stringify({ scopeId: 'cy' })],
+    );
+    await raw.close();
+    const b1 = await open(filePath, 'b1');
+    expect((await scopeIdsOf(b1))['t-late']).toBe('cy');
+  });
+
+  it('is filled at the next open for a row whose metadata spells the scopeId key with a JSON escape', async () => {
+    const filePath = tempFile();
+    await (await open(filePath, 'b1')).close();
+    brains.length = 0;
+    const raw = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    // JSON.parse reads the key "\u0073copeId" as scopeId: a writer may escape any letter of a key.
+    await raw.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata) VALUES ('b1', 't-escaped', 'episodic', 'user', 'x', 1, ?)`,
+      ['{"\\u0073copeId":"cy"}'],
+    );
+    await raw.close();
+    const b1 = await open(filePath, 'b1');
+    expect((await scopeIdsOf(b1))['t-escaped']).toBe('cy');
+  });
+
+  it('is filled with one read of each row when the migration of the brain opened adds it', async () => {
+    const raw = await resolveStorageAdapter({ filePath: await schema2File(), priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    const { adapter, reads } = countingReads(raw);
+    try {
+      await v2ToV3.up(adapter, createStorageFeatures(raw), 'b1');
+    } finally {
+      await raw.close();
+    }
+    expect(reads).toEqual({ 't-bad': 1, 't-none': 1, 't-other': 1, 't-persona': 1, 't-user': 1 });
+  });
+
+  it("is filled at an open from a read of only the rows whose metadata can name a scope id other than ''", async () => {
+    const filePath = tempFile();
+    await (await open(filePath, 'b1')).close();
+    brains.length = 0;
+    const raw = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    const rows: Array<[string, Record<string, unknown>]> = [
+      // remember() files a trace that names no scope id with the metadata scopeId ''.
+      ['t-unscoped', { content_hash: 'h1', scopeId: '' }],
+      ['t-no-key', { document_id: 'doc-1' }],
+      // A release without the column wrote these two: the scope id of the second is its top-level scopeId.
+      ['t-ana', { scopeId: 'ana' }],
+      ['t-nested', { scopeId: 'bo', origin: { scopeId: '' } }],
+    ];
+    for (const [id, metadata] of rows) {
+      await raw.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata) VALUES ('b1', ?, 'episodic', 'user', 'x', 1, ?)`,
+        [id, JSON.stringify(metadata)],
+      );
+    }
+    const { adapter, reads } = countingReads(raw);
+    try {
+      await fillScopeIds(adapter, 'b1');
+      expect(reads).toEqual({ 't-ana': 1, 't-nested': 1 });
+      expect(await raw.all(`SELECT id, scope_id FROM memory_traces WHERE brain_id = 'b1' ORDER BY id`)).toEqual([
+        { id: 't-ana', scope_id: 'ana' },
+        { id: 't-nested', scope_id: 'bo' },
+        { id: 't-no-key', scope_id: '' },
+        { id: 't-unscoped', scope_id: '' },
+      ]);
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it('is filled at an open by a read of an index that holds only the rows it can fill', async () => {
+    const filePath = tempFile();
+    await (await open(filePath, 'b1')).close();
+    brains.length = 0;
+    const raw = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    const { adapter, statements } = countingReads(raw);
+    try {
+      await fillScopeIds(adapter, 'b1');
+      expect(statements).toHaveLength(1);
+      // The primary key would walk every row of the brain, the embedding of each before its metadata.
+      const plan = await raw.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${statements[0]!.sql}`, statements[0]!.params);
+      expect(plan.map((step) => step.detail).join('\n')).toContain('idx_memory_traces_unfiled_scope_id');
+    } finally {
+      await raw.close();
+    }
   });
 
   it('is part of a fresh Brain, which seeds schema version 3', async () => {
@@ -264,10 +387,12 @@ describe('the importers file by scope id and deduplicate inside one', () => {
     ]);
   });
 
+  /** A CSV holding one row of `user:<scopeId>` with the text 'Same words.'. */
+  const csv = (scopeId: string) =>
+    `content,scope,metadata\n"Same words.",user,"${JSON.stringify({ scopeId }).replace(/"/g, '""')}"\n`;
+
   it('CSV: the scope id comes from the metadata column, and dedup reads only that scope id', async () => {
     const brain = await open(tempFile(), 'csv');
-    const csv = (scopeId: string) =>
-      `content,scope,metadata\n"Same words.",user,"${JSON.stringify({ scopeId }).replace(/"/g, '""')}"\n`;
     await new CsvImporter(brain).importFromString(csv('A%2F42'));
     expect((await new CsvImporter(brain).importFromString(csv('B%2F42'))).imported).toBe(1);
     expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['A%2F42', 'B%2F42']);
@@ -283,5 +408,67 @@ describe('the importers file by scope id and deduplicate inside one', () => {
     expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['', 'A%2F42']);
     // A second import finds the trace the first filed under ''.
     expect((await new MarkdownImporter(brain).import(dir)).skipped).toBe(1);
+  });
+
+  describe("a trace a release without scope_id wrote holds '', and is read under the scope id its metadata names", () => {
+    /** A release without the column writes its default, '', whatever scope id the metadata names. */
+    const asOlderRelease = (brain: Brain) => brain.run(`UPDATE memory_traces SET scope_id = ''`);
+
+    it('JSON: a record of that scope id is its duplicate', async () => {
+      const brain = await open(tempFile(), 'json-older');
+      const importer = new JsonImporter(brain);
+      await importer.importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+      await asOlderRelease(brain);
+      expect((await importer.importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100))).skipped).toBe(1);
+      expect(await tracesOf(brain)).toEqual([{ scope_id: 'A%2F42', tags: '["a"]', created_at: 100 }]);
+    });
+
+    it("SQLite: a record filed under '' is imported, and no tags or time are merged into that trace", async () => {
+      const target = await open(tempFile(), 'sqlite-older-target');
+      await new JsonImporter(target).importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+      await asOlderRelease(target);
+      const sourcePath = tempFile();
+      const source = await open(sourcePath, 'sqlite-older-source');
+      await new JsonImporter(source).importFromString(exportOf('', 'Same words.', ['b'], 200));
+      expect((await new SqliteImporter(target).import(sourcePath)).imported).toBe(1);
+      expect(await tracesOf(target)).toEqual([
+        { scope_id: '', tags: '["b"]', created_at: 200 },
+        { scope_id: 'A%2F42', tags: '["a"]', created_at: 100 },
+      ]);
+    });
+
+    it('CSV: a row of that scope id is its duplicate', async () => {
+      const brain = await open(tempFile(), 'csv-older');
+      await new CsvImporter(brain).importFromString(csv('A%2F42'));
+      await asOlderRelease(brain);
+      expect((await new CsvImporter(brain).importFromString(csv('A%2F42'))).skipped).toBe(1);
+      expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['A%2F42']);
+    });
+
+    it("Markdown: a file with that text is imported under ''", async () => {
+      const brain = await open(tempFile(), 'markdown-older');
+      await new JsonImporter(brain).importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+      await asOlderRelease(brain);
+      const dir = path.join(path.dirname(tempFile()), 'notes');
+      await fsp.mkdir(dir);
+      await fsp.writeFile(path.join(dir, 'same.md'), '---\nscope: user\n---\nSame words.\n', 'utf8');
+      expect((await new MarkdownImporter(brain).import(dir)).imported).toBe(1);
+      expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['', 'A%2F42']);
+    });
+
+    it("ChatGPT: a message with that text is imported under ''", async () => {
+      const brain = await open(tempFile(), 'chatgpt-older');
+      await new JsonImporter(brain).importFromString(exportOf('A%2F42', '[user]: Same words.', ['a'], 100));
+      await asOlderRelease(brain);
+      const filePath = path.join(path.dirname(tempFile()), 'conversations.json');
+      const message = { author: { role: 'user' }, content: { parts: ['Same words.'] }, create_time: 1 };
+      await fsp.writeFile(
+        filePath,
+        JSON.stringify([{ title: 'Same', create_time: 1, mapping: { m1: { id: 'm1', parent: null, children: [], message } } }]),
+        'utf8',
+      );
+      expect((await new ChatGptImporter(brain).import(filePath)).imported).toBe(1);
+      expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['', 'A%2F42']);
+    });
   });
 });
