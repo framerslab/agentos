@@ -16,7 +16,12 @@ import type { StructuredReplyOutput } from '../../src/api/runtime/structuredRepl
 import type { RagRetrievedChunk } from '../../src/cognition/rag/IRetrievalAugmentor';
 import { GMI } from '../../src/cognition/substrate/GMI.js';
 import { GMIManager } from '../../src/cognition/substrate/GMIManager.js';
-import { GMIOutputChunkType, type GMIOutput, type ToolCallRequest } from '../../src/cognition/substrate/IGMI.js';
+import {
+  GMIOutputChunkType,
+  type AudioOutputConfig,
+  type GMIOutput,
+  type ToolCallRequest,
+} from '../../src/cognition/substrate/IGMI.js';
 import { InMemoryWorkingMemory } from '../../src/cognition/substrate/memory/InMemoryWorkingMemory.js';
 import { ConversationContext } from '../../src/core/conversation/ConversationContext';
 import { PromptEngine } from '../../src/core/llm/PromptEngine';
@@ -145,11 +150,23 @@ const ROOM_STRUCTURED: StructuredReplyOutput = {
 /** The structured reply without the room, as a guard rewrites it. */
 const ROOMLESS_REPLY = '{"standup":"10:00"}';
 
+/** The audio output a GMI made of `reply`: the voice settings, the text it spoke and the audio file. */
+function audioOf(reply: string): AudioOutputConfig {
+  return {
+    provider: 'test-tts',
+    voiceId: 'voice-1',
+    textToSpeak: reply,
+    url: 'https://audio.example.com/reply.mp3',
+    format: 'mp3',
+  };
+}
+
 /**
- * An output guard that rewrites every final response to `text`. It declares `canSanitize`: the dispatcher applies a
- * rewrite only from a sanitizer, and turns any other guard's SANITIZE into a FLAG.
+ * An output guard that rewrites every final response to `text`, or removes the reply when `text` is null. It declares
+ * `canSanitize`: the dispatcher applies a rewrite only from a sanitizer, and turns any other guard's SANITIZE into a
+ * FLAG.
  */
-function finalRewriter(text: string): IGuardrailService {
+function finalRewriter(text: string | null): IGuardrailService {
   return {
     id: 'final-rewriter',
     config: { canSanitize: true },
@@ -171,8 +188,8 @@ function finalBlocker(text: string): IGuardrailService {
   };
 }
 
-/** A supervisor that rewrites every final response of the agents it observes to `text`. */
-function finalSupervisor(text: string): ICrossAgentGuardrailService {
+/** A supervisor that rewrites every final response of the agents it observes to `text`, or removes it when null. */
+function finalSupervisor(text: string | null): ICrossAgentGuardrailService {
   return {
     id: 'final-supervisor',
     canInterruptOthers: true,
@@ -466,6 +483,25 @@ function structuredReplyGmi(reply: string, structuredOutput: StructuredReplyOutp
         timestamp: new Date(),
       };
       return { isFinal: true, responseText: reply, structuredOutput };
+    },
+    hydrateConversationHistory: vi.fn(),
+  };
+}
+
+/** A GMI whose turn streams the reply of `output` and ends with `output`. */
+function replyGmi(output: GMIOutput & { responseText: string }) {
+  return {
+    getCurrentPrimaryPersonaId: () => 'test-persona',
+    getGMIId: () => 'gmi-reply',
+    getPersona: () => PERSONA,
+    processTurnStream: async function* (): AsyncGenerator<any, GMIOutput, undefined> {
+      yield {
+        type: GMIOutputChunkType.TEXT_DELTA,
+        content: output.responseText,
+        interactionId: 'interaction-reply',
+        timestamp: new Date(),
+      };
+      return output;
     },
     hydrateConversationHistory: vi.fn(),
   };
@@ -1030,6 +1066,79 @@ describe('AgentOS tool-result continuations', () => {
     expect(final.finalResponseText).toBe(ROOMLESS_REPLY);
     // a continuation holds no schema to check the rewrite against, so the value parsed from the original does not reach the host
     expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'standup', valid: false, stage: 'post_guardrail' } });
+  });
+
+  it.each([
+    ["an output guard's rewrite", 'conv-audio-rewrite', 'guard', '**Standup** moved to 10:00.'],
+    ["a supervisor's rewrite", 'conv-audio-supervised', 'supervisor', '**Standup** moved to 10:00.'],
+    ["an output guard's removal", 'conv-audio-removed', 'guard', null],
+  ] as const)('%s of a final response leaves the reply it replaced out of the audio output', async (_label, conversationId, mode, rewrite) => {
+    const reply = 'Standup moved to 10:00, in room 4B.';
+    const rt = await runtime(conversationId, mode === 'guard' ? { guardrailService: finalRewriter(rewrite) } : {});
+    rt.useGmi(replyGmi({ isFinal: true, responseText: reply, audioOutput: audioOf(reply) }));
+    const turn = rt.agentos.processRequest(rt.input);
+
+    const responses = await collect(
+      mode === 'supervisor'
+        ? wrapWithCrossAgentGuardrails(
+            [finalSupervisor(rewrite)],
+            { sourceAgentId: 'notes-agent', observerAgentId: 'supervisor' },
+            { userId: 'user-1', sessionId: rt.input.sessionId, personaId: 'test-persona', conversationId },
+            turn,
+            { streamId: `supervised-${conversationId}` },
+          )
+        : turn,
+    );
+
+    const final = responses.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe(rewrite);
+    // the voice settings stay and speak the rewrite as plain text; the audio file spoke the reply it replaced, and a
+    // removed reply leaves nothing to speak
+    expect(final.audioOutput).toEqual(
+      rewrite === null
+        ? undefined
+        : { provider: 'test-tts', voiceId: 'voice-1', textToSpeak: 'Standup moved to 10:00.', format: 'mp3' },
+    );
+  });
+
+  it.each([
+    ["an output guard's SANITIZE of a continuation's reply", 'conv-unchanged-guarded', 'guard'],
+    ["a supervisor's SANITIZE of a turn's reply", 'conv-unchanged-supervised', 'supervisor'],
+  ] as const)('%s that leaves the reply as it was keeps the value parsed from it and its audio output', async (_label, conversationId, mode) => {
+    const output: GMIOutput = {
+      isFinal: true,
+      responseText: ROOM_REPLY,
+      structuredOutput: ROOM_STRUCTURED,
+      audioOutput: audioOf(ROOM_REPLY),
+    };
+    let responses: AgentOSResponse[];
+    if (mode === 'guard') {
+      const rt = await runtime(conversationId, { guardrailService: finalRewriter(ROOM_REPLY) });
+      const { request } = await rt.pauseOnRead(hostToolGmi(output));
+      responses = await collect(
+        rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      );
+    } else {
+      const rt = await runtime(conversationId);
+      rt.useGmi(replyGmi({ ...output, responseText: ROOM_REPLY }));
+      responses = await collect(
+        wrapWithCrossAgentGuardrails(
+          [finalSupervisor(ROOM_REPLY)],
+          { sourceAgentId: 'notes-agent', observerAgentId: 'supervisor' },
+          { userId: 'user-1', sessionId: rt.input.sessionId, personaId: 'test-persona', conversationId },
+          rt.agentos.processRequest(rt.input),
+          { streamId: `supervised-${conversationId}` },
+        ),
+      );
+    }
+
+    const final = responses.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe(ROOM_REPLY);
+    // the guard rewrote nothing, so the value parsed from the reply and the audio made of it still hold
+    expect(final.structured).toEqual(ROOM_STRUCTURED);
+    expect(final.audioOutput).toEqual(audioOf(ROOM_REPLY));
   });
 
   it("every output guard evaluation of a continuation's reply reads the sources the GMI used", async () => {
