@@ -113,11 +113,12 @@ describe('launch_agency on gmi(): the coordinator route and the budgets of a sea
     // The tight member's own cap refuses its seat's call before it is sent, though the launch's budget has room.
     expect(tightCalls.seen).toHaveLength(0);
     expect(tightOwn.tokensUsed()).toBe(0);
-    expect(out.seats.map((r) => [r.role, r.status])).toEqual([['reader', 'completed'], ['checker', 'failed']]);
+    // A budget the seat's call draws on ended it, as the launch's own would have: the seat is cut, and the launch
+    // reports the budget and the cap that refused, while its own budget counted the one call.
+    expect(out.seats.map((r) => [r.role, r.status])).toEqual([['reader', 'completed'], ['checker', 'cut']]);
     expect(out.seats[1].error?.code).toBe('LLM_PROVIDER_ERROR');
-    // A member's own cap is not the launch's: the launch failed with that seat, and its budget counted the one call.
-    expect(out.status).toBe('failed');
-    expect(out.reason).toContain("seat 'checker' failed");
+    expect(out.status).toBe('budget_exhausted');
+    expect(out.reason).toMatch(/^a budget the team draws on refused a call: \d+ tokens would pass 1000$/);
     expect(out.provenance.budget.tokensUsed).toBe(15);
     expect(result.text).toBe('Reviewed.');
   });
