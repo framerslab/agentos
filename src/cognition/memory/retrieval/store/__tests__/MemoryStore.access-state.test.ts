@@ -6,7 +6,8 @@
  * keeps that state where the `Memory` facade keeps it, so the facade's feedback on the row between the access and the
  * restart is what the restarted store loads. With `persistAccessState: false` the store writes and loads as it did
  * before the fix. A real SQLite Brain; the vector store is the in-memory one, rebuilt for each store, as a restarted
- * process rebuilds it.
+ * process rebuilds it. With no Brain, a store started later over the same vector store restores the reinforcement
+ * schedule from the document's metadata.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -19,6 +20,7 @@ import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVecto
 import type { IKnowledgeGraph } from '../../graph/knowledge/IKnowledgeGraph.js';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager.js';
 import type { MemoryTrace } from '../../../core/types.js';
+import type { PADState } from '../../../core/config.js';
 import type { VectorStoreProviderConfig } from '../../../../../core/vector-store/IVectorStore.js';
 
 const dirs: string[] = [];
@@ -26,10 +28,16 @@ afterEach(() => {
   while (dirs.length) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
 });
 
-async function storeOver(brain: Brain, extra: Partial<MemoryStoreConfig> = {}): Promise<MemoryStore> {
+/** An empty in-memory vector store of four dimensions. */
+async function vectorStoreOf4(): Promise<InMemoryVectorStore> {
   const vectorStore = new InMemoryVectorStore();
   await vectorStore.initialize({ id: `access-${Math.random()}`, type: 'in_memory', defaultEmbeddingDimension: 4, similarityMetric: 'cosine' } as VectorStoreProviderConfig);
-  const store = new MemoryStore({
+  return vectorStore;
+}
+
+/** A store over the vector store, with no Brain, embedding every text as one fixed vector. */
+function storeWith(vectorStore: InMemoryVectorStore, extra: Partial<MemoryStoreConfig> = {}): MemoryStore {
+  return new MemoryStore({
     vectorStore,
     embeddingManager: {
       generateEmbeddings: async (input: { texts: string | string[] }) => ({
@@ -40,8 +48,13 @@ async function storeOver(brain: Brain, extra: Partial<MemoryStoreConfig> = {}): 
     } as unknown as IEmbeddingManager,
     knowledgeGraph: { recordMemory: async () => ({}) } as unknown as IKnowledgeGraph,
     collectionPrefix: 'cogmem',
+    embeddingDimension: 4,
     ...extra,
   });
+}
+
+async function storeOver(brain: Brain, extra: Partial<MemoryStoreConfig> = {}): Promise<MemoryStore> {
+  const store = storeWith(await vectorStoreOf4(), extra);
   store.setBrain(brain);
   return store;
 }
@@ -141,5 +154,56 @@ describe('a trace after an access and a restart', () => {
     const { reloaded } = await accessThenRestart({ persistAccessState: false });
     expect(reloaded).toMatchObject({ stability: 7_200_000, accessCount: 0, reinforcementInterval: 3_600_000, retrievalCount: 1 });
     expect(reloaded.nextReinforcementAt).toBeUndefined();
+  });
+});
+
+// With no Brain, the vector store is a store's only record: a store started later over the same
+// vector store stands for a restarted process over a durable index, and restores each trace from
+// the document's metadata.
+describe('a trace restored from the vector store by a store with no Brain', () => {
+  const neutralMood: PADState = { valence: 0, arousal: 0, dominance: 0 };
+
+  it('keeps the reinforcement schedule an access left, through getByScope and through query', async () => {
+    const vectorStore = await vectorStoreOf4();
+    const first = storeWith(vectorStore);
+    await first.store(trace(Date.now()));
+    expect(await first.recordAccess('t-vera')).not.toBeNull();
+    const accessed = structuredClone(first.getTrace('t-vera')!);
+    const schedule = {
+      stability: accessed.stability,
+      accessCount: 1,
+      reinforcementInterval: 7_200_000,
+      nextReinforcementAt: accessed.nextReinforcementAt,
+    };
+
+    const [restored] = await storeWith(vectorStore).getByScope('user', 'ana');
+    expect(restored).toMatchObject(schedule);
+
+    const querying = storeWith(vectorStore);
+    const { scored } = await querying.query("Who is Ana's sister?", neutralMood, {
+      scopes: [{ scope: 'user', scopeId: 'ana' }],
+    });
+    expect(scored.map((hit) => hit.id)).toEqual(['t-vera']);
+    expect(querying.getTrace('t-vera')).toMatchObject(schedule);
+  });
+
+  it('restores a trace whose metadata holds no schedule with a one-hour interval, which its next access doubles', async () => {
+    const vectorStore = await vectorStoreOf4();
+    await storeWith(vectorStore, { persistAccessState: false }).store(trace(Date.now()));
+    const store = storeWith(vectorStore);
+    const [restored] = await store.getByScope('user', 'ana');
+    expect(restored!.reinforcementInterval).toBe(3_600_000);
+    expect(await store.recordAccess('t-vera')).not.toBeNull();
+    expect(store.getTrace('t-vera')!.reinforcementInterval).toBe(7_200_000);
+  });
+
+  it('with persistAccessState false, restores as before the fix: no schedule from the vector metadata', async () => {
+    const vectorStore = await vectorStoreOf4();
+    const first = storeWith(vectorStore, { persistAccessState: false });
+    await first.store(trace(Date.now()));
+    expect(await first.recordAccess('t-vera')).not.toBeNull();
+    const [restored] = await storeWith(vectorStore, { persistAccessState: false }).getByScope('user', 'ana');
+    expect(restored!.reinforcementInterval).toBe(0);
+    expect(restored!.nextReinforcementAt).toBeUndefined();
   });
 });
