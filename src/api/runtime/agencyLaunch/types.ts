@@ -71,7 +71,10 @@ export interface AgencyLaunchOptions {
   defaultDeadlineMs?: number;
   /** The longest deadline a launch may name, in ms: from 1,000 to 3,600,000, default 600,000. */
   maxDeadlineMs?: number;
-  /** gmi() only: the persistent members a launch may seat by agentKey, each a gmi() handle. */
+  /**
+   * gmi() only: the persistent members a launch may seat by agentKey, each a gmi() handle. The record is read once,
+   * when the agent is built: a member put in it afterwards, under a new key or an old one, is never seated.
+   */
   members?: Record<string, Agent>;
   /** The approval policy every launched team runs under after the gate the launching turn carries; applied at a root launch and inherited below it. */
   hitl?: HitlConfig;
