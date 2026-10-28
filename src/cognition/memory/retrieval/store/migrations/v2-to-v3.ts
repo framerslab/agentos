@@ -87,20 +87,25 @@ function scopeIdOfMetadata(metadata: string | null | undefined): string {
 }
 
 /**
- * Matches a row whose metadata text names `scopeId`. A fill gives a scope id to no other row, so the fill that runs at
- * every open reads only these, and the traces a brain holds under no scope id are not read back each time.
+ * Matches a row whose metadata text can name a scope id other than `''`: it holds `"scopeId"`, and not only once with
+ * the value `""`, as `JSON.stringify` writes the metadata of a trace `remember()` files under no scope id. A fill gives
+ * a scope id to no other row, so the fill that runs at every open reads only these, and the traces a brain holds under
+ * no scope id are not read back each time. A row whose text holds `"scopeId"` once is excluded only when that one
+ * `"scopeId"` reads `""`: whether it is the top-level key or a nested one, the top-level scope id is then `''` or
+ * missing. SQLite's `LIKE` ignores ASCII case, which counts more occurrences and so excludes no further row.
  */
-const NAMES_SCOPE_ID = `metadata LIKE '%"scopeId"%'`;
+const NAMES_SCOPE_ID =
+  `metadata LIKE '%"scopeId"%' AND NOT (metadata LIKE '%"scopeId":""%' AND metadata NOT LIKE '%"scopeId"%"scopeId"%')`;
 
 /**
  * Fills one brain's `scope_id` from the metadata JSON for its rows that hold `''`. Pages by `id` inside the brain, so
  * each page is a range read of the primary key, and writes each page's values in one statement, to the rows that
  * still hold `''`.
  *
- * @param named - Read only the rows whose metadata text names `scopeId`.
+ * @param named - Read only the rows whose metadata text can name a scope id other than `''`.
  */
 async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: string, named = false): Promise<void> {
-  const filter = named ? ` AND ${NAMES_SCOPE_ID}` : '';
+  const filter = named ? ` AND (${NAMES_SCOPE_ID})` : '';
   let afterId = '';
   for (;;) {
     const rows = await adapter.all<{ id: string; metadata: string | null }>(
@@ -129,8 +134,8 @@ async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: s
 /**
  * Files the traces of one brain that hold `scope_id` `''` while their metadata names a scope id: the rows a release
  * older than the column writes, with the column's default, to a brain that is already at schema version 3. Only the
- * rows whose metadata text names `scopeId` are read; a row whose JSON cannot be read, or whose `scopeId` is not a
- * string, keeps `''`. A row that holds a scope id is never written.
+ * rows whose metadata text can name a scope id other than `''` are read; a row whose JSON cannot be read, or whose
+ * `scopeId` is not a string, keeps `''`. A row that holds a scope id is never written.
  *
  * `Brain` runs it for the brain it opens, at every open. Each importer runs it before its first duplicate check,
  * inside the import's transaction where it has one: an older release can write to a brain while this process holds
