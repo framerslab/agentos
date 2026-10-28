@@ -12,8 +12,10 @@
  * retry as it was. A replacement that hands the strategy's own text back
  * replaced nothing, and the retry runs as after an approval without
  * modifications; a replacement that does not match writes one line through
- * the host's logger. Without a schema, a `parsed` a seat returned does not
- * outlive a replacement that changes the text.
+ * the host's logger. stream() runs no validation retry: a text that does not
+ * match ends the stream with `parsed` undefined after one run. Without a
+ * schema, a `parsed` a seat returned does not outlive a replacement that
+ * changes the text.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -239,6 +241,27 @@ describe('a beforeReturn approval and the output schema', () => {
     expect(bodies).toHaveLength(2);
     expect(JSON.stringify(bodies[1].messages)).toContain(`Response was: ${ANSWER}`);
     expect(handler.mock.calls.map(([request]) => request.details)).toEqual([{ output: ANSWER }, { output: ANSWER_JSON }]);
+  });
+
+  it('stream() runs no validation retry: after an approval without modifications, or one that hands the text back, a text that fails the schema ends the stream with parsed undefined after one run', async () => {
+    // generate() retries such a text (the two cases above). A stream
+    // finalizes the one run it streamed, so the second reply is never asked for.
+    const handBack = vi.fn(async (request: ApprovalRequest): Promise<ApprovalDecision> => ({
+      approved: true,
+      modifications: { output: String(request.details.output) },
+    }));
+    for (const handler of [approve(), handBack]) {
+      fetchMock.mockClear();
+      serveAnswer(ANSWER, ANSWER_JSON);
+      const s = team(handler, {}, { output: ROTATION }).stream(PROMPT);
+      const parts: Json[] = [];
+      for await (const part of s.fullStream) parts.push(part);
+      const finalOutputs = parts.filter((part) => part.type === 'final-output');
+      expect(finalOutputs.map((part) => [part.text, part.parsed])).toEqual([[ANSWER, undefined]]);
+      await expect(s.parsed).resolves.toBeUndefined();
+      expect(chatBodies()).toHaveLength(1);
+      expect(handler).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('a replacement that does not match the schema writes one line through the host logger, and one that matches or hands the strategy text back writes none', async () => {
