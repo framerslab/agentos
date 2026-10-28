@@ -113,7 +113,7 @@ describe('AgentOS docs alignment', () => {
     // The guide's cognitive-memory example runs on the GMI path.
     expect(guide).toMatch(/agent\(\{\s*runtime: 'gmi',[^`]*\bmemory: \{ embedding: \{/);
     // The guide distinguishes GMI store settings from the default runtime's callback.
-    expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`');
+    expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation` and `persistAccessState`');
     expect(guide).toContain('The default runtime reads only the `memory.working` callback described above.');
     // No example passes memory to an agent() that does not read it.
     const pages = { 'README.md': readme, 'docs/getting-started/HIGH_LEVEL_API.md': guide, 'examples/high-level-api.mjs': example, 'docs/GMI.md': gmiGuide, 'docs/memory/HEXACO_PERSONALITY.md': personality };
