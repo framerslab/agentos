@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS memory_traces (
 );
 ```
 
-`scope_id` holds the trace's scope id, the value `metadata.scopeId` holds, and `''` for a trace filed under no scope id. The index `idx_memory_traces_brain_scope_id` covers `(brain_id, scope, scope_id, created_at)`. A database written at schema version 2 gains the column at its first open at version 3, filled from each row's metadata JSON for every brain the table holds; a row whose JSON cannot be read, or names no scope id, keeps `''`.
+`scope_id` holds the trace's scope id, the value `metadata.scopeId` holds, and `''` for a trace filed under no scope id. The index `idx_memory_traces_brain_scope_id` covers `(brain_id, scope, scope_id, created_at)`. A database written at schema version 2 gains the column at its first open at version 3, filled from each row's metadata JSON for every brain the table holds; a row whose JSON cannot be read, or names no scope id, keeps `''`. A release older than the column writes `''` whatever scope id the metadata names, to a brain at version 3 as well, where no migration runs again. Every open files the rows of the brain it opens that hold `''` while their metadata names a scope id, reading only the rows whose metadata can name a scope id other than `''`, and every import does the same before its first duplicate check. That read goes through the partial index `idx_memory_traces_unfiled_scope_id` on `(brain_id, id)`, so an open reads none of the traces that hold their scope id. On SQLite the index holds only the rows that hold `''` while their metadata text can name a scope id, so an open reads none of the traces `remember()` filed under no scope id either. On Postgres it holds every row that holds `''`, and the read tests the metadata of each on the server. Postgres can update a row without writing any of the table's indexes (a heap-only update) only when the update changes no column an index reads, and a recall writes the metadata of every trace it returns, so no index of `memory_traces` reads `metadata` there. A row whose metadata text names `scopeId` while its JSON gives no scope id other than `''` keeps `''` and is read again at every open and import. Such a row holds a `null` scope id, a nested `scopeId` key, a `""` written with a space after the colon, or JSON that cannot be read. A row whose metadata holds a `\u` escape and names no scope id stays there too.
 
 `metadata.decay` holds a trace's decay state: `stability` and `reinforcementInterval` in milliseconds, `accessCount`, and `nextReinforcementAt` (Unix ms) once a retrieval has set it. `Memory` writes it at `remember()`, at each recall and at each `feedback()`, the consolidation loop and `memory_merge` merge it, and the store of `CognitiveMemoryManager` writes it at `store()` and at every access ([Access state across restarts](./COGNITIVE_MEMORY.md#access-state-across-restarts)).
 
@@ -147,8 +147,9 @@ setInterval(async () => {
 2. Sets WAL journal mode and foreign keys where the dialect supports the pragmas.
 3. Runs pending schema migrations.
 4. Creates the tables, then the full-text index (skipped when FTS5 is missing).
-5. Seeds `brain_meta` with `schema_version` and `created_at` when absent.
-6. Repairs the full-text index on SQLite when it is out of step with `memory_traces`.
+5. Files the brain's traces that hold `scope_id` `''` while their metadata names a scope id, the rows a release older than the column wrote.
+6. Seeds `brain_meta` with `schema_version` and `created_at` when absent.
+7. Repairs the full-text index on SQLite when it is out of step with `memory_traces`.
 
 ```ts
 import { Brain } from '@framers/agentos';
