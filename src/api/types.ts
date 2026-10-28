@@ -694,7 +694,9 @@ export interface ResourceControls {
    * When `agent({ output: someZodSchema })` is set and the LLM returns text
    * that does not parse or validate against the schema, the agency will
    * retry the generation up to this many times, each time appending an
-   * error feedback hint to the prompt so the model can self-correct.
+   * error feedback hint to the prompt so the model can self-correct. A final
+   * text that a `beforeReturn` approval replaced is not retried: the
+   * replacement is returned, with `parsed` undefined when it does not match.
    *
    * Defaults to `1` (one extra attempt = two total calls). Set to `0` to
    * disable retries entirely.
@@ -788,6 +790,9 @@ export interface ApprovalDecision {
      * Replaces the final text, on a `beforeReturn` approval. The replacement
      * goes through the agency's output guardrails and the post-approval check
      * first, and one the check blocks is refused as a blocked final text is.
+     * With the agency's `output` schema, `parsed` is read from the
+     * replacement; one that does not match the schema is returned with
+     * `parsed` undefined, and `generate()` does not run the strategy again.
      */
     output?: string;
     /**
@@ -1188,8 +1193,10 @@ export interface AgencyStreamResult<R extends AgencyResult = AgencyResult> {
   /** Final per-agent execution ledger for the streamed run. */
   agentCalls: Promise<AgentCallRecord[]>;
   /**
-   * Final structured payload; resolves to `undefined` when structured output
-   * was not configured for the run.
+   * Final structured payload, parsed from the finalized text (a
+   * `beforeReturn` approval's replacement when it carries one); resolves to
+   * `undefined` when structured output was not configured for the run or
+   * that text does not match the schema.
    */
   parsed: Promise<unknown>;
   /**
@@ -2090,6 +2097,11 @@ export interface AgencyResult {
   text: string;
   usage: { promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number; cacheReadTokens?: number; cacheCreationTokens?: number };
   agentCalls: AgentCallRecord[];
+  /**
+   * With `output`, the value `text` parses to: after a `beforeReturn`
+   * approval that replaced the final text, the replacement's; `undefined`
+   * when that text does not match the schema.
+   */
   parsed?: unknown;
   provenanceTrail?: import('./agency-provenance.js').AgencyProvenanceTrail;
   provider?: string;

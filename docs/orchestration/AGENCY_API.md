@@ -1375,6 +1375,13 @@ repeated up to `controls.maxValidationRetries` times (default `1`) with the
 previous reply quoted in the prompt; when every attempt fails, `parsed` is
 `undefined` and no error is thrown. A member's own `output` is not read.
 
+The text parsed is the one the caller receives: the final text after the
+output guardrails and a `beforeReturn` approval. When the approval's
+`modifications.output` replaces the final text, `parsed` is read from the
+replacement. A replacement that does not match the schema is returned as it
+is, with `parsed` `undefined`, and the run is not repeated: a retry would
+throw the approver's text away and ask for the approval again.
+
 ---
 
 ## Nested Agencies
