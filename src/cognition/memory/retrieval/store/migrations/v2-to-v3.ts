@@ -14,8 +14,10 @@
  * An older release goes on writing `''` to a brain that is already at version 3, where its migration never runs
  * again. `Brain` runs {@link fillScopeIds} for the brain it opens, at every open, and each importer runs it before it
  * looks for duplicates, so such a row is filed under the scope id its metadata names before an import reads the column.
- * Its read goes through `idx_memory_traces_unfiled_scope_id`, a partial index of the rows it can fill, so an open of a
- * brain with nothing left to fill reads none of its traces.
+ * Its read goes through `idx_memory_traces_unfiled_scope_id`, the partial index of the rows that hold `''` while their
+ * metadata text can name a scope id. The fill files each such row whose JSON names one. A row whose JSON names none
+ * other than `''` (JSON that cannot be read, a `null` scope id, a nested `scopeId` key) stays in the index and is
+ * read again by the next fill.
  *
  * A row's JSON is read in code, not with a SQL JSON function: `json_extract` (SQLite) and the `::jsonb` cast
  * (Postgres) raise on a malformed row, which would stop the migration for the whole Brain. A row whose JSON cannot be
@@ -158,8 +160,9 @@ async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: s
  * Files the traces of one brain that hold `scope_id` `''` while their metadata names a scope id: the rows a release
  * older than the column writes, with the column's default, to a brain that is already at schema version 3. Only the
  * rows whose metadata text can name a scope id other than `''` are read, through the index that holds those rows
- * alone, so a brain with none left to fill costs one probe of that index; a row whose JSON cannot be read, or whose
- * `scopeId` is not a string, keeps `''`. A row that holds a scope id is never written.
+ * alone, so a brain with no such row costs one probe of that index. A row whose JSON gives no scope id other than
+ * `''` (JSON that cannot be read, a `scopeId` that is not a string, a nested `scopeId` key) keeps `''`, stays in
+ * that index and is read again by the next fill. A row that holds a scope id is never written.
  *
  * `Brain` runs it for the brain it opens, at every open. Each importer runs it before its first duplicate check,
  * inside the import's transaction where it has one: an older release can write to a brain while this process holds
