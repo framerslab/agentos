@@ -159,6 +159,18 @@ function finalRewriter(text: string): IGuardrailService {
   };
 }
 
+/** An output guard that blocks every final response and gives `text` as the reply in its place. */
+function finalBlocker(text: string): IGuardrailService {
+  return {
+    id: 'final-blocker',
+    async evaluateOutput({ chunk }: GuardrailOutputPayload) {
+      return chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE
+        ? { action: GuardrailAction.BLOCK, reason: 'The reply named a room.', replacementText: text }
+        : null;
+    },
+  };
+}
+
 /** A supervisor that rewrites every final response of the agents it observes to `text`. */
 function finalSupervisor(text: string): ICrossAgentGuardrailService {
   return {
@@ -403,6 +415,37 @@ function emptyRequestGmi() {
         metadata: { executionMode: 'external', requiresExternalToolResult: true },
       };
       return { isFinal: false, responseText: 'I need the notes file first.', toolCalls: [READ_CALL] };
+    },
+    hydrateConversationHistory: vi.fn(),
+    handleToolResult: vi.fn(async (): Promise<GMIOutput> => ({ isFinal: true, responseText: 'Done.' })),
+  };
+}
+
+/** The rationale each request of `streamingRequestsGmi()` gives. */
+const STREAMED_RATIONALE = 'Reading the notes file.';
+
+/**
+ * A GMI that streams `streamed` in order, each part a request for calls the host runs (with `STREAMED_RATIONALE`) or a
+ * piece of text, and then returns `output`.
+ */
+function streamingRequestsGmi(streamed: Array<ToolCallRequest[] | string>, output: GMIOutput) {
+  return {
+    getCurrentPrimaryPersonaId: () => 'test-persona',
+    getGMIId: () => 'gmi-streamed-requests',
+    getPersona: () => PERSONA,
+    processTurnStream: async function* (): AsyncGenerator<any, GMIOutput, undefined> {
+      for (const part of streamed) {
+        yield typeof part === 'string'
+          ? { type: GMIOutputChunkType.TEXT_DELTA, content: part, interactionId: 'interaction-streamed-requests', timestamp: new Date() }
+          : {
+              type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+              content: part,
+              interactionId: 'interaction-streamed-requests',
+              timestamp: new Date(),
+              metadata: { executionMode: 'external', requiresExternalToolResult: true, rationale: STREAMED_RATIONALE },
+            };
+      }
+      return output;
     },
     hydrateConversationHistory: vi.fn(),
     handleToolResult: vi.fn(async (): Promise<GMIOutput> => ({ isFinal: true, responseText: 'Done.' })),
@@ -765,6 +808,64 @@ describe('AgentOS tool-result continuations', () => {
   });
 
   it.each([
+    ['one request that names part of the calls it stops for', 'conv-streamed-part', [[READ_CALL]], [READ_CALL, WRITE_CALL]],
+    ['a request for each call it stops for', 'conv-streamed-each', [[READ_CALL], [WRITE_CALL]], [READ_CALL, WRITE_CALL]],
+    ['a request that names a call it does not stop for', 'conv-streamed-more', [[READ_CALL, WRITE_CALL]], [READ_CALL]],
+  ])('a turn whose GMI streamed %s hands the host one request for exactly the calls it saved', async (_label, conversationId, streamed, pauseCalls) => {
+    const rt = await runtime(conversationId);
+    rt.useGmi(streamingRequestsGmi(streamed, { isFinal: false, responseText: 'I need the notes file first.', toolCalls: pauseCalls }));
+
+    const responses = await collectWithin(rt.agentos.processRequest(rt.input), 'the turn');
+
+    // the host stops reading at the first request it acts on, so that request names every call the turn waits on
+    const requests = responses.filter(isActionableToolCallRequestChunk);
+    expect(requests.map((r) => r.toolCalls)).toEqual([pauseCalls]);
+    expect(responses.at(-1)).toBe(requests[0]);
+    // the pause is saved before the host reads its request
+    expect((await rt.pending())?.toolCalls).toEqual(pauseCalls);
+  });
+
+  it("a turn that streams its request for host calls before its text hands the host the text, then the GMI's request", async () => {
+    const rt = await runtime('conv-streamed-text');
+    rt.useGmi(
+      streamingRequestsGmi([[READ_CALL], 'Reading your notes.'], {
+        isFinal: false,
+        responseText: 'I need the notes file first.',
+        toolCalls: [READ_CALL],
+      }),
+    );
+
+    const responses = await collectWithin(rt.agentos.processRequest(rt.input), 'the turn');
+
+    // the request waits for the GMI's output, so the text the GMI streamed after it reaches the host before it
+    expect(
+      responses
+        .filter((r) => r.type === AgentOSResponseChunkType.TEXT_DELTA || r.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST)
+        .map((r) => r.type),
+    ).toEqual([AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.TOOL_CALL_REQUEST]);
+    const request = responses.at(-1) as AgentOSToolCallRequestChunk;
+    expect(isActionableToolCallRequestChunk(request)).toBe(true);
+    // the GMI's own request, which names exactly the calls the turn stops for
+    expect(request.toolCalls).toEqual([READ_CALL]);
+    expect(request.rationale).toBe(STREAMED_RATIONALE);
+    expect((await rt.pending())?.toolCalls).toEqual([READ_CALL]);
+  });
+
+  it('a turn whose GMI streamed a request for host calls and then ends without stopping hands the host its FINAL_RESPONSE', async () => {
+    const rt = await runtime('conv-streamed-no-pause');
+    rt.useGmi(streamingRequestsGmi([[READ_CALL]], { isFinal: true, responseText: 'Standup moved to 10:00.' }));
+
+    const responses = await collectWithin(rt.agentos.processRequest(rt.input), 'the turn');
+
+    // the turn waits on no call, and a request would stop the host's read before the reply
+    expect(responses.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+    const final = responses.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe('Standup moved to 10:00.');
+    expect(await rt.pending()).toBeNull();
+  });
+
+  it.each([
     ['an output that lists the calls the GMI ran', 'conv-final-calls', [LOOKUP_CALL]],
     ['an output with no calls', 'conv-final-plain', undefined],
   ])('%s: the continuation ends with a FINAL_RESPONSE that holds the reply, its sources and its structured value', async (_label, conversationId, toolCalls) => {
@@ -855,6 +956,63 @@ describe('AgentOS tool-result continuations', () => {
     expect(final.finalResponseText).toBe(ROOMLESS_REPLY);
     // the wrapper holds no schema to check the rewrite against, so the value parsed from the original does not reach the host
     expect(final.structured).toMatchObject({ value: null, meta: { schemaName: 'standup', valid: false, stage: 'post_guardrail' } });
+  });
+
+  it.each([
+    ["an output guard's rewrite", 'conv-plain-rewrite', 'rewrite'],
+    ["a supervisor's rewrite", 'conv-plain-supervised', 'supervisor'],
+    ["an output guard's fixed reply for a block", 'conv-plain-block', 'block'],
+  ] as const)('%s of a final response reaches the host as plain text, as a turn renders its own reply', async (_label, conversationId, mode) => {
+    const reply = '**Standup** moved to [10:00](https://example.com/standup).';
+    const guardrailService = mode === 'rewrite' ? finalRewriter(reply) : mode === 'block' ? finalBlocker(reply) : undefined;
+    const rt = await runtime(conversationId, guardrailService ? { guardrailService } : {});
+    const { gmi } = await rt.shippedGmi([{ text: 'Standup moved to 10:00, in room 4B.' }]);
+    rt.useGmi(gmi);
+    const turn = rt.agentos.processRequest(rt.input);
+
+    const responses = await collect(
+      mode === 'supervisor'
+        ? wrapWithCrossAgentGuardrails(
+            [finalSupervisor(reply)],
+            { sourceAgentId: 'notes-agent', observerAgentId: 'supervisor' },
+            { userId: 'user-1', sessionId: rt.input.sessionId, personaId: 'test-persona', conversationId },
+            turn,
+            { streamId: `supervised-${conversationId}` },
+          )
+        : turn,
+    );
+
+    const final = responses.at(-1) as AgentOSFinalResponseChunk;
+    expect(final.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(final.finalResponseText).toBe(reply);
+    // the plain text a voice host speaks
+    expect(final.finalResponseTextPlain).toBe('Standup moved to 10:00.');
+  });
+
+  it('in hold mode, the text before a host request reaches the guards as a reply with its plain text, as a final reply does', async () => {
+    const plain: Array<string | null | undefined> = [];
+    const recorder: IGuardrailService = {
+      id: 'plain-recorder',
+      async evaluateOutput({ chunk }: GuardrailOutputPayload) {
+        if (chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
+          plain.push((chunk as AgentOSFinalResponseChunk).finalResponseTextPlain);
+        }
+        return null;
+      },
+    };
+    const rt = await runtime('conv-hold-plain', { guardrailService: recorder, guardrailOutputMode: 'hold' });
+    rt.useGmi(
+      streamingRequestsGmi(['**Reading** your notes.', [READ_CALL]], {
+        isFinal: false,
+        responseText: 'I need the notes file first.',
+        toolCalls: [READ_CALL],
+      }),
+    );
+
+    const responses = await collectWithin(rt.agentos.processRequest(rt.input), 'the turn');
+
+    expect(isActionableToolCallRequestChunk(responses.at(-1))).toBe(true);
+    expect(plain).toEqual(['Reading your notes.']);
   });
 
   it("an output guard's rewrite of a continuation's structured reply withdraws the value parsed from the reply it replaced", async () => {
