@@ -432,7 +432,20 @@ export function gmi(opts: GmiOptions): GmiHandle {
     if (tools.some((tool) => tool.name === LAUNCH_AGENCY_TOOL_NAME)) {
       throw new Error(`gmi(): agencies.launch registers '${LAUNCH_AGENCY_TOOL_NAME}', and the agent's tools already hold a tool of that name.`);
     }
-    tools.push(createGmiLaunchTool({ opts, limits: launchLimits, tools: () => tools, ledger, createAgent: gmi }));
+    tools.push(
+      createGmiLaunchTool({
+        opts,
+        limits: launchLimits,
+        tools: () => tools,
+        ledger,
+        createAgent: gmi,
+        // The pair the agent's persona resolved in the shared build, which every turn that can launch has built.
+        route: async () => {
+          const { persona } = await shared.get();
+          return { provider: persona.defaultProviderId, model: persona.defaultModelId };
+        },
+      }),
+    );
   }
   // Put first in the system prompt of every call that offers tools, as generateText puts it.
   const chainOfThought = tools.length > 0 ? resolveChainOfThought(opts.chainOfThought ?? true) : undefined;

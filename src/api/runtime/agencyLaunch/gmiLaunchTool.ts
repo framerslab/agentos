@@ -1,10 +1,11 @@
 /**
  * @file gmiLaunchTool.ts
  * `launch_agency` on gmi(): the tool a gmi() agent with `agencies.launch` registers, and the host the launch engine
- * runs through on that surface. A temporary seat is a gmi() agent built for the launch from the launching agent's route,
- * the seat's instructions and the very tool instances its allowlist names, on the light profile with no memory and no
- * learner, and closed with the seat; a persistent seat runs a member of `agencies.members` as itself, through a session
- * of its own. The engine, and agency() with it, is imported on the first launch, so building an agent loads neither.
+ * runs through on that surface. A temporary seat is a gmi() agent built for the launch from the launching agent's route
+ * (the provider and model its persona resolved, and its other route options), the seat's instructions and the very tool
+ * instances its allowlist names, on the light profile with no memory and no learner, and closed with the seat; a
+ * persistent seat runs a member of `agencies.members` as itself, through a session of its own. The engine, and agency()
+ * with it, is imported on the first launch, so building an agent loads neither.
  * @internal
  */
 import { randomUUID } from 'node:crypto';
@@ -12,7 +13,6 @@ import type { AgentOptions } from '../../agent.js';
 import type { Agent } from '../../types.js';
 import type { ITool, JSONSchemaObject, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import { contentSafeConsole as console } from '../../../core/logging/contentSafeConsole.js';
-import { resolveModelOption } from '../../model.js';
 import { outputEstimateTokens } from '../spendBudget.js';
 import { adaptTools } from '../toolAdapter.js';
 import type { AgentOSUsageLedgerOptions } from '../usageLedger.js';
@@ -41,6 +41,11 @@ export interface GmiLaunchToolOptions {
   ledger?: AgentOSUsageLedgerOptions;
   /** Builds a temporary seat's agent (gmi() itself). */
   createAgent: (options: AgentOptions) => Agent;
+  /**
+   * The provider and model the agent's persona resolved in its shared build: those its options name, else the pair its
+   * first call resolved from the environment. Every turn that can launch runs on that build, so it has resolved.
+   */
+  route: () => Promise<{ provider?: string; model?: string }>;
 }
 
 /** The launching agent's options a temporary seat's agent takes: its route and its completion settings. */
@@ -77,26 +82,6 @@ function temporarySeatOptions(parent: AgentOptions, role: string, instructions: 
     cognition: 'light',
     ...(ledger ? { usageLedger: { ...ledger, source: LAUNCH_AGENCY_TOOL_NAME } } : {}),
   };
-}
-
-/**
- * The provider and model a launched team's manager and synthesizers run on: the launching agent's own. Those its options
- * name, else the pair its persona resolved on its first call, resolved here the same way (`resolveModelOption`, which
- * reads the environment), since `agency()` refuses a parallel, debate or hierarchical team without a route. When that
- * pair does not resolve, the error is logged and the team gets neither.
- */
-function teamRoute(opts: AgentOptions, logError: (error: unknown, where: string) => void): { provider?: string; model?: string } {
-  if (opts.provider || opts.model) {
-    return { ...(opts.provider ? { provider: opts.provider } : {}), ...(opts.model ? { model: opts.model } : {}) };
-  }
-  try {
-    // The call gmi()'s persona makes on the agent's first call, with no provider and no model named.
-    const { providerId, modelId } = resolveModelOption({ baseUrl: opts.baseUrl }, 'text');
-    return { provider: providerId, model: modelId };
-  } catch (error) {
-    logError(error, 'launch_agency route');
-    return {};
-  }
 }
 
 /** The tool names a persistent member's own turns can run: its tools, and launch_agency when it launches teams itself. */
@@ -182,6 +167,23 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
   /** The member of a persistent seat, by its agentKey. */
   const memberOf = (ref: string): Agent | undefined => (Object.prototype.hasOwnProperty.call(members, ref) ? members[ref] : undefined);
 
+  /**
+   * The provider and model a launched team's manager, synthesizers and temporary seats run on: the pair the agent's
+   * persona resolved (`o.route`), which `agency()` needs for a parallel, debate or hierarchical team. The team stays on it
+   * when the environment names another pair after the agent's first call, as the agent's own turns do; a call that names
+   * its own provider or model runs on that pair alone, and a team it launches on the agent's. A pair that cannot be read
+   * (no turn that can launch runs without it) is logged, and the pair the options name stands in.
+   */
+  const agentRoute = async (): Promise<{ provider?: string; model?: string }> => {
+    try {
+      const { provider, model } = await o.route();
+      return { ...(provider ? { provider } : {}), ...(model ? { model } : {}) };
+    } catch (error) {
+      logError(error, 'launch_agency route');
+      return { ...(opts.provider ? { provider: opts.provider } : {}), ...(opts.model ? { model: opts.model } : {}) };
+    }
+  };
+
   const host: LaunchHost = {
     surface: 'gmi',
 
@@ -253,7 +255,7 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
         // names it: the frame its turns carry makes a launch from the seat a nested one.
         const byName = new Map(o.tools().map((tool) => [tool.name, tool]));
         const tools = [...seat.toolNames].map((name) => byName.get(name)).filter((tool): tool is ITool => tool !== undefined);
-        const member = o.createAgent(temporarySeatOptions(opts, seat.role, seat.instructions, tools, ledger));
+        const member = o.createAgent(temporarySeatOptions({ ...opts, ...(await agentRoute()) }, seat.role, seat.instructions, tools, ledger));
         const description = descriptionOf({ instructions: seat.instructions });
         return buildSessionSeat(member, { ...common, form: 'temporary', ownsMember: true, ...(description ? { description } : {}) });
       } catch (error) {
@@ -265,7 +267,7 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
 
     async agencyRoute() {
       return {
-        ...teamRoute(opts, logError),
+        ...(await agentRoute()),
         ...(opts.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
         ...(opts.baseUrl !== undefined ? { baseUrl: opts.baseUrl } : {}),
       };

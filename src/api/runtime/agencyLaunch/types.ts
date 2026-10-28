@@ -54,9 +54,10 @@ export type ToolCallHook = NonNullable<AgentOptions['onBeforeToolExecution']>;
 /** `agencies` on an agent: whether it may launch temporary teams, and every launch's bounds. */
 export interface AgencyLaunchOptions {
   /**
-   * Registers `launch_agency` on the agent's tool table. Default false. On gmi(), a launched team's manager and
-   * synthesizers run on the agent's provider and model: those its options name, else the pair its first call resolves
-   * from the environment.
+   * Registers `launch_agency` on the agent's tool table. Default false. On gmi(), a launched team's manager, synthesizers
+   * and temporary seats run on the provider and model the agent's first call resolved: those its options name, else the
+   * environment's pair at that call, whatever the environment names later. A call that names its own provider or model
+   * runs on that pair alone; a team it launches runs on the agent's.
    */
   launch?: boolean;
   /** The deepest team level a launch tree reaches: an integer from 1 to 4, default 2. */
