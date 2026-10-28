@@ -40,7 +40,7 @@ import type { ITurnPlanner, TurnPlan } from '../../orchestration/turn-planner/Tu
 import { CapabilityContextAssembler } from '../../cognition/discovery/CapabilityContextAssembler.js';
 import { filterCapabilityDiscoveryResultByDisabledSkills } from './selfImprovementRuntime.js';
 import { multimodalTurnParts } from '../../cognition/substrate/turnContent';
-import { toolCallChunkMode } from './externalToolPause';
+import { streamedToolCalls, toolCallChunkMode } from './externalToolPause';
 import { finalResponseFieldsOf } from './turnFinalResponse';
 
 /**
@@ -314,7 +314,8 @@ export class GMIChunkTransformer {
         }
         break;
       case GMIOutputChunkType.TOOL_CALL_REQUEST:
-        if (gmiChunk.content && Array.isArray(gmiChunk.content)) {
+        // a request that names no call gives the host nothing to run, and the host stops reading at a request
+        if (streamedToolCalls(gmiChunk)) {
           const toolCalls = gmiChunk.content as ToolCallRequest[];
           // the turn reads the same mode to tell whether this chunk handed the host its calls
           const { executionMode, requiresExternalToolResult } = toolCallChunkMode(gmiChunk.metadata);

@@ -1,7 +1,7 @@
 /**
  * @fileoverview The rule that stops a turn for the host. The turn and each tool-result continuation decide with it
- * whether the GMI's output waits on calls the host runs, and the turn reads with it whether a chunk the GMI streamed
- * already handed the host such calls.
+ * whether the GMI's output waits on calls the host runs; the chunk transformer reads with it which request the GMI
+ * streamed reaches the host, and the turn whether such a request already handed the host its calls.
  * @module backend/agentos/api/runtime/externalToolPause
  */
 
@@ -50,17 +50,32 @@ export function toolCallChunkMode(metadata: Record<string, any> | undefined): {
 }
 
 /**
+ * The calls a `TOOL_CALL_REQUEST` chunk a GMI streamed names, when it names at least one. The runtime stream carries
+ * only such a chunk: a request that names no call gives the host nothing to run, and a host stops reading at a request.
+ *
+ * @param chunk - A chunk the GMI streamed.
+ * @returns The chunk's calls, or undefined when the chunk is no request or names no call.
+ */
+export function streamedToolCalls(chunk: GMIOutputChunk): ToolCallRequest[] | undefined {
+  if (chunk.type !== GMIOutputChunkType.TOOL_CALL_REQUEST || !Array.isArray(chunk.content) || chunk.content.length === 0) {
+    return undefined;
+  }
+  return chunk.content as ToolCallRequest[];
+}
+
+/**
  * Whether a chunk a GMI streamed reaches the host as an actionable request, one whose calls the host runs and passes
  * back (`isActionableToolCallRequestChunk()`). The host stops reading the turn's stream at such a chunk, so a turn that
  * then stops for the host streams no request of its own. A chunk for a call the GMI runs itself does not stop the
- * host's read: a turn that streamed only such chunks streams the request it stops for.
+ * host's read, and a chunk that names no call never reaches the host (`streamedToolCalls()`): a turn that streamed only
+ * such chunks streams the request it stops for.
  *
  * @param chunk - A chunk the GMI streamed.
- * @returns Whether the stream reports the chunk as a `TOOL_CALL_REQUEST` with `executionMode: 'external'` and
- *   `requiresExternalToolResult: true`.
+ * @returns Whether the stream reports the chunk as a `TOOL_CALL_REQUEST` with at least one call,
+ *   `executionMode: 'external'` and `requiresExternalToolResult: true`.
  */
 export function streamsActionableToolCalls(chunk: GMIOutputChunk): boolean {
-  if (chunk.type !== GMIOutputChunkType.TOOL_CALL_REQUEST || !Array.isArray(chunk.content)) {
+  if (!streamedToolCalls(chunk)) {
     return false;
   }
   const mode = toolCallChunkMode(chunk.metadata);
