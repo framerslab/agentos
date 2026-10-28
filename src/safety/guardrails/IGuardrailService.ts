@@ -273,7 +273,8 @@ export interface GuardrailConfig {
    *   that holds no actionable call (the chunk of calls the runtime runs
    *   itself, or a streamed delta) ends the stream while the turn goes on
    *   inside the runtime; when the turn then stops for calls the host runs,
-   *   AgentOS drops that pause the same way once the turn ends.
+   *   AgentOS drops that pause the same way once the turn ends, and until
+   *   then the pause is neither offered nor resumed nor continued.
    * - SANITIZE cannot rewrite a tool call; it is applied as a BLOCK that keeps
    *   the guard's reason and reason code.
    * - FLAG and ALLOW pass the chunk on with the evaluation in its

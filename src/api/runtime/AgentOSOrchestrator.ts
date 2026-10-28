@@ -614,6 +614,14 @@ export class AgentOSOrchestrator {
     return agentOSStreamId;
   }
 
+  /**
+   * Resumes a pause from its snapshot on a new stream. The pause is taken before the stream is made or the session's
+   * GMI acquired, so a resume of a pause the conversation no longer holds, whose stream an output guardrail blocked, or
+   * that another resume holds, is refused with nothing changed.
+   *
+   * @returns The new stream's id.
+   * @throws {GMIError} `INVALID_STATE` when the pause is not taken.
+   */
   public async orchestrateResumedToolResults(
     pendingRequest: AgentOSPendingExternalToolRequest,
     toolResults: AgentOSToolResultInput[],
@@ -621,7 +629,14 @@ export class AgentOSOrchestrator {
     guards: AgentOSOrchestratorGuards = {}
   ): Promise<StreamId> {
     this.ensureInitialized();
-    const agentOSStreamId = await this.dependencies.streamingManager.createStream();
+    const releasePause = await this.toolResultHandler.claimPendingExternalToolRequest(pendingRequest);
+    let agentOSStreamId: StreamId;
+    try {
+      agentOSStreamId = await this.dependencies.streamingManager.createStream();
+    } catch (error) {
+      releasePause();
+      throw error;
+    }
     console.log(
       `AgentOSOrchestrator: Resuming external tool request for conversation ${pendingRequest.conversationId} on new stream ${agentOSStreamId}.`
     );
@@ -637,8 +652,13 @@ export class AgentOSOrchestrator {
       },
     });
 
-    const run = async () =>
-      this.toolResultHandler.resumeToolResultsInternal(agentOSStreamId, pendingRequest, toolResults, options, guards.toolCallGate);
+    const run = async () => {
+      try {
+        await this.toolResultHandler.resumeToolResultsInternal(agentOSStreamId, pendingRequest, toolResults, options, guards.toolCallGate);
+      } finally {
+        releasePause();
+      }
+    };
 
     const promise = rootSpan ? runWithSpanContext(rootSpan, run) : run();
     this.trackStreamRun(agentOSStreamId, promise
@@ -709,9 +729,10 @@ export class AgentOSOrchestrator {
    * stream's turn or resumed turn to end, since a turn can save its pause after it streams the call or after the
    * block; then, when the conversation's pending request is this stream's, it records a refused tool result for each
    * call of the pause, clears the pending request and closes the stream, so the call can be neither continued on the
-   * stream nor resumed from the conversation. Anything else is left as it is. The stream is closed even when the store
-   * refuses the conversation's save; the stored conversation then keeps the pause until the conversation is saved
-   * again.
+   * stream nor resumed from the conversation. Anything else is left as it is. From the call until the drop ends, the
+   * stream is held as blocked (see {@link isStreamBlocked}): a pause the turn saves meanwhile is not offered, resumed
+   * or continued. The stream is closed even when the store refuses the conversation's save; the stored conversation
+   * then keeps the pause until the conversation is saved again.
    *
    * @param agentOSStreamId - The stream the guardrail blocked.
    * @param toolCallIds - The ids of the calls the block withheld, or undefined for a block that withheld none.
@@ -725,17 +746,32 @@ export class AgentOSOrchestrator {
     refusal: GMIToolCallRefusal
   ): Promise<boolean> {
     this.ensureInitialized();
-    await this.streamRuns.get(agentOSStreamId);
-    const streamContext = this.activeStreamContexts.get(agentOSStreamId);
-    if (!streamContext) {
-      return false;
+    // held before the first wait, so the stream is blocked by the time the verdict reaches the caller
+    const releaseStream = this.toolResultHandler.holdBlockedStream(agentOSStreamId);
+    try {
+      await this.streamRuns.get(agentOSStreamId);
+      const streamContext = this.activeStreamContexts.get(agentOSStreamId);
+      if (!streamContext) {
+        return false;
+      }
+      return await this.toolResultHandler.discardPendingExternalToolRequest(
+        agentOSStreamId,
+        streamContext,
+        toolCallIds,
+        refusal
+      );
+    } finally {
+      releaseStream();
     }
-    return this.toolResultHandler.discardPendingExternalToolRequest(
-      agentOSStreamId,
-      streamContext,
-      toolCallIds,
-      refusal
-    );
+  }
+
+  /**
+   * Whether an output guardrail blocked the stream and the pause it saves is being dropped: until the drop ends, that
+   * pause is not offered by `getPendingExternalToolRequest()`, a resume of it is refused, and tool results do not
+   * continue the stream.
+   */
+  public isStreamBlocked(agentOSStreamId: StreamId): boolean {
+    return this.toolResultHandler.isBlockedStream(agentOSStreamId);
   }
 
   /**

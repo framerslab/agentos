@@ -191,7 +191,9 @@ export interface IAgentOS {
 
   /**
    * Returns the pending external-tool pause snapshot for a conversation, if one
-   * was persisted during an actionable TOOL_CALL_REQUEST pause.
+   * was persisted during an actionable TOOL_CALL_REQUEST pause. A pause saved
+   * by a stream an output guardrail blocked is never returned: it is dropped
+   * once the stream's turn ends, and this returns `null` for it meanwhile.
    */
   getPendingExternalToolRequest(
     conversationId: string,
@@ -209,7 +211,14 @@ export interface IAgentOS {
    * the snapshot names (its results were passed on its stream, an output
    * guardrail blocked its stream, or a newer pause replaced it) or another
    * resume of it is under way, the stream yields one error chunk with the code
-   * `SYS_INVALID_STATE` and the GMI takes none of the results.
+   * `SYS_INVALID_STATE` and the GMI takes none of the results. Such a resume
+   * is refused before the session's GMI is acquired, so it changes neither the
+   * conversation nor that GMI.
+   *
+   * The once-only rule holds within one AgentOS instance: instances that share
+   * a conversation store do not see each other's resumes, so a deployment with
+   * several instances sends one conversation's resumes to one instance at a
+   * time.
    */
   resumeExternalToolRequest(
     pendingRequest: AgentOSPendingExternalToolRequest,

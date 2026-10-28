@@ -1504,9 +1504,10 @@ export class AgentOS implements IAgentOS {
    * calls drops their pause before the verdict reaches the caller. A block that withheld none (on a streamed delta, or
    * on the chunk of calls the runtime runs itself) ends the caller's stream while the turn goes on inside the runtime:
    * a pause the turn saves when it then stops for calls the host runs is dropped once the turn ends, and the verdict
-   * does not wait for that. Then a replaced or rewritten reply is written to the stored conversation. A store that
-   * refuses the save of the dropped pause is logged: the stream is closed all the same, and the stored conversation
-   * keeps the pause until the conversation is saved again. Nothing here throws into the stream.
+   * does not wait for that; from the verdict on, the stream is held as blocked, so that pause is neither offered nor
+   * resumed nor continued meanwhile. Then a replaced or rewritten reply is written to the stored conversation. A store
+   * that refuses the save of the dropped pause is logged: the stream is closed all the same, and the stored
+   * conversation keeps the pause until the conversation is saved again. Nothing here throws into the stream.
    */
   private async onOutputVerdict(conversationKey: string, verdict: GuardrailOutputVerdict): Promise<void> {
     if (verdict.action === GuardrailAction.BLOCK) {
@@ -2549,7 +2550,13 @@ export class AgentOS implements IAgentOS {
       return null;
     }
 
-    const pendingRequest = context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY);
+    const pendingRequest = context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    // a pause a stream saves after an output guardrail blocked it is dropped once the turn ends, and never offered
+    if (pendingRequest && this.agentOSOrchestrator.isStreamBlocked(pendingRequest.streamId)) {
+      return null;
+    }
     return pendingRequest ?? null;
   }
 
@@ -2606,13 +2613,17 @@ export class AgentOS implements IAgentOS {
         }
       }
     } catch (error: unknown) {
+      // a resume of a pause the conversation no longer holds is refused before its stream is made, and keeps its code
+      const refused = error instanceof GMIError && error.code === GMIErrorCode.INVALID_STATE;
       const serviceError = AgentOSServiceError.wrap(
         error,
-        GMIErrorCode.TOOL_ERROR,
+        refused ? GMIErrorCode.INVALID_STATE : GMIErrorCode.TOOL_ERROR,
         `Error during AgentOS.resumeExternalToolRequest for conversation '${pendingRequest.conversationId}'`,
         'AgentOS.resumeExternalToolRequest'
       );
-      console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      if (!refused) {
+        console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      }
 
       const errorChunk: AgentOSErrorChunk = {
         type: AgentOSResponseChunkType.ERROR,
