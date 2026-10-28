@@ -145,10 +145,14 @@ const ROOM_STRUCTURED: StructuredReplyOutput = {
 /** The structured reply without the room, as a guard rewrites it. */
 const ROOMLESS_REPLY = '{"standup":"10:00"}';
 
-/** An output guard that rewrites every final response to `text`. */
+/**
+ * An output guard that rewrites every final response to `text`. It declares `canSanitize`: the dispatcher applies a
+ * rewrite only from a sanitizer, and turns any other guard's SANITIZE into a FLAG.
+ */
 function finalRewriter(text: string): IGuardrailService {
   return {
     id: 'final-rewriter',
+    config: { canSanitize: true },
     async evaluateOutput({ chunk }: GuardrailOutputPayload) {
       return chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE ? { action: GuardrailAction.SANITIZE, modifiedText: text } : null;
     },
