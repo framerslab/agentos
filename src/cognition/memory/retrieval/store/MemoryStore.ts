@@ -104,11 +104,15 @@ export interface MemoryStoreConfig {
    * every access write them into the row's metadata JSON under `decay` (the
    * object the `Memory` facade, its consolidation and the memory tools read
    * and write; the row's other keys are kept), and a load reads them back.
-   * Default `true`.
-   * `false` writes and loads as before: an access writes the row's
-   * `last_accessed`, `retrieval_count` and `strength` alone, and a load
-   * gives the access count 0, the interval one hour and the stability as
-   * stored, for one release of before-and-after measurement.
+   * The vector metadata carries the interval and the next reinforcement time
+   * as well, so a store with no Brain restores them with a trace; a document
+   * that holds no interval restores with one hour. Default `true`.
+   * `false` writes and loads as before, for one release of before-and-after
+   * measurement: an access writes the row's `last_accessed`,
+   * `retrieval_count` and `strength` alone, and a load gives the access count
+   * 0, the interval one hour and the stability as stored; with no Brain, a
+   * trace restored from the vector store has no next reinforcement time and
+   * the interval 0 through `getByScope()` or one hour through `query()`.
    */
   persistAccessState?: boolean;
 }
@@ -128,8 +132,17 @@ function scopeKey(scope: MemoryScope, scopeId: string): string {
   return `${scope}:${scopeId}`;
 }
 
-function traceToMetadata(trace: MemoryTrace): Record<string, any> {
+/**
+ * A trace's metadata in the vector store.
+ *
+ * @param trace - The trace.
+ * @param accessState - Whether the store persists access state (`persistAccessState`). With it,
+ *   the metadata also carries the reinforcement interval and the next reinforcement time, so a
+ *   store with no Brain restores the trace's schedule with the trace.
+ */
+function traceToMetadata(trace: MemoryTrace, accessState: boolean): Record<string, any> {
   return {
+    ...(accessState ? reinforcementSchedule(trace) : {}),
     type: trace.type,
     scope: trace.scope,
     scopeId: trace.scopeId,
@@ -176,6 +189,24 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * The reinforcement schedule of a trace or of a vector document's metadata: the interval and the
+ * next reinforcement time, each only where it is a finite number.
+ */
+function reinforcementSchedule(
+  source: { reinforcementInterval?: unknown; nextReinforcementAt?: unknown },
+): Partial<Pick<MemoryTrace, 'reinforcementInterval' | 'nextReinforcementAt'>> {
+  const { reinforcementInterval, nextReinforcementAt } = source;
+  return {
+    ...(typeof reinforcementInterval === 'number' && Number.isFinite(reinforcementInterval)
+      ? { reinforcementInterval }
+      : {}),
+    ...(typeof nextReinforcementAt === 'number' && Number.isFinite(nextReinforcementAt)
+      ? { nextReinforcementAt }
+      : {}),
+  };
+}
+
 /** A trace's decay state, as a Brain row's `metadata.decay` holds it. */
 function decayStateOf(trace: MemoryTrace): PersistedDecayState {
   return {
@@ -188,8 +219,17 @@ function decayStateOf(trace: MemoryTrace): PersistedDecayState {
   };
 }
 
-function metadataToTracePartial(metadata: Record<string, any>): Partial<MemoryTrace> {
+/**
+ * The part of a trace a vector document's metadata holds.
+ *
+ * @param metadata - The document's metadata.
+ * @param accessState - Whether the store persists access state (`persistAccessState`). With it,
+ *   the reinforcement interval and the next reinforcement time come back too, where the metadata
+ *   holds them.
+ */
+function metadataToTracePartial(metadata: Record<string, any>, accessState: boolean): Partial<MemoryTrace> {
   return {
+    ...(accessState ? reinforcementSchedule(metadata) : {}),
     type: metadata.type as MemoryType,
     scope: metadata.scope as MemoryScope,
     scopeId: metadata.scopeId as string,
@@ -926,7 +966,7 @@ export class MemoryStore {
         id: trace.id,
         textContent: trace.content,
         embedding,
-        metadata: traceToMetadata(trace),
+        metadata: traceToMetadata(trace, this.persistsAccessState),
       }]);
       if ((result?.failedCount ?? 0) > 0) return false;
       const revivedTrace: MemoryTrace = {
@@ -1189,7 +1229,7 @@ export class MemoryStore {
                 id: trace.id,
                 textContent: trace.content,
                 embedding,
-                metadata: traceToMetadata(trace),
+                metadata: traceToMetadata(trace, this.persistsAccessState),
               },
             ]);
             if ((upsertResult?.failedCount ?? 0) > 0) return;
@@ -1350,7 +1390,7 @@ export class MemoryStore {
       id: trace.id,
       textContent: trace.content,
       embedding,
-      metadata: traceToMetadata(activeTrace),
+      metadata: traceToMetadata(activeTrace, this.persistsAccessState),
     };
 
     const upsertResult = await this.config.vectorStore.upsert(collection, [doc]);
@@ -1641,7 +1681,7 @@ export class MemoryStore {
           ) {
             continue;
           }
-          const tracePartial = metadataToTracePartial(result.metadata ?? {});
+          const tracePartial = metadataToTracePartial(result.metadata ?? {}, this.persistsAccessState);
           const cached = this.traceCache.get(result.id);
 
           const trace: MemoryTrace =
@@ -1651,7 +1691,7 @@ export class MemoryStore {
               content: result.textContent ?? '',
               structuredData: undefined,
               associatedTraceIds: [],
-              reinforcementInterval: 3_600_000,
+              reinforcementInterval: DEFAULT_REINFORCEMENT_INTERVAL_MS,
               updatedAt: Date.now(),
               ...tracePartial,
             } as MemoryTrace);
@@ -1806,7 +1846,7 @@ export class MemoryStore {
             id: trace.id,
             textContent: trace.content,
             embedding,
-            metadata: traceToMetadata(trace),
+            metadata: traceToMetadata(trace, this.persistsAccessState),
           },
         ]);
       }
@@ -1961,13 +2001,18 @@ export class MemoryStore {
               results.push(cached);
             }
           } else {
-            // Reconstruct trace from vector store metadata.
-            const partial = metadataToTracePartial(doc.metadata as Record<string, any>);
+            // Reconstruct trace from vector store metadata. A document that holds no
+            // interval loads with the store's one hour; with persistAccessState off, as
+            // before, with 0.
+            const partial = metadataToTracePartial(
+              doc.metadata as Record<string, any>,
+              this.persistsAccessState,
+            );
             const trace: MemoryTrace = {
               id: doc.id,
               content: doc.textContent ?? '',
               associatedTraceIds: [],
-              reinforcementInterval: 0,
+              reinforcementInterval: this.persistsAccessState ? DEFAULT_REINFORCEMENT_INTERVAL_MS : 0,
               updatedAt: (partial.createdAt as number) ?? Date.now(),
               ...partial,
             } as MemoryTrace;
@@ -2032,7 +2077,7 @@ export class MemoryStore {
       id: trace.id,
       textContent: trace.content,
       embedding,
-      metadata: traceToMetadata(trace),
+      metadata: traceToMetadata(trace, this.persistsAccessState),
     };
     try {
       await this.config.vectorStore.upsert(collection, [doc]);
