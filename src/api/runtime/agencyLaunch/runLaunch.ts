@@ -176,9 +176,10 @@ function frameIn(sessionData: Record<string, unknown> | undefined): AgencyLaunch
 }
 
 /**
- * Step 2: the parent. A frame naming a live entry gives the depth, the limits, the budget, the user, the namespace and
- * the calling seat's names; the call's own context gives the gate and the hooks it carries (the entry's then the
- * member's own), else the entry's. A frame naming a closing or missing entry is refused. No frame: the host's root.
+ * Step 2: the parent. A frame naming a live entry gives the depth, the limits, the user, the namespace and the calling
+ * seat's names; the call's own context gives the gate, the hooks it carries (the entry's then the member's own) and the
+ * budget (the seat's turn's: the entry's, held on gmi() beside a persistent member's own), else the entry's. A frame
+ * naming a closing or missing entry is refused. No frame: the host's root.
  */
 async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promise<{ parent: LaunchParent; toolNames: ReadonlySet<string>; frame?: AgencyLaunchFrame } | LaunchRefusal> {
   const frame = frameIn(ctx.sessionData);
@@ -203,7 +204,9 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
       ...(typeof conversationId === 'string' ? { conversationId } : {}),
       depth: entry.depth,
       limits: entry.limits,
-      budget: entry.budget,
+      // The seat's turn's budget draws on the entry's, so the tree stays under its root; a persistent member's own
+      // budget, held beside it, bounds the teams the member launches from its seat as it bounds the member's calls.
+      budget: ctx.callerTurn?.budget ?? entry.budget,
       ...(gate ? { approvalGate: gate } : {}),
       signal: ctx.signal ? AbortSignal.any([entry.signal, ctx.signal]) : entry.signal,
       ...(entry.providerUserId !== undefined ? { providerUserId: entry.providerUserId } : {}),
@@ -594,7 +597,8 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
     const seats = await checkBounds(host, ctx, args, parent, toolNames);
     if (isRefusal(seats)) return refused(seats);
 
-    // 4. The budget: a root launch draws on its turn's pool; a nested one on its parent launch's budget.
+    // 4. The budget: a root launch draws on its turn's pool; a nested one on its parent launch's budget, and on a
+    // persistent member's own as well when the member launches it from its seat.
     // A root launch's scope is the launching session as its host names it, never the calling GMI.
     const scopeKey = frame ? frame.launchId : `${host.surface}:${parent.scopeId}`;
     const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget);

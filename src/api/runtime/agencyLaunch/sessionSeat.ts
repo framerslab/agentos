@@ -68,7 +68,8 @@ export interface InternalSeatOptions extends SessionSeatOptions {
   frame?: AgencyLaunchFrame;
   /**
    * A launch's seat: the launch's own budget, charged whatever budget the per-call options carry (those carry the
-   * coordinator's). The member's own budget, when it has one, is checked and charged beside it (gmi()).
+   * coordinator's). The member's own budget, when it has one, is checked and charged beside it (gmi()), on the seat's
+   * calls and on those of a team the seat launches.
    */
   budget?: SpendBudget;
   /** A launch's seat: the hooks the launching turn ran under, run before the member's own. */
