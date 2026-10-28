@@ -47,7 +47,7 @@ import {
   DDL_ARCHIVE_ACCESS_LOG_IDX,
 } from '../../archive/SqlStorageMemoryArchive.js';
 import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations/index.js';
-import { ensureScopeIdColumn, postgresIndexExists } from './migrations/v2-to-v3.js';
+import { ensureScopeIdColumn, fillScopeIds, postgresIndexExists } from './migrations/v2-to-v3.js';
 import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 
@@ -1032,7 +1032,9 @@ export class Brain {
    * 3. Enable foreign key enforcement (dialect.pragma returns null on Postgres).
    * 4. Run the pending schema migrations (idempotent; no-op for fresh DBs and the latest schema).
    * 5. Apply full DDL via _initSchema().
-   * 6. Seed brain_meta defaults.
+   * 6. File the brain's traces that hold `scope_id` `''` while their metadata names a scope id (`fillScopeIds`).
+   * 7. Seed brain_meta defaults.
+   * 8. Repair the full-text index (SQLite).
    */
   private static async _initialize(
     adapter: StorageAdapter,
@@ -1050,6 +1052,9 @@ export class Brain {
 
     await MigrationRunner.runPending(adapter, features, brainId, MIGRATIONS);
     await brain._initSchema();
+    // A release older than `scope_id` writes the column's default, '', to a brain at version 3 too, whose migration
+    // never runs again.
+    await fillScopeIds(adapter, brainId);
     await brain._seedMeta();
     await brain._repairFullTextIndex();
 

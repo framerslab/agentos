@@ -10,6 +10,10 @@
  * default). `Brain` runs {@link ensureScopeIdColumn} on every open as well, for a table another path created without
  * the column (a migration engine's copy, a file an import reads).
  *
+ * An older release goes on writing `''` to a brain that is already at version 3, where its migration never runs
+ * again. `Brain` runs {@link fillScopeIds} for the brain it opens, at every open, so such a row is filed under the
+ * scope id its metadata names.
+ *
  * A row's JSON is read in code, not with a SQL JSON function: `json_extract` (SQLite) and the `::jsonb` cast
  * (Postgres) raise on a malformed row, which would stop the migration for the whole Brain. A row whose JSON cannot be
  * read, or holds no string `scopeId`, keeps `''`.
@@ -82,15 +86,25 @@ function scopeIdOfMetadata(metadata: string | null | undefined): string {
 }
 
 /**
- * Fills one brain's `scope_id` from the metadata JSON for its rows that hold `''`. Pages by `id` inside the brain, so
- * each page is a range read of the primary key, and writes each page's values in one statement.
+ * Matches a row whose metadata text names `scopeId`. A fill gives a scope id to no other row, so the fill that runs at
+ * every open reads only these, and the traces a brain holds under no scope id are not read back each time.
  */
-async function backfill(adapter: StorageAdapter, brainId: string): Promise<void> {
+const NAMES_SCOPE_ID = `metadata LIKE '%"scopeId"%'`;
+
+/**
+ * Fills one brain's `scope_id` from the metadata JSON for its rows that hold `''`. Pages by `id` inside the brain, so
+ * each page is a range read of the primary key, and writes each page's values in one statement, to the rows that
+ * still hold `''`.
+ *
+ * @param named - Read only the rows whose metadata text names `scopeId`.
+ */
+async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: string, named = false): Promise<void> {
+  const filter = named ? ` AND ${NAMES_SCOPE_ID}` : '';
   let afterId = '';
   for (;;) {
     const rows = await adapter.all<{ id: string; metadata: string | null }>(
       `SELECT id, metadata FROM memory_traces
-        WHERE brain_id = ? AND scope_id = '' AND id > ?
+        WHERE brain_id = ? AND scope_id = '' AND id > ?${filter}
         ORDER BY id LIMIT ${PAGE}`,
       [brainId, afterId],
     );
@@ -102,13 +116,28 @@ async function backfill(adapter: StorageAdapter, brainId: string): Promise<void>
     if (filled.length > 0) {
       await adapter.run(
         `UPDATE memory_traces SET scope_id = CASE id ${filled.map(() => 'WHEN ? THEN ?').join(' ')} END
-          WHERE brain_id = ? AND id IN (${filled.map(() => '?').join(', ')})`,
+          WHERE brain_id = ? AND scope_id = '' AND id IN (${filled.map(() => '?').join(', ')})`,
         [...filled.flat(), brainId, ...filled.map(([id]) => id)],
       );
     }
     if (rows.length < PAGE) return;
     afterId = rows[rows.length - 1]!.id;
   }
+}
+
+/**
+ * Files the traces of one brain that hold `scope_id` `''` while their metadata names a scope id: the rows a release
+ * older than the column writes, with the column's default, to a brain that is already at schema version 3. Only the
+ * rows whose metadata text names `scopeId` are read; a row whose JSON cannot be read, or whose `scopeId` is not a
+ * string, keeps `''`. A row that holds a scope id is never written.
+ *
+ * `Brain` runs it for the brain it opens, at every open.
+ *
+ * @param adapter - The store.
+ * @param brainId - The brain whose traces are filed.
+ */
+export async function fillScopeIds(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: string): Promise<void> {
+  await backfill(adapter, brainId, true);
 }
 
 /**

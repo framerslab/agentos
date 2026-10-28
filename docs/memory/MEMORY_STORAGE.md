@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS memory_traces (
 );
 ```
 
-`scope_id` holds the trace's scope id, the value `metadata.scopeId` holds, and `''` for a trace filed under no scope id. The index `idx_memory_traces_brain_scope_id` covers `(brain_id, scope, scope_id, created_at)`. A database written at schema version 2 gains the column at its first open at version 3, filled from each row's metadata JSON for every brain the table holds; a row whose JSON cannot be read, or names no scope id, keeps `''`.
+`scope_id` holds the trace's scope id, the value `metadata.scopeId` holds, and `''` for a trace filed under no scope id. The index `idx_memory_traces_brain_scope_id` covers `(brain_id, scope, scope_id, created_at)`. A database written at schema version 2 gains the column at its first open at version 3, filled from each row's metadata JSON for every brain the table holds; a row whose JSON cannot be read, or names no scope id, keeps `''`. A release older than the column writes `''` whatever scope id the metadata names, to a brain at version 3 as well, where no migration runs again: every open files the rows of the brain it opens that hold `''` while their metadata names a scope id, reading only the rows whose metadata names `scopeId`.
 
 ### `memory_traces_fts`
 
@@ -145,8 +145,9 @@ setInterval(async () => {
 2. Sets WAL journal mode and foreign keys where the dialect supports the pragmas.
 3. Runs pending schema migrations.
 4. Creates the tables, then the full-text index (skipped when FTS5 is missing).
-5. Seeds `brain_meta` with `schema_version` and `created_at` when absent.
-6. Repairs the full-text index on SQLite when it is out of step with `memory_traces`.
+5. Files the brain's traces that hold `scope_id` `''` while their metadata names a scope id, the rows a release older than the column wrote.
+6. Seeds `brain_meta` with `schema_version` and `created_at` when absent.
+7. Repairs the full-text index on SQLite when it is out of step with `memory_traces`.
 
 ```ts
 import { Brain } from '@framers/agentos';
