@@ -90,26 +90,43 @@ const refusalInfo = new WeakMap<object, SpendLimitInfo>();
 
 let budgets = 0;
 
-/**
- * The budgets that the check, or the record, of a call held to two budgets ({@link bothBudgets}) has reached so far, so
- * a budget both draw on is checked, and charged, once. Unset outside such a check or record, each of which runs
- * synchronously.
- */
-const reaching: { check?: Set<SpendBudget>; charge?: Set<SpendBudget> } = {};
+/** What the check, or the record, of a call held to two budgets ({@link bothBudgets}) has reached so far. */
+interface Reach {
+  /** The budgets reached: a budget both draw on is checked, and charged, once. */
+  budgets: Set<SpendBudget>;
+  /**
+   * The spending totals the record has charged, by guard and id: budgets on one guard and one id keep one total, which
+   * one call is charged once, while each of those budgets still counts the call's tokens.
+   */
+  totals: Map<CostGuard, Set<string>>;
+}
+
+/** The two-budget check and record in progress; unset outside one, each of which runs synchronously. */
+const reaching: { check?: Reach; charge?: Reach } = {};
 
 /** Whether the two-budget check or record in progress has reached `budget` already; marks it reached. */
 function reachedBefore(kind: 'check' | 'charge', budget: SpendBudget): boolean {
-  const reached = reaching[kind];
-  if (!reached) return false;
-  if (reached.has(budget)) return true;
-  reached.add(budget);
+  const reach = reaching[kind];
+  if (!reach) return false;
+  if (reach.budgets.has(budget)) return true;
+  reach.budgets.add(budget);
+  return false;
+}
+
+/** Whether the two-budget record in progress has charged the total `guard` keeps under `id` already; marks it charged. */
+function totalChargedBefore(guard: CostGuard, id: string): boolean {
+  const reach = reaching.charge;
+  if (!reach) return false;
+  const ids = reach.totals.get(guard) ?? new Set<string>();
+  if (ids.has(id)) return true;
+  reach.totals.set(guard, ids.add(id));
   return false;
 }
 
 /** Runs `work` as one two-budget check or record, or as part of the one in progress. */
 function reachOnce(kind: 'check' | 'charge', work: () => void): void {
   const outer = reaching[kind];
-  reaching[kind] = outer ?? new Set();
+  reaching[kind] = outer ?? { budgets: new Set(), totals: new Map() };
   try {
     work();
   } finally {
@@ -254,11 +271,14 @@ export class SpendBudget {
    * there too, after itself.
    */
   record(costUSD: number | undefined, tokens: number, what: string): void {
-    // Under a call held to two budgets, a budget both draw on is charged once.
+    // Under a call held to two budgets, a budget both draw on is charged once, and so is a total that budgets on one
+    // guard and one id keep.
     if (reachedBefore('charge', this)) return;
     const counted = Math.max(0, tokens);
     this.tokens += Number.isNaN(counted) ? 0 : counted;
-    if (costUSD !== undefined && costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what });
+    if (costUSD !== undefined && costUSD > 0 && !totalChargedBefore(this.guard, this.id)) {
+      this.guard.recordCost(this.id, costUSD, undefined, { what });
+    }
     this.options.parent?.record(costUSD, tokens, what);
   }
 
@@ -274,7 +294,7 @@ export class SpendBudget {
       throw new RangeError(`An outside cost must be a number of US dollars, not ${String(costUSD)}`);
     }
     if (reachedBefore('charge', this)) return;
-    if (costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
+    if (costUSD > 0 && !totalChargedBefore(this.guard, this.id)) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
     this.options.parent?.recordExternal(costUSD, kind);
   }
 
@@ -298,8 +318,9 @@ export class SpendBudget {
 /**
  * A budget that holds each call to two budgets: a call is checked against the first, then the second, and refused when
  * either refuses it, and a finished call or an outside cost is recorded in both. A budget both draw on is checked and
- * charged once. What is left is the lesser of what each has left under its own caps; what it has spent, and the tokens it
- * has counted, are the first's.
+ * charged once, and so is the one total that budgets on one guard and one id keep, each of them still counting the
+ * call's tokens. What is left is the lesser of what each has left under its own caps; what it has spent, and the tokens
+ * it has counted, are the first's.
  */
 class BothBudgets extends SpendBudget {
   constructor(
@@ -349,9 +370,10 @@ class BothBudgets extends SpendBudget {
 }
 
 /**
- * A budget that holds each call to `first` and to `second`: checked against both, recorded in both, and a budget both
- * draw on checked and charged once. `first` itself when the two are one budget. A seat's turn runs under one: the budget
- * its team's call carries, and the member's own (gmi.ts).
+ * A budget that holds each call to `first` and to `second`: checked against both, recorded in both, a budget both draw
+ * on checked and charged once, and a total that budgets on one guard and one id keep charged once. `first` itself when
+ * the two are one budget. A seat's turn runs under one: the budget its team's call carries, and the member's own
+ * (gmi.ts).
  *
  * @internal
  */
