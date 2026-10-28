@@ -11,7 +11,9 @@
  * undefined, and an approval without modifications leaves the validation
  * retry as it was. A replacement that hands the strategy's own text back is
  * the approver's answer as any other is, and a replacement that does not
- * match writes one line through the host's logger.
+ * match writes one line through the host's logger. Without a schema, a
+ * `parsed` a seat returned does not outlive a replacement that changes the
+ * text.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -247,5 +249,26 @@ describe('a beforeReturn approval and the output schema', () => {
       expect(result.parsed).toEqual({ rotate: 'every Sunday' });
     });
     expect(unparsed(matching)).toEqual([]);
+  });
+});
+
+describe('a beforeReturn approval in an agency without an output schema', () => {
+  it('a parsed the seat returned is kept beside the text it describes, and dropped when the replacement changes the text', async () => {
+    // The seat's own responseSchema gives its result a parsed value, which the
+    // sequential strategy returns with the seat's text.
+    serveAnswer(ANSWER_JSON);
+    const seatSchema = { agents: { worker: { instructions: 'You answer the operator.', responseSchema: ROTATION } } };
+
+    const unmodified = (await team(approve(), {}, seatSchema).generate(PROMPT)) as Json;
+    expect(unmodified.text).toBe(ANSWER_JSON);
+    expect(unmodified.parsed).toEqual({ rotate: 'weekly' });
+
+    const handedBack = (await team(approve({ output: ANSWER_JSON }), {}, seatSchema).generate(PROMPT)) as Json;
+    expect(handedBack.text).toBe(ANSWER_JSON);
+    expect(handedBack.parsed).toEqual({ rotate: 'weekly' });
+
+    const replaced = (await team(approve({ output: REWRITTEN_JSON }), {}, seatSchema).generate(PROMPT)) as Json;
+    expect(replaced.text).toBe(REWRITTEN_JSON);
+    expect(replaced.parsed).toBeUndefined();
   });
 });
