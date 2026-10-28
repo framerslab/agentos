@@ -9,7 +9,8 @@
  * read from the text the caller receives: a replacement that matches the
  * schema is parsed, one that does not is returned once with `parsed`
  * undefined, and an approval without modifications leaves the validation
- * retry as it was.
+ * retry as it was. A replacement that hands the strategy's own text back is
+ * the approver's answer as any other is.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -204,5 +205,16 @@ describe('a beforeReturn approval and the output schema', () => {
     expect(bodies).toHaveLength(2);
     expect(JSON.stringify(bodies[1].messages)).toContain(`Response was: ${ANSWER}`);
     expect(handler.mock.calls.map(([request]) => request.details)).toEqual([{ output: ANSWER }, { output: ANSWER_JSON }]);
+  });
+
+  it('a replacement that hands the strategy text back, which fails the schema, is returned once with parsed undefined: the strategy runs once and the approval is asked once', async () => {
+    // An approver that always sends the text back, edited or not, here
+    // unedited: the replacement is the strategy's own text.
+    const handler = approve({ output: ANSWER });
+    const result = (await team(handler, {}, { output: ROTATION }).generate(PROMPT)) as Json;
+    expect(result.text).toBe(ANSWER);
+    expect(result.parsed).toBeUndefined();
+    expect(chatBodies()).toHaveLength(1);
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 });
