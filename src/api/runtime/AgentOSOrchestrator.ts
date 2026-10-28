@@ -768,10 +768,10 @@ export class AgentOSOrchestrator {
   /**
    * Whether an output guardrail blocked the stream and the pause it saves is being dropped: until the drop ends, that
    * pause is not offered by `getPendingExternalToolRequest()`, a resume of it is refused, and tool results do not
-   * continue the stream.
+   * continue the stream. Before `initialize()` no stream has run, so none is blocked.
    */
   public isStreamBlocked(agentOSStreamId: StreamId): boolean {
-    return this.toolResultHandler.isBlockedStream(agentOSStreamId);
+    return this.toolResultHandler?.isBlockedStream(agentOSStreamId) ?? false;
   }
 
   /**
