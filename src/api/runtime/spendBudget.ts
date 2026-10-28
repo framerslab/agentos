@@ -88,7 +88,58 @@ export function outputEstimateTokens(modelId: string, maxOutputTokens: number | 
 /** The info of the budget that refused, by the error it threw, so a child learns of an ancestor's refusal. */
 const refusalInfo = new WeakMap<object, SpendLimitInfo>();
 
+/** Runs `budget`'s own `onLimitReached` function, when it is one, with the info of the budget that refused with `error`. */
+function hearRefusal(budget: SpendBudget, error: unknown): void {
+  const info = typeof error === 'object' && error !== null ? refusalInfo.get(error) : undefined;
+  const on = budget.options.onLimitReached;
+  if (info && typeof on === 'function') on(info);
+}
+
 let budgets = 0;
+
+/** What the check, or the record, of a call held to two budgets ({@link bothBudgets}) has reached so far. */
+interface Reach {
+  /** The budgets reached: a budget both draw on is checked, and charged, once. */
+  budgets: Set<SpendBudget>;
+  /**
+   * The spending totals the record has charged, by guard and id: budgets on one guard and one id keep one total, which
+   * one call is charged once, while each of those budgets still counts the call's tokens.
+   */
+  totals: Map<CostGuard, Set<string>>;
+}
+
+/** The two-budget check and record in progress; unset outside one, each of which runs synchronously. */
+const reaching: { check?: Reach; charge?: Reach } = {};
+
+/** Whether the two-budget check or record in progress has reached `budget` already; marks it reached. */
+function reachedBefore(kind: 'check' | 'charge', budget: SpendBudget): boolean {
+  const reach = reaching[kind];
+  if (!reach) return false;
+  if (reach.budgets.has(budget)) return true;
+  reach.budgets.add(budget);
+  return false;
+}
+
+/** Whether the two-budget record in progress has charged the total `guard` keeps under `id` already; marks it charged. */
+function totalChargedBefore(guard: CostGuard, id: string): boolean {
+  const reach = reaching.charge;
+  if (!reach) return false;
+  const ids = reach.totals.get(guard) ?? new Set<string>();
+  if (ids.has(id)) return true;
+  reach.totals.set(guard, ids.add(id));
+  return false;
+}
+
+/** Runs `work` as one two-budget check or record, or as part of the one in progress. */
+function reachOnce(kind: 'check' | 'charge', work: () => void): void {
+  const outer = reaching[kind];
+  reaching[kind] = outer ?? { budgets: new Set(), totals: new Map() };
+  try {
+    work();
+  } finally {
+    reaching[kind] = outer;
+  }
+}
 
 /** A budget for a run of calls; pass one instance to every call that should share it. */
 export class SpendBudget {
@@ -170,15 +221,15 @@ export class SpendBudget {
     what: string,
     model?: { providerId: string; modelId: string },
   ): void {
+    // Under a call held to two budgets, a budget both draw on is asked once.
+    if (reachedBefore('check', this)) return;
     const parent = this.options.parent;
     if (parent) {
       try {
         parent.assertCanSpend(estimateUSD, estimateTokens, what, model);
       } catch (error) {
         // An ancestor refused: this budget's own function hears of it, with that budget's info, before it goes on.
-        const info = typeof error === 'object' && error !== null ? refusalInfo.get(error) : undefined;
-        const on = this.options.onLimitReached;
-        if (info && typeof on === 'function') on(info);
+        hearRefusal(this, error);
         throw error;
       }
     }
@@ -225,9 +276,14 @@ export class SpendBudget {
    * there too, after itself.
    */
   record(costUSD: number | undefined, tokens: number, what: string): void {
+    // Under a call held to two budgets, a budget both draw on is charged once, and so is a total that budgets on one
+    // guard and one id keep.
+    if (reachedBefore('charge', this)) return;
     const counted = Math.max(0, tokens);
     this.tokens += Number.isNaN(counted) ? 0 : counted;
-    if (costUSD !== undefined && costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what });
+    if (costUSD !== undefined && costUSD > 0 && !totalChargedBefore(this.guard, this.id)) {
+      this.guard.recordCost(this.id, costUSD, undefined, { what });
+    }
     this.options.parent?.record(costUSD, tokens, what);
   }
 
@@ -242,7 +298,8 @@ export class SpendBudget {
     if (typeof costUSD !== 'number' || Number.isNaN(costUSD)) {
       throw new RangeError(`An outside cost must be a number of US dollars, not ${String(costUSD)}`);
     }
-    if (costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
+    if (reachedBefore('charge', this)) return;
+    if (costUSD > 0 && !totalChargedBefore(this.guard, this.id)) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
     this.options.parent?.recordExternal(costUSD, kind);
   }
 
@@ -261,6 +318,80 @@ export class SpendBudget {
       throw error;
     }
   }
+}
+
+/**
+ * A budget that holds each call to two budgets: a call is checked against the first, then the second, and refused when
+ * either refuses it, a refusal by the second (or a budget above it) running the first's own `onLimitReached` function as
+ * a refusal by the first's parent does; a finished call or an outside cost is recorded in both. A budget both draw on is checked and
+ * charged once, and so is the one total that budgets on one guard and one id keep, each of them still counting the
+ * call's tokens. What is left is the lesser of what each has left under its own caps; what it has spent, and the tokens
+ * it has counted, are the first's.
+ */
+class BothBudgets extends SpendBudget {
+  constructor(
+    private readonly first: SpendBudget,
+    private readonly second: SpendBudget,
+  ) {
+    // No cap of its own: every check and record goes to the two budgets.
+    super({ maxCostUSD: Number.POSITIVE_INFINITY, unpriced: 'allow', budgetId: first.id });
+  }
+
+  override spentUSD(): number {
+    return this.first.spentUSD();
+  }
+
+  override tokensUsed(): number {
+    return this.first.tokensUsed();
+  }
+
+  override remaining(): { usd: number; tokens?: number } {
+    const a = this.first.remaining();
+    const b = this.second.remaining();
+    const usd = Math.min(a.usd, b.usd);
+    if (a.tokens === undefined) return b.tokens === undefined ? { usd } : { usd, tokens: b.tokens };
+    return { usd, tokens: b.tokens === undefined ? a.tokens : Math.min(a.tokens, b.tokens) };
+  }
+
+  override assertCanSpend(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
+    reachOnce('check', () => {
+      this.first.assertCanSpend(estimateUSD, estimateTokens, what, model);
+      try {
+        this.second.assertCanSpend(estimateUSD, estimateTokens, what, model);
+      } catch (error) {
+        // The first draws on the second as on a parent: its own function hears of the second's refusal before it goes on.
+        hearRefusal(this.first, error);
+        throw error;
+      }
+    });
+  }
+
+  override record(costUSD: number | undefined, tokens: number, what: string): void {
+    reachOnce('charge', () => {
+      this.first.record(costUSD, tokens, what);
+      this.second.record(costUSD, tokens, what);
+    });
+  }
+
+  override recordExternal(costUSD: number, kind: string): void {
+    reachOnce('charge', () => {
+      this.first.recordExternal(costUSD, kind);
+      this.second.recordExternal(costUSD, kind);
+    });
+  }
+}
+
+/**
+ * A budget that holds each call to `first` and to `second`: checked against both (`first`'s own `onLimitReached`
+ * function hearing of a refusal by `second`, as of one by its parent), recorded in both, a budget both draw on checked
+ * and charged once, and a total that budgets on one guard and one id keep charged once. `first` itself when
+ * the two are one budget. A seat's turn runs under one: the budget its team's call carries, and the member's own
+ * (gmi.ts).
+ *
+ * @internal
+ */
+export function bothBudgets(first: SpendBudget, second: SpendBudget): SpendBudget {
+  return first === second ? first : new BothBudgets(first, second);
 }
 
 /** A budget from what a caller passed: an instance as it is, settings made into a new instance, or nothing. */
