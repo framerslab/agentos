@@ -1373,20 +1373,25 @@ console.log(data?.title, data?.keyPoints);
 
 `agency()` appends a short JSON instruction to the prompt; for an object
 schema it names the top-level keys. It reads the reply as JSON, then from a fenced code block, then
-from the first `{ ... }` object in the text. When that fails, the run is
-repeated up to `controls.maxValidationRetries` times (default `1`) with the
-previous reply quoted in the prompt; when every attempt fails, `parsed` is
-`undefined` and no error is thrown. A member's own `output` is not read.
+from the first `{ ... }` object in the text. When that fails, `generate()` and
+a session's `send()` repeat the run up to `controls.maxValidationRetries`
+times (default `1`) with the previous reply quoted in the prompt; when every
+attempt fails, `parsed` is `undefined` and no error is thrown. `stream()` and
+a session's `stream()` finalize the one run they streamed and repeat nothing:
+a reply that does not match leaves `parsed` `undefined`. A member's own
+`output` is not read.
 
 The text parsed is the one the caller receives: the final text after the
 output guardrails and a `beforeReturn` approval. When the approval's
 `modifications.output` replaces the final text, `parsed` is read from the
 replacement. A replacement that does not match the schema is returned as it
-is, with `parsed` `undefined`, and the run is not repeated: a retry would
-throw the approver's text away and ask for the approval again. A replacement
-equal to the strategy's text, an approver handing the text back unedited,
-replaces nothing and counts as an approval without modifications: a text that
-does not match is retried, and the approval is asked for the new attempt.
+is, with `parsed` `undefined`, and `generate()` does not repeat the run: a
+retry would throw the approver's text away and ask for the approval again. A
+replacement equal to the strategy's text, an approver handing the text back
+unedited, replaces nothing and counts as an approval without modifications:
+under `generate()` a text that does not match is retried, and the approval is
+asked for the new attempt; under `stream()` it is returned with `parsed`
+`undefined`, as every reply that does not match is.
 
 In an agency without `output`, the `parsed` of `generate()`'s result is
 whatever the strategy's result carried: `sequential` returns its last seat's

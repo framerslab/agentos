@@ -494,6 +494,24 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     return preparedPrompt;
   };
 
+  /**
+   * Turns one run of the strategy into the result the caller receives, in
+   * order: an empty text for a run that returned none (and the
+   * `agency_no_seat_answered` line when no seat answered), this agency's own
+   * ledger, the pool's mask, the output guardrails, the usage bill and the
+   * limit check, the `beforeReturn` approval, the mask over a replacement it
+   * carries, the output schema's parse of the text the caller receives, the
+   * `final-output` part, `agentEnd` and the provenance record.
+   * `generate()` and a session's `send()` call it once for each attempt of
+   * the validation retry; `stream()` and a session's `stream()` call it once.
+   *
+   * @param result - The strategy's result for this run.
+   * @param start - When the call started, for `durationMs`.
+   * @param sessionId - The session whose usage totals the run adds to, on a session's call.
+   * @param streamPartBuffer - Under `stream()`, where the approval and final-output parts go.
+   * @param seated - This call's seating, in an agency with a pool or a panel.
+   * @returns The finalized result; a new object when the approval carries a replacement.
+   */
   const finalizeExecutionResult = async (
     result: Record<string, unknown>,
     start: number,

@@ -34,7 +34,9 @@ Use the right one for the job:
   - Final structured payload when `output` is configured, parsed from the
     finalized `text`: after a `beforeReturn` approval that replaces the text,
     from the replacement, and `undefined` when that text does not match the
-    schema.
+    schema. A stream runs no validation retry: where `generate()` repeats a
+    run whose reply does not match, `stream()` finalizes the one run it
+    streamed.
 
 ## Recommended Usage
 

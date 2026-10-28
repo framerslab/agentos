@@ -694,7 +694,9 @@ export interface ResourceControls {
    * When `agent({ output: someZodSchema })` is set and the LLM returns text
    * that does not parse or validate against the schema, the agency will
    * retry the generation up to this many times, each time appending an
-   * error feedback hint to the prompt so the model can self-correct. A final
+   * error feedback hint to the prompt so the model can self-correct. The
+   * retry runs under `generate()` and a session's `send()`; `stream()` and a
+   * session's `stream()` finalize the one run they streamed. A final
    * text that a `beforeReturn` approval replaced with a different one is not
    * retried: the replacement is returned, with `parsed` undefined when it
    * does not match. A replacement equal to the strategy's text counts as an
@@ -796,8 +798,9 @@ export interface ApprovalDecision {
      * replacement; one that does not match the schema is returned with
      * `parsed` undefined, and `generate()` does not run the strategy again.
      * A replacement equal to the strategy's text (the text handed back
-     * unedited) counts as an approval without modifications: a text that
-     * does not match is retried, and the approval is asked for the new one.
+     * unedited) counts as an approval without modifications: under
+     * `generate()` a text that does not match is retried, and the approval is
+     * asked for the new one; `stream()` runs no validation retry.
      * Without the schema, a replacement that changes the text leaves
      * `parsed` undefined.
      */
@@ -1203,7 +1206,7 @@ export interface AgencyStreamResult<R extends AgencyResult = AgencyResult> {
    * Final structured payload, parsed from the finalized text (a
    * `beforeReturn` approval's replacement when it carries one); resolves to
    * `undefined` when structured output was not configured for the run or
-   * that text does not match the schema.
+   * that text does not match the schema. A stream runs no validation retry.
    */
   parsed: Promise<unknown>;
   /**
