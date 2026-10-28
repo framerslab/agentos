@@ -453,7 +453,7 @@ describe('a trace keeps its reinforcement across a restart, with a Brain file', 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 
 describe.skipIf(!POSTGRES_URL)('a trace keeps its reinforcement across a restart, with a Postgres Brain', () => {
-  it("a recall that loses the row to another writer merges its decay state on the second read and keeps that writer's keys, and a manager over a new connection loads it", async () => {
+  it("a recall that loses the row to another writer merges its decay state on the second read and keeps that writer's keys; a manager over a new connection loads the trace, and it and the Memory facade count on from the row", async () => {
     const brainId = `qa-access-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const firstBrain = await Brain.openPostgres(POSTGRES_URL!, { brainId });
     brains.add(firstBrain);
@@ -487,10 +487,30 @@ describe.skipIf(!POSTGRES_URL)('a trace keeps its reinforcement across a restart
         accessCount: 1,
         reinforcementInterval: TWO_HOURS,
         nextReinforcementAt: accessed.nextReinforcementAt,
+        retrievalCount: 1,
+        lastAccessedAt: accessed.lastAccessedAt,
+        createdAt: accessed.createdAt,
         entities: ['Vera', 'Ana'],
       });
+      // The restarted manager's recall counts on from the loaded state, in the trace and in the row.
+      expect(second.getStore().getTrace(id)).toMatchObject({ accessCount: 2, retrievalCount: 2, reinforcementInterval: FOUR_HOURS });
+      expect(Number((await rowOf(secondBrain, id)).retrieval_count)).toBe(2);
+      await stop(second, secondBrain);
+
+      // The Memory facade's feedback on the same database counts on from the row as well.
+      const facade = await Memory.createPostgres(POSTGRES_URL!, { brainId, selfImprove: true });
+      try {
+        await facade.feedback(id, 'used');
+      } finally {
+        await facade.close();
+      }
+      const reader = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+      brains.add(reader);
+      expect(Number((await rowOf(reader, id)).retrieval_count)).toBe(3);
+      expect(await metadataOf(reader, id)).toMatchObject({ decay: { accessCount: 3, reinforcementInterval: 2 * FOUR_HOURS } });
     } finally {
       const cleaner = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+      await cleaner.run('DELETE FROM retrieval_feedback WHERE brain_id = ?', [brainId]);
       await cleaner.run('DELETE FROM memory_traces WHERE brain_id = ?', [brainId]);
       await cleaner.close();
     }
