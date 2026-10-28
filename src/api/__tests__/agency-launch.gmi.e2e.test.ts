@@ -192,6 +192,10 @@ describe('launch_agency on gmi()', () => {
     expect(lastUserText(s.seen[1])).toContain('Your role in this team: checker. Check the sum.');
     // The schema offers the member form, since the agent lists members.
     expect(JSON.stringify(s.seen[0].options.tools)).toContain('agentKey');
+    // The description names the member form and the one-seat form.
+    const described = (s.seen[0].options.tools as Array<{ function: { name: string; description?: string } }>).find((t) => t.function.name === 'launch_agency')?.function.description ?? '';
+    expect(described).toContain('a member you seat as itself by agentKey (tutor)');
+    expect(described).toContain('One seat makes a subagent.');
     // The seat names no tools, so the member's seat call offers none of its own: its memory_add stays out of the team.
     expect(offered(s.seen[1])).toEqual([]);
     // The launch never closes the member: its own session, open since before the launch, still answers, offering the
