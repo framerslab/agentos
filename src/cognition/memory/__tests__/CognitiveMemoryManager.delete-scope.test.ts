@@ -6,7 +6,8 @@
  * `deleteTraces` does the same for the traces it names. The rows that name a deleted trace go or let go of it (its
  * retrieval feedback, the document chunk it was filed from), and a scope deleted again counts nothing. A soft delete
  * (a supersede, a prune) takes the trace's copy with it and keeps the Brain row as a tombstone. A real manager over a
- * real SQLite Brain.
+ * real SQLite Brain; with no Brain, a manager started over a vector index another manager filed into finds the scope's
+ * traces in the index, whether it lists a collection a page at a time or answers similarity queries alone.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -175,6 +176,70 @@ describe('deleting traces other rows name', () => {
 
     expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 2, graph: 'reached' });
     expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 0, graph: 'reached' });
+  });
+});
+
+/** A manager with no Brain over a vector index and a knowledge graph that outlive it, as a host restarts one over a durable index. */
+async function managerWithoutBrain(vectorStore: InMemoryVectorStore, knowledgeGraph: IKnowledgeGraph): Promise<CognitiveMemoryManager> {
+  const manager = new CognitiveMemoryManager();
+  await manager.initialize({
+    agentId: 'agent-1',
+    traits: { openness: 0.5, conscientiousness: 0.5, extraversion: 0.5, agreeableness: 0.5, emotionality: 0.5, honesty: 0.5 },
+    moodProvider: () => MOOD,
+    featureDetectionStrategy: 'keyword',
+    workingMemory: new InMemoryWorkingMemory(),
+    knowledgeGraph,
+    vectorStore,
+    embeddingManager: {
+      generateEmbeddings: async ({ texts }: { texts: string | string[] }) => ({
+        embeddings: (Array.isArray(texts) ? texts : [texts]).map(embed),
+      }),
+    },
+    encoding: { baseStrength: 0.5, flashbulbThreshold: 0.8, flashbulbStrengthMultiplier: 2, flashbulbStabilityMultiplier: 5, baseStabilityMs: 3_600_000 },
+  } as never);
+  return manager;
+}
+
+/** An in-memory index whose metadata scan returns at most two documents a read, as a store that pages a scan does. */
+function scanningTwoAtATime(store: InMemoryVectorStore): InMemoryVectorStore {
+  const scan = store.scanByMetadata.bind(store);
+  store.scanByMetadata = (name, options) => scan(name, { ...options, limit: Math.min(options?.limit ?? 100, 2) });
+  return store;
+}
+
+/** An in-memory index with no metadata scan, as a host's store that answers similarity queries alone. */
+function answeringQueriesAlone(store: InMemoryVectorStore): InMemoryVectorStore {
+  (store as { scanByMetadata?: unknown }).scanByMetadata = undefined;
+  return store;
+}
+
+describe.each([
+  ['an index that lists a collection two documents a read', scanningTwoAtATime],
+  ['an index that answers similarity queries alone', answeringQueriesAlone],
+])('deleteScope with no Brain, over %s', (_name, shape) => {
+  it('finds in the vector index the traces another store filed before a restart, and deletes them, their copies and their nodes', async () => {
+    const vectorStore = shape(new InMemoryVectorStore());
+    await vectorStore.initialize({ id: `delete-scope-${Math.random()}`, type: 'in_memory' });
+    const knowledgeGraph = new KnowledgeGraph() as IKnowledgeGraph;
+    const first = await managerWithoutBrain(vectorStore, knowledgeGraph);
+    const bees = await first.encode('Ana keeps bees on the roof.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    const walnuts = await first.encode('Ana is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    const lyon = await first.encode('Ana lives in Lyon.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    const cello = await first.encode('Bo plays the cello.', MOOD, 'neutral', { scope: 'user', scopeId: 'bo' });
+    await first.shutdown();
+    const second = await managerWithoutBrain(vectorStore, knowledgeGraph);
+    closers.push(() => second.shutdown());
+
+    expect(await second.deleteScope('user', 'ana')).toEqual({ deleted: 3, graph: 'reached' });
+
+    expect(await second.getStore().getByScope('user', 'ana')).toEqual([]);
+    expect((await second.getStore().getByScope('user', 'bo')).map((trace) => trace.content)).toEqual(['Bo plays the cello.']);
+    const recalled = await second.retrieve('bees on the roof', MOOD, { scopes: [{ scope: 'user', scopeId: 'ana' }] } as never);
+    expect(recalled.retrieved).toEqual([]);
+    expect(await copiesOf(knowledgeGraph)).toEqual([{ scopeId: 'bo', text: 'Bo plays the cello.' }]);
+    for (const gone of [bees, walnuts, lyon]) expect(await knowledgeGraph.getEntity(gone.id)).toBeUndefined();
+    expect(await knowledgeGraph.getEntity(cello.id)).toBeDefined();
+    expect(await second.deleteScope('user', 'ana')).toEqual({ deleted: 0, graph: 'reached' });
   });
 });
 
