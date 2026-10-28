@@ -11,8 +11,8 @@
  * the column (a migration engine's copy, a file an import reads).
  *
  * An older release goes on writing `''` to a brain that is already at version 3, where its migration never runs
- * again. `Brain` runs {@link fillScopeIds} for the brain it opens, at every open, so such a row is filed under the
- * scope id its metadata names.
+ * again. `Brain` runs {@link fillScopeIds} for the brain it opens, at every open, and each importer runs it before it
+ * looks for duplicates, so such a row is filed under the scope id its metadata names before an import reads the column.
  *
  * A row's JSON is read in code, not with a SQL JSON function: `json_extract` (SQLite) and the `::jsonb` cast
  * (Postgres) raise on a malformed row, which would stop the migration for the whole Brain. A row whose JSON cannot be
@@ -131,9 +131,11 @@ async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: s
  * rows whose metadata text names `scopeId` are read; a row whose JSON cannot be read, or whose `scopeId` is not a
  * string, keeps `''`. A row that holds a scope id is never written.
  *
- * `Brain` runs it for the brain it opens, at every open.
+ * `Brain` runs it for the brain it opens, at every open. Each importer runs it before its first duplicate check,
+ * inside the import's transaction where it has one: an older release can write to a brain while this process holds
+ * it open.
  *
- * @param adapter - The store.
+ * @param adapter - The store, or the transaction an import runs in.
  * @param brainId - The brain whose traces are filed.
  */
 export async function fillScopeIds(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: string): Promise<void> {

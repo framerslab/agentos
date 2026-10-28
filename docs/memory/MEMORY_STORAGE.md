@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS memory_traces (
 );
 ```
 
-`scope_id` holds the trace's scope id, the value `metadata.scopeId` holds, and `''` for a trace filed under no scope id. The index `idx_memory_traces_brain_scope_id` covers `(brain_id, scope, scope_id, created_at)`. A database written at schema version 2 gains the column at its first open at version 3, filled from each row's metadata JSON for every brain the table holds; a row whose JSON cannot be read, or names no scope id, keeps `''`. A release older than the column writes `''` whatever scope id the metadata names, to a brain at version 3 as well, where no migration runs again: every open files the rows of the brain it opens that hold `''` while their metadata names a scope id, reading only the rows whose metadata names `scopeId`.
+`scope_id` holds the trace's scope id, the value `metadata.scopeId` holds, and `''` for a trace filed under no scope id. The index `idx_memory_traces_brain_scope_id` covers `(brain_id, scope, scope_id, created_at)`. A database written at schema version 2 gains the column at its first open at version 3, filled from each row's metadata JSON for every brain the table holds; a row whose JSON cannot be read, or names no scope id, keeps `''`. A release older than the column writes `''` whatever scope id the metadata names, to a brain at version 3 as well, where no migration runs again: every open files the rows of the brain it opens that hold `''` while their metadata names a scope id, reading only the rows whose metadata names `scopeId`, and every import does the same before its first duplicate check.
 
 ### `memory_traces_fts`
 
