@@ -18,7 +18,7 @@
  * );
  * ```
  */
-import { AgentOSResponse, AgentOSResponseChunkType } from '../../api/types/AgentOSResponse';
+import { AgentOSResponse, AgentOSResponseChunkType, type AgentOSFinalResponseChunk } from '../../api/types/AgentOSResponse';
 import {
   GuardrailAction,
   type GuardrailContext,
@@ -31,6 +31,7 @@ import {
   shouldObserveAgent,
 } from './ICrossAgentGuardrailService';
 import { createGuardrailBlockedStream, type GuardrailOutputOptions } from './guardrailDispatcher';
+import { sanitizedFinalResponse } from './sanitizedFinalResponse';
 
 /**
  * Context for cross-agent guardrail evaluation.
@@ -174,10 +175,8 @@ export async function evaluateCrossAgentGuardrails(
           textDelta: evaluation.modifiedText,
         } as AgentOSResponse;
       } else if (currentChunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
-        currentChunk = {
-          ...currentChunk,
-          finalResponseText: evaluation.modifiedText,
-        } as AgentOSResponse;
+        // every field that carries the reply reads the rewrite, as an output guardrail's SANITIZE leaves it
+        currentChunk = sanitizedFinalResponse(currentChunk as AgentOSFinalResponseChunk, evaluation.modifiedText);
       }
     }
   }
