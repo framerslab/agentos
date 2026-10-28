@@ -3,8 +3,10 @@
  * Deleting memory: `deleteScope` removes every trace of one scope from the cache, the vector index and the Brain
  * (a reload brings none back), the knowledge graph's episodic copy of each, in the in-memory graph and in
  * `SqlKnowledgeGraph`, and the memory graph's node of each; another scope's traces, copies and nodes stay.
- * `deleteTraces` does the same for the traces it names. A soft delete (a supersede, a prune) takes the trace's copy
- * with it and keeps the Brain row as a tombstone. A real manager over a real SQLite Brain.
+ * `deleteTraces` does the same for the traces it names. The rows that name a deleted trace go or let go of it (its
+ * retrieval feedback, the document chunk it was filed from), and a scope deleted again counts nothing. A soft delete
+ * (a supersede, a prune) takes the trace's copy with it and keeps the Brain row as a tombstone. A real manager over a
+ * real SQLite Brain.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -133,6 +135,46 @@ describe.each([
     expect((await copiesOf(knowledgeGraph)).map((copy) => copy.text)).toEqual(['Ana keeps bees on the roof.']);
     expect(await knowledgeGraph.getEntity(gone.id)).toBeUndefined();
     expect(await knowledgeGraph.getEntity(keep.id)).toBeDefined();
+  });
+});
+
+describe('deleting traces other rows name', () => {
+  it('deletes their feedback rows and unlinks their document chunks, so the trace rows can go', async () => {
+    const { manager, brain } = await managerOver(tempFile(), (brainOf) => new SqlKnowledgeGraph(brainOf));
+    const bees = await manager.encode('Ana keeps bees on the roof.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    const walnuts = await manager.encode('Ana is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    const cello = await manager.encode('Bo plays the cello.', MOOD, 'neutral', { scope: 'user', scopeId: 'bo' });
+    // The rows `Memory.feedback` writes for a recalled trace, and the chunk an ingest links to the trace it filed.
+    for (const trace of [bees, walnuts, cello]) {
+      await brain.run(
+        'INSERT INTO retrieval_feedback (brain_id, trace_id, signal, query, created_at) VALUES (?, ?, ?, ?, ?)',
+        ['agent-1', trace.id, 'used', 'what does Ana keep', Date.now()],
+      );
+    }
+    await brain.run(
+      `INSERT INTO documents (brain_id, id, path, format, content_hash, ingested_at) VALUES ('agent-1', 'doc-1', 'notes.md', 'md', 'hash', ?)`,
+      [Date.now()],
+    );
+    await brain.run(
+      `INSERT INTO document_chunks (brain_id, id, document_id, trace_id, content, chunk_index) VALUES ('agent-1', 'chunk-1', 'doc-1', ?, 'Ana keeps bees on the roof.', 0)`,
+      [bees.id],
+    );
+
+    expect(await manager.deleteTraces([walnuts.id])).toEqual({ deleted: 1, graph: 'reached' });
+    expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 1, graph: 'reached' });
+
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([{ id: cello.id }]);
+    expect(await brain.all('SELECT trace_id FROM retrieval_feedback')).toEqual([{ trace_id: cello.id }]);
+    expect(await brain.all('SELECT id, trace_id FROM document_chunks')).toEqual([{ id: 'chunk-1', trace_id: null }]);
+  });
+
+  it('counts nothing when a scope is deleted again', async () => {
+    const { manager } = await managerOver(tempFile(), (brainOf) => new SqlKnowledgeGraph(brainOf));
+    await manager.encode('Ana keeps bees on the roof.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    await manager.encode('Ana is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+
+    expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 2, graph: 'reached' });
+    expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 0, graph: 'reached' });
   });
 });
 
