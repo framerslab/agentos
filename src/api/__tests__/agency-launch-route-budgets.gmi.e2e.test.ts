@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 import { gmi } from '../gmi';
 import type { GenerateTextResult } from '../generateText';
 import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
@@ -78,6 +79,46 @@ describe('launch_agency on gmi(): the coordinator route and the budgets of a sea
     expect(s.seen.map((call) => call.streamed)).toEqual([true, true, true, false, true]);
     expect(new Set(s.seen.map((call) => call.modelId))).toEqual(new Set([s.seen[0].modelId]));
     expect(lastUserText(s.seen[3])).toContain('Synthesize these into a single coherent response.');
+    expect(result.text).toBe('Two colours.');
+  });
+
+  it('a launched team runs on the route the agent resolved on its first call, after the environment comes to prefer another provider', async () => {
+    const k = key();
+    const ka = key();
+    setProviderPriority(['openai']);
+    vi.stubEnv('OPENAI_API_KEY', k);
+    const s = script('openai', k, {
+      replies: [
+        reply.text('Ready.'),
+        launchStep({
+          goal: 'Name a colour.',
+          strategy: 'parallel',
+          seats: [{ role: 'warm', instructions: 'Name a warm colour.' }, { role: 'cool', instructions: 'Name a cool colour.' }],
+        }),
+        reply.text('Red.'),
+        reply.text('Blue.'),
+        reply.text('Red and blue.'),
+        reply.text('Two colours.'),
+      ],
+      whole: true,
+    });
+    // Scripted with no replies: a call that reaches it left the agent's route.
+    const other = script('anthropic', ka, { replies: [], whole: true });
+    const parent = gmi({ instructions: 'Coordinate.', fallbackProviders: [], agencies: { launch: true } });
+    const session = parent.session('p1');
+    // The first call resolves the agent's provider and model from the environment.
+    expect((await session.send('Are you there?')).text).toBe('Ready.');
+    // Then the environment comes to prefer another provider.
+    vi.stubEnv('ANTHROPIC_API_KEY', ka);
+    setProviderPriority(['anthropic', 'openai']);
+
+    const result = await session.send('Name two colours.');
+    expect(other.seen.map((call) => call.modelId)).toEqual([]);
+    const out = launchOf(result);
+    expect(out).toMatchObject({ status: 'completed', text: 'Red and blue.' });
+    // The parent's three steps, the two seats and the synthesizer, every one on the model the first call resolved.
+    expect(s.seen).toHaveLength(6);
+    expect(new Set(s.seen.map((call) => call.modelId))).toEqual(new Set([s.seen[0].modelId]));
     expect(result.text).toBe('Two colours.');
   });
 
