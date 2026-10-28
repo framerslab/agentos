@@ -6,6 +6,7 @@ import { AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY } from '../../src/ap
 import {
   AgentOSResponseChunkType,
   isActionableToolCallRequestChunk,
+  type AgentOSErrorChunk,
   type AgentOSFinalResponseChunk,
   type AgentOSResponse,
   type AgentOSToolCallRequestChunk,
@@ -1288,5 +1289,159 @@ describe('AgentOS tool-result continuations', () => {
       [AgentOSResponseChunkType.TEXT_DELTA, SOURCES],
       [AgentOSResponseChunkType.FINAL_RESPONSE, SOURCES],
     ]);
+  });
+
+  /** The tool messages of the conversation that answer `callId`. */
+  const answersOf = (context: ConversationContext, callId: string) =>
+    context.getAllMessages().filter((message) => message.role === 'tool' && message.tool_call_id === callId);
+
+  it('a new turn on a conversation that holds a pause answers its calls as not run, so the model reads no call without its result', async () => {
+    const rt = await runtime('conv-new-turn-ends-pause');
+    const host = hostToolGmi();
+    const { request } = await rt.pauseOnRead(host);
+
+    // the host never passes READ_CALL's result: the user asks something else, and the shipped GMI answers
+    const { gmi, provider, promptCalls } = await rt.shippedGmi([{ text: 'Standup moved to 10:00.' }]);
+    rt.useGmi(gmi);
+    const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: 'Never mind the file. When is the standup?' }));
+
+    expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('Standup moved to 10:00.');
+    expect(provider.generateCompletionStream).toHaveBeenCalledTimes(1);
+    // a provider refuses a request that holds a call with no result; the model reads that the call did not run
+    expect(unansweredToolCallIds(promptCalls[0] ?? [])).toEqual([]);
+    const notRun = promptCalls[0]?.find((m) => m.role === 'tool' && m.tool_call_id === READ_CALL.id);
+    expect(String(notRun?.content)).toContain('EXTERNAL_TOOL_NOT_RUN');
+    // the answer follows the pause's assistant message, before the new question
+    const messages = rt.context.getAllMessages() as any[];
+    const pauseAt = messages.findIndex(
+      (m) => m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.some((call: ToolCallRequest) => call.id === READ_CALL.id),
+    );
+    expect(pauseAt).toBeGreaterThanOrEqual(0);
+    expect(messages[pauseAt + 1]).toMatchObject({ role: 'tool', tool_call_id: READ_CALL.id });
+    expect(messages[pauseAt + 2]).toMatchObject({ role: 'user', content: 'Never mind the file. When is the standup?' });
+    expect(await rt.pending()).toBeNull();
+
+    // the stream that stopped for the call takes no result once the conversation moved on
+    const late = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+    expect(late.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+    expect(host.handleToolResult).not.toHaveBeenCalled();
+    expect(answersOf(rt.context, READ_CALL.id)).toHaveLength(1);
+  });
+
+  it('a result passed on the stream of a pause a resume already continued is refused, and the GMI takes it once', async () => {
+    const rt = await runtime('conv-resumed-then-stream');
+    const host = hostToolGmi();
+    const { request, saved } = await rt.pauseOnRead(host);
+
+    const resumed = await collect(rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT]));
+    expect(resumed.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(host.handleToolResult).toHaveBeenCalledTimes(1);
+    const messagesAfterResume = rt.context.getAllMessages().length;
+
+    // the host passes the same result on the turn's stream as well, as a retry does
+    const late = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    expect(late.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+    expect(host.handleToolResult).toHaveBeenCalledTimes(1);
+    expect(rt.context.getAllMessages()).toHaveLength(messagesAfterResume);
+    expect(answersOf(rt.context, READ_CALL.id)).toHaveLength(1);
+  });
+
+  it('a result for a call the stream no longer waits on is refused, and the pause the stream waits on stays', async () => {
+    const host = hostToolGmi({ isFinal: false, responseText: 'Now I write the file.', toolCalls: [WRITE_CALL] });
+    const rt = await runtime('conv-stale-result');
+    const { request } = await rt.pauseOnRead(host);
+    const first = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+    expect(first.filter((r) => isActionableToolCallRequestChunk(r)).map((r) => (r as AgentOSToolCallRequestChunk).toolCalls)).toEqual([
+      [WRITE_CALL],
+    ]);
+    const messagesAfterFirst = rt.context.getAllMessages().length;
+
+    // the host passes READ_CALL's result again, as a retry of the first does
+    const stale = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    expect(stale.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+    expect((stale[0] as AgentOSErrorChunk).code).toBe('SYS_INVALID_STATE');
+    expect(host.handleToolResult).toHaveBeenCalledTimes(1);
+    expect(rt.context.getAllMessages()).toHaveLength(messagesAfterFirst);
+    expect(answersOf(rt.context, READ_CALL.id)).toHaveLength(1);
+    const pause = await rt.pending();
+    expect(pause?.streamId).toBe(request.streamId);
+    expect(pause?.toolCalls).toEqual([WRITE_CALL]);
+  });
+
+  it.each([
+    ['on the stream', 'stream'],
+    ['resumed from the saved pause', 'resume'],
+  ] as const)(
+    'a continuation %s of the shipped GMI gives the output guards and the host the sources the turn it continues retrieved',
+    async (_label, path) => {
+      const recorder = sourcesRecorder();
+      const rt = await runtime(`conv-continued-sources-${path}`, { guardrailService: recorder.guard });
+      const { gmi, retrieveContext } = await rt.shippedGmi(
+        [{ text: 'I will read the notes file first.' }, { text: 'Payroll runs on Friday.' }],
+        { sources: [PAYROLL_SOURCE] },
+      );
+      // the shipped GMI runs the user's turn and retrieves the source; the host stops the turn for READ_CALL
+      const { request, saved } = await rt.pauseOnRead(hostOverShippedGmi(gmi));
+      expect(retrieveContext).toHaveBeenCalledTimes(1);
+      recorder.seen.length = 0;
+
+      const continuation = await collect(
+        path === 'stream'
+          ? rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true)
+          : rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT]),
+      );
+
+      // the continuation retrieves nothing of its own; its reply was written from the turn's source
+      expect(retrieveContext).toHaveBeenCalledTimes(1);
+      const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+      expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+      expect(last.finalResponseText).toBe('Payroll runs on Friday.');
+      expect(last.ragSources).toEqual([PAYROLL_SOURCE]);
+      expect(recorder.seen).toEqual([
+        [AgentOSResponseChunkType.TEXT_DELTA, [PAYROLL_SOURCE]],
+        [AgentOSResponseChunkType.FINAL_RESPONSE, [PAYROLL_SOURCE]],
+      ]);
+    },
+  );
+
+  it('with conversational persistence off, a pause and its continuation leave no message in the conversation, so the next turn sends no call without its result', async () => {
+    const rt = await runtime('conv-unrecorded', { orchestratorConfig: { enableConversationalPersistence: false } });
+    const { request } = await rt.pauseOnRead(hostToolGmi());
+    const continued = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+    expect(continued.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    // the runtime records no message in a conversation it does not persist
+    expect(rt.context.getAllMessages()).toEqual([]);
+
+    const { gmi, promptCalls } = await rt.shippedGmi([{ text: 'Standup moved to 10:00.' }]);
+    rt.useGmi(gmi);
+    const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: 'When is the standup now?' }));
+
+    expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('Standup moved to 10:00.');
+    expect(unansweredToolCallIds(promptCalls[0] ?? [])).toEqual([]);
+  });
+
+  it("with conversational persistence off, a resume continues on the GMI's own history", async () => {
+    const rt = await runtime('conv-unrecorded-resume', { orchestratorConfig: { enableConversationalPersistence: false } });
+    const host = hostToolGmi();
+    const { saved } = await rt.pauseOnRead(host);
+
+    const resumed = await collect(rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT]));
+
+    expect(resumed.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(host.handleToolResult).toHaveBeenCalledTimes(1);
+    // the conversation holds no history the runtime recorded, so none replaces the GMI's
+    expect(host.hydrateConversationHistory).not.toHaveBeenCalled();
   });
 });
