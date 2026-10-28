@@ -50,6 +50,8 @@ import {
   createGuardrailBlockedStream,
   hasEvaluateOutput,
 } from './guardrailDispatcher';
+import { renderPlainText } from '../../api/runtime/turnFinalResponse';
+import { sanitizedFinalResponse } from './sanitizedFinalResponse';
 
 // ---------------------------------------------------------------------------
 // Severity map used by worstAction — SANITIZE is excluded because it is
@@ -654,14 +656,7 @@ export class ParallelGuardrailDispatcher {
         if (evaluation.action === GuardrailAction.SANITIZE && evaluation.modifiedText !== undefined) {
           sanitized = true;
           if (workingChunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
-            const before = workingChunk as AgentOSFinalResponseChunk;
-            workingChunk = {
-              ...before,
-              finalResponseText: evaluation.modifiedText,
-              finalResponseTextPlain: evaluation.modifiedText,
-              // the serialized conversation the chunk carries holds the reply as the model wrote it: it reads the rewrite too
-              updatedConversationContext: withReplyRewritten(before.updatedConversationContext, before.finalResponseText ?? null, evaluation.modifiedText),
-            };
+            workingChunk = sanitizedFinalResponse(workingChunk as AgentOSFinalResponseChunk, evaluation.modifiedText);
           } else {
             workingChunk = {
               ...(workingChunk as any),
@@ -928,7 +923,8 @@ export class ParallelGuardrailDispatcher {
           isFinal: true,
           timestamp: chunk.timestamp,
           finalResponseText: text,
-          finalResponseTextPlain: text,
+          // the plain text a final reply carries, so a guard judges this reply as it judges one
+          finalResponseTextPlain: renderPlainText(text),
         };
         const verdict = await evaluateFinal(synthetic);
         if (verdict.outcome === 'block') {
@@ -1002,28 +998,6 @@ function stampGuardrailId(evaluation: GuardrailEvaluationResult, svc: IGuardrail
  * What the caller receives in place of a blocked reply: the guard's fixed reply as a final response that records the
  * block, when the guard gave one; otherwise the error chunk.
  */
-/**
- * A copy of a serialized conversation (a final chunk's `updatedConversationContext`) in which the newest assistant
- * message that reads `from` reads `to`; anything that is not a conversation with messages is returned as it is.
- */
-function withReplyRewritten<T>(context: T, from: string | null, to: string | null | undefined): T {
-  if (from === null || !context || typeof context !== 'object') return context;
-  const messages = (context as { messages?: unknown }).messages;
-  if (!Array.isArray(messages)) return context;
-  let index = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i] as { role?: unknown; content?: unknown } | null;
-    if (m && m.role === 'assistant' && m.content === from) {
-      index = i;
-      break;
-    }
-  }
-  if (index < 0) return context;
-  const copy = messages.slice();
-  copy[index] = { ...(messages[index] as object), content: to ?? '' };
-  return { ...(context as object), messages: copy } as T;
-}
-
 async function* blockedOutput(
   context: GuardrailContext,
   evaluation: GuardrailEvaluationResult,
@@ -1038,7 +1012,7 @@ async function* blockedOutput(
       isFinal: true,
       timestamp: new Date().toISOString(),
       finalResponseText: evaluation.replacementText,
-      finalResponseTextPlain: evaluation.replacementText,
+      finalResponseTextPlain: renderPlainText(evaluation.replacementText),
       metadata: { guardrail: { output: [serializeEvaluation(evaluation)] } },
     };
     yield replacement;
