@@ -938,6 +938,11 @@ export class Brain {
    * Open a Brain backed by PostgreSQL. Requires the `pg` npm package and
    * a reachable Postgres instance.
    *
+   * Every integer column of the Brain's schema is `BIGINT` on Postgres, and
+   * this adapter reads `BIGINT` as a number, as SQLite returns its integers:
+   * a trace's retrieval count, access and creation times and deleted flag
+   * load as numbers on both dialects.
+   *
    * @param connectionString - Standard Postgres connection URL.
    * @param opts.brainId - REQUIRED. Used to scope every query so multiple
    *   brains can share one Postgres database without leaking rows.
@@ -957,6 +962,8 @@ export class Brain {
       adapter = await createPostgresAdapter({
         connectionString,
         max: opts.poolSize ?? 10,
+        // pg reads BIGINT as a string by default; the Brain's integer columns are BIGINT here.
+        typeParsers: { int8: 'number' },
       });
       await adapter.open();
     } catch (err) {
@@ -988,6 +995,12 @@ export class Brain {
    *      gets `AsyncLocalStorage`-tracked transactional clients.
    * Non-transactional concurrent reads/writes against a shared adapter
    * are safe (the pool handles those correctly).
+   *
+   * **INTEGER COLUMNS (Postgres adapters):** the Brain's integer columns are
+   * `BIGINT` on Postgres, which pg reads as strings unless the adapter is
+   * opened with `typeParsers: { int8: 'number' }`, as {@link Brain.openPostgres}
+   * opens its own. Read as strings, a trace's retrieval count and times load
+   * as text, and an access appends to the count instead of adding to it.
    *
    * @param adapter - Pre-built StorageAdapter instance.
    * @param opts.brainId - Required for postgres-kind adapters; optional for

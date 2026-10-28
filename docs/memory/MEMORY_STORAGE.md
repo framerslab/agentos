@@ -95,7 +95,7 @@ An FTS5 index over `content` and `tags`, with `memory_traces` as its external co
 | `prospective_items` | Reminders: trigger type, time, event or cue, importance, triggered and recurring flags |
 | `archived_traces`, `archive_access_log` | Verbatim content kept by the memory archive, and its rehydration log |
 
-The full DDL is in [`Brain.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) and, for the archive tables, [`SqlStorageMemoryArchive.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/SqlStorageMemoryArchive.ts). On Postgres, `INTEGER` columns become `BIGINT`, `BLOB` becomes `BYTEA`, and autoincrement keys become identity columns.
+The full DDL is in [`Brain.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) and, for the archive tables, [`SqlStorageMemoryArchive.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/SqlStorageMemoryArchive.ts). On Postgres, `INTEGER` columns become `BIGINT`, `BLOB` becomes `BYTEA`, and autoincrement keys become identity columns. `Memory.createPostgres()` and `Brain.openPostgres()` read `BIGINT` back as numbers, as SQLite returns its integers. A brain on a Postgres adapter you build yourself (`Memory.createWithAdapter()`, `Brain.openWithAdapter()`) reads them the same way only when the adapter is opened with `typeParsers: { int8: 'number' }` (`createPostgresAdapter` from `@framers/sql-storage-adapter`); with pg's default, a trace's retrieval count and times load as strings.
 
 ---
 
