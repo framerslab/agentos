@@ -1499,30 +1499,50 @@ export class AgentOS implements IAgentOS {
   }
 
   /**
-   * The output guards' verdict on a stream. A block that withheld actionable tool calls drops the pause the
-   * orchestrator saved for them, so neither `getPendingExternalToolRequest()` nor the stream offers them again; then
-   * a replaced or rewritten reply is written to the stored conversation. A store that refuses the save of the dropped
-   * pause is logged: the stream is closed all the same, and the stored conversation keeps the pause until the
-   * conversation is saved again. Nothing here throws into the stream.
+   * The output guards' verdict on a stream. A block drops the pause the orchestrator saved for the stream, so neither
+   * `getPendingExternalToolRequest()` nor the stream offers its calls again. A block that withheld actionable tool
+   * calls drops their pause before the verdict reaches the caller. A block that withheld none (on a streamed delta, or
+   * on the chunk of calls the runtime runs itself) ends the caller's stream while the turn goes on inside the runtime:
+   * a pause the turn saves when it then stops for calls the host runs is dropped once the turn ends, and the verdict
+   * does not wait for that; from the verdict on, the stream is held as blocked, so that pause is neither offered nor
+   * resumed nor continued meanwhile. Then a replaced or rewritten reply is written to the stored conversation. A store
+   * that refuses the save of the dropped pause is logged: the stream is closed all the same, and the stored
+   * conversation keeps the pause until the conversation is saved again. Nothing here throws into the stream.
    */
   private async onOutputVerdict(conversationKey: string, verdict: GuardrailOutputVerdict): Promise<void> {
-    const withheld = verdict.toolCallIds ?? [];
-    if (verdict.action === GuardrailAction.BLOCK && withheld.length > 0) {
-      try {
-        await this.agentOSOrchestrator.discardBlockedToolCalls(verdict.streamId, withheld, {
-          reason: 'An output guardrail blocked the reply that requested this tool call, so the call was not run.',
-          ...(verdict.reasonCode ? { reasonCode: verdict.reasonCode } : {}),
-          ...(verdict.guardrailId ? { guardrailId: verdict.guardrailId } : {}),
-        });
-      } catch (error) {
-        this.logger.warn('The refusal of a blocked tool call could not be saved: the stored conversation keeps its pause until it is saved again', {
-          streamId: verdict.streamId,
-          toolCallIds: withheld,
-          error: error instanceof Error ? error.message : String(error),
-        });
+    if (verdict.action === GuardrailAction.BLOCK) {
+      const withheld = verdict.toolCallIds ?? [];
+      const dropped = this.dropBlockedPause(verdict, withheld);
+      // the withheld calls' pause is dropped before the caller reads the verdict; a block that withheld none waits for
+      // the rest of the turn, which the caller's stream, already ended, does not wait for
+      if (withheld.length > 0) {
+        await dropped;
       }
     }
     await this.recordGuardedReply(conversationKey, verdict);
+  }
+
+  /**
+   * Drops the pause a blocked stream saved, or saves before its turn ends: the calls the block withheld, or, for a
+   * block that withheld none, whatever calls the stream's pause holds. A failure is logged, never thrown.
+   */
+  private async dropBlockedPause(verdict: GuardrailOutputVerdict, withheld: readonly string[]): Promise<void> {
+    try {
+      await this.agentOSOrchestrator.discardBlockedToolCalls(verdict.streamId, withheld.length > 0 ? withheld : undefined, {
+        reason:
+          withheld.length > 0
+            ? 'An output guardrail blocked the reply that requested this tool call, so the call was not run.'
+            : 'An output guardrail blocked the turn that requested this tool call, so the call was not run.',
+        ...(verdict.reasonCode ? { reasonCode: verdict.reasonCode } : {}),
+        ...(verdict.guardrailId ? { guardrailId: verdict.guardrailId } : {}),
+      });
+    } catch (error) {
+      this.logger.warn('The refusal of a blocked tool call could not be saved: the stored conversation keeps its pause until it is saved again', {
+        streamId: verdict.streamId,
+        ...(withheld.length > 0 ? { toolCallIds: [...withheld] } : {}),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -2530,7 +2550,13 @@ export class AgentOS implements IAgentOS {
       return null;
     }
 
-    const pendingRequest = context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY);
+    const pendingRequest = context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    // a pause a stream saves after an output guardrail blocked it is dropped once the turn ends, and never offered
+    if (pendingRequest && this.agentOSOrchestrator.isStreamBlocked(pendingRequest.streamId)) {
+      return null;
+    }
     return pendingRequest ?? null;
   }
 
@@ -2587,13 +2613,17 @@ export class AgentOS implements IAgentOS {
         }
       }
     } catch (error: unknown) {
+      // a resume of a pause the conversation no longer holds is refused before its stream is made, and keeps its code
+      const refused = error instanceof GMIError && error.code === GMIErrorCode.INVALID_STATE;
       const serviceError = AgentOSServiceError.wrap(
         error,
-        GMIErrorCode.TOOL_ERROR,
+        refused ? GMIErrorCode.INVALID_STATE : GMIErrorCode.TOOL_ERROR,
         `Error during AgentOS.resumeExternalToolRequest for conversation '${pendingRequest.conversationId}'`,
         'AgentOS.resumeExternalToolRequest'
       );
-      console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      if (!refused) {
+        console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      }
 
       const errorChunk: AgentOSErrorChunk = {
         type: AgentOSResponseChunkType.ERROR,

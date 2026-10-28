@@ -39,7 +39,7 @@ import {
   UICommand, // Assuming UICommand is used internally if GMI constructs them
   // AudioOutputConfig, ImageOutputConfig are part of GMIOutput
 } from './IGMI';
-import type { GMIToolCallGate, GMIToolCallRefusal, GMIToolResultOptions, StepFinishedChunkPayload, ToolResultChunkPayload } from './IGMI';
+import type { GMIToolCallGate, GMIToolCallGateContext, GMIToolCallRefusal, GMIToolResultOptions, StepFinishedChunkPayload, ToolResultChunkPayload } from './IGMI';
 import { refusedToolCallResult } from './toolCallGate';
 import {
   IPersonaDefinition,
@@ -306,6 +306,13 @@ export class GMI implements IGMI {
    * a tool continuation that names none sits in this one.
    */
   private turnLaunchFrame: AgencyLaunchFrame | undefined;
+
+  /**
+   * The sources the user turn retrieved, when it retrieved any. Cleared when a
+   * user turn starts; a tool continuation retrieves nothing of its own, so the
+   * tool-call gate is asked about its calls with these.
+   */
+  private turnRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
 
   /** The learner session the host passed (`GMIBaseConfig.learning`), when its learning option is on. */
   private learnerSession: ILearnerSession | undefined;
@@ -854,14 +861,38 @@ export class GMI implements IGMI {
    * Asks the turn's tool-call gate about one call. A gate that throws refuses
    * the call, so a check that fails never lets a call through.
    */
-  private async askToolCallGate(gate: GMIToolCallGate, call: ToolCallRequest): Promise<GMIToolCallRefusal | null> {
+  private async askToolCallGate(
+    gate: GMIToolCallGate,
+    call: ToolCallRequest,
+    context: GMIToolCallGateContext,
+  ): Promise<GMIToolCallRefusal | null> {
     try {
-      return await gate(call);
+      return await gate(call, context);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.addTraceEntry(ReasoningEntryType.WARNING, `The tool-call gate failed on '${call.name}'; the call is refused.`, { reqId: call.id, error: message });
       return { reason: `The call to '${call.name}' was refused because its check failed: ${message}`, reasonCode: 'TOOL_CALL_GATE_ERROR' };
     }
+  }
+
+  /**
+   * Asks the turn's tool-call gate about every call of one model step, in
+   * order, before any of them runs: each question names the step's calls and
+   * the sources the turn retrieved, so the gate can judge the calls together
+   * and against those sources. Returns each call's refusal, or null, by the
+   * call's position in the step.
+   */
+  private async askToolCallGateForStep(
+    gate: GMIToolCallGate,
+    stepCalls: ToolCallRequest[],
+    ragSources: GMIToolCallGateContext['ragSources'],
+  ): Promise<Array<GMIToolCallRefusal | null>> {
+    const context: GMIToolCallGateContext = { stepCalls, ...(ragSources && ragSources.length > 0 ? { ragSources } : {}) };
+    const refusals: Array<GMIToolCallRefusal | null> = [];
+    for (const call of stepCalls) {
+      refusals.push(await this.askToolCallGate(gate, call, context));
+    }
+    return refusals;
   }
 
   /**
@@ -1189,12 +1220,16 @@ export class GMI implements IGMI {
       this.turnLearning = undefined;
       this.turnToolCallGate = toolCallGateOf(turnInput);
       this.turnLaunchFrame = launchFrameOf(turnInput);
+      this.turnRagSources = undefined;
     }
     // The gate this turn's tool round asks before each call: the one the input names; a continuation that names none
     // asks the gate of the turn it continues.
     const toolCallGate = toolCallGateOf(turnInput) ?? this.turnToolCallGate;
     // The launched team this turn's tool calls sit in, likewise: a continuation that names none sits in its turn's.
     const launchFrame = launchFrameOf(turnInput) ?? this.turnLaunchFrame;
+    // A continuation retrieves nothing of its own: the gate is asked about its calls with the sources the turn it
+    // continues retrieved.
+    const continuedTurnSources = turnInput.metadata?.isToolContinuation === true ? this.turnRagSources : undefined;
     this.stateOwnerTurn = turnNumber;
     // False once a newer turn has started; lifecycle writes below check it.
     const ownsState = (): boolean => this.stateOwnerTurn === turnNumber;
@@ -1400,6 +1435,7 @@ export class GMI implements IGMI {
             const ragResult = await this.retrievalAugmentor.retrieveContext(currentQueryForRag, retrievalOptions);
             augmentedContextFromRAG = ragResult.augmentedContext;
             lastRagSources = ragResult.retrievedChunks;
+            if (ownsState()) this.turnRagSources = ragResult.retrievedChunks;
             this.addTraceEntry(ReasoningEntryType.RAG_QUERY_RESULT, 'RAG context retrieved.', {
               length: augmentedContextFromRAG.length,
               chunkCount: ragResult.retrievedChunks?.length ?? 0,
@@ -1986,7 +2022,12 @@ export class GMI implements IGMI {
           let callInFlight: ToolCallRequest | undefined;
           let toolRoundFailure: { error: unknown } | undefined;
           try {
-            for (const toolCallReq of currentIterationToolCallRequests) {
+            // The gate is asked about every call of the step before any of them runs, as the stream's chunk for the
+            // step holds them all.
+            const refusals = toolCallGate
+              ? await this.askToolCallGateForStep(toolCallGate, currentIterationToolCallRequests, lastRagSources ?? continuedTurnSources)
+              : [];
+            for (const [callIndex, toolCallReq] of currentIterationToolCallRequests.entries()) {
               const requestDetails: ToolExecutionRequestDetails = {
                 toolCallRequest: toolCallReq,
                 gmiId: this.gmiId, personaId: this.activePersona.id,
@@ -1996,8 +2037,8 @@ export class GMI implements IGMI {
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;
-              // A call the gate refuses is recorded as a refused result the model reads; the tool is not called.
-              const refusal = toolCallGate ? await this.askToolCallGate(toolCallGate, toolCallReq) : null;
+              // A call the gate refused is recorded as a refused result the model reads; the tool is not called.
+              const refusal = refusals[callIndex] ?? null;
               const result = refusal
                 ? refusedToolCallResult(toolCallReq, refusal)
                 : await this.toolOrchestrator.processToolCall(requestDetails);

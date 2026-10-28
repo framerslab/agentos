@@ -126,12 +126,33 @@ export interface GMIToolCallRefusal {
 }
 
 /**
+ * What the GMI tells a {@link GMIToolCallGate} beside the call it asks about.
+ * @interface GMIToolCallGateContext
+ */
+export interface GMIToolCallGateContext {
+  /**
+   * Every call of the model step the call belongs to, in the order the model asked for them, the call among them. The
+   * GMI asks about each call of a step before the first of them runs and passes the same array with each question, so
+   * a gate can judge the calls together as well as one by one.
+   */
+  stepCalls?: readonly ToolCallRequest[];
+  /**
+   * The sources the turn retrieved for the model, when it retrieved any. A tool continuation retrieves nothing of
+   * its own and passes the sources of the user turn it continues.
+   */
+  ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
+}
+
+/**
  * Asked before the GMI runs a call of its own tool round. Resolving to null lets the call run. A refusal turns the call
  * into a refused tool result that the model reads (an error with the code `AUTH_PERMISSION_DENIED`, as a permission
- * refusal is recorded), and the tool is not called; a gate that throws refuses the call too. AgentOS builds one from its
- * output guardrails that set `config.evaluateToolCalls`.
+ * refusal is recorded), and the tool is not called; a gate that throws refuses the call too. The GMI asks about every
+ * call of a step, with the step's calls and the turn's retrieved sources in `context`, before any call of the step
+ * runs. AgentOS builds one from its output guardrails that set `config.evaluateToolCalls`: it judges each call alone,
+ * then the calls of the step that pass alone together, as the stream's `TOOL_CALL_REQUEST` chunk for the step holds
+ * them, each time with the turn's sources; a block on the calls together refuses each of them.
  */
-export type GMIToolCallGate = (call: ToolCallRequest) => Promise<GMIToolCallRefusal | null>;
+export type GMIToolCallGate = (call: ToolCallRequest, context?: GMIToolCallGateContext) => Promise<GMIToolCallRefusal | null>;
 
 /**
  * Options for the continuation a tool result starts.
