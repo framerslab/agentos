@@ -169,6 +169,28 @@ describeIfPostgres('Brain.openPostgres', () => {
     expect(row?.scope_id).toBe('cy');
   });
 
+  it('files at the next open a trace whose metadata spells the scopeId key with a JSON escape', async () => {
+    const brainId = uniqueBrainId();
+    const brain1 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain1);
+    // JSON.parse reads the key "scopeId" as scopeId: a writer may escape any letter of a key.
+    await brain1.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [brainId, 'escaped-trace', 'episodic', 'user', 'escaped', Date.now(), '{"\\u0073copeId":"cy"}'],
+    );
+    await brain1.close();
+    openedBrains.pop();
+
+    const brain2 = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain2);
+    const row = await brain2.get<{ scope_id: string }>(
+      `SELECT scope_id FROM memory_traces WHERE brain_id = $1 AND id = $2`,
+      [brainId, 'escaped-trace'],
+    );
+    expect(row?.scope_id).toBe('cy');
+  });
+
   it('serializes concurrent first-opens against the same brainId', async () => {
     const brainId = uniqueBrainId();
     // Two parallel opens against the same brainId.

@@ -3,7 +3,8 @@
  * `memory_traces.scope_id`: the scope id of a trace as a column of its own. A Brain at schema version 2 gains the
  * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds, with
  * one read of each row; a row a release without the column writes to a brain already at version 3 is filled at the
- * next open, by a fill that reads only the rows whose metadata can name a scope id; a fresh Brain has it; the index a
+ * next open, a key spelled with a JSON escape included, by a fill that reads only the rows whose metadata can name a
+ * scope id; a fresh Brain has it; the index a
  * per-scope read uses exists; every writer this file reaches sets it; and the importers file by it and deduplicate
  * inside one scope id, where a trace such a release wrote counts under the scope id its metadata names. Real SQLite
  * files through `@framers/sql-storage-adapter`, as the store opens them in production.
@@ -152,6 +153,21 @@ describe('memory_traces.scope_id', () => {
     await raw.close();
     const b1 = await open(filePath, 'b1');
     expect((await scopeIdsOf(b1))['t-late']).toBe('cy');
+  });
+
+  it('is filled at the next open for a row whose metadata spells the scopeId key with a JSON escape', async () => {
+    const filePath = tempFile();
+    await (await open(filePath, 'b1')).close();
+    brains.length = 0;
+    const raw = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    // JSON.parse reads the key "scopeId" as scopeId: a writer may escape any letter of a key.
+    await raw.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata) VALUES ('b1', 't-escaped', 'episodic', 'user', 'x', 1, ?)`,
+      ['{"\\u0073copeId":"cy"}'],
+    );
+    await raw.close();
+    const b1 = await open(filePath, 'b1');
+    expect((await scopeIdsOf(b1))['t-escaped']).toBe('cy');
   });
 
   it('is filled with one read of each row when the migration of the brain opened adds it', async () => {
