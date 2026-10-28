@@ -50,6 +50,7 @@ import {
   createGuardrailBlockedStream,
   hasEvaluateOutput,
 } from './guardrailDispatcher';
+import { renderPlainText } from '../../api/runtime/turnFinalResponse';
 import { sanitizedFinalResponse } from './sanitizedFinalResponse';
 
 // ---------------------------------------------------------------------------
@@ -922,7 +923,8 @@ export class ParallelGuardrailDispatcher {
           isFinal: true,
           timestamp: chunk.timestamp,
           finalResponseText: text,
-          finalResponseTextPlain: text,
+          // the plain text a final reply carries, so a guard judges this reply as it judges one
+          finalResponseTextPlain: renderPlainText(text),
         };
         const verdict = await evaluateFinal(synthetic);
         if (verdict.outcome === 'block') {
@@ -1010,7 +1012,7 @@ async function* blockedOutput(
       isFinal: true,
       timestamp: new Date().toISOString(),
       finalResponseText: evaluation.replacementText,
-      finalResponseTextPlain: evaluation.replacementText,
+      finalResponseTextPlain: renderPlainText(evaluation.replacementText),
       metadata: { guardrail: { output: [serializeEvaluation(evaluation)] } },
     };
     yield replacement;

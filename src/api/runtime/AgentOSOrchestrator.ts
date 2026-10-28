@@ -34,6 +34,7 @@ import {
   IGMI,
   GMIOutput,
   GMIOutputChunkType,
+  type GMIOutputChunk,
   type GMIToolCallRefusal,
 } from '../../cognition/substrate/IGMI';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
@@ -68,7 +69,7 @@ import { ExternalToolResultHandler } from './ExternalToolResultHandler';
 import { GMIChunkTransformer } from './GMIChunkTransformer';
 import { TurnExecutionPipeline } from './TurnExecutionPipeline';
 import { gmiToolCallGateFor } from './toolCallGate';
-import { externalToolPauseCalls, streamsActionableToolCalls } from './externalToolPause';
+import { externalToolPauseCalls, streamedRequestForPause, streamsActionableToolCalls } from './externalToolPause';
 import { addReplyToConversation, finalResponseFieldsOf } from './turnFinalResponse';
 
 // Public config types extracted to types/OrchestratorConfig.ts
@@ -733,8 +734,8 @@ export class AgentOSOrchestrator {
     let didForceTerminate = false;
     let lifecycleDegraded = false;
     let keepStreamContextActive = false;
-    // whether the stream already handed the host a request it acts on: the host stops reading the turn's stream there
-    let streamedActionableToolCallRequest = false;
+    // the requests for host calls the GMI streamed: the host stops reading at the first, so they wait for the GMI's output
+    const streamedHostToolCallRequests: GMIOutputChunk[] = [];
     // the spend meter: processRequest reserved this turn under input.operationId; the turn keeps the lease alive and settles it
     const spendMeter = this.dependencies.spendMeter;
     const meteredOperationId = spendMeter && typeof input.operationId === 'string' && input.operationId.trim() ? input.operationId.trim() : undefined;
@@ -844,11 +845,14 @@ export class AgentOSOrchestrator {
             if (gmiChunk.type === GMIOutputChunkType.TEXT_DELTA && typeof gmiChunk.content === 'string' && gmiChunk.content.length > 0) {
               outputReached = true;
             }
-            // a request for calls the GMI runs itself is informational: the host reads on past it
+            // A request for calls the host runs waits for the GMI's output, which names the calls the turn stops for:
+            // the host stops reading at the first such request and runs only its calls. A request for calls the GMI
+            // runs itself is informational, and the host reads on past it.
             if (streamsActionableToolCalls(gmiChunk)) {
-              streamedActionableToolCallRequest = true;
+              streamedHostToolCallRequests.push(gmiChunk);
+            } else {
+              await this.chunkTransformer.transformAndPushGMIChunk(agentOSStreamId, streamContext, gmiChunk);
             }
-            await this.chunkTransformer.transformAndPushGMIChunk(agentOSStreamId, streamContext, gmiChunk);
 
             // NOTE: Tool calls may be executed internally by the GMI/tool orchestrator. Do not stop
             // streaming on TOOL_CALL_REQUEST; treat it as informational for observers/UI.
@@ -907,7 +911,15 @@ export class AgentOSOrchestrator {
           );
         }
 
-        if (!streamedActionableToolCallRequest) {
+        // One request reaches the host, after the pause is saved, naming the calls as the turn saved them: the GMI's
+        // own when it streamed one request for exactly these calls, and the turn's otherwise.
+        const streamedRequest = streamedRequestForPause(streamedHostToolCallRequests, pauseCalls);
+        if (streamedRequest) {
+          await this.chunkTransformer.transformAndPushGMIChunk(agentOSStreamId, streamContext, {
+            ...streamedRequest,
+            content: pauseCalls,
+          });
+        } else {
           await this.chunks.pushChunk(
             agentOSStreamId,
             AgentOSResponseChunkType.TOOL_CALL_REQUEST,
@@ -927,6 +939,13 @@ export class AgentOSOrchestrator {
         }
 
         return;
+      }
+
+      if (streamedHostToolCallRequests.length > 0) {
+        // the turn waits on no call, and a request would stop the host's read before the reply
+        console.warn(
+          `AgentOSOrchestrator: the GMI streamed ${streamedHostToolCallRequests.length} request(s) for host calls on stream ${agentOSStreamId}, but its output does not stop the turn; they were not streamed.`
+        );
       }
 
       const normalizedUsage = normalizeUsage(finalGMIStateForResponse.usage);

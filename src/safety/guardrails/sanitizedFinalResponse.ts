@@ -1,11 +1,12 @@
 /**
  * @fileoverview The final response a guardrail's `SANITIZE` leaves: every field that carries the reply reads the
- * guardrail's text, and no value parsed from the replaced reply stays. The output guardrails and the cross-agent
- * guardrails rewrite a final response with it.
+ * guardrail's text, the plain text field as plain text, and no value parsed from the replaced reply stays. The output
+ * guardrails and the cross-agent guardrails rewrite a final response with it.
  * @module backend/agentos/safety/guardrails/sanitizedFinalResponse
  */
 
 import type { StructuredReplyOutput } from '../../api/runtime/structuredReply';
+import { renderPlainText } from '../../api/runtime/turnFinalResponse';
 import type { AgentOSFinalResponseChunk } from '../../api/types/AgentOSResponse';
 
 /** The issue a withdrawn structured value records (`structured.meta.issues`). */
@@ -56,9 +57,10 @@ export function withReplyRewritten<T>(context: T, from: string | null, to: strin
 }
 
 /**
- * The final response with its reply replaced by a guardrail's text: the reply, its plain text and the reply in the
- * serialized conversation the chunk carries all read `text`, and a structured value parsed from the replaced reply is
- * withdrawn (`withdrawnStructuredReply()`), so no field keeps the reply the guardrail rewrote.
+ * The final response with its reply replaced by a guardrail's text: the reply and the reply in the serialized
+ * conversation the chunk carries read `text`, its plain text is `text` rendered as a turn renders its own reply
+ * (`renderPlainText()`), and a structured value parsed from the replaced reply is withdrawn
+ * (`withdrawnStructuredReply()`), so no field keeps the reply the guardrail rewrote.
  *
  * @param chunk - The final response the guardrail sanitized.
  * @param text - The guardrail's text (`GuardrailEvaluationResult.modifiedText`).
@@ -68,7 +70,7 @@ export function sanitizedFinalResponse(chunk: AgentOSFinalResponseChunk, text: s
   return {
     ...chunk,
     finalResponseText: text,
-    finalResponseTextPlain: text,
+    finalResponseTextPlain: text === null ? null : renderPlainText(text),
     // the serialized conversation the chunk carries holds the reply as the model wrote it: it reads the rewrite too
     updatedConversationContext: withReplyRewritten(chunk.updatedConversationContext, chunk.finalResponseText ?? null, text),
     ...(chunk.structured ? { structured: withdrawnStructuredReply(chunk.structured) } : {}),

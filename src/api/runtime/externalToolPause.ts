@@ -1,7 +1,8 @@
 /**
  * @fileoverview The rule that stops a turn for the host. The turn and each tool-result continuation decide with it
  * whether the GMI's output waits on calls the host runs; the chunk transformer reads with it which request the GMI
- * streamed reaches the host, and the turn whether such a request already handed the host its calls.
+ * streamed reaches the host, and the turn which requests for host calls the GMI streamed wait for its output and which
+ * one the host reads.
  * @module backend/agentos/api/runtime/externalToolPause
  */
 
@@ -64,11 +65,11 @@ export function streamedToolCalls(chunk: GMIOutputChunk): ToolCallRequest[] | un
 }
 
 /**
- * Whether a chunk a GMI streamed reaches the host as an actionable request, one whose calls the host runs and passes
- * back (`isActionableToolCallRequestChunk()`). The host stops reading the turn's stream at such a chunk, so a turn that
- * then stops for the host streams no request of its own. A chunk for a call the GMI runs itself does not stop the
- * host's read, and a chunk that names no call never reaches the host (`streamedToolCalls()`): a turn that streamed only
- * such chunks streams the request it stops for.
+ * Whether a chunk a GMI streamed is a request for calls the host runs and passes back, one the stream would report as
+ * actionable (`isActionableToolCallRequestChunk()`). The host stops reading the turn's stream at such a chunk, so the
+ * turn holds it until the GMI's output names the calls the turn stops for (`streamedRequestForPause()`). A chunk for a
+ * call the GMI runs itself does not stop the host's read and streams as it comes, and a chunk that names no call never
+ * reaches the host (`streamedToolCalls()`).
  *
  * @param chunk - A chunk the GMI streamed.
  * @returns Whether the stream reports the chunk as a `TOOL_CALL_REQUEST` with at least one call,
@@ -80,4 +81,38 @@ export function streamsActionableToolCalls(chunk: GMIOutputChunk): boolean {
   }
   const mode = toolCallChunkMode(chunk.metadata);
   return mode.executionMode === 'external' && mode.requiresExternalToolResult;
+}
+
+/**
+ * The request the GMI streamed that the host reads when its turn stops for `pauseCalls`: the one request for host calls
+ * it streamed (`streamsActionableToolCalls()`), when that request names exactly the calls of `pauseCalls`, by id. The
+ * host stops reading at the first request it acts on and runs only the calls it names, so any other set of streamed
+ * requests (one that names part of the calls, one per call, one that names a call the turn does not stop for) gives way
+ * to a request the turn builds for `pauseCalls`. The caller streams the request it picks with `pauseCalls` as its calls,
+ * the calls as the turn saved them.
+ *
+ * @param streamed - The requests for host calls the GMI streamed during the turn, in order.
+ * @param pauseCalls - The calls the turn stops for (`externalToolPauseCalls()`).
+ * @returns The streamed request whose rationale and metadata the host's request keeps, or undefined when the turn
+ *   streams a request of its own.
+ */
+export function streamedRequestForPause(
+  streamed: readonly GMIOutputChunk[],
+  pauseCalls: readonly ToolCallRequest[],
+): GMIOutputChunk | undefined {
+  if (streamed.length !== 1) {
+    return undefined;
+  }
+  const calls = streamedToolCalls(streamed[0]!);
+  if (!calls) {
+    return undefined;
+  }
+  const streamedIds = new Set(calls.map((call) => call.id));
+  const pauseIds = new Set(pauseCalls.map((call) => call.id));
+  const namesExactly =
+    streamedIds.size === calls.length &&
+    pauseIds.size === pauseCalls.length &&
+    streamedIds.size === pauseIds.size &&
+    [...streamedIds].every((id) => pauseIds.has(id));
+  return namesExactly ? streamed[0] : undefined;
 }
