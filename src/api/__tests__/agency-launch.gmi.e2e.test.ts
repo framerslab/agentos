@@ -146,4 +146,48 @@ describe('launch_agency on gmi()', () => {
     expect(getCapabilitySupport('agent', 'agencies')).toBe('accepted_but_deferred');
     expect(getCapabilitySupport('generation', 'agencies')).toBe('runtime_only');
   });
+
+  it('allowlists the parent cannot give are refused before any seat runs; a member named without them takes its seat as itself', async () => {
+    const k = key();
+    const tool = (name: string) => ({ description: `The ${name} tool.`, parameters: { type: 'object', properties: {} }, execute: async () => name });
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([
+          // maxDepth 1: a level-1 seat cannot launch.
+          { id: 'a', name: 'launch_agency', args: { goal: 'Check.', seats: [{ role: 'lead', instructions: 'Lead.', tools: ['launch_agency'] }] } },
+          // The parent has no web_fetch.
+          { id: 'b', name: 'launch_agency', args: { goal: 'Check.', seats: [{ role: 'lead', instructions: 'Lead.', tools: ['web_fetch'] }] } },
+          // memory_add is the parent's, and never a seat's in this release.
+          { id: 'c', name: 'launch_agency', args: { goal: 'Check.', seats: [{ role: 'checker', agentKey: 'tutor', tools: ['memory_add'] }] } },
+          { id: 'd', name: 'launch_agency', args: { goal: 'Check 2 + 2.', seats: [{ role: 'checker', agentKey: 'tutor', brief: 'Check the sum.' }] } },
+        ]),
+        reply.text('2 + 2 is 4.'),
+        reply.text('Checked.'),
+        reply.text('Hello.'),
+      ],
+    });
+    const tutor = gmi({ ...route(k), name: 'Tutor', instructions: 'You are the maths tutor.', tools: { memory_add: tool('memory_add') } });
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      tools: { search: tool('search'), memory_add: tool('memory_add') },
+      agencies: { launch: true, maxDepth: 1, members: { tutor } },
+    });
+
+    const result = await parent.session('p1').send('Check the sum.');
+    expect([0, 1, 2].map((i) => refusalOf(result, i))).toEqual(['tool_not_allowed', 'unknown_tool', 'tool_not_allowed']);
+    expect(result.toolCalls[2].error).toContain('a memory tool');
+    // The fourth launch ran, so a seat call is reachable: the member's turn is the one seat call the stub saw.
+    expect(launchOf(result, 3).seats).toMatchObject([{ role: 'checker', form: 'persistent', member: 'tutor', status: 'completed', summary: '2 + 2 is 4.' }]);
+    expect(s.seen).toHaveLength(3);
+    expect(systemText(s.seen[1])).toContain('You are the maths tutor.');
+    expect(lastUserText(s.seen[1])).toContain('Your role in this team: checker. Check the sum.');
+    // The schema offers the member form, since the agent lists members.
+    expect(JSON.stringify(s.seen[0].options.tools)).toContain('agentKey');
+    // The seat names no tools, so the member's seat call offers none of its own: its memory_add stays out of the team.
+    expect(offered(s.seen[1])).toEqual([]);
+    // The launch closed the seat's session alone: the member still serves its own sessions, with its own tools.
+    await tutor.session('t1').send('Hi.');
+    expect(offered(s.seen[3])).toEqual(['memory_add']);
+  });
 });
