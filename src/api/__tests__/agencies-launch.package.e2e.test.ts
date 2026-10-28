@@ -7,7 +7,11 @@
  * host's own tool is handed, warnings and construction errors.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+// The provider class alone is replaced: the package root reads the module's other exports (its default base URL).
+vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../core/llm/providers/implementations/OpenAIProvider')>()),
+  OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai'),
+}));
 import { AgencyConfigError, LAUNCH_AGENCY_TOOL_NAME, agent, gmi } from '../../index';
 import type { AgencyLaunchOptions, GenerateTextResult, ITool, LaunchAgencyResult } from '../../index';
 import { reply, script } from './helpers/stubProviders';
