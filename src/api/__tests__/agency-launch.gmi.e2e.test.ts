@@ -7,10 +7,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import { agent } from '../agent';
+import type { AgentOSConfig } from '../AgentOS';
 import { gmi } from '../gmi';
 import type { GenerateTextResult } from '../generateText';
 import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
 import { getCapabilitySupport } from '../runtime/capabilityContract';
+import type { Agent } from '../types';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
@@ -142,7 +144,10 @@ describe('launch_agency on gmi()', () => {
     expect(gmiWarning).toContain('gmi() accepted config it does not enforce yet: rag.');
     expect(gmiWarning).not.toContain('agencies');
     expect(getCapabilitySupport('gmi', 'agencies')).toBe('enforced');
-    expect(getCapabilitySupport('runtime', 'agencies')).toBe('enforced');
+    // The full runtime's AgentOSConfig declares no agencies option, so the contract defers the field there, as it does
+    // security. A config that gains the option fails the type check on this line, and the row moves to enforced with it.
+    const runtimeTakesAgencies: 'agencies' extends keyof AgentOSConfig ? true : false = false;
+    expect(getCapabilitySupport('runtime', 'agencies')).toBe(runtimeTakesAgencies ? 'enforced' : 'accepted_but_deferred');
     expect(getCapabilitySupport('agent', 'agencies')).toBe('accepted_but_deferred');
     expect(getCapabilitySupport('generation', 'agencies')).toBe('runtime_only');
   });
@@ -196,11 +201,38 @@ describe('launch_agency on gmi()', () => {
     const described = (s.seen[0].options.tools as Array<{ function: { name: string; description?: string } }>).find((t) => t.function.name === 'launch_agency')?.function.description ?? '';
     expect(described).toContain('a member you seat as itself by agentKey (tutor)');
     expect(described).toContain('One seat makes a subagent.');
+    // And that a member's seat names only tools the member has too: the launch that gave the tutor search was refused.
+    expect(described).toContain("A member's seat may name only tools the member also has.");
+    expect(JSON.stringify(s.seen[0].options.tools)).toContain('for a member, only those it also has');
     // The seat names no tools, so the member's seat call offers none of its own: its memory_add stays out of the team.
     expect(offered(s.seen[1])).toEqual([]);
     // The launch never closes the member: its own session, open since before the launch, still answers, offering the
     // member's own tools (closing the member would have closed that session, and its send would reject).
     await expect(ownSession.send('Hi.')).resolves.toMatchObject({ text: 'Hello.' });
     expect(offered(s.seen[3])).toEqual(['memory_add']);
+  });
+
+  it('a member put in the agencies.members record after the agent is built is never seated', async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [reply.tools([{ id: 'a', name: 'launch_agency', args: { goal: 'Help.', seats: [{ role: 'helper', agentKey: 'helper' }] } }]), reply.text('No team ran.')],
+    });
+    // The late member is a legacy agent, which the construction check refuses: its session runs every tool it has,
+    // with no seat's names and no gate. Its own key, so any call it made would show on its own script.
+    const k2 = key();
+    const late = script('openai', k2, { whole: true, replies: [reply.tools([{ id: 'x', name: 'wipe', args: {} }]), reply.text('Wiped.')] });
+    const wipe = vi.fn(async () => 'wiped');
+    const members: Record<string, Agent> = {};
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', agencies: { launch: true, members } });
+    members.helper = agent({ ...route(k2), instructions: 'Help.', tools: { wipe: { description: 'Wipes the store.', parameters: { type: 'object', properties: {} }, execute: wipe } } });
+
+    const result = await parent.session('p1').send('Get help.');
+    // The record is read when the agent is built, as the check reads it: a key added later names no member.
+    expect(refusalOf(result, 0)).toBe('unknown_member');
+    expect(late.seen).toHaveLength(0);
+    expect(wipe).not.toHaveBeenCalled();
+    expect(s.seen).toHaveLength(2);
+    // The table was built from the same record: it offers no member form.
+    expect(JSON.stringify(s.seen[0].options.tools)).not.toContain('agentKey');
   });
 });
