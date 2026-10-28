@@ -14,6 +14,8 @@
  * An older release goes on writing `''` to a brain that is already at version 3, where its migration never runs
  * again. `Brain` runs {@link fillScopeIds} for the brain it opens, at every open, and each importer runs it before it
  * looks for duplicates, so such a row is filed under the scope id its metadata names before an import reads the column.
+ * Its read goes through `idx_memory_traces_unfiled_scope_id`, a partial index of the rows it can fill, so an open of a
+ * brain with nothing left to fill reads none of its traces.
  *
  * A row's JSON is read in code, not with a SQL JSON function: `json_extract` (SQLite) and the `::jsonb` cast
  * (Postgres) raise on a malformed row, which would stop the migration for the whole Brain. A row whose JSON cannot be
@@ -102,11 +104,28 @@ const NAMES_SCOPE_ID =
   ` OR metadata LIKE '%\\u%' ESCAPE '!'`;
 
 /**
+ * The partial index of the rows a fill can give a scope id: the rows that hold `scope_id` `''` while their metadata
+ * text can name one ({@link NAMES_SCOPE_ID}). The fill that runs at every open and before every import reads through
+ * it, so it walks none of a brain's other rows: a brain whose traces all hold their scope id has no entry here. SQLite
+ * and Postgres use a partial index only for a query whose `WHERE` holds the index's own terms, so the fill's read
+ * holds `scope_id = ''` and `(NAMES_SCOPE_ID)` as written here.
+ */
+const UNFILED_SCOPE_ID_INDEX_DDL =
+  `CREATE INDEX IF NOT EXISTS idx_memory_traces_unfiled_scope_id ON memory_traces (brain_id, id) WHERE scope_id = '' AND (${NAMES_SCOPE_ID})`;
+
+/** The indexes {@link ensureScopeIdColumn} gives `memory_traces`, each with its name. */
+const SCOPE_ID_INDEXES: ReadonlyArray<{ name: string; ddl: string }> = [
+  { name: 'idx_memory_traces_brain_scope_id', ddl: SCOPE_ID_INDEX_DDL },
+  { name: 'idx_memory_traces_unfiled_scope_id', ddl: UNFILED_SCOPE_ID_INDEX_DDL },
+];
+
+/**
  * Fills one brain's `scope_id` from the metadata JSON for its rows that hold `''`. Pages by `id` inside the brain, so
  * each page is a range read of the primary key, and writes each page's values in one statement, to the rows that
  * still hold `''`.
  *
- * @param named - Read only the rows whose metadata text can name a scope id other than `''`.
+ * @param named - Read only the rows whose metadata text can name a scope id other than `''`, through the index of
+ *   those rows ({@link UNFILED_SCOPE_ID_INDEX_DDL}) where the table has it.
  */
 async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: string, named = false): Promise<void> {
   const filter = named ? ` AND (${NAMES_SCOPE_ID})` : '';
@@ -138,7 +157,8 @@ async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: s
 /**
  * Files the traces of one brain that hold `scope_id` `''` while their metadata names a scope id: the rows a release
  * older than the column writes, with the column's default, to a brain that is already at schema version 3. Only the
- * rows whose metadata text can name a scope id other than `''` are read; a row whose JSON cannot be read, or whose
+ * rows whose metadata text can name a scope id other than `''` are read, through the index that holds those rows
+ * alone, so a brain with none left to fill costs one probe of that index; a row whose JSON cannot be read, or whose
  * `scopeId` is not a string, keeps `''`. A row that holds a scope id is never written.
  *
  * `Brain` runs it for the brain it opens, at every open. Each importer runs it before its first duplicate check,
@@ -162,8 +182,9 @@ async function backfillEveryBrain(adapter: StorageAdapter): Promise<void> {
 }
 
 /**
- * Gives `memory_traces` its `scope_id` column and index. Adding the column fills it for every row of the table.
- * A store without the table is left alone: the schema step that follows creates it with the column.
+ * Gives `memory_traces` its `scope_id` column and the column's two indexes: the one a per-scope read uses and the one
+ * of the rows a fill can give a scope id. Adding the column fills it for every row of the table, before either index
+ * is built. A store without the table is left alone: the schema step that follows creates it with the column.
  *
  * @param adapter - The store, or a migration's transaction.
  * @returns Whether this call added the column, and so filled every row of the table.
@@ -182,10 +203,10 @@ export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<bool
   }
   // Postgres takes the table's SHARE lock before it checks IF NOT EXISTS, so an existing index is skipped by name:
   // otherwise every open would wait for a long write transaction on memory_traces and hold up the writers behind it.
-  if (isPostgres(adapter) && (await postgresIndexExists(adapter, 'idx_memory_traces_brain_scope_id', 'memory_traces'))) {
-    return added;
+  for (const { name, ddl } of SCOPE_ID_INDEXES) {
+    if (isPostgres(adapter) && (await postgresIndexExists(adapter, name, 'memory_traces'))) continue;
+    await adapter.exec(ddl);
   }
-  await adapter.exec(SCOPE_ID_INDEX_DDL);
   return added;
 }
 
