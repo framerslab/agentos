@@ -14,6 +14,7 @@
  * @module @framers/agentos/emergent/PersonalityMutationStore
  */
 
+import { randomUUID } from 'node:crypto';
 import type { IStorageAdapter } from './EmergentToolRegistry.js';
 
 // ============================================================================
@@ -159,10 +160,16 @@ export class PersonalityMutationStore {
   /**
    * Idempotent schema initialization.
    *
-   * Creates the `personality_mutations` table and its agent/trait index if
-   * they don't already exist. Uses the adapter's `exec()` method when
-   * available (for multi-statement DDL), falling back to individual `run()`
-   * calls for adapters that don't support it.
+   * Creates the `personality_mutations` table and its agent/trait index, and
+   * the `personality_decay_cycles` guard table of {@link decayForAgent}, if
+   * they don't already exist. The guard table's `applied_at` column holds the
+   * owner token of the call that applied a cycle. It keeps the BIGINT
+   * declaration earlier releases made, so no migration runs: SQLite stores
+   * text that does not read as a number as TEXT in such a column
+   * (https://www.sqlite.org/datatype3.html#type_affinity), and the rows an
+   * earlier release wrote hold a number there. Uses the adapter's `exec()`
+   * method when available (for multi-statement DDL), falling back to
+   * individual `run()` calls for adapters that don't support it.
    *
    * @returns A promise that resolves when the schema is ready.
    */
@@ -367,6 +374,13 @@ export class PersonalityMutationStore {
    * decay unit must be all-or-nothing so a mid-cycle failure cannot
    * double-decay on retry.
    *
+   * Each call writes a fresh `randomUUID()` token into the guard row's
+   * `applied_at`, reads the row back, and decays only when the row holds its
+   * own token; every other call for that cycle returns `skipped`. A token
+   * belongs to one call, so two calls in one millisecond never both own a
+   * cycle. A guard row an earlier release wrote holds a millisecond stamp
+   * there, a number, which never equals a token, so its cycle stays applied.
+   *
    * @param agentId - The agent whose mutations decay (other agents' rows
    *   are untouched — the class defect in `decayAll`).
    * @param rate    - Strength subtracted per cycle (typically
@@ -393,18 +407,23 @@ export class PersonalityMutationStore {
     return this.db.transaction(async (tx) => {
       // Conflict-safe guard INSERT FIRST (no check-then-insert window): a
       // concurrent same-cycle caller's insert is ignored, and ownership is
-      // decided by reading back which applied_at stamp won. The loser
+      // decided by reading back whose token the guard row holds. The loser
       // returns the promised `skipped` no-op instead of a uniqueness error.
-      const stamp = Date.now() + Math.random();
+      // The token is a UUID, not a time: near 1.8e12 adjacent doubles are
+      // 2^-12 apart, so `Date.now() + Math.random()` gives two calls in one
+      // millisecond the same number about 1 time in 4096.
+      const token = randomUUID();
       await tx.run(
         'INSERT OR IGNORE INTO personality_decay_cycles (agent_id, cycle_id, applied_at) VALUES (?, ?, ?)',
-        [agentId, cycleId, stamp],
+        [agentId, cycleId, token],
       );
+      // A token (a string), or the stamp (a number) of a row an earlier
+      // release wrote.
       const guard = (await tx.get(
         'SELECT applied_at FROM personality_decay_cycles WHERE agent_id = ? AND cycle_id = ?',
         [agentId, cycleId],
-      )) as { applied_at?: number } | undefined;
-      if (guard?.applied_at !== stamp) return { decayed: 0, pruned: 0, skipped: true };
+      )) as { applied_at?: string | number } | null | undefined;
+      if (guard?.applied_at !== token) return { decayed: 0, pruned: 0, skipped: true };
 
       const stale = (await tx.all(
         'SELECT id FROM personality_mutations WHERE agent_id = ? AND strength <= 0.1',

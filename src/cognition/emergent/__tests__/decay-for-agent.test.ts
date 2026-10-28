@@ -1,9 +1,9 @@
 /**
  * @fileoverview Tests for PersonalityMutationStore.decayForAgent
  * (spec batch-1 C6): agent scoping, cycle-id idempotency via the
- * guard-first transaction, pre-existing sub-threshold pruning, post-decay
- * pruning, atomicity on mid-transaction failure, and the
- * transaction-required error.
+ * guard-first transaction (a replay in the same millisecond included),
+ * pre-existing sub-threshold pruning, post-decay pruning, atomicity on
+ * mid-transaction failure, and the transaction-required error.
  *
  * The fake adapter emulates exactly the SQL statements the store issues
  * (two tables, verb + WHERE pattern matched) with snapshot-rollback
@@ -17,7 +17,8 @@ interface Row { id: string; agentId: string; strength: number }
 
 class FakeAdapter {
   rows = new Map<string, Row>();
-  cycles = new Map<string, number>();
+  /** Each guard row's applied_at as written: SQLite keeps a token there as text. */
+  cycles = new Map<string, unknown>();
   /** When set, the Nth write inside a transaction throws (1-based). */
   failOnWrite = 0;
   private writes = 0;
@@ -39,7 +40,7 @@ class FakeAdapter {
     if (sql.includes('INSERT OR IGNORE INTO personality_decay_cycles')) {
       this.bump();
       const key = `${params[0]}|${params[1]}`;
-      if (!this.cycles.has(key)) this.cycles.set(key, Number(params[2]));
+      if (!this.cycles.has(key)) this.cycles.set(key, params[2]);
       return {};
     }
     if (sql.includes('DELETE FROM personality_mutations WHERE id = ?')) {

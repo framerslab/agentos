@@ -63,4 +63,31 @@ describe('PersonalityMutationStore.decayForAgent on SQLite', () => {
     expect(replay).toEqual({ decayed: 0, pruned: 0, skipped: true });
     expect(await strengthOf(store)).toBeCloseTo(0.95);
   });
+
+  it('a cycle an earlier release applied stays applied: its guard row holds the stamp 1793194099407.37, which no token equals', async () => {
+    const { db, store } = await storeWithOneMutation();
+    await db.run('INSERT INTO personality_decay_cycles (agent_id, cycle_id, applied_at) VALUES (?, ?, ?)', [
+      'a1',
+      'day:2026-10-28',
+      1_793_194_099_407.37,
+    ]);
+    const earlier = await db.get<{ applied_at: unknown }>(
+      'SELECT applied_at FROM personality_decay_cycles WHERE agent_id = ? AND cycle_id = ?',
+      ['a1', 'day:2026-10-28'],
+    );
+    expect(earlier?.applied_at).toBe(1_793_194_099_407.37);
+
+    expect(await store.decayForAgent('a1', 0.05, 'day:2026-10-28')).toEqual({ decayed: 0, pruned: 0, skipped: true });
+    expect(await strengthOf(store)).toBe(1);
+
+    // The next cycle's guard row keeps its owner's token as text in the BIGINT column.
+    expect(await store.decayForAgent('a1', 0.05, 'day:2026-10-29')).toEqual({ decayed: 1, pruned: 0 });
+    expect(await strengthOf(store)).toBeCloseTo(0.95);
+    const owned = await db.get<{ kind: string; applied_at: unknown }>(
+      'SELECT typeof(applied_at) AS kind, applied_at FROM personality_decay_cycles WHERE agent_id = ? AND cycle_id = ?',
+      ['a1', 'day:2026-10-29'],
+    );
+    expect(owned?.kind).toBe('text');
+    expect(owned?.applied_at).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
 });
