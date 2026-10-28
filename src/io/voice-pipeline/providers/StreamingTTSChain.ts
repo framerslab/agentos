@@ -16,10 +16,11 @@
  * that completes its flush as it reports a lost connection leaves the text to
  * the backup. A `cancel()` during the switch cuts the request and not the
  * switch: the backup takes the text admitted after it, none of the cut
- * request's. Under a `ProviderPolicy` a request that has already produced
- * audio is never sent again: the facade fails rather than repeat speech the
- * listener may have heard. Under the legacy policy the text is sent again
- * either way.
+ * request's, and a `writeTokens()` that waited on the switch when the cancel
+ * came admits nothing. Under a `ProviderPolicy` a request that has already
+ * produced audio is never sent again: the facade fails rather than repeat
+ * speech the listener may have heard. Under the legacy policy the text is
+ * sent again either way.
  */
 
 import { EventEmitter } from 'node:events';
@@ -99,15 +100,26 @@ export interface StreamingTTSChainOptions {
    * failed and closed, and the next provider is tried; from the moment its
    * failure is recorded, nothing it emits is forwarded but its `'usage'`, so a
    * backup that reports a lost connection and completes its flush in one call
-   * leaves the text to the next provider. An `'error'` the backup reports after
-   * a `cancel()` during the switch is the cut request's, though the next
-   * request's text has come: the backup is passed over only when it refuses a
-   * write of that text or closes. Text pushed during a
+   * leaves the text to the next provider. An `'error'` carries no request, so
+   * the facade reads it by when it arrives. After a `cancel()` an `'error'` of
+   * the session in use is the cut request's until the next request's text is
+   * admitted; a backup the cancel reached during the switch keeps that until
+   * the switch ends or another backup is attached, though the next request's
+   * text has come, as a write the cancel cut reports it, and is passed over
+   * only when it refuses a write of that text or closes. A backup that really
+   * fails in that window, reporting `'error'` with no `'close'` and refusing
+   * no write, stays in use, and a `flush()` that waits on its flush may never
+   * complete; a host that sees that closes the facade and starts a new
+   * session. An `'error'` after that, once the switch has ended and the next
+   * request's text has come, is the session's own failure and begins a
+   * switch. Text pushed during a
    * switch goes to the backup: the replay sends what comes before the backup
    * has taken it, and what comes after goes straight to it. A `cancel()` cuts
    * the request and not a switch under way, since the facade still needs a
    * provider for the next request: the backup takes the text admitted after
-   * the cancel and none of the cut request's. A provider close after
+   * the cancel and none of the cut request's, and a `writeTokens()` that
+   * waited on the switch when the cancel came admits nothing and resolves, as
+   * a write the cancel cut in flight does. A provider close after
    * `flush_complete`, after its `flush()` resolved or after `cancel()` ends
    * the facade with one `'close'`; a close while its flush is still under way
    * is a failure like any other. A `flush()` counts for the request it began
@@ -219,17 +231,21 @@ export class StreamingTTSChain implements IStreamingTTS {
    * admits text within `maxReplayCharacters` and, on the active session's error, or its close before its flush
    * completed or `cancel()`, cancels and closes it, opens the next remaining provider (authorized first under a
    * `ProviderPolicy`) and sends it the admitted text. A backup that reports an error or a close while it takes that
-   * text, or refuses a write of it, is recorded as failed and closed, and the next remaining provider is opened; so
-   * is one without the pull contract when the audio goes to a sink, but without a recorded failure. The active
-   * session's warnings reach the facade, as `Error('provider warning')` under a `ProviderPolicy`. Audio,
+   * text, or refuses a write of it, is recorded as failed and closed, and the next remaining provider is opened (an
+   * error it reports after a `cancel()` reached it, until the switch ends or another backup is attached, is the cut
+   * request's and no failure); so is one without the pull contract when the audio goes to a sink, but without a
+   * recorded failure. The active session's warnings reach the facade, as `Error('provider warning')` under a
+   * `ProviderPolicy`. Audio,
    * `flush_complete`, warnings and errors of a session that is no longer active never reach the facade; its `usage`
    * reports do. A session is no longer active from the moment its failure begins a switch, though the switch takes it
    * out of use only in a later promise job, so what it emits in the same call as its error, as a frame it held and the
    * `flush_complete` of its flush, ends nothing and goes nowhere. `close()` stops a switch under way, and a backup that
    * opens after it is cancelled and closed. `cancel()` cuts the request and not the switch: the switch goes on, the
    * backup takes the text admitted since the cancel, and a replay under way when it comes starts over on that text.
-   * `cancel()` and `close()` advance an epoch, and a flush ends without flushing once the epoch it began in has
-   * passed, so the flush of a cut request completes nothing of the next one. Text pushed during a switch waits while
+   * `cancel()` and `close()` advance an epoch; a flush ends without flushing once the epoch it began in has passed,
+   * so the flush of a cut request completes nothing of the next one, and a `writeTokens()` that waited on a switch
+   * admits nothing and resolves once the epoch it was issued in has passed, as a write the cancel cut in flight does,
+   * while after `close()` it throws `synthesis closed`. Text pushed during a switch waits while
    * the replay is the backup's to send, and goes straight to the backup once it has taken the replay. With the pull
    * contract (`setAudioSink()` and `writeTokens()`), audio flows only through the sink, and a chunk emitted as
    * `'audio'` as well ends the facade.
@@ -273,7 +289,8 @@ export class StreamingTTSChain implements IStreamingTTS {
     // Set when cancel() comes during a switch, once its backup is attached: until the switch ends or attaches another
     // backup, an error that backup reports is the cut request's, as a write the cancel cut reports it, though the next
     // request's text has come. The replay finds a backup that has really failed when it refuses that text's write, or
-    // closes.
+    // closes; one that fails with an error alone in that window stays in use, the cost of not ending the next request on
+    // the cut's error.
     let cutInSwitch = false;
     let sink: ((chunk: EncodedAudioChunk) => Promise<void>) | undefined;
     // A promise the facade settles itself.
@@ -605,8 +622,12 @@ export class StreamingTTSChain implements IStreamingTTS {
         sink = nextSink;
         if (current) bindSink(current);
       },
+      // A write that waited on a switch was issued before any cancel() that came meanwhile, so it is the cut request's:
+      // it admits nothing and resolves, as a write the cancel cut in flight does; after close() it throws, as any write.
       writeTokens: async (text: string): Promise<void> => {
+        const request = epoch;
         await switching;
+        if (!closed && epoch !== request) return;
         admit(text);
         if (!current) throw new Error('synthesis unavailable');
         try {
