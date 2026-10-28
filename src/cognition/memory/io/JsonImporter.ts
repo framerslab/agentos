@@ -7,7 +7,10 @@
  *
  * Trace deduplication is performed via SHA-256 content hash inside the trace's
  * scope and scope id by default, but it can be disabled via `{ dedup: false }`
- * on the importer or `Memory.importFrom`.
+ * on the importer or `Memory.importFrom`. A trace a release older than
+ * `memory_traces.scope_id` wrote holds `''` in that column whatever scope id
+ * its metadata names; the import files such traces under that scope id before
+ * its first duplicate check (`fillScopeIds`).
  *
  * @module memory/io/JsonImporter
  */
@@ -18,6 +21,7 @@ import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { base64ToBytes } from './base64.js';
 import { importedScopeId } from './importScope.js';
+import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -255,6 +259,8 @@ export class JsonImporter {
 
     await this.brain.transaction(async (trx) => {
       await this._importMeta(trx, payload.meta);
+      // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
+      if (context.dedup) await fillScopeIds(trx, this.brain.brainId);
       await this._importTraces(trx, payload.traces, result, context);
       await this._importNodes(trx, payload.nodes ?? [], result, context);
       await this._importEdges(trx, payload.edges ?? [], result, context);

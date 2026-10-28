@@ -5,10 +5,19 @@
  * with an index on (brain_id, scope, scope_id, created_at).
  *
  * Idempotent. The column is added once per table: when this step adds it, every row of the table is filled, whatever
- * brain it belongs to. Each brain's own migration then fills that brain's rows that hold `''` again, which catches rows
- * an older release wrote after another brain's migration added the column (such a release writes the column's
- * default). `Brain` runs {@link ensureScopeIdColumn} on every open as well, for a table another path created without
- * the column (a migration engine's copy, a file an import reads).
+ * brain it belongs to, and the brain being migrated is not read again. When the column is already there, a brain's
+ * migration fills that brain's rows that hold `''`, which catches rows an older release wrote after another brain's
+ * migration added the column (such a release writes the column's default). `Brain` runs {@link ensureScopeIdColumn}
+ * on every open as well, for a table another path created without the column (a migration engine's copy, a file an
+ * import reads).
+ *
+ * An older release goes on writing `''` to a brain that is already at version 3, where its migration never runs
+ * again. `Brain` runs {@link fillScopeIds} for the brain it opens, at every open, and each importer runs it before it
+ * looks for duplicates, so such a row is filed under the scope id its metadata names before an import reads the column.
+ * Its read goes through `idx_memory_traces_unfiled_scope_id`, a partial index of the rows that hold `''` (on SQLite,
+ * only those whose metadata text can name a scope id), and returns the rows whose metadata text can name one. The fill
+ * files each such row whose JSON names one. A row whose JSON names none other than `''` (JSON that cannot be read, a
+ * `null` scope id, a nested `scopeId` key) keeps `''` and is read again by the next fill.
  *
  * A row's JSON is read in code, not with a SQL JSON function: `json_extract` (SQLite) and the `::jsonb` cast
  * (Postgres) raise on a malformed row, which would stop the migration for the whole Brain. A row whose JSON cannot be
@@ -82,15 +91,65 @@ function scopeIdOfMetadata(metadata: string | null | undefined): string {
 }
 
 /**
- * Fills one brain's `scope_id` from the metadata JSON for its rows that hold `''`. Pages by `id` inside the brain, so
- * each page is a range read of the primary key, and writes each page's values in one statement.
+ * Matches a row whose metadata text can name a scope id other than `''`. Either it holds `"scopeId"`, and not only once
+ * with the value `""`, as `JSON.stringify` writes the metadata of a trace `remember()` files under no scope id; or it
+ * holds a `\u` escape, with which a writer can spell any letter of the key (`JSON.parse` reads `"\u0073copeId"` as
+ * `scopeId`). A fill gives a scope id to no other row, so the fill that runs at every open reads only these, and the
+ * traces a brain holds under no scope id are not read back each time. A row whose text holds `"scopeId"` once, and no
+ * `\u`, is excluded only when that one `"scopeId"` reads `""`: whether it is the top-level key or a nested one, the
+ * top-level scope id is then `''` or missing. SQLite's `LIKE` ignores ASCII case, which counts more occurrences and so
+ * excludes no further row. `ESCAPE '!'` makes the backslash a plain character for Postgres, whose `LIKE` otherwise
+ * reads it as the escape character; SQLite's `LIKE` has none unless one is named.
  */
-async function backfill(adapter: StorageAdapter, brainId: string): Promise<void> {
+const NAMES_SCOPE_ID =
+  `(metadata LIKE '%"scopeId"%' AND NOT (metadata LIKE '%"scopeId":""%' AND metadata NOT LIKE '%"scopeId"%"scopeId"%'))` +
+  ` OR metadata LIKE '%\\u%' ESCAPE '!'`;
+
+/**
+ * The partial index the fill that runs at every open and before every import reads through, so it walks none of a
+ * brain's rows that hold a scope id: a brain whose traces all hold their scope id has no entry here.
+ *
+ * On SQLite it holds the rows that hold `scope_id` `''` while their metadata text can name a scope id
+ * ({@link NAMES_SCOPE_ID}), so the traces a brain holds under no scope id have no entry either. SQLite uses a partial
+ * index only for a query whose `WHERE` holds each of the index's terms, so the fill's read holds `scope_id = ''` and
+ * `(NAMES_SCOPE_ID)` as written here.
+ *
+ * On Postgres it holds every row that holds `scope_id` `''`, and the fill's read tests each one's metadata on the
+ * server. Postgres can update a row without writing any of the table's indexes (a heap-only update) only when the
+ * update changes no column that an index reads, in its key, an expression or its predicate. A recall writes the
+ * metadata of each trace it returns, so a predicate that read `metadata` would make each of those writes add an entry
+ * to every index of `memory_traces`, the full-text GIN index among them.
+ *
+ * @param postgres - Whether the index is made on Postgres.
+ */
+function unfiledScopeIdIndexDdl(postgres: boolean): string {
+  const rows = postgres ? `scope_id = ''` : `scope_id = '' AND (${NAMES_SCOPE_ID})`;
+  return `CREATE INDEX IF NOT EXISTS idx_memory_traces_unfiled_scope_id ON memory_traces (brain_id, id) WHERE ${rows}`;
+}
+
+/** The indexes {@link ensureScopeIdColumn} gives `memory_traces` on `adapter`, each with its name. */
+function scopeIdIndexes(adapter: StorageAdapter): ReadonlyArray<{ name: string; ddl: string }> {
+  return [
+    { name: 'idx_memory_traces_brain_scope_id', ddl: SCOPE_ID_INDEX_DDL },
+    { name: 'idx_memory_traces_unfiled_scope_id', ddl: unfiledScopeIdIndexDdl(isPostgres(adapter)) },
+  ];
+}
+
+/**
+ * Fills one brain's `scope_id` from the metadata JSON for its rows that hold `''`. Pages by `id` inside the brain, so
+ * each page is a range read of the primary key, and writes each page's values in one statement, to the rows that
+ * still hold `''`.
+ *
+ * @param named - Read only the rows whose metadata text can name a scope id other than `''`, through the partial index
+ *   of the rows that hold `''` ({@link unfiledScopeIdIndexDdl}) where the table has it.
+ */
+async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: string, named = false): Promise<void> {
+  const filter = named ? ` AND (${NAMES_SCOPE_ID})` : '';
   let afterId = '';
   for (;;) {
     const rows = await adapter.all<{ id: string; metadata: string | null }>(
       `SELECT id, metadata FROM memory_traces
-        WHERE brain_id = ? AND scope_id = '' AND id > ?
+        WHERE brain_id = ? AND scope_id = '' AND id > ?${filter}
         ORDER BY id LIMIT ${PAGE}`,
       [brainId, afterId],
     );
@@ -102,13 +161,33 @@ async function backfill(adapter: StorageAdapter, brainId: string): Promise<void>
     if (filled.length > 0) {
       await adapter.run(
         `UPDATE memory_traces SET scope_id = CASE id ${filled.map(() => 'WHEN ? THEN ?').join(' ')} END
-          WHERE brain_id = ? AND id IN (${filled.map(() => '?').join(', ')})`,
+          WHERE brain_id = ? AND scope_id = '' AND id IN (${filled.map(() => '?').join(', ')})`,
         [...filled.flat(), brainId, ...filled.map(([id]) => id)],
       );
     }
     if (rows.length < PAGE) return;
     afterId = rows[rows.length - 1]!.id;
   }
+}
+
+/**
+ * Files the traces of one brain that hold `scope_id` `''` while their metadata names a scope id: the rows a release
+ * older than the column writes, with the column's default, to a brain that is already at schema version 3. Only the
+ * rows whose metadata text can name a scope id other than `''` are read back, through the partial index of the rows
+ * that hold `''` ({@link unfiledScopeIdIndexDdl}): on SQLite it holds those rows alone, so a brain with none costs one
+ * probe of it; on Postgres it holds every row that holds `''`, whose metadata the read tests on the server. A row
+ * whose JSON gives no scope id other than `''` (JSON that cannot be read, a `scopeId` that is not a string, a nested
+ * `scopeId` key) keeps `''` and is read again by the next fill. A row that holds a scope id is never written.
+ *
+ * `Brain` runs it for the brain it opens, at every open. Each importer runs it before its first duplicate check,
+ * inside the import's transaction where it has one: an older release can write to a brain while this process holds
+ * it open.
+ *
+ * @param adapter - The store, or the transaction an import runs in.
+ * @param brainId - The brain whose traces are filed.
+ */
+export async function fillScopeIds(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: string): Promise<void> {
+  await backfill(adapter, brainId, true);
 }
 
 /**
@@ -121,13 +200,16 @@ async function backfillEveryBrain(adapter: StorageAdapter): Promise<void> {
 }
 
 /**
- * Gives `memory_traces` its `scope_id` column and index. Adding the column fills it for every row of the table.
- * A store without the table is left alone: the schema step that follows creates it with the column.
+ * Gives `memory_traces` its `scope_id` column and the column's two indexes: the one a per-scope read uses and the one
+ * of the rows a fill can give a scope id. Adding the column fills it for every row of the table, before either index
+ * is built. A store without the table is left alone: the schema step that follows creates it with the column.
  *
  * @param adapter - The store, or a migration's transaction.
+ * @returns Whether this call added the column, and so filled every row of the table.
  */
-export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<void> {
-  if (!(await tableExists(adapter, 'memory_traces'))) return;
+export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<boolean> {
+  if (!(await tableExists(adapter, 'memory_traces'))) return false;
+  let added = false;
   if (!(await hasColumn(adapter, 'memory_traces', 'scope_id'))) {
     // On Postgres the first opens of two brains can both find the column missing: the second ALTER waits for the
     // first's lock and then finds the column, which `IF NOT EXISTS` lets it pass. SQLite has no such clause; its
@@ -135,19 +217,35 @@ export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<void
     const ifNotExists = isPostgres(adapter) ? 'IF NOT EXISTS ' : '';
     await adapter.exec(`ALTER TABLE memory_traces ADD COLUMN ${ifNotExists}scope_id TEXT NOT NULL DEFAULT ''`);
     await backfillEveryBrain(adapter);
+    added = true;
   }
   // Postgres takes the table's SHARE lock before it checks IF NOT EXISTS, so an existing index is skipped by name:
   // otherwise every open would wait for a long write transaction on memory_traces and hold up the writers behind it.
-  if (isPostgres(adapter) && (await postgresIndexExists(adapter, 'idx_memory_traces_brain_scope_id', 'memory_traces'))) return;
-  await adapter.exec(SCOPE_ID_INDEX_DDL);
+  for (const { name, ddl } of scopeIdIndexes(adapter)) {
+    if (isPostgres(adapter) && (await postgresIndexExists(adapter, name, 'memory_traces'))) continue;
+    await adapter.exec(ddl);
+  }
+  return added;
 }
 
+/**
+ * Schema version 3: `memory_traces.scope_id`, each trace's scope id as a column of its own, and the index
+ * `idx_memory_traces_brain_scope_id` a per-scope read uses. `MigrationRunner` runs it for a brain whose
+ * `schema_version` is below 3, inside the migration's transaction (`BEGIN IMMEDIATE` on SQLite, a transaction that
+ * holds the brain's advisory lock on Postgres), and then records version 3 for that brain.
+ *
+ * The first brain of a table to migrate adds the column ({@link ensureScopeIdColumn}), which fills it for every brain
+ * the table holds from each row's metadata JSON. A brain that migrates after that fills its own rows that hold `''`:
+ * a release older than the column may have written them since. A store with no `memory_traces` is left to the schema
+ * step that follows, which creates the table with the column.
+ */
 export const v2ToV3: Migration = {
   version: 3,
   async up(adapter: StorageAdapter, _features: StorageFeatures, brainId: string): Promise<void> {
     // A file with no `memory_traces` gets the table, with the column, from the schema step that follows.
     if (!(await tableExists(adapter, 'memory_traces'))) return;
-    await ensureScopeIdColumn(adapter);
+    // Adding the column filled every brain's rows, this brain's among them.
+    if (await ensureScopeIdColumn(adapter)) return;
     await backfill(adapter, brainId);
   },
 };
