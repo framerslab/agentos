@@ -42,6 +42,7 @@ import {
   GuardrailAction,
   type GuardrailContext,
   type GuardrailEvaluationResult,
+  type GuardrailOutputPayload,
   type IGuardrailService,
 } from './IGuardrailService';
 import { ParallelGuardrailDispatcher } from './ParallelGuardrailDispatcher';
@@ -137,7 +138,8 @@ export interface GuardrailOutputVerdict {
    * The ids of the actionable tool calls (`executionMode: 'external'`) a block withheld from the caller: the calls of
    * the tool-call chunk it ended the stream in place of, or, in hold mode, of the tool-call chunk after the text it
    * blocked. AgentOS drops the pause the runtime saved for them when the turn stopped for them. Unset when a verdict
-   * withheld no actionable call.
+   * withheld no actionable call; after such a block AgentOS drops the pause the turn saves later, once the turn ends,
+   * and never offers it meanwhile.
    */
   toolCallIds?: string[];
 }
@@ -298,13 +300,18 @@ export async function* wrapOutputGuardrails(
 /**
  * Judges one TOOL_CALL_REQUEST chunk with the guardrails that set `config.evaluateToolCalls`, as the output stream
  * judges the tool-call chunks it carries: resolves to the blocking evaluation (a SANITIZE is applied as a BLOCK), or to
- * null when the guardrails let the chunk pass.
+ * null when the guardrails let the chunk pass. `ragSources` reach the guardrails as the stream's sources do.
  */
-export type GuardrailToolCallGate = (chunk: AgentOSToolCallRequestChunk) => Promise<GuardrailEvaluationResult | null>;
+export type GuardrailToolCallGate = (
+  chunk: AgentOSToolCallRequestChunk,
+  ragSources?: GuardrailOutputPayload['ragSources'],
+) => Promise<GuardrailEvaluationResult | null>;
 
 /**
- * Create the tool-call gate over the guardrails that evaluate tool calls. AgentOS asks it about each call the runtime
- * runs itself (`executionMode: 'internal'`) before the call runs, so a block refuses the call and the tool never runs.
+ * Create the tool-call gate over the guardrails that evaluate tool calls. AgentOS asks it about the calls the runtime
+ * runs itself (`executionMode: 'internal'`) before any call of their model step runs: each call alone, then the
+ * step's calls that pass alone together, as the stream's chunk for the step holds them, each time with the sources the
+ * turn retrieved. A block refuses the calls it was asked about, and their tools never run.
  *
  * @param service - Single guardrail or array of guardrails
  * @param context - Conversation context for policy decisions
@@ -318,8 +325,8 @@ export function createToolCallGate(
   if (!services.some((svc) => hasEvaluateOutput(svc) && svc.config?.evaluateToolCalls === true)) {
     return undefined;
   }
-  return async (chunk) => {
-    const verdict = await ParallelGuardrailDispatcher.evaluateToolCall(services, context, chunk);
+  return async (chunk, ragSources) => {
+    const verdict = await ParallelGuardrailDispatcher.evaluateToolCall(services, context, chunk, ragSources);
     return verdict.outcome === 'block' ? verdict.evaluation : null;
   };
 }

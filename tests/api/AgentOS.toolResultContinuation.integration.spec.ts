@@ -232,6 +232,30 @@ function shellGuard(internalOnly: boolean): IGuardrailService {
   };
 }
 
+/** A source the user's turn retrieves, marked confidential. */
+const PAYROLL_SOURCE: RagRetrievedChunk = {
+  id: 'chunk-payroll-1',
+  content: 'October payroll: the salaries of the team.',
+  originalDocumentId: 'doc-payroll',
+  metadata: { classification: 'confidential' },
+};
+
+/** An output guard that evaluates tool calls and blocks a shell command in a turn whose retrieved sources hold a confidential one. */
+function confidentialSourcesGuard(): IGuardrailService {
+  return {
+    id: 'confidential-sources',
+    config: { evaluateToolCalls: true },
+    async evaluateOutput({ chunk, ragSources }: GuardrailOutputPayload) {
+      if (chunk.type !== AgentOSResponseChunkType.TOOL_CALL_REQUEST) return null;
+      const confidential = (ragSources ?? []).some((source) => source.metadata?.classification === 'confidential');
+      const shell = (chunk as AgentOSToolCallRequestChunk).toolCalls.some((call) => call.name === SHELL_CALL.name);
+      return confidential && shell
+        ? { action: GuardrailAction.BLOCK, reason: 'A shell command in a turn that read confidential sources', reasonCode: 'CONFIDENTIAL_SOURCES' }
+        : null;
+    },
+  };
+}
+
 const PERSONA = {
   id: 'test-persona',
   name: 'Test Persona',
@@ -507,6 +531,32 @@ function replyGmi(output: GMIOutput & { responseText: string }) {
   };
 }
 
+/**
+ * A GMI that runs the user's turn on `inner`, the shipped GMI, and then stops the turn for READ_CALL, streaming the call
+ * before it returns, as a host that adds a tool of its own to the shipped GMI does; the tool result continues `inner`.
+ */
+function hostOverShippedGmi(inner: GMI): ReturnType<typeof hostToolGmi> {
+  const host = hostToolGmi();
+  host.processTurnStream = async function* (turnInput?: unknown): AsyncGenerator<any, GMIOutput, undefined> {
+    const turn = inner.processTurnStream(turnInput as Parameters<GMI['processTurnStream']>[0]);
+    for (let step = await turn.next(); !step.done; step = await turn.next()) {
+      yield step.value;
+    }
+    yield {
+      type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+      content: [READ_CALL],
+      interactionId: 'interaction-host-tools',
+      timestamp: new Date(),
+      metadata: { executionMode: 'external', requiresExternalToolResult: true },
+    };
+    return { isFinal: false, responseText: 'I need the notes file first.', toolCalls: [READ_CALL] };
+  };
+  host.handleToolResult.mockImplementation((...args: any[]) =>
+    (inner.handleToolResult as (...forwarded: any[]) => Promise<GMIOutput>)(...args),
+  );
+  return host;
+}
+
 describe('AgentOS tool-result continuations', () => {
   const openAgents: AgentOS[] = [];
   const openGmis: GMI[] = [];
@@ -583,15 +633,28 @@ describe('AgentOS tool-result continuations', () => {
 
     /**
      * The shipped GMI on a provider that gives `replies`, with the runtime's tool orchestrator and `gmiConfig` over
-     * its base config.
+     * its base config. With `sources`, the persona retrieves on a user turn's query and the retrieval returns them.
      */
-    async function shippedGmi(replies: ModelReply[], gmiConfig: Record<string, unknown> = {}) {
+    async function shippedGmi(
+      replies: ModelReply[],
+      options: { sources?: RagRetrievedChunk[]; gmiConfig?: Record<string, unknown> } = {},
+    ) {
       const { provider, promptCalls } = scriptedProvider(replies);
+      const sources = options.sources;
+      const retrieveContext = vi.fn(async (queryText: string) => ({
+        queryText,
+        retrievedChunks: sources ?? [],
+        augmentedContext: (sources ?? []).map((source) => source.content).join('\n'),
+      }));
       const gmi = new GMI(`gmi-shipped-${conversationId}`);
       openGmis.push(gmi);
-      await gmi.initialize(PERSONA as any, {
-        ...gmiConfig,
+      const persona = sources
+        ? { ...PERSONA, memoryConfig: { enabled: false, ragConfig: { enabled: true, retrievalTriggers: { onUserQuery: true } } } }
+        : PERSONA;
+      await gmi.initialize(persona as any, {
+        ...options.gmiConfig,
         workingMemory: new InMemoryWorkingMemory(),
+        ...(sources ? { retrievalAugmentor: { augmenterId: 'stub-retrieval', retrieveContext } as any } : {}),
         promptEngine: historyPromptEngine(),
         llmProviderManager: {
           getModelInfo: vi.fn().mockResolvedValue({
@@ -609,7 +672,7 @@ describe('AgentOS tool-result continuations', () => {
         defaultLlmModelId: 'mock-model',
         defaultLlmProviderId: 'mock-provider',
       });
-      return { gmi, provider, promptCalls };
+      return { gmi, provider, promptCalls, retrieveContext };
     }
 
     const input: AgentOSInput = {
@@ -733,6 +796,75 @@ describe('AgentOS tool-result continuations', () => {
     expect(await rt.pending()).toBeNull();
   });
 
+  it('a continuation on the stream asks the gate before each call the GMI runs itself, and a refused call never runs', async () => {
+    const rt = await runtime('conv-continuation-gate', { guardrailService: shellGuard(false) });
+    const { gmi, provider, promptCalls } = await rt.shippedGmi([
+      { toolCalls: [SHELL_CALL] },
+      { text: 'The command was refused.' },
+    ]);
+    // the host's GMI stops the user's turn for READ_CALL; the shipped GMI takes the tool result and runs the rest
+    const host = hostToolGmi();
+    host.handleToolResult.mockImplementation((...args: any[]) =>
+      (gmi.handleToolResult as (...forwarded: any[]) => Promise<GMIOutput>)(...args),
+    );
+    const { request } = await rt.pauseOnRead(host);
+
+    const continuation = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    expect(host.handleToolResult).toHaveBeenCalledTimes(1);
+    expect(provider.generateCompletionStream).toHaveBeenCalledTimes(2);
+    expect(rt.shell).not.toHaveBeenCalled();
+    const refusal = promptCalls[1]?.find((m) => m.role === 'tool' && m.tool_call_id === SHELL_CALL.id);
+    expect(String(refusal?.content)).toContain('AUTH_PERMISSION_DENIED');
+    expect(String(refusal?.content)).toContain('A destructive shell command');
+
+    const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+    expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(last.finalResponseText).toBe('The command was refused.');
+    expect(last.finalToolCalls).toEqual([SHELL_CALL]);
+    expect(continuation.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+    expect(await rt.pending()).toBeNull();
+  });
+
+  it.each([
+    ['on the stream', 'stream'],
+    ['resumed from the saved pause', 'resume'],
+  ] as const)(
+    'a continuation %s judges the calls the GMI runs itself with the sources the turn it continues retrieved',
+    async (_label, path) => {
+      const rt = await runtime(`conv-continuation-sources-${path}`, { guardrailService: confidentialSourcesGuard() });
+      const { gmi, provider, promptCalls, retrieveContext } = await rt.shippedGmi(
+        [{ text: 'I will read the notes file first.' }, { toolCalls: [SHELL_CALL] }, { text: 'The command was refused.' }],
+        { sources: [PAYROLL_SOURCE] },
+      );
+      // the shipped GMI runs the user's turn and retrieves the confidential source; the host stops the turn for READ_CALL
+      const { request, saved } = await rt.pauseOnRead(hostOverShippedGmi(gmi));
+      expect(retrieveContext).toHaveBeenCalledTimes(1);
+
+      const continuation = await collect(
+        path === 'stream'
+          ? rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true)
+          : rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT]),
+      );
+
+      // the continuation retrieves nothing of its own; the gate judged shell_execute with the turn's source and refused it
+      expect(retrieveContext).toHaveBeenCalledTimes(1);
+      expect(provider.generateCompletionStream).toHaveBeenCalledTimes(3);
+      expect(rt.shell).not.toHaveBeenCalled();
+      const refusal = promptCalls[2]?.find((m) => m.role === 'tool' && m.tool_call_id === SHELL_CALL.id);
+      expect(String(refusal?.content)).toContain('AUTH_PERMISSION_DENIED');
+      expect(String(refusal?.content)).toContain('A shell command in a turn that read confidential sources');
+
+      const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+      expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+      expect(last.finalResponseText).toBe('The command was refused.');
+      expect(continuation.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+      expect(await rt.pending()).toBeNull();
+    },
+  );
+
   it('a turn with no continuation is unchanged: a call the GMI runs itself ends in FINAL_RESPONSE with no pause', async () => {
     const rt = await runtime('conv-turn-only');
     const { gmi, provider } = await rt.shippedGmi([{ toolCalls: [LOOKUP_CALL] }, { text: 'Standup moved to 10:00.' }]);
@@ -788,7 +920,7 @@ describe('AgentOS tool-result continuations', () => {
     // the GMI stops its tool loop after one round, as it does when the model keeps calling tools; the next turn answers
     const { gmi, provider, promptCalls } = await rt.shippedGmi(
       [{ toolCalls: [LOOKUP_CALL] }, { text: 'Standup moved to 10:00.' }],
-      { maxToolLoopIterations: 1 },
+      { gmiConfig: { maxToolLoopIterations: 1 } },
     );
     rt.useGmi(gmi);
 
