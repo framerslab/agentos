@@ -39,7 +39,7 @@ import {
   UICommand, // Assuming UICommand is used internally if GMI constructs them
   // AudioOutputConfig, ImageOutputConfig are part of GMIOutput
 } from './IGMI';
-import type { GMIToolCallGate, GMIToolCallRefusal, GMIToolResultOptions, StepFinishedChunkPayload, ToolResultChunkPayload } from './IGMI';
+import type { GMIToolCallGate, GMIToolCallGateContext, GMIToolCallRefusal, GMIToolResultOptions, StepFinishedChunkPayload, ToolResultChunkPayload } from './IGMI';
 import { refusedToolCallResult } from './toolCallGate';
 import {
   IPersonaDefinition,
@@ -837,14 +837,38 @@ export class GMI implements IGMI {
    * Asks the turn's tool-call gate about one call. A gate that throws refuses
    * the call, so a check that fails never lets a call through.
    */
-  private async askToolCallGate(gate: GMIToolCallGate, call: ToolCallRequest): Promise<GMIToolCallRefusal | null> {
+  private async askToolCallGate(
+    gate: GMIToolCallGate,
+    call: ToolCallRequest,
+    context: GMIToolCallGateContext,
+  ): Promise<GMIToolCallRefusal | null> {
     try {
-      return await gate(call);
+      return await gate(call, context);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.addTraceEntry(ReasoningEntryType.WARNING, `The tool-call gate failed on '${call.name}'; the call is refused.`, { reqId: call.id, error: message });
       return { reason: `The call to '${call.name}' was refused because its check failed: ${message}`, reasonCode: 'TOOL_CALL_GATE_ERROR' };
     }
+  }
+
+  /**
+   * Asks the turn's tool-call gate about every call of one model step, in
+   * order, before any of them runs: each question names the step's calls and
+   * the sources the turn retrieved, so the gate can judge the calls together
+   * and against those sources. Returns each call's refusal, or null, by the
+   * call's position in the step.
+   */
+  private async askToolCallGateForStep(
+    gate: GMIToolCallGate,
+    stepCalls: ToolCallRequest[],
+    ragSources: GMIToolCallGateContext['ragSources'],
+  ): Promise<Array<GMIToolCallRefusal | null>> {
+    const context: GMIToolCallGateContext = { stepCalls, ...(ragSources && ragSources.length > 0 ? { ragSources } : {}) };
+    const refusals: Array<GMIToolCallRefusal | null> = [];
+    for (const call of stepCalls) {
+      refusals.push(await this.askToolCallGate(gate, call, context));
+    }
+    return refusals;
   }
 
   /**
@@ -1960,7 +1984,12 @@ export class GMI implements IGMI {
           let callInFlight: ToolCallRequest | undefined;
           let toolRoundFailure: { error: unknown } | undefined;
           try {
-            for (const toolCallReq of currentIterationToolCallRequests) {
+            // The gate is asked about every call of the step before any of them runs, as the stream's chunk for the
+            // step holds them all.
+            const refusals = toolCallGate
+              ? await this.askToolCallGateForStep(toolCallGate, currentIterationToolCallRequests, lastRagSources)
+              : [];
+            for (const [callIndex, toolCallReq] of currentIterationToolCallRequests.entries()) {
               const requestDetails: ToolExecutionRequestDetails = {
                 toolCallRequest: toolCallReq,
                 gmiId: this.gmiId, personaId: this.activePersona.id,
@@ -1970,8 +1999,8 @@ export class GMI implements IGMI {
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;
-              // A call the gate refuses is recorded as a refused result the model reads; the tool is not called.
-              const refusal = toolCallGate ? await this.askToolCallGate(toolCallGate, toolCallReq) : null;
+              // A call the gate refused is recorded as a refused result the model reads; the tool is not called.
+              const refusal = refusals[callIndex] ?? null;
               const result = refusal
                 ? refusedToolCallResult(toolCallReq, refusal)
                 : await this.toolOrchestrator.processToolCall(requestDetails);

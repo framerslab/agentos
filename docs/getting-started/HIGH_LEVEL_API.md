@@ -911,6 +911,13 @@ For custom host-managed tools that are not registered in AgentOS, keep using
 This recovery path assumes the conversation store is still available after the
 original process exits.
 
+A pause is resumed once. When the conversation no longer holds the pause the
+snapshot names (its results were passed on its stream, an output guardrail
+blocked its stream, or a newer pause replaced it), or another resume of it is
+under way, `resumeExternalToolRequest(...)` yields one error chunk with the
+code `SYS_INVALID_STATE` and the GMI takes none of the results. Read the
+pending request again with `getPendingExternalToolRequest(...)` before a retry.
+
 `AgentOSConfig.learning` turns on the runtime's learning layer: every GMI sends its persona's personality section as a system prompt of its own on every turn, each session is bound to its user under the turn's resolved organization, and `AgentOS.getLearningLayer()` returns the layer (`undefined` while learning is off). [Learning](../GMI.md#learning) has the rules.
 
 ## Guidance

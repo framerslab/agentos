@@ -659,7 +659,9 @@ export class ToolOrchestrator implements IToolOrchestrator {
    * call meets. The orchestrator's refusals reach the step's result as
    * `details.code` (permission_denied, step_disabled, approval_rejected,
    * approval_unavailable, approval_failed, step_replaced, step_aborted), with
-   * the orchestrator's own code kept as `orchestratorCode`.
+   * the orchestrator's own code kept as `orchestratorCode`. A step is not a
+   * call the model requested, so the output guardrails that evaluate tool
+   * calls never judge it: they judge the composed tool's own call.
    */
   private buildStepGate(): StepGate {
     return {

@@ -760,6 +760,42 @@ describe('AgentOS output guards that evaluate tool calls', () => {
       expect(context.getAllMessages()).toHaveLength(messagesAfterAnswer);
     });
 
+    it('two resumes of one pause at once: one resumes it, the other is refused, and the GMI takes the results once', async () => {
+      const gmi = pausingGmi(READ_CALL);
+      const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-double-resume', shellGuard(BLOCK_SHELL));
+      await collect(agentos.processRequest(input));
+      await vi.waitFor(() => expect(pauseMessageFor(context, READ_CALL.id)).toBeDefined());
+      const pending = await agentos.getPendingExternalToolRequest('conv-double-resume', 'user-1');
+      expect(pending?.toolCalls).toEqual([READ_CALL]);
+
+      // both resumes load the conversation before either goes on, as two requests that arrive together do
+      let releaseLoads!: () => void;
+      const bothLoading = new Promise<void>((resolve) => {
+        releaseLoads = resolve;
+      });
+      let loads = 0;
+      vi.mocked(GMIManager.prototype.getOrCreateGMIForSession).mockImplementation(async () => {
+        loads += 1;
+        if (loads === 2) releaseLoads();
+        await bothLoading;
+        return { gmi, conversationContext: context } as any;
+      });
+
+      const result = { toolCallId: READ_CALL.id, toolName: READ_CALL.name, toolOutput: 'notes', isSuccess: true };
+      const [first, second] = await Promise.all([
+        collect(agentos.resumeExternalToolRequest(pending!, [result])),
+        collect(agentos.resumeExternalToolRequest(pending!, [result])),
+      ]);
+
+      const resumed = [first, second].filter((responses) => responses.at(-1)?.type === AgentOSResponseChunkType.FINAL_RESPONSE);
+      const refused = [first, second].filter((responses) => responses.some((r) => r.type === AgentOSResponseChunkType.ERROR));
+      expect(resumed).toHaveLength(1);
+      expect(refused).toHaveLength(1);
+      expect((refused[0]!.find((r) => r.type === AgentOSResponseChunkType.ERROR) as AgentOSErrorChunk).code).toBe('SYS_INVALID_STATE');
+      expect(gmi.handleToolResult).toHaveBeenCalledTimes(1);
+      expect(await agentos.getPendingExternalToolRequest('conv-double-resume', 'user-1')).toBeNull();
+    });
+
     it('a call the guard allows still pauses as before: the host receives it and the pause is saved', async () => {
       const gmi = pausingGmi(READ_CALL);
       const { agentos, context, input } = await runtimeWithHostTools(gmi, 'conv-allowed', shellGuard(BLOCK_SHELL));

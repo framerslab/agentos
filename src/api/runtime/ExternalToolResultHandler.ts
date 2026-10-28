@@ -94,6 +94,24 @@ function buildToolCallChunkMetadata(
 }
 
 /**
+ * Whether `held`, the pending request a conversation holds, is the pause `given` names: the one its stream saved for
+ * the same calls. A snapshot read before its pause was answered, dropped or replaced names none the conversation holds.
+ */
+function isHeldPendingRequest(
+  held: AgentOSPendingExternalToolRequest | undefined,
+  given: AgentOSPendingExternalToolRequest,
+): boolean {
+  if (!held || held.streamId !== given.streamId || !Array.isArray(held.toolCalls) || !Array.isArray(given.toolCalls)) {
+    return false;
+  }
+  return (
+    held.toolCalls.length > 0 &&
+    held.toolCalls.length === given.toolCalls.length &&
+    held.toolCalls.every((call, index) => call.id === given.toolCalls[index]?.id)
+  );
+}
+
+/**
  * @class ExternalToolResultHandler
  * @description
  * Manages the full lifecycle of external tool result handling:
@@ -114,6 +132,9 @@ function buildToolCallChunkMetadata(
  * All chunk emission is delegated to the shared {@link StreamChunkEmitter}.
  */
 export class ExternalToolResultHandler {
+  /** The pauses being resumed, by conversation and stream, until their results reach the GMI. */
+  private readonly resumingPauses = new Set<string>();
+
   /**
    * Creates an ExternalToolResultHandler.
    *
@@ -541,6 +562,11 @@ export class ExternalToolResultHandler {
   /**
    * Resumes an external tool request from persisted conversation metadata.
    * Re-creates the stream context and delegates to {@link orchestrateToolResults}.
+   * A pause is resumed once: when the conversation no longer holds the pause
+   * the snapshot names (answered on its stream, dropped after an output
+   * guardrail blocked its stream, or replaced by a newer pause), or another
+   * resume of it is under way, the stream ends with one error chunk
+   * (`SYS_INVALID_STATE`) and neither the GMI nor the conversation is touched.
    *
    * @param agentOSStreamId - Fresh stream ID allocated by the orchestrator.
    * @param pendingRequest - The persisted pending request snapshot.
@@ -581,6 +607,51 @@ export class ExternalToolResultHandler {
 
     const gmi = gmiResult.gmi;
     const conversationContext = gmiResult.conversationContext;
+
+    // the pause is checked before the GMI's history is replaced, since a stale snapshot can arrive while the
+    // conversation's next turn runs on the same GMI
+    const pauseKey = `${pendingRequest.conversationId}\u0000${pendingRequest.streamId}`;
+    const heldRequest = conversationContext.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    if (!isHeldPendingRequest(heldRequest, pendingRequest) || this.resumingPauses.has(pauseKey)) {
+      const message =
+        `The conversation '${pendingRequest.conversationId}' no longer holds the pending tool request of stream ` +
+        `'${pendingRequest.streamId}': it was answered, dropped, replaced or is being resumed already, so it is not resumed.`;
+      console.warn(`AgentOSOrchestrator: ${message}`);
+      await this.chunks.pushError(
+        agentOSStreamId,
+        pendingRequest.personaId,
+        pendingRequest.gmiInstanceId,
+        GMIErrorCode.INVALID_STATE,
+        message,
+        {
+          conversationId: pendingRequest.conversationId,
+          streamId: pendingRequest.streamId,
+          toolCallIds: Array.isArray(pendingRequest.toolCalls) ? pendingRequest.toolCalls.map((call) => call.id) : [],
+        },
+      );
+      await this.dependencies.streamingManager.closeStream(agentOSStreamId, 'The pending tool request is no longer current.');
+      return;
+    }
+    this.resumingPauses.add(pauseKey);
+    try {
+      await this.resumeHeldToolResults(agentOSStreamId, pendingRequest, toolResults, options, gmi, conversationContext, toolCallGate);
+    } finally {
+      this.resumingPauses.delete(pauseKey);
+    }
+  }
+
+  /** Resumes a pause the conversation holds: the stream's context, the GMI's history, then the results. */
+  private async resumeHeldToolResults(
+    agentOSStreamId: StreamId,
+    pendingRequest: AgentOSPendingExternalToolRequest,
+    toolResults: AgentOSToolResultInput[],
+    options: AgentOSResumeExternalToolRequestOptions,
+    gmi: IGMI,
+    conversationContext: ConversationContext,
+    toolCallGate?: GuardrailToolCallGate,
+  ): Promise<void> {
     const currentPersonaId = gmi.getCurrentPrimaryPersonaId();
     const gmiInstanceIdForChunks = gmi.getGMIId();
     const storedOrganizationId = conversationContext.getMetadata(ORGANIZATION_ID_METADATA_KEY);
@@ -718,11 +789,11 @@ export class ExternalToolResultHandler {
   }
 
   /**
-   * Drops the pause a stream saved for tool calls an output guardrail withheld
-   * from the caller. It acts only when the conversation's pending request was
-   * saved by `agentOSStreamId` and holds one of `toolCallIds`: each call of the
-   * pause is answered with a refused tool result, so the history answers every
-   * call the pause's assistant message declared, the pending request is
+   * Drops the pause a stream saved after an output guardrail blocked the
+   * stream. It acts only when the conversation's pending request was saved by
+   * `agentOSStreamId` and, with `toolCallIds`, holds one of them: each call of
+   * the pause is answered with a refused tool result, so the history answers
+   * every call the pause's assistant message declared, the pending request is
    * cleared, and the stream's context is removed and the stream closed, so no
    * result for the calls can continue it. The conversation is saved when
    * persistence is on. The stream is closed whether or not the store takes the
@@ -731,7 +802,9 @@ export class ExternalToolResultHandler {
    *
    * @param agentOSStreamId - The stream the guardrail blocked.
    * @param streamContext - The stream's context.
-   * @param toolCallIds - The ids of the calls the block withheld.
+   * @param toolCallIds - The ids of the calls the block withheld, or undefined
+   *   for a block that withheld none, which drops the stream's pause whatever
+   *   calls it holds.
    * @param refusal - What the refused tool results say.
    * @returns Whether the pause was dropped.
    * @throws The store's error when it refuses the save, after the stream is closed.
@@ -739,7 +812,7 @@ export class ExternalToolResultHandler {
   async discardPendingExternalToolRequest(
     agentOSStreamId: string,
     streamContext: ActiveStreamContext,
-    toolCallIds: readonly string[],
+    toolCallIds: readonly string[] | undefined,
     refusal: GMIToolCallRefusal,
   ): Promise<boolean> {
     const { conversationContext, personaId } = streamContext;
@@ -750,7 +823,8 @@ export class ExternalToolResultHandler {
       !pending ||
       pending.streamId !== agentOSStreamId ||
       !Array.isArray(pending.toolCalls) ||
-      !pending.toolCalls.some((call) => toolCallIds.includes(call.id))
+      pending.toolCalls.length === 0 ||
+      (toolCallIds !== undefined && !pending.toolCalls.some((call) => toolCallIds.includes(call.id)))
     ) {
       return false;
     }
@@ -785,7 +859,7 @@ export class ExternalToolResultHandler {
     } finally {
       await this.dependencies.streamingManager.closeStream(
         agentOSStreamId,
-        'An output guardrail blocked the tool call the stream stopped for.',
+        'An output guardrail blocked the stream, so the tool call it stopped for was dropped.',
       );
     }
     return true;

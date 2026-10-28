@@ -204,6 +204,12 @@ export interface IAgentOS {
    *
    * Hosts can re-assert runtime-only organization context through `options`
    * when the resumed turn needs organization-scoped memory or tenant routing.
+   *
+   * A pause is resumed once. When the conversation no longer holds the pause
+   * the snapshot names (its results were passed on its stream, an output
+   * guardrail blocked its stream, or a newer pause replaced it) or another
+   * resume of it is under way, the stream yields one error chunk with the code
+   * `SYS_INVALID_STATE` and the GMI takes none of the results.
    */
   resumeExternalToolRequest(
     pendingRequest: AgentOSPendingExternalToolRequest,
