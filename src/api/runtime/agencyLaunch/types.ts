@@ -149,8 +149,30 @@ export interface LaunchAgencyArgs {
   maxRounds?: number;
 }
 
+/**
+ * How a launch that started ended, the first that holds: `budget_exhausted` (the launch's budget, or a budget it draws
+ * on, refused a call), `timed_out` (its deadline passed), `cancelled` (the launching turn stopped), `completed` (the team
+ * answered) or `failed` (the team or a seat failed, no seat ran, or the launch failed before its team ran).
+ */
 export type LaunchStatus = 'completed' | 'timed_out' | 'budget_exhausted' | 'cancelled' | 'failed';
 
+/**
+ * Why a launch was refused before it started. A refusal is the tool call's error, `<code>: <reason>`.
+ *
+ * - `invalid_arguments`: the arguments break their own rules, or `agency()` refuses the team they describe.
+ * - `depth_exceeded`: the team would sit deeper than `maxDepth`.
+ * - `too_many_seats`: more seats than `maxSeats`.
+ * - `concurrency_exceeded`: `maxConcurrent` launches of the scope are in flight.
+ * - `unknown_tool`: a seat names a tool the launching agent, or the member it seats, does not have.
+ * - `tool_not_allowed`: a seat names a self-modification or memory tool, `launch_agency` at a level that cannot launch,
+ *   or a composed tool one of whose steps its allowlist leaves out.
+ * - `seat_form_unsupported`: a seat form the surface does not run (`personaId` on gmi(), `agentKey` on the full runtime).
+ * - `unknown_member`: a seat names a member the surface does not have.
+ * - `member_unavailable`: a member could not be seated.
+ * - `duplicate_member`: two seats name one member.
+ * - `budget_unavailable`: the launch's token cap cannot cover one call, or it has no dollars left.
+ * - `parent_launch_closed`: the team the calling seat sits in is closing or gone.
+ */
 export type LaunchRefusalCode =
   | 'invalid_arguments'
   | 'depth_exceeded'
@@ -165,18 +187,24 @@ export type LaunchRefusalCode =
   | 'budget_unavailable'
   | 'parent_launch_closed';
 
+/** A launch refused before it started. */
 export interface LaunchRefusal {
+  /** The rule that refused it. */
   code: LaunchRefusalCode;
+  /** What was refused, in one sentence: the seat, the tool, the member or the bound. */
   reason: string;
 }
 
+/** The tokens a seat's calls, or all of a launch's seats' calls, used, as their results reported them. */
 export interface LaunchUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** The cost the results reported, in US dollars; unset when none reported one. */
   costUSD?: number;
 }
 
+/** One seat of a launched team, as the launch's result reports it. */
 export interface LaunchSeatRecord {
   role: string;
   form: 'temporary' | 'persistent';
