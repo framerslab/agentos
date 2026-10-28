@@ -798,6 +798,8 @@ export interface ApprovalDecision {
      * A replacement equal to the strategy's text (the text handed back
      * unedited) counts as an approval without modifications: a text that
      * does not match is retried, and the approval is asked for the new one.
+     * Without the schema, a replacement that changes the text leaves
+     * `parsed` undefined.
      */
     output?: string;
     /**
@@ -2105,7 +2107,10 @@ export interface AgencyResult {
   /**
    * With `output`, the value `text` parses to: after a `beforeReturn`
    * approval that replaced the final text, the replacement's; `undefined`
-   * when that text does not match the schema.
+   * when that text does not match the schema. Without `output`, the value
+   * the strategy's result carried (an agent's own `parsed`, such as the last
+   * seat's under sequential), and `undefined` after a `beforeReturn`
+   * replacement that changed the text.
    */
   parsed?: unknown;
   provenanceTrail?: import('./agency-provenance.js').AgencyProvenanceTrail;

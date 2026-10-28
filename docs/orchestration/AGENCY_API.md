@@ -1388,6 +1388,13 @@ equal to the strategy's text, an approver handing the text back unedited,
 replaces nothing and counts as an approval without modifications: a text that
 does not match is retried, and the approval is asked for the new attempt.
 
+In an agency without `output`, the `parsed` of `generate()`'s result is
+whatever the strategy's result carried: `sequential` returns its last seat's
+result and `graph` the last result of its final tier, so a seat with its own
+`responseSchema` passes on its `parsed`. A `beforeReturn` replacement that
+changes the text leaves `parsed` `undefined`, since nothing parsed the
+replacement.
+
 ---
 
 ## Nested Agencies

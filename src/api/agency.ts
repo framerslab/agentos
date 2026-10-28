@@ -619,6 +619,12 @@ export function agency(opts: AgencyOptions): AgencyInstance {
           strategy: chosenStrategy,
         });
       }
+    } else if (replacedText) {
+      // Without a schema, a parsed value the strategy's result carried (an
+      // agent's own, which sequential and graph pass on with their last
+      // seat's result under generate()) was read from the text the
+      // replacement changed, and nothing parsed the replacement.
+      delete approvedResult.parsed;
     }
 
     streamPartBuffer?.push({
