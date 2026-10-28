@@ -196,6 +196,7 @@ interface GuardrailEvaluationResult {
 
 - If `canSanitize: true` is set in your config, your guardrail runs in **Phase 1 (sequential)** and your `modifiedText` is applied before downstream guardrails see the content.
 - If your guardrail is in **Phase 2** (no `canSanitize` or `canSanitize: false`) and it returns SANITIZE, the action is **automatically downgraded to FLAG** with a warning logged. This prevents non-deterministic concurrent modifications.
+- On a `FINAL_RESPONSE`, `modifiedText` replaces the reply in every field that carries it: `finalResponseText`; `finalResponseTextPlain`, rendered as plain text as a turn renders its own reply; the reply in `updatedConversationContext`; and `audioOutput`, which keeps its voice settings, speaks the new text as plain text in `textToSpeak` and drops the `url` of the audio made from the replaced reply. A `null` `modifiedText` removes the reply, and the audio output with it. A structured value parsed from the replaced reply is withdrawn, as [Structured replies](../features/STRUCTURED_REPLY.md) (item 5) states. A `modifiedText` equal to the reply changes nothing: the parsed value and the audio output stay.
 
 ---
 

@@ -1,6 +1,7 @@
 /**
  * @fileoverview The final response a guardrail's `SANITIZE` leaves: every field that carries the reply reads the
- * guardrail's text, the plain text field as plain text, and no value parsed from the replaced reply stays. The output
+ * guardrail's text, the plain text field and the text the audio output speaks as plain text, and no value parsed or
+ * audio made from the replaced reply stays. A `SANITIZE` that leaves the reply as it was changes nothing. The output
  * guardrails and the cross-agent guardrails rewrite a final response with it.
  * @module backend/agentos/safety/guardrails/sanitizedFinalResponse
  */
@@ -8,6 +9,7 @@
 import type { StructuredReplyOutput } from '../../api/runtime/structuredReply';
 import { renderPlainText } from '../../api/runtime/turnFinalResponse';
 import type { AgentOSFinalResponseChunk } from '../../api/types/AgentOSResponse';
+import type { AudioOutputConfig } from '../../cognition/substrate/IGMI';
 
 /** The issue a withdrawn structured value records (`structured.meta.issues`). */
 export const STRUCTURED_REPLY_WITHDRAWN_ISSUE =
@@ -27,6 +29,21 @@ export function withdrawnStructuredReply(structured: StructuredReplyOutput): Str
     value: null,
     meta: { ...structured.meta, valid: false, stage: 'post_guardrail', issues: [STRUCTURED_REPLY_WITHDRAWN_ISSUE] },
   };
+}
+
+/**
+ * The audio output a rewritten final response carries in place of the one made of the reply it replaced: the same voice
+ * settings, speaking the guardrail's text as plain text (`renderPlainText()`, as `finalResponseTextPlain` carries it),
+ * and no audio file, since the file speaks the replaced reply. A removed reply (`null`) leaves nothing to speak.
+ *
+ * @param audioOutput - The audio output made of the reply the guardrail replaced.
+ * @param text - The guardrail's text.
+ * @returns The audio output for the guardrail's text, or undefined when the guardrail removed the reply.
+ */
+export function rewrittenAudioOutput(audioOutput: AudioOutputConfig, text: string | null): AudioOutputConfig | undefined {
+  if (text === null) return undefined;
+  const { url: _audioOfReplacedReply, ...voice } = audioOutput;
+  return { ...voice, textToSpeak: renderPlainText(text) };
 }
 
 /**
@@ -59,14 +76,19 @@ export function withReplyRewritten<T>(context: T, from: string | null, to: strin
 /**
  * The final response with its reply replaced by a guardrail's text: the reply and the reply in the serialized
  * conversation the chunk carries read `text`, its plain text is `text` rendered as a turn renders its own reply
- * (`renderPlainText()`), and a structured value parsed from the replaced reply is withdrawn
- * (`withdrawnStructuredReply()`), so no field keeps the reply the guardrail rewrote.
+ * (`renderPlainText()`), a structured value parsed from the replaced reply is withdrawn (`withdrawnStructuredReply()`),
+ * and the audio output speaks `text` with no audio file of the replaced reply (`rewrittenAudioOutput()`), so no field
+ * keeps the reply the guardrail rewrote. When `text` is the reply the chunk carries, the guardrail rewrote nothing, and
+ * the chunk is returned as it is, with the value parsed and the audio made from its reply.
  *
  * @param chunk - The final response the guardrail sanitized.
  * @param text - The guardrail's text (`GuardrailEvaluationResult.modifiedText`).
- * @returns A copy of the chunk that carries `text` wherever it carried the reply.
+ * @returns A copy of the chunk that carries `text` wherever it carried the reply, or `chunk` when `text` is its reply.
  */
 export function sanitizedFinalResponse(chunk: AgentOSFinalResponseChunk, text: string | null): AgentOSFinalResponseChunk {
+  if (text === chunk.finalResponseText) {
+    return chunk;
+  }
   return {
     ...chunk,
     finalResponseText: text,
@@ -74,5 +96,6 @@ export function sanitizedFinalResponse(chunk: AgentOSFinalResponseChunk, text: s
     // the serialized conversation the chunk carries holds the reply as the model wrote it: it reads the rewrite too
     updatedConversationContext: withReplyRewritten(chunk.updatedConversationContext, chunk.finalResponseText ?? null, text),
     ...(chunk.structured ? { structured: withdrawnStructuredReply(chunk.structured) } : {}),
+    ...(chunk.audioOutput ? { audioOutput: rewrittenAudioOutput(chunk.audioOutput, text) } : {}),
   };
 }
