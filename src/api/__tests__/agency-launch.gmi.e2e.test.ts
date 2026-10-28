@@ -10,6 +10,7 @@ import { agent } from '../agent';
 import type { AgentOSConfig } from '../AgentOS';
 import { gmi } from '../gmi';
 import type { GenerateTextResult } from '../generateText';
+import { launchRegistry } from '../runtime/agencyLaunch/launchRegistry';
 import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
 import { getCapabilitySupport } from '../runtime/capabilityContract';
 import type { Agent } from '../types';
@@ -357,4 +358,118 @@ describe('launch_agency on gmi()', () => {
     expect(seatStep).not.toContain('parent_launch_closed');
     expect(s.seen).toHaveLength(4);
   });
+
+  it('the deadline returns timed_out with what the seats produced, and the parent turn goes on', async () => {
+    const k = key();
+    const never = new Promise<void>(() => undefined);
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Draft and edit.', deadlineMs: 1_000, seats: [{ role: 'drafter', instructions: 'Draft.' }, { role: 'editor', instructions: 'Edit.' }] }),
+        reply.text('A draft.'),
+        // The editor's request holds until it is aborted.
+        reply.hold([], never),
+        reply.text('Partial work.'),
+      ],
+    });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', agencies: { launch: true } });
+
+    const started = Date.now();
+    const result = await parent.session('p1').send('Go.');
+    const out = launchOf(result);
+    expect(out).toMatchObject({ status: 'timed_out', reason: 'the deadline of 1000 ms passed' });
+    expect(out.seats.map((r) => [r.role, r.status])).toEqual([['drafter', 'completed'], ['editor', 'cut']]);
+    expect(out.seats[0].summary).toBe('A draft.');
+    expect(s.aborts).toBe(1);
+    // Within the deadline and one grace, the settle wait and the close sharing it.
+    expect(Date.now() - started).toBeLessThan(1_000 + 5_000);
+    expect(result.text).toBe('Partial work.');
+  }, 20_000);
+
+  it('a launch while an earlier one of its scope is closing is concurrency_exceeded until its seats are released', async () => {
+    const k = key();
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const hang = vi.fn(async () => {
+      await hanging;
+      return 'done';
+    });
+    const oneSeat = { goal: 'Answer.', seats: [{ role: 'second', instructions: 'Answer.' }] };
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Wait.', deadlineMs: 1_000, seats: [{ role: 'waiter', instructions: 'Call hang.', tools: ['hang'] }] }),
+        // The waiter's tool runs past the deadline and the grace.
+        reply.tools([{ id: 'h1', name: 'hang', args: {} }]),
+        launchStep(oneSeat, 'l2'),
+        reply.text('Waited.'),
+        launchStep(oneSeat, 'l3'),
+        reply.text('Answered.'),
+        reply.text('Now it ran.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k), instructions: 'Coordinate.',
+      tools: { hang: { description: 'Hangs.', parameters: { type: 'object', properties: {} }, execute: hang } },
+      agencies: { launch: true },
+    });
+    const session = parent.session('p1');
+
+    const first = await session.send('Start.');
+    const timedOut = launchOf(first, 0);
+    expect(timedOut.status).toBe('timed_out');
+    expect(launchRegistry.get(timedOut.agencyId)?.state).toBe('closing');
+    // The closing launch still counts toward the session's one launch in flight.
+    expect(refusalOf(first, 1)).toBe('concurrency_exceeded');
+    // Another agent's session of the same id is a scope of its own: it launches while this one is closing.
+    const k2 = key();
+    script('openai', k2, { replies: [launchStep(oneSeat, 'o1'), reply.text('Answered.'), reply.text('Ran.')] });
+    const other = gmi({ ...route(k2), instructions: 'Coordinate.', agencies: { launch: true } });
+    expect(launchOf(await other.session('p1').send('Go.')).status).toBe('completed');
+    release();
+    await vi.waitFor(() => expect(launchRegistry.get(timedOut.agencyId)).toBeUndefined(), { timeout: 10_000 });
+    const second = await session.send('Again.');
+    expect(launchOf(second).status).toBe('completed');
+    expect(hang).toHaveBeenCalledTimes(1);
+    // Root (three steps), the waiter, root, the second team's seat, root: nothing was sent for the waiter after its tool.
+    expect(s.seen).toHaveLength(7);
+  }, 40_000);
+
+  it('a session that keeps no history counts its closing launch toward its next turn', async () => {
+    const k = key();
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const hang = vi.fn(async () => {
+      await hanging;
+      return 'done';
+    });
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Wait.', deadlineMs: 1_000, seats: [{ role: 'waiter', instructions: 'Call hang.', tools: ['hang'] }] }),
+        reply.tools([{ id: 'h1', name: 'hang', args: {} }]),
+        reply.text('Waited.'),
+        // The next send runs on a GMI of its own (history: false), in the same session.
+        launchStep({ goal: 'Answer.', seats: [{ role: 'second', instructions: 'Answer.' }] }, 'l2'),
+        reply.text('Refused.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k), instructions: 'Coordinate.', history: false,
+      tools: { hang: { description: 'Hangs.', parameters: { type: 'object', properties: {} }, execute: hang } },
+      agencies: { launch: true },
+    });
+    const session = parent.session('p1');
+
+    const timedOut = launchOf(await session.send('Start.'));
+    expect(launchRegistry.get(timedOut.agencyId)?.state).toBe('closing');
+    // The closing launch still counts toward the session's one launch in flight, from the next turn's GMI too.
+    expect(refusalOf(await session.send('Again.'), 0)).toBe('concurrency_exceeded');
+    release();
+    await vi.waitFor(() => expect(launchRegistry.get(timedOut.agencyId)).toBeUndefined(), { timeout: 10_000 });
+    expect(hang).toHaveBeenCalledTimes(1);
+    // The first send's root, waiter and root steps, the second's two root steps: nothing was sent for the waiter after its tool.
+    expect(s.seen).toHaveLength(5);
+  }, 40_000);
 });
