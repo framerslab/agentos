@@ -87,15 +87,19 @@ function scopeIdOfMetadata(metadata: string | null | undefined): string {
 }
 
 /**
- * Matches a row whose metadata text can name a scope id other than `''`: it holds `"scopeId"`, and not only once with
- * the value `""`, as `JSON.stringify` writes the metadata of a trace `remember()` files under no scope id. A fill gives
- * a scope id to no other row, so the fill that runs at every open reads only these, and the traces a brain holds under
- * no scope id are not read back each time. A row whose text holds `"scopeId"` once is excluded only when that one
- * `"scopeId"` reads `""`: whether it is the top-level key or a nested one, the top-level scope id is then `''` or
- * missing. SQLite's `LIKE` ignores ASCII case, which counts more occurrences and so excludes no further row.
+ * Matches a row whose metadata text can name a scope id other than `''`. Either it holds `"scopeId"`, and not only once
+ * with the value `""`, as `JSON.stringify` writes the metadata of a trace `remember()` files under no scope id; or it
+ * holds a `\u` escape, with which a writer can spell any letter of the key (`JSON.parse` reads `"\u0073copeId"` as
+ * `scopeId`). A fill gives a scope id to no other row, so the fill that runs at every open reads only these, and the
+ * traces a brain holds under no scope id are not read back each time. A row whose text holds `"scopeId"` once, and no
+ * `\u`, is excluded only when that one `"scopeId"` reads `""`: whether it is the top-level key or a nested one, the
+ * top-level scope id is then `''` or missing. SQLite's `LIKE` ignores ASCII case, which counts more occurrences and so
+ * excludes no further row. `ESCAPE '!'` makes the backslash a plain character for Postgres, whose `LIKE` otherwise
+ * reads it as the escape character; SQLite's `LIKE` has none unless one is named.
  */
 const NAMES_SCOPE_ID =
-  `metadata LIKE '%"scopeId"%' AND NOT (metadata LIKE '%"scopeId":""%' AND metadata NOT LIKE '%"scopeId"%"scopeId"%')`;
+  `(metadata LIKE '%"scopeId"%' AND NOT (metadata LIKE '%"scopeId":""%' AND metadata NOT LIKE '%"scopeId"%"scopeId"%'))` +
+  ` OR metadata LIKE '%\\u%' ESCAPE '!'`;
 
 /**
  * Fills one brain's `scope_id` from the metadata JSON for its rows that hold `''`. Pages by `id` inside the brain, so
