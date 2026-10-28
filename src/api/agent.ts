@@ -172,6 +172,8 @@ export interface AgentOptions extends BaseAgentConfig {
    * outside AgentOS to it. Settings make one {@link SpendBudget} for the agent; pass an instance to share it wider.
    * With `runtime: 'gmi'` every completion call a GMI makes is checked against it before it is sent, metaprompts and
    * self-reflection included; its cognitive memory's embeddings and the learning layer's own calls are not counted.
+   * A seat's turn (`sessionSeat()`, or a member a launched team seats) is checked against it and charged to it beside the
+   * budget its team's call carries.
    */
   budget?: SpendBudget | SpendBudgetOptions;
   /**

@@ -36,7 +36,7 @@ import { APPROVAL_GRANTED, askApprovalGate, composeReceivedGate, type ApprovalGa
 import { runCitationVerification } from './runtime/citationVerification.js';
 import { createCompletionGateway, type CompletionAttempt, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
-import { asSpendBudget, assertCallWithinBudget, promptCharsOf, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
+import { asSpendBudget, assertCallWithinBudget, bothBudgets, promptCharsOf, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import { adaptTools } from './runtime/toolAdapter.js';
 import { withMembers } from './runtime/withMembers.js';
 import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type AgencyLaunchFrame, type CallerTurnContext, type ToolCallHook } from './runtime/agencyLaunch/types.js';
@@ -378,8 +378,8 @@ function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName,
  * An agent whose sessions are GMIs (docs/GMI.md, "GMIs from agent()").
  *
  * @param opts - The options of `agent()`. `voice`, `avatar` and `channels` throw when set;
- *   a config that sets only `enabled: false` is unset. `budget` checks every completion call a GMI makes
- *   (docs/GMI.md, "Spend budget").
+ *   a config that sets only `enabled: false` is unset. `budget` checks every completion call a GMI makes, a seat's
+ *   turn's beside the budget its team's call carries (docs/GMI.md, "Spend budget").
  * @returns The `Agent` surface: `generate`, `stream`, `session`, `usage`, `close`, `export`.
  * @throws {Error} At construction, naming the option: an option the GMI path
  *   cannot honour, an unknown cognition profile or metaprompt preset, a
@@ -843,6 +843,17 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const turnSignal = (callerSignal: AbortSignal | undefined): AbortSignal =>
         callerSignal ? AbortSignal.any([stopTurns.signal, callerSignal]) : stopTurns.signal;
 
+      /**
+       * A turn's budget: the one its send carries (settings make a new one) in place of the agent's. A seat's turn
+       * (sessionSeat(), launch_agency) is held to the agent's own as well: each call is checked against both and charged
+       * to both, a budget both draw on once, so a member's cap holds on the turns it serves in a team.
+       */
+      const turnBudget = (carried: SpendBudget | SpendBudgetOptions | undefined): SpendBudget | undefined => {
+        const budget = asSpendBudget(carried);
+        if (!budget) return agentBudget;
+        return seat && agentBudget ? bothBudgets(budget, agentBudget) : budget;
+      };
+
       const session = {
         id: sessionId,
         send: async (input: MessageContent, sendOpts?: SessionSendOptions<GmiTurnOptions['responseSchema']>) => {
@@ -865,8 +876,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               schemaName: sendOpts?.schemaName,
               blockLabel: sendOpts?.blockLabel,
               abortSignal: turnSignal(callerSignal),
-              // The turn's budget: the send's own (a new one from settings) in place of the agent's.
-              budget: asSpendBudget(sendOpts?.budget) ?? agentBudget,
+              budget: turnBudget(sendOpts?.budget),
               ...seatTurnOf(sendOpts),
             });
           } catch (error) {
@@ -881,7 +891,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
           streamGmiTurn(deps('agent.session.stream'), input, {
             abortSignal: turnSignal(streamOpts?.abortSignal),
-            budget: asSpendBudget(streamOpts?.budget) ?? agentBudget,
+            budget: turnBudget(streamOpts?.budget),
             ...seatTurnOf(streamOpts),
           }),
         messages: (): SessionTranscriptMessage[] => history?.messages() ?? [],

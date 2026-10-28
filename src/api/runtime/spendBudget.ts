@@ -90,6 +90,33 @@ const refusalInfo = new WeakMap<object, SpendLimitInfo>();
 
 let budgets = 0;
 
+/**
+ * The budgets that the check, or the record, of a call held to two budgets ({@link bothBudgets}) has reached so far, so
+ * a budget both draw on is checked, and charged, once. Unset outside such a check or record, each of which runs
+ * synchronously.
+ */
+const reaching: { check?: Set<SpendBudget>; charge?: Set<SpendBudget> } = {};
+
+/** Whether the two-budget check or record in progress has reached `budget` already; marks it reached. */
+function reachedBefore(kind: 'check' | 'charge', budget: SpendBudget): boolean {
+  const reached = reaching[kind];
+  if (!reached) return false;
+  if (reached.has(budget)) return true;
+  reached.add(budget);
+  return false;
+}
+
+/** Runs `work` as one two-budget check or record, or as part of the one in progress. */
+function reachOnce(kind: 'check' | 'charge', work: () => void): void {
+  const outer = reaching[kind];
+  reaching[kind] = outer ?? new Set();
+  try {
+    work();
+  } finally {
+    reaching[kind] = outer;
+  }
+}
+
 /** A budget for a run of calls; pass one instance to every call that should share it. */
 export class SpendBudget {
   /** The id its spending is kept under. */
@@ -170,6 +197,8 @@ export class SpendBudget {
     what: string,
     model?: { providerId: string; modelId: string },
   ): void {
+    // Under a call held to two budgets, a budget both draw on is asked once.
+    if (reachedBefore('check', this)) return;
     const parent = this.options.parent;
     if (parent) {
       try {
@@ -225,6 +254,8 @@ export class SpendBudget {
    * there too, after itself.
    */
   record(costUSD: number | undefined, tokens: number, what: string): void {
+    // Under a call held to two budgets, a budget both draw on is charged once.
+    if (reachedBefore('charge', this)) return;
     const counted = Math.max(0, tokens);
     this.tokens += Number.isNaN(counted) ? 0 : counted;
     if (costUSD !== undefined && costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what });
@@ -242,6 +273,7 @@ export class SpendBudget {
     if (typeof costUSD !== 'number' || Number.isNaN(costUSD)) {
       throw new RangeError(`An outside cost must be a number of US dollars, not ${String(costUSD)}`);
     }
+    if (reachedBefore('charge', this)) return;
     if (costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
     this.options.parent?.recordExternal(costUSD, kind);
   }
@@ -261,6 +293,70 @@ export class SpendBudget {
       throw error;
     }
   }
+}
+
+/**
+ * A budget that holds each call to two budgets: a call is checked against the first, then the second, and refused when
+ * either refuses it, and a finished call or an outside cost is recorded in both. A budget both draw on is checked and
+ * charged once. What is left is the lesser of what each has left under its own caps; what it has spent, and the tokens it
+ * has counted, are the first's.
+ */
+class BothBudgets extends SpendBudget {
+  constructor(
+    private readonly first: SpendBudget,
+    private readonly second: SpendBudget,
+  ) {
+    // No cap of its own: every check and record goes to the two budgets.
+    super({ maxCostUSD: Number.POSITIVE_INFINITY, unpriced: 'allow', budgetId: first.id });
+  }
+
+  override spentUSD(): number {
+    return this.first.spentUSD();
+  }
+
+  override tokensUsed(): number {
+    return this.first.tokensUsed();
+  }
+
+  override remaining(): { usd: number; tokens?: number } {
+    const a = this.first.remaining();
+    const b = this.second.remaining();
+    const usd = Math.min(a.usd, b.usd);
+    if (a.tokens === undefined) return b.tokens === undefined ? { usd } : { usd, tokens: b.tokens };
+    return { usd, tokens: b.tokens === undefined ? a.tokens : Math.min(a.tokens, b.tokens) };
+  }
+
+  override assertCanSpend(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
+    reachOnce('check', () => {
+      this.first.assertCanSpend(estimateUSD, estimateTokens, what, model);
+      this.second.assertCanSpend(estimateUSD, estimateTokens, what, model);
+    });
+  }
+
+  override record(costUSD: number | undefined, tokens: number, what: string): void {
+    reachOnce('charge', () => {
+      this.first.record(costUSD, tokens, what);
+      this.second.record(costUSD, tokens, what);
+    });
+  }
+
+  override recordExternal(costUSD: number, kind: string): void {
+    reachOnce('charge', () => {
+      this.first.recordExternal(costUSD, kind);
+      this.second.recordExternal(costUSD, kind);
+    });
+  }
+}
+
+/**
+ * A budget that holds each call to `first` and to `second`: checked against both, recorded in both, and a budget both
+ * draw on checked and charged once. `first` itself when the two are one budget. A seat's turn runs under one: the budget
+ * its team's call carries, and the member's own (gmi.ts).
+ *
+ * @internal
+ */
+export function bothBudgets(first: SpendBudget, second: SpendBudget): SpendBudget {
+  return first === second ? first : new BothBudgets(first, second);
 }
 
 /** A budget from what a caller passed: an instance as it is, settings made into a new instance, or nothing. */

@@ -66,7 +66,10 @@ export interface InternalSeatOptions extends SessionSeatOptions {
   seat?: { memoryScope: 'session'; learner: 'none' };
   /** The frame each of the seat's turns carries (`metadata.agencyLaunch`). */
   frame?: AgencyLaunchFrame;
-  /** A launch's seat: the launch's own budget, charged whatever budget the per-call options carry (those carry the coordinator's). */
+  /**
+   * A launch's seat: the launch's own budget, charged whatever budget the per-call options carry (those carry the
+   * coordinator's). The member's own budget, when it has one, is checked and charged beside it (gmi()).
+   */
   budget?: SpendBudget;
   /** A launch's seat: the hooks the launching turn ran under, run before the member's own. */
   toolHooks?: readonly ToolCallHook[];
@@ -144,7 +147,8 @@ async function streamErrorOf(result: StreamTextResult): Promise<unknown> {
  * Seats a persistent gmi() agent in an agency as itself: its own persona, cognition profile, tools and learning
  * config, through a session of its own handle. The session opens on the seat's first call and runs every call of the
  * run, so a manager that delegates twice to the seat finds the first exchange. The session's memory is scoped to the
- * seat session and it has no learner: a team turn's input is a manager's or a sibling's text.
+ * seat session and it has no learner: a team turn's input is a manager's or a sibling's text. Each call of the session
+ * is checked against, and charged to, the member's own `budget` beside the budget the agency's call carries.
  * `agency().close()` closes the seat's session and leaves the member serving its own users.
  *
  * @param member - A gmi() handle (gmi() or agent({ runtime: 'gmi' })).
