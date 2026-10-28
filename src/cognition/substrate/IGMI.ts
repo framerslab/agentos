@@ -502,8 +502,19 @@ export interface UICommand {
  * @interface GMIOutput
  */
 export interface GMIOutput {
+    /**
+     * `false` with `toolCalls` stops the turn for the host: the runtime saves the pending request, and the host runs
+     * those calls and passes their results back. Any other output, final or naming no calls, ends the turn, or the
+     * tool-result continuation, with `FINAL_RESPONSE`.
+     */
     isFinal: boolean;
     responseText?: string | null;
+    /**
+     * On an output with `isFinal: false`, the calls the host runs: the runtime reads every one of them as a call that
+     * waits on the host, since a call carries no mode of its own, so a GMI leaves out of such an output the calls it ran
+     * itself. On a final output, the calls of the GMI's own tool rounds, each one run or refused by the tool-call gate:
+     * `FINAL_RESPONSE.finalToolCalls` lists them, and nothing waits on them.
+     */
     toolCalls?: ToolCallRequest[];
     uiCommands?: UICommand[];
     audioOutput?: AudioOutputConfig;

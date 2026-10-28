@@ -37,8 +37,9 @@ import { refusedToolCallResult } from '../../cognition/substrate/toolCallGate';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { gmiToolCallGateFor } from './toolCallGate';
 import { externalToolPauseCalls } from './externalToolPause';
+import { addReplyToConversation, finalResponseFieldsOf } from './turnFinalResponse';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
-import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
+import { snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import {
   withAgentOSSpan,
   recordAgentOSToolResultMetrics,
@@ -388,8 +389,8 @@ export class ExternalToolResultHandler {
             },
           );
 
-          // Process the GMI output (text, ui commands, errors).
-          await this.processGMIOutputCallback(agentOSStreamId, streamContext, gmiOutputAfterTool, false);
+          // Process the GMI output (sources, text, ui commands, errors). The continuation's own end follows here.
+          await this.processGMIOutputCallback(agentOSStreamId, streamContext, gmiOutputAfterTool, true);
 
           // Handle further tool calls or finalization. The continuation stops for the host by the turn's rule, so the
           // calls a final output lists, which the GMI ran or refused itself, end the turn with the final response.
@@ -417,30 +418,12 @@ export class ExternalToolResultHandler {
                 metadata: buildToolCallChunkMetadata(streamContext),
               },
             );
-          } else if (gmiOutputAfterTool.isFinal) {
-            // Persist assistant output.
+          } else {
+            // An output that does not stop for the host ends the continuation as it ends a turn, marked final or not:
+            // the conversation keeps the reply, and one FINAL_RESPONSE carries what the turn's would.
             if (this.enableConversationalPersistence && conversationContext) {
               try {
-                if (
-                  typeof gmiOutputAfterTool.responseText === 'string' &&
-                  gmiOutputAfterTool.responseText.trim()
-                ) {
-                  conversationContext.addMessage({
-                    role: MessageRole.ASSISTANT,
-                    content: gmiOutputAfterTool.responseText,
-                    metadata: { agentPersonaId: personaId, source: 'agentos_output' },
-                  });
-                } else if (
-                  gmiOutputAfterTool.toolCalls &&
-                  gmiOutputAfterTool.toolCalls.length > 0
-                ) {
-                  conversationContext.addMessage({
-                    role: MessageRole.ASSISTANT,
-                    content: null,
-                    tool_calls: gmiOutputAfterTool.toolCalls as any,
-                    metadata: { agentPersonaId: personaId, source: 'agentos_output_tool_calls' },
-                  });
-                }
+                addReplyToConversation(conversationContext, gmiOutputAfterTool, personaId);
                 await withAgentOSSpan('agentos.conversation.save', async (child) => {
                   child?.setAttribute('agentos.stage', 'assistant_output_after_tool');
                   child?.setAttribute('agentos.stream_id', agentOSStreamId);
@@ -462,17 +445,9 @@ export class ExternalToolResultHandler {
               personaId,
               true,
               {
-                finalResponseText: gmiOutputAfterTool.responseText,
-                finalToolCalls: gmiOutputAfterTool.toolCalls,
-                finalUiCommands: gmiOutputAfterTool.uiCommands,
-                audioOutput: gmiOutputAfterTool.audioOutput,
-                imageOutput: gmiOutputAfterTool.imageOutput,
-                usage: normalizeUsage(gmiOutputAfterTool.usage),
-                reasoningTrace: gmiOutputAfterTool.reasoningTrace,
-                error: gmiOutputAfterTool.error,
+                ...finalResponseFieldsOf(gmiOutputAfterTool),
                 updatedConversationContext: conversationContext.toJSON(),
                 activePersonaDetails: snapshotPersonaDetails(gmi.getPersona?.()),
-                ...(gmiOutputAfterTool.structuredOutput ? { structured: gmiOutputAfterTool.structuredOutput } : {}),
               },
             );
             this.activeStreamContexts.delete(agentOSStreamId);
@@ -481,8 +456,6 @@ export class ExternalToolResultHandler {
               'Tool processing complete and final response generated.',
             );
           }
-          // If not final and no tool calls, the stream remains open for further
-          // GMI internal processing or new user input.
         } catch (error: any) {
           const gmiErr =
             GMIError.wrap?.(
