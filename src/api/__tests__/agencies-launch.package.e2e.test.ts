@@ -13,8 +13,8 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (import
   OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai'),
 }));
 import { AgencyConfigError, LAUNCH_AGENCY_TOOL_NAME, agent, gmi } from '../../index';
-import type { AgencyLaunchOptions, GenerateTextResult, ITool, LaunchAgencyResult } from '../../index';
-import { reply, script } from './helpers/stubProviders';
+import type { AgencyLaunchOptions, AgentSession, GenerateTextResult, ITool, LaunchAgencyResult } from '../../index';
+import { reply, script, type ProviderScript } from './helpers/stubProviders';
 
 let n = 0;
 const key = () => `k-agencies-package-${++n}`;
@@ -64,6 +64,22 @@ const codeOf = (refusal: string): string => refusal.split(':')[0];
 const route = (k: string) => ({ provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [] });
 /** A host tool in the plain form, answering its own name. */
 const tool = (name: string) => ({ description: `The ${name} tool.`, parameters: { type: 'object', properties: {} }, execute: async () => name });
+/** A model step that calls launch_agency once with `args`. */
+const launchStep = (args: Record<string, unknown>, id = 'l1') => reply.tools([{ id, name: LAUNCH_AGENCY_TOOL_NAME, args }]);
+/**
+ * What a host does while its session's scope is closing: send again until the launch the turn makes is admitted. Each
+ * try scripts the stub afresh (the launch step, then the replies after it); at most 50 tries, 100 ms apart.
+ */
+const sendUntilAdmitted = async (session: AgentSession, s: ProviderScript, replies: () => ProviderScript['replies']): Promise<GenerateTextResult> => {
+  for (let tries = 0; tries < 50; tries++) {
+    s.replies.length = 0;
+    s.replies.push(...replies());
+    const result = await session.send('Again.');
+    if (codeOf(String(result.toolCalls[0]?.error ?? '')) !== 'concurrency_exceeded') return result;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('no launch was admitted in 50 tries');
+};
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -419,4 +435,150 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     expect(systemText(s.seen[2])).toContain('Write one line.');
     expect(search).not.toHaveBeenCalled();
   });
+
+  it('a launch past its deadline returns timed_out with what its seats produced, within one grace, and the parent turn goes on', async () => {
+    const k = key();
+    const never = new Promise<void>(() => undefined);
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Draft and edit.', deadlineMs: 1_000, seats: [{ role: 'drafter', instructions: 'Draft.' }, { role: 'editor', instructions: 'Edit.' }] }),
+        reply.text('A draft.'),
+        // The editor's request holds until it is aborted.
+        reply.hold([], never),
+        reply.text('Partial work.'),
+      ],
+    });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', agencies: { launch: true } });
+
+    const started = Date.now();
+    const result = await parent.session('p1').send('Go.');
+    const out = launchOf(result);
+    expect(out).toMatchObject({ status: 'timed_out', reason: 'the deadline of 1000 ms passed', provenance: { deadlineMs: 1_000 } });
+    expect(out.seats.map((r) => [r.role, r.status, r.summary])).toEqual([
+      ['drafter', 'completed', 'A draft.'],
+      ['editor', 'cut', ''],
+    ]);
+    // The editor's held request was aborted, once, and not tried again.
+    expect(s.aborts).toBe(1);
+    // Within the deadline and one grace, the settle wait and the close sharing it.
+    expect(Date.now() - started).toBeLessThan(1_000 + 5_000);
+    // The parent's next step ran: root, drafter, editor, root.
+    expect(result.text).toBe('Partial work.');
+    expect(s.seen).toHaveLength(4);
+  }, 20_000);
+
+  it('a launch runs under the least of its deadlineMs and maxDeadlineMs, defaultDeadlineMs when it names none, and the tool tells the model both', async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([
+          { id: 'a', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Answer.', seats: [{ role: 'solver', instructions: 'Answer.' }] } },
+          { id: 'b', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Answer.', deadlineMs: 10_000, seats: [{ role: 'solver', instructions: 'Answer.' }] } },
+        ]),
+        reply.text('A.'),
+        reply.text('B.'),
+        reply.text('Both.'),
+      ],
+    });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', agencies: { launch: true, defaultDeadlineMs: 2_000, maxDeadlineMs: 3_000 } });
+
+    const result = await parent.session('p1').send('Go.');
+    expect(result.text).toBe('Both.');
+    expect(launchOf(result, 0)).toMatchObject({ status: 'completed', text: 'A.', provenance: { deadlineMs: 2_000 } });
+    expect(launchOf(result, 1)).toMatchObject({ status: 'completed', text: 'B.', provenance: { deadlineMs: 3_000 } });
+    expect(JSON.stringify(launchTool(s.seen[0]).parameters)).toContain('default 2000, at most 3000');
+  });
+
+  it("a launch whose seat holds past the deadline and the grace keeps its session's scope until the seat is released, and another agent's session of the same id is a scope of its own", async () => {
+    const k = key();
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const hang = vi.fn(async () => {
+      await hanging;
+      return 'done';
+    });
+    const oneSeat = { goal: 'Answer.', seats: [{ role: 'second', instructions: 'Answer.' }] };
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Wait.', deadlineMs: 1_000, seats: [{ role: 'waiter', instructions: 'Call hang.', tools: ['hang'] }] }),
+        // The waiter's tool runs past the deadline and the grace.
+        reply.tools([{ id: 'h1', name: 'hang', args: {} }]),
+        launchStep(oneSeat, 'l2'),
+        reply.text('Waited.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      tools: { hang: { description: 'Hangs.', parameters: { type: 'object', properties: {} }, execute: hang } },
+      agencies: { launch: true },
+    });
+    const session = parent.session('p1');
+
+    const first = await session.send('Start.');
+    expect(first.text).toBe('Waited.');
+    expect(launchOf(first, 0).status).toBe('timed_out');
+    // The seat still holds the tool, so the launch is closing and counts toward the session's one launch in flight.
+    expect(hang).toHaveBeenCalledTimes(1);
+    expect(refusalOf(first, 1)).toMatch(/^concurrency_exceeded: /);
+    // Another agent's session of the same id is a scope of its own: it launches meanwhile.
+    const k2 = key();
+    script('openai', k2, { replies: [launchStep(oneSeat, 'o1'), reply.text('Answered.'), reply.text('Ran.')] });
+    const other = gmi({ ...route(k2), instructions: 'Coordinate.', agencies: { launch: true } });
+    expect(launchOf(await other.session('p1').send('Go.')).status).toBe('completed');
+
+    // Once the tool returns, the seat is released and the session launches again.
+    release();
+    const again = await sendUntilAdmitted(session, s, () => [launchStep(oneSeat, 'l3'), reply.text('Answered.'), reply.text('Now it ran.')]);
+    expect(launchOf(again)).toMatchObject({ status: 'completed', text: 'Answered.' });
+    expect(again.text).toBe('Now it ran.');
+    expect(hang).toHaveBeenCalledTimes(1);
+    // Nothing was sent for the waiter after its tool: its one request is the step that called it.
+    expect(s.seen.filter((call) => systemText(call).includes('Call hang.'))).toHaveLength(1);
+  }, 40_000);
+
+  it("a session that keeps no history keeps one scope across its turns: its closing launch refuses the next turn's launch until the seat is released", async () => {
+    const k = key();
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const hang = vi.fn(async () => {
+      await hanging;
+      return 'done';
+    });
+    const oneSeat = { goal: 'Answer.', seats: [{ role: 'second', instructions: 'Answer.' }] };
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Wait.', deadlineMs: 1_000, seats: [{ role: 'waiter', instructions: 'Call hang.', tools: ['hang'] }] }),
+        reply.tools([{ id: 'h1', name: 'hang', args: {} }]),
+        reply.text('Waited.'),
+        // The next send runs on a GMI of its own (history: false), in the same session.
+        launchStep(oneSeat, 'l2'),
+        reply.text('Refused.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      history: false,
+      tools: { hang: { description: 'Hangs.', parameters: { type: 'object', properties: {} }, execute: hang } },
+      agencies: { launch: true },
+    });
+    const session = parent.session('p1');
+
+    expect(launchOf(await session.send('Start.')).status).toBe('timed_out');
+    expect(hang).toHaveBeenCalledTimes(1);
+    const next = await session.send('Again.');
+    expect(refusalOf(next, 0)).toMatch(/^concurrency_exceeded: /);
+    expect(next.text).toBe('Refused.');
+
+    release();
+    const again = await sendUntilAdmitted(session, s, () => [launchStep(oneSeat, 'l3'), reply.text('Answered.'), reply.text('Now it ran.')]);
+    expect(launchOf(again)).toMatchObject({ status: 'completed', text: 'Answered.' });
+    expect(hang).toHaveBeenCalledTimes(1);
+    expect(s.seen.filter((call) => systemText(call).includes('Call hang.'))).toHaveLength(1);
+  }, 40_000);
 });
