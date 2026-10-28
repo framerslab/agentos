@@ -10,7 +10,8 @@
  * schema is parsed, one that does not is returned once with `parsed`
  * undefined, and an approval without modifications leaves the validation
  * retry as it was. A replacement that hands the strategy's own text back is
- * the approver's answer as any other is.
+ * the approver's answer as any other is, and a replacement that does not
+ * match writes one line through the host's logger.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -23,6 +24,7 @@ vi.stubGlobal('fetch', fetchMock);
 import { agency } from '../agency.js';
 import type { ApprovalDecision, ApprovalRequest } from '../types.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
+import { setLoggerFactory, resetLoggerFactory } from '../../core/logging/loggerFactory.js';
 
 type Json = Record<string, any>;
 const KEY = 'sk-return-approval-test-0001';
@@ -102,6 +104,19 @@ function team(handler: (r: ApprovalRequest) => Promise<ApprovalDecision>, on: Js
 
 const approve = (modifications?: ApprovalDecision['modifications']) =>
   vi.fn(async (_r: ApprovalRequest): Promise<ApprovalDecision> => ({ approved: true, ...(modifications ? { modifications } : {}) }));
+
+type LogLine = { level: string; message: unknown; meta: Json | undefined };
+/** Every line the host's logger (`setLoggerFactory`) is handed while `run` runs. */
+async function logLines(run: () => Promise<void>): Promise<LogLine[]> {
+  const lines: LogLine[] = [];
+  const make = (): unknown => {
+    const write = (level: string) => (message: unknown, meta?: Json) => { lines.push({ level, message, meta }); };
+    return { info: write('info'), warn: write('warn'), error: write('error'), debug: write('debug'), child: () => make() };
+  };
+  setLoggerFactory(() => make() as never);
+  try { await run(); } finally { resetLoggerFactory(); }
+  return lines;
+}
 
 /** The reports of the agency's own output guardrail: one for each text it received. */
 const outputGuardReports = (guardrailResult: ReturnType<typeof vi.fn>): unknown[] =>
@@ -216,5 +231,21 @@ describe('a beforeReturn approval and the output schema', () => {
     expect(result.parsed).toBeUndefined();
     expect(chatBodies()).toHaveLength(1);
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('a replacement that does not match the schema writes one line through the host logger, and one that matches writes none', async () => {
+    const unparsed = (lines: LogLine[]): LogLine[] => lines.filter((line) => line.meta?.event === 'agency_replacement_unparsed');
+    const failing = await logLines(async () => {
+      const result = (await team(approve({ output: REWRITTEN }), {}, { output: ROTATION }).generate(PROMPT)) as Json;
+      expect(result.parsed).toBeUndefined();
+    });
+    expect(unparsed(failing)).toEqual([
+      { level: 'info', message: expect.any(String), meta: { event: 'agency_replacement_unparsed', agency: '__agency__', strategy: 'sequential' } },
+    ]);
+    const matching = await logLines(async () => {
+      const result = (await team(approve({ output: REWRITTEN_JSON }), {}, { output: ROTATION }).generate(PROMPT)) as Json;
+      expect(result.parsed).toEqual({ rotate: 'every Sunday' });
+    });
+    expect(unparsed(matching)).toEqual([]);
   });
 });
