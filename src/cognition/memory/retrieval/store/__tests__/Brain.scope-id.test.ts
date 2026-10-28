@@ -4,10 +4,10 @@
  * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds, with
  * one read of each row; a row a release without the column writes to a brain already at version 3 is filled at the
  * next open, a key spelled with a JSON escape included, by a fill that reads only the rows whose metadata can name a
- * scope id; a fresh Brain has it; the index a
- * per-scope read uses exists; every writer this file reaches sets it; and the importers file by it and deduplicate
- * inside one scope id, where a trace such a release wrote counts under the scope id its metadata names. Real SQLite
- * files through `@framers/sql-storage-adapter`, as the store opens them in production.
+ * scope id, through an index of those rows alone; a fresh Brain has it; the index a per-scope read uses exists; every
+ * writer this file reaches sets it; and the importers file by it and deduplicate inside one scope id, where a trace
+ * such a release wrote counts under the scope id its metadata names. Real SQLite files through
+ * `@framers/sql-storage-adapter`, as the store opens them in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -85,12 +85,15 @@ async function schema2File(): Promise<string> {
   return filePath;
 }
 
+type Statement = { sql: string; params?: Parameters<StorageAdapter['all']>[1] };
+
 /**
- * `raw`, counting how often each row comes back from the fill's reads: the statements on memory_traces that ask for
- * scope_id ''.
+ * `raw`, counting how often each row comes back from the fill's reads, the statements on memory_traces that ask for
+ * scope_id '', and keeping each such statement.
  */
-function countingReads(raw: StorageAdapter): { adapter: StorageAdapter; reads: Record<string, number> } {
+function countingReads(raw: StorageAdapter): { adapter: StorageAdapter; reads: Record<string, number>; statements: Statement[] } {
   const reads: Record<string, number> = {};
+  const statements: Statement[] = [];
   const adapter = {
     kind: raw.kind,
     get: raw.get.bind(raw),
@@ -99,12 +102,13 @@ function countingReads(raw: StorageAdapter): { adapter: StorageAdapter; reads: R
     all: async (sql: string, params?: Parameters<StorageAdapter['all']>[1]) => {
       const rows = await raw.all<{ id?: string }>(sql, params);
       if (sql.includes('FROM memory_traces') && sql.includes("scope_id = ''")) {
+        statements.push({ sql, params });
         for (const { id } of rows) if (id) reads[id] = (reads[id] ?? 0) + 1;
       }
       return rows;
     },
   } as unknown as StorageAdapter;
-  return { adapter, reads };
+  return { adapter, reads, statements };
 }
 
 const scopeIdsOf = async (brain: Brain) =>
@@ -210,6 +214,23 @@ describe('memory_traces.scope_id', () => {
         { id: 't-no-key', scope_id: '' },
         { id: 't-unscoped', scope_id: '' },
       ]);
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it('is filled at an open by a read of an index that holds only the rows it can fill', async () => {
+    const filePath = tempFile();
+    await (await open(filePath, 'b1')).close();
+    brains.length = 0;
+    const raw = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+    const { adapter, statements } = countingReads(raw);
+    try {
+      await fillScopeIds(adapter, 'b1');
+      expect(statements).toHaveLength(1);
+      // The primary key would walk every row of the brain, the embedding of each before its metadata.
+      const plan = await raw.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${statements[0]!.sql}`, statements[0]!.params);
+      expect(plan.map((step) => step.detail).join('\n')).toContain('idx_memory_traces_unfiled_scope_id');
     } finally {
       await raw.close();
     }

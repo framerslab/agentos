@@ -15,8 +15,9 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { PostgresAdapter } from '@framers/sql-storage-adapter';
+import { PostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
+import { fillScopeIds } from '../migrations/v2-to-v3.js';
 import { PORTABLE_TABLES } from '../portable-tables.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -189,6 +190,37 @@ describeIfPostgres('Brain.openPostgres', () => {
       [brainId, 'escaped-trace'],
     );
     expect(row?.scope_id).toBe('cy');
+  });
+
+  it('files the traces of an open by a read of an index that holds only the rows it can fill', async () => {
+    const brainId = uniqueBrainId();
+    const brain = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    openedBrains.push(brain);
+    // Traces filed under no scope id, as remember() writes them, which the fill never fills; then fresh statistics.
+    await brain.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata)
+         SELECT $1, 'unscoped-' || g, 'episodic', 'user', 'unscoped', 1, '{"scopeId":""}' FROM generate_series(1, 200) AS g`,
+      [brainId],
+    );
+    await brain.exec('ANALYZE memory_traces');
+
+    const statements: Array<{ sql: string; params?: Parameters<StorageAdapter['all']>[1] }> = [];
+    const reading = {
+      all: (sql: string, params?: Parameters<StorageAdapter['all']>[1]) => {
+        statements.push({ sql, params });
+        return brain.adapter.all(sql, params);
+      },
+      run: (sql: string, params?: Parameters<StorageAdapter['run']>[1]) => brain.adapter.run(sql, params),
+    } as unknown as StorageAdapter;
+    await fillScopeIds(reading, brainId);
+    expect(statements).toHaveLength(1);
+
+    // With sequential scans priced out, the primary key would walk all 200 rows; the index of the rows to fill holds none.
+    const plan = await brain.transaction(async (trx) => {
+      await trx.exec('SET LOCAL enable_seqscan = off');
+      return trx.all<Record<string, string>>(`EXPLAIN ${statements[0]!.sql}`, statements[0]!.params);
+    });
+    expect(plan.map((step) => Object.values(step)[0]).join('\n')).toContain('idx_memory_traces_unfiled_scope_id');
   });
 
   it('serializes concurrent first-opens against the same brainId', async () => {
