@@ -647,4 +647,44 @@ describe('runLaunch: the grace and the closing entry', () => {
     releaseClose();
     await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
   }, 10_000);
+
+  it("a team a seat launched keeps the launch it came from closing while that team's seat outlives the grace, so the session's next launch waits for it", async () => {
+    let releaseWaiter!: () => void;
+    const waited = new Promise<string>((resolve) => {
+      releaseWaiter = () => resolve('Waited.');
+    });
+    // Its call runs on past every abort until released, as a seat whose tool hangs does.
+    const waiter = fakeSeat('waiter', () => waited);
+    let lead: FakeSeat | undefined;
+    let nested: LaunchAgencyResult | undefined;
+    const host: FakeHost = fakeHost({
+      seat: (s, launch) => {
+        if (s.role === 'waiter') return waiter;
+        if (s.role !== 'lead') return fakeSeat(s.role);
+        // The lead's call is a tool call that launches a team from its seat: a launch nested under the lead's team.
+        lead = fakeSeat('lead', async () => {
+          nested = (await runLaunch(host, args({ seats: [seat('waiter')] }), framed(launch, 'lead'))).output as LaunchAgencyResult;
+          return 'Lead done.';
+        });
+        return lead;
+      },
+    });
+    const out = (await runLaunch(host, args({ seats: [seat('lead')], deadlineMs: 1_000 }), ctxFor())).output as LaunchAgencyResult;
+    expect(out.status).toBe('timed_out');
+    // The lead's team stopped with its parent and came back while its waiter still holds its call (the precondition).
+    await vi.waitFor(() => expect(nested?.status).toBe('cancelled'));
+    expect(waiter.inputs).toHaveLength(1);
+    expect(launchRegistry.get(nested!.agencyId)?.state).toBe('closing');
+    // The lead itself is released: its call returned and its close ran, and every hold of either settles before the
+    // next task runs.
+    await vi.waitFor(() => expect(lead?.closed).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The launch stays closing for the seat its lead's team holds, and counts toward the session's one launch in flight.
+    expect(launchRegistry.get(out.agencyId)?.state).toBe('closing');
+    expect((await refusalOf(host, args())).code).toBe('concurrency_exceeded');
+    releaseWaiter();
+    await vi.waitFor(() => expect(launchRegistry.get(nested!.agencyId)).toBeUndefined());
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+    expect((await runLaunch(host, args(), ctxFor())).output).toMatchObject({ status: 'completed' });
+  }, 10_000);
 });

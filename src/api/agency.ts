@@ -228,6 +228,19 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     );
   }
 
+  /*
+   * `agencies` is a gmi() option, which AgencyOptions does not declare: an agency is not a GMI, launches no team
+   * itself and passes the option to none of its seats. It still arrives from JavaScript, or in an agent's options
+   * object spread into an agency's, so say so instead of dropping it silently. A seat that may launch teams sets it on
+   * itself.
+   */
+  if ((opts as { agencies?: unknown }).agencies != null) {
+    console.warn(
+      '[AgentOS] agency() accepted an agencies config, but an agency launches no team itself and passes the config ' +
+      "to none of its seats. Set agencies on a gmi() agent (gmi() or agent({ runtime: 'gmi' })) and seat that agent.",
+    );
+  }
+
   // 2. Compile the orchestration strategy into an executable CompiledStrategy.
   //    When `adaptive` is true the hierarchical strategy is compiled in place
   //    of the declared one. compileStrategy()'s adaptive wrapper, which names
