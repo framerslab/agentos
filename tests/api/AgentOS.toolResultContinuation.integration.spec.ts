@@ -33,6 +33,7 @@ import {
   type IGuardrailService,
 } from '../../src/safety/guardrails/IGuardrailService';
 import type { ICrossAgentGuardrailService } from '../../src/safety/guardrails/ICrossAgentGuardrailService';
+import type { ISpendMeter } from '../../src/safety/runtime/SpendMeter';
 import { wrapWithCrossAgentGuardrails } from '../../src/safety/guardrails/crossAgentGuardrailDispatcher';
 
 /**
@@ -1809,5 +1810,51 @@ describe('AgentOS tool-result continuations', () => {
     const answers = answersOf(rt.context, READ_CALL.id);
     expect(answers).toHaveLength(1);
     expect(answers[0]?.content).toBe(READ_RESULT.toolOutput);
+  });
+
+  it('a turn whose pause the store refuses to save keeps nothing of its closed stream, and settles as a turn that failed before any output', async () => {
+    const settle = vi.fn(async () => ({ status: 'settled' as const }));
+    const meter: ISpendMeter = {
+      reserve: async (request) => ({
+        status: 'reserved',
+        operationId: request.operationId,
+        accountId: request.accountId,
+        period: '2026-10',
+        units: request.units ?? 1,
+        attempt: 1,
+        remaining: 9,
+        expiresAt: Date.now() + 60_000,
+      }),
+      settle,
+      heartbeat: async () => undefined,
+      reconcile: async () => ({ consumed: 0, released: 0, pending: 0 }),
+      snapshot: async () => {
+        throw new Error('The test reads no snapshot.');
+      },
+      setAllowance: async () => undefined,
+    };
+    const rt = await runtime('conv-unsaved-turn-pause-stream', { spendMeter: { meter } });
+    rt.useGmi(hostToolGmi());
+    // the store refuses to keep the turn's pause for READ_CALL
+    vi.spyOn(rt.agentos.getConversationManager(), 'saveConversation').mockImplementation(async (saved: ConversationContext) => {
+      const pause = saved.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+        | { toolCalls?: ToolCallRequest[] }
+        | undefined;
+      if (pause?.toolCalls?.some((call) => call.id === READ_CALL.id)) {
+        throw new Error('The conversation store is unavailable.');
+      }
+    });
+
+    const turn = await collect(rt.agentos.processRequest({ ...rt.input, operationId: 'op-unsaved-turn-pause' }));
+
+    const error = turn.find((r) => r.type === AgentOSResponseChunkType.ERROR);
+    expect(error).toBeDefined();
+    expect(turn.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+    // the turn's stream is closed, and the runtime keeps nothing of it once the turn has settled
+    const orchestrator = (rt.agentos as any).agentOSOrchestrator;
+    await vi.waitFor(() => expect(settle).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(orchestrator.getStreamIdentity(error!.streamId)).toBeNull());
+    // neither text nor a request reached the host, so the turn is settled as one that failed before any output
+    expect(settle).toHaveBeenCalledWith(expect.objectContaining({ operationId: 'op-unsaved-turn-pause', outcome: 'released' }));
   });
 });
