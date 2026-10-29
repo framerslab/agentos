@@ -770,17 +770,20 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
 
   /**
    * The node ids of these traces' copies held under another node id than their key, read by the text their stored
-   * JSON holds (`"memoryTraceId":"<id>"`, an escaped `LIKE`) and matched exactly in code: what a delete by trace id
-   * reads while the pass that keys such copies fails as a whole ({@link rekeyOlderCopies}).
+   * JSON holds (`"memoryTraceId":"<id>"`, an escaped `LIKE`, 50 traces a statement) and matched exactly in code: what
+   * a delete by trace id reads while the pass that keys such copies fails as a whole ({@link rekeyOlderCopies}).
    */
   private async olderCopyIds(traceIds: readonly string[]): Promise<string[]> {
     const byTrace: MemoryCopyFilter = { traceIds };
+    const needles = traceNeedles(traceIds);
     const ids: string[] = [];
-    for (const needle of traceNeedles(traceIds)) {
+    for (let offset = 0; offset < needles.length; offset += 50) {
+      const chunk = needles.slice(offset, offset + 50);
       const rows = await this.brain.all<{ id: string; properties: string }>(
         `SELECT id, properties FROM knowledge_nodes
-          WHERE brain_id = ? AND type = 'memory' AND id NOT LIKE ? ESCAPE '!' AND properties LIKE ? ESCAPE '!'`,
-        [this.brain.brainId, `${likeLiteral(COPY_KEY_PREFIX)}%`, likeContaining(needle)],
+          WHERE brain_id = ? AND type = 'memory' AND id NOT LIKE ? ESCAPE '!'
+            AND (${chunk.map(() => "properties LIKE ? ESCAPE '!'").join(' OR ')})`,
+        [this.brain.brainId, `${likeLiteral(COPY_KEY_PREFIX)}%`, ...chunk.map(likeContaining)],
       );
       for (const row of rows) {
         if (isMemoryCopyOf(storedContext(row.properties), byTrace)) ids.push(row.id);
