@@ -2,7 +2,10 @@
  * @file Memory.delete-scope.test.ts
  * The facade's deletes and restores, which account deletion and a ledger revert call on the memory tools' Brain:
  * `deleteScope` (all of a scope, or a second user's traces in it), `deleteTraces`, `restoreTrace` (a trace brought
- * back to the state a snapshot holds) and `brainId`. A real SQLite facade.
+ * back to the state a snapshot holds, its vector kept where its content is) and `brainId`. A delete takes the rows that
+ * name a trace (its feedback, the chunk it was filed from) and its memory-graph node and edges, whichever facade on
+ * the Brain wrote them; a second user's words stay a trace of their own beside the same words of the session's owner.
+ * A real SQLite facade.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -19,12 +22,13 @@ afterEach(async () => {
   while (dirs.length) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
 });
 
-async function facade(): Promise<{ memory: Memory; brain: Brain }> {
+async function facade(): Promise<{ memory: Memory; brain: Brain; file: string }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'facade-delete-'));
   dirs.push(dir);
-  const memory = await Memory.createSqlite(path.join(dir, 'brain.sqlite'), { brainId: 'tools-brain' });
+  const file = path.join(dir, 'brain.sqlite');
+  const memory = await Memory.createSqlite(file, { brainId: 'tools-brain' });
   memories.push(memory);
-  return { memory, brain: (memory as unknown as { _brain: Brain })._brain };
+  return { memory, brain: (memory as unknown as { _brain: Brain })._brain, file };
 }
 
 const contents = async (brain: Brain) =>
@@ -55,6 +59,65 @@ describe('Memory.deleteScope', () => {
     expect(await memory.deleteScope('user', '/s-1', { turnUserId: 'bo' })).toEqual({ deleted: 1 });
     expect(await contents(brain)).toEqual(['Owner note.']);
   });
+
+  it("keeps a second user's words a trace of their own beside the same words of the session's owner", async () => {
+    const { memory, brain } = await facade();
+    const visitor = await memory.remember('Same words.', { scope: 'user', scopeId: '/s-1', metadata: { turnUserId: 'bo' } });
+    const owner = await memory.remember('Same words.', { scope: 'user', scopeId: '/s-1' });
+    expect(owner.id).not.toBe(visitor.id);
+    expect(owner.turnUserId).toBeUndefined();
+    const again = await memory.remember('Same words.', { scope: 'user', scopeId: '/s-1', metadata: { turnUserId: 'bo' } });
+    expect(again.id).toBe(visitor.id);
+
+    expect(await memory.deleteScope('user', '/s-1', { turnUserId: 'bo' })).toEqual({ deleted: 1 });
+    expect(await contents(brain)).toEqual(['Same words.']);
+    expect((await memory.recall('words')).map((r) => r.trace.id)).toEqual([owner.id]);
+  });
+});
+
+describe('Memory.deleteTraces with rows that name a trace', () => {
+  it('deletes a trace that a feedback row or a document chunk names, and keeps the chunk', async () => {
+    const { memory, brain } = await facade();
+    const bees = await memory.remember('Ana keeps bees.', { scope: 'user', scopeId: 'ana' });
+    const tea = await memory.remember('Ana likes tea.', { scope: 'user', scopeId: 'ana' });
+    const cello = await memory.remember('Bo plays cello.', { scope: 'user', scopeId: 'bo' });
+    await memory.feedback(bees.id, 'used', 'what does Ana keep');
+    await memory.feedback(cello.id, 'used', 'what does Bo play');
+    expect((await brain.all('SELECT trace_id FROM retrieval_feedback')).length).toBe(2);
+    await brain.run(
+      `INSERT INTO documents (brain_id, id, path, format, content_hash, ingested_at) VALUES (?, 'doc-1', 'notes.md', 'md', 'hash', ?)`,
+      [brain.brainId, Date.now()],
+    );
+    await brain.run(
+      `INSERT INTO document_chunks (brain_id, id, document_id, trace_id, content, chunk_index) VALUES (?, 'chunk-1', 'doc-1', ?, 'Ana likes tea.', 0)`,
+      [brain.brainId, tea.id],
+    );
+
+    expect(await memory.deleteTraces([bees.id])).toEqual({ deleted: 1 });
+    expect(await memory.deleteScope('user', 'ana')).toEqual({ deleted: 1 });
+
+    expect(await contents(brain)).toEqual(['Bo plays cello.']);
+    expect(await brain.all('SELECT trace_id FROM retrieval_feedback')).toEqual([{ trace_id: cello.id }]);
+    expect(await brain.all('SELECT id, trace_id, content FROM document_chunks')).toEqual([
+      { id: 'chunk-1', trace_id: null, content: 'Ana likes tea.' },
+    ]);
+  });
+
+  it('deletes the memory-graph node and edges of a trace when another facade on the Brain wrote the edge', async () => {
+    const { memory: writer, brain, file } = await facade();
+    // Opened before the edge exists, as a second facade of the runtime or another process is.
+    const deleter = await Memory.createSqlite(file, { brainId: 'tools-brain' });
+    memories.push(deleter);
+    const bees = await writer.remember('Ana keeps bees.', { scope: 'user', scopeId: 'ana' });
+    const tea = await writer.remember('Ana likes tea.', { scope: 'user', scopeId: 'ana' });
+    await (writer as unknown as { _memoryGraph: { recordCoActivation(ids: string[]): Promise<void> } })._memoryGraph.recordCoActivation([bees.id, tea.id]);
+    expect((await brain.all('SELECT id FROM knowledge_edges')).length).toBe(1);
+
+    expect(await deleter.deleteScope('user', 'ana')).toEqual({ deleted: 2 });
+
+    expect(await brain.all('SELECT id FROM knowledge_nodes WHERE id IN (?, ?)', [bees.id, tea.id])).toEqual([]);
+    expect(await brain.all('SELECT id FROM knowledge_edges')).toEqual([]);
+  });
 });
 
 describe('Memory.deleteTraces and restoreTrace', () => {
@@ -75,5 +138,28 @@ describe('Memory.deleteTraces and restoreTrace', () => {
     await memory.restoreTrace(kept.id, before!);
     expect(await contents(brain)).toEqual(['Ana keeps bees.']);
     await expect(memory.restoreTrace('other-id', before!)).rejects.toThrow(/snapshot of trace/);
+  });
+
+  it("keeps the vector of a trace it restores to the content its row holds, and drops it for other content", async () => {
+    const { memory, brain } = await facade();
+    const kept = await memory.remember('Ana keeps bees.', { scope: 'user', scopeId: 'ana' });
+    const vector = Buffer.from(Float32Array.from([1, 0, 0, 0]).buffer);
+    await brain.run('UPDATE memory_traces SET embedding = ? WHERE brain_id = ? AND id = ?', [vector, brain.brainId, kept.id]);
+    const before = (await readTraceSnapshot(brain, brain.brainId, kept.id))!;
+    const embeddingOf = async () => {
+      const row = await brain.get<{ embedding: Uint8Array | null }>('SELECT embedding FROM memory_traces WHERE id = ?', [kept.id]);
+      return row?.embedding ? Buffer.from(row.embedding) : null;
+    };
+
+    // A reverted delete: the content is the snapshot's, so the vector still holds it.
+    await memory.forget(kept.id);
+    await memory.restoreTrace(kept.id, before);
+    expect(await embeddingOf()).toEqual(vector);
+
+    // A reverted update: the row holds other content, whose vector is not the snapshot's.
+    await brain.run(`UPDATE memory_traces SET content = 'changed' WHERE id = ?`, [kept.id]);
+    await memory.restoreTrace(kept.id, before);
+    expect(await embeddingOf()).toBeNull();
+    expect(await contents(brain)).toEqual(['Ana keeps bees.']);
   });
 });
