@@ -1,5 +1,5 @@
 /**
- * A budget drawing on a parent (spec 4.6): the parent checks first and receives every record; a refusal by any
+ * A budget drawing on a parent: the parent checks first and receives every record; a refusal by any
  * budget above runs the child's own onLimitReached function before the error goes on; remaining() never goes
  * below zero. Pure logic: the launch builds its child budgets on it.
  */
