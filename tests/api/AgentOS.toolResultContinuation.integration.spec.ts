@@ -1751,4 +1751,63 @@ describe('AgentOS tool-result continuations', () => {
     expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('Standup moved to 10:00.');
     expect(unansweredToolCallIds(promptCalls[0] ?? [])).toEqual([]);
   });
+
+  it('a resume with results for part of its pause gives the GMI the calls they leave out as not run, so the model reads every call answered', async () => {
+    const rt = await runtime('conv-partial-resume-shipped');
+    const host = hostToolGmi();
+    host.processTurnStream = async function* (): AsyncGenerator<any, GMIOutput, undefined> {
+      yield {
+        type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+        content: [READ_CALL, WRITE_CALL],
+        interactionId: 'interaction-two-calls',
+        timestamp: new Date(),
+        metadata: { executionMode: 'external', requiresExternalToolResult: true },
+      };
+      return { isFinal: false, responseText: 'I need the notes file read and written.', toolCalls: [READ_CALL, WRITE_CALL] };
+    };
+    rt.useGmi(host);
+    await collect(rt.agentos.processRequest(rt.input));
+    await vi.waitFor(() => expect(rt.context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY)).toBeDefined());
+    const saved = await rt.pending();
+    expect(saved?.toolCalls).toEqual([READ_CALL, WRITE_CALL]);
+
+    // the host resumes with READ_CALL's result alone, on a runtime whose session GMI is the shipped one
+    const { gmi, promptCalls } = await rt.shippedGmi([{ text: 'The notes say the standup moved to 10:00.' }]);
+    rt.useGmi(gmi);
+    const resumed = await collect(rt.agentos.resumeExternalToolRequest(saved!, [READ_RESULT]));
+
+    expect((resumed.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('The notes say the standup moved to 10:00.');
+    // a provider refuses a request that holds a call with no result: the model reads that WRITE_CALL has none
+    expect(unansweredToolCallIds(promptCalls[0] ?? [])).toEqual([]);
+    const notRun = promptCalls[0]?.find((m) => m.role === 'tool' && m.tool_call_id === WRITE_CALL.id);
+    expect(String(notRun?.content)).toContain('EXTERNAL_TOOL_NOT_RUN');
+  });
+
+  it('a new turn whose organization the runtime refuses leaves the pause it found, and the pause goes on with its result', async () => {
+    const rt = await runtime('conv-turn-refused-organization', {
+      orchestratorConfig: {
+        tenantRouting: { mode: 'single_tenant', defaultOrganizationId: 'org-notes', strictOrganizationIsolation: true },
+      },
+    });
+    const host = hostToolGmi();
+    const { request, saved } = await rt.pauseOnRead(host);
+
+    const refused = await collect(
+      rt.agentos.processRequest({ ...rt.input, organizationId: 'org-elsewhere', textInput: 'When is the standup?' }),
+    );
+
+    // the turn is refused before it records its input, so the conversation has not moved on and keeps its pause
+    expect(refused.some((r) => r.type === AgentOSResponseChunkType.ERROR)).toBe(true);
+    expect(await rt.pending()).toEqual(saved);
+    expect(answersOf(rt.context, READ_CALL.id)).toHaveLength(0);
+
+    const continued = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+    expect(continued.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(host.handleToolResult).toHaveBeenCalledTimes(1);
+    const answers = answersOf(rt.context, READ_CALL.id);
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.content).toBe(READ_RESULT.toolOutput);
+  });
 });
