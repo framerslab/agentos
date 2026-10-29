@@ -99,6 +99,13 @@ jobs:
       - name: Package exports point at built files
         run: pnpm run verify:exports
 
+      # The tags module as an application installs it: the packed candidate in an empty project, imported through
+      # its subpath, @framers/agentos/cognition/library/tags, compiled against the installed declarations under
+      # NodeNext and run with network access refused (scripts/fixtures/tags-consumer.ts).
+      - name: The tags module runs from the packed package
+        timeout-minutes: 10
+        run: node --test scripts/tags-package.test.mjs
+
       # The executor from the built package, as a host loads it: its prelude and
       # bindings are compiled source, and its engine resolves from node_modules.
       - name: The QuickJS executor runs from the built package
