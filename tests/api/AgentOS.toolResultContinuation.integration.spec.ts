@@ -1635,13 +1635,13 @@ describe('AgentOS tool-result continuations', () => {
   });
 
   it.each([
-    ['on the stream', 'stream', 'the store refuses to save that the pause was taken', 'store'],
-    ['on the stream', 'stream', 'a result cannot be recorded', 'unrecordable'],
-    ['resumed from the saved pause', 'resume', 'the store refuses to save that the pause was taken', 'store'],
-    ['resumed from the saved pause', 'resume', 'a result cannot be recorded', 'unrecordable'],
+    ['on the stream', 'the store refuses to save that the pause was taken', 'stream', 'store'],
+    ['on the stream', 'a result cannot be recorded', 'stream', 'unrecordable'],
+    ['resumed from the saved pause', 'the store refuses to save that the pause was taken', 'resume', 'store'],
+    ['resumed from the saved pause', 'a result cannot be recorded', 'resume', 'unrecordable'],
   ] as const)(
     'a continuation %s that fails before its results reach the conversation (%s) leaves the pause for a resume',
-    async (_pathLabel, path, _failureLabel, failure) => {
+    async (_pathLabel, _failureLabel, path, failure) => {
       const rt = await runtime(`conv-failed-before-results-${path}-${failure}`);
       const host = hostToolGmi();
       const { request, saved } = await rt.pauseOnRead(host);
@@ -1706,6 +1706,42 @@ describe('AgentOS tool-result continuations', () => {
     const writeAnswers = answersOf(rt.context, WRITE_CALL.id);
     expect(writeAnswers).toHaveLength(1);
     expect(String(writeAnswers[0]?.content)).toContain('EXTERNAL_TOOL_NOT_RUN');
+
+    // the store is back for the next turn, which sends the model no call without its result
+    storeDown = false;
+    const { gmi, promptCalls } = await rt.shippedGmi([{ text: 'Standup moved to 10:00.' }]);
+    rt.useGmi(gmi);
+    const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: 'When is the standup?' }));
+    expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('Standup moved to 10:00.');
+    expect(unansweredToolCallIds(promptCalls[0] ?? [])).toEqual([]);
+  });
+
+  it("a turn whose pause the store refuses to save answers the pause's calls as not run, so the next turn sends no call without its result", async () => {
+    const rt = await runtime('conv-unsaved-turn-pause');
+    rt.useGmi(hostToolGmi());
+    // the store goes down when it is asked to keep the turn's pause for READ_CALL, and stays down until the next turn
+    let storeDown = false;
+    vi.spyOn(rt.agentos.getConversationManager(), 'saveConversation').mockImplementation(async (saved: ConversationContext) => {
+      const pause = saved.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+        | { toolCalls?: ToolCallRequest[] }
+        | undefined;
+      if (pause?.toolCalls?.some((call) => call.id === READ_CALL.id)) {
+        storeDown = true;
+      }
+      if (storeDown) {
+        throw new Error('The conversation store is unavailable.');
+      }
+    });
+
+    const turn = await collect(rt.agentos.processRequest(rt.input));
+
+    // the turn ends with an error before the host is asked for the call, and the conversation answers the call
+    expect(turn.some((r) => r.type === AgentOSResponseChunkType.ERROR)).toBe(true);
+    expect(turn.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+    expect(await rt.pending()).toBeNull();
+    const readAnswers = answersOf(rt.context, READ_CALL.id);
+    expect(readAnswers).toHaveLength(1);
+    expect(String(readAnswers[0]?.content)).toContain('EXTERNAL_TOOL_NOT_RUN');
 
     // the store is back for the next turn, which sends the model no call without its result
     storeDown = false;
