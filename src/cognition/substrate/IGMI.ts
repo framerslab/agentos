@@ -545,9 +545,12 @@ export interface GMIOutput {
     error?: { code: string; message: string; details?: any };
     /**
      * Retrieved RAG chunks for the turn, populated when the GMI performed a
-     * RAG retrieval. Threaded into the FINAL_RESPONSE chunk so client code and
-     * the output-guardrail layer (Grounding Guard, Citation Verifier) can
-     * verify generated claims against the same sources the model saw.
+     * RAG retrieval; a tool continuation retrieves nothing of its own and
+     * carries the chunks of the user turn it continues, when the same GMI ran
+     * that turn (a pause stores no retrieved chunk). Threaded into the
+     * FINAL_RESPONSE chunk so client code and the output-guardrail layer
+     * (Grounding Guard, Citation Verifier) can verify generated claims against
+     * the same sources the model saw.
      */
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
     /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */
@@ -743,6 +746,14 @@ export interface IGMI {
     options?: GMIToolResultOptions,
   ): Promise<GMIOutput>;
 
+  /**
+   * Continues the turn with several tool results at once: a batch the host passes, or a pause the host answers in
+   * part. For a pause answered in part, the results hold, after the host's, one error result for each call of the
+   * pause the host left out (`isError: true`, `errorDetails.code` `EXTERNAL_TOOL_NOT_RUN`), so the GMI's own history
+   * answers every call of the pause before it writes again. An `IGMI` without it takes one result at a time: a pause
+   * answered in part continues it through `handleToolResult()` with the host's result alone, and a batch of several
+   * results ends the continuation with an error.
+   */
   handleToolResults?(
     toolResults: ToolCallResult[],
     userId: string,
