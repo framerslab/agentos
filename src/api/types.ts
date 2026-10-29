@@ -295,15 +295,18 @@ export interface HitlConfig {
    * the agent's name and input, or the final text. These are fixed pattern
    * checks inside `agency()`, not guardrail packs. The agent's input is
    * checked as the strategy passes it, other agents' output included under
-   * the graph, review-loop and debate strategies, and as the agent receives
-   * it, with the approval's `modifications.instructions` that every strategy
-   * appends, so instructions a check blocks override the approval. The
-   * final text is checked as the strategy produced it and, when the
-   * approval's `modifications.output` replaces it, as the replacement, after
-   * the agency's output guardrails have read it. If a check matches, the
-   * approval is overridden: the tool call is skipped, the agent does not
-   * run, or the final output is rejected. A `beforeEmergent` approval is not
-   * checked.
+   * the sequential, graph, review-loop and debate strategies and at the
+   * panel's chair, and as the agent receives it, with the approval's
+   * `modifications.instructions` that every strategy appends, so
+   * instructions a check blocks override the approval. Where the strategy
+   * writes more text after the task or after another agent's output, the
+   * task and each output are checked on their own too. The final text is
+   * checked as the strategy produced it and, when the approval's
+   * `modifications.output` replaces it, as the replacement, after the
+   * agency's output guardrails have read it; a replacement does not clear a
+   * strategy text a check blocks. If a check matches, the approval is
+   * overridden: the tool call is skipped, the agent does not run, or the
+   * final output is rejected. A `beforeEmergent` approval is not checked.
    *
    * Set to `false` to disable this safety net and give full autonomy to the
    * HITL handler's decision.
@@ -794,6 +797,11 @@ export interface ApprovalDecision {
      * Replaces the final text, on a `beforeReturn` approval. The replacement
      * goes through the agency's output guardrails and the post-approval check
      * first, and one the check blocks is refused as a blocked final text is.
+     * It does not clear a strategy text the check blocks: the check reads
+     * that text beside the replacement, since `stream()` has streamed it
+     * before the approval is asked for and the call records of sequential,
+     * graph and review-loop still hold it, so a replacement that sanitizes it
+     * is refused too.
      * With the agency's `output` schema, `parsed` is read from the
      * replacement; one that does not match the schema is returned with
      * `parsed` undefined, and `generate()` does not run the strategy again.
@@ -824,7 +832,11 @@ export interface ApprovalDecision {
 export interface AgentCallRecord {
   /** Name of the agent that was invoked. */
   agent: string;
-  /** Input prompt or message sent to the agent. */
+  /**
+   * The text the agent was sent: the input the strategy built for it, with a
+   * `beforeAgent` approval's `modifications.instructions` appended when the
+   * approval carried them.
+   */
   input: string;
   /** Final text output produced by the agent. */
   output: string;
