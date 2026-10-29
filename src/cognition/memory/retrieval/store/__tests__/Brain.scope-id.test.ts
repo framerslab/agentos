@@ -9,8 +9,12 @@
  * table already has the column reads none of its rows and builds no index, which the open does once that migration has
  * committed; a fresh Brain has it; the index a per-scope read uses exists; every writer this file reaches sets it; and
  * the importers file by it and deduplicate inside one scope id, where a trace such a release wrote counts under the
- * scope id its metadata names. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them in
- * production.
+ * scope id its metadata names; a Markdown or Obsidian file carries its trace's scope id out and back in, a CSV row
+ * takes it from a `scope_id` cell, and a record whose metadata is not an object is stored with metadata that names its
+ * scope id; and a trace no import wrote, with the hash `remember()` stores or no hash at all, is the duplicate of a
+ * record of its text in its scope id, and of its own Markdown or Obsidian note whatever whitespace surrounds its text
+ * and whatever tags and links the note adds after it; a trace the brain forgot stays forgotten through an import of
+ * its text. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -23,11 +27,16 @@ import { fillScopeIds, v2ToV3 } from '../migrations/v2-to-v3.js';
 import { MemoryStore } from '../MemoryStore.js';
 import { Memory } from '../../../io/facade/Memory.js';
 import { MemoryAddTool } from '../../../io/tools/MemoryAddTool.js';
+import { JsonExporter } from '../../../io/JsonExporter.js';
 import { JsonImporter } from '../../../io/JsonImporter.js';
 import { SqliteImporter } from '../../../io/SqliteImporter.js';
 import { CsvImporter } from '../../../io/CsvImporter.js';
 import { MarkdownImporter } from '../../../io/MarkdownImporter.js';
+import { MarkdownExporter } from '../../../io/MarkdownExporter.js';
+import { ObsidianExporter } from '../../../io/ObsidianExporter.js';
+import { ObsidianImporter } from '../../../io/ObsidianImporter.js';
 import { ChatGptImporter } from '../../../io/ChatGptImporter.js';
+import { readFrontMatter } from '../../../../../core/utils/frontMatter.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
 import type { IKnowledgeGraph } from '../../graph/knowledge/IKnowledgeGraph.js';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager.js';
@@ -576,6 +585,254 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       );
       expect((await new ChatGptImporter(brain).import(filePath)).imported).toBe(1);
       expect((await tracesOf(brain)).map((row) => row.scope_id)).toEqual(['', 'A%2F42']);
+    });
+  });
+
+  describe('the scope id a record names, in each format', () => {
+    /** Each live trace's text, its column, and the scope id and import hash its stored metadata object holds. */
+    const filedOf = async (brain: Brain) =>
+      (
+        await brain.all<{ content: string; scope_id: string; metadata: string }>(
+          'SELECT content, scope_id, metadata FROM memory_traces WHERE deleted = 0 ORDER BY content, scope_id',
+        )
+      ).map((row) => {
+        const parsed: unknown = JSON.parse(row.metadata);
+        const fields =
+          parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+        return {
+          content: row.content,
+          scopeId: row.scope_id,
+          metadataScopeId: fields.scopeId,
+          hashed: typeof fields.import_hash === 'string',
+        };
+      });
+    /** An empty folder beside a brain file of its own. */
+    const folder = async (name: string): Promise<string> => {
+      const dir = path.join(path.dirname(tempFile()), name);
+      await fsp.mkdir(dir);
+      return dir;
+    };
+
+    it('Markdown: a file whose front matter names a scope id is filed under it, and dedup reads only that scope id', async () => {
+      const brain = await open(tempFile(), 'markdown-named');
+      await new JsonImporter(brain).importFromString(exportOf('B%2F42', 'Same words.', ['b'], 200));
+      const dir = await folder('notes');
+      await fsp.writeFile(path.join(dir, 'same.md'), "---\nscope: user\nscopeId: 'A%2F42'\n---\nSame words.\n", 'utf8');
+      expect(await new MarkdownImporter(brain).import(dir)).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+      expect(await filedOf(brain)).toEqual([
+        { content: 'Same words.', scopeId: 'A%2F42', metadataScopeId: 'A%2F42', hashed: true },
+        { content: 'Same words.', scopeId: 'B%2F42', metadataScopeId: 'B%2F42', hashed: true },
+      ]);
+      // A second import finds the trace the first filed under that scope id.
+      expect(await new MarkdownImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 1 });
+    });
+
+    it("Markdown: an export writes each trace's scope id, and its import adds nothing to the brain it came from", async () => {
+      const brain = await open(tempFile(), 'markdown-round-trip');
+      await new JsonImporter(brain).importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+      await new JsonImporter(brain).importFromString(exportOf('', 'Other words.', ['o'], 150));
+      const dir = await folder('export');
+      expect((await new MarkdownExporter(brain).export(dir)).refused).toEqual([]);
+      const frontMatterOf = async (id: string) =>
+        readFrontMatter(await fsp.readFile(path.join(dir, 'user', 'episodic', `${id}.md`), 'utf8')).data;
+      expect(await frontMatterOf('t-A%2F42')).toMatchObject({ scope: 'user', scopeId: 'A%2F42' });
+      // A trace filed under no scope id is written as before, with no scope id.
+      expect(await frontMatterOf('t-')).not.toHaveProperty('scopeId');
+
+      expect(await new MarkdownImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+
+      const fresh = await open(tempFile(), 'markdown-round-trip-fresh');
+      expect(await new MarkdownImporter(fresh).import(dir)).toMatchObject({ imported: 2, errors: [] });
+      expect(await filedOf(fresh)).toEqual([
+        { content: 'Other words.', scopeId: '', metadataScopeId: undefined, hashed: true },
+        { content: 'Same words.', scopeId: 'A%2F42', metadataScopeId: 'A%2F42', hashed: true },
+      ]);
+    });
+
+    it("Obsidian: an export writes each trace's scope id, and an import files the note under it", async () => {
+      const source = await open(tempFile(), 'obsidian-source');
+      await new JsonImporter(source).importFromString(exportOf('A%2F42', 'Same words.', ['a'], 100));
+      const dir = await folder('vault');
+      expect((await new ObsidianExporter(source).export(dir)).refused).toEqual([]);
+      const target = await open(tempFile(), 'obsidian-target');
+      expect(await new ObsidianImporter(target).import(dir)).toMatchObject({ imported: 1, errors: [] });
+      expect((await filedOf(target)).map(({ scopeId, metadataScopeId }) => ({ scopeId, metadataScopeId }))).toEqual([
+        { scopeId: 'A%2F42', metadataScopeId: 'A%2F42' },
+      ]);
+    });
+
+    it("CSV: a scope_id cell names a row's scope id when its metadata names none", async () => {
+      const brain = await open(tempFile(), 'csv-cell');
+      const rows =
+        'content,scope,scope_id,metadata\n' +
+        '"Same words.",user,A%2F42,\n' +
+        `"Other words.",user,A%2F42,"${JSON.stringify({ scopeId: 'B%2F42' }).replace(/"/g, '""')}"\n`;
+      expect(await new CsvImporter(brain).importFromString(rows)).toMatchObject({ imported: 2, errors: [] });
+      expect(await filedOf(brain)).toEqual([
+        // The metadata's scope id comes first, as in a JSON or SQLite record.
+        { content: 'Other words.', scopeId: 'B%2F42', metadataScopeId: 'B%2F42', hashed: true },
+        { content: 'Same words.', scopeId: 'A%2F42', metadataScopeId: 'A%2F42', hashed: true },
+      ]);
+      expect((await new CsvImporter(brain).importFromString(rows)).skipped).toBe(2);
+    });
+
+    it('JSON: a record whose metadata is not an object is stored with metadata that names its scope id and hash', async () => {
+      const brain = await open(tempFile(), 'json-not-object');
+      const payload = JSON.stringify({
+        traces: [
+          { id: 't-array', type: 'episodic', scope: 'user', content: 'Array words.', metadata: '["x"]', scope_id: 'A%2F42' },
+          { id: 't-null', type: 'episodic', scope: 'user', content: 'Null words.', metadata: 'null', scope_id: 'A%2F42' },
+        ],
+      });
+      expect(await new JsonImporter(brain).importFromString(payload)).toMatchObject({ imported: 2, errors: [] });
+      expect(await filedOf(brain)).toEqual([
+        { content: 'Array words.', scopeId: 'A%2F42', metadataScopeId: 'A%2F42', hashed: true },
+        { content: 'Null words.', scopeId: 'A%2F42', metadataScopeId: 'A%2F42', hashed: true },
+      ]);
+      expect((await new JsonImporter(brain).importFromString(payload)).skipped).toBe(2);
+    });
+
+    it('SQLite: a source row whose metadata is not an object is stored with metadata that names its scope id and hash', async () => {
+      const sourcePath = tempFile();
+      const source = await open(sourcePath, 'sqlite-not-object-source');
+      await source.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, scope_id)
+         VALUES (?, 't-array', 'episodic', 'user', 'Array words.', 1, '["x"]', 'A%2F42')`,
+        [source.brainId],
+      );
+      const target = await open(tempFile(), 'sqlite-not-object-target');
+      expect(await new SqliteImporter(target).import(sourcePath)).toMatchObject({ imported: 1, errors: [] });
+      expect(await filedOf(target)).toEqual([
+        { content: 'Array words.', scopeId: 'A%2F42', metadataScopeId: 'A%2F42', hashed: true },
+      ]);
+    });
+
+    it('CSV: a metadata cell that is not a JSON object makes its row an error', async () => {
+      const brain = await open(tempFile(), 'csv-not-object');
+      const result = await new CsvImporter(brain).importFromString(
+        'content,scope,metadata\n"Array words.",user,"[""x""]"\n"Null words.",user,null\n',
+      );
+      expect(result.imported).toBe(0);
+      expect(result.errors).toHaveLength(2);
+      expect(await filedOf(brain)).toEqual([]);
+    });
+  });
+
+  describe('a trace no import wrote is the duplicate of a record of its text in its scope id', () => {
+    const closers: Array<() => Promise<void>> = [];
+    afterEach(async () => {
+      while (closers.length) await closers.pop()!();
+    });
+    /**
+     * A brain whose traces no import wrote: `remembered` through `remember()`, which stores the hash of its text as
+     * `content_hash`, and `bare` with no hash at all, as `MemoryStore` stores a trace; both under `user` and `scopeId`.
+     */
+    async function written(name: string, scopeId: string, remembered: string, bare: string): Promise<Brain> {
+      const memory = await Memory.createSqlite(tempFile(), { brainId: name, graph: false });
+      closers.push(() => memory.close());
+      await memory.remember(remembered, { scope: 'user', scopeId });
+      const brain = (memory as unknown as { _brain: Brain })._brain;
+      await brain.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, scope_id)
+         VALUES (?, 't-bare', 'episodic', 'user', ?, 1, ?, ?)`,
+        [brain.brainId, bare, JSON.stringify({ scopeId }), scopeId],
+      );
+      return brain;
+    }
+    const textsOf = async (brain: Brain) =>
+      (await brain.all<{ content: string }>('SELECT content FROM memory_traces WHERE deleted = 0 ORDER BY content')).map(
+        (row) => row.content,
+      );
+
+    it('JSON: an export imported into the brain it came from adds nothing', async () => {
+      const brain = await written('json-unhashed', 'A%2F42', 'Kept words.', 'Bare words.');
+      const exported = await new JsonExporter(brain).exportToString();
+      expect(await new JsonImporter(brain).importFromString(exported)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it('Markdown: an export imported into the brain it came from adds nothing', async () => {
+      const brain = await written('markdown-unhashed', 'A%2F42', 'Kept words.', 'Bare words.');
+      const dir = path.join(path.dirname(tempFile()), 'export');
+      expect((await new MarkdownExporter(brain).export(dir)).refused).toEqual([]);
+      expect(await new MarkdownImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it('CSV: a row of a text the brain holds in its scope id is a duplicate', async () => {
+      const brain = await written('csv-unhashed', 'A%2F42', 'Kept words.', 'Bare words.');
+      const rows = 'content,scope,scope_id\n"Kept words.",user,A%2F42\n"Bare words.",user,A%2F42\n';
+      expect(await new CsvImporter(brain).importFromString(rows)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it("ChatGPT: a message whose trace text the brain holds under '' is a duplicate", async () => {
+      const brain = await written('chatgpt-unhashed', '', '[user]: Kept words.', '[user]: Bare words.');
+      const filePath = path.join(path.dirname(tempFile()), 'conversations.json');
+      const conversation = (id: string, text: string) => ({
+        title: text,
+        create_time: 1,
+        mapping: { [id]: { id, parent: null, children: [], message: { author: { role: 'user' }, content: { parts: [text] }, create_time: 1 } } },
+      });
+      await fsp.writeFile(
+        filePath,
+        JSON.stringify([conversation('m1', 'Kept words.'), conversation('m2', 'Bare words.')]),
+        'utf8',
+      );
+      expect(await new ChatGptImporter(brain).import(filePath)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['[user]: Bare words.', '[user]: Kept words.']);
+    });
+
+    it('Markdown: a trace whose text begins or ends with whitespace is the duplicate of its own note', async () => {
+      const brain = await written('markdown-padded', 'A%2F42', '  Kept words.\n', '\tBare words.  ');
+      const dir = path.join(path.dirname(tempFile()), 'export');
+      expect((await new MarkdownExporter(brain).export(dir)).refused).toEqual([]);
+      expect(await new MarkdownImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['\tBare words.  ', '  Kept words.\n']);
+    });
+
+    it('Obsidian: a trace with tags and graph links is the duplicate of its own note', async () => {
+      const brain = await written('obsidian-linked', 'A%2F42', 'Kept words.', 'Bare words.');
+      await brain.run('UPDATE memory_traces SET tags = ? WHERE brain_id = ?', [JSON.stringify(['alpha', 'beta gamma']), brain.brainId]);
+      await brain.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at)
+         VALUES (?, 't-bare', 'trace', 'trace:t-bare', 1), (?, 'kn-target', 'concept', 'Target note', 1)`,
+        [brain.brainId, brain.brainId],
+      );
+      await brain.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+         VALUES (?, 'ke-target', 't-bare', 'kn-target', 'related_to', 1)`,
+        [brain.brainId],
+      );
+      const dir = path.join(path.dirname(tempFile()), 'vault');
+      expect((await new ObsidianExporter(brain).export(dir)).refused).toEqual([]);
+      // The note carries the trace's tags as a line of hashtags and its link as a Related list after the text.
+      const note = await fsp.readFile(path.join(dir, 'user', 'episodic', 't-bare.md'), 'utf8');
+      expect(readFrontMatter(note).content.trim()).toBe('Bare words.\n\n#alpha #beta-gamma\n\n**Related:**\n- [[Target note]]');
+
+      expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it('a trace the brain forgot: an import of an export taken before the forget brings it back in no format', async () => {
+      const memory = await Memory.createSqlite(tempFile(), { brainId: 'forgotten', graph: false });
+      closers.push(() => memory.close());
+      const trace = await memory.remember('Forgotten words.', { scope: 'user', scopeId: 'A%2F42' });
+      const brain = (memory as unknown as { _brain: Brain })._brain;
+      const exported = await new JsonExporter(brain).exportToString();
+      const dir = path.join(path.dirname(tempFile()), 'export');
+      expect((await new MarkdownExporter(brain).export(dir)).refused).toEqual([]);
+      await memory.forget(trace.id);
+
+      expect(await new JsonImporter(brain).importFromString(exported)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+      expect(await new MarkdownImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+      expect(
+        await new CsvImporter(brain).importFromString('content,scope,scope_id\n"Forgotten words.",user,A%2F42\n'),
+      ).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+      expect(await textsOf(brain)).toEqual([]);
+      // remember() stores the text again.
+      await memory.remember('Forgotten words.', { scope: 'user', scopeId: 'A%2F42' });
+      expect(await textsOf(brain)).toEqual(['Forgotten words.']);
     });
   });
 });

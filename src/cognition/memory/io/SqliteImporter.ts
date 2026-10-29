@@ -6,10 +6,11 @@
  * nodes, and edges into the target `Brain`.
  *
  * ## Merge strategy
- * - **memory_traces**: deduplicated by SHA-256 of `content` (or equal `content`)
- *   inside the trace's scope and scope id.
- *   - If a trace of the same scope and scope id with the same hash already
- *     exists in the target:
+ * - **memory_traces**: deduplicated inside the trace's scope and scope id: a
+ *   trace there with equal `content`, or whose metadata names the SHA-256 of
+ *   that text as `import_hash` or `content_hash`, is the duplicate, whichever
+ *   writer stored it.
+ *   - If such a trace already exists in the target:
  *     - Keep the newer `created_at` timestamp.
  *     - Merge `tags` arrays (union, dedup).
  *   - A trace of another scope id is not a duplicate: its tags and time are
@@ -47,8 +48,9 @@ import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
-import { importedScopeId } from './importScope.js';
+import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 
 // ---------------------------------------------------------------------------
 // Internal row types (matched to Brain DDL)
@@ -237,13 +239,11 @@ export class SqliteImporter {
       return { inserted, retagged };
     }
 
-    const { dialect } = this.brain.features;
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id, created_at, tags
        FROM memory_traces
        WHERE brain_id = ? AND scope = ? AND scope_id = ?
-         AND (${dialect.jsonExtract('metadata', '$.import_hash')} = ?
-              OR content = ?)
+         AND ${duplicateTraceCondition(this.brain)}
        LIMIT 1`;
 
     const insertSql = `INSERT INTO memory_traces
@@ -258,14 +258,14 @@ export class SqliteImporter {
         const hash = await this._sha256(row.content);
         const scope = row.scope ?? 'user';
 
-        // The metadata names the scope id, so it is read before the dedup check.
-        let meta: Record<string, unknown> = {};
-        try { meta = JSON.parse(row.metadata) as Record<string, unknown>; } catch { /* ignore */ }
+        // The metadata names the scope id, so it is read before the dedup check. Metadata that is not a JSON object
+        // (malformed text, an array, null) starts fresh: the object stored names the scope id and the import hash.
+        const meta = parseTraceMetadata(row.metadata);
         const scopeId = importedScopeId(meta, row.scope_id);
 
         if (options?.dedup ?? true) {
           const existing = await trx.get<{ id: string; created_at: number; tags: string }>(
-            checkSql, [brainId, scope, scopeId, hash, row.content],
+            checkSql, [brainId, scope, scopeId, ...duplicateTraceParams(hash, row.content)],
           );
 
           if (existing) {
