@@ -5,10 +5,11 @@
  * included: under the sequential (generate and stream), parallel and
  * hierarchical strategies, an approval whose instructions the check blocks is
  * a rejection and the agent never runs, and one whose instructions pass runs
- * with them in its input. The check still reads the input as the strategy
- * passes it, so instructions do not hide a statement at its end. An approval
- * without modifications is checked and sent as before, and a `beforeEmergent`
- * approval is still not checked.
+ * with them in its input, which its call record holds. The check still reads
+ * the input as the strategy passes it, so instructions do not hide a statement
+ * at its end, nor does whitespace after it. An approval without modifications
+ * is checked and sent as before, and a `beforeEmergent` approval is still not
+ * checked.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -46,6 +47,12 @@ const textStream = (content: string) =>
 
 /** The messages a chat request carried, as one string. */
 const said = (body: Json): string => JSON.stringify(body.messages);
+
+/** The text of a chat request's last user message: the input its agent was given. */
+function userText(body: Json): string {
+  const content = (body.messages as Json[]).filter((m) => m.role === 'user').at(-1)?.content;
+  return Array.isArray(content) ? content.map((p: Json) => String(p.text ?? '')).join('') : String(content ?? '');
+}
 
 /**
  * Answers the model listing always, and each chat request by what it holds:
@@ -93,12 +100,18 @@ const MARKER = '[Additional instructions]';
 
 type Team = {
   generate: (prompt: string) => Promise<unknown>;
-  stream: (prompt: string) => { fullStream: AsyncIterable<Json>; text: Promise<string> };
+  stream: (prompt: string) => { fullStream: AsyncIterable<Json>; text: Promise<string>; agentCalls: Promise<Json[]> };
 };
 
-/** Each strategy that applies an approval's instructions, with the input ops is given and a way to run the team. */
-const STRATEGIES: Array<{ name: string; strategy: string; opsInput: string; run: (team: Team) => Promise<unknown> }> = [
-  { name: 'sequential generate()', strategy: 'sequential', opsInput: PROMPT, run: (team) => team.generate(PROMPT) },
+/** Runs the team under generate() and returns the run's call records. */
+const generated = async (team: Team): Promise<Json[]> => ((await team.generate(PROMPT)) as Json).agentCalls as Json[];
+
+/**
+ * Each strategy that applies an approval's instructions, with the input ops is
+ * given and a way to run the team, which returns the run's call records.
+ */
+const STRATEGIES: Array<{ name: string; strategy: string; opsInput: string; run: (team: Team) => Promise<Json[]> }> = [
+  { name: 'sequential generate()', strategy: 'sequential', opsInput: PROMPT, run: generated },
   {
     name: 'sequential stream()',
     strategy: 'sequential',
@@ -106,11 +119,11 @@ const STRATEGIES: Array<{ name: string; strategy: string; opsInput: string; run:
     run: async (team) => {
       const s = team.stream(PROMPT);
       for await (const part of s.fullStream) void part;
-      return s.text;
+      return s.agentCalls;
     },
   },
-  { name: 'parallel', strategy: 'parallel', opsInput: PROMPT, run: (team) => team.generate(PROMPT) },
-  { name: 'hierarchical', strategy: 'hierarchical', opsInput: TASK, run: (team) => team.generate(PROMPT) },
+  { name: 'parallel', strategy: 'parallel', opsInput: PROMPT, run: generated },
+  { name: 'hierarchical', strategy: 'hierarchical', opsInput: TASK, run: generated },
 ];
 
 function team(strategy: string, handler: (r: ApprovalRequest) => Promise<ApprovalDecision>, on: Json): Team {
@@ -159,6 +172,15 @@ describe.each(STRATEGIES)('a beforeAgent approval under $name', ({ strategy, ops
     expect(said(requests[0])).toContain(JSON.stringify(`${opsInput}\n\n${MARKER}: ${BENIGN}`).slice(1, -1));
   });
 
+  it("with instructions the check passes: ops's call record holds the input it was sent, the instructions included", async () => {
+    const calls = await run(team(strategy, approve({ instructions: BENIGN }), {}));
+    const sent = `${opsInput}\n\n${MARKER}: ${BENIGN}`;
+    const requests = opsRequests();
+    expect(requests).toHaveLength(1);
+    expect(userText(requests[0])).toBe(sent);
+    expect(calls.filter((c) => c.agent === 'ops').map((c) => c.input)).toEqual([sent]);
+  });
+
   it('without modifications: ops runs with its input unchanged, and the check still reads that input', async () => {
     const guardrailHitlOverride = vi.fn();
     await run(team(strategy, approve(), { guardrailHitlOverride }));
@@ -186,6 +208,19 @@ describe('a beforeAgent approval with instructions over an input that ends in a 
   it.each(['DELETE FROM sessions;', 'rm -rf .'])('is overridden by the check (%s), and ops never runs', async (statement) => {
     const guardrailHitlOverride = vi.fn();
     const crew = team('sequential', approve({ instructions: BENIGN }), { guardrailHitlOverride });
+    await crew.generate(`Clear the stale data: ${statement}`);
+    expect(guardrailHitlOverride).toHaveBeenCalledTimes(1);
+    expect(guardrailHitlOverride).toHaveBeenCalledWith(expect.objectContaining({ guardrailId: 'code-safety', toolName: 'agent:ops' }));
+    expect(opsRequests()).toHaveLength(0);
+  });
+});
+
+describe('a beforeAgent approval over an input that ends in a destructive statement with whitespace after it', () => {
+  // The check reads the input inside JSON, where the text ends at its closing
+  // quote and a line break is written \n: the statement still ends the text.
+  it.each(['DELETE FROM sessions; ', 'DELETE FROM sessions \n', 'rm -rf .\n'])('is overridden by the check (%j), and ops never runs', async (statement) => {
+    const guardrailHitlOverride = vi.fn();
+    const crew = team('sequential', approve(), { guardrailHitlOverride });
     await crew.generate(`Clear the stale data: ${statement}`);
     expect(guardrailHitlOverride).toHaveBeenCalledTimes(1);
     expect(guardrailHitlOverride).toHaveBeenCalledWith(expect.objectContaining({ guardrailId: 'code-safety', toolName: 'agent:ops' }));

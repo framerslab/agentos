@@ -155,6 +155,135 @@ class RacingAdapter implements StorageAdapter {
   }
 }
 
+/** A promise and the function that resolves it. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+/** `target` with `overrides` in place of its own members, and its other methods bound to it. */
+function overriding(target: StorageAdapter, overrides: Partial<StorageAdapter>): StorageAdapter {
+  return new Proxy(target, {
+    get(t, prop) {
+      if (Object.prototype.hasOwnProperty.call(overrides, prop)) return (overrides as Record<PropertyKey, unknown>)[prop];
+      const value: unknown = Reflect.get(t, prop, t);
+      return typeof value === 'function' ? value.bind(t) : value;
+    },
+  });
+}
+
+/**
+ * `adapter`, stopping after the first statement it runs, in a transaction or out of one, whose text matches
+ * `statement`: it calls `stopped` there and runs nothing more until `go` resolves.
+ */
+function stoppingAfter(adapter: StorageAdapter, statement: RegExp, stopped: () => void, go: Promise<void>): StorageAdapter {
+  let stopping = true;
+  const wrap = (target: StorageAdapter): StorageAdapter =>
+    overriding(target, {
+      exec: async (sql: string) => {
+        await target.exec(sql);
+        if (stopping && statement.test(sql)) {
+          stopping = false;
+          stopped();
+          await go;
+        }
+      },
+      transaction: <T>(fn: (trx: StorageAdapter) => Promise<T>) => target.transaction((trx) => fn(wrap(trx))),
+    });
+  return wrap(adapter);
+}
+
+/** `adapter`, keeping the text of each statement its transactions run in `statements`. */
+function keepingTransactionStatements(adapter: StorageAdapter, statements: string[]): StorageAdapter {
+  const keeping = (trx: StorageAdapter): StorageAdapter =>
+    overriding(trx, {
+      all: <T>(sql: string, params?: StorageParameters) => {
+        statements.push(sql);
+        return trx.all<T>(sql, params);
+      },
+      get: <T>(sql: string, params?: StorageParameters) => {
+        statements.push(sql);
+        return trx.get<T>(sql, params);
+      },
+      run: (sql: string, params?: StorageParameters) => {
+        statements.push(sql);
+        return trx.run(sql, params);
+      },
+      exec: (sql: string) => {
+        statements.push(sql);
+        return trx.exec(sql);
+      },
+    });
+  return overriding(adapter, {
+    transaction: <T>(fn: (trx: StorageAdapter) => Promise<T>) => adapter.transaction((trx) => fn(keeping(trx))),
+  });
+}
+
+/** Whether a connection whose application_name is `applicationName` waits on a lock. */
+async function waitsOnLock(brain: Brain, applicationName: string): Promise<boolean> {
+  const row = await brain.get<{ n: string | number }>(
+    `SELECT count(*) AS n FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock'`,
+    [applicationName],
+  );
+  return Number(row?.n) > 0;
+}
+
+/** Resolves once `ready` answers true, asking every 50 ms; rejects after 30 seconds. */
+async function until(ready: () => boolean | Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (!(await ready())) {
+    if (Date.now() > deadline) throw new Error('until: still not ready after 30 seconds');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+/** Whether `promise` has settled, read at each call. */
+function settledFlag(promise: Promise<unknown>): () => boolean {
+  let settled = false;
+  promise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  return () => settled;
+}
+
+/**
+ * A schema of its own, on the search path of every connection `url` opens, for tables an older release left behind.
+ * `adapterFor` opens a connection pool there (with an application_name, to find its lock waits); `drop` closes those
+ * pools and drops the schema.
+ */
+async function ownSchema(admin: Brain): Promise<{
+  url: string;
+  adapterFor: (applicationName?: string) => Promise<StorageAdapter>;
+  drop: () => Promise<void>;
+}> {
+  const schema = `agentos_scope_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await admin.exec(`CREATE SCHEMA ${schema}`);
+  const url = new URL(POSTGRES_URL!);
+  url.searchParams.set('options', `-c search_path=${schema},public`);
+  const pools: PostgresAdapter[] = [];
+  return {
+    url: url.toString(),
+    adapterFor: async (applicationName) => {
+      const pool = new PostgresAdapter({ connectionString: url.toString(), application_name: applicationName });
+      await pool.open();
+      pools.push(pool);
+      return pool;
+    },
+    drop: async () => {
+      for (const pool of pools) await pool.close().catch(() => undefined);
+      await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
+    },
+  };
+}
+
 describeIfPostgres('Brain.openPostgres', () => {
   const openedBrains: Brain[] = [];
 
@@ -607,6 +736,135 @@ describeIfPostgres('Brain.openPostgres', () => {
     } finally {
       release();
       await transaction;
+    }
+  });
+
+  it('opens a brain at version 2 and another brain at once, on a table that has scope_id and lacks an index of it', async () => {
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    const own = await ownSchema(admin);
+    const go = deferred();
+    const opening: Array<Promise<Brain>> = [];
+    let setup: Brain | undefined;
+    try {
+      // The tables a release with the column and without the index of the rows to file left behind, and a brain at
+      // version 2 that holds a trace a release older than the column wrote.
+      setup = await Brain.openPostgres(own.url, { brainId: uniqueBrainId() });
+      await setup.exec('DROP INDEX idx_memory_traces_unfiled_scope_id');
+      const oldId = uniqueBrainId();
+      await setup.run(`INSERT INTO brain_meta (brain_id, key, value) VALUES ($1, 'schema_version', '2')`, [oldId]);
+      await setup.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata)
+           VALUES ($1, 'late-trace', 'episodic', 'user', 'late', 1, $2)`,
+        [oldId, JSON.stringify({ scopeId: 'cy' })],
+      );
+
+      // The open of that brain stops once it has made the index, wherever it makes it, and another brain opens then.
+      let stopped = false;
+      const stop = deferred();
+      const reached = () => {
+        stopped = true;
+        stop.resolve();
+      };
+      const migrating = Brain.openWithAdapter(
+        stoppingAfter(await own.adapterFor(), /idx_memory_traces_unfiled_scope_id/, reached, go.promise),
+        { brainId: oldId },
+      );
+      opening.push(migrating);
+      await Promise.race([stop.promise, migrating]);
+      expect(stopped).toBe(true);
+      const otherName = `scope-id-${Math.random().toString(36).slice(2, 10)}`;
+      const other = Brain.openWithAdapter(await own.adapterFor(otherName), { brainId: uniqueBrainId() });
+      opening.push(other);
+      const otherSettled = settledFlag(other);
+      await until(async () => otherSettled() || (await waitsOnLock(admin, otherName)));
+      go.resolve();
+
+      const results = await Promise.allSettled(opening);
+      expect(results.map((result) => (result.status === 'fulfilled' ? 'opened' : String(result.reason)))).toEqual(['opened', 'opened']);
+      const row = await setup.get<{ scope_id: string }>(
+        `SELECT scope_id FROM memory_traces WHERE brain_id = $1 AND id = 'late-trace'`,
+        [oldId],
+      );
+      expect(row?.scope_id).toBe('cy');
+    } finally {
+      go.resolve();
+      await Promise.allSettled(opening);
+      await setup?.close();
+      await own.drop();
+    }
+  });
+
+  it('reads no trace in the migration of a brain whose open waited while another brain added scope_id', async () => {
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    const own = await ownSchema(admin);
+    const go = deferred();
+    const opening: Array<Promise<Brain>> = [];
+    let setup: Brain | undefined;
+    try {
+      // The tables a release older than the column left behind (dropping the column drops its indexes), and two brains
+      // at version 2, each with a trace that names a scope id and one that names none.
+      setup = await Brain.openPostgres(own.url, { brainId: uniqueBrainId() });
+      await setup.exec('ALTER TABLE memory_traces DROP COLUMN scope_id');
+      const firstId = uniqueBrainId();
+      const secondId = uniqueBrainId();
+      for (const brainId of [firstId, secondId]) {
+        await setup.run(`INSERT INTO brain_meta (brain_id, key, value) VALUES ($1, 'schema_version', '2')`, [brainId]);
+        for (const [id, metadata] of [['t-scoped', { scopeId: 'cy' }], ['t-unscoped', { document_id: 'doc-1' }]] as const) {
+          await setup.run(
+            `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata)
+               VALUES ($1, $2, 'episodic', 'user', 'x', 1, $3)`,
+            [brainId, id, JSON.stringify(metadata)],
+          );
+        }
+      }
+
+      // The first brain's open stops once its migration has added the column, and the second brain's opens then.
+      let stopped = false;
+      const stop = deferred();
+      const reached = () => {
+        stopped = true;
+        stop.resolve();
+      };
+      const first = Brain.openWithAdapter(
+        stoppingAfter(await own.adapterFor(), /ADD COLUMN (IF NOT EXISTS )?scope_id/, reached, go.promise),
+        { brainId: firstId },
+      );
+      opening.push(first);
+      await Promise.race([stop.promise, first]);
+      expect(stopped).toBe(true);
+      const secondName = `scope-id-${Math.random().toString(36).slice(2, 10)}`;
+      const inMigration: string[] = [];
+      const second = Brain.openWithAdapter(
+        keepingTransactionStatements(await own.adapterFor(secondName), inMigration),
+        { brainId: secondId },
+      );
+      opening.push(second);
+      const secondSettled = settledFlag(second);
+      await until(async () => secondSettled() || (await waitsOnLock(admin, secondName)));
+      go.resolve();
+
+      const results = await Promise.allSettled(opening);
+      expect(results.map((result) => (result.status === 'fulfilled' ? 'opened' : String(result.reason)))).toEqual(['opened', 'opened']);
+      // The first migration filled every brain's rows. The second holds the table's lock from the moment it gets it, and
+      // reads none of them again.
+      expect(inMigration.filter((sql) => /\bFROM memory_traces\b/.test(sql))).toEqual([]);
+      const rows = await setup.all<{ brain_id: string; id: string; scope_id: string }>(
+        `SELECT brain_id, id, scope_id FROM memory_traces WHERE brain_id IN ($1, $2)`,
+        [firstId, secondId],
+      );
+      expect(Object.fromEntries(rows.map((row) => [`${row.brain_id === firstId ? 'first' : 'second'}/${row.id}`, row.scope_id]))).toEqual({
+        'first/t-scoped': 'cy',
+        'first/t-unscoped': '',
+        'second/t-scoped': 'cy',
+        'second/t-unscoped': '',
+      });
+    } finally {
+      go.resolve();
+      await Promise.allSettled(opening);
+      await setup?.close();
+      await own.drop();
     }
   });
 
