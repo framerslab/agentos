@@ -122,7 +122,7 @@ describe('launch_agency on gmi(): what the result reports', () => {
     const managerCalls = s.seen.filter((call) => !call.streamed);
     expect(managerCalls).toHaveLength(2);
     const told = managerCalls[1].messages.find((m) => m.role === 'tool' && m.tool_call_id === 'd1');
-    expect(String(told?.content)).toContain('error');
+    expect(String(told?.content)).toContain('LLM_PROVIDER_ERROR');
     expect(hang).toHaveBeenCalledTimes(1);
     expect(launchRegistry.get(out.agencyId)?.state).toBe('closing');
     expect(out.status).toBe('timed_out');
