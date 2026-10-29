@@ -17,7 +17,10 @@
  * the HITL handler rejects an agent, or the post-approval check blocks the
  * input it would receive (the approver's instructions included), it is
  * skipped and the chain continues with the next agent using the same context
- * (the rejected agent's contribution is simply omitted).
+ * (the rejected agent's contribution is simply omitted). After the first
+ * agent the input writes the previous agent's output after the task, so the
+ * check also reads the task and that output each on its own. An agent's call
+ * record holds the input it was sent.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link checkBeforeAgentInput} -- the HITL gate applied before each agent.
@@ -83,6 +86,8 @@ export function compileSequential(
     async execute(prompt, opts) {
       const agentCalls: AgentCallRecord[] = [];
       let context = prompt;
+      // The output the next agent's input writes after the task: none before the first agent has answered.
+      let previousOutput = '';
       let lastResult: Record<string, unknown> | null = null;
       const totalUsage: StrategyTotalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
@@ -90,8 +95,10 @@ export function compileSequential(
         // HITL: check beforeAgent gate before invoking this agent. The
         // decision is null when no gate applies. The input carries the
         // approver's instructions, if any, and the post-approval check read
-        // it, instructions included.
-        const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig);
+        // it, instructions included, and the task and the previous agent's
+        // output each on its own, since the input puts more text after the
+        // task.
+        const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig, [prompt, previousOutput]);
         if (gate.decision && !gate.decision.approved) {
           // Agent was rejected by HITL -- skip and continue to the next
           // agent in the chain. The context remains unchanged.
@@ -127,7 +134,7 @@ export function compileSequential(
 
         agentCalls.push({
           agent: name,
-          input: context,
+          input: effectiveContext,
           output: resultText,
           toolCalls: resultToolCalls,
           usage: buildAgentCallUsage(resultUsage),
@@ -143,6 +150,7 @@ export function compileSequential(
         // Chain: subsequent agents see the original task plus previous output.
         // This ensures each agent has full context without losing the original prompt.
         context = `Original task: ${prompt}\n\nPrevious agent (${name}) output:\n${resultText}`;
+        previousOutput = resultText;
         lastResult = result;
       }
 
@@ -172,12 +180,14 @@ export function compileSequential(
        */
       async function* streamGenerator(): AsyncGenerator<AgencyStreamPart> {
         let currentPrompt = prompt;
+        // The output the next agent's input writes after the task, as under execute().
+        let previousOutput = '';
         let finalText = '';
 
         yield { type: 'agent-start' as const, agent: '__agency__', input: prompt };
 
         for (const [name, agentOrConfig] of Object.entries(agents)) {
-          const gate = await checkBeforeAgentInput(name, currentPrompt, agentCalls, agencyConfig);
+          const gate = await checkBeforeAgentInput(name, currentPrompt, agentCalls, agencyConfig, [prompt, previousOutput]);
           if (gate.decision && !gate.decision.approved) {
             continue;
           }
@@ -289,7 +299,7 @@ export function compileSequential(
             if (!unanswered) {
               agentCalls.push({
                 agent: name,
-                input: currentPrompt,
+                input: effectivePrompt,
                 output: agentText,
                 toolCalls: resultToolCalls,
                 usage: buildAgentCallUsage(resultUsage),
@@ -320,6 +330,7 @@ export function compileSequential(
 
           finalText = agentText;
           currentPrompt = `Original task: ${prompt}\n\nPrevious agent (${name}) output:\n${agentText}`;
+          previousOutput = agentText;
         }
 
         const totalDurationMs = Date.now() - startMs;
