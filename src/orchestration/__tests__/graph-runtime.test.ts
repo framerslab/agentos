@@ -2401,3 +2401,61 @@ describe('GraphRuntime: a key named __proto__ stays a key of scratch', () => {
     expect(scratch.approved).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// A guardrail node a mission expansion adds to a parallel batch
+// ---------------------------------------------------------------------------
+//
+// An expansion handler can add nodes while the run goes on, and the nodes it
+// adds can become ready together. A guardrail node among them that blocks
+// stops the run for a guardrail violation, as it does outside a batch.
+
+describe('GraphRuntime: a guardrail node a mission expansion adds to a parallel batch', () => {
+  it('stops the run for a guardrail violation when it blocks', async () => {
+    const executeMock = vi.fn().mockImplementation(async (node: GraphNode): Promise<NodeExecutionResult> => {
+      if (node.id === 'a') {
+        return {
+          success: true,
+          output: 'a-done',
+          expansionRequests: [{ trigger: 'agent_request', reason: 'Check the draft', request: {} }],
+        };
+      }
+      if (node.id === 'safety') return { success: false, error: 'blocked by policy' };
+      return { success: true, output: `${node.id}-done` };
+    });
+    // After a, the handler adds safety, a guardrail node, and notes, which
+    // both follow a and so run as one batch.
+    const expansionHandler = {
+      handle: vi.fn(async (context: { graph: CompiledExecutionGraph }) => ({
+        graph: {
+          ...context.graph,
+          nodes: [
+            ...context.graph.nodes,
+            makeNode('safety', {
+              type: 'guardrail',
+              executorConfig: { type: 'guardrail', guardrailIds: ['code-safety'], onViolation: 'block' },
+            }),
+            makeNode('notes'),
+          ],
+          edges: [
+            { id: 'start-a', source: START, target: 'a', type: 'static' as const },
+            { id: 'a-safety', source: 'a', target: 'safety', type: 'static' as const },
+            { id: 'a-notes', source: 'a', target: 'notes', type: 'static' as const },
+            { id: 'safety-end', source: 'safety', target: END, type: 'static' as const },
+            { id: 'notes-end', source: 'notes', target: END, type: 'static' as const },
+          ],
+        },
+      })),
+    };
+    const runtime = new GraphRuntime({
+      checkpointStore: new InMemoryCheckpointStore(),
+      nodeExecutor: makeExecutorWithMock(executeMock),
+      expansionHandler,
+    });
+
+    const events = await readAll(runtime.stream(makeLinearGraph('g-expanded-guardrail', [makeNode('a')]), {}));
+
+    expect(executeMock.mock.calls.map(([node]) => (node as GraphNode).id).sort()).toEqual(['a', 'notes', 'safety']);
+    expect(events).toContainEqual({ type: 'interrupt', nodeId: 'safety', reason: 'guardrail_violation' });
+  });
+});
