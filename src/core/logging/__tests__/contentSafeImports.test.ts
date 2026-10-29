@@ -41,5 +41,9 @@ it('routes every executable console reference in the covered provider paths', ()
     };
     visit(tree);
     if (references > 0) expect(guarded, path).toBe(true);
+    // A factory import routes nothing until the module binds its console from it at the top level.
+    if (references > 0 && source.includes('createContentSafeConsole')) {
+      expect(/^const console = createContentSafeConsole\('[a-z_]+'\);$/m.test(source), path).toBe(true);
+    }
   }
 });

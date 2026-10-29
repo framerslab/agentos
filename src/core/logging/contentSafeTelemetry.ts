@@ -28,7 +28,10 @@ export interface ContentSafeLogEvent {
   /** Library-authored module origin, never a name from a record. */
   readonly component: ContentSafeLogComponent;
 }
-/** Synchronous receiver; reentrant library logs are dropped and a receiver throw is swallowed. */
+/**
+ * Called synchronously; reentrant library logs are dropped, and a receiver throw, or the rejection of a promise an
+ * async receiver returns, is swallowed.
+ */
 export type ContentSafeLogSink = (event: ContentSafeLogEvent) => void;
 /** Installation settings are copied once, with no runtime disable or replacement. */
 export interface ContentSafeTelemetryOptions {
@@ -99,7 +102,11 @@ export function emitContentSafeLog(level: ContentSafeLogLevel, component: Conten
   const state: ContentSafeLogLevel = level === 'debug' || level === 'info' || level === 'warn' ? level : 'error';
   if (rank(state) < rank(minimum)) return true;
   emitting = true;
-  try { target(Object.freeze({ kind: 'library_event', state, n: 1, component: componentOf(component) })); }
+  try {
+    const returned: unknown = target(Object.freeze({ kind: 'library_event', state, n: 1, component: componentOf(component) }));
+    // An async receiver fails by rejecting instead of throwing; the rejection is consumed like a throw.
+    if (returned instanceof Promise) void returned.catch(() => undefined);
+  }
   catch { /* A diagnostic receiver cannot expose content or fail provider work. */ }
   finally { emitting = false; }
   return true;

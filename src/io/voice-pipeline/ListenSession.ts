@@ -61,9 +61,10 @@ export interface ListenSessionOverrides {
   speaker?: (event: TranscriptEvent) => string | undefined;
   /**
    * Receives stt_warning for a warning of the opened STT session and speaker_failed for a throwing speaker hook.
-   * No error, provider name, transcript or message is passed. A callback throw is swallowed. Omission preserves
-   * the provider's normal unlistened-warning behavior. Warnings emitted before startSession resolves cannot be
-   * observed by a listener on its returned session. The listener remains during drain and is detached on end.
+   * No error, provider name, transcript or message is passed. A callback throw, or the rejection of a promise an
+   * async callback returns, is swallowed. Omission preserves the provider's normal unlistened-warning behavior.
+   * Warnings emitted before startSession resolves cannot be observed by a listener on its returned session. The
+   * listener remains during drain and is detached on end.
    */
   onWarning?: (kind: ListenWarningKind) => void;
   /** How long a stop waits for the flushed final to arrive, before draining a pending detector turn. Default 250. */
@@ -164,9 +165,13 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
   const accepting = (): boolean => state === 'listening' || state === 'draining';
   /** Capture this session's diagnostic receiver once, without holding a provider warning. */
   const warningReceiver = overrides.onWarning;
-  /** A diagnostic callback must not discard a turn or fail a provider event. */
+  /** A diagnostic callback must not discard a turn, fail a provider event or leave a rejection unhandled. */
   const reportWarning = (kind: ListenWarningKind): void => {
-    try { warningReceiver?.(kind); }
+    try {
+      // The void return type admits an async callback, which fails by rejecting instead of throwing.
+      const returned: unknown = warningReceiver?.(kind);
+      if (returned instanceof Promise) void returned.catch(() => undefined);
+    }
     catch { /* A warning callback cannot change the hearing lifecycle. */ }
   };
   /** Deliberately accepts no warning argument and never inspects an emitted value. */
