@@ -566,9 +566,11 @@ describe('launch_agency on gmi()', () => {
     // The parent's step (6,000) was recorded before its tool ran: the child's cap is half of the 14,000 left.
     expect(out.provenance.budget.maxTotalTokens).toBe(7_000);
     expect(out.seats.map((r) => [r.role, r.status])).toEqual([['first', 'completed'], ['second', 'cut']]);
-    // The launch's own cap refused the second seat's call (at least its 2,000 output tokens, with 1,000 left) before its
-    // request: the stub saw the parent's two steps and the first seat's call.
-    expect(out.reason).toBe("the launch's budget is spent: 6000 of 7000 tokens");
+    // The launch's own cap refused the second seat's call before its request: the 6,000 tokens the launch had used and
+    // the call's estimate, at least its 2,000 output tokens, would pass the 7,000. The stub saw the parent's two steps
+    // and the first seat's call.
+    expect(out.reason).toMatch(/^the launch's budget refused a call: \d+ tokens would pass 7000$/);
+    expect(Number(out.reason?.match(/(\d+) tokens/)?.[1])).toBeGreaterThanOrEqual(8_000);
     expect(out.provenance.budget.tokensUsed).toBe(6_000);
     expect(s.seen).toHaveLength(3);
     // The parent's budget holds its own two steps (6,000 and 15 tokens) and the first seat's 6,000.
