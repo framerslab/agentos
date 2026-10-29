@@ -298,4 +298,44 @@ describe('QueryRouter credentials per route', () => {
     expect(embeddingProviders).toEqual([{ providerId: 'openai', apiKey: 'test-openrouter-key' }]);
     expect(embeddingBaseUrls).toEqual(['https://openrouter.ai/api/v1']);
   });
+
+  it.each(['', ' \t\n '])(
+    'keeps the OpenRouter fallback of an OpenAI route, and its URL for OpenAI embeddings, for a router baseUrl of %j, as with none',
+    async (baseUrl) => {
+      vi.stubEnv('OPENROUTER_API_KEY', 'test-openrouter-key');
+      const { QueryRouter, mockGenerateText } = await loadRouter();
+
+      await routeOnce(QueryRouter, {
+        classifierProvider: 'openai',
+        classifierModel: 'gpt-4o-mini',
+        generationProvider: 'openai',
+        generationModel: 'gpt-4o-mini',
+        generationModelDeep: 'gpt-4o',
+        embeddingProvider: 'openai',
+        baseUrl,
+      });
+
+      const calls = callsOf(mockGenerateText);
+      expect(calls).toHaveLength(2);
+      for (const call of calls) {
+        // generateText reads a blank URL as unset, so a blank one here would send the OpenRouter key to OpenAI.
+        expect(call).toMatchObject({ provider: 'openai', apiKey: 'test-openrouter-key', baseUrl: 'https://openrouter.ai/api/v1' });
+      }
+      expect(embeddingProviders).toEqual([{ providerId: 'openai', apiKey: 'test-openrouter-key' }]);
+      expect(embeddingBaseUrls).toEqual(['https://openrouter.ai/api/v1']);
+    },
+  );
+
+  it.each(['', ' \t\n '])(
+    "keeps OpenRouter's URL for an OpenAI embedding provider on the OpenRouter key for an embeddingBaseUrl of %j, as with none",
+    async (embeddingBaseUrl) => {
+      vi.stubEnv('OPENROUTER_API_KEY', 'test-openrouter-key');
+      const { QueryRouter } = await loadRouter();
+
+      await routeOnce(QueryRouter, { embeddingProvider: 'openai', embeddingBaseUrl });
+
+      expect(embeddingProviders).toEqual([{ providerId: 'openai', apiKey: 'test-openrouter-key' }]);
+      expect(embeddingBaseUrls).toEqual(['https://openrouter.ai/api/v1']);
+    },
+  );
 });
