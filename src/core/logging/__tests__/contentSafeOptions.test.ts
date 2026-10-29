@@ -109,3 +109,23 @@ it('leaves the global console object and arguments unchanged while the mode is o
   expect(native.mock.calls).toEqual([[PRIVATE, object]]);
   expect(globalThis.console.warn).toBe(native);
 });
+
+it('consumes the rejection of an asynchronous sink, so a failing receiver cannot end the process', async () => {
+  const api = await import('../contentSafeTelemetry.js');
+  const escaped = vi.fn();
+  process.on('unhandledRejection', escaped);
+  try {
+    const states: string[] = [];
+    api.enableContentSafeTelemetry(async (event: ContentSafeLogEvent): Promise<void> => {
+      states.push(event.state);
+      throw new Error(PRIVATE);
+    });
+    expect(api.emitContentSafeLog('warn', 'listen_session')).toBe(true);
+    expect(api.emitContentSafeLog('error')).toBe(true);
+    // Node reports a rejection nothing handles once the microtasks of the turn have run.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(states).toEqual(['warn', 'error']);
+    expect(escaped).not.toHaveBeenCalled();
+  } finally { process.off('unhandledRejection', escaped); }
+});

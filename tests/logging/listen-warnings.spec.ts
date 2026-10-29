@@ -76,3 +76,32 @@ it('keeps the old no-callback speaker warning and does not install a swallowing 
     expect(native).toHaveBeenCalledWith('[listen-session] the speaker option threw; the turn is written with no speaker:', 'fixed speaker failure');
   } finally { await session.close('purged'); }
 });
+
+it('consumes the rejection of an asynchronous callback, so a failing callback cannot end the process', async () => {
+  const native = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const escaped = vi.fn();
+  process.on('unhandledRejection', escaped);
+  const source = provider(); const sink = new Sink(); const warnings: string[] = [];
+  const session = await startListenSession(transport(), sink, {
+    streamingSTT: source.peer, runId: 'fixture-run', reconnect: false, drainMs: 0,
+    /** The void return type admits an async callback, whose failure is a rejected promise rather than a throw. */
+    async onWarning(kind: string): Promise<void> { warnings.push(kind); throw new Error(PRIVATE); },
+    speaker: () => { throw hostile(); },
+  });
+  try {
+    source.sessions[0].emit('warning', hostile());
+    source.sessions[0].emit('transcript', final());
+    await vi.waitFor(() => expect(sink.turns).toHaveLength(1));
+    // Node reports a rejection nothing handles once the microtasks of the turn have run.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(warnings).toEqual(['stt_warning', 'speaker_failed']);
+    expect(escaped).not.toHaveBeenCalled();
+    expect(sink.turns[0].speaker).toBeUndefined();
+    expect(session.state).toBe('listening');
+    expect(native).not.toHaveBeenCalled();
+  } finally {
+    process.off('unhandledRejection', escaped);
+    await session.close('purged');
+  }
+});
