@@ -704,4 +704,49 @@ describe('launch_agency on gmi()', () => {
     expect(s.seen).toHaveLength(4);
     expect(result.text).toBe('Planned.');
   });
+
+  it("a launch of persistent members is floored on the largest call its seats make, each on its member's own route", async () => {
+    const k = key();
+    const kb = key();
+    const kw = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([
+          { id: 'c1', name: 'launch_agency', args: { goal: 'Answer.', maxTokens: 5_000, seats: [{ role: 'answerer', agentKey: 'brief' }] } },
+          {
+            id: 'c2',
+            name: 'launch_agency',
+            args: { goal: 'Answer.', maxTokens: 18_000, seats: [{ role: 'answerer', agentKey: 'brief' }, { role: 'expander', agentKey: 'wordy' }] },
+          },
+          { id: 'c3', name: 'launch_agency', args: { goal: 'Expand.', maxTokens: 20_000, seats: [{ role: 'expander', agentKey: 'wordy' }] } },
+        ]),
+        reply.text('Done.'),
+      ],
+    });
+    const briefCalls = script('openai', kb, { replies: [reply.text('Short answer.')] });
+    const wordyCalls = script('openai', kw, { replies: [reply.text('A long answer.')] });
+    // A member's seat calls run on its own route and maxTokens: 1,000 on stub-model, and 32,000 on OpenAI's default,
+    // gpt-4o, which writes at most 16,384 tokens a call. The launching agent's own route counts 32,000.
+    const brief = gmi({ ...route(kb), instructions: 'Answer briefly.', maxTokens: 1_000 });
+    const wordy = gmi({ provider: 'openai', apiKey: kw, fallbackProviders: [], instructions: 'Answer at length.', maxTokens: 32_000 });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', maxTokens: 32_000, agencies: { launch: true, members: { brief, wordy } } });
+
+    const result = await parent.session('p1').send('Go.');
+    // 5,000 covers one call of the brief member's (2,000 for the prompt and its 1,000 output tokens), though not one of
+    // the launching agent's route: the member's seat runs, at its own maxTokens.
+    expect(launchOf(result, 0)).toMatchObject({ status: 'completed', text: 'Short answer.' });
+    expect(briefCalls.seen).toHaveLength(1);
+    expect(briefCalls.seen[0].options.maxTokens).toBe(1_000);
+    // 18,000 cannot cover one call of the wordy member's, the largest its team makes: refused before a seat is built,
+    // so the brief member is not called again.
+    expect(refusalOf(result, 1)).toBe('budget_unavailable');
+    expect(result.toolCalls[1].error).toBe("budget_unavailable: the launch's token cap, 18000, cannot cover one call (18384: 2000 for the prompt and 16384 for the output)");
+    // 20,000 can: the wordy member's seat runs on gpt-4o with its 32,000.
+    expect(launchOf(result, 2)).toMatchObject({ status: 'completed', text: 'A long answer.' });
+    expect(wordyCalls.seen.map((call) => call.modelId)).toEqual(['gpt-4o']);
+    expect(wordyCalls.seen[0].options.maxTokens).toBe(32_000);
+    expect(briefCalls.seen).toHaveLength(1);
+    expect(s.seen).toHaveLength(2);
+    expect(result.text).toBe('Done.');
+  });
 });
