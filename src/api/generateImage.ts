@@ -58,8 +58,26 @@ const IMAGE_PROVIDER_ENV_MAP: Array<{ envKey: string; providerId: string }> = [
 const imageFallbackEmitter = new EventEmitter();
 
 /**
+ * Whether the variable an {@link IMAGE_PROVIDER_ENV_MAP} entry reads
+ * configures its provider: a key that is set, or a base URL that is set as
+ * resolveMediaProvider reads it ({@link baseUrlIfSet}). An empty or
+ * whitespace-only STABLE_DIFFUSION_LOCAL_BASE_URL leaves stable-diffusion-local
+ * out, so detection goes on to the next provider (MiniMax after it) instead of
+ * choosing one whose call is then refused for want of a base URL.
+ *
+ * @param envKey - The variable's name.
+ * @returns True when the variable configures its provider.
+ */
+function configuresImageProvider(envKey: string): boolean {
+  const value = process.env[envKey];
+  return envKey.endsWith('_BASE_URL') ? baseUrlIfSet(value) !== undefined : Boolean(value);
+}
+
+/**
  * Detects all image providers with valid credentials in the environment
  * and returns their provider IDs in priority order, excluding the primary.
+ * A base-URL variable that is empty or whitespace-only configures none (see
+ * {@link configuresImageProvider}).
  *
  * @param primaryProviderId - The provider that was explicitly selected; it
  *   is excluded from the fallback list since it is already the first in line.
@@ -69,7 +87,7 @@ function detectFallbackImageProviders(primaryProviderId: string): string[] {
   const fallbacks: string[] = [];
   for (const { envKey, providerId } of IMAGE_PROVIDER_ENV_MAP) {
     if (providerId === primaryProviderId) continue;
-    if (!process.env[envKey]) continue;
+    if (!configuresImageProvider(envKey)) continue;
     if (!hasImageProviderFactory(providerId)) continue;
     fallbacks.push(providerId);
   }
@@ -77,14 +95,16 @@ function detectFallbackImageProviders(primaryProviderId: string): string[] {
 }
 
 /**
- * Detects all image providers with valid credentials in the environment.
+ * Detects all image providers with valid credentials in the environment. A
+ * base-URL variable that is empty or whitespace-only configures none (see
+ * {@link configuresImageProvider}).
  *
  * @returns Provider IDs in priority order.
  */
 function detectAvailableImageProviders(): string[] {
   const available: string[] = [];
   for (const { envKey, providerId } of IMAGE_PROVIDER_ENV_MAP) {
-    if (!process.env[envKey]) continue;
+    if (!configuresImageProvider(envKey)) continue;
     if (!hasImageProviderFactory(providerId)) continue;
     available.push(providerId);
   }

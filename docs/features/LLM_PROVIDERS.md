@@ -128,6 +128,8 @@ order and uses the first one found:
 11. `which gemini` → Gemini CLI (PATH detection — no API key, uses Google account)
 12. `OLLAMA_BASE_URL` → Ollama
 
+An `OLLAMA_BASE_URL` that is empty or whitespace alone is unset, as the call reads it, so detection passes over Ollama.
+
 LiteLLM is never auto-detected: name it with `provider: 'litellm'` ([LiteLLM](#litellm)).
 
 You can override auto-detection in four ways, highest priority first:

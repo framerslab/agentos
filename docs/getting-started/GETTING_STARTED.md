@@ -46,7 +46,7 @@ AgentOS resolves credentials in three layers, highest priority first:
 
 1. **Inline `apiKey` / `provider` / `baseUrl`** on the call.
 2. **Module-level default** set via `setDefaultProvider()` (see below).
-3. **Environment variable auto-detect chain**: `OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `MINIMAX_API_KEY` (text) → `which claude` → `which gemini` → `OLLAMA_BASE_URL` → `STABILITY_API_KEY` → `REPLICATE_API_TOKEN` → `STABLE_DIFFUSION_LOCAL_BASE_URL` → `BFL_API_KEY` → `FAL_API_KEY` → `MINIMAX_API_KEY` (images).
+3. **Environment variable auto-detect chain**: `OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `MINIMAX_API_KEY` (text) → `which claude` → `which gemini` → `OLLAMA_BASE_URL` → `STABILITY_API_KEY` → `REPLICATE_API_TOKEN` → `STABLE_DIFFUSION_LOCAL_BASE_URL` → `BFL_API_KEY` → `FAL_API_KEY` → `MINIMAX_API_KEY` (images). An empty or whitespace-only `OLLAMA_BASE_URL` or `STABLE_DIFFUSION_LOCAL_BASE_URL` is unset here, as the call reads it, so the chain goes on to the next runtime.
 
 You only need one of these — pick whichever fits your deployment.
 
