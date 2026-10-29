@@ -130,6 +130,15 @@ export interface StepGateOptions {
   };
 }
 
+/** The refusal of a step whose `signal` aborted before its tool ran: nothing ran. */
+function stepStopped(): ToolExecutionResult {
+  return {
+    success: false,
+    error: 'step_aborted: the step was stopped before its tool ran (its call stopped or its time ran out)',
+    details: { code: 'step_aborted' },
+  };
+}
+
 /**
  * A gate for a host that builds the engine itself. `ToolOrchestrator` does
  * not use this: its gate runs each step through `processToolCall`.
@@ -137,6 +146,9 @@ export interface StepGateOptions {
  * Built with `resolve` alone, the gate runs a step by calling the tool: no
  * permission check and no approval, as a direct call has in a host with
  * neither manager. The chainability rule is applied by the builder either way.
+ * A step whose `signal` has aborted by the time its checks pass is refused
+ * (`step_aborted`) before its approval is asked; one whose signal aborts while
+ * its approval is pending is refused after it. Nothing runs either way.
  */
 export function createStepGate(options: StepGateOptions): StepGate {
   return {
@@ -161,6 +173,11 @@ export function createStepGate(options: StepGateOptions): StepGate {
             details: { ...(verdict.details ?? {}), code: 'permission_denied' },
           };
         }
+      }
+      // A step whose stop has already come asks no one: no approval is asked
+      // for a step that cannot run.
+      if (signal?.aborted) {
+        return stepStopped();
       }
       const hitl = options.hitl;
       // A step that is itself a composition is not asked: its own
@@ -208,11 +225,7 @@ export function createStepGate(options: StepGateOptions): StepGate {
         }
       }
       if (signal?.aborted) {
-        return {
-          success: false,
-          error: 'step_aborted: the step expired before its tool ran',
-          details: { code: 'step_aborted' },
-        };
+        return stepStopped();
       }
       return withInnerCode(await tool.execute(args, context));
     },

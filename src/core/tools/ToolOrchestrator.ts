@@ -733,6 +733,18 @@ export class ToolOrchestrator implements IToolOrchestrator {
     const llmProvidedCallId = toolCallRequest.id;
 
     const logPrefix = `ToolOrchestrator (ID: ${this.orchestratorId}, GMI: ${gmiId}, Persona: ${personaId}, LLMCallID: ${llmProvidedCallId}, Tool: ${toolName}):`;
+    /** The refusal of a call whose stop came before it was delegated (its turn stopped, or its time ran out): nothing ran. */
+    const stopped = (): ToolCallResult => {
+      const errorMsg = `step_aborted: the call to '${toolName}' was stopped before it ran (its turn stopped or its time ran out); nothing ran.`;
+      console.warn(`${logPrefix} ${errorMsg}`);
+      return {
+        toolCallId: llmProvidedCallId,
+        toolName,
+        output: null,
+        isError: true,
+        errorDetails: { message: errorMsg, code: 'STEP_ABORTED' },
+      };
+    };
 
     if (this.config.logToolCalls) {
       const argsPreview =
@@ -841,6 +853,13 @@ export class ToolOrchestrator implements IToolOrchestrator {
           details: permissionResult.details,
         },
       };
+    }
+
+    // A call whose stop has already come (the next call of a turn that stopped, a step its composed call or workflow
+    // reached after the stop) is refused here, after its checks and before its approval, so no one is asked about a
+    // call that cannot run; a stop that comes while the approval is pending refuses the call after it, below.
+    if (signal?.aborted) {
+      return stopped();
     }
 
     // Optional HITL gating for side-effect tools.
@@ -959,15 +978,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
     }
 
     if (signal?.aborted) {
-      const errorMsg = `step_aborted: the call to '${toolName}' expired before it was delegated; nothing ran.`;
-      console.warn(`${logPrefix} ${errorMsg}`);
-      return {
-        toolCallId: llmProvidedCallId,
-        toolName,
-        output: null,
-        isError: true,
-        errorDetails: { message: errorMsg, code: 'STEP_ABORTED' },
-      };
+      return stopped();
     }
     // Every call runs the instance its checks and approval were for: a
     // composed step the one its pipeline checked, a direct call the one

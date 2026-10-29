@@ -57,9 +57,12 @@ export interface ToolExecutionRequestDetails {
   /**
    * The call's stop: on a call a GMI makes, its turn's stop (a session's
    * close(), the caller's abort signal, the GMI's shutdown()); on a step, the
-   * one its composed call passes on, or a workflow step's timer. When it is
-   * aborted after the checks and the approval, the call is refused
-   * (`STEP_ABORTED`) and nothing runs; a call already running is not cut.
+   * one its composed call passes on, or a workflow step's timer joined with
+   * the workflow call's own. A call whose stop has come by the time its checks
+   * pass is refused (`STEP_ABORTED`) before its approval is asked, so no one is
+   * asked about a call that cannot run; one whose stop comes while its approval
+   * is pending is refused after it. Nothing runs either way, and a call already
+   * running is not cut.
    */
   signal?: AbortSignal;
   /** The calling turn's live objects; copied into the tool's context (see ToolExecutionContext.callerTurn). */

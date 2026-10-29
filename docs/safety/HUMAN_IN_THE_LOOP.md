@@ -236,7 +236,7 @@ After an approval that no human gave (auto-accept, the judge, or `onTimeout: 'ac
 
 Source: [`src/orchestration/hitl/HumanInteractionManager.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts) + interface [`IHumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/IHumanInteractionManager.ts).
 
-This is the richer surface of the full runtime: pass one as `hitlManager` in the `AgentOS` config and, with `toolOrchestratorConfig.hitl.enabled`, its `ToolOrchestrator` asks `requestApproval()` before a tool with `hasSideEffects: true` runs; the emergent step gate asks it before a composed tool's side-effecting step. Custom orchestrators can call it too. It speaks four interaction modes plus checkpoints and feedback ingestion:
+This is the richer surface of the full runtime: pass one as `hitlManager` in the `AgentOS` config and, with `toolOrchestratorConfig.hitl.enabled`, its `ToolOrchestrator` asks `requestApproval()` before a tool with `hasSideEffects: true` runs; the emergent step gate asks it before a composed tool's side-effecting step. A call or a step whose stop has already come (its turn stopped, its time ran out) is refused (`STEP_ABORTED`) without asking. A pending approval is not withdrawn when the stop comes: the call waits for its answer, or for `approvalTimeoutMs`, and is then refused, so nothing runs. Custom orchestrators can call it too. It speaks four interaction modes plus checkpoints and feedback ingestion:
 
 ```typescript
 interface IHumanInteractionManager {

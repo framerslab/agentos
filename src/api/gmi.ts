@@ -162,10 +162,11 @@ function skippedCall(req: ToolCallRequest, reason: string): ToolCallResult {
  * was built with, is then asked about a tool the orchestrator has, with the arguments the hooks left; anything but the
  * exact approval skips the tool, and the model is told why. Every call passed on carries `callerTurn`: the gate, the
  * budget, the explicit user, the names, the hooks (the carried ones, then the agent's) and this view's own
- * `processToolCall`, through which the step gate runs each step of a composed tool. It carries the turn's stop too, so
- * a call whose turn stopped while its hooks or its approval ran is refused (`STEP_ABORTED`) and nothing runs. A seat's
- * call keeps the session data the GMI gave it, the frozen copy of the seat's frame (`sessionData.agencyLaunch`) among
- * it, which a launch from that call nests under.
+ * `processToolCall`, through which the step gate runs each step of a composed tool. It carries the turn's stop too: once
+ * the turn has stopped, a call runs no further hook and asks no gate, so no one is asked about a call that cannot run,
+ * and the orchestrator refuses it (`STEP_ABORTED`), as it refuses a call whose turn stopped while its approval was
+ * pending; nothing runs either way. A seat's call keeps the session data the GMI gave it, the frozen copy of the seat's
+ * frame (`sessionData.agencyLaunch`) among it, which a launch from that call nests under.
  */
 function hookTools(
   base: IToolOrchestrator,
@@ -182,9 +183,14 @@ function hookTools(
     const turn = turnOf();
     const req = details.toolCallRequest;
     if (turn.toolNames && !turn.toolNames.has(req.name)) return skippedCall(req, 'not available in this seat');
+    // The turn's stop, with the one the call carries: the GMI's own turn stop, or a composed tool's step's.
+    const stop = turn.abortSignal;
+    const signal = stop && details.signal ? AbortSignal.any([details.signal, stop]) : (stop ?? details.signal);
     const hooks: ToolCallHook[] = [...(turn.toolHooks ?? []), ...(hook ? [hook] : [])];
     let args = (req.arguments ?? {}) as Record<string, unknown>;
     for (const run of hooks) {
+      // Once the turn has stopped, no hook runs: the orchestrator refuses the call.
+      if (signal?.aborted) break;
       try {
         const hookResult = await run({ name: req.name, args, id: req.id, step: step.index });
         if (hookResult === null) {
@@ -196,8 +202,9 @@ function hookTools(
       }
     }
     const gate = turn.approvalGate ?? buildGate;
-    // A tool the orchestrator does not have is reported by it without asking anyone.
-    if (gate && (await base.getTool(req.name))) {
+    // A tool the orchestrator does not have is reported by it without asking anyone, and so is a call whose turn has
+    // stopped: the orchestrator refuses it (STEP_ABORTED).
+    if (gate && (await base.getTool(req.name)) && !signal?.aborted) {
       const verdict = await askApprovalGate(gate, { name: req.name, args: args ?? {}, id: req.id, step: step.index });
       if (verdict !== APPROVAL_GRANTED) return skippedCall(req, verdict.reason);
     }
@@ -209,9 +216,6 @@ function hookTools(
       toolHooks: hooks,
       dispatch: processToolCall,
     };
-    // The turn's stop, with the one the call carries: the GMI's own turn stop, or a composed tool's step's.
-    const stop = turn.abortSignal;
-    const signal = stop && details.signal ? AbortSignal.any([details.signal, stop]) : (stop ?? details.signal);
     return base.processToolCall({
       ...details,
       toolCallRequest: { ...req, arguments: args },

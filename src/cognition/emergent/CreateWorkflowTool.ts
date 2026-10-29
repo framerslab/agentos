@@ -101,9 +101,10 @@ export interface CreateWorkflowDeps {
   /**
    * Execute a tool by name with the given arguments. `signal` is aborted when
    * the step expires or the workflow's own call stops (its
-   * `ToolExecutionContext.signal`): an implementation that waits on an
-   * approval checks it before the tool starts, so a late approval starts
-   * nothing.
+   * `ToolExecutionContext.signal`): an implementation that asks an approval
+   * checks it before it asks and again before the tool starts, so a step whose
+   * signal has aborted asks no one and a late approval starts nothing, as
+   * `processToolCall` does.
    */
   executeTool: (
     name: string,
