@@ -42,8 +42,9 @@ export interface GmiLaunchToolOptions {
   /** Builds a temporary seat's agent (gmi() itself). */
   createAgent: (options: AgentOptions) => Agent;
   /**
-   * The provider and model the agent's persona resolved in its shared build: those its options name, else the pair its
-   * first call resolved from the environment. Every turn that can launch runs on that build, so it has resolved.
+   * The provider and model the agent's persona resolved in its shared build: those its options name (the provider's
+   * default model when they name only a provider), else the pair its first call resolved from the environment. Every
+   * turn that can launch runs on that build, so it has resolved.
    */
   route: () => Promise<{ provider?: string; model?: string }>;
 }
@@ -191,6 +192,14 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
     }
   };
 
+  /**
+   * The output tokens one call of a temporary seat is counted with, as the seat's own check counts it: the agent's
+   * maxTokens, which the seat takes, held to the output ceiling of the model the persona resolved, which the seat runs
+   * on (4,096 when maxTokens is unset). The one-call floor of every launch this agent runs: its root launches, and the
+   * teams it launches from a seat it holds in another agent's team, whose seats it builds on this route too.
+   */
+  const seatOutputEstimate = async (): Promise<number> => outputEstimateTokens((await agentRoute()).model ?? '', opts.maxTokens);
+
   const host: LaunchHost = {
     surface: 'gmi',
 
@@ -198,6 +207,7 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
       const caller = ctx.callerTurn;
       const sessionId = String(ctx.sessionData?.sessionId ?? ctx.gmiId);
       const conversationId = ctx.sessionData?.conversationId;
+      const outputEstimate = await seatOutputEstimate();
       return {
         gmiId: ctx.gmiId,
         personaId: ctx.personaId,
@@ -212,10 +222,12 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
         namespace,
         ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
         toolHooks: caller?.toolHooks ?? [],
-        outputEstimateTokens: outputEstimateTokens(opts.model ?? '', opts.maxTokens),
+        outputEstimateTokens: outputEstimate,
         scopeId: `${agentScope}:${sessionId}`,
       };
     },
+
+    outputEstimateTokens: seatOutputEstimate,
 
     async parentToolNames(ctx: ToolExecutionContext): Promise<ReadonlySet<string>> {
       // A seat's turn runs only its names; any other turn runs every tool of the agent.

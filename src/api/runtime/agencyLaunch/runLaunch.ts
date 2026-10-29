@@ -72,7 +72,7 @@ export interface LaunchParent {
   turnId?: string;
   /** The hooks the parent turn's calls ran under, outermost first. */
   toolHooks: readonly ToolCallHook[];
-  /** The output tokens one call of the route is counted with. */
+  /** The output tokens one call of the seats the launch builds is counted with: its one-call floor. */
   outputEstimateTokens: number;
   /**
    * The root scope's id: the launching session as its agent knows it, never the calling GMI. On
@@ -93,6 +93,12 @@ export interface LaunchHost {
   surface: 'gmi' | 'runtime';
   /** The parent of a root launch (no frame): depth 0. */
   rootParent(ctx: ToolExecutionContext): Promise<LaunchParent | LaunchRefusal>;
+  /**
+   * The output tokens one call of a seat this host builds is counted with: the one-call floor of a nested launch it
+   * runs, whose seats it builds on its own route (a persistent member that launches from its seat builds them on the
+   * member's, not the root's). Unset, a nested launch counts the one its parent launch's entry holds.
+   */
+  outputEstimateTokens?(ctx: ToolExecutionContext): Promise<number>;
   /** A root launch's parent tool names; a nested launch reads its seat's from the entry. */
   parentToolNames(ctx: ToolExecutionContext, parent: LaunchParent): Promise<ReadonlySet<string>>;
   /** A tool of the parent's table by name, read for a composition's step tools. */
@@ -196,6 +202,8 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
   }
   const gate = ctx.callerTurn?.approvalGate ?? entry.approvalGate;
   const conversationId = ctx.sessionData?.conversationId;
+  // The floor counts a call of the seats this launch builds, which run on its host's route.
+  const outputEstimateTokens = host.outputEstimateTokens ? await host.outputEstimateTokens(ctx) : entry.outputEstimateTokens;
   return {
     frame,
     toolNames: entry.seatTools.get(frame.role) ?? new Set<string>(),
@@ -215,7 +223,7 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
       namespace: entry.namespace,
       ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
       toolHooks: ctx.callerTurn?.toolHooks ?? entry.toolHooks,
-      outputEstimateTokens: entry.outputEstimateTokens,
+      outputEstimateTokens,
       // A nested launch's scope is the launch its team comes from.
       scopeId: frame.launchId,
     },
