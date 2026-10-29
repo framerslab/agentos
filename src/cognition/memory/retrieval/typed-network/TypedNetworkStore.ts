@@ -112,18 +112,18 @@ export class TypedNetworkStore {
   }
 
   /**
-   * Delete facts by ID, with their bank membership and every edge that
-   * starts or ends at one of them. Unknown IDs are skipped.
+   * Delete facts by ID, from every bank they are filed in (a fact added
+   * again under another bank stays filed in the bank it had, see
+   * {@link addFact}), with every edge that starts or ends at one of them.
+   * Unknown IDs are skipped.
    *
    * @returns How many facts were deleted.
    */
   deleteFacts(ids: Iterable<string>): number {
     const gone = new Set<string>();
     for (const id of ids) {
-      const fact = this.facts.get(id);
-      if (!fact) continue;
-      this.facts.delete(id);
-      this.banks[fact.bank].delete(id);
+      if (!this.facts.delete(id)) continue;
+      for (const bank of BANK_IDS) this.banks[bank].delete(id);
       gone.add(id);
     }
     if (gone.size === 0) return 0;
