@@ -1087,7 +1087,7 @@ async evaluateOutput(
 
 ### When ragSources is available
 
-- `ragSources` comes with every evaluation after the turn's retrieval: the GMI's sources reach the stream as a `METADATA_UPDATE` before the first `TEXT_DELTA`, and the `FINAL_RESPONSE` carries them too. A tool-result continuation (`handleToolResult()`, `handleToolResults()`, `resumeExternalToolRequest()`) streams the sources of the GMI's output the same way, before its text.
+- `ragSources` comes with every evaluation after the turn's retrieval: the GMI's sources reach the stream as a `METADATA_UPDATE` before the first `TEXT_DELTA`, and the `FINAL_RESPONSE` carries them too. A tool-result continuation (`handleToolResult()`, `handleToolResults()`, `resumeExternalToolRequest()`) streams the sources of the GMI's output the same way, before its text. `GMI` retrieves nothing in a continuation: its output carries the sources of the user turn it continues, which it keeps until its next user turn starts, so a continuation's reply is judged with them, as its calls are. A continuation resumed on another `GMI`, after a restart or once the session's GMI was replaced, carries none: the pause stores the calls, never the documents the turn retrieved.
 - It is `undefined` when the turn retrieved no sources.
 - Each [`RagRetrievedChunk`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/IRetrievalAugmentor.ts) contains `content`, `relevanceScore`, `metadata`, and source identifiers (`originalDocumentId`, `dataSourceId`, `source`).
 
