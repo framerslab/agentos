@@ -811,7 +811,7 @@ describe('launch_agency on gmi()', () => {
     // The parent is a member of a host agency whose rejecting handler covers search.
     const host = agency({ provider: 'openai', model: 'stub-model', apiKey: k, strategy: 'sequential', hitl: { approvals: { beforeTool: ['search'] }, handler }, agents: { coordinator: parent } });
 
-    const result = (await host.generate('Find x.')) as GenerateTextResult;
+    const result = await host.generate('Find x.');
     expect(result.text).toBe('Team done.');
     // The seat was offered search and called it (the precondition).
     expect(systemText(s.seen[1])).toContain('Find it.');
@@ -820,7 +820,10 @@ describe('launch_agency on gmi()', () => {
     expect(asked).toEqual(['search']);
     expect(search).not.toHaveBeenCalled();
     expect(JSON.stringify(s.seen[2].messages)).toContain('search is paused');
-    expect(launchOf(result)).toMatchObject({ status: 'completed', text: 'Search held.' });
+    // The host's one call record is the parent's, and its one tool call is the launch, which completed with the seat's answer.
+    expect(result.agentCalls.map((call) => call.agent)).toEqual(['coordinator']);
+    expect(result.agentCalls[0].toolCalls.map((call) => [call.name, call.error])).toEqual([['launch_agency', undefined]]);
+    expect(result.agentCalls[0].toolCalls[0].result).toMatchObject({ status: 'completed', text: 'Search held.' });
     // Root, the seat's two steps, root.
     expect(s.seen).toHaveLength(4);
 
@@ -875,8 +878,9 @@ describe('launch_agency on gmi()', () => {
       agents: { coordinator: gated },
     });
 
-    const composed = (await host2.generate('Find x and y.')) as GenerateTextResult;
-    expect(launchOf(composed)).toMatchObject({ status: 'completed', text: 'Found x.' });
+    const composed = await host2.generate('Find x and y.');
+    expect(composed.agentCalls[0].toolCalls.map((call) => [call.name, call.error])).toEqual([['launch_agency', undefined]]);
+    expect(composed.agentCalls[0].toolCalls[0].result).toMatchObject({ status: 'completed', text: 'Found x.' });
     // The host's handler is asked first, the parent's own only after the host approved, and the host's refusal ends the
     // second search before the parent's handler is asked.
     expect(order).toEqual(['host search', 'own search', 'host search']);
