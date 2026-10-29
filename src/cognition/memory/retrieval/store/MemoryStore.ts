@@ -53,6 +53,7 @@ import {
   withPersistedDecayState,
   type PersistedDecayState,
 } from './tracePersistence.js';
+import { fillScopeIds } from './migrations/v2-to-v3.js';
 
 // ---------------------------------------------------------------------------
 // Embedding guard (CR4)
@@ -326,6 +327,35 @@ function blobToEmbedding(blob: unknown): number[] | null {
   return Array.from(new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4));
 }
 
+/**
+ * A trace deleted for good, as a store keeps it once its row is gone: where it was filed, so a later delete can evict
+ * a document that stayed in the index, and none of what it said (its content, entities, tags, structured data and
+ * linked traces). It stays inactive.
+ */
+function withoutWords(trace: MemoryTrace): MemoryTrace {
+  return {
+    ...trace,
+    content: '',
+    structuredData: undefined,
+    entities: [],
+    tags: [],
+    associatedTraceIds: [],
+    provenance: {
+      sourceType: trace.provenance.sourceType,
+      sourceTimestamp: trace.provenance.sourceTimestamp,
+      confidence: trace.provenance.confidence,
+      verificationCount: 0,
+    },
+    policy: undefined,
+    isActive: false,
+  };
+}
+
+/** Whether a cached trace is filed under this scope and scope id. */
+function isFiledUnder(trace: MemoryTrace, scope: MemoryScope, scopeId: string): boolean {
+  return trace.scope === scope && trace.scopeId === scopeId;
+}
+
 type TraceOperationKind = 'normal' | 'delete';
 
 interface TraceOperationState {
@@ -346,6 +376,8 @@ interface StoreCoordinationTarget {
   releaseDeleteAuthority: (traceId: string) => void;
   evictDeleted: (traceId: string, fallback?: MemoryTrace) => Promise<boolean>;
   revive: (trace: MemoryTrace, embedding: number[], source: boolean) => Promise<boolean>;
+  /** Drops the words of a trace deleted for good from the store's cache ({@link withoutWords}). */
+  forgetDeleted: (traceId: string) => void;
 }
 
 interface ReferenceLike<T extends object> {
@@ -479,6 +511,18 @@ function releaseDeleteAuthority(namespace: object, traceId: string): void {
     if (target) target.releaseDeleteAuthority(traceId);
     else coordinator.stores.delete(reference);
   }
+}
+
+/** Drops the words of a trace deleted for good from every live store on the backing resource, `source` included. */
+function forgetDeletedTrace(namespace: object, traceId: string, source: StoreCoordinationTarget): void {
+  const coordinator = getNamespaceCoordinator(namespace);
+  const targets = new Set<StoreCoordinationTarget>([source]);
+  for (const reference of coordinator.stores) {
+    const target = reference.deref();
+    if (target) targets.add(target);
+    else coordinator.stores.delete(reference);
+  }
+  for (const target of targets) target.forgetDeleted(traceId);
 }
 
 async function evictDeletedTrace(
@@ -839,6 +883,7 @@ export class MemoryStore {
       releaseDeleteAuthority: (traceId) => this.authoritativeTombstoneIds.delete(traceId),
       evictDeleted: (traceId, fallback) => this.evictDeletedLocally(traceId, fallback),
       revive: (trace, embedding, source) => this.reviveLocally(trace, embedding, source),
+      forgetDeleted: (traceId) => this.forgetDeletedLocally(traceId),
     };
     this.coordinationNamespace = vectorStoreNamespace(
       config.vectorStore,
@@ -960,6 +1005,18 @@ export class MemoryStore {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Keeps of a trace deleted for good only where it was filed ({@link withoutWords}). A trace revived since, which is
+   * active again and no longer tombstoned, keeps what it holds.
+   */
+  private forgetDeletedLocally(traceId: string): void {
+    if (!this.tombstonedTraceIds.has(traceId)) return;
+    const trace = this.traceCache.get(traceId);
+    if (trace?.isActive) return;
+    this.embeddingCache.delete(traceId);
+    if (trace) this.traceCache.set(traceId, withoutWords(trace));
   }
 
   private async reviveLocally(
@@ -1709,12 +1766,21 @@ export class MemoryStore {
               reinforcementInterval: DEFAULT_REINFORCEMENT_INTERVAL_MS,
               updatedAt: Date.now(),
               ...tracePartial,
+              // A document of this collection is a trace of its scope.
+              scope,
+              scopeId,
             } as MemoryTrace);
 
           // Treat the in-memory tombstone as authoritative. A best-effort
           // vector-store update can fail after softDelete(), leaving a stale
           // document whose metadata still says it is active.
           if (!trace.isActive) {
+            continue;
+          }
+          // The document of a trace filed under another scope since (stored
+          // again there, or moved by a refile whose delete here failed) is a
+          // stale copy: the trace is not this scope's.
+          if (cached && !isFiledUnder(cached, scope, scopeId)) {
             continue;
           }
 
@@ -2012,11 +2078,13 @@ export class MemoryStore {
           if (!doc.metadata) continue;
           const cached = this.traceCache.get(doc.id);
           if (cached) {
-            if (cached.isActive) {
+            // A trace filed under another scope since leaves a stale document here, not a trace of this scope.
+            if (cached.isActive && isFiledUnder(cached, scope, scopeId)) {
               results.push(cached);
             }
           } else {
-            const trace = this.traceFromVectorDocument(doc);
+            // A document of this collection is a trace of its scope.
+            const trace: MemoryTrace = { ...this.traceFromVectorDocument(doc), scope, scopeId };
             if (!trace.isActive) continue;
             this.traceCache.set(trace.id, trace);
             results.push(trace);
@@ -2360,13 +2428,23 @@ export class MemoryStore {
    * foreign keys require: its retrieval feedback (with the query that recalled it) is deleted, and the document chunk
    * it was filed from lets go of it and keeps its text, which belongs to the document. On SQLite the full-text index
    * is rebuilt from the rows that remain, as every hard delete must; a rebuild that fails is repaired when the Brain
-   * next opens.
+   * next opens. Last, every store on the backing resource in this process, this one included, keeps of each trace
+   * only where it was filed, none of its words ({@link withoutWords}).
+   *
+   * With no Brain, the traces this store holds are the ones it reaches: an id the vector index holds of a trace this
+   * store never loaded names no collection, and `deleteScope` is what finds such a trace.
    *
    * @param traceIds - Trace ids; unknown ids are skipped.
+   * @param options.beforeDelete - Runs with the ids of the traces found (a Brain row or a trace this store holds)
+   *   before any of them is deleted, and not at all when none is found. The memory manager removes what it keeps of
+   *   each trace there, so a call that fails part way finds the same traces again.
    * @returns How many of them had a Brain row or a live cached trace, so a second call for the same ids counts none.
-   * @throws When the Brain cannot be read or a row cannot be deleted.
+   * @throws When the Brain cannot be read or a row cannot be deleted, or what `beforeDelete` throws.
    */
-  async deleteTraces(traceIds: readonly string[]): Promise<number> {
+  async deleteTraces(
+    traceIds: readonly string[],
+    options: { beforeDelete?: (traceIds: readonly string[]) => Promise<void> } = {},
+  ): Promise<number> {
     this.beginOperation();
     const ids = [...new Set(traceIds)];
     if (ids.length === 0) return 0;
@@ -2375,16 +2453,27 @@ export class MemoryStore {
     // eviction that failed, and it counts only when it still has a row.
     const counted = new Set(ids.filter((id) => this.traceCache.get(id)?.isActive === true));
     const known = new Set(ids.filter((id) => this.traceCache.has(id)));
-    let rowIds: string[] = [];
+    const rowIds: string[] = [];
     if (brain) {
-      const durable = await this.getDurableTraceRows(ids, brain);
-      if (!durable.ok) throw new Error('MemoryStore.deleteTraces: the Brain could not be read');
-      rowIds = [...durable.rows.keys()];
+      try {
+        for (let offset = 0; offset < ids.length; offset += 400) {
+          const chunk = ids.slice(offset, offset + 400);
+          const rows = await brain.all<{ id: string }>(
+            `SELECT id FROM memory_traces WHERE brain_id = ? AND id IN (${chunk.map(() => '?').join(', ')})`,
+            [brain.brainId, ...chunk],
+          );
+          for (const row of rows) rowIds.push(row.id);
+        }
+      } catch {
+        throw new Error('MemoryStore.deleteTraces: the Brain could not be read');
+      }
       for (const id of rowIds) {
         counted.add(id);
         known.add(id);
       }
     }
+    if (known.size === 0) return 0;
+    await options.beforeDelete?.([...known]);
     for (const id of known) {
       try {
         await this.softDelete(id);
@@ -2416,23 +2505,27 @@ export class MemoryStore {
         }
       }
     }
+    for (const id of known) forgetDeletedTrace(this.coordinationNamespace, id, this.coordinationTarget);
     return counted.size;
   }
 
   /**
    * Deletes every trace of one scope for good ({@link deleteTraces}). The traces this store holds and every Brain row
    * filed under the scope (`memory_traces.scope_id`), soft-deleted rows and another process's included, go in one
-   * batch. With no Brain the vector index is the scope's durable record, holding what another store filed before a
-   * restart, so the scope's collection is then walked from its start a page at a time ({@link readScopeCollection}),
-   * following the cursor the index returns, and each page is deleted. The walk runs again while it finds a document
-   * this call has not read, since a delete moves the documents after it past a cursor that counts positions. A
-   * document whose eviction fails stays in the index, as `softDelete` warns, and a later call reads it again. Last,
-   * every knowledge-graph copy filed under the scope whose trace was already gone.
+   * batch; the brain's rows a release older than the column wrote are filed first ({@link scopeTraceIds}). With no
+   * Brain the vector index is the scope's durable record, holding what another store filed before a restart, so the
+   * scope's collection is then walked from its start a page at a time ({@link readScopeCollection}), following the
+   * cursor the index returns, and each page is deleted. The walk runs again while it finds a document this call has
+   * not read, since a delete moves the documents after it past a cursor that counts positions. A document whose
+   * eviction fails stays in the index, as `softDelete` warns, and a later call reads it again; a document of a trace
+   * this store holds under another scope is removed from the collection and its trace kept. Last, every
+   * knowledge-graph copy filed under the scope whose trace was already gone.
    *
    * @param options.turnUserId - Deletes only the scope's traces that this user filed as a second user on another
    *   user's session ({@link MemoryTrace.turnUserId}); the scope's other traces and copies stay.
-   * @param options.beforeDelete - Runs with each batch's trace ids before the batch is deleted. The memory manager
-   *   removes their memory-graph nodes there, so a call that fails part way finds the same traces again.
+   * @param options.beforeDelete - Runs with the ids of each batch's traces before the batch is deleted (`deleteTraces`
+   *   runs it). The memory manager removes what it keeps of each trace there, so a call that fails part way finds the
+   *   same traces again.
    * @returns The number of traces deleted.
    * @throws TypeError when `turnUserId` is given and is not a non-empty string.
    * @throws When the Brain cannot be read or a row cannot be deleted, or, with no Brain, when the vector index
@@ -2448,11 +2541,8 @@ export class MemoryStore {
       throw new TypeError('MemoryStore.deleteScope: turnUserId must be a non-empty string');
     }
     this.beginOperation();
-    const deleteBatch = async (traceIds: string[]): Promise<number> => {
-      if (traceIds.length === 0) return 0;
-      await options.beforeDelete?.(traceIds);
-      return this.deleteTraces(traceIds);
-    };
+    const deleteBatch = async (traceIds: string[]): Promise<number> =>
+      traceIds.length === 0 ? 0 : this.deleteTraces(traceIds, { beforeDelete: options.beforeDelete });
     const filedByThem = (traceId: string): boolean =>
       only === undefined || this.traceCache.get(traceId)?.turnUserId === only;
     let deleted = await deleteBatch(await this.scopeTraceIds(scope, scopeId, only));
@@ -2470,7 +2560,7 @@ export class MemoryStore {
           if (fresh.length > 0) found = true;
           deleted += await deleteBatch(fresh.filter(filedByThem));
           // An empty page or a cursor this walk already followed ends the walk.
-          const next = page.traceIds.length > 0 ? page.nextCursor : undefined;
+          const next = page.documentCount > 0 ? page.nextCursor : undefined;
           cursor = next !== undefined && !cursors.has(next) ? next : undefined;
           if (cursor !== undefined) cursors.add(cursor);
         } while (cursor !== undefined);
@@ -2490,17 +2580,20 @@ export class MemoryStore {
   /**
    * The ids of every trace of one scope this store holds, and of every Brain row filed under the scope
    * (`memory_traces.scope_id`), soft-deleted rows and another process's included; with `turnUserId`, only those
-   * that user filed as a second user.
+   * that user filed as a second user. The rows of the brain that hold `scope_id` `''` while their metadata names a
+   * scope id are filed first (`fillScopeIds`): a release older than the column writes them to a brain this process
+   * holds open, and the read by `scope_id` would miss them.
    */
   private async scopeTraceIds(scope: MemoryScope, scopeId: string, turnUserId?: string): Promise<string[]> {
     const ids = new Set<string>();
     for (const trace of this.traceCache.values()) {
-      if (trace.scope === scope && trace.scopeId === scopeId && (turnUserId === undefined || trace.turnUserId === turnUserId)) {
+      if (isFiledUnder(trace, scope, scopeId) && (turnUserId === undefined || trace.turnUserId === turnUserId)) {
         ids.add(trace.id);
       }
     }
     const brain = this.brain;
     if (brain) {
+      await fillScopeIds(brain.adapter, brain.brainId);
       const rows = await brain.all<{ id: string; metadata?: string | null }>(
         `SELECT id${turnUserId === undefined ? '' : ', metadata'} FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?`,
         [brain.brainId, scope, scopeId],
@@ -2516,11 +2609,14 @@ export class MemoryStore {
    * One page of a scope's collection in the vector index, for a store with no Brain: up to
    * {@link SCOPE_DELETE_PAGE_SIZE} documents, listed by metadata where the index can (`scanByMetadata`), else found by
    * a query with a zero vector of the index's size. Each document this store does not hold is cached as a trace of
-   * the scope ({@link traceFromVectorDocument}), so its delete evicts it from this collection. An index that says the
-   * collection does not exist (`collectionExists`) gives no page; one that cannot say, and fails the read, is read as
-   * holding nothing, with a warning, since a scope never filed has no collection.
+   * the scope ({@link traceFromVectorDocument}), so its delete evicts it from this collection. A document of a trace
+   * this store holds under another scope (filed there since, by a store again or a refile whose delete here failed)
+   * is a stale copy: it is removed from this collection and its trace is not one of the scope's. An index that says
+   * the collection does not exist (`collectionExists`) gives no page; one that cannot say, and fails the read, is read
+   * as holding nothing, with a warning, since a scope never filed has no collection.
    *
    * @param cursor - Where the previous page ended, for an index whose scan pages.
+   * @returns The ids of the page's traces of the scope, how many documents the page held, and the index's cursor.
    * @throws When the index fails to say whether it holds the collection (`collectionExists` throws), or fails the
    *   read of a collection it holds.
    */
@@ -2528,14 +2624,14 @@ export class MemoryStore {
     scope: MemoryScope,
     scopeId: string,
     cursor?: string,
-  ): Promise<{ traceIds: string[]; nextCursor?: string }> {
+  ): Promise<{ traceIds: string[]; documentCount: number; nextCursor?: string }> {
     const vectorStore = this.config.vectorStore;
     const collection = collectionName(this.config.collectionPrefix, scope, scopeId);
     const exists =
       typeof vectorStore.collectionExists === 'function'
         ? await vectorStore.collectionExists(collection)
         : undefined;
-    if (exists === false) return { traceIds: [] };
+    if (exists === false) return { traceIds: [], documentCount: 0 };
     let documents: RetrievedVectorDocument[];
     let nextCursor: string | undefined;
     try {
@@ -2563,16 +2659,31 @@ export class MemoryStore {
         `[MemoryStore] deleteScope read the vector index as holding nothing for a scope: the index cannot say whether ` +
           `the collection exists, and its read failed: ${message}`,
       );
-      return { traceIds: [] };
+      return { traceIds: [], documentCount: 0 };
     }
+    const traceIds: string[] = [];
+    const stale: string[] = [];
     for (const document of documents) {
-      if (this.traceCache.has(document.id)) continue;
+      const cached = this.traceCache.get(document.id);
+      if (cached && !isFiledUnder(cached, scope, scopeId)) {
+        stale.push(document.id);
+        continue;
+      }
+      traceIds.push(document.id);
+      if (cached) continue;
       const trace = this.traceFromVectorDocument(document);
       // A trace this store deleted before, whose eviction failed, counts once: it is cached as deleted.
       const isActive = trace.isActive && !this.tombstonedTraceIds.has(document.id);
       this.traceCache.set(document.id, { ...trace, scope, scopeId, isActive });
     }
-    return { traceIds: documents.map((document) => document.id), nextCursor };
+    if (stale.length > 0) {
+      try {
+        await vectorStore.delete(collection, stale);
+      } catch {
+        // A stale copy that stays is skipped again by the next read.
+      }
+    }
+    return { traceIds, documentCount: documents.length, nextCursor };
   }
 
   /**
