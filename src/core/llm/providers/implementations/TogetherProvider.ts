@@ -23,7 +23,10 @@ import {
 } from '../IProvider';
 import { OpenAIProvider, type OpenAIProviderConfig } from './OpenAIProvider';
 import { keyPoolStrategyFromEnv } from '../../../providers/ApiKeyPool.js';
-import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('together_provider');
 
 // ---------------------------------------------------------------------------
 // Configuration

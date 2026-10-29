@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import type { AgentOptions } from '../../agent.js';
 import type { Agent } from '../../types.js';
 import type { ITool, JSONSchemaObject, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
-import { contentSafeConsole as console } from '../../../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../core/logging/contentSafeConsole.js';
 import { outputEstimateTokens } from '../spendBudget.js';
 import { adaptTools } from '../toolAdapter.js';
 import type { AgentOSUsageLedgerOptions } from '../usageLedger.js';
@@ -29,6 +29,9 @@ import {
   type LaunchLimits,
   type LaunchRefusal,
 } from './types.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('gmi_launch_tool');
 
 /** What gmi() hands the tool. */
 export interface GmiLaunchToolOptions {

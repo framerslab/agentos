@@ -24,7 +24,10 @@ import {
 import { sha256Hex } from '../../../utils/sha256';
 import { OpenAIProvider, type OpenAIProviderConfig } from './OpenAIProvider';
 import { keyPoolStrategyFromEnv } from '../../../providers/ApiKeyPool.js';
-import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('mistral_provider');
 
 /** Mistral accepts only tool call ids made of nine letters and digits. */
 const MISTRAL_TOOL_CALL_ID = /^[A-Za-z0-9]{9}$/;
