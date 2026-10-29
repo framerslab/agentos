@@ -29,8 +29,9 @@ export interface ContentSafeLogEvent {
   readonly component: ContentSafeLogComponent;
 }
 /**
- * Called synchronously; reentrant library logs are dropped, and a receiver throw, or the rejection of a promise an
- * async receiver returns, is swallowed.
+ * Called synchronously; reentrant library logs are dropped. A receiver throw is swallowed, and an object or function it
+ * returns is resolved as `await` resolves it, so the rejection of an async receiver's promise, a promise from another
+ * realm or a thenable is swallowed too.
  */
 export type ContentSafeLogSink = (event: ContentSafeLogEvent) => void;
 /** Installation settings are copied once, with no runtime disable or replacement. */
@@ -68,7 +69,8 @@ function componentOf(value: unknown): ContentSafeLogComponent {
  * Enable once before provider work. Existing and future factory/pino loggers and covered console modules discard
  * their messages, metadata and bindings. Tracing, metrics, log exports and the usage observer remain disabled by
  * their existing guards. The host's own outputs, third-party loggers and uncovered modules are outside this mode.
- * A repeated call must have the same sink and effective minimum. No original record is replayed on sink failure.
+ * A repeated call must have the same sink and effective minimum; the options are read once, before the installed
+ * settings are compared. No original record is replayed on sink failure.
  *
  * @param value - The synchronous receiver of frozen events.
  * @param options - Optional source threshold; omission preserves all four levels.
@@ -76,10 +78,12 @@ function componentOf(value: unknown): ContentSafeLogComponent {
  */
 export function enableContentSafeTelemetry(value: ContentSafeLogSink, options: ContentSafeTelemetryOptions = {}): void {
   if ((typeof value === 'function') === false) throw new Error('invalid_content_safe_sink');
-  if (sink && (sink === value) === false) throw new Error('content_safe_sink_already_set');
+  // Every option is read and checked before the installed state: a getter that installs a sink itself is then refused
+  // below like any other replacement, instead of being overwritten.
   let requested: ContentSafeLogLevel;
   try { requested = checkedMinimum(options.minLevel); }
   catch { throw new Error('invalid_content_safe_min_level'); }
+  if (sink && (sink === value) === false) throw new Error('content_safe_sink_already_set');
   if (sink && (minimum === requested) === false) throw new Error('content_safe_options_already_set');
   sink = value;
   minimum = requested;
@@ -104,8 +108,9 @@ export function emitContentSafeLog(level: ContentSafeLogLevel, component: Conten
   emitting = true;
   try {
     const returned: unknown = target(Object.freeze({ kind: 'library_event', state, n: 1, component: componentOf(component) }));
-    // An async receiver fails by rejecting instead of throwing; the rejection is consumed like a throw.
-    if (returned instanceof Promise) void returned.catch(() => undefined);
+    // An async receiver fails by rejecting instead of throwing. Resolving whatever object or function it returns, as
+    // await does, also catches a promise from another realm or a thenable, and a then that throws when read or called.
+    if (typeof returned === 'function' || (typeof returned === 'object' && (returned === null) === false)) void Promise.resolve(returned).catch(() => undefined);
   }
   catch { /* A diagnostic receiver cannot expose content or fail provider work. */ }
   finally { emitting = false; }

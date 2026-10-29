@@ -61,10 +61,11 @@ export interface ListenSessionOverrides {
   speaker?: (event: TranscriptEvent) => string | undefined;
   /**
    * Receives stt_warning for a warning of the opened STT session and speaker_failed for a throwing speaker hook.
-   * No error, provider name, transcript or message is passed. A callback throw, or the rejection of a promise an
-   * async callback returns, is swallowed. Omission preserves the provider's normal unlistened-warning behavior.
-   * Warnings emitted before startSession resolves cannot be observed by a listener on its returned session. The
-   * listener remains during drain and is detached on end.
+   * No error, provider name, transcript or message is passed. A callback throw is swallowed, and an object or
+   * function the callback returns is resolved as `await` resolves it, so the rejection of an async callback's
+   * promise, a promise from another realm or a thenable is swallowed too. Omission preserves the provider's normal
+   * unlistened-warning behavior. Warnings emitted before startSession resolves cannot be observed by a listener on
+   * its returned session. The listener remains during drain and is detached on end.
    */
   onWarning?: (kind: ListenWarningKind) => void;
   /** How long a stop waits for the flushed final to arrive, before draining a pending detector turn. Default 250. */
@@ -168,9 +169,11 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
   /** A diagnostic callback must not discard a turn, fail a provider event or leave a rejection unhandled. */
   const reportWarning = (kind: ListenWarningKind): void => {
     try {
-      // The void return type admits an async callback, which fails by rejecting instead of throwing.
+      // The void return type admits an async callback, which fails by rejecting instead of throwing. Resolving whatever
+      // object or function it returns, as await does, also catches a promise from another realm or a thenable, and a
+      // then that throws when read or called.
       const returned: unknown = warningReceiver?.(kind);
-      if (returned instanceof Promise) void returned.catch(() => undefined);
+      if ((typeof returned === 'object' && returned !== null) || typeof returned === 'function') void Promise.resolve(returned).catch(() => undefined);
     }
     catch { /* A warning callback cannot change the hearing lifecycle. */ }
   };
