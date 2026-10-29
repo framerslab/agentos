@@ -1,7 +1,8 @@
 /**
  * @file memoryCopies.test.ts
  * A memory trace's episodic copy in the in-memory graph and in `SqlKnowledgeGraph`: the copy is keyed by its trace,
- * so recording the trace again replaces it and a delete by trace id finds it by key. In SQL the delete reads no
+ * so recording the trace again replaces it, a delete by trace id finds it by key, and the relations that name a copy go
+ * with it in both. In SQL the delete reads no
  * memory node once the graph has re-keyed, at its first delete by trace id, the copies an older release recorded
  * under a random node id. A real SQLite Brain, and a Postgres one where CI provides it (`AGENTOS_TEST_POSTGRES_URL`):
  * a relation that names a copy goes with the copy and moves with it to its key, a move that fails keeps the copy for a
@@ -134,6 +135,37 @@ describe.each([
     expect(await textsOf(graph)).toEqual(['Ana is allergic to walnuts.', 'Bo plays the cello.']);
     expect(await graph.deleteMemories!({ scopes: [{ scope: 'user', scopeId: 'ana' }] })).toBe(1);
     expect(await textsOf(graph)).toEqual(['Bo plays the cello.']);
+  });
+
+  it('takes the relations that name it with it, by trace id and by scope', async () => {
+    const graph = await graphOf();
+    await graph.initialize();
+    const entity = (label: string) =>
+      graph.upsertEntity({ type: 'concept', label, properties: {}, confidence: 1, source: SOURCE });
+    const relation = (sourceId: string, targetId: string) =>
+      graph.upsertRelation({
+        sourceId,
+        targetId,
+        type: 'related_to',
+        label: 'mentions',
+        weight: 1,
+        bidirectional: false,
+        confidence: 1,
+        source: SOURCE,
+      });
+    const bees = await entity('bees');
+    const honey = await entity('honey');
+    // A host relates an episodic memory to what it mentions (`upsertRelation` takes any node id).
+    await relation((await graph.recordMemory(copyOf('mt_1', 'ana', 'Ana keeps bees.'))).id, bees.id);
+    await relation(bees.id, (await graph.recordMemory(copyOf('mt_2', 'ana', 'Ana sells honey.'))).id);
+    await relation(honey.id, bees.id);
+
+    expect(await graph.deleteMemories!({ traceIds: ['mt_1'] })).toBe(1);
+    expect(await graph.deleteMemories!({ scopes: [{ scope: 'user', scopeId: 'ana' }] })).toBe(1);
+
+    const left = await graph.getRelations(bees.id);
+    expect(left.map((kept) => [kept.sourceId, kept.targetId])).toEqual([[honey.id, bees.id]]);
+    expect(await graph.getEntity(bees.id)).toBeDefined();
   });
 });
 
