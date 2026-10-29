@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import { agency } from '../agency';
-import { agent } from '../agent';
+import { agent, type AgentOptions } from '../agent';
 import { gmi } from '../gmi';
 import { AgencyConfigError } from '../types';
 import type { ApprovalDecision, ApprovalRequest } from '../types';
@@ -241,5 +241,24 @@ describe('agency() seats served by GMIs', () => {
     expect(offered).not.toContain('search');
     // The budget the stream carried was charged for the seat's steps.
     expect(budget.tokensUsed()).toBeGreaterThan(0);
+  });
+
+  it('agency() warns about an agencies config, which it applies to none of its seats', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('A draft.')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // An agent's options spread into the agency's, as a host that shares one options object does: the type check reads
+    // no property a spread brings, so `agencies` reaches agency() as it does from JavaScript.
+    const shared: Pick<AgentOptions, 'provider' | 'model' | 'apiKey' | 'agencies'> = { provider: 'openai', model: 'stub-model', apiKey: k, agencies: { launch: true } };
+    const team = agency({ ...shared, runtime: 'gmi', strategy: 'sequential', agents: { writer: { instructions: 'Write.' } } });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('agency() accepted an agencies config'));
+
+    const result = (await team.generate('Write it.')) as { text: string };
+    // The seat ran on a GMI (the precondition) and was offered no launch_agency: the agency's config reached no seat.
+    expect(result.text).toBe('A draft.');
+    expect(s.seen).toHaveLength(1);
+    expect(s.seen[0].streamed).toBe(true);
+    const offered = ((s.seen[0].options.tools as Array<{ function: { name: string } }> | undefined) ?? []).map((tool) => tool.function.name);
+    expect(offered).not.toContain('launch_agency');
   });
 });
