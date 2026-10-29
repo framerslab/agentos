@@ -8,11 +8,12 @@
  * retrieval feedback, the document chunk it was filed from), and a scope deleted again counts nothing. A soft delete
  * (a supersede, a prune) takes the trace's copy with it and keeps the Brain row as a tombstone. A real manager over a
  * real SQLite Brain; with no Brain, a manager started over a vector index another manager filed into finds the scope's
- * traces in the index, whether it lists a collection a page at a time, pages it by position, or answers similarity
- * queries alone. A trace deleted for good leaves none of its words in this process or the Brain: not in the cache of
- * any store over the Brain, the archive's original, or the typed facts the manager extracted from it; a row an older
- * release wrote under the scope is found too, an id that names no trace is skipped, and a document a scope's collection
- * still holds of a trace filed under another scope since is neither read nor deleted under the scope.
+ * traces in the index, a second user's alone with `turnUserId`, whether it lists a collection a page at a time, pages
+ * it by position, or answers similarity queries alone. A trace deleted for good leaves none of its words in this
+ * process or the Brain: not in the cache of any store over the Brain, the archive's original, or the typed facts the
+ * manager extracted from it; a row an older release wrote under the scope is found too, an id that names no trace is
+ * skipped, and a document a scope's collection still holds of a trace filed under another scope since is neither read
+ * nor deleted under the scope.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -291,6 +292,26 @@ describe.each([
     for (const gone of [bees, walnuts, lyon]) expect(await knowledgeGraph.getEntity(gone.id)).toBeUndefined();
     expect(await knowledgeGraph.getEntity(cello.id)).toBeDefined();
     expect(await second.deleteScope('user', 'ana')).toEqual({ deleted: 0, graph: 'reached' });
+  });
+
+  it('with turnUserId deletes only the traces that user filed, among those another store filed before a restart', async () => {
+    const vectorStore = shape(new InMemoryVectorStore());
+    await vectorStore.initialize({ id: `delete-scope-${Math.random()}`, type: 'in_memory' });
+    const knowledgeGraph = new KnowledgeGraph() as IKnowledgeGraph;
+    const first = await managerWithoutBrain(vectorStore, knowledgeGraph);
+    const notes = await first.encode('The owner keeps notes.', MOOD, 'neutral', { scope: 'user', scopeId: '/s-1' });
+    const snakes = await first.encode('Bo keeps snakes.', MOOD, 'neutral', { scope: 'user', scopeId: '/s-1', turnUserId: 'bo' });
+    const lizards = await first.encode('Bo keeps lizards.', MOOD, 'neutral', { scope: 'user', scopeId: '/s-1', turnUserId: 'bo' });
+    await first.shutdown();
+    const second = await managerWithoutBrain(vectorStore, knowledgeGraph);
+    closers.push(() => second.shutdown());
+
+    expect(await second.deleteScope('user', '/s-1', { turnUserId: 'bo' })).toEqual({ deleted: 2, graph: 'reached' });
+
+    expect((await second.getStore().getByScope('user', '/s-1')).map((trace) => trace.content)).toEqual(['The owner keeps notes.']);
+    expect(await copiesOf(knowledgeGraph)).toEqual([{ scopeId: '/s-1', text: 'The owner keeps notes.' }]);
+    for (const gone of [snakes, lizards]) expect(await knowledgeGraph.getEntity(gone.id)).toBeUndefined();
+    expect(await knowledgeGraph.getEntity(notes.id)).toBeDefined();
   });
 });
 
