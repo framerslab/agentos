@@ -241,12 +241,16 @@ export function parseModelString(model: string): ParsedModel {
  *   first image vendor with a key in the environment.
  *
  * A call with neither field, and a provider the global default names, pass.
+ * An empty or whitespace-only `baseUrl` is not a base URL the call gives: it
+ * is unset ({@link baseUrlIfSet}), names no endpoint, and passes as a call
+ * with none does. A key beside it is still refused.
  *
  * @throws {Error} Naming the provider the credentials would have gone to.
  */
 function refuseMisdirectedCredentials(opts: ModelOption, task: TaskType): void {
   const inline = opts as { apiKey?: unknown; baseUrl?: unknown };
-  if (typeof inline.apiKey !== 'string' && typeof inline.baseUrl !== 'string') return;
+  const baseUrl = typeof inline.baseUrl === 'string' ? baseUrlIfSet(inline.baseUrl) : undefined;
+  if (typeof inline.apiKey !== 'string' && baseUrl === undefined) return;
   const prefixed = opts.provider === 'ollama' ? undefined : knownProviderPrefixOf(opts.model);
   if (opts.provider && prefixed && prefixed !== opts.provider) {
     throw new Error(
@@ -452,7 +456,8 @@ export interface ModelOption {
    * Base URL override (useful for local proxies or Ollama). An empty or
    * whitespace-only value is unset: the global default's URL, then the
    * provider's base-URL variable, apply as with no `baseUrl`, and with none the
-   * call goes to the provider's own endpoint.
+   * call goes to the provider's own endpoint. It is never refused as a base URL
+   * meant for another provider, since it names no endpoint.
    */
   baseUrl?: string;
 }

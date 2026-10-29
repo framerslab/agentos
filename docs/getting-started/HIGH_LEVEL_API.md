@@ -129,7 +129,7 @@ const bot = agent({
 });
 ```
 
-A `baseUrl` that is an empty or whitespace-only string is unset: the call reads the global default's URL, then the provider's base-URL variable, as it does with no `baseUrl`, and with none it goes to the provider's own endpoint. The same reading applies to the default's `baseUrl` and to the variable (`OPENAI_BASE_URL=` leaves OpenAI's own endpoint), so no request is built on a blank base, whose relative URL (`/chat/completions`) Node's fetch rejects and a browser's would resolve against the page's own origin, with the key.
+A `baseUrl` that is an empty or whitespace-only string is unset: the call reads the global default's URL, then the provider's base-URL variable, as it does with no `baseUrl`, and with none it goes to the provider's own endpoint. The same reading applies to the default's `baseUrl` and to the variable (`OPENAI_BASE_URL=` leaves OpenAI's own endpoint), so no request is built on a blank base, whose relative URL (`/chat/completions`) Node's fetch rejects and a browser's would resolve against the page's own origin, with the key. A blank `baseUrl` names no endpoint, so it is not refused where a base URL meant for one provider would be: beside a `model` whose `provider:` prefix names another provider than `provider`, and on an image call that names no provider, the call runs as it does with no `baseUrl`. A key there is still refused.
 
 ### Local Providers
 
