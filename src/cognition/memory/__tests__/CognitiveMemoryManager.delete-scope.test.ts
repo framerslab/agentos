@@ -16,7 +16,9 @@
  * nor deleted under the scope; with no Brain, the scope's delete deletes that stale copy from its collection and walks
  * on to the scope's traces after it, and the trace keeps its own document. A trace an import brings in after the
  * graph keyed the copies it held (a file an older release wrote, through `SqliteImporter`, `Brain.importFromSqlite` or a
- * JSON export) is deleted with its copy.
+ * JSON export) is deleted with its copy; a trace an import merges into one the brain holds, or writes under another id
+ * because its id names another trace, comes with no copy, so a delete of the trace the brain files it as leaves none
+ * of its words.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -529,6 +531,62 @@ describe.each([
     expect(await copiesOf(graph)).toEqual([{ scopeId: 'ana', text: 'Ana is allergic to walnuts.' }]);
 
     expect(await manager.deleteTraces(['mt_old1'])).toEqual({ deleted: 1, graph: 'reached' });
+    expect(await copiesOf(graph)).toEqual([]);
+    expect(await brain.all("SELECT id FROM knowledge_nodes WHERE properties LIKE '%walnuts%'")).toEqual([]);
+  });
+});
+
+/**
+ * A trace a writer filed with no episodic copy, as the facade's `remember` does, with the `import_hash` an import
+ * gives the traces it writes.
+ */
+async function heldWithNoCopy(brain: Brain, id: string, text: string, scopeId: string): Promise<void> {
+  await brain.run(
+    `INSERT INTO memory_traces (brain_id, id, type, scope, content, strength, created_at, tags, emotions, metadata, scope_id)
+     VALUES ('agent-1', ?, 'episodic', 'user', ?, 0.5, ?, '[]', '{}', ?, ?)`,
+    [id, text, Date.now(), JSON.stringify({ scopeId, import_hash: await sha256Hex(text) }), scopeId],
+  );
+}
+
+describe.each([
+  [
+    'SqliteImporter',
+    async (target: Brain, _manager: CognitiveMemoryManager, source: string) => {
+      expect((await new SqliteImporter(target).import(source)).errors).toEqual([]);
+    },
+  ],
+  [
+    'a JSON export',
+    async (_target: Brain, manager: CognitiveMemoryManager, source: string) => {
+      const brain = await Brain.openSqlite(source, { brainId: 'agent-1' });
+      const json = await new JsonExporter(brain).exportToString();
+      await brain.close();
+      expect((await manager.importFromString(json)).errors).toEqual([]);
+    },
+  ],
+])('a trace a file brings in through %s under another id than its own', (_name, importInto) => {
+  it('comes with no copy when it merges into a trace the brain holds, so the delete of that trace leaves none of its words', async () => {
+    const { manager, brain, graph } = await managerOver(tempFile(), (brainOf) => new SqlKnowledgeGraph(brainOf));
+    await heldWithNoCopy(brain, 'mt_held', 'Ana is allergic to walnuts.', 'ana');
+
+    await importInto(brain, manager, await olderReleaseFile());
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([{ id: 'mt_held' }]);
+
+    expect(await manager.deleteTraces(['mt_held'])).toEqual({ deleted: 1, graph: 'reached' });
+    expect(await copiesOf(graph)).toEqual([]);
+    expect(await brain.all("SELECT id FROM knowledge_nodes WHERE properties LIKE '%walnuts%'")).toEqual([]);
+  });
+
+  it('comes with no copy when its id names another trace the brain holds, so its delete leaves none of its words', async () => {
+    const { manager, brain, graph } = await managerOver(tempFile(), (brainOf) => new SqlKnowledgeGraph(brainOf));
+    await heldWithNoCopy(brain, 'mt_old1', 'Bo plays the cello.', 'bo');
+
+    await importInto(brain, manager, await olderReleaseFile());
+    const walnuts = await brain.all<{ id: string }>("SELECT id FROM memory_traces WHERE content LIKE '%walnuts%'");
+    expect(walnuts).toHaveLength(1);
+    expect(walnuts[0]!.id).not.toBe('mt_old1');
+
+    expect(await manager.deleteTraces([walnuts[0]!.id])).toEqual({ deleted: 1, graph: 'reached' });
     expect(await copiesOf(graph)).toEqual([]);
     expect(await brain.all("SELECT id FROM knowledge_nodes WHERE properties LIKE '%walnuts%'")).toEqual([]);
   });
