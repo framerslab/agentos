@@ -206,9 +206,10 @@ export function compileGraph(
 
             outputs.set(name, resultText);
 
+            // The record holds the input the agent was sent, the approver's instructions included.
             agentCalls.push({
               agent: name,
-              input: context,
+              input: gate.input,
               output: resultText,
               toolCalls: resultToolCalls,
               usage: buildAgentCallUsage(resultUsage),
@@ -341,7 +342,7 @@ export function compileGraph(
             if (!unanswered) {
               agentCalls.push({
                 agent: name,
-                input: context,
+                input: agentInput,
                 output: agentText,
                 toolCalls: resultToolCalls,
                 usage: buildAgentCallUsage(resultUsage),

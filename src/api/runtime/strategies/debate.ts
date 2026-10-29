@@ -187,9 +187,10 @@ export function compileDebate(
           // in the synthesis prompt.
           collectedArguments.push(`[${name}, round ${round + 1}]: ${resultText}`);
 
+          // The record holds the input the agent was sent, the approver's instructions included.
           agentCalls.push({
             agent: name,
-            input: debateContext,
+            input: gate.input,
             output: resultText,
             toolCalls: resultToolCalls,
             usage: buildAgentCallUsage(resultUsage),

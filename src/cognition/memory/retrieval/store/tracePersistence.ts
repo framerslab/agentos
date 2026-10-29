@@ -248,8 +248,9 @@ export function bindingsFor(fragment: string, value: unknown): unknown[] {
 }
 
 /**
- * A `memory_traces` row as a ledger row's before-state holds it: every column but the embedding, which a restored
- * trace regains when it is next written (as `memory_update` clears it when the content changes).
+ * A `memory_traces` row as a ledger row's before-state holds it: every column but the embedding. A restore keeps the
+ * row's embedding where the row holds the snapshot's content ({@link writeTraceSnapshot}); a trace restored to other
+ * content regains a vector when it is next written (as `memory_update` clears it when the content changes).
  */
 export interface TraceSnapshot {
   id: string;
@@ -271,6 +272,28 @@ export interface TraceSnapshot {
 export interface SnapshotDb {
   get<T>(sql: string, params?: unknown[]): Promise<T | null | undefined>;
   run(sql: string, params?: unknown[]): Promise<{ changes: number }>;
+}
+
+/**
+ * Deletes trace rows of one brain for good, 400 ids a statement, with the rows that name them first, as the Brain's
+ * foreign keys require: a trace's `retrieval_feedback` rows, each holding the query that recalled it, are deleted, and
+ * a `document_chunks` row the trace was filed from lets go of it (`trace_id` set to NULL) and keeps its text, which
+ * belongs to its document.
+ *
+ * @returns How many trace rows it deleted.
+ */
+export async function deleteTraceRows(db: Pick<SnapshotDb, 'run'>, brainId: string, traceIds: readonly string[]): Promise<number> {
+  const ids = [...new Set(traceIds)];
+  let deleted = 0;
+  for (let offset = 0; offset < ids.length; offset += 400) {
+    const chunk = ids.slice(offset, offset + 400);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const params = [brainId, ...chunk];
+    await db.run(`DELETE FROM retrieval_feedback WHERE brain_id = ? AND trace_id IN (${placeholders})`, params);
+    await db.run(`UPDATE document_chunks SET trace_id = NULL WHERE brain_id = ? AND trace_id IN (${placeholders})`, params);
+    deleted += (await db.run(`DELETE FROM memory_traces WHERE brain_id = ? AND id IN (${placeholders})`, params)).changes;
+  }
+  return deleted;
 }
 
 /** Reads one row of a brain as a snapshot; `undefined` when there is no such row. */
@@ -303,7 +326,9 @@ export async function readTraceSnapshot(db: SnapshotDb, brainId: string, traceId
 }
 
 /**
- * Writes a snapshot back as the row's whole state, live (`deleted = 0`), with no embedding.
+ * Writes a snapshot back as the row's whole state, live (`deleted = 0`). The row keeps its embedding when it holds
+ * the snapshot's content (a delete taken back), so a store over the Brain loads and recalls the trace again; any other
+ * row is written with no embedding, since its vector is of other text.
  *
  * @param insertOrReplace - The dialect's `insertOrReplace` (`brain.features.dialect.insertOrReplace`).
  */
@@ -313,10 +338,16 @@ export async function writeTraceSnapshot(
   brainId: string,
   snapshot: TraceSnapshot,
 ): Promise<void> {
+  const current = await db.get<{ content: string; embedding: unknown }>(
+    'SELECT content, embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
+    [brainId, snapshot.id],
+  );
+  const embedding = current && current.content === snapshot.content ? current.embedding ?? null : null;
   const columns = ['brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed', 'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted', 'scope_id'];
-  const sql = insertOrReplace('memory_traces', columns, columns.map((column) => (column === 'embedding' ? 'NULL' : column === 'deleted' ? '0' : '?')), 'brain_id, id');
+  const sql = insertOrReplace('memory_traces', columns, columns.map((column) => (column === 'deleted' ? '0' : '?')), 'brain_id, id');
   await db.run(sql, [
-    brainId, snapshot.id, snapshot.type, snapshot.scope, snapshot.content, snapshot.strength, snapshot.createdAt,
-    snapshot.lastAccessed, snapshot.retrievalCount, snapshot.tags, snapshot.emotions, snapshot.metadata, snapshot.scopeId,
+    brainId, snapshot.id, snapshot.type, snapshot.scope, snapshot.content, embedding, snapshot.strength,
+    snapshot.createdAt, snapshot.lastAccessed, snapshot.retrievalCount, snapshot.tags, snapshot.emotions,
+    snapshot.metadata, snapshot.scopeId,
   ]);
 }
