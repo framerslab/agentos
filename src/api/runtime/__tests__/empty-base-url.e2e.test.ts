@@ -380,6 +380,33 @@ describe('generateImage reads an empty or whitespace-only baseUrl as unset', () 
   });
 });
 
+describe('generateImage refuses no call for a blank baseUrl that it makes with none', () => {
+  it.each(BLANK_BASE_URLS)(
+    "sends OpenAI's key from the environment to OpenAI's own endpoint for baseUrl %j, with no provider named and no global default",
+    async (baseUrl) => {
+      setEnv({ OPENAI_API_KEY: 'openai-env-key' });
+
+      const result = await generateImage({ prompt: 'A red panda on a rooftop.', baseUrl });
+
+      expect(postsTo(/\/images\/generations$/)).toEqual([
+        { url: 'https://api.openai.com/v1/images/generations', authorization: 'Bearer openai-env-key' },
+      ]);
+      expect(result.provider).toBe('openai');
+      expect(result.model).toBe('gpt-image-2.5-flare');
+    },
+  );
+
+  it.each(BLANK_BASE_URLS)('still refuses an apiKey beside baseUrl %j with no provider named, before any request', async (baseUrl) => {
+    setEnv({ OPENAI_API_KEY: 'openai-env-key' });
+
+    await expect(generateImage({ prompt: 'A red panda on a rooftop.', apiKey: 'caller-key', baseUrl })).rejects.toThrow(
+      'an apiKey or baseUrl needs provider',
+    );
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
 describe("importAgent drops a redacted baseUrl only for a base URL the importing process sets, read as the call reads it", () => {
   /** An export whose `baseUrl` lost its credentials and whose key is redacted. */
   function exportedAgent() {
