@@ -12,6 +12,13 @@
  * its metadata names; the import files such traces under that scope id before
  * its first duplicate check (`fillScopeIds`).
  *
+ * A trace's episodic copy written under another node id than its trace's key
+ * (an export from a release older than keyed copies, or a copy whose key the
+ * brain's own copy of the trace holds, written under a new id) is filed under
+ * the key once the edges are in, with the relations that name it, so a delete
+ * by its trace id finds it (`keyTraceCopies`); a copy whose key the brain's own
+ * copy holds is deleted.
+ *
  * @module memory/io/JsonImporter
  */
 
@@ -22,6 +29,7 @@ import type { Brain } from '../retrieval/store/Brain.js';
 import { base64ToBytes } from './base64.js';
 import { importedScopeId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { keyTraceCopies } from '../retrieval/store/SqlKnowledgeGraph.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -262,8 +270,10 @@ export class JsonImporter {
       // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
       if (context.dedup) await fillScopeIds(trx, this.brain.brainId);
       await this._importTraces(trx, payload.traces, result, context);
-      await this._importNodes(trx, payload.nodes ?? [], result, context);
+      const memoryNodes = await this._importNodes(trx, payload.nodes ?? [], result, context);
       await this._importEdges(trx, payload.edges ?? [], result, context);
+      // A trace's copy is found by its trace's key: one written under another node id gets the key here.
+      if (memoryNodes > 0) await keyTraceCopies(trx, this.brain.brainId);
       await this._importDocuments(trx, payload.documents ?? [], result, context);
       await this._importChunks(trx, payload.chunks ?? [], result, context);
       await this._importImages(trx, payload.images ?? [], result, context);
@@ -417,13 +427,15 @@ export class JsonImporter {
    * @param trx    - Transactional storage adapter.
    * @param nodes  - Array of serialised node objects.
    * @param result - Mutable `ImportResult` to accumulate counts.
+   * @returns How many of the nodes it wrote are of type `memory`.
    */
   private async _importNodes(
     trx: { run: Brain['run']; get: Brain['get'] },
     nodes: NodeRecord[],
     result: ImportResult,
     context: ImportContext,
-  ): Promise<void> {
+  ): Promise<number> {
+    let memoryNodes = 0;
     const { dialect } = this.brain.features;
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id FROM knowledge_nodes WHERE brain_id = ? AND ${dialect.jsonExtract('properties', '$.import_hash')} = ? LIMIT 1`;
@@ -478,11 +490,13 @@ export class JsonImporter {
         ]);
 
         if (sourceId) context.nodeIds.set(sourceId, id);
+        if (n.type === 'memory') memoryNodes++;
         result.imported++;
       } catch (err) {
         result.errors.push(`Node import error: ${String(err)}`);
       }
     }
+    return memoryNodes;
   }
 
   /**

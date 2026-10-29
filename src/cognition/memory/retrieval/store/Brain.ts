@@ -51,6 +51,7 @@ import { ensureScopeIdColumn, fillScopeIds, postgresIndexExists } from './migrat
 import { retryLostCreate } from './migrations/lost-create.js';
 import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
+import { keyTraceCopies } from './SqlKnowledgeGraph.js';
 
 /**
  * Derive a stable brain identifier from the database file path.
@@ -1535,6 +1536,12 @@ export class Brain {
    * older than the column wrote. To preserve the source unchanged, copy the
    * file to a temp path before calling this method.
    *
+   * A trace's episodic copy the file holds under another node id than its
+   * trace's key (a release older than keyed copies recorded it so) is filed
+   * under the key once the rows are in, with the relations that name it, so
+   * a delete by its trace id finds it (`keyTraceCopies`); a copy whose key the
+   * brain's own copy of the trace holds is deleted.
+   *
    * @param sourcePath - Source SQLite file path (typically produced by
    *   `Brain.exportToSqlite`).
    * @param opts.strategy - `'merge'` (default) upserts on PK collision;
@@ -1619,6 +1626,10 @@ export class Brain {
         // by `_seedMeta` during the receiving Brain's initialization (which
         // would otherwise collide with the source's schema_version/created_at).
         await this._bulkCopy(this, table, rows, this.#brainId, { upsert: true });
+      }
+      // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
+      if ((tablesImported['knowledge_nodes'] ?? 0) > 0) {
+        await this.transaction((trx) => keyTraceCopies(trx, this.#brainId));
       }
     } finally {
       await source.close();

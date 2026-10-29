@@ -22,6 +22,11 @@
  *   - New traces are inserted wholesale.
  * - **knowledge_nodes**: deduplicated by `label` + `type`.
  *   - New nodes are inserted; existing nodes are left unchanged.
+ *   - A trace's episodic copy the file holds under another node id than its
+ *     trace's key (a release older than keyed copies recorded it so) is filed
+ *     under the key once the edges are in, with the relations that name it,
+ *     so a delete by its trace id finds it (`keyTraceCopies`); a copy whose
+ *     key the brain's own copy of the trace holds is deleted.
  * - **knowledge_edges**: deduplicated by `source_id` + `target_id` + `type`.
  *   - New edges are inserted; existing edges are left unchanged.
  *
@@ -49,6 +54,7 @@ import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import { importedScopeId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { keyTraceCopies } from '../retrieval/store/SqlKnowledgeGraph.js';
 
 // ---------------------------------------------------------------------------
 // Internal row types (matched to Brain DDL)
@@ -167,8 +173,10 @@ export class SqliteImporter {
         // A trace an older release wrote holds scope_id '': filed under its scope id first, it is matched there.
         if (options?.dedup ?? true) await fillScopeIds(trx, this.brain.brainId);
         traces = await this._mergeTraces(sourceAdapter, read, result, trx, options);
-        await this._mergeNodes(sourceAdapter, read, result, trx);
+        const memoryNodes = await this._mergeNodes(sourceAdapter, read, result, trx);
         await this._mergeEdges(sourceAdapter, read, result, trx);
+        // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
+        if (memoryNodes > 0) await keyTraceCopies(trx, this.brain.brainId);
       });
       // The inserts are not synced into the full-text index, and a tag merge
       // rewrites a held trace's tags in place and counts as skipped. One
@@ -335,17 +343,24 @@ export class SqliteImporter {
     }
   }
 
+  /**
+   * Insert the source's knowledge nodes the brain has no node of the same
+   * label and type for.
+   *
+   * @returns How many of the nodes it wrote are of type `memory`.
+   */
   private async _mergeNodes(
     src: StorageAdapter,
     read: SourceRead,
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
-  ): Promise<void> {
+  ): Promise<number> {
+    let memoryNodes = 0;
     let sourceRows: NodeRow[];
     try {
       sourceRows = await src.all<NodeRow>(...read('knowledge_nodes'));
     } catch {
-      return;
+      return memoryNodes;
     }
 
     const checkSql = `SELECT id FROM knowledge_nodes WHERE brain_id = ? AND label = ? AND type = ? LIMIT 1`;
@@ -378,11 +393,13 @@ export class SqliteImporter {
           row.created_at ?? Date.now(),
         ]);
 
+        if (row.type === 'memory') memoryNodes++;
         result.imported++;
       } catch (err) {
         result.errors.push(`Node merge error: ${String(err)}`);
       }
     }
+    return memoryNodes;
   }
 
   private async _mergeEdges(

@@ -181,6 +181,68 @@ function likeContaining(text: string): string {
   return `%${likeLiteral(text)}%`;
 }
 
+/**
+ * Files under its trace's key (`trace:<traceId>`) each trace copy a brain holds under another node id, so a delete by
+ * trace id finds it by key: a copy a release older than keyed copies recorded under a random node id, and one an
+ * import writes so (from a file such a release wrote, or a JSON export's copy whose key the brain's own copy of the
+ * trace holds, which the import writes under a new id). The newest such copy of a trace takes the key when no copy
+ * holds it; a copy whose key holds a copy already is deleted, and the keyed copy stays. The relations that name a
+ * moved or deleted copy move to the key ({@link moveCopyToKey}).
+ *
+ * @param db - The brain, or the transaction an import writes in.
+ * @param brainId - The brain whose copies are keyed.
+ * @param onFailure - Called with each copy whose move fails, and the walk goes on to the next copy; without it the
+ *   first failure throws, so the transaction an import keys in rolls back.
+ */
+export async function keyTraceCopies(
+  db: { run: Brain['run']; all: Brain['all'] },
+  brainId: string,
+  onFailure?: (copy: { nodeId: string; traceId: string }, error: unknown) => void,
+): Promise<void> {
+  const rows = await db.all<{ id: string; properties: string }>(
+    `SELECT id, properties FROM knowledge_nodes
+      WHERE brain_id = ? AND type = 'memory' AND id NOT LIKE ? ESCAPE '!' AND properties LIKE ? ESCAPE '!'
+      ORDER BY created_at DESC`,
+    [brainId, `${likeLiteral(COPY_KEY_PREFIX)}%`, likeContaining(TRACE_CONTEXT_MARKER)],
+  );
+  for (const row of rows) {
+    const traceId = copiedTraceId(storedContext(row.properties));
+    if (traceId === undefined) continue;
+    try {
+      await moveCopyToKey(db, brainId, row.id, copyKey(traceId));
+    } catch (error) {
+      if (!onFailure) throw error;
+      onFailure({ nodeId: row.id, traceId }, error);
+    }
+  }
+}
+
+/**
+ * Move one trace copy held under another node id to its trace's key. The copy is written under the key unless the
+ * trace's keyed copy exists (recorded after it, which replaces it), the relations that name the older node are moved
+ * to the key, and the older node is deleted last, once the key holds a copy. Each statement leaves the node set valid
+ * for the edges' foreign keys, so one that fails leaves the older copy for a later pass and never deletes a trace's
+ * only copy.
+ */
+async function moveCopyToKey(db: { run: Brain['run'] }, brainId: string, id: string, key: string): Promise<void> {
+  await db.run(
+    `INSERT INTO knowledge_nodes (${MEMORY_NODE_COLUMNS.join(', ')})
+     SELECT brain_id, CAST(? AS TEXT), type, label, properties, embedding, confidence, source, created_at
+       FROM knowledge_nodes
+      WHERE brain_id = ? AND id = ?
+        AND NOT EXISTS (SELECT 1 FROM knowledge_nodes WHERE brain_id = ? AND id = ?)`,
+    [key, brainId, id, brainId, key],
+  );
+  await db.run('UPDATE knowledge_edges SET source_id = ? WHERE brain_id = ? AND source_id = ?', [key, brainId, id]);
+  await db.run('UPDATE knowledge_edges SET target_id = ? WHERE brain_id = ? AND target_id = ?', [key, brainId, id]);
+  await db.run(
+    `DELETE FROM knowledge_nodes
+      WHERE brain_id = ? AND id = ?
+        AND EXISTS (SELECT 1 FROM knowledge_nodes WHERE brain_id = ? AND id = ?)`,
+    [brainId, id, brainId, key],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // SqlKnowledgeGraph
 // ---------------------------------------------------------------------------
@@ -711,12 +773,12 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
 
   /**
    * Give the trace copies an older release recorded under a random node id their trace's key, once per instance, so
-   * a delete by trace id finds them by key ({@link moveOlderCopy}). Of two copies of one trace the newer takes the key
-   * and the other is deleted, as a second record of a trace replaces the first; the relations that name either move
-   * to the key. A copy whose move fails keeps its node id, with a warning, and the next instance's pass moves it; a
-   * delete by its trace id in the meantime deletes it by that node id. A copy an older release writes into the same
-   * Brain after the pass, or an import brings in, gets its key from the next instance's pass; until then a delete by
-   * its scope finds it.
+   * a delete by trace id finds them by key ({@link keyTraceCopies}). Of two copies of one trace the newer takes the
+   * key and the other is deleted, as a second record of a trace replaces the first; the relations that name either
+   * move to the key. A copy whose move fails keeps its node id, with a warning, and the next instance's pass moves it;
+   * a delete by its trace id in the meantime deletes it by that node id. An import keys the copies it writes as it
+   * writes them. A copy a release older than keyed copies writes into the same Brain after the pass, while both
+   * releases run on it, gets its key from the next instance's pass; until then a delete by its scope finds it.
    */
   private rekeyOlderCopies(): Promise<void> {
     if (!this.olderCopiesRekeyed) {
@@ -733,62 +795,23 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
   }
 
   private async moveOlderCopies(): Promise<void> {
-    const brainId = this.brain.brainId;
-    const rows = await this.brain.all<{ id: string; properties: string }>(
-      `SELECT id, properties FROM knowledge_nodes
-        WHERE brain_id = ? AND type = 'memory' AND id NOT LIKE ? ESCAPE '!' AND properties LIKE ? ESCAPE '!'
-        ORDER BY created_at DESC`,
-      [brainId, `${likeLiteral(COPY_KEY_PREFIX)}%`, likeContaining(TRACE_CONTEXT_MARKER)],
-    );
     let kept = 0;
     let reason = '';
-    for (const row of rows) {
-      const traceId = copiedTraceId(storedContext(row.properties));
-      if (traceId === undefined) continue;
-      try {
-        await this.moveOlderCopy(row.id, copyKey(traceId));
-      } catch (error) {
-        kept += 1;
-        reason = error instanceof Error ? error.message : String(error);
-        const unmoved = this.unmovedOlderCopies.get(traceId) ?? new Set<string>();
-        unmoved.add(row.id);
-        this.unmovedOlderCopies.set(traceId, unmoved);
-      }
-    }
+    await keyTraceCopies(this.brain, this.brain.brainId, ({ nodeId, traceId }, error) => {
+      kept += 1;
+      reason = error instanceof Error ? error.message : String(error);
+      const unmoved = this.unmovedOlderCopies.get(traceId) ?? new Set<string>();
+      unmoved.add(nodeId);
+      this.unmovedOlderCopies.set(traceId, unmoved);
+    });
     if (kept > 0) {
       console.warn(
-        `[SqlKnowledgeGraph] ${kept} trace copies an older release recorded in brain ${brainId} keep their node id, ` +
-          `where a delete by their trace id finds them, and the next instance's first delete by trace id moves them: ` +
+        `[SqlKnowledgeGraph] ${kept} trace copies an older release recorded in brain ${this.brain.brainId} keep their ` +
+          `node id, where a delete by their trace id finds them, and the next instance's first delete by trace id ` +
+          `moves them: ` +
           reason,
       );
     }
-  }
-
-  /**
-   * Move one copy an older release recorded under a random node id to its trace's key. The copy is written under the
-   * key unless the trace's keyed copy exists (recorded after it, which replaces it), the relations that name the
-   * older node are moved to the key, and the older node is deleted last, once the key holds a copy. Each statement
-   * leaves the node set valid for the edges' foreign keys, so one that fails leaves the older copy for a later pass
-   * and never deletes a trace's only copy.
-   */
-  private async moveOlderCopy(id: string, key: string): Promise<void> {
-    const brainId = this.brain.brainId;
-    await this.brain.run(
-      `INSERT INTO knowledge_nodes (${MEMORY_NODE_COLUMNS.join(', ')})
-       SELECT brain_id, CAST(? AS TEXT), type, label, properties, embedding, confidence, source, created_at
-         FROM knowledge_nodes
-        WHERE brain_id = ? AND id = ?
-          AND NOT EXISTS (SELECT 1 FROM knowledge_nodes WHERE brain_id = ? AND id = ?)`,
-      [key, brainId, id, brainId, key],
-    );
-    await this.brain.run('UPDATE knowledge_edges SET source_id = ? WHERE brain_id = ? AND source_id = ?', [key, brainId, id]);
-    await this.brain.run('UPDATE knowledge_edges SET target_id = ? WHERE brain_id = ? AND target_id = ?', [key, brainId, id]);
-    await this.brain.run(
-      `DELETE FROM knowledge_nodes
-        WHERE brain_id = ? AND id = ?
-          AND EXISTS (SELECT 1 FROM knowledge_nodes WHERE brain_id = ? AND id = ?)`,
-      [brainId, id, brainId, key],
-    );
   }
 
   /**
