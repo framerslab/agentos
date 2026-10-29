@@ -407,6 +407,62 @@ describe('generateImage refuses no call for a blank baseUrl that it makes with n
   });
 });
 
+describe('a blank baseUrl names no endpoint, so no refusal of credentials meant for another provider applies to it', () => {
+  it.each(BLANK_BASE_URLS)(
+    "generateText sends a model whose provider: prefix names OpenAI to OpenAI, on OpenAI's key, for baseUrl %j beside another provider",
+    async (baseUrl) => {
+      setEnv({ OPENAI_API_KEY: 'openai-env-key' });
+
+      const result = await generateText({ provider: 'mistral', model: 'openai:gpt-4.1', baseUrl, prompt: 'hi' });
+
+      expect(result.text).toBe('ok');
+      expect(postsTo(/\/chat\/completions$/)).toEqual([
+        { url: 'https://api.openai.com/v1/chat/completions', authorization: 'Bearer openai-env-key' },
+      ]);
+    },
+  );
+
+  it.each(BLANK_BASE_URLS)(
+    "generateText still refuses an apiKey beside baseUrl %j when the model's prefix names another provider, before any request",
+    async (baseUrl) => {
+      setEnv({ OPENAI_API_KEY: 'openai-env-key' });
+
+      await expect(
+        generateText({ provider: 'mistral', model: 'openai:gpt-4.1', apiKey: 'mistral-caller-key', baseUrl, prompt: 'hi' }),
+      ).rejects.toThrow("names provider 'openai', not 'mistral'");
+
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(BLANK_BASE_URLS)(
+    "generateImage with a plain model and no provider generates on the provider detected from the environment for baseUrl %j",
+    async (baseUrl) => {
+      setEnv({ OPENAI_API_KEY: 'openai-env-key' });
+
+      const result = await generateImage({ model: 'gpt-image-2.5-flare', prompt: 'A red panda on a rooftop.', baseUrl });
+
+      expect(postsTo(/\/images\/generations$/)).toEqual([
+        { url: 'https://api.openai.com/v1/images/generations', authorization: 'Bearer openai-env-key' },
+      ]);
+      expect(result.provider).toBe('openai');
+    },
+  );
+
+  it.each(BLANK_BASE_URLS)(
+    'generateImage with a plain model still refuses an apiKey beside baseUrl %j with no provider, before any request',
+    async (baseUrl) => {
+      setEnv({ OPENAI_API_KEY: 'openai-env-key' });
+
+      await expect(
+        generateImage({ model: 'gpt-image-2.5-flare', prompt: 'A red panda on a rooftop.', apiKey: 'caller-key', baseUrl }),
+      ).rejects.toThrow('An apiKey or baseUrl for an image call needs provider');
+
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe("importAgent drops a redacted baseUrl only for a base URL the importing process sets, read as the call reads it", () => {
   /** An export whose `baseUrl` lost its credentials and whose key is redacted. */
   function exportedAgent() {
