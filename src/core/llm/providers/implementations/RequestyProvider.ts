@@ -25,10 +25,13 @@ import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeRe
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
-import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream } from '../stream-error-body.js';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('requesty_provider');
 
 /**
  * Requesty's router base URL, which requests go to when the config names no `baseURL`. `embedText` posts Requesty
