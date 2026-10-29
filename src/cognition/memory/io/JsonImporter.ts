@@ -22,6 +22,7 @@ import type { Brain } from '../retrieval/store/Brain.js';
 import { base64ToBytes } from './base64.js';
 import { importedScopeId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -349,13 +350,9 @@ export class JsonImporter {
         const sourceId = t.id;
         const scope = t.scope ?? 'user';
 
-        // The metadata names the scope id, so it is read before the dedup check.
-        let meta: Record<string, unknown> = {};
-        try {
-          meta = JSON.parse(t.metadata ?? '{}') as Record<string, unknown>;
-        } catch {
-          // If metadata is malformed, start fresh.
-        }
+        // The metadata names the scope id, so it is read before the dedup check. Metadata that is not a JSON object
+        // (malformed text, an array, null) starts fresh: the object stored names the scope id and the import hash.
+        const meta = parseTraceMetadata(t.metadata);
         const scopeId = importedScopeId(meta, t.scope_id);
 
         if (context.dedup) {
@@ -445,12 +442,8 @@ export class JsonImporter {
           continue;
         }
 
-        let props: Record<string, unknown> = {};
-        try {
-          props = JSON.parse(n.properties ?? '{}') as Record<string, unknown>;
-        } catch {
-          // ignore malformed JSON
-        }
+        // Properties that are not a JSON object (malformed text, an array, null) start fresh and keep the import hash.
+        const props = parseTraceMetadata(n.properties);
         props['import_hash'] = hash;
 
         let embeddingBuf: Uint8Array | null = null;
@@ -527,12 +520,8 @@ export class JsonImporter {
           continue;
         }
 
-        let meta: Record<string, unknown> = {};
-        try {
-          meta = JSON.parse(e.metadata ?? '{}') as Record<string, unknown>;
-        } catch {
-          // ignore malformed JSON
-        }
+        // Metadata that is not a JSON object (malformed text, an array, null) starts fresh, so the import hash is kept.
+        const meta = parseTraceMetadata(e.metadata);
         meta['import_hash'] = hash;
 
         await trx.run(insertSql, [

@@ -6,9 +6,15 @@
  * `gray-matter`) are mapped to trace columns; the document body becomes the
  * trace content.
  *
+ * A file's front-matter `scopeId`, when it is a string, names the scope id
+ * the trace is filed under, in `memory_traces.scope_id` and in its metadata;
+ * a file that names none files under `''`. `MarkdownExporter` writes it for a
+ * trace filed under a scope id, so an export carries each trace's scope id
+ * out and back in.
+ *
  * Deduplication uses SHA-256 of the content body — files already present in
  * the target brain (same hash in `metadata.import_hash`, same scope, and the
- * scope id `''` a file carries) are skipped. A trace a release older than
+ * same scope id) are skipped. A trace a release older than
  * `memory_traces.scope_id` wrote holds `''` in that column whatever scope id
  * its metadata names; the import files such traces under that scope id first
  * (`fillScopeIds`), so another scope id's trace is not taken for a file's
@@ -39,6 +45,8 @@ interface TraceFrontmatter {
   strength?: number;
   tags?: string[];
   createdAt?: number;
+  /** The scope id the trace is filed under; a value that is not a string is ignored. */
+  scopeId?: string;
   [key: string]: unknown;
 }
 
@@ -192,16 +200,18 @@ export class MarkdownImporter {
 
     const hash = await sha256(body);
     const scope = typeof fm.scope === 'string' ? fm.scope : 'user';
+    // The front matter names the scope id; a file that names none, or names one that is not a string, files under ''.
+    const scopeId = typeof fm.scopeId === 'string' ? fm.scopeId : '';
 
-    // Dedup check, inside the file's scope and the scope id '' it files under (a file names no scope id).
+    // Dedup check, inside the file's scope and scope id.
     const { dialect } = this.brain.features;
     if (options?.dedup ?? true) {
       const existing = await this.brain.get<{ id: string }>(
         `SELECT id FROM memory_traces
-          WHERE brain_id = ? AND scope = ? AND scope_id = ''
+          WHERE brain_id = ? AND scope = ? AND scope_id = ?
             AND ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
           LIMIT 1`,
-        [this.brain.brainId, scope, hash],
+        [this.brain.brainId, scope, scopeId, hash],
       );
 
       if (existing) {
@@ -216,13 +226,15 @@ export class MarkdownImporter {
 
     const tags: string[] = Array.isArray(fm.tags) ? (fm.tags as string[]) : [];
     const meta: Record<string, unknown> = { import_hash: hash, source_file: filePath };
+    // A trace loaded from the Brain reads its scope id in its metadata, so the metadata names it as the column does.
+    if (scopeId !== '') meta.scopeId = scopeId;
 
     try {
       await this.brain.run(
         `INSERT INTO memory_traces
              (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
               retrieval_count, tags, emotions, metadata, deleted, scope_id)
-           VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0, ?, '{}', ?, 0, '')`,
+           VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0, ?, '{}', ?, 0, ?)`,
         [
           this.brain.brainId,
           traceId,
@@ -233,6 +245,7 @@ export class MarkdownImporter {
           typeof fm.createdAt === 'number' ? fm.createdAt : Date.now(),
           JSON.stringify(tags),
           JSON.stringify(meta),
+          scopeId,
         ],
       );
 

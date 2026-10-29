@@ -49,6 +49,7 @@ import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import { importedScopeId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 
 // ---------------------------------------------------------------------------
 // Internal row types (matched to Brain DDL)
@@ -258,9 +259,9 @@ export class SqliteImporter {
         const hash = await this._sha256(row.content);
         const scope = row.scope ?? 'user';
 
-        // The metadata names the scope id, so it is read before the dedup check.
-        let meta: Record<string, unknown> = {};
-        try { meta = JSON.parse(row.metadata) as Record<string, unknown>; } catch { /* ignore */ }
+        // The metadata names the scope id, so it is read before the dedup check. Metadata that is not a JSON object
+        // (malformed text, an array, null) starts fresh: the object stored names the scope id and the import hash.
+        const meta = parseTraceMetadata(row.metadata);
         const scopeId = importedScopeId(meta, row.scope_id);
 
         if (options?.dedup ?? true) {

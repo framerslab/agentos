@@ -219,7 +219,7 @@ Store a new memory trace in the agent's brain database.
 - Refuses a `type` or `scope` outside the lists above with an error result and stores nothing, also when the caller runs the tool without checking its arguments against the schema.
 - Stores the SHA-256 hash of the content in the trace's metadata. It does not check for an existing trace with the same content: calling it twice stores two traces.
 - ID format: `mt_<uuid>`, a v4 UUID, as the Memory facade names its traces.
-- Records the scope id resolved from the execution context (for example the user id for `user` scope) in the metadata.
+- Files the trace under the scope id resolved from the execution context (for example the user id for `user` scope), in the trace's `scope_id` column and in its metadata.
 - Writes the trace's full-text entry in the transaction that writes the trace: in the `memory_traces_fts` table on SQLite (FTS5 on better-sqlite3; FTS4 on sql.js and the IndexedDB adapter), in the trace's `_tsv` column on Postgres. `memory_search` finds the trace as soon as the call returns.
 
 **Example:**
@@ -567,9 +567,12 @@ Each trace entry is the raw `memory_traces` row, with snake_case columns and JSO
   "tags": "[\"preference\",\"language\"]",
   "emotions": "{}",
   "metadata": "{\"source\":\"user_statement\"}",
-  "deleted": 0
+  "deleted": 0,
+  "scope_id": ""
 }
 ```
+
+`scope_id` is the trace's scope id, which its metadata's `scopeId` also names; `''` for a trace filed under none, as here.
 
 `includeConversations: false` leaves out the conversation and message rows.
 
@@ -610,6 +613,8 @@ createdAt: 1711234567890
 ---
 User prefers TypeScript over Python
 ```
+
+A trace filed under a scope id also writes it, as `scopeId` after `scope`, so an import files the note under it. The scope id is the trace's metadata `scopeId`, else its `scope_id` column, as a JSON import reads the trace's row. A trace filed under `''`, like the one above, writes no `scopeId`.
 
 A trace's scope and type name its folders and its id names its file, so each must be a safe file or folder name: not empty; no slash, backslash or colon, none of `"`, `*`, `<`, `>`, `?` and `|`, and no control character; not starting with a dot; not starting or ending with a space, or ending with a dot; at most 200 bytes in UTF-8. The ids, scopes and types AgentOS makes all are. A trace imported or added with any other value is left out of the export, and `export()` lists it in `refused` with the field and the reason. Below the export folder, folders are made one name at a time and no folder or file is written through a link: a trace whose folder or file there is a symbolic link, or whose file there has a second name (a hard link), is left out too (`problem: 'link'`). The export folder itself may be a link; to export into a linked folder, pass it as the export folder. A trace whose file's place holds anything but a regular file, such as a folder, a named pipe, a socket or a device, is left out as well (`problem: 'special'`): the export opens a file without waiting, so a named pipe that no process reads never holds it up. Of two traces whose files would be one file, the older is written and the newer left out (`problem: 'collision'`). On every platform, that includes two names that differ only in case or Unicode form, which macOS and Windows treat as one name (`mt_case` and `MT_CASE`, or the long s `ſ` and `s`); names they keep apart, such as `ß` and `ss`, are both written. It also includes two names the file system resolves to one file in another way, such as a Windows short name; the export finds those by comparing the files it opens. Every other trace is written, and no file is written outside the export folder. An error opening or writing a file for any other reason, such as a full disk, rejects `export()` once every other trace has been tried. The checks run as each folder is made and each file opened, so they do not stop another process that swaps a folder below the export folder for a link while the export runs:
 
@@ -672,7 +677,7 @@ console.log(`Imported: ${result.imported}, Skipped: ${result.skipped}`);
 
 ### JSON
 
-Parses a [`JsonExporter`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/JsonExporter.ts)-format JSON file and restores traces plus any included graph/document/conversation rows.
+Parses a [`JsonExporter`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/JsonExporter.ts)-format JSON file and restores traces plus any included graph/document/conversation rows. A trace record whose `metadata` is not a JSON object (text that is not JSON, an array, `null`) is stored with a metadata object of its own, which names the record's scope id and import hash; a SQLite import treats a source row's metadata the same way. A knowledge node's `properties` and an edge's `metadata` that are not a JSON object are stored the same way, with the import hash a second import finds them by.
 
 ```ts
 const result = await mem.importFrom('./memories.json', { format: 'json' });
@@ -680,7 +685,7 @@ const result = await mem.importFrom('./memories.json', { format: 'json' });
 
 ### Markdown
 
-Walks a directory of Markdown files with YAML front-matter. Each file whose body is not blank becomes one memory trace. The `id`, `type`, `scope`, `tags`, `strength` and `createdAt` fields are read from front-matter (defaults: a new id, `episodic`, `user`, no tags, 1.0, now); the body, without its leading and trailing whitespace, becomes the trace content. Front-matter is read as data: a block marked as JavaScript (`---js`) gives no fields and is never evaluated.
+Walks a directory of Markdown files with YAML front-matter. Each file whose body is not blank becomes one memory trace. The `id`, `type`, `scope`, `scopeId`, `tags`, `strength` and `createdAt` fields are read from front-matter (defaults: a new id, `episodic`, `user`, `''`, no tags, 1.0, now); the body, without its leading and trailing whitespace, becomes the trace content. A `scopeId` that is a string files the trace under that scope id, in its `scope_id` column and its metadata; any other value is ignored. Front-matter is read as data: a block marked as JavaScript (`---js`) gives no fields and is never evaluated.
 
 ```ts
 const result = await mem.importFrom('./notes/', { format: 'markdown' });
@@ -715,7 +720,7 @@ const result = await mem.importFrom('./conversations.json', { format: 'chatgpt' 
 
 ### CSV
 
-Imports flat CSV files with a header row. A `content` column is required. The optional columns `id`, `type`, `scope`, `strength`, `created_at` (or `createdAt`), `last_accessed`, `retrieval_count`, `deleted`, `tags` (a JSON array, or comma- or pipe-separated) and `metadata` (a JSON object) map onto the trace's fields:
+Imports flat CSV files with a header row. A `content` column is required. The optional columns `id`, `type`, `scope`, `strength`, `created_at` (or `createdAt`), `last_accessed`, `retrieval_count`, `deleted`, `tags` (a JSON array, or comma- or pipe-separated), `metadata` (a JSON object) and `scope_id` map onto the trace's fields:
 
 ```ts
 const result = await mem.importFrom('./knowledge-base.csv', { format: 'csv' });
@@ -729,7 +734,7 @@ content,type,tags
 "Deploy with Docker Compose",procedural,"deployment,docker"
 ```
 
-A row's `metadata` cell names its scope id, so it is read before the duplicate check: a cell that is not valid JSON makes the row an error, listed in `errors` and not imported, even when a trace of the same scope already holds the row's text.
+A row's scope id is its `metadata` cell's `scopeId`, else its `scope_id` cell, which is then written into the metadata too. The `metadata` cell is read before the duplicate check: a cell that is not valid JSON, or whose JSON is not an object (an array or `null`, say), makes the row an error, listed in `errors` and not imported, even when a trace of the same scope already holds the row's text.
 
 
 ### SHA-256 Deduplication
@@ -737,7 +742,7 @@ A row's `metadata` cell names its scope id, so it is read before the duplicate c
 All import paths use SHA-256 content hashing to prevent duplicate traces:
 
 1. Before inserting a trace, the importer computes `SHA-256(content)` and stores it in the trace's metadata as `import_hash`.
-2. When a trace of the same scope and scope id already carries that hash, the row is skipped (counted in `skipped`), whatever its type. A trace of another scope id is not a duplicate: a record whose text another tenant's, user's or session's trace holds is imported under its own scope id. A record's scope id is its metadata `scopeId`, else the `scope_id` an export of a schema-3 brain carries, else `''`; Markdown, Obsidian and ChatGPT records file under `''`. A trace a release older than the `scope_id` column wrote holds `''` there whatever scope id its metadata names; before its first duplicate check the importer files such traces of the brain under that scope id, so a record of that scope id finds it and a record filed under `''` does not. The CSV importer also matches a trace whose metadata `content_hash` equals the hash. The SQLite importer also matches a trace with identical `content`, does not read `content_hash`, and merges the skipped row's tags, and the later of the two `created_at` times, into the trace it matched; when that changes the trace's tags, it rebuilds the full-text index, so the trace is found by the merged tags.
+2. When a trace of the same scope and scope id already carries that hash, the row is skipped (counted in `skipped`), whatever its type. A trace of another scope id is not a duplicate: a record whose text another tenant's, user's or session's trace holds is imported under its own scope id. A record's scope id is its metadata `scopeId`, else its `scope_id` (the field a JSON or SQLite export of a schema-3 brain carries, or a CSV row's cell), else `''`; a Markdown or Obsidian note's is its front-matter `scopeId`, else `''`; ChatGPT records file under `''`. A trace a release older than the `scope_id` column wrote holds `''` there whatever scope id its metadata names; before its first duplicate check the importer files such traces of the brain under that scope id, so a record of that scope id finds it and a record filed under `''` does not. The CSV importer also matches a trace whose metadata `content_hash` equals the hash. The SQLite importer also matches a trace with identical `content`, does not read `content_hash`, and merges the skipped row's tags, and the later of the two `created_at` times, into the trace it matched; when that changes the trace's tags, it rebuilds the full-text index, so the trace is found by the merged tags.
 3. Deduplication is enabled by default (`dedup: true`) and can be disabled per-import.
 
 ```ts

@@ -15,7 +15,11 @@
  * - `retrieval_count`
  * - `deleted`
  * - `tags` (JSON array, comma-separated, or pipe-separated)
- * - `metadata` (JSON object; its `scopeId` names the trace's scope id)
+ * - `metadata` (JSON object; its `scopeId` names the trace's scope id). A cell
+ *   that is not valid JSON, or whose JSON is not an object, makes its row an
+ *   error.
+ * - `scope_id` (the trace's scope id when the metadata names none; the
+ *   metadata is given it too)
  *
  * Deduplication uses SHA-256 of the `content` field, inside the row's scope
  * and scope id, and stores the hash in `metadata.import_hash`. A trace a
@@ -112,6 +116,7 @@ export class CsvImporter {
     const deletedIndex = indexOf('deleted');
     const tagsIndex = indexOf('tags');
     const metadataIndex = indexOf('metadata');
+    const scopeIdIndex = indexOf('scope_id');
 
     const { dialect } = this.brain.features;
     const brainId = this.brain.brainId;
@@ -145,14 +150,22 @@ export class CsvImporter {
           let metadata: Record<string, unknown> = {};
           const rawMetadata = metadataIndex >= 0 ? row[metadataIndex] ?? '' : '';
           if (rawMetadata.trim()) {
+            let parsed: unknown;
             try {
-              metadata = JSON.parse(rawMetadata) as Record<string, unknown>;
+              parsed = JSON.parse(rawMetadata);
             } catch {
               result.errors.push(`CSV metadata parse error for content "${content.slice(0, 40)}..."`);
               continue;
             }
+            // An array, null or a lone value cannot hold the row's scope id and import hash.
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              result.errors.push(`CSV metadata is not a JSON object for content "${content.slice(0, 40)}..."`);
+              continue;
+            }
+            metadata = parsed as Record<string, unknown>;
           }
-          const scopeId = importedScopeId(metadata);
+          // The metadata's scopeId comes first, then the scope_id cell, as for a JSON or SQLite record.
+          const scopeId = importedScopeId(metadata, this._readCell(row, scopeIdIndex));
 
           if (options?.dedup ?? true) {
             const existing = await trx.get<{ id: string }>(checkSql, [brainId, scope, scopeId, hash, hash]);
