@@ -45,7 +45,10 @@ export interface LaunchEntry {
    * host counts none of its own.
    */
   outputEstimateTokens: number;
-  /** 'closing': the run outlived the grace, or its seats are not released yet; admits nothing under it and still counts. */
+  /**
+   * 'closing': the run outlived the grace, or its seats, or those of a launch nested under it, are not released yet;
+   * admits nothing under it and still counts.
+   */
   state: 'running' | 'closing';
 }
 
@@ -53,6 +56,8 @@ export interface LaunchEntry {
 const MAX_POOL_SCOPES = 10_000;
 const entries = new Map<string, LaunchEntry>();
 const pools = new Map<string, { turnId: string | undefined; budget: SpendBudget }>();
+/** What waits for an entry's removal, by launch id. */
+const removalWaiters = new Map<string, Array<() => void>>();
 
 /** The launches in flight, by launch id, and each root scope's launch pool. */
 export const launchRegistry = {
@@ -105,8 +110,26 @@ export const launchRegistry = {
     if (entry) entry.state = 'closing';
   },
 
+  /** The launches in flight that the seats of a launch started: the entries whose scope is that launch. */
+  nestedUnder(launchId: string): LaunchEntry[] {
+    return [...entries.values()].filter((entry) => entry.scopeKey === launchId);
+  },
+
+  /** Resolves once the launch's entry is removed; at once for an id that has no entry. */
+  whenRemoved(launchId: string): Promise<void> {
+    if (!entries.has(launchId)) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const waiting = removalWaiters.get(launchId);
+      if (waiting) waiting.push(resolve);
+      else removalWaiters.set(launchId, [resolve]);
+    });
+  },
+
   /** Removes the launch's entry, which frees its place in its scope; an unknown id changes nothing. */
   remove(launchId: string): void {
     entries.delete(launchId);
+    const waiting = removalWaiters.get(launchId);
+    removalWaiters.delete(launchId);
+    for (const resolve of waiting ?? []) resolve();
   },
 };
