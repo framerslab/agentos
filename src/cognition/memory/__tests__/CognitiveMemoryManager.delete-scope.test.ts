@@ -14,7 +14,9 @@
  * manager extracted from it; a row an older release wrote under the scope is found too, an id that names no trace is
  * skipped, and a document a scope's collection still holds of a trace filed under another scope since is neither read
  * nor deleted under the scope; with no Brain, the scope's delete deletes that stale copy from its collection and walks
- * on to the scope's traces after it, and the trace keeps its own document.
+ * on to the scope's traces after it, and the trace keeps its own document. A trace an import brings in after the
+ * graph keyed the copies it held (a file an older release wrote, through `SqliteImporter`, `Brain.importFromSqlite` or a
+ * JSON export) is deleted with its copy.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -26,6 +28,8 @@ import { SqlKnowledgeGraph } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { KnowledgeGraph } from '../retrieval/graph/knowledge/KnowledgeGraph.js';
 import type { IKnowledgeGraph } from '../retrieval/graph/knowledge/IKnowledgeGraph.js';
 import { SqlStorageMemoryArchive } from '../archive/SqlStorageMemoryArchive.js';
+import { SqliteImporter } from '../io/SqliteImporter.js';
+import { JsonExporter } from '../io/JsonExporter.js';
 import { sha256Hex } from '../retrieval/store/tracePersistence.js';
 import { InMemoryVectorStore } from '../../rag/vector_stores/InMemoryVectorStore.js';
 import { InMemoryWorkingMemory } from '../../substrate/memory/InMemoryWorkingMemory.js';
@@ -462,6 +466,71 @@ describe('a trace deleted for good', () => {
 
     expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 2, graph: 'reached' });
     expect(await brain.all('SELECT id FROM memory_traces')).toEqual([]);
+  });
+});
+
+/** A Brain file as a release older than keyed copies wrote it: a trace of Ana's, and its copy under a random node id. */
+async function olderReleaseFile(): Promise<string> {
+  const filePath = tempFile();
+  const brain = await Brain.openSqlite(filePath, { brainId: 'agent-1' });
+  const text = 'Ana is allergic to walnuts.';
+  await brain.run(
+    `INSERT INTO memory_traces (brain_id, id, type, scope, content, strength, created_at, tags, emotions, metadata, scope_id)
+     VALUES ('agent-1', 'mt_old1', 'episodic', 'user', ?, 0.5, ?, '[]', '{}', ?, 'ana')`,
+    [text, Date.now(), JSON.stringify({ scopeId: 'ana' })],
+  );
+  const properties = {
+    _props: {},
+    _memoryType: 'conversation',
+    _summary: text,
+    _description: text,
+    _participants: ['ana'],
+    _context: { memoryTraceId: 'mt_old1', scope: 'user', scopeId: 'ana', type: 'episodic' },
+  };
+  await brain.run(
+    `INSERT INTO knowledge_nodes (brain_id, id, type, label, properties, embedding, confidence, source, created_at)
+     VALUES ('agent-1', '5d2c0f4e-1111-4a6b-9c1d-000000000001', 'memory', ?, ?, NULL, 0.5, '{}', ?)`,
+    [text, JSON.stringify(properties), Date.now()],
+  );
+  await brain.close();
+  return filePath;
+}
+
+describe.each([
+  [
+    'SqliteImporter',
+    async (target: Brain, _manager: CognitiveMemoryManager, source: string) => {
+      expect((await new SqliteImporter(target).import(source)).errors).toEqual([]);
+    },
+  ],
+  [
+    'Brain.importFromSqlite',
+    async (target: Brain, _manager: CognitiveMemoryManager, source: string) => {
+      await target.importFromSqlite(source);
+    },
+  ],
+  [
+    'a JSON export',
+    async (_target: Brain, manager: CognitiveMemoryManager, source: string) => {
+      const brain = await Brain.openSqlite(source, { brainId: 'agent-1' });
+      const json = await new JsonExporter(brain).exportToString();
+      await brain.close();
+      expect((await manager.importFromString(json)).errors).toEqual([]);
+    },
+  ],
+])('a trace a file an older release wrote brings in through %s', (_name, importInto) => {
+  it('is deleted with its copy after the graph keyed the copies the brain held', async () => {
+    const { manager, brain, graph } = await managerOver(tempFile(), (brainOf) => new SqlKnowledgeGraph(brainOf));
+    const bees = await manager.encode('Ana keeps bees on the roof.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    // The graph's first delete by trace id keys the copies an older release recorded in the brain it holds.
+    expect(await manager.deleteTraces([bees.id])).toEqual({ deleted: 1, graph: 'reached' });
+
+    await importInto(brain, manager, await olderReleaseFile());
+    expect(await copiesOf(graph)).toEqual([{ scopeId: 'ana', text: 'Ana is allergic to walnuts.' }]);
+
+    expect(await manager.deleteTraces(['mt_old1'])).toEqual({ deleted: 1, graph: 'reached' });
+    expect(await copiesOf(graph)).toEqual([]);
+    expect(await brain.all("SELECT id FROM knowledge_nodes WHERE properties LIKE '%walnuts%'")).toEqual([]);
   });
 });
 
