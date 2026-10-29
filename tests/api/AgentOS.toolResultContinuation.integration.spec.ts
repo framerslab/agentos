@@ -1479,4 +1479,102 @@ describe('AgentOS tool-result continuations', () => {
     // no history from the conversation replaces the GMI's own: the model reads the question alone
     expect(promptCalls[0]?.map((message) => message.role)).toEqual(['user']);
   });
+
+  it('results for part of a pause answer the calls they leave out as not run, before the GMI writes again', async () => {
+    const rt = await runtime('conv-partial-results');
+    const host = hostToolGmi();
+    host.processTurnStream = async function* (): AsyncGenerator<any, GMIOutput, undefined> {
+      yield {
+        type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+        content: [READ_CALL, WRITE_CALL],
+        interactionId: 'interaction-two-calls',
+        timestamp: new Date(),
+        metadata: { executionMode: 'external', requiresExternalToolResult: true },
+      };
+      return { isFinal: false, responseText: 'I need the notes file read and written.', toolCalls: [READ_CALL, WRITE_CALL] };
+    };
+    rt.useGmi(host);
+    const first = await collect(rt.agentos.processRequest(rt.input));
+    const request = first.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk;
+    expect(request.toolCalls).toEqual([READ_CALL, WRITE_CALL]);
+
+    // the host passes READ_CALL's result alone, and the GMI's continuation answers
+    const continued = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    expect(continued.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    const messages = rt.context.getAllMessages() as any[];
+    // a provider refuses a request that holds a call with no result
+    expect(unansweredToolCallIds(messages)).toEqual([]);
+    expect(answersOf(rt.context, READ_CALL.id)).toHaveLength(1);
+    const left = answersOf(rt.context, WRITE_CALL.id);
+    expect(left).toHaveLength(1);
+    expect(String(left[0]?.content)).toContain('EXTERNAL_TOOL_NOT_RUN');
+    // the call left out is answered before the reply the continuation stored
+    const replyAt = messages.findIndex((m) => m.role === 'assistant' && m.content === 'Done.');
+    expect(replyAt).toBeGreaterThan(0);
+    expect(messages.findIndex((m) => m.role === 'tool' && m.tool_call_id === WRITE_CALL.id)).toBeLessThan(replyAt);
+  });
+
+  it('a new turn that starts while a resume continues the pause leaves the pause to the resume, so its call is answered once', async () => {
+    const rt = await runtime('conv-turn-during-resume');
+    const host = hostToolGmi();
+    const { request, saved } = await rt.pauseOnRead(host);
+    // the resume waits while it closes the stream the pause was saved on, and the conversation's next turn runs meanwhile
+    const streamingManager = (rt.agentos as any).streamingManager;
+    const closeStream = streamingManager.closeStream.bind(streamingManager);
+    let closing!: () => void;
+    const closeStarted = new Promise<void>((resolve) => {
+      closing = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(streamingManager, 'closeStream').mockImplementation(async (...args: unknown[]) => {
+      const [streamId, reason] = args as [string, string | undefined];
+      if (streamId === request.streamId) {
+        closing();
+        await released;
+      }
+      return closeStream(streamId, reason);
+    });
+
+    const resuming = collect(rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT]));
+    await closeStarted;
+    const { gmi } = await rt.shippedGmi([{ text: 'Standup moved to 10:00.' }]);
+    rt.useGmi(gmi);
+    const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: 'When is the standup?' }));
+    release();
+    const resumed = await resuming;
+
+    expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('Standup moved to 10:00.');
+    expect(resumed.at(-1)?.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect(host.handleToolResult).toHaveBeenCalledTimes(1);
+    // the resume took the pause before the turn started, so the turn ended no pause: the call's one answer is its result
+    const answers = answersOf(rt.context, READ_CALL.id);
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.content).toBe(READ_RESULT.toolOutput);
+  });
+
+  it('a continuation whose taken pause the store refuses to save ends with an error before the GMI takes the results', async () => {
+    const rt = await runtime('conv-unsaved-take');
+    const host = hostToolGmi();
+    const { request } = await rt.pauseOnRead(host);
+    // the store takes no save of the conversation once its pause is taken
+    vi.spyOn(rt.agentos.getConversationManager(), 'saveConversation').mockImplementation(async (saved: ConversationContext) => {
+      if (saved.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) === undefined) {
+        throw new Error('The conversation store is unavailable.');
+      }
+    });
+
+    const continued = await collect(
+      rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+    );
+
+    // the stored conversation still holds the pause, so the GMI does not take results the store has not seen taken
+    expect(continued.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+    expect(host.handleToolResult).not.toHaveBeenCalled();
+  });
 });
