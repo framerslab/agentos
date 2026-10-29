@@ -1444,4 +1444,39 @@ describe('AgentOS tool-result continuations', () => {
     // the conversation holds no history the runtime recorded, so none replaces the GMI's
     expect(host.hydrateConversationHistory).not.toHaveBeenCalled();
   });
+
+  it('with conversational persistence off, a pause an output guard blocked leaves no message in the conversation, so the next turn reads the GMI\'s own history', async () => {
+    const readBlocker: IGuardrailService = {
+      id: 'read-blocker',
+      config: { evaluateToolCalls: true },
+      async evaluateOutput({ chunk }: GuardrailOutputPayload) {
+        return chunk.type === AgentOSResponseChunkType.TOOL_CALL_REQUEST &&
+          (chunk as AgentOSToolCallRequestChunk).toolCalls.some((call) => call.id === READ_CALL.id)
+          ? { action: GuardrailAction.BLOCK, reason: 'The notes file is private.', reasonCode: 'NOTES_PRIVATE' }
+          : null;
+      },
+    };
+    const rt = await runtime('conv-unrecorded-block', {
+      orchestratorConfig: { enableConversationalPersistence: false },
+      guardrailService: readBlocker,
+    });
+    rt.useGmi(hostToolGmi());
+
+    const blocked = await collect(rt.agentos.processRequest(rt.input));
+
+    // the guard's verdict ends the stream, and the pause the turn saved for the call is dropped before it
+    expect(blocked.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+    expect((blocked.at(-1) as AgentOSErrorChunk).code).toBe('NOTES_PRIVATE');
+    expect(await rt.pending()).toBeNull();
+    // the runtime records neither the call nor its refusal in a conversation it does not persist
+    expect(rt.context.getAllMessages()).toEqual([]);
+
+    const { gmi, promptCalls } = await rt.shippedGmi([{ text: 'Standup moved to 10:00.' }]);
+    rt.useGmi(gmi);
+    const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: 'When is the standup now?' }));
+
+    expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe('Standup moved to 10:00.');
+    // no history from the conversation replaces the GMI's own: the model reads the question alone
+    expect(promptCalls[0]?.map((message) => message.role)).toEqual(['user']);
+  });
 });
