@@ -6,7 +6,7 @@ description: "How AgentOS tests whether a GMI on the full runtime improves compa
 
 This study compares a GMI on the full AgentOS runtime with the `agent()`-based reply path of a reference product, the companion chat of wilds.ai, on the same model. It reads both against `agent()` on its own and against a bare loop that calls the model with no framework. [Generalized Mind Instances (GMIs)](../GMI.md) describes what a GMI adds over a plain agent, and [Two API Paths](../API_PATHS.md) describes the runtime and the lightweight helper the arms are built on. This page sets out the study's design and lists each report set once it is published. It states no measured number: measurements are published only in the report sets.
 
-Status: design published; protocol not yet registered; no report published.
+Status: design published; protocol 0a registered 2026-10-28; record-mode reports published.
 
 ## The question
 
@@ -167,7 +167,13 @@ Every table names the files its figures come from. An input a run did not have r
 
 ## Reports and results
 
-No report set is published.
+- 2026-10-28, CI run 40723979292, record mode, legs 01 to 10: [set README](https://github.com/framerslab/agentos/blob/master/docs/research/gmi-vs-agent/reports/record-pilot-2026-10-28-40723979292/README.md)
+
+Protocol 0a: SHA-256 `10579b4e3eb958f8fbc5e17983fdb121e53f764bc36e9d3bf1657912099dd186`, frozen 2026-10-14.
+
+Amendments to 0a, each dated by its commit in the private runner's repository:
+
+- 2026-10-28: Z takes the vendor's chat-completions compatibility route only when the day's probe finds that the route refuses an invalid value of the thinking field and of the effort field and answers a valid call; otherwise Z speaks the vendor's Messages API for the run. Until this amendment the probe checked the valid call only when the subject accepted temperature 0, so with a subject that refuses it, a route that answers no valid call would have been taken, and every Z call of the pilot's two recall legs would have failed. No pilot probe had run.
 
 The research paper's method draft is at [docs/research/gmi-vs-agent/paper.md](https://github.com/framerslab/agentos/blob/master/docs/research/gmi-vs-agent/paper.md) in this repository, with its [references](https://github.com/framerslab/agentos/blob/master/docs/research/gmi-vs-agent/references.md); its results are pending the confirmatory analysis.
 
