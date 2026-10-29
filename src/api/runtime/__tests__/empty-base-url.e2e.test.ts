@@ -61,6 +61,9 @@ const PROVIDER_VARIABLES = [
 /** The base URLs these cases pass as unset: empty, and whitespace alone. */
 const BLANK_BASE_URLS = ['', ' \t\n '];
 
+/** OpenAI's API root and one of its regional roots, each serving OpenAI's own model names. */
+const OPENAI_API_ROOTS = ['https://api.openai.com/v1', 'https://eu.api.openai.com/v1'];
+
 /** Each provider with an OpenAI-compatible embeddings endpoint of its own, a model it embeds with, its key variable and that endpoint. */
 const OWN_EMBEDDINGS_ENDPOINTS = [
   { provider: 'openai', model: 'text-embedding-3-small', keyVar: 'OPENAI_API_KEY', url: 'https://api.openai.com/v1/embeddings' },
@@ -251,6 +254,23 @@ describe("embedText reads an empty or whitespace-only baseUrl as unset and posts
     expect(bodiesSent()[0].model).toBe('text-embedding-3-small');
   });
 
+  it.each(OPENAI_API_ROOTS.flatMap((root) => BLANK_BASE_URLS.map((baseUrl) => ({ root, baseUrl, label: JSON.stringify(baseUrl) }))))(
+    "sends the provider's embedding model to OPENAI_BASE_URL at OpenAI's root $root for baseUrl $label",
+    async ({ root, baseUrl }) => {
+      // The blank call URL is unset, so OPENAI_BASE_URL applies. A root OpenAI
+      // documents for its own API serves OpenAI's model names: it is not a
+      // custom endpoint, so the default's chat model is not sent to the
+      // embeddings endpoint.
+      setEnv({ OPENAI_BASE_URL: root });
+      setDefaultProvider({ provider: 'openai', model: 'gpt-4o', apiKey: 'openai-default-key' });
+
+      await embedText({ baseUrl, input: 'hello' });
+
+      expect(requestsSent()).toEqual([{ url: `${root}/embeddings`, authorization: 'Bearer openai-default-key', googleKey: undefined }]);
+      expect(bodiesSent()[0].model).toBe('text-embedding-3-small');
+    },
+  );
+
   it("keeps the global default's model at the global default's custom endpoint when the call's baseUrl is empty", async () => {
     // The empty inline URL is unset, so the call goes to the default's endpoint,
     // which may serve the default's model under that name.
@@ -379,6 +399,20 @@ describe('generateImage reads an empty or whitespace-only baseUrl as unset', () 
     ]);
     expect(result.model).toBe('gpt-4o');
   });
+
+  it.each(OPENAI_API_ROOTS)(
+    "sends the global default's key to OPENAI_BASE_URL at OpenAI's root %s with OpenAI's image model for an empty baseUrl",
+    async (root) => {
+      setEnv({ OPENAI_BASE_URL: root });
+      setDefaultProvider({ provider: 'openai', model: 'gpt-4o', apiKey: 'openai-default-key' });
+
+      const result = await generateImage({ prompt: 'A red panda on a rooftop.', baseUrl: '' });
+
+      expect(postsTo(/\/images\/generations$/)).toEqual([{ url: `${root}/images/generations`, authorization: 'Bearer openai-default-key' }]);
+      // OpenAI's own root is no custom endpoint: the default's chat model is not sent to the image endpoint.
+      expect(result.model).toBe('gpt-image-2.5-flare');
+    },
+  );
 });
 
 describe('generateImage refuses no call for a blank baseUrl that it makes with none', () => {
