@@ -74,8 +74,9 @@ export interface Checkpoint {
   };
 
   /**
-   * Results from every node that completed execution before this checkpoint was taken.
-   * Keyed by node id.
+   * Results recorded when this checkpoint was taken, keyed by node id: those of the
+   * nodes in `visitedNodes` and, in the checkpoint of a run that a node interrupted,
+   * that node's. A node that failed records none, so a resume runs it again.
    */
   nodeResults: Record<string, {
     /** The node's declared effect class. */
