@@ -134,8 +134,31 @@ function staleResumeDetails(pendingRequest: AgentOSPendingExternalToolRequest): 
   };
 }
 
-/** The code of the tool result that answers a call of a pause a new turn ended. */
+/** The code of the tool result that answers a call of a pause that never got its result. */
 export const EXTERNAL_TOOL_NOT_RUN_CODE = 'EXTERNAL_TOOL_NOT_RUN';
+
+/** Records, for each of `calls`, a tool result that says why the call has no result, worded as the GMI words a failed result. */
+function answerAsNotRun(
+  conversationContext: ConversationContext,
+  calls: readonly ToolCallRequest[],
+  personaId: string | undefined,
+  why: (call: ToolCallRequest) => string,
+): void {
+  for (const call of calls) {
+    const notRun = { code: EXTERNAL_TOOL_NOT_RUN_CODE, message: why(call) };
+    conversationContext.addMessage({
+      role: MessageRole.TOOL,
+      content: `Error from tool '${call.name}': ${JSON.stringify(notRun)}`,
+      tool_call_id: call.id,
+      name: call.name,
+      metadata: {
+        agentPersonaId: personaId,
+        source: 'agentos_tool_call_not_run',
+        isSuccess: false,
+      },
+    });
+  }
+}
 
 /**
  * The calls of `pendingRequest` that no tool message answers after the assistant message the pause recorded for them,
@@ -282,7 +305,7 @@ export class ExternalToolResultHandler {
    * @param toolCallGate - The output guardrails' tool-call gate, which the GMI asks before each call it runs itself in
    *   the continuation.
    * @throws {GMIError} If the stream context is missing or processing fails; `INVALID_STATE`, with nothing changed,
-   *   when an output guardrail blocked the stream or the stream waits on none of the results.
+   *   when an output guardrail blocked the stream or the stream does not wait on every one of the results.
    */
   async orchestrateToolResults(
     agentOSStreamId: StreamId,
@@ -322,9 +345,9 @@ export class ExternalToolResultHandler {
         })),
       });
     }
-    this.takeStreamPause(agentOSStreamId, streamContext, toolResults);
+    const takenPause = this.takeStreamPause(agentOSStreamId, streamContext, toolResults);
 
-    await this.continueWithToolResults(agentOSStreamId, streamContext, toolResults, toolCallGate);
+    await this.continueWithToolResults(agentOSStreamId, streamContext, takenPause, toolResults, toolCallGate);
   }
 
   /**
@@ -333,15 +356,16 @@ export class ExternalToolResultHandler {
    * it. The pending request is cleared at once, before the continuation waits on anything, so a second delivery of the
    * results on the stream and a resume of the pause's snapshot find none.
    *
-   * @throws {GMIError} `INVALID_STATE` when the stream waits on none of the calls: its pause was continued, resumed
-   *   on another stream, ended by a newer turn or replaced by its next pause. The pending request and the stream are
-   *   left as they are.
+   * @throws {GMIError} `INVALID_STATE` when the stream does not wait on every call the results answer: its pause was
+   *   continued, resumed on another stream, ended by a newer turn or replaced by its next pause, or a result answers a
+   *   call the pause does not hold. The pending request and the stream are left as they are.
+   * @returns The pause taken.
    */
   private takeStreamPause(
     agentOSStreamId: StreamId,
     streamContext: ActiveStreamContext,
     toolResults: AgentOSToolResultInput[],
-  ): void {
+  ): AgentOSPendingExternalToolRequest {
     const { conversationContext } = streamContext;
     const held = conversationContext?.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
       | AgentOSPendingExternalToolRequest
@@ -357,8 +381,9 @@ export class ExternalToolResultHandler {
       !this.resumingPauses.has(pauseKeyOf(held));
     if (!waitsOnResults) {
       const errMsg =
-        `Orchestrator: Stream ${agentOSStreamId} waits on none of these tool results: the pause it stopped for was ` +
-        'continued, resumed, ended by a newer turn or replaced, so they do not continue it.';
+        `Orchestrator: Stream ${agentOSStreamId} does not wait on every one of these tool results: the pause it stopped ` +
+        'for was continued, resumed, ended by a newer turn or replaced, or does not hold every call they answer, so they ' +
+        'do not continue it.';
       console.warn(errMsg);
       throw new GMIError(errMsg, GMIErrorCode.INVALID_STATE, {
         agentOSStreamId,
@@ -370,15 +395,19 @@ export class ExternalToolResultHandler {
       });
     }
     conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
+    return held!;
   }
 
   /**
    * Feeds `toolResults` to the stream's GMI and ends the continuation by the turn's rule: a pause for the calls of a
-   * non-final output, one `FINAL_RESPONSE` otherwise. The caller has taken the pause the results answer.
+   * non-final output, one `FINAL_RESPONSE` otherwise. The caller has taken `takenPause`, the pause the results answer:
+   * the store keeps that it was taken before the results reach the GMI, and a call of it the results leave out is
+   * answered as not run, so the history answers every call of the pause before the GMI writes again.
    */
   private async continueWithToolResults(
     agentOSStreamId: StreamId,
     streamContext: ActiveStreamContext,
+    takenPause: AgentOSPendingExternalToolRequest,
     toolResults: AgentOSToolResultInput[],
     toolCallGate?: GuardrailToolCallGate,
   ): Promise<void> {
@@ -413,7 +442,15 @@ export class ExternalToolResultHandler {
         span?.setAttribute('agentos.tool_success', metricToolSuccess);
 
         try {
-          await this.clearPendingExternalToolRequest(conversationContext);
+          // The caller took the pause; the store keeps that before the results reach the GMI, since the GMI takes
+          // them once. A store that refuses the save ends the continuation here, with the stored pause still resumable.
+          if (this.enableConversationalPersistence && conversationContext) {
+            await withAgentOSSpan('agentos.conversation.save', async (child) => {
+              child?.setAttribute('agentos.stage', 'take_pending_external_tool_request');
+              child?.setAttribute('agentos.stream_id', agentOSStreamId);
+              await this.dependencies.conversationManager.saveConversation(conversationContext);
+            });
+          }
 
           // Emit TOOL_RESULT_EMISSION chunk and persist each result.
           for (const toolResult of toolResults) {
@@ -448,6 +485,17 @@ export class ExternalToolResultHandler {
                 },
               });
             }
+          }
+
+          // The calls of the pause the results leave out never get a result: the next message the GMI writes ends the
+          // pause's tool round, which a provider accepts only when every call of it is answered.
+          if (this.enableConversationalPersistence && conversationContext) {
+            answerAsNotRun(
+              conversationContext,
+              unansweredPauseCalls(conversationContext, takenPause),
+              personaId,
+              (call) => `The host passed back results for this pause without one for '${call.name}', so the call has none.`,
+            );
           }
 
           // Persist tool result messages.
@@ -816,6 +864,9 @@ export class ExternalToolResultHandler {
       await this.dependencies.streamingManager.closeStream(agentOSStreamId, 'The pending tool request is no longer current.');
       return;
     }
+    // the resume takes the pause in the same step as the check, so a result on the pause's stream or a new turn that
+    // comes while the resume waits below finds no pause to continue or end
+    conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
     // the pause goes on on this stream, so the stream that stopped for it ends and no result on it continues it again
     await this.endPausedStream(
       pendingRequest.streamId,
@@ -897,7 +948,7 @@ export class ExternalToolResultHandler {
       },
     );
 
-    await this.continueWithToolResults(agentOSStreamId, streamContext, toolResults, toolCallGate);
+    await this.continueWithToolResults(agentOSStreamId, streamContext, pendingRequest, toolResults, toolCallGate);
   }
 
   // ---------------------------------------------------------------------------
@@ -1093,26 +1144,15 @@ export class ExternalToolResultHandler {
       return false;
     }
 
-    const unanswered = this.enableConversationalPersistence ? unansweredPauseCalls(conversationContext, pending) : [];
-    for (const call of unanswered) {
-      const notRun = {
-        code: EXTERNAL_TOOL_NOT_RUN_CODE,
-        message:
-          `A new turn started on the conversation before the host passed back the result of '${call.name}', ` +
-          'so the call never ran.',
-      };
-      conversationContext.addMessage({
-        role: MessageRole.TOOL,
-        // worded as the GMI words a failed result in its own history
-        content: `Error from tool '${call.name}': ${JSON.stringify(notRun)}`,
-        tool_call_id: call.id,
-        name: call.name,
-        metadata: {
-          agentPersonaId: pending.personaId,
-          source: 'agentos_tool_call_not_run',
-          isSuccess: false,
-        },
-      });
+    if (this.enableConversationalPersistence) {
+      answerAsNotRun(
+        conversationContext,
+        unansweredPauseCalls(conversationContext, pending),
+        pending.personaId,
+        (call) =>
+          `A new turn started on the conversation before the host passed back the result of '${call.name}', so the ` +
+          'call has none.',
+      );
     }
     conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
     await this.endPausedStream(

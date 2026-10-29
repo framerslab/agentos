@@ -73,12 +73,15 @@ export interface IAgentOS {
    * response chunks after processing the tool result.
    * @throws {Error} If the `streamId` or `toolCallId` is invalid.
    *
-   * A pause is continued once. When the conversation no longer holds the pause
-   * the stream stopped for (its results were passed already, it was resumed on
-   * another stream, a newer turn ended it, or the stream's next pause replaced
-   * it), or the result answers none of its calls, the stream yields one error
-   * chunk with the code `SYS_INVALID_STATE` and the GMI takes none of the
-   * results.
+   * A pause is continued once. While the stream is open, a result for a pause
+   * that is being continued already, or for a call the stream's pause does not
+   * hold, yields one error chunk with the code `SYS_INVALID_STATE`; once the
+   * stream is closed (its continuation ended, a resume took the pause, or a
+   * newer turn ended it), a result yields the closed stream's error chunk
+   * (`TOOL_ERROR`). The GMI takes none of such results. A call of a pause
+   * that the results leave out is answered with a tool result that says it has
+   * none (code `EXTERNAL_TOOL_NOT_RUN`), so pass every result of a pause
+   * together through `handleToolResults()`.
    */
   handleToolResult(
     streamId: string,
@@ -98,10 +101,10 @@ export interface IAgentOS {
    * response chunks after processing the tool results.
    * @throws {Error} If the `streamId` is invalid or the tool result batch is empty.
    *
-   * The batch continues the pause once, as `handleToolResult()` does: a batch
-   * for a pause the conversation no longer holds, or with a result for a call
-   * the stream does not wait on, yields one error chunk with the code
-   * `SYS_INVALID_STATE`.
+   * The batch continues the pause once, as `handleToolResult()` does: on an
+   * open stream, a batch for a pause that is being continued already, or with
+   * a result for a call the stream's pause does not hold, yields one error
+   * chunk with the code `SYS_INVALID_STATE`.
    */
   handleToolResults?(
     streamId: string,
