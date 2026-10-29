@@ -115,7 +115,7 @@ function answer(url: string, init: RequestInit | undefined): Response {
       usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
     });
   }
-  if (/\/images\/generations$/.test(url)) {
+  if (/\/images\/(generations|edits)$/.test(url)) {
     return jsonResponse({ created: 100, data: [{ b64_json: 'aW1hZ2U=' }] });
   }
   if (/\/image_generation$/.test(url)) {
@@ -506,6 +506,31 @@ describe('a blank baseUrl names no endpoint, so no refusal of credentials meant 
       await expect(
         generateImage({ model: 'gpt-image-2.5-flare', prompt: 'A red panda on a rooftop.', apiKey: 'caller-key', baseUrl }),
       ).rejects.toThrow('An apiKey or baseUrl for an image call needs provider');
+
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(BLANK_BASE_URLS)(
+    'editImage with no provider or model edits on the provider detected from the environment for baseUrl %j',
+    async (baseUrl) => {
+      setEnv({ OPENAI_API_KEY: 'openai-env-key' });
+
+      const result = await editImage({ image: TINY_PNG, prompt: 'Add a hat.', baseUrl });
+
+      expect(postsTo(/\/images\/edits$/)).toEqual([{ url: 'https://api.openai.com/v1/images/edits', authorization: 'Bearer openai-env-key' }]);
+      expect(result.provider).toBe('openai');
+    },
+  );
+
+  it.each(BLANK_BASE_URLS)(
+    'editImage with no provider or model still refuses an apiKey beside baseUrl %j, before any request',
+    async (baseUrl) => {
+      setEnv({ OPENAI_API_KEY: 'openai-env-key' });
+
+      await expect(editImage({ image: TINY_PNG, prompt: 'Add a hat.', apiKey: 'caller-key', baseUrl })).rejects.toThrow(
+        'An apiKey or baseUrl for an image call needs provider',
+      );
 
       expect(fetch).not.toHaveBeenCalled();
     },
