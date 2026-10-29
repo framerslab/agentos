@@ -236,6 +236,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
         depth: 0,
         limits,
         ...(caller?.budget ? { budget: caller.budget } : {}),
+        // The gate the launching turn carries (an agency's, when this agent is one of its members): the team asks it
+        // first on every seat's tool call, and its refusal is final.
         ...(caller?.approvalGate ? { approvalGate: caller.approvalGate } : {}),
         ...(ctx.signal ? { signal: ctx.signal } : {}),
         ...(caller?.providerUserId !== undefined ? { providerUserId: caller.providerUserId } : {}),
