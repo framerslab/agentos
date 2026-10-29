@@ -15,6 +15,7 @@ import type {
   VectorDocument,
   QueryOptions,
   MetadataFilter,
+  RetrievedVectorDocument,
 } from '../../../../core/vector-store/IVectorStore.js';
 import type { IEmbeddingManager } from '../../../../core/embeddings/IEmbeddingManager.js';
 import type { IKnowledgeGraph } from '../graph/knowledge/IKnowledgeGraph.js';
@@ -129,6 +130,9 @@ export interface MemoryStoreConfig {
 
 /** The reinforcement interval a trace loads with when none was persisted: one hour. */
 const DEFAULT_REINFORCEMENT_INTERVAL_MS = 3_600_000;
+
+/** How many documents of a scope's collection a store with no Brain reads at once while it deletes the scope. */
+const SCOPE_DELETE_PAGE_SIZE = 500;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2016,21 +2020,7 @@ export class MemoryStore {
               results.push(cached);
             }
           } else {
-            // Reconstruct trace from vector store metadata. A document that holds no
-            // interval loads with the store's one hour; with persistAccessState off, as
-            // before, with 0.
-            const partial = metadataToTracePartial(
-              doc.metadata as Record<string, any>,
-              this.persistsAccessState,
-            );
-            const trace: MemoryTrace = {
-              id: doc.id,
-              content: doc.textContent ?? '',
-              associatedTraceIds: [],
-              reinforcementInterval: this.persistsAccessState ? DEFAULT_REINFORCEMENT_INTERVAL_MS : 0,
-              updatedAt: (partial.createdAt as number) ?? Date.now(),
-              ...partial,
-            } as MemoryTrace;
+            const trace = this.traceFromVectorDocument(doc);
             if (!trace.isActive) continue;
             this.traceCache.set(trace.id, trace);
             results.push(trace);
@@ -2330,11 +2320,66 @@ export class MemoryStore {
   }
 
   /**
-   * The ids of every trace of one scope: the traces this store holds and every Brain row filed under the scope
+   * Deletes every trace of one scope for good ({@link deleteTraces}). The traces this store holds and every Brain row
+   * filed under the scope (`memory_traces.scope_id`), soft-deleted rows and another process's included, go in one
+   * batch. With no Brain the vector index is the scope's durable record, holding what another store filed before a
+   * restart, so the scope's collection is then walked from its start a page at a time ({@link readScopeCollection}),
+   * following the cursor the index returns, and each page is deleted. The walk runs again while it finds a document
+   * this call has not read, since a delete moves the documents after it past a cursor that counts positions. A
+   * document whose eviction fails stays in the index, as `softDelete` warns, and a later call reads it again. Last,
+   * every knowledge-graph copy filed under the scope whose trace was already gone.
+   *
+   * @param options.beforeDelete - Runs with each batch's trace ids before the batch is deleted. The memory manager
+   *   removes their memory-graph nodes there, so a call that fails part way finds the same traces again.
+   * @returns The number of traces deleted.
+   * @throws When the Brain cannot be read or a row cannot be deleted, or, with no Brain, when the vector index
+   *   cannot say whether it holds the scope's collection or cannot read the collection it holds.
+   */
+  async deleteScope(
+    scope: MemoryScope,
+    scopeId: string,
+    options: { beforeDelete?: (traceIds: readonly string[]) => Promise<void> } = {},
+  ): Promise<number> {
+    this.beginOperation();
+    const deleteBatch = async (traceIds: string[]): Promise<number> => {
+      if (traceIds.length === 0) return 0;
+      await options.beforeDelete?.(traceIds);
+      return this.deleteTraces(traceIds);
+    };
+    let deleted = await deleteBatch(await this.scopeTraceIds(scope, scopeId));
+    if (!this.brain) {
+      const read = new Set<string>();
+      let found = true;
+      while (found) {
+        found = false;
+        const cursors = new Set<string>();
+        let cursor: string | undefined;
+        do {
+          const page = await this.readScopeCollection(scope, scopeId, cursor);
+          const fresh = [...new Set(page.traceIds)].filter((id) => !read.has(id));
+          for (const id of fresh) read.add(id);
+          if (fresh.length > 0) found = true;
+          deleted += await deleteBatch(fresh);
+          // An empty page or a cursor this walk already followed ends the walk.
+          const next = page.traceIds.length > 0 ? page.nextCursor : undefined;
+          cursor = next !== undefined && !cursors.has(next) ? next : undefined;
+          if (cursor !== undefined) cursors.add(cursor);
+        } while (cursor !== undefined);
+      }
+    }
+    try {
+      await this.config.knowledgeGraph.deleteMemories?.({ scopes: [{ scope, scopeId }] });
+    } catch {
+      // Each trace's own copy went with it above.
+    }
+    return deleted;
+  }
+
+  /**
+   * The ids of every trace of one scope this store holds, and of every Brain row filed under the scope
    * (`memory_traces.scope_id`), soft-deleted rows and another process's included.
    */
-  async scopeTraceIds(scope: MemoryScope, scopeId: string): Promise<string[]> {
-    this.beginOperation();
+  private async scopeTraceIds(scope: MemoryScope, scopeId: string): Promise<string[]> {
     const ids = new Set<string>();
     for (const trace of this.traceCache.values()) {
       if (trace.scope === scope && trace.scopeId === scopeId) ids.add(trace.id);
@@ -2351,21 +2396,88 @@ export class MemoryStore {
   }
 
   /**
-   * Deletes every trace of one scope for good ({@link deleteTraces}): the traces this store holds and every Brain row
-   * filed under the scope ({@link scopeTraceIds}), then any knowledge-graph copy filed under it whose trace row was
-   * already gone.
+   * One page of a scope's collection in the vector index, for a store with no Brain: up to
+   * {@link SCOPE_DELETE_PAGE_SIZE} documents, listed by metadata where the index can (`scanByMetadata`), else found by
+   * a query with a zero vector of the index's size. Each document this store does not hold is cached as a trace of
+   * the scope ({@link traceFromVectorDocument}), so its delete evicts it from this collection. An index that says the
+   * collection does not exist (`collectionExists`) gives no page; one that cannot say, and fails the read, is read as
+   * holding nothing, with a warning, since a scope never filed has no collection.
    *
-   * @returns The number of traces deleted.
+   * @param cursor - Where the previous page ended, for an index whose scan pages.
+   * @throws When the index fails to say whether it holds the collection (`collectionExists` throws), or fails the
+   *   read of a collection it holds.
    */
-  async deleteScope(scope: MemoryScope, scopeId: string): Promise<number> {
-    this.beginOperation();
-    const deleted = await this.deleteTraces(await this.scopeTraceIds(scope, scopeId));
+  private async readScopeCollection(
+    scope: MemoryScope,
+    scopeId: string,
+    cursor?: string,
+  ): Promise<{ traceIds: string[]; nextCursor?: string }> {
+    const vectorStore = this.config.vectorStore;
+    const collection = collectionName(this.config.collectionPrefix, scope, scopeId);
+    const exists =
+      typeof vectorStore.collectionExists === 'function'
+        ? await vectorStore.collectionExists(collection)
+        : undefined;
+    if (exists === false) return { traceIds: [] };
+    let documents: RetrievedVectorDocument[];
+    let nextCursor: string | undefined;
     try {
-      await this.config.knowledgeGraph.deleteMemories?.({ scopes: [{ scope, scopeId }] });
-    } catch {
-      // Each trace's own copy went with it above.
+      if (typeof vectorStore.scanByMetadata === 'function') {
+        const scanned = await vectorStore.scanByMetadata(collection, {
+          limit: SCOPE_DELETE_PAGE_SIZE,
+          includeMetadata: true,
+          includeTextContent: true,
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        documents = scanned.documents;
+        nextCursor = scanned.nextCursor;
+      } else {
+        const queried = await vectorStore.query(collection, await this.zeroQueryVector(), {
+          topK: SCOPE_DELETE_PAGE_SIZE,
+          includeMetadata: true,
+          includeTextContent: true,
+        });
+        documents = queried.documents;
+      }
+    } catch (error) {
+      if (exists === true) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[MemoryStore] deleteScope read the vector index as holding nothing for a scope: the index cannot say whether ` +
+          `the collection exists, and its read failed: ${message}`,
+      );
+      return { traceIds: [] };
     }
-    return deleted;
+    for (const document of documents) {
+      if (this.traceCache.has(document.id)) continue;
+      const trace = this.traceFromVectorDocument(document);
+      // A trace this store deleted before, whose eviction failed, counts once: it is cached as deleted.
+      const isActive = trace.isActive && !this.tombstonedTraceIds.has(document.id);
+      this.traceCache.set(document.id, { ...trace, scope, scopeId, isActive });
+    }
+    return { traceIds: documents.map((document) => document.id), nextCursor };
+  }
+
+  /**
+   * A trace rebuilt from its vector document, for a store that has no Brain row of it: the document's text and
+   * metadata ({@link metadataToTracePartial}). A document that holds no interval loads with the store's one hour;
+   * with `persistAccessState` off, as before, with 0.
+   */
+  private traceFromVectorDocument(
+    document: Pick<RetrievedVectorDocument, 'id' | 'textContent' | 'metadata'>,
+  ): MemoryTrace {
+    const partial = metadataToTracePartial(
+      (document.metadata ?? {}) as Record<string, any>,
+      this.persistsAccessState,
+    );
+    return {
+      id: document.id,
+      content: document.textContent ?? '',
+      associatedTraceIds: [],
+      reinforcementInterval: this.persistsAccessState ? DEFAULT_REINFORCEMENT_INTERVAL_MS : 0,
+      updatedAt: (partial.createdAt as number) ?? Date.now(),
+      ...partial,
+    } as MemoryTrace;
   }
 
   /** Whether the knowledge graph can delete a trace's episodic copy (`IKnowledgeGraph.deleteMemories`). */
