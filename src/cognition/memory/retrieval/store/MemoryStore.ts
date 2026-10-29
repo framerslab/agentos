@@ -2862,7 +2862,7 @@ export class MemoryStore {
       if (exists === true) throw error;
       const message = error instanceof Error ? error.message : String(error);
       console.warn(
-        `[MemoryStore] deleteScope read the vector index as holding nothing for a scope: the index cannot say whether ` +
+        `[MemoryStore] a scope's delete or move read the vector index as holding nothing: the index cannot say whether ` +
           `the collection exists, and its read failed: ${message}`,
       );
       return { traceIds: [], staleIds: [], read: 0 };
