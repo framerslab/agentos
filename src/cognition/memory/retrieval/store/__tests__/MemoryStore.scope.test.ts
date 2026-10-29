@@ -3,10 +3,11 @@
  * One scope at a time: `hydrateScope` loads a returning user's oldest trace that the whole-brain hydration (the
  * 1,000 most recent traces) leaves out; `refileScope` moves a scope's traces to another scope id in the Brain, the
  * cache, the vector index and the knowledge graph's copy, its soft-deleted rows, a trace held with no embedding and,
- * with no Brain, the documents another store filed into a durable index included, and recall under the old id finds
- * none of them though the index failed to delete an old document; a trace's `turnUserId` survives a restart, and
- * `deleteScope` with `turnUserId` deletes only that user's traces of the scope. An empty scope id is refused by
- * `refileScope` and `deleteScope`, and a limit that is not a positive integer by `hydrateScope`. Real SQLite Brains.
+ * with no Brain, the documents another store filed into a durable index included, recall under the old id finds none
+ * of them though the index failed to delete an old document, and a write another writer makes to a moving trace's row
+ * is kept; a trace's `turnUserId` survives a restart, and `deleteScope` with `turnUserId` deletes only that user's
+ * traces of the scope. An empty scope id is refused by `refileScope` and `deleteScope`, and a limit that is not a
+ * positive integer by `hydrateScope`. Real SQLite Brains.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -231,6 +232,27 @@ describe('refileScope', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("keeps a write another writer makes to the trace's row while the trace moves", async () => {
+    const brain = await openBrain(tempFile());
+    const vectorStore = await vectorStoreOf4();
+    const store = await storeOver(brain, new KnowledgeGraph(), vectorStore);
+    await store.store(trace('t-1', '42', 1_000));
+    const upsert = vectorStore.upsert.bind(vectorStore);
+    vectorStore.upsert = async (name, documents, options) => {
+      // Another facade over the Brain writes the row's metadata while the trace's vector moves.
+      if (name === 'cogmem_user_A/42') {
+        await brain.run(`UPDATE memory_traces SET metadata = json_set(metadata, '$.recalledBy', 'facade') WHERE id = 't-1'`);
+      }
+      return upsert(name, documents, options);
+    };
+
+    expect(await store.refileScope('user', '42', 'A/42')).toBe(1);
+
+    const row = await brain.get<{ scope_id: string; metadata: string }>('SELECT scope_id, metadata FROM memory_traces WHERE id = ?', ['t-1']);
+    expect(row?.scope_id).toBe('A/42');
+    expect(JSON.parse(row!.metadata)).toMatchObject({ scopeId: 'A/42', recalledBy: 'facade' });
   });
 });
 
