@@ -10,6 +10,7 @@ const fixed = [
   'src/core/llm/providers/AIModelProviderManager.ts', 'src/core/llm/routing/ModelRouter.ts',
   'src/io/voice-pipeline/ListenSession.ts', 'src/io/voice-pipeline/ReconnectingSTT.ts',
   'src/io/voice-pipeline/providers/StreamingSTTChain.ts', 'src/io/voice-pipeline/LiveKitStreamTransport.ts',
+  'src/api/runtime/agencyLaunch/gmiLaunchTool.ts',
 ];
 const folder = 'src/core/llm/providers/implementations';
 

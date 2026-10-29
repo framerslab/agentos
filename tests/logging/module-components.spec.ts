@@ -35,6 +35,7 @@ const origins = {
   'src/io/voice-pipeline/ReconnectingSTT.ts': 'reconnecting_stt',
   'src/io/voice-pipeline/providers/StreamingSTTChain.ts': 'streaming_stt_chain',
   'src/io/voice-pipeline/LiveKitStreamTransport.ts': 'livekit_transport',
+  'src/api/runtime/agencyLaunch/gmiLaunchTool.ts': 'gmi_launch_tool',
 } as const;
 
 it('binds a fixed component at every covered source module', async () => {
