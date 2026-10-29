@@ -112,6 +112,31 @@ export class TypedNetworkStore {
   }
 
   /**
+   * Delete facts by ID, with their bank membership and every edge that
+   * starts or ends at one of them. Unknown IDs are skipped.
+   *
+   * @returns How many facts were deleted.
+   */
+  deleteFacts(ids: Iterable<string>): number {
+    const gone = new Set<string>();
+    for (const id of ids) {
+      const fact = this.facts.get(id);
+      if (!fact) continue;
+      this.facts.delete(id);
+      this.banks[fact.bank].delete(id);
+      gone.add(id);
+    }
+    if (gone.size === 0) return 0;
+    for (const id of gone) this.edgesFrom.delete(id);
+    for (const [fromId, edges] of this.edgesFrom) {
+      const kept = edges.filter((edge) => !gone.has(edge.toFactId));
+      if (kept.length === 0) this.edgesFrom.delete(fromId);
+      else if (kept.length !== edges.length) this.edgesFrom.set(fromId, kept);
+    }
+    return gone.size;
+  }
+
+  /**
    * Append an edge to the outgoing-edge map for `fromId`, allocating
    * the inner array on first insertion.
    */

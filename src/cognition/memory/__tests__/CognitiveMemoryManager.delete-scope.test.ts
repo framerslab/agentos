@@ -13,7 +13,8 @@
  * process or the Brain: not in the cache of any store over the Brain, the archive's original, or the typed facts the
  * manager extracted from it; a row an older release wrote under the scope is found too, an id that names no trace is
  * skipped, and a document a scope's collection still holds of a trace filed under another scope since is neither read
- * nor deleted under the scope.
+ * nor deleted under the scope; with no Brain, the scope's delete deletes that stale copy from its collection and walks
+ * on to the scope's traces after it, and the trace keeps its own document.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -273,6 +274,12 @@ function answeringQueriesAlone(store: InMemoryVectorStore): InMemoryVectorStore 
   return store;
 }
 
+/** The id of every document a collection holds, read past the shape a case gives the index. */
+async function idsIn(vectorStore: InMemoryVectorStore, collection: string): Promise<string[]> {
+  const { documents } = await InMemoryVectorStore.prototype.scanByMetadata.call(vectorStore, collection, { limit: 1000 });
+  return documents.map((document) => document.id).sort();
+}
+
 describe.each([
   ['an index that lists a collection two documents a read', scanningTwoAtATime],
   ['an index that pages a collection by position, two documents a page', pagingByPosition],
@@ -321,6 +328,32 @@ describe.each([
     expect(await copiesOf(knowledgeGraph)).toEqual([{ scopeId: '/s-1', text: 'The owner keeps notes.' }]);
     for (const gone of [snakes, lizards]) expect(await knowledgeGraph.getEntity(gone.id)).toBeUndefined();
     expect(await knowledgeGraph.getEntity(notes.id)).toBeDefined();
+  });
+
+  it("deletes the stale copies its collection holds first of traces filed under another scope since, then the scope's traces after them", async () => {
+    const vectorStore = shape(new InMemoryVectorStore());
+    await vectorStore.initialize({ id: `delete-scope-${Math.random()}`, type: 'in_memory' });
+    const knowledgeGraph = new KnowledgeGraph() as IKnowledgeGraph;
+    const manager = await managerWithoutBrain(vectorStore, knowledgeGraph);
+    closers.push(() => manager.shutdown());
+    const store = manager.getStore();
+    const bees = await manager.encode('Ana keeps bees on the roof.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    const hens = await manager.encode('Ana keeps hens.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    // Stored again under another scope id, as a move whose delete from the old collection fails leaves them: the first
+    // documents of Ana's collection are stale copies of these two traces.
+    for (const moved of [bees, hens]) await store.store({ ...store.getTrace(moved.id)!, scopeId: 'cy' });
+    // Another manager on the same index files two traces under Ana's scope that this one never loads.
+    const other = await managerWithoutBrain(vectorStore, knowledgeGraph);
+    closers.push(() => other.shutdown());
+    await other.encode('Ana is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    await other.encode('Ana lives in Lyon.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+
+    expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 2, graph: 'reached' });
+
+    expect(await idsIn(vectorStore, 'cogmem_user_ana')).toEqual([]);
+    expect(await idsIn(vectorStore, 'cogmem_user_cy')).toEqual([bees.id, hens.id].sort());
+    expect((await store.getByScope('user', 'cy')).map((trace) => trace.id).sort()).toEqual([bees.id, hens.id].sort());
+    expect((await copiesOf(knowledgeGraph)).map((copy) => copy.scopeId)).toEqual(['cy', 'cy']);
   });
 });
 

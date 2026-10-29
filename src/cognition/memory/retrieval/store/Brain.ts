@@ -1253,8 +1253,8 @@ export class Brain {
    * rowid set. The writers that rewrite indexed text in place
    * (MemoryUpdateTool, the Memory facade, ConsolidationLoop, SqliteImporter's
    * tag merge, and `MemoryStore.store()` when a revival's move fails) rebuild
-   * the index themselves, and the one writer that hard deletes traces
-   * (`importFromSqlite`) does too.
+   * the index themselves, and so do the writers that hard delete traces
+   * (`importFromSqlite`, `MemoryStore.deleteTraces` and `Memory.deleteTraces`).
    * SQLite only: on Postgres the index is a column of each row, and every
    * open fills the rows where it is null. Best-effort: nothing here may
    * block opening the brain.

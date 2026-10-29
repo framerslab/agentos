@@ -4,8 +4,9 @@
  * so recording the trace again replaces it and a delete by trace id finds it by key. In SQL the delete reads no
  * memory node once the graph has re-keyed, at its first delete by trace id, the copies an older release recorded
  * under a random node id. A real SQLite Brain, and a Postgres one where CI provides it (`AGENTOS_TEST_POSTGRES_URL`):
- * a relation that names a copy goes with the copy and moves with it to its key, a move that fails keeps the copy, and
- * a scope id that holds a quote or a backslash finds its copies on both.
+ * a relation that names a copy goes with the copy and moves with it to its key, a move that fails keeps the copy for a
+ * later graph and a delete by its trace id still deletes it, and a scope id that holds a quote or a backslash finds its
+ * copies on both.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -271,5 +272,31 @@ describe.each(sqlBrains)('SqlKnowledgeGraph over %s', (_name, open) => {
     expect(await textsOf(graph)).toEqual(['Ana keeps bees.']);
     expect(await new SqlKnowledgeGraph(brain).deleteMemories({ traceIds: ['mt_old1'] })).toBe(1);
     expect(await textsOf(graph)).toEqual([]);
+  });
+
+  it('deletes by its trace id a copy an older release recorded whose move to its key failed, with its relation', async () => {
+    const brain = await open();
+    const graph = new SqlKnowledgeGraph(brain);
+    const bees = await graph.upsertEntity({ type: 'concept', label: 'bees', properties: {}, confidence: 1, source: SOURCE });
+    await insertOlderCopy(brain, '5d2c0f4e-1111-4a6b-9c1d-000000000001', 'mt_old1', 'ana', 'Ana keeps bees.');
+    await relate(graph, '5d2c0f4e-1111-4a6b-9c1d-000000000001', bees.id);
+    // The move's write fails, as one does while another connection holds the lock, in the delete of that same trace.
+    const run = brain.run.bind(brain);
+    let failed = false;
+    vi.spyOn(brain, 'run').mockImplementation(((sql: string, params?: unknown[]) => {
+      if (!failed && /^\s*INSERT INTO knowledge_nodes\b/.test(sql)) {
+        failed = true;
+        return Promise.reject(new Error('database is locked'));
+      }
+      return run(sql, params as never);
+    }) as never);
+
+    expect(await graph.deleteMemories({ traceIds: ['mt_old1'] })).toBe(1);
+    vi.restoreAllMocks();
+
+    expect(failed).toBe(true);
+    expect(await textsOf(graph)).toEqual([]);
+    expect(await brain.all('SELECT id FROM knowledge_edges WHERE brain_id = ?', [brain.brainId])).toEqual([]);
+    expect(await graph.getEntity(bees.id)).toBeDefined();
   });
 });
