@@ -70,6 +70,8 @@ import {
   parseTraceMetadata,
   readPersistedDecayState,
   withPersistedDecayState,
+  writeTraceSnapshot,
+  type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
@@ -487,6 +489,10 @@ export class Memory {
     const tags = options?.tags ?? [];
     const entities = options?.entities ?? [];
     const importance = options?.importance ?? 1.0;
+    // The caller's keys go under the facade's own, which win.
+    const metadata = JSON.stringify(
+      buildInitialTraceMetadata({ ...(options?.metadata ?? {}) }, { contentHash, entities, scopeId }),
+    );
 
     // Generate embedding if embed function is available.
     let embeddingBlob: Uint8Array | null = null;
@@ -517,7 +523,7 @@ export class Memory {
         now,
         JSON.stringify(tags),
         JSON.stringify({}),
-        JSON.stringify(buildInitialTraceMetadata({}, { contentHash, entities, scopeId })),
+        metadata,
         scopeId,
       ],
     );
@@ -591,7 +597,7 @@ export class Memory {
       retrieval_count: 0,
       tags: JSON.stringify(tags),
       emotions: JSON.stringify({}),
-      metadata: JSON.stringify(buildInitialTraceMetadata({}, { contentHash, entities, scopeId })),
+      metadata,
       deleted: 0,
     });
   }
@@ -834,6 +840,94 @@ export class Memory {
       'UPDATE memory_traces SET deleted = 1 WHERE brain_id = ? AND id = ?',
       [this._brain.brainId, traceId],
     );
+  }
+
+  /** The id of the brain this facade reads and writes; a ledger row names it for the writes it records. */
+  get brainId(): string {
+    return this._brain.brainId;
+  }
+
+  /**
+   * Deletes every trace of one scope for good: the rows, their memory-graph nodes and knowledge-graph copies, and
+   * the full-text index entries. With `turnUserId`, only the scope's traces whose metadata names that user, as a
+   * memory write on another user's session records a second user. Account deletion calls it.
+   *
+   * @throws TypeError when `turnUserId` is given and is not a non-empty string.
+   */
+  async deleteScope(scope: string, scopeId: string, options: { turnUserId?: string } = {}): Promise<{ deleted: number }> {
+    const only = options.turnUserId;
+    if (only !== undefined && (typeof only !== 'string' || only === '')) {
+      throw new TypeError('Memory.deleteScope: turnUserId must be a non-empty string');
+    }
+    await this._initPromise;
+    const rows = await this._brain.all<{ id: string; metadata: string | null }>(
+      'SELECT id, metadata FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?',
+      [this._brain.brainId, scope, scopeId],
+    );
+    const ids = rows
+      .filter((row) => only === undefined || parseTraceMetadata(row.metadata).turnUserId === only)
+      .map((row) => row.id);
+    const result = await this.deleteTraces(ids);
+    if (only === undefined) {
+      try {
+        await this._knowledgeGraph.deleteMemories({ scopes: [{ scope, scopeId }] });
+      } catch {
+        // The per-trace deletes above took each trace's own copy.
+      }
+    }
+    return result;
+  }
+
+  /** Deletes the given traces for good, as {@link deleteScope} does for a scope. Unknown ids are skipped. */
+  async deleteTraces(traceIds: readonly string[]): Promise<{ deleted: number }> {
+    await this._initPromise;
+    const brainId = this._brain.brainId;
+    let deleted = 0;
+    const ids = [...new Set(traceIds)];
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const chunk = ids.slice(offset, offset + 400);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const result = await this._brain.run(`DELETE FROM memory_traces WHERE brain_id = ? AND id IN (${placeholders})`, [brainId, ...chunk]);
+      deleted += result.changes;
+    }
+    if (ids.length > 0) {
+      for (const id of ids) {
+        if (this._config.graph) {
+          try {
+            await this._memoryGraph.removeNode(id);
+          } catch {
+            // No node for a trace the graph never held.
+          }
+        }
+        this._hnswSidecar?.remove(id);
+      }
+      try {
+        await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+      } catch {
+        // Non-critical, as for the store's deletes.
+      }
+      await this._rebuildFtsIndex();
+    }
+    return { deleted };
+  }
+
+  /**
+   * Brings one trace back to the state a snapshot holds (`readTraceSnapshot`): its content, tags, scope and
+   * metadata, live again. A ledger revert of a memory tool's update, delete or merge calls it with the before-state
+   * its row recorded; a revert of an add calls {@link forget}.
+   *
+   * @throws When the snapshot is of another trace.
+   */
+  async restoreTrace(traceId: string, before: TraceSnapshot): Promise<void> {
+    await this._initPromise;
+    if (before.id !== traceId) {
+      throw new Error(`Memory.restoreTrace: the snapshot of trace ${before.id} cannot restore ${traceId}`);
+    }
+    const { dialect } = this._brain.features;
+    await this._brain.transaction(async (trx) => {
+      await writeTraceSnapshot(trx, dialect.insertOrReplace.bind(dialect), this._brain.brainId, before);
+    });
+    await this._rebuildFtsIndex();
   }
 
   /**
@@ -1654,6 +1748,7 @@ export class Memory {
       type: row.type as MemoryTrace['type'],
       scope: row.scope as MemoryTrace['scope'],
       scopeId,
+      ...(typeof metadata.turnUserId === 'string' && metadata.turnUserId ? { turnUserId: metadata.turnUserId } : {}),
       content: row.content,
       entities,
       tags,

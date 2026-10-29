@@ -327,6 +327,13 @@ export interface RememberOptions {
    * When omitted the encoding engine derives one automatically.
    */
   importance?: number;
+
+  /**
+   * Extra keys for the trace's stored metadata, merged under the keys the facade sets itself (`scopeId`,
+   * `content_hash`, `entities`, `decay`), which win. The rolling-summary sink records `contributorIds` here, and a
+   * memory write on a turn with no learner records `turnUserId` (`MemoryTrace.turnUserId`).
+   */
+  metadata?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------

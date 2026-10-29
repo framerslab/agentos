@@ -48,6 +48,7 @@ import {
 } from '../graph/extraction/index.js';
 import { spreadActivation } from '../graph/SpreadingActivation.js';
 import {
+  parseTraceMetadata,
   readPersistedDecayFields,
   withPersistedDecayState,
   type PersistedDecayState,
@@ -1195,82 +1196,102 @@ export class MemoryStore {
           LIMIT ?`,
         [brain.brainId, MemoryStore.HYDRATION_LIMIT],
       );
-      for (const row of rows) {
-        await withTraceOperation(
-          namespace,
-          row.id,
-          'normal',
-          async ({ blockedByDelete, isDeletePending }) => {
-            if (
-              blockedByDelete ||
-              this.tombstonedTraceIds.has(row.id) ||
-              this.traceCache.has(row.id)
-            ) {
-              return;
-            }
-
-            // A delete may finish after the bulk SELECT but before this row's
-            // operation slot. Recheck only when deletion activity occurred.
-            if (getDeleteEpoch(namespace) !== hydrationDeleteEpoch) {
-              const stillActive = await brain.get<{ id: string }>(
-                'SELECT id FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0',
-                [brain.brainId, row.id],
-              );
-              if (!stillActive) return;
-            }
-
-            const embedding = blobToEmbedding(row.embedding);
-            // Legacy rows persisted without embeddings become recallable once
-            // they are mentioned and stored again.
-            if (embedding == null || !isUsableEmbedding(embedding)) return;
-            const trace = this.rowToTrace(row);
-            const collection = collectionName(
-              this.config.collectionPrefix,
-              trace.scope,
-              trace.scopeId,
-            );
-            try {
-              const exists = this.config.vectorStore.collectionExists
-                ? await this.config.vectorStore.collectionExists(collection)
-                : true;
-              if (!exists) {
-                await this.config.vectorStore.createCollection?.(
-                  collection,
-                  this.config.embeddingDimension ?? embedding.length,
-                  { overwriteIfExists: false },
-                );
-              }
-            } catch {
-              // Provider auto-creates the collection or omits existence checks.
-            }
-            const upsertResult = await this.config.vectorStore.upsert(collection, [
-              {
-                id: trace.id,
-                textContent: trace.content,
-                embedding,
-                metadata: traceToMetadata(trace, this.persistsAccessState),
-              },
-            ]);
-            if ((upsertResult?.failedCount ?? 0) > 0) return;
-
-            if (isDeletePending() || this.tombstonedTraceIds.has(row.id)) {
-              try {
-                await this.config.vectorStore.delete(collection, [row.id]);
-              } catch {
-                // The queued delete retries after this operation releases.
-              }
-              return;
-            }
-
-            this.traceCache.set(trace.id, trace);
-            this.embeddingCache.set(trace.id, embedding);
-            this.registerScope(trace.scope, trace.scopeId);
-          },
-        );
-      }
+      await this.hydrateRows(rows, brain, namespace, hydrationDeleteEpoch);
     } catch {
       // Best-effort: durable hydration must never throw into recall.
     }
+  }
+
+  /**
+   * Loads Brain rows into this store's cache and vector index, one trace operation per row, skipping a row a delete
+   * blocks, a row already cached and a row with no usable embedding.
+   *
+   * @param hydrationDeleteEpoch - The namespace's delete epoch when the rows were read: a row read before a delete
+   *   that has since run is read again before it loads.
+   * @returns How many rows it loaded.
+   */
+  private async hydrateRows(
+    rows: MemoryTraceRow[],
+    brain: import('./Brain.js').Brain,
+    namespace: object,
+    hydrationDeleteEpoch: number,
+  ): Promise<number> {
+    let loaded = 0;
+    for (const row of rows) {
+      await withTraceOperation(
+        namespace,
+        row.id,
+        'normal',
+        async ({ blockedByDelete, isDeletePending }) => {
+          if (
+            blockedByDelete ||
+            this.tombstonedTraceIds.has(row.id) ||
+            this.traceCache.has(row.id)
+          ) {
+            return;
+          }
+
+          // A delete may finish after the bulk SELECT but before this row's
+          // operation slot. Recheck only when deletion activity occurred.
+          if (getDeleteEpoch(namespace) !== hydrationDeleteEpoch) {
+            const stillActive = await brain.get<{ id: string }>(
+              'SELECT id FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0',
+              [brain.brainId, row.id],
+            );
+            if (!stillActive) return;
+          }
+
+          const embedding = blobToEmbedding(row.embedding);
+          // Legacy rows persisted without embeddings become recallable once
+          // they are mentioned and stored again.
+          if (embedding == null || !isUsableEmbedding(embedding)) return;
+          const trace = this.rowToTrace(row);
+          const collection = collectionName(
+            this.config.collectionPrefix,
+            trace.scope,
+            trace.scopeId,
+          );
+          try {
+            const exists = this.config.vectorStore.collectionExists
+              ? await this.config.vectorStore.collectionExists(collection)
+              : true;
+            if (!exists) {
+              await this.config.vectorStore.createCollection?.(
+                collection,
+                this.config.embeddingDimension ?? embedding.length,
+                { overwriteIfExists: false },
+              );
+            }
+          } catch {
+            // Provider auto-creates the collection or omits existence checks.
+          }
+          const upsertResult = await this.config.vectorStore.upsert(collection, [
+            {
+              id: trace.id,
+              textContent: trace.content,
+              embedding,
+              metadata: traceToMetadata(trace, this.persistsAccessState),
+            },
+          ]);
+          if ((upsertResult?.failedCount ?? 0) > 0) return;
+
+          if (isDeletePending() || this.tombstonedTraceIds.has(row.id)) {
+            try {
+              await this.config.vectorStore.delete(collection, [row.id]);
+            } catch {
+              // The queued delete retries after this operation releases.
+            }
+            return;
+          }
+
+          this.traceCache.set(trace.id, trace);
+          this.embeddingCache.set(trace.id, embedding);
+          this.registerScope(trace.scope, trace.scopeId);
+          loaded += 1;
+        },
+      );
+    }
+    return loaded;
   }
 
   /**
@@ -1323,6 +1344,7 @@ export class MemoryStore {
       isActive: true,
       importance: typeof meta.importance === 'number' ? meta.importance : undefined,
       structuredData: meta.structuredData,
+      ...(typeof meta.turnUserId === 'string' && meta.turnUserId ? { turnUserId: meta.turnUserId } : {}),
     } as MemoryTrace;
   }
 
@@ -1450,6 +1472,7 @@ export class MemoryStore {
           importance: trace.importance,
           associatedTraceIds: trace.associatedTraceIds,
           structuredData: trace.structuredData,
+          turnUserId: trace.turnUserId,
         };
         const insertParams = [
           brain.brainId,
@@ -1496,35 +1519,8 @@ export class MemoryStore {
     trace.isActive = true;
     trace.updatedAt = activeUpdatedAt;
 
-    // Record in knowledge graph as episodic memory. Step 13: thread
-    // `trace.entities` through as `entityIds` (slugified for deterministic
-    // lookup). Previously hardcoded to `[]`, which silenced the sixth
-    // signal in the composite scoring formula.
-    const entityIds = (trace.entities ?? [])
-      .map(slugifyEntityId)
-      .filter((id) => id.length > 0);
-    try {
-      await this.config.knowledgeGraph.recordMemory({
-        type: trace.type === 'episodic' ? 'conversation' : 'discovery',
-        summary: trace.content.substring(0, 200),
-        description: trace.content,
-        participants: [trace.scopeId],
-        valence: trace.emotionalContext.valence,
-        importance: trace.encodingStrength,
-        entityIds,
-        embedding,
-        occurredAt: new Date(trace.createdAt).toISOString(),
-        outcome: 'unknown',
-        context: {
-          memoryTraceId: trace.id,
-          scope: trace.scope,
-          scopeId: trace.scopeId,
-          type: trace.type,
-        },
-      });
-    } catch {
-      // Knowledge graph may not be available; non-critical
-    }
+    // Record in knowledge graph as episodic memory.
+    await this.recordGraphCopy(trace, embedding);
 
     // Step 13: upsert entity nodes and co-occurrence edges when the
     // feature flag is on. Non-critical; swallows errors so an unavailable
@@ -2040,6 +2036,110 @@ export class MemoryStore {
   }
 
   /**
+   * Loads one scope's most recent traces from the Brain by the `scope_id` column, so a returning learner's
+   * memories are recallable however many traces other scopes hold (the whole-brain hydration loads the
+   * {@link MemoryStore.HYDRATION_LIMIT} most recent of the brain). A trace already loaded is skipped.
+   *
+   * @returns How many traces it loaded.
+   */
+  async hydrateScope(scope: MemoryScope, scopeId: string, limit: number = MemoryStore.HYDRATION_LIMIT): Promise<number> {
+    this.beginOperation();
+    const brain = this.brain;
+    if (!brain) return 0;
+    const namespace = this.coordinationNamespace;
+    const epoch = getDeleteEpoch(namespace);
+    const rows = await brain.all<MemoryTraceRow>(
+      `SELECT id, type, scope, content, embedding, strength, created_at,
+              last_accessed, retrieval_count, tags, emotions, metadata
+         FROM memory_traces
+        WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0
+        ORDER BY created_at DESC
+        LIMIT ?`,
+      [brain.brainId, scope, scopeId, limit],
+    );
+    return this.hydrateRows(rows, brain, namespace, epoch);
+  }
+
+  /**
+   * Moves every live trace of one scope id to another: the Brain row (`scope_id` and the metadata's `scopeId`),
+   * this store's cached trace and its vector document, and the knowledge graph's copy, recorded again under the new
+   * id. A host that starts passing an organization id re-files each user's earlier traces with it once, since a
+   * learner under a namespace reads `user:<namespace>/<userId>` and not the plain form filed before.
+   *
+   * @returns The number of traces moved.
+   */
+  async refileScope(scope: MemoryScope, fromScopeId: string, toScopeId: string): Promise<number> {
+    this.beginOperation();
+    if (fromScopeId === toScopeId) return 0;
+    const brain = this.brain;
+    const namespace = this.coordinationNamespace;
+    const moved = new Map<string, { trace: MemoryTrace; embedding: number[] | undefined }>();
+    for (const trace of this.traceCache.values()) {
+      if (trace.isActive && trace.scope === scope && trace.scopeId === fromScopeId) {
+        moved.set(trace.id, { trace, embedding: this.embeddingCache.get(trace.id) });
+      }
+    }
+    if (brain) {
+      const rows = await brain.all<MemoryTraceRow>(
+        `SELECT id, type, scope, content, embedding, strength, created_at,
+                last_accessed, retrieval_count, tags, emotions, metadata
+           FROM memory_traces
+          WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0`,
+        [brain.brainId, scope, fromScopeId],
+      );
+      for (const row of rows) {
+        const metadata = parseTraceMetadata(row.metadata);
+        metadata.scopeId = toScopeId;
+        await brain.run(
+          'UPDATE memory_traces SET scope_id = ?, metadata = ? WHERE brain_id = ? AND id = ? AND deleted = 0',
+          [toScopeId, JSON.stringify(metadata), brain.brainId, row.id],
+        );
+        if (!moved.has(row.id)) {
+          moved.set(row.id, { trace: this.rowToTrace(row), embedding: blobToEmbedding(row.embedding) ?? undefined });
+        }
+      }
+    }
+    for (const [traceId, { trace, embedding }] of moved) {
+      await withTraceOperation(namespace, traceId, 'normal', async ({ blockedByDelete }) => {
+        if (blockedByDelete) return;
+        const fromCollection = collectionName(this.config.collectionPrefix, trace.scope, fromScopeId);
+        trace.scopeId = toScopeId;
+        trace.updatedAt = Date.now();
+        if (this.traceCache.has(traceId) && embedding) {
+          const toCollection = collectionName(this.config.collectionPrefix, trace.scope, toScopeId);
+          try {
+            const exists = this.config.vectorStore.collectionExists
+              ? await this.config.vectorStore.collectionExists(toCollection)
+              : true;
+            if (!exists) {
+              await this.config.vectorStore.createCollection?.(toCollection, this.config.embeddingDimension ?? embedding.length, { overwriteIfExists: false });
+            }
+          } catch {
+            // Some providers auto-create collections.
+          }
+          await this.config.vectorStore.upsert(toCollection, [
+            { id: traceId, textContent: trace.content, embedding, metadata: traceToMetadata(trace, this.persistsAccessState) },
+          ]);
+          try {
+            await this.config.vectorStore.delete(fromCollection, [traceId]);
+          } catch {
+            // The old collection's document is fenced by the cache's scope from here on.
+          }
+          this.registerScope(trace.scope, toScopeId);
+        }
+        try {
+          await this.config.knowledgeGraph.deleteMemories?.({ traceIds: [traceId] });
+        } catch {
+          // A stale copy is deleted by a later deleteTraces of the trace.
+        }
+        await this.recordGraphCopy(trace, embedding);
+      });
+    }
+    this.knownScopes.delete(scopeKey(scope, fromScopeId));
+    return moved.size;
+  }
+
+  /**
    * A zero vector of the size of the vectors in this store's collections ({@link resolveVectorSize}), for a read of
    * a collection that matches no text. An index refuses a query vector of another size, and the read finds nothing.
    */
@@ -2329,24 +2429,33 @@ export class MemoryStore {
    * document whose eviction fails stays in the index, as `softDelete` warns, and a later call reads it again. Last,
    * every knowledge-graph copy filed under the scope whose trace was already gone.
    *
+   * @param options.turnUserId - Deletes only the scope's traces that this user filed as a second user on another
+   *   user's session ({@link MemoryTrace.turnUserId}); the scope's other traces and copies stay.
    * @param options.beforeDelete - Runs with each batch's trace ids before the batch is deleted. The memory manager
    *   removes their memory-graph nodes there, so a call that fails part way finds the same traces again.
    * @returns The number of traces deleted.
+   * @throws TypeError when `turnUserId` is given and is not a non-empty string.
    * @throws When the Brain cannot be read or a row cannot be deleted, or, with no Brain, when the vector index
    *   cannot say whether it holds the scope's collection or cannot read the collection it holds.
    */
   async deleteScope(
     scope: MemoryScope,
     scopeId: string,
-    options: { beforeDelete?: (traceIds: readonly string[]) => Promise<void> } = {},
+    options: { turnUserId?: string; beforeDelete?: (traceIds: readonly string[]) => Promise<void> } = {},
   ): Promise<number> {
+    const only = options.turnUserId;
+    if (only !== undefined && (typeof only !== 'string' || only === '')) {
+      throw new TypeError('MemoryStore.deleteScope: turnUserId must be a non-empty string');
+    }
     this.beginOperation();
     const deleteBatch = async (traceIds: string[]): Promise<number> => {
       if (traceIds.length === 0) return 0;
       await options.beforeDelete?.(traceIds);
       return this.deleteTraces(traceIds);
     };
-    let deleted = await deleteBatch(await this.scopeTraceIds(scope, scopeId));
+    const filedByThem = (traceId: string): boolean =>
+      only === undefined || this.traceCache.get(traceId)?.turnUserId === only;
+    let deleted = await deleteBatch(await this.scopeTraceIds(scope, scopeId, only));
     if (!this.brain) {
       const read = new Set<string>();
       let found = true;
@@ -2359,7 +2468,7 @@ export class MemoryStore {
           const fresh = [...new Set(page.traceIds)].filter((id) => !read.has(id));
           for (const id of fresh) read.add(id);
           if (fresh.length > 0) found = true;
-          deleted += await deleteBatch(fresh);
+          deleted += await deleteBatch(fresh.filter(filedByThem));
           // An empty page or a cursor this walk already followed ends the walk.
           const next = page.traceIds.length > 0 ? page.nextCursor : undefined;
           cursor = next !== undefined && !cursors.has(next) ? next : undefined;
@@ -2367,30 +2476,38 @@ export class MemoryStore {
         } while (cursor !== undefined);
       }
     }
-    try {
-      await this.config.knowledgeGraph.deleteMemories?.({ scopes: [{ scope, scopeId }] });
-    } catch {
-      // Each trace's own copy went with it above.
+    // With a user named, each deleted trace took its own copy, and the scope's other copies are the session's.
+    if (only === undefined) {
+      try {
+        await this.config.knowledgeGraph.deleteMemories?.({ scopes: [{ scope, scopeId }] });
+      } catch {
+        // Each trace's own copy went with it above.
+      }
     }
     return deleted;
   }
 
   /**
    * The ids of every trace of one scope this store holds, and of every Brain row filed under the scope
-   * (`memory_traces.scope_id`), soft-deleted rows and another process's included.
+   * (`memory_traces.scope_id`), soft-deleted rows and another process's included; with `turnUserId`, only those
+   * that user filed as a second user.
    */
-  private async scopeTraceIds(scope: MemoryScope, scopeId: string): Promise<string[]> {
+  private async scopeTraceIds(scope: MemoryScope, scopeId: string, turnUserId?: string): Promise<string[]> {
     const ids = new Set<string>();
     for (const trace of this.traceCache.values()) {
-      if (trace.scope === scope && trace.scopeId === scopeId) ids.add(trace.id);
+      if (trace.scope === scope && trace.scopeId === scopeId && (turnUserId === undefined || trace.turnUserId === turnUserId)) {
+        ids.add(trace.id);
+      }
     }
     const brain = this.brain;
     if (brain) {
-      const rows = await brain.all<{ id: string }>(
-        'SELECT id FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?',
+      const rows = await brain.all<{ id: string; metadata?: string | null }>(
+        `SELECT id${turnUserId === undefined ? '' : ', metadata'} FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?`,
         [brain.brainId, scope, scopeId],
       );
-      for (const row of rows) ids.add(row.id);
+      for (const row of rows) {
+        if (turnUserId === undefined || parseTraceMetadata(row.metadata).turnUserId === turnUserId) ids.add(row.id);
+      }
     }
     return [...ids];
   }
@@ -2552,6 +2669,29 @@ export class MemoryStore {
   private registerScope(scope: MemoryScope, scopeId: string): void {
     if (!scopeId) return;
     this.knownScopes.set(scopeKey(scope, scopeId), { scope, scopeId });
+  }
+
+  /** Records a trace's episodic copy in the knowledge graph. Non-critical: a graph error never fails a write. */
+  private async recordGraphCopy(trace: MemoryTrace, embedding: number[] | undefined): Promise<void> {
+    // The trace's entities, slugified as `ingestEntityGraph` writes their nodes, feed the graph-activation signal.
+    const entityIds = (trace.entities ?? []).map(slugifyEntityId).filter((id) => id.length > 0);
+    try {
+      await this.config.knowledgeGraph.recordMemory({
+        type: trace.type === 'episodic' ? 'conversation' : 'discovery',
+        summary: trace.content.substring(0, 200),
+        description: trace.content,
+        participants: [trace.scopeId],
+        valence: trace.emotionalContext.valence,
+        importance: trace.encodingStrength,
+        entityIds,
+        embedding,
+        occurredAt: new Date(trace.createdAt).toISOString(),
+        outcome: 'unknown',
+        context: { memoryTraceId: trace.id, scope: trace.scope, scopeId: trace.scopeId, type: trace.type },
+      });
+    } catch {
+      // Knowledge graph may not be available; non-critical.
+    }
   }
 
   private getKnownScopes(): Array<{ scope: MemoryScope; scopeId: string }> {

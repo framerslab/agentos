@@ -123,6 +123,8 @@ export interface ICognitiveMemoryManager {
       contentSentiment?: number;
       tags?: string[];
       entities?: string[];
+      /** {@link MemoryTrace.turnUserId}: set on a trace a turn with no learner files for a second user. */
+      turnUserId?: string;
       /**
        * When encoding a subjective trace from `PerspectiveObserver`
        * (`@framers/agentos/memory/pipeline/observation/PerspectiveObserver`),
@@ -274,9 +276,12 @@ export interface ICognitiveMemoryManager {
    * Delete every trace of one scope for good, as an account deletion needs: its memory-graph node, then the trace in
    * the cache, the vector index and the Brain, and the knowledge graph's episodic copy (`MemoryStore.deleteScope`).
    * With no Brain, the scope's documents in the vector index are found and deleted too, those another store filed
-   * before a restart included. Optional, so a host's own implementation keeps compiling.
+   * before a restart included. With `turnUserId`, only the scope's traces that user filed as a second user on the
+   * session ({@link MemoryTrace.turnUserId}). Optional, so a host's own implementation keeps compiling.
+   *
+   * @throws TypeError when `turnUserId` is given and is not a non-empty string.
    */
-  deleteScope?(scope: MemoryScope, scopeId: string): Promise<MemoryDeletion>;
+  deleteScope?(scope: MemoryScope, scopeId: string, options?: { turnUserId?: string }): Promise<MemoryDeletion>;
 
   /** Delete the given traces for good, as {@link deleteScope} does for a scope. Unknown ids are skipped. */
   deleteTraces?(traceIds: readonly string[]): Promise<MemoryDeletion>;
@@ -734,6 +739,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       updatedAt: now,
       isActive: true,
     };
+    if (options.turnUserId) trace.turnUserId = options.turnUserId;
 
     // Stamp PerspectiveObserver provenance into MechanismMetadata when this
     // trace originated from a subjective rewrite of an objective event. The
@@ -1579,11 +1585,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   /**
    * Delete every trace of one scope for good (`MemoryStore.deleteScope`), a batch at a time. The memory graph's node
    * of each trace in a batch goes before the batch's traces, so a call that fails part way can be made again and
-   * finds the same traces.
+   * finds the same traces. With `turnUserId`, only the scope's traces that user filed as a second user on the session.
    */
-  async deleteScope(scope: MemoryScope, scopeId: string): Promise<MemoryDeletion> {
+  async deleteScope(scope: MemoryScope, scopeId: string, options: { turnUserId?: string } = {}): Promise<MemoryDeletion> {
     this.ensureInitialized();
     const deleted = await this.store.deleteScope(scope, scopeId, {
+      ...(options.turnUserId !== undefined ? { turnUserId: options.turnUserId } : {}),
       beforeDelete: (traceIds) => this.removeGraphNodes(traceIds),
     });
     return this.deletionOf(deleted);

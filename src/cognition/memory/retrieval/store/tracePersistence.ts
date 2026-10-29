@@ -246,3 +246,77 @@ export function buildNaturalLanguageFtsQuery(query: string): string {
 export function bindingsFor(fragment: string, value: unknown): unknown[] {
   return Array.from({ length: (fragment.match(/\?/g) ?? []).length }, () => value);
 }
+
+/**
+ * A `memory_traces` row as a ledger row's before-state holds it: every column but the embedding, which a restored
+ * trace regains when it is next written (as `memory_update` clears it when the content changes).
+ */
+export interface TraceSnapshot {
+  id: string;
+  type: string;
+  scope: string;
+  scopeId: string;
+  content: string;
+  strength: number;
+  createdAt: number;
+  lastAccessed: number | null;
+  retrievalCount: number;
+  tags: string;
+  emotions: string;
+  metadata: string;
+  deleted: 0 | 1;
+}
+
+/** The two calls of a storage adapter, a Brain or a transaction the snapshot helpers use. */
+export interface SnapshotDb {
+  get<T>(sql: string, params?: unknown[]): Promise<T | null | undefined>;
+  run(sql: string, params?: unknown[]): Promise<{ changes: number }>;
+}
+
+/** Reads one row of a brain as a snapshot; `undefined` when there is no such row. */
+export async function readTraceSnapshot(db: SnapshotDb, brainId: string, traceId: string): Promise<TraceSnapshot | undefined> {
+  const row = await db.get<{
+    id: string; type: string; scope: string; scope_id: string | null; content: string; strength: number;
+    created_at: number; last_accessed: number | null; retrieval_count: number; tags: string; emotions: string;
+    metadata: string; deleted: number;
+  }>(
+    `SELECT id, type, scope, scope_id, content, strength, created_at, last_accessed, retrieval_count, tags, emotions, metadata, deleted
+       FROM memory_traces WHERE brain_id = ? AND id = ?`,
+    [brainId, traceId],
+  );
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    type: row.type,
+    scope: row.scope,
+    scopeId: row.scope_id ?? '',
+    content: row.content,
+    strength: row.strength,
+    createdAt: row.created_at,
+    lastAccessed: row.last_accessed ?? null,
+    retrievalCount: row.retrieval_count ?? 0,
+    tags: row.tags,
+    emotions: row.emotions,
+    metadata: row.metadata,
+    deleted: row.deleted === 1 ? 1 : 0,
+  };
+}
+
+/**
+ * Writes a snapshot back as the row's whole state, live (`deleted = 0`), with no embedding.
+ *
+ * @param insertOrReplace - The dialect's `insertOrReplace` (`brain.features.dialect.insertOrReplace`).
+ */
+export async function writeTraceSnapshot(
+  db: SnapshotDb,
+  insertOrReplace: (table: string, columns: string[], values: string[], conflict: string) => string,
+  brainId: string,
+  snapshot: TraceSnapshot,
+): Promise<void> {
+  const columns = ['brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed', 'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted', 'scope_id'];
+  const sql = insertOrReplace('memory_traces', columns, columns.map((column) => (column === 'embedding' ? 'NULL' : column === 'deleted' ? '0' : '?')), 'brain_id, id');
+  await db.run(sql, [
+    brainId, snapshot.id, snapshot.type, snapshot.scope, snapshot.content, snapshot.strength, snapshot.createdAt,
+    snapshot.lastAccessed, snapshot.retrievalCount, snapshot.tags, snapshot.emotions, snapshot.metadata, snapshot.scopeId,
+  ]);
+}

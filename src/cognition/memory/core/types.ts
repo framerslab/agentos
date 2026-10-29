@@ -292,6 +292,12 @@ export interface MemoryTrace {
   type: MemoryType;
   scope: MemoryScope;
   scopeId: string;
+  /**
+   * The explicit user id of the turn that filed this trace when that turn had no learner: a second user speaking
+   * on another user's session, whose trace is filed under the session's scope. Account deletion for that user
+   * (`LearningLayer.forgetUser`) finds the trace by it. Absent on every other trace.
+   */
+  turnUserId?: string;
 
   // --- Content ---
   content: string;
