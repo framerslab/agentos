@@ -13,7 +13,7 @@ import type { GenerateTextResult } from '../generateText';
 import { launchRegistry } from '../runtime/agencyLaunch/launchRegistry';
 import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
 import { getCapabilitySupport } from '../runtime/capabilityContract';
-import type { Agent } from '../types';
+import type { Agent, ApprovalDecision, ApprovalRequest } from '../types';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import type { ITool } from '../../core/tools/ITool';
@@ -46,6 +46,7 @@ const launchOf = (result: GenerateTextResult, i = 0): LaunchAgencyResult => {
 const refusalOf = (result: GenerateTextResult, i: number): string => String(result.toolCalls[i]?.error ?? '').split(':')[0];
 /** The parent's route, under a key of its own; no fallback, so a failed hop ends the turn. */
 const route = (k: string) => ({ provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [] });
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
@@ -472,4 +473,72 @@ describe('launch_agency on gmi()', () => {
     // The first send's root, waiter and root steps, the second's two root steps: nothing was sent for the waiter after its tool.
     expect(s.seen).toHaveLength(5);
   }, 40_000);
+
+  it('a tool already running at the deadline finishes, and nothing starts after it', async () => {
+    const k = key();
+    const effects: string[] = [];
+    const slowWrite = vi.fn(async () => {
+      await sleep(1_500);
+      effects.push('written');
+      return 'written';
+    });
+    const note = vi.fn(async () => {
+      effects.push('noted');
+      return 'noted';
+    });
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Write, then note.', deadlineMs: 1_000, seats: [{ role: 'writer', instructions: 'Write, then note.', tools: ['slow_write', 'note'] }] }),
+        // The writer's step: slow_write runs past the 1,000 ms deadline; note comes after it in the same step.
+        reply.tools([{ id: 'w1', name: 'slow_write', args: {} }, { id: 'n1', name: 'note', args: {} }]),
+        reply.text('Parent done.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k), instructions: 'Coordinate.',
+      tools: {
+        slow_write: { description: 'Writes slowly.', parameters: { type: 'object', properties: {} }, execute: slowWrite },
+        note: { description: 'Notes.', parameters: { type: 'object', properties: {} }, execute: note },
+      },
+      agencies: { launch: true },
+    });
+
+    const result = await parent.session('p1').send('Go.');
+    expect(launchOf(result).status).toBe('timed_out');
+    // The running tool finished once (the precondition); the call after it never started.
+    expect(effects).toEqual(['written']);
+    expect(note).not.toHaveBeenCalled();
+    // Nothing was sent for the writer after its tools: root, writer, root.
+    expect(s.seen).toHaveLength(3);
+  }, 20_000);
+
+  it('a tool whose approval arrives after the deadline is refused before it runs', async () => {
+    const k = key();
+    const sendEmail = vi.fn(async () => 'sent');
+    const asked: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      // Approved after the 1,000 ms deadline.
+      await sleep(1_500);
+      return { approved: true };
+    };
+    script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Send it.', deadlineMs: 1_000, seats: [{ role: 'sender', instructions: 'Send the mail.', tools: ['send_email'] }] }),
+        reply.tools([{ id: 'e1', name: 'send_email', args: { to: 'team' } }]),
+        reply.text('Parent done.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k), instructions: 'Coordinate.',
+      tools: { send_email: { description: 'Sends an email.', parameters: { type: 'object', properties: { to: { type: 'string' } } }, execute: sendEmail } },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['send_email'] }, handler } },
+    });
+
+    const result = await parent.session('p1').send('Go.');
+    expect(launchOf(result).status).toBe('timed_out');
+    // The approval was asked (the precondition), and the call it approved was refused: its turn had stopped.
+    expect(asked).toEqual(['send_email']);
+    expect(sendEmail).not.toHaveBeenCalled();
+  }, 20_000);
 });
