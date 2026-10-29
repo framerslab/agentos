@@ -5,15 +5,16 @@
  * with an index on (brain_id, scope, scope_id, created_at).
  *
  * Idempotent. The column is added once per table: when this step adds it, every row of the table is filled, whatever
- * brain it belongs to, and the brain being migrated is not read again. When the column is already there, a brain's
- * migration fills that brain's rows that hold `''`, which catches rows an older release wrote after another brain's
- * migration added the column (such a release writes the column's default). `Brain` runs {@link ensureScopeIdColumn}
- * on every open as well, for a table another path created without the column (a migration engine's copy, a file an
- * import reads).
+ * brain it belongs to. When the column is already there, a brain's migration changes nothing: the open that runs it
+ * builds the column's indexes and files the brain's traces that hold `''` while their metadata names a scope id once
+ * the migration has committed, as every open does. An index build or a read of the brain's rows inside the migration
+ * would hold up the table's writers until it committed. `Brain` runs {@link ensureScopeIdColumn} on every open as
+ * well, for a table another path created without the column (a migration engine's copy, a file an import reads).
  *
  * An older release goes on writing `''` to a brain that is already at version 3, where its migration never runs
- * again. `Brain` runs {@link fillScopeIds} for the brain it opens, at every open, and each importer runs it before it
- * looks for duplicates, so such a row is filed under the scope id its metadata names before an import reads the column.
+ * again, and to a brain at version 2 after another brain's migration added the column. `Brain` runs
+ * {@link fillScopeIds} for the brain it opens, at every open, and each importer runs it before it looks for
+ * duplicates, so such a row is filed under the scope id its metadata names before an import reads the column.
  * Its read goes through `idx_memory_traces_unfiled_scope_id`, a partial index of the rows that hold `''` (on SQLite,
  * only those whose metadata text can name a scope id), and returns the rows whose metadata text can name one. The fill
  * files each such row whose JSON names one. A row whose JSON names none other than `''` (JSON that cannot be read, a
@@ -145,13 +146,14 @@ function scopeIdIndexes(adapter: StorageAdapter): ReadonlyArray<{ name: string; 
  */
 async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: string, named = false): Promise<void> {
   const filter = named ? ` AND (${NAMES_SCOPE_ID})` : '';
-  let afterId = '';
+  // The first page starts at '' itself: an id can be the empty string (the JSON importer keeps a record's id "").
+  let afterId: string | null = null;
   for (;;) {
     const rows = await adapter.all<{ id: string; metadata: string | null }>(
       `SELECT id, metadata FROM memory_traces
-        WHERE brain_id = ? AND scope_id = '' AND id > ?${filter}
+        WHERE brain_id = ? AND scope_id = '' AND id ${afterId === null ? '>=' : '>'} ?${filter}
         ORDER BY id LIMIT ${PAGE}`,
-      [brainId, afterId],
+      [brainId, afterId ?? ''],
     );
     const filled: Array<[string, string]> = [];
     for (const row of rows) {
@@ -200,22 +202,39 @@ async function backfillEveryBrain(adapter: StorageAdapter): Promise<void> {
 }
 
 /**
+ * Adds `memory_traces.scope_id`, and answers whether this call added it. Two connections can both find the column
+ * missing. On Postgres the second ALTER waits for the first's lock and then finds the column, which `IF NOT EXISTS`
+ * passes. SQLite has no such clause: the second ALTER fails ("duplicate column name") and finds the column when it looks
+ * again, and the connection that added it fills the table. A SQLite migration runs under `BEGIN IMMEDIATE`, where no
+ * other connection can add the column between its look and its ALTER; an open's schema step runs outside it.
+ */
+async function addScopeIdColumn(adapter: StorageAdapter): Promise<boolean> {
+  const ifNotExists = isPostgres(adapter) ? 'IF NOT EXISTS ' : '';
+  try {
+    await adapter.exec(`ALTER TABLE memory_traces ADD COLUMN ${ifNotExists}scope_id TEXT NOT NULL DEFAULT ''`);
+    return true;
+  } catch (error) {
+    // A failed statement aborts a Postgres transaction, so only SQLite looks again.
+    if (isPostgres(adapter) || !(await hasColumn(adapter, 'memory_traces', 'scope_id'))) throw error;
+    return false;
+  }
+}
+
+/**
  * Gives `memory_traces` its `scope_id` column and the column's two indexes: the one a per-scope read uses and the one
  * of the rows a fill can give a scope id. Adding the column fills it for every row of the table, before either index
  * is built. A store without the table is left alone: the schema step that follows creates it with the column.
  *
  * @param adapter - The store, or a migration's transaction.
- * @returns Whether this call added the column, and so filled every row of the table.
+ * @returns Whether this call added the column, and so filled every row of the table. On Postgres an ALTER that waited
+ *   for another connection's ALTER of the column passes it by `IF NOT EXISTS` and counts as added, and this call then
+ *   reads the rows that hold `''` again. The schema-3 migration takes the table's lock and looks for the column again
+ *   before it calls this, so its call never meets that case.
  */
 export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<boolean> {
   if (!(await tableExists(adapter, 'memory_traces'))) return false;
   let added = false;
-  if (!(await hasColumn(adapter, 'memory_traces', 'scope_id'))) {
-    // On Postgres the first opens of two brains can both find the column missing: the second ALTER waits for the
-    // first's lock and then finds the column, which `IF NOT EXISTS` lets it pass. SQLite has no such clause; its
-    // migrations run under `BEGIN IMMEDIATE`, so the second sees the column the first committed.
-    const ifNotExists = isPostgres(adapter) ? 'IF NOT EXISTS ' : '';
-    await adapter.exec(`ALTER TABLE memory_traces ADD COLUMN ${ifNotExists}scope_id TEXT NOT NULL DEFAULT ''`);
+  if (!(await hasColumn(adapter, 'memory_traces', 'scope_id')) && (await addScopeIdColumn(adapter))) {
     await backfillEveryBrain(adapter);
     added = true;
   }
@@ -234,18 +253,29 @@ export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<bool
  * `schema_version` is below 3, inside the migration's transaction (`BEGIN IMMEDIATE` on SQLite, a transaction that
  * holds the brain's advisory lock on Postgres), and then records version 3 for that brain.
  *
- * The first brain of a table to migrate adds the column ({@link ensureScopeIdColumn}), which fills it for every brain
- * the table holds from each row's metadata JSON. A brain that migrates after that fills its own rows that hold `''`:
- * a release older than the column may have written them since. A store with no `memory_traces` is left to the schema
+ * The first brain of a table to migrate adds the column ({@link ensureScopeIdColumn}): it fills the column for every
+ * brain the table holds from each row's metadata JSON, then builds the column's indexes. A brain that migrates after
+ * that changes nothing. The open that runs its migration builds any index the table lacks and files the traces a
+ * release older than the column wrote since, after the migration commits. Inside the migration's transaction, an index
+ * build would hold Postgres's SHARE lock on the table until the transaction ended, and the fill's update would then
+ * ask for ROW EXCLUSIVE: an open that builds the same index in the meantime holds SHARE while it waits for this
+ * transaction, and one of the two fails on the deadlock. When the migrations of two brains both find the column
+ * missing on Postgres, they take the table's ACCESS EXCLUSIVE lock in turn; the second looks again once it holds the
+ * lock, finds the column the first committed, and reads no row. A store with no `memory_traces` is left to the schema
  * step that follows, which creates the table with the column.
  */
 export const v2ToV3: Migration = {
   version: 3,
-  async up(adapter: StorageAdapter, _features: StorageFeatures, brainId: string): Promise<void> {
+  async up(adapter: StorageAdapter, _features: StorageFeatures, _brainId: string): Promise<void> {
     // A file with no `memory_traces` gets the table, with the column, from the schema step that follows.
     if (!(await tableExists(adapter, 'memory_traces'))) return;
-    // Adding the column filled every brain's rows, this brain's among them.
-    if (await ensureScopeIdColumn(adapter)) return;
-    await backfill(adapter, brainId);
+    if (await hasColumn(adapter, 'memory_traces', 'scope_id')) return;
+    if (isPostgres(adapter)) {
+      // The lock the ALTER would take, taken before the look that decides whether this migration adds the column.
+      await adapter.exec('LOCK TABLE memory_traces IN ACCESS EXCLUSIVE MODE');
+      if (await hasColumn(adapter, 'memory_traces', 'scope_id')) return;
+    }
+    // Adding the column fills every brain's rows, this brain's among them.
+    await ensureScopeIdColumn(adapter);
   },
 };
