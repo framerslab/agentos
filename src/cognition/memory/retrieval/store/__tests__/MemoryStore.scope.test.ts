@@ -3,9 +3,11 @@
  * One scope at a time: `hydrateScope` loads a returning user's oldest trace that the whole-brain hydration (the
  * 1,000 most recent traces) leaves out; `refileScope` moves a scope's traces to another scope id in the Brain, the
  * cache, the vector index and the knowledge graph's copy, its soft-deleted rows, a trace held with no embedding and,
- * with no Brain, the documents another store filed into a durable index included, and recall under the old id finds
- * none of them though the index failed to delete an old document; a trace's `turnUserId` survives a restart, and
- * `deleteScope` with `turnUserId` deletes only that user's traces of the scope. Real SQLite Brains.
+ * with no Brain, the documents another store filed into a durable index included, past stale copies at the front of
+ * the old collection; recall under the old id finds none of them though the index failed to delete an old document,
+ * and a write another writer makes to a moving trace's row is kept. A trace's `turnUserId` survives a restart, and
+ * `deleteScope` with `turnUserId` deletes only that user's traces of the scope. An empty scope id is refused by
+ * `refileScope` and `deleteScope`, and a limit that is not a positive integer by `hydrateScope`. Real SQLite Brains.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -112,6 +114,16 @@ describe('hydrateScope', () => {
     expect((await scoped.getByScope('user', 'ana')).map((t) => t.id)).toEqual(['t-ana']);
     expect(await scoped.hydrateScope('user', 'ana')).toBe(0);
   });
+
+  it('refuses a limit that is not a positive integer', async () => {
+    const brain = await openBrain(tempFile());
+    await (await storeOver(brain)).store(trace('t-ana', 'ana', 1_000));
+    const store = await storeOver(brain);
+    for (const limit of [0, -1, 2.5, Number.NaN]) {
+      await expect(store.hydrateScope('user', 'ana', limit)).rejects.toThrow(RangeError);
+    }
+    expect(await store.hydrateScope('user', 'ana', 1)).toBe(1);
+  });
 });
 
 describe('refileScope', () => {
@@ -196,6 +208,34 @@ describe('refileScope', () => {
     ]);
   });
 
+  it('with no Brain moves the traces after stale documents at the front of the old collection', async () => {
+    const vectorStore = await vectorStoreOf4();
+    // The index lists a collection two documents a read, from its start.
+    const scan = vectorStore.scanByMetadata.bind(vectorStore);
+    vectorStore.scanByMetadata = (name, options) => scan(name, { ...options, limit: Math.min(options?.limit ?? 100, 2) });
+    const graph = new KnowledgeGraph();
+    const store = storeWithoutBrain(vectorStore, graph);
+    await store.store(trace('t-1', '42', 1_000));
+    await store.store(trace('t-2', '42', 1_001));
+    // Stored again under another scope id, as a move whose delete from the old collection failed leaves them: the
+    // first documents of the old collection are stale copies of these two traces.
+    for (const id of ['t-1', 't-2']) await store.store({ ...store.getTrace(id)!, scopeId: '7' });
+    // Another store on the same index files two traces under the old id that this one never loads.
+    const other = storeWithoutBrain(vectorStore, graph);
+    await other.store(trace('t-3', '42', 1_002));
+    await other.store(trace('t-4', '42', 1_003));
+
+    expect(await store.refileScope('user', '42', 'A/42')).toBe(2);
+
+    const allIdsIn = async (collection: string) =>
+      (await InMemoryVectorStore.prototype.scanByMetadata.call(vectorStore, collection, { limit: 1000 })).documents
+        .map((document) => document.id)
+        .sort();
+    expect(await allIdsIn('cogmem_user_42')).toEqual([]);
+    expect(await allIdsIn('cogmem_user_A/42')).toEqual(['t-3', 't-4']);
+    expect(await allIdsIn('cogmem_user_7')).toEqual(['t-1', 't-2']);
+  });
+
   it('keeps recall under the old id from a trace whose old document the index failed to delete', async () => {
     const brain = await openBrain(tempFile());
     const vectorStore = await vectorStoreOf4();
@@ -220,6 +260,53 @@ describe('refileScope', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("keeps a write another writer makes to the trace's row while the trace moves", async () => {
+    const brain = await openBrain(tempFile());
+    const vectorStore = await vectorStoreOf4();
+    const store = await storeOver(brain, new KnowledgeGraph(), vectorStore);
+    await store.store(trace('t-1', '42', 1_000));
+    const upsert = vectorStore.upsert.bind(vectorStore);
+    vectorStore.upsert = async (name, documents, options) => {
+      // Another facade over the Brain writes the row's metadata while the trace's vector moves.
+      if (name === 'cogmem_user_A/42') {
+        await brain.run(`UPDATE memory_traces SET metadata = json_set(metadata, '$.recalledBy', 'facade') WHERE id = 't-1'`);
+      }
+      return upsert(name, documents, options);
+    };
+
+    expect(await store.refileScope('user', '42', 'A/42')).toBe(1);
+
+    const row = await brain.get<{ scope_id: string; metadata: string }>('SELECT scope_id, metadata FROM memory_traces WHERE id = ?', ['t-1']);
+    expect(row?.scope_id).toBe('A/42');
+    expect(JSON.parse(row!.metadata)).toMatchObject({ scopeId: 'A/42', recalledBy: 'facade' });
+  });
+});
+
+describe('an empty scope id', () => {
+  it('is refused by refileScope on either side, so a missing id never moves the traces filed under none', async () => {
+    const brain = await openBrain(tempFile());
+    const store = await storeOver(brain);
+    await store.store(trace('t-none', '', 1_000));
+    await store.store(trace('t-42', '42', 1_001));
+
+    await expect(store.refileScope('user', '', 'A/42')).rejects.toThrow(TypeError);
+    await expect(store.refileScope('user', '42', '')).rejects.toThrow(TypeError);
+
+    const rows = await brain.all<{ id: string; scope_id: string }>('SELECT id, scope_id FROM memory_traces ORDER BY id');
+    expect(rows).toEqual([{ id: 't-42', scope_id: '42' }, { id: 't-none', scope_id: '' }]);
+    expect((await store.getByScope('user', '42')).map((t) => t.id)).toEqual(['t-42']);
+  });
+
+  it('is refused by deleteScope, so a missing id never deletes the traces filed under none', async () => {
+    const brain = await openBrain(tempFile());
+    const store = await storeOver(brain);
+    await store.store(trace('t-none', '', 1_000));
+
+    await expect(store.deleteScope('user', '')).rejects.toThrow(TypeError);
+
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([{ id: 't-none' }]);
   });
 });
 
