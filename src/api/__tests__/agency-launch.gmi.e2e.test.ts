@@ -576,4 +576,87 @@ describe('launch_agency on gmi()', () => {
     // The parent's budget holds its own two steps (6,000 and 15 tokens) and the first seat's 6,000.
     expect(budget.tokensUsed()).toBe(12_015);
   });
+
+  it('a parent with no budget draws on the launch pool, and the one-call floor counts its output cap', async () => {
+    const twoSeats = { goal: 'Two parts.', seats: [{ role: 'first', instructions: 'Part one.' }, { role: 'second', instructions: 'Part two.' }] };
+    const k = key();
+    const s = script('openai', k, { replies: [launchStep(twoSeats), textCosting('Part one done.', 2_500), reply.text('Partial.')] });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', maxTokens: 1_000, agencies: { launch: true, maxLaunchTokens: 3_000 } });
+    const out = launchOf(await parent.session('p1').send('Go.'));
+    expect(out.status).toBe('budget_exhausted');
+    expect(out.provenance.budget.maxTotalTokens).toBe(3_000);
+    expect(out.seats.map((r) => r.status)).toEqual(['completed', 'cut']);
+    // The pool refused the second seat's call before its request: the 2,500 tokens the first used and the call's
+    // estimate, at least its 1,000 output tokens, would pass the pool's 3,000. The stub saw root, first, root.
+    expect(out.reason).toMatch(/^a budget the team draws on refused a call: \d+ tokens would pass 3000$/);
+    expect(Number(out.reason?.match(/(\d+) tokens/)?.[1])).toBeGreaterThanOrEqual(3_500);
+    expect(out.provenance.budget.tokensUsed).toBe(2_500);
+    expect(s.seen).toHaveLength(3);
+
+    // 2,500 cannot cover one call: 2,000 for the prompt and the route's 1,000 output tokens.
+    const k2 = key();
+    const s2 = script('openai', k2, { replies: [launchStep(twoSeats), reply.text('No team.')] });
+    const poor = gmi({ ...route(k2), instructions: 'Coordinate.', maxTokens: 1_000, agencies: { launch: true, maxLaunchTokens: 2_500 } });
+    const refused = await poor.session('p2').send('Go.');
+    expect(refusalOf(refused, 0)).toBe('budget_unavailable');
+    expect(refused.toolCalls[0].error).toBe("budget_unavailable: the launch's token cap, 2500, cannot cover one call (3000: 2000 for the prompt and 1000 for the output)");
+    expect(s2.seen).toHaveLength(2);
+  });
+
+  it("the one-call floor holds the route's maxTokens to the output ceiling of the model the agent resolved", async () => {
+    const oneSeat = { goal: 'Answer.', seats: [{ role: 'answerer', instructions: 'Answer.' }] };
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([
+          { id: 'c1', name: 'launch_agency', args: { ...oneSeat, maxTokens: 18_000 } },
+          { id: 'c2', name: 'launch_agency', args: oneSeat },
+        ]),
+        reply.text('Answered.'),
+        reply.text('Done.'),
+      ],
+    });
+    // No model named: the agent runs on OpenAI's default, gpt-4o, which writes at most 16,384 tokens a call, so each
+    // seat's own check counts the 32,000 as 16,384.
+    const parent = gmi({ provider: 'openai', apiKey: k, fallbackProviders: [], instructions: 'Coordinate.', maxTokens: 32_000, agencies: { launch: true, maxLaunchTokens: 20_000 } });
+
+    const result = await parent.session('p1').send('Go.');
+    // 18,000 cannot cover one call: 2,000 for the prompt and the 16,384 a call of the route writes at most.
+    expect(refusalOf(result, 0)).toBe('budget_unavailable');
+    expect(result.toolCalls[0].error).toBe("budget_unavailable: the launch's token cap, 18000, cannot cover one call (18384: 2000 for the prompt and 16384 for the output)");
+    // The pool's 20,000 can, and the seat runs on the agent's route with its maxTokens: root, the seat, root.
+    expect(launchOf(result, 1)).toMatchObject({ status: 'completed', text: 'Answered.' });
+    expect(s.seen.map((call) => call.modelId)).toEqual(['gpt-4o', 'gpt-4o', 'gpt-4o']);
+    expect(s.seen[1].options.maxTokens).toBe(32_000);
+    expect(result.text).toBe('Done.');
+  });
+
+  it("a member's launch from its seat is floored on the member's own route, which its team's seats run on", async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        // The root's step: the member takes the team's one seat, and may launch from it.
+        launchStep({ goal: 'Plan the trip.', seats: [{ role: 'lead', agentKey: 'planner', tools: ['launch_agency'] }] }),
+        // The member's seat turn: a team of one under a 5,000-token cap, whose seat the member builds on its own route,
+        // at 8,000 output tokens a call.
+        launchStep({ goal: 'Draft the plan.', maxTokens: 5_000, seats: [{ role: 'drafter', instructions: 'Draft the plan.' }] }, 'n1'),
+        reply.text('No team.'),
+        reply.text('Planned.'),
+      ],
+    });
+    const planner = gmi({ ...route(k), name: 'Planner', instructions: 'You plan trips.', maxTokens: 8_000, agencies: { launch: true } });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', maxTokens: 1_000, agencies: { launch: true, members: { planner } } });
+
+    const result = await parent.session('p1').send('Plan a trip.');
+    expect(launchOf(result).status).toBe('completed');
+    // The member's seat turn ran (the precondition), and its launch was refused before a seat was built: 5,000 covers
+    // one call of the root's route, but not one of the member's (2,000 for the prompt and its 8,000 output tokens).
+    expect(systemText(s.seen[1])).toContain('You plan trips.');
+    const memberStep = JSON.stringify(s.seen[2].messages);
+    expect(memberStep).toContain('(10000: 2000 for the prompt and 8000 for the output)');
+    expect(memberStep).toContain('budget_unavailable');
+    // Root, the member's two steps, root: no drafter call.
+    expect(s.seen).toHaveLength(4);
+    expect(result.text).toBe('Planned.');
+  });
 });
