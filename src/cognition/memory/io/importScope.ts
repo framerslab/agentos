@@ -1,13 +1,15 @@
 /**
- * @fileoverview The scope id an imported trace is filed under.
+ * @fileoverview The scope id an imported trace is filed under, and the trace an imported record duplicates.
  *
  * An importer files each trace under its scope and scope id and deduplicates inside that pair: a record whose text a
  * trace of another scope id holds (another tenant's, user's or session's) is imported, and a record whose text a trace
- * of its own scope and scope id holds is a duplicate. The Markdown export writes the same scope id into a trace's
- * front matter, so a note carries it out of one brain and into another.
+ * of its own scope and scope id holds is a duplicate, whichever writer stored that trace. The Markdown export writes
+ * the same scope id into a trace's front matter, so a note carries it out of one brain and into another.
  *
  * @module memory/io/importScope
  */
+
+import type { Brain } from '../retrieval/store/Brain.js';
 
 /**
  * The scope id an imported trace files under: its metadata's `scopeId` when that is a string, else the record's own
@@ -31,4 +33,32 @@ export function importedScopeId(metadata: unknown, scopeIdColumn?: unknown): str
   if (typeof scopeIdColumn !== 'string' || scopeIdColumn === '') return '';
   if (record) record.scopeId = scopeIdColumn;
   return scopeIdColumn;
+}
+
+/**
+ * The SQL condition that finds the trace an imported record duplicates, beside the conditions that name the brain,
+ * the scope and the scope id: a trace whose text is the record's, or whose metadata names the SHA-256 of that text as
+ * `import_hash` (an import stores it) or `content_hash` (`remember()`, `ingest()` and `memory_add` store it). A trace
+ * the cognitive memory store wrote carries neither hash, and its text finds it.
+ *
+ * @param brain - The brain the query runs on; its dialect reads the metadata.
+ * @returns A parenthesised condition on `memory_traces` with the three placeholders {@link duplicateTraceParams}
+ *   fills, in its order.
+ */
+export function duplicateTraceCondition(brain: Pick<Brain, 'features'>): string {
+  const { dialect } = brain.features;
+  return `(${dialect.jsonExtract('metadata', '$.import_hash')} = ?
+              OR ${dialect.jsonExtract('metadata', '$.content_hash')} = ?
+              OR content = ?)`;
+}
+
+/**
+ * The values of {@link duplicateTraceCondition}'s placeholders.
+ *
+ * @param hash - The SHA-256 of the record's text.
+ * @param content - The record's text, as the import would store it.
+ * @returns The hash twice, then the text.
+ */
+export function duplicateTraceParams(hash: string, content: string): [string, string, string] {
+  return [hash, hash, content];
 }

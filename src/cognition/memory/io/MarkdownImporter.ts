@@ -12,9 +12,10 @@
  * trace filed under a scope id, so an export carries each trace's scope id
  * out and back in.
  *
- * Deduplication uses SHA-256 of the content body — files already present in
- * the target brain (same hash in `metadata.import_hash`, same scope, and the
- * same scope id) are skipped. A trace a release older than
+ * Deduplication works inside the file's scope and scope id: a file whose body
+ * a trace there holds, or whose body's SHA-256 a trace there names as
+ * `metadata.import_hash` or `metadata.content_hash`, is skipped, whichever
+ * writer stored that trace. A trace a release older than
  * `memory_traces.scope_id` wrote holds `''` in that column whatever scope id
  * its metadata names; the import files such traces under that scope id first
  * (`fillScopeIds`), so another scope id's trace is not taken for a file's
@@ -29,6 +30,7 @@ import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { readFrontMatter, type FrontMatterFile } from '../../../core/utils/frontMatter.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { duplicateTraceCondition, duplicateTraceParams } from './importScope.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -204,14 +206,13 @@ export class MarkdownImporter {
     const scopeId = typeof fm.scopeId === 'string' ? fm.scopeId : '';
 
     // Dedup check, inside the file's scope and scope id.
-    const { dialect } = this.brain.features;
     if (options?.dedup ?? true) {
       const existing = await this.brain.get<{ id: string }>(
         `SELECT id FROM memory_traces
           WHERE brain_id = ? AND scope = ? AND scope_id = ?
-            AND ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
+            AND ${duplicateTraceCondition(this.brain)}
           LIMIT 1`,
-        [this.brain.brainId, scope, scopeId, hash],
+        [this.brain.brainId, scope, scopeId, ...duplicateTraceParams(hash, body)],
       );
 
       if (existing) {
