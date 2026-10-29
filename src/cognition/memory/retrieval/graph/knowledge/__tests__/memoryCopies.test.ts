@@ -6,8 +6,8 @@
  * memory node once the graph has re-keyed, at its first delete by trace id, the copies an older release recorded
  * under a random node id. A real SQLite Brain, and a Postgres one where CI provides it (`AGENTOS_TEST_POSTGRES_URL`):
  * a relation that names a copy goes with the copy and moves with it to its key, a move that fails keeps the copy for a
- * later graph and a delete by its trace id still deletes it, and a scope id that holds a quote or a backslash finds its
- * copies on both.
+ * later graph and a delete by its trace id still deletes it, a read of the older copies that fails leaves a delete by
+ * trace id its older copy too, and a scope id that holds a quote or a backslash finds its copies on both.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -303,6 +303,32 @@ describe.each(sqlBrains)('SqlKnowledgeGraph over %s', (_name, open) => {
     expect(failed).toBe(true);
     expect(await textsOf(graph)).toEqual(['Ana keeps bees.']);
     expect(await new SqlKnowledgeGraph(brain).deleteMemories({ traceIds: ['mt_old1'] })).toBe(1);
+    expect(await textsOf(graph)).toEqual([]);
+  });
+
+  it('deletes by its trace id a copy an older release recorded when the read of such copies fails', async () => {
+    const brain = await open();
+    await insertOlderCopy(brain, '5d2c0f4e-1111-4a6b-9c1d-000000000001', 'mt_old1', 'ana', 'Ana keeps bees.');
+    await insertOlderCopy(brain, '9a1b7c3d-2222-4a6b-9c1d-000000000002', 'mt_old2', 'ana', 'Ana sells honey.');
+    const graph = new SqlKnowledgeGraph(brain);
+    // The read of the copies an older release recorded fails, as one does when the connection drops.
+    const all = brain.all.bind(brain);
+    let failed = false;
+    vi.spyOn(brain, 'all').mockImplementation(((sql: string, params?: unknown[]) => {
+      if (!failed && /\bid NOT LIKE\b/.test(sql)) {
+        failed = true;
+        return Promise.reject(new Error('Connection terminated unexpectedly'));
+      }
+      return all(sql, params as never);
+    }) as never);
+
+    expect(await graph.deleteMemories({ traceIds: ['mt_old1'] })).toBe(1);
+    vi.restoreAllMocks();
+
+    expect(failed).toBe(true);
+    expect(await textsOf(graph)).toEqual(['Ana sells honey.']);
+    // The next delete by trace id keys the older copies that are left.
+    expect(await graph.deleteMemories({ traceIds: ['mt_old2'] })).toBe(1);
     expect(await textsOf(graph)).toEqual([]);
   });
 

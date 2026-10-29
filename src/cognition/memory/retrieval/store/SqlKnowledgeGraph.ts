@@ -46,6 +46,7 @@ import {
   isEmptyCopyFilter,
   isMemoryCopyOf,
   scopeNeedles,
+  traceNeedles,
 } from '../graph/knowledge/memoryCopies.js';
 import type { Brain } from './Brain.js';
 import { uuid } from '../../core/util/crossPlatformCrypto.js';
@@ -164,6 +165,15 @@ function storedContext(properties: string): unknown {
   }
 }
 
+/**
+ * The trace a `knowledge_nodes` row copies, read from its `properties` (the stored context names it,
+ * `memoryTraceId`), or `undefined` for a row that copies no trace or whose properties do not parse. An importer reads
+ * a file's rows with it.
+ */
+export function storedCopyTraceId(properties: string | null | undefined): string | undefined {
+  return typeof properties === 'string' ? copiedTraceId(storedContext(properties)) : undefined;
+}
+
 /** The columns `recordMemory` writes, in order. */
 const MEMORY_NODE_COLUMNS = ['brain_id', 'id', 'type', 'label', 'properties', 'embedding', 'confidence', 'source', 'created_at'];
 
@@ -206,7 +216,7 @@ export async function keyTraceCopies(
     [brainId, `${likeLiteral(COPY_KEY_PREFIX)}%`, likeContaining(TRACE_CONTEXT_MARKER)],
   );
   for (const row of rows) {
-    const traceId = copiedTraceId(storedContext(row.properties));
+    const traceId = storedCopyTraceId(row.properties);
     if (traceId === undefined) continue;
     try {
       await moveCopyToKey(db, brainId, row.id, copyKey(traceId));
@@ -274,8 +284,11 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
   /** The shared SQLite brain instance. */
   private readonly brain: Brain;
 
-  /** This instance's pass over the trace copies an older release recorded, once it has started ({@link rekeyOlderCopies}). */
-  private olderCopiesRekeyed: Promise<void> | null = null;
+  /**
+   * This instance's pass over the trace copies an older release recorded, once it has started, and whether it ran
+   * through ({@link rekeyOlderCopies}).
+   */
+  private olderCopiesRekeyed: Promise<boolean> | null = null;
 
   /**
    * The node ids of the copies an older release recorded whose move to their key failed in this instance's pass, by
@@ -715,7 +728,9 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
    * Delete the memory nodes that copy the filter's traces or scopes, with the relations that name them, as
    * `deleteEntity` deletes an entity's. A trace's copy is deleted by its key; the first delete by trace id of this
    * instance first gives the copies an older release recorded their key ({@link rekeyOlderCopies}), and a copy whose
-   * move failed in that pass is deleted by its node id. A scope's copies are read by the text their stored JSON holds
+   * move failed in that pass is deleted by its node id. While that pass fails as a whole, a delete by trace id reads
+   * the trace's copies held under another node id by the text their stored JSON holds ({@link olderCopyIds}) and
+   * deletes them too. A scope's copies are read by the text their stored JSON holds
    * (`LIKE` with an escape clause, which on SQLite also matches the text in other letter cases) and matched exactly in
    * code, so a malformed `properties` value is skipped rather than failing the delete.
    */
@@ -724,10 +739,15 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
     let deleted = 0;
     const traceIds = filterTraceIds(filter);
     if (traceIds.length > 0) {
-      await this.rekeyOlderCopies();
-      const ids = traceIds.map(copyKey);
-      for (const traceId of traceIds) ids.push(...(this.unmovedOlderCopies.get(traceId) ?? []));
-      deleted += await this.deleteMemoryNodes(ids);
+      const keyed = await this.rekeyOlderCopies();
+      const ids = new Set(traceIds.map(copyKey));
+      for (const traceId of traceIds) {
+        for (const id of this.unmovedOlderCopies.get(traceId) ?? []) ids.add(id);
+      }
+      if (!keyed) {
+        for (const id of await this.olderCopyIds(traceIds)) ids.add(id);
+      }
+      deleted += await this.deleteMemoryNodes([...ids]);
       for (const traceId of traceIds) this.unmovedOlderCopies.delete(traceId);
     }
     const scopes = filter.scopes ?? [];
@@ -746,6 +766,30 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
       deleted += await this.deleteMemoryNodes([...ids]);
     }
     return deleted;
+  }
+
+  /**
+   * The node ids of these traces' copies held under another node id than their key, read by the text their stored
+   * JSON holds (`"memoryTraceId":"<id>"`, an escaped `LIKE`, 50 traces a statement) and matched exactly in code: what
+   * a delete by trace id reads while the pass that keys such copies fails as a whole ({@link rekeyOlderCopies}).
+   */
+  private async olderCopyIds(traceIds: readonly string[]): Promise<string[]> {
+    const byTrace: MemoryCopyFilter = { traceIds };
+    const needles = traceNeedles(traceIds);
+    const ids: string[] = [];
+    for (let offset = 0; offset < needles.length; offset += 50) {
+      const chunk = needles.slice(offset, offset + 50);
+      const rows = await this.brain.all<{ id: string; properties: string }>(
+        `SELECT id, properties FROM knowledge_nodes
+          WHERE brain_id = ? AND type = 'memory' AND id NOT LIKE ? ESCAPE '!'
+            AND (${chunk.map(() => "properties LIKE ? ESCAPE '!'").join(' OR ')})`,
+        [this.brain.brainId, `${likeLiteral(COPY_KEY_PREFIX)}%`, ...chunk.map(likeContaining)],
+      );
+      for (const row of rows) {
+        if (isMemoryCopyOf(storedContext(row.properties), byTrace)) ids.push(row.id);
+      }
+    }
+    return ids;
   }
 
   /**
@@ -776,20 +820,29 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
    * a delete by trace id finds them by key ({@link keyTraceCopies}). Of two copies of one trace the newer takes the
    * key and the other is deleted, as a second record of a trace replaces the first; the relations that name either
    * move to the key. A copy whose move fails keeps its node id, with a warning, and the next instance's pass moves it;
-   * a delete by its trace id in the meantime deletes it by that node id. An import keys the copies it writes as it
-   * writes them. A copy a release older than keyed copies writes into the same Brain after the pass, while both
-   * releases run on it, gets its key from the next instance's pass; until then a delete by its scope finds it.
+   * a delete by its trace id in the meantime deletes it by that node id. A pass that fails as a whole (its read of
+   * the copies) resolves `false`, with a warning: the delete that waited for it reads the trace's older copies by
+   * their stored JSON ({@link olderCopyIds}), and the next delete by trace id makes the pass again. An import keys the
+   * copies it writes as it writes them. A copy a release older than keyed copies writes into the same Brain after the
+   * pass, while both releases run on it, gets its key from the next instance's pass; until then a delete by its scope
+   * finds it.
+   *
+   * @returns Whether the pass ran through, its copies moved or remembered by node id.
    */
-  private rekeyOlderCopies(): Promise<void> {
+  private rekeyOlderCopies(): Promise<boolean> {
     if (!this.olderCopiesRekeyed) {
-      this.olderCopiesRekeyed = this.moveOlderCopies().catch((error: unknown) => {
-        this.olderCopiesRekeyed = null;
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(
-          `[SqlKnowledgeGraph] keying the trace copies an older release recorded in brain ${this.brain.brainId} ` +
-            `failed; a delete by trace id misses them until the next one tries again: ${message}`,
-        );
-      });
+      this.olderCopiesRekeyed = this.moveOlderCopies().then(
+        () => true,
+        (error: unknown) => {
+          this.olderCopiesRekeyed = null;
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[SqlKnowledgeGraph] keying the trace copies an older release recorded in brain ${this.brain.brainId} ` +
+              `failed; until a pass runs through, a delete by trace id reads them by their stored context: ${message}`,
+          );
+          return false;
+        },
+      );
     }
     return this.olderCopiesRekeyed;
   }

@@ -663,7 +663,7 @@ User prefers TypeScript over Python
 
 ### SQLite
 
-Merges one brain's SQLite file into the current brain. The importer reads the rows of the one brain the file holds: a file whose rows carry several brain ids imports nothing, and `errors` names the ids. A SQLite export holds one brain, so export each brain and import its file. A file older than the `brain_id` column holds one brain, and every row of it is read. A source trace is not inserted when a trace of the same scope and scope id in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. Once the import has committed, the importer rebuilds the brain's full-text index, once, when it inserted a trace or a merge changed a trace's tags (on Postgres, the `_tsv` column of the brain's own rows), so `memory_search` finds the imported traces, and a trace by a merged tag. Knowledge nodes are matched by label and type, edges by source, target and type.
+Merges one brain's SQLite file into the current brain. The importer reads the rows of the one brain the file holds: a file whose rows carry several brain ids imports nothing, and `errors` names the ids. A SQLite export holds one brain, so export each brain and import its file. A file older than the `brain_id` column holds one brain, and every row of it is read. A source trace is not inserted when a trace of the same scope and scope id in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. Once the import has committed, the importer rebuilds the brain's full-text index, once, when it inserted a trace or a merge changed a trace's tags (on Postgres, the `_tsv` column of the brain's own rows), so `memory_search` finds the imported traces, and a trace by a merged tag. Knowledge nodes are matched by label and type, edges by source, target and type. A trace's episodic copy comes in with its trace alone: the copy of a source trace merged into a trace the brain holds, or written under another id because its id names another trace, is not imported, nor are the edges that name it.
 
 ```ts
 const result = await mem.importFrom('./backup.sqlite', { format: 'sqlite' });
@@ -672,7 +672,7 @@ console.log(`Imported: ${result.imported}, Skipped: ${result.skipped}`);
 
 ### JSON
 
-Parses a [`JsonExporter`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/JsonExporter.ts)-format JSON file and restores traces plus any included graph/document/conversation rows.
+Parses a [`JsonExporter`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/JsonExporter.ts)-format JSON file and restores traces plus any included graph/document/conversation rows. A trace's episodic copy comes in with its trace alone, as in the SQLite import: the copy of a trace merged into one the brain holds, or written under another id, is not imported, nor are the edges that name it.
 
 ```ts
 const result = await mem.importFrom('./memories.json', { format: 'json' });

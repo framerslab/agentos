@@ -17,7 +17,10 @@
  * brain's own copy of the trace holds, written under a new id) is filed under
  * the key once the edges are in, with the relations that name it, so a delete
  * by its trace id finds it (`keyTraceCopies`); a copy whose key the brain's own
- * copy holds is deleted.
+ * copy holds is deleted. A trace's copy comes in with its trace alone: the copy
+ * of a trace the import merges into a trace the brain holds, writes under
+ * another id because its id names another trace, or does not write, is
+ * skipped, with the edges that name it.
  *
  * @module memory/io/JsonImporter
  */
@@ -29,7 +32,7 @@ import type { Brain } from '../retrieval/store/Brain.js';
 import { base64ToBytes } from './base64.js';
 import { importedScopeId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
-import { keyTraceCopies } from '../retrieval/store/SqlKnowledgeGraph.js';
+import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -152,6 +155,12 @@ interface MessageRecord {
 interface ImportContext {
   dedup: boolean;
   traceIds: Map<string, string>;
+  /** The payload's trace ids. */
+  sourceTraceIds: Set<string>;
+  /** The payload's trace ids the import wrote, or matched as a duplicate, under that same id. */
+  filedTraceIds: Set<string>;
+  /** The payload ids of the copies left out, since their trace was not filed under its own id. */
+  skippedNodeIds: Set<string>;
   nodeIds: Map<string, string>;
   documentIds: Map<string, string>;
   chunkIds: Map<string, string>;
@@ -259,6 +268,9 @@ export class JsonImporter {
     const context: ImportContext = {
       dedup: options?.dedup ?? true,
       traceIds: new Map<string, string>(),
+      sourceTraceIds: new Set<string>(),
+      filedTraceIds: new Set<string>(),
+      skippedNodeIds: new Set<string>(),
       nodeIds: new Map<string, string>(),
       documentIds: new Map<string, string>(),
       chunkIds: new Map<string, string>(),
@@ -354,6 +366,7 @@ export class JsonImporter {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
     for (const t of traces) {
+      if (t.id) context.sourceTraceIds.add(t.id);
       try {
         const hash = await this._sha256(t.content);
         const sourceId = t.id;
@@ -372,6 +385,7 @@ export class JsonImporter {
           const existing = await trx.get<{ id: string }>(checkSql, [brainId, scope, scopeId, hash]);
           if (existing) {
             if (sourceId) context.traceIds.set(sourceId, existing.id);
+            if (sourceId && existing.id === sourceId) context.filedTraceIds.add(sourceId);
             result.skipped++;
             continue;
           }
@@ -412,6 +426,7 @@ export class JsonImporter {
         ]);
 
         if (sourceId) context.traceIds.set(sourceId, id);
+        if (sourceId && id === sourceId) context.filedTraceIds.add(sourceId);
         result.imported++;
       } catch (err) {
         result.errors.push(`Trace import error: ${String(err)}`);
@@ -422,7 +437,9 @@ export class JsonImporter {
   /**
    * Import knowledge node records into `knowledge_nodes`.
    *
-   * Dedup key: SHA-256 of `label` concatenated with `type`.
+   * Dedup key: SHA-256 of `label` concatenated with `type`. The copy of a
+   * payload trace the import did not file under its own id is skipped: it
+   * would name a trace the brain does not hold under that id.
    *
    * @param trx    - Transactional storage adapter.
    * @param nodes  - Array of serialised node objects.
@@ -448,6 +465,14 @@ export class JsonImporter {
 
     for (const n of nodes) {
       try {
+        // A trace's copy comes in with its trace alone.
+        const copied = n.type === 'memory' ? storedCopyTraceId(n.properties) : undefined;
+        if (copied !== undefined && context.sourceTraceIds.has(copied) && !context.filedTraceIds.has(copied)) {
+          if (n.id) context.skippedNodeIds.add(n.id);
+          result.skipped++;
+          continue;
+        }
+
         const hash = await this._sha256(`${n.label ?? ''}::${n.type ?? ''}`);
         const sourceId = n.id;
         const existing = await trx.get<{ id: string }>(checkSql, [brainId, hash]);
@@ -503,7 +528,8 @@ export class JsonImporter {
    * Import knowledge edge records into `knowledge_edges`.
    *
    * Dedup key: SHA-256 of `source_id + target_id + type`.
-   * Edges referencing non-existent nodes are silently skipped (FK constraint).
+   * Edges referencing non-existent nodes are silently skipped (FK constraint),
+   * and an edge that names a copy the node import skipped is skipped.
    *
    * @param trx    - Transactional storage adapter.
    * @param edges  - Array of serialised edge objects.
@@ -527,6 +553,10 @@ export class JsonImporter {
 
     for (const e of edges) {
       try {
+        if ((e.source_id && context.skippedNodeIds.has(e.source_id)) || (e.target_id && context.skippedNodeIds.has(e.target_id))) {
+          result.skipped++;
+          continue;
+        }
         const sourceId = e.source_id ? (context.nodeIds.get(e.source_id) ?? e.source_id) : null;
         const targetId = e.target_id ? (context.nodeIds.get(e.target_id) ?? e.target_id) : null;
         if (!sourceId || !targetId) {

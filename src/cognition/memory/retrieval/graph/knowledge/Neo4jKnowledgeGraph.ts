@@ -41,6 +41,7 @@ import {
   isEmptyCopyFilter,
   isMemoryCopyOf,
   scopeNeedles,
+  traceNeedles,
 } from './memoryCopies.js';
 import type { Neo4jConnectionManager } from '../neo4j/Neo4jConnectionManager.js';
 import { Neo4jCypherRunner } from '../neo4j/Neo4jCypherRunner.js';
@@ -89,8 +90,11 @@ export interface Neo4jKnowledgeGraphConfig {
 
 export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
   private cypher!: Neo4jCypherRunner;
-  /** This graph's pass over the trace copies an older release recorded, once it has started ({@link backfillCopyTraceIds}). */
-  private copyTraceIdsBackfilled: Promise<void> | null = null;
+  /**
+   * This graph's pass over the trace copies an older release recorded, once it has started, and whether it ran through
+   * ({@link backfillCopyTraceIds}).
+   */
+  private copyTraceIdsBackfilled: Promise<boolean> | null = null;
   private embeddingDimension: number;
   private memoryDecayRate: number;
   private minImportanceThreshold: number;
@@ -451,7 +455,9 @@ export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
   /**
    * Delete the episodic memories that copy the filter's traces or scopes. A trace's copies are read through their
    * trace id (`traceId`, indexed); the first delete by trace id of this graph first gives the copies an older release
-   * recorded their trace id ({@link backfillCopyTraceIds}). A scope's copies are read by the text their stored context
+   * recorded their trace id ({@link backfillCopyTraceIds}). While that pass fails, a delete by trace id also reads the
+   * copies that carry no trace id by the text their stored context JSON must hold (`"memoryTraceId":"<id>"`) and
+   * matches them exactly in code. A scope's copies are read by the text their stored context
    * JSON must hold (`CONTAINS`) and matched exactly in code, so a malformed `context_json` is skipped rather than
    * failing the delete.
    */
@@ -460,12 +466,25 @@ export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
     const ids = new Set<string>();
     const traceIds = filterTraceIds(filter);
     if (traceIds.length > 0) {
-      await this.backfillCopyTraceIds();
+      const backfilled = await this.backfillCopyTraceIds();
       const rows = await this.cypher.read<{ id: string }>(
         `MATCH (m:${MEMORY_LABEL}) WHERE m.traceId IN $traceIds RETURN m.memoryId AS id`,
         { traceIds },
       );
       for (const row of rows) ids.add(row.id);
+      if (!backfilled) {
+        const byTrace: MemoryCopyFilter = { traceIds };
+        const older = await this.cypher.read<{ id: string; context: string | null }>(
+          `MATCH (m:${MEMORY_LABEL})
+           WHERE m.traceId IS NULL AND m.context_json IS NOT NULL
+             AND any(needle IN $needles WHERE m.context_json CONTAINS needle)
+           RETURN m.memoryId AS id, m.context_json AS context`,
+          { needles: traceNeedles(traceIds) },
+        );
+        for (const row of older) {
+          if (isMemoryCopyOf(this.safeParseJson(row.context, undefined), byTrace)) ids.add(row.id);
+        }
+      }
     }
     const scopes = filter.scopes ?? [];
     if (scopes.length > 0) {
@@ -487,20 +506,27 @@ export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
 
   /**
    * Give the trace copies an older release recorded, which carry no `traceId`, the trace id their stored context
-   * names, once per graph, so a delete by trace id finds them through the index. A pass that fails is made again at
-   * the next delete by trace id. A copy an older release writes after the pass gets its trace id from the next
-   * graph's pass; until then a delete by its scope finds it.
+   * names, once per graph, so a delete by trace id finds them through the index. A pass that fails (its read or one
+   * of its writes) resolves `false`, with a warning: the delete that waited for it reads the trace's copies with no
+   * trace id by their stored context, and the next delete by trace id makes the pass again. A copy an older release
+   * writes after the pass gets its trace id from the next graph's pass; until then a delete by its scope finds it.
+   *
+   * @returns Whether the pass ran through.
    */
-  private backfillCopyTraceIds(): Promise<void> {
+  private backfillCopyTraceIds(): Promise<boolean> {
     if (!this.copyTraceIdsBackfilled) {
-      this.copyTraceIdsBackfilled = this.writeCopyTraceIds().catch((error: unknown) => {
-        this.copyTraceIdsBackfilled = null;
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(
-          `[Neo4jKnowledgeGraph] giving older trace copies their trace id failed; a delete by trace id misses them ` +
-            `until the next one tries again: ${message}`,
-        );
-      });
+      this.copyTraceIdsBackfilled = this.writeCopyTraceIds().then(
+        () => true,
+        (error: unknown) => {
+          this.copyTraceIdsBackfilled = null;
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[Neo4jKnowledgeGraph] giving older trace copies their trace id failed; until a pass runs through, a ` +
+              `delete by trace id reads them by their stored context: ${message}`,
+          );
+          return false;
+        },
+      );
     }
     return this.copyTraceIdsBackfilled;
   }
