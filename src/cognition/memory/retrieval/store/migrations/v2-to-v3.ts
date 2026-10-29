@@ -203,21 +203,19 @@ async function backfillEveryBrain(adapter: StorageAdapter): Promise<void> {
 }
 
 /**
- * Adds `memory_traces.scope_id`, and answers whether this call added it. Two connections can both find the column
+ * Adds `memory_traces.scope_id`, or finds that another connection has. Two connections can both find the column
  * missing. On Postgres the second ALTER waits for the first's lock and then finds the column, which `IF NOT EXISTS`
  * passes. SQLite has no such clause: the second ALTER fails ("duplicate column name") and finds the column when it looks
- * again, and the connection that added it fills the table. A SQLite migration runs under `BEGIN IMMEDIATE`, where no
- * other connection can add the column between its look and its ALTER; an open's schema step runs outside it.
+ * again. A SQLite migration runs under `BEGIN IMMEDIATE`, where no other connection can add the column between its look
+ * and its ALTER; an open's schema step runs outside it.
  */
-async function addScopeIdColumn(adapter: StorageAdapter): Promise<boolean> {
+async function addScopeIdColumn(adapter: StorageAdapter): Promise<void> {
   const ifNotExists = isPostgres(adapter) ? 'IF NOT EXISTS ' : '';
   try {
     await adapter.exec(`ALTER TABLE memory_traces ADD COLUMN ${ifNotExists}scope_id TEXT NOT NULL DEFAULT ''`);
-    return true;
   } catch (error) {
     // A failed statement aborts a Postgres transaction, so only SQLite looks again.
     if (isPostgres(adapter) || !(await hasColumn(adapter, 'memory_traces', 'scope_id'))) throw error;
-    return false;
   }
 }
 
@@ -226,16 +224,19 @@ async function addScopeIdColumn(adapter: StorageAdapter): Promise<boolean> {
  * of the rows a fill can give a scope id. Adding the column fills it for every row of the table, before either index
  * is built. A store without the table is left alone: the schema step that follows creates it with the column.
  *
+ * A call that finds the column missing fills the table even when another connection adds the column first: that
+ * connection may stop after its ALTER, before its own fill, and the fill writes only the rows that still hold `''`.
+ *
  * @param adapter - The store, or a migration's transaction.
- * @returns Whether this call added the column, and so filled every row of the table. On Postgres an ALTER that waited
- *   for another connection's ALTER of the column passes it by `IF NOT EXISTS` and counts as added, and this call then
- *   reads the rows that hold `''` again. The schema-3 migration takes the table's lock and looks for the column again
- *   before it calls this, so its call never meets that case.
+ * @returns Whether this call found the column missing, and so filled every row of the table. The schema-3 migration
+ *   looks for the column under the table's lock (Postgres) or `BEGIN IMMEDIATE` (SQLite) before it calls this, so
+ *   another connection never adds the column first there.
  */
 export async function ensureScopeIdColumn(adapter: StorageAdapter): Promise<boolean> {
   if (!(await tableExists(adapter, 'memory_traces'))) return false;
   let added = false;
-  if (!(await hasColumn(adapter, 'memory_traces', 'scope_id')) && (await addScopeIdColumn(adapter))) {
+  if (!(await hasColumn(adapter, 'memory_traces', 'scope_id'))) {
+    await addScopeIdColumn(adapter);
     await backfillEveryBrain(adapter);
     added = true;
   }
