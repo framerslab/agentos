@@ -3,7 +3,8 @@
  * Deleting memory: `deleteScope` removes every trace of one scope from the cache, the vector index and the Brain
  * (a reload brings none back), the knowledge graph's episodic copy of each, in the in-memory graph and in
  * `SqlKnowledgeGraph`, and the memory graph's node of each; another scope's traces, copies and nodes stay.
- * `deleteTraces` does the same for the traces it names. The rows that name a deleted trace go or let go of it (its
+ * `deleteTraces` does the same for the traces it names, and `deleteScope` with `turnUserId` for the traces a second
+ * user filed on another user's session (`encode`'s `turnUserId`). The rows that name a deleted trace go or let go of it (its
  * retrieval feedback, the document chunk it was filed from), and a scope deleted again counts nothing. A soft delete
  * (a supersede, a prune) takes the trace's copy with it and keeps the Brain row as a tombstone. A real manager over a
  * real SQLite Brain; with no Brain, a manager started over a vector index another manager filed into finds the scope's
@@ -137,6 +138,23 @@ describe.each([
     expect((await copiesOf(knowledgeGraph)).map((copy) => copy.text)).toEqual(['Ana keeps bees on the roof.']);
     expect(await knowledgeGraph.getEntity(gone.id)).toBeUndefined();
     expect(await knowledgeGraph.getEntity(keep.id)).toBeDefined();
+  });
+
+  it("with turnUserId deletes only the traces that user filed on the session, with their copies and nodes", async () => {
+    const { manager, brain, graph: knowledgeGraph } = await managerOver(tempFile(), graph);
+    const owner = await manager.encode('The owner keeps notes.', MOOD, 'neutral', { scope: 'user', scopeId: '/s-1' });
+    const visitor = await manager.encode('Bo keeps snakes.', MOOD, 'neutral', { scope: 'user', scopeId: '/s-1', turnUserId: 'bo' });
+    expect(visitor.turnUserId).toBe('bo');
+    expect(owner.turnUserId).toBeUndefined();
+
+    await expect(manager.deleteScope('user', '/s-1', { turnUserId: '' })).rejects.toThrow(TypeError);
+    expect(await manager.deleteScope('user', '/s-1', { turnUserId: 'bo' })).toEqual({ deleted: 1, graph: 'reached' });
+
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([{ id: owner.id }]);
+    expect((await manager.getStore().getByScope('user', '/s-1')).map((trace) => trace.id)).toEqual([owner.id]);
+    expect(await copiesOf(knowledgeGraph)).toEqual([{ scopeId: '/s-1', text: 'The owner keeps notes.' }]);
+    expect(await knowledgeGraph.getEntity(visitor.id)).toBeUndefined();
+    expect(await knowledgeGraph.getEntity(owner.id)).toBeDefined();
   });
 });
 
