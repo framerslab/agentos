@@ -2034,6 +2034,10 @@ export class GMI implements IGMI {
                 personaCapabilities: this.activePersona.allowedCapabilities || [],
                 userContext: this.currentUserContext, correlationId: turnId,
                 sessionData: this.buildToolSessionData(turnInput, launchFrame),
+                // The turn's stop: a call whose checks or approval finish after the turn stopped is refused before it
+                // runs (STEP_ABORTED), and the tool receives it as its context's signal; a composed tool hands it to
+                // each step, so it stops between steps. A call already running is never cut.
+                signal: stop.signal,
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;

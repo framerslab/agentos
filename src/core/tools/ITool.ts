@@ -147,10 +147,13 @@ export interface ToolExecutionContext {
    */
   personaCapabilities?: string[];
   /**
-   * The call's expiry signal, when the call carries one (a workflow step's
-   * timer: `ToolExecutionRequestDetails.signal`). A tool that runs other
-   * tools on the caller's behalf (a composed tool) passes it on, so a step
-   * whose call expired starts nothing, however late its approval arrives.
+   * The call's stop, when the call carries one
+   * (`ToolExecutionRequestDetails.signal`): its turn's stop on a call a GMI
+   * makes; on a step, the one its composed call passes on, or a workflow
+   * step's timer. A tool that runs other tools on the caller's behalf (a
+   * composed tool) passes it on, so a step whose call stopped starts nothing,
+   * however late its approval arrives. A tool may end its own work when it
+   * aborts; nothing else cuts a call already running.
    */
   signal?: AbortSignal;
   /**

@@ -55,9 +55,11 @@ export interface ToolExecutionRequestDetails {
    */
   tool?: ITool;
   /**
-   * An expiry signal (a workflow step's timer). When it is aborted after the
-   * checks and the approval, the call is refused (`STEP_ABORTED`) and nothing
-   * runs.
+   * The call's stop: on a call a GMI makes, its turn's stop (a session's
+   * close(), the caller's abort signal, the GMI's shutdown()); on a step, the
+   * one its composed call passes on, or a workflow step's timer. When it is
+   * aborted after the checks and the approval, the call is refused
+   * (`STEP_ABORTED`) and nothing runs; a call already running is not cut.
    */
   signal?: AbortSignal;
   /** The calling turn's live objects; copied into the tool's context (see ToolExecutionContext.callerTurn). */

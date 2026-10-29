@@ -209,7 +209,7 @@ function hookTools(
       toolHooks: hooks,
       dispatch: processToolCall,
     };
-    // The turn's stop, with the call's own when it has one (a composed tool's step).
+    // The turn's stop, with the one the call carries: the GMI's own turn stop, or a composed tool's step's.
     const stop = turn.abortSignal;
     const signal = stop && details.signal ? AbortSignal.any([details.signal, stop]) : (stop ?? details.signal);
     return base.processToolCall({
