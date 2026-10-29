@@ -39,7 +39,9 @@ export function importedScopeId(metadata: unknown, scopeIdColumn?: unknown): str
  * The SQL condition that finds the trace an imported record duplicates, beside the conditions that name the brain,
  * the scope and the scope id: a trace whose text is the record's, or whose metadata names the SHA-256 of that text as
  * `import_hash` (an import stores it) or `content_hash` (`remember()`, `ingest()` and `memory_add` store it). A trace
- * the cognitive memory store wrote carries neither hash, and its text finds it.
+ * the cognitive memory store wrote carries neither hash, and its text finds it. A trace the brain forgot counts as any
+ * other, so an import does not bring it back: a forgotten row stays a record of what the brain let go, and a JSON or
+ * SQLite export carries it, so leaving it out would add another forgotten copy at each import of such a file.
  *
  * @param brain - The brain the query runs on; its dialect reads the metadata.
  * @returns A parenthesised condition on `memory_traces` with the three placeholders {@link duplicateTraceParams}

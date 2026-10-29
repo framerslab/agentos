@@ -15,11 +15,14 @@
  * Deduplication works inside the file's scope and scope id: a file whose body
  * a trace there holds, or whose body's SHA-256 a trace there names as
  * `metadata.import_hash` or `metadata.content_hash`, is skipped, whichever
- * writer stored that trace. A trace a release older than
- * `memory_traces.scope_id` wrote holds `''` in that column whatever scope id
- * its metadata names; the import files such traces under that scope id first
- * (`fillScopeIds`), so another scope id's trace is not taken for a file's
- * duplicate.
+ * writer stored that trace. So is a file whose front-matter `id` names a trace
+ * there whose text, without its leading and trailing whitespace, is the body:
+ * that trace's own note, as `MarkdownExporter` writes it. A trace the brain
+ * forgot counts as any other, so deduplication never brings it back. A trace a
+ * release older than `memory_traces.scope_id` wrote holds `''` in that column
+ * whatever scope id its metadata names; the import files such traces under
+ * that scope id first (`fillScopeIds`), so another scope id's trace is not
+ * taken for a file's duplicate.
  *
  * @module memory/io/MarkdownImporter
  */
@@ -126,6 +129,22 @@ export class MarkdownImporter {
     // No-op in base class.
   }
 
+  /**
+   * Whether a note's body holds a trace's text: the text without its leading
+   * and trailing whitespace, which the import takes off a body, is the body.
+   * A note whose front-matter `id` names a trace of its scope and scope id
+   * that it holds is that trace's own note, and so its duplicate, also when
+   * the trace's text begins or ends with whitespace. `ObsidianImporter` first
+   * takes off the tags and links `ObsidianExporter` writes after the text.
+   *
+   * @param text - The text of the trace the note's `id` names.
+   * @param body - The note's body, without its leading and trailing whitespace.
+   * @returns `true` when the note holds the trace's text.
+   */
+  protected holdsTraceText(text: string, body: string): boolean {
+    return text.trim() === body;
+  }
+
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
@@ -215,7 +234,7 @@ export class MarkdownImporter {
         [this.brain.brainId, scope, scopeId, ...duplicateTraceParams(hash, body)],
       );
 
-      if (existing) {
+      if (existing || (await this._isNoteOfHeldTrace(fm, scope, scopeId, body))) {
         result.skipped++;
         return;
       }
@@ -257,6 +276,32 @@ export class MarkdownImporter {
     } catch (err) {
       result.errors.push(`Insert error for ${filePath}: ${String(err)}`);
     }
+  }
+
+  /**
+   * Whether a note is the note of a trace the brain holds: its front-matter
+   * `id` names a trace of the note's scope and scope id, and the note holds
+   * that trace's text (see {@link holdsTraceText}). An export writes each
+   * trace's id, so its import into the brain it came from adds nothing,
+   * whatever whitespace surrounds a trace's text.
+   *
+   * @param fm      - The note's front matter.
+   * @param scope   - The scope the note files under.
+   * @param scopeId - The scope id the note files under.
+   * @param body    - The note's body, without its leading and trailing whitespace.
+   */
+  private async _isNoteOfHeldTrace(
+    fm: TraceFrontmatter,
+    scope: string,
+    scopeId: string,
+    body: string,
+  ): Promise<boolean> {
+    if (typeof fm.id !== 'string' || !fm.id) return false;
+    const named = await this.brain.get<{ content: string }>(
+      'SELECT content FROM memory_traces WHERE brain_id = ? AND id = ? AND scope = ? AND scope_id = ? LIMIT 1',
+      [this.brain.brainId, fm.id, scope, scopeId],
+    );
+    return named ? this.holdsTraceText(named.content, body) : false;
   }
 
   private async _resolveTraceId(preferredId: string): Promise<string> {
