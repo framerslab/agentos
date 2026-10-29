@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+import { agency } from '../agency';
 import { agent } from '../agent';
 import type { AgentOSConfig } from '../AgentOS';
 import { gmi } from '../gmi';
@@ -784,5 +785,105 @@ describe('launch_agency on gmi()', () => {
     // The first turn's three steps and its one seat, then the second turn's two steps and its seat: the refused
     // launches built no seat.
     expect(s.seen).toHaveLength(7);
+  });
+
+  it('the gate the parent carries governs the seats', async () => {
+    const k = key();
+    const search = vi.fn(async () => 'found');
+    const asked: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      return { approved: false, reason: 'search is paused' };
+    };
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Look it up.', seats: [{ role: 'finder', instructions: 'Find it.', tools: ['search'] }] }),
+        reply.tools([{ id: 's1', name: 'search', args: { q: 'x' } }]),
+        reply.text('Search held.'),
+        reply.text('Team done.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k), instructions: 'Coordinate.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: { q: { type: 'string' } } }, execute: search } },
+      agencies: { launch: true },
+    });
+    // The parent is a member of a host agency whose rejecting handler covers search.
+    const host = agency({ provider: 'openai', model: 'stub-model', apiKey: k, strategy: 'sequential', hitl: { approvals: { beforeTool: ['search'] }, handler }, agents: { coordinator: parent } });
+
+    const result = (await host.generate('Find x.')) as GenerateTextResult;
+    expect(result.text).toBe('Team done.');
+    // The seat was offered search and called it (the precondition).
+    expect(systemText(s.seen[1])).toContain('Find it.');
+    expect(offered(s.seen[1])).toEqual(['search']);
+    // The launched seat's search was asked once, by the host's handler, and did not run; the seat's next step was told why.
+    expect(asked).toEqual(['search']);
+    expect(search).not.toHaveBeenCalled();
+    expect(JSON.stringify(s.seen[2].messages)).toContain('search is paused');
+    expect(launchOf(result)).toMatchObject({ status: 'completed', text: 'Search held.' });
+    // Root, the seat's two steps, root.
+    expect(s.seen).toHaveLength(4);
+
+    // With agencies.hitl of its own, the parent's team asks the gate the parent carries first, and that gate's refusal
+    // is final: the host approves the seat's first search and refuses its second.
+    const k2 = key();
+    const ran: string[] = [];
+    const order: string[] = [];
+    let hostAsks = 0;
+    const s2 = script('openai', k2, {
+      replies: [
+        launchStep({ goal: 'Look up x, then y.', seats: [{ role: 'finder', instructions: 'Find them.', tools: ['search'] }] }),
+        reply.tools([{ id: 's1', name: 'search', args: { q: 'x' } }]),
+        reply.tools([{ id: 's2', name: 'search', args: { q: 'y' } }]),
+        reply.text('Found x.'),
+        reply.text('Team done.'),
+      ],
+    });
+    const gated = gmi({
+      ...route(k2), instructions: 'Coordinate.',
+      tools: {
+        search: {
+          description: 'Search.',
+          parameters: { type: 'object', properties: { q: { type: 'string' } } },
+          execute: async (args: { q?: string }) => {
+            ran.push(String(args.q));
+            return 'found';
+          },
+        },
+      },
+      agencies: {
+        launch: true,
+        hitl: {
+          approvals: { beforeTool: ['search'] },
+          handler: async (request) => {
+            order.push(`own ${request.action}`);
+            return { approved: true };
+          },
+        },
+      },
+    });
+    const host2 = agency({
+      provider: 'openai', model: 'stub-model', apiKey: k2, strategy: 'sequential',
+      hitl: {
+        approvals: { beforeTool: ['search'] },
+        handler: async (request) => {
+          order.push(`host ${request.action}`);
+          hostAsks += 1;
+          return hostAsks === 1 ? { approved: true } : { approved: false, reason: 'search is paused' };
+        },
+      },
+      agents: { coordinator: gated },
+    });
+
+    const composed = (await host2.generate('Find x and y.')) as GenerateTextResult;
+    expect(launchOf(composed)).toMatchObject({ status: 'completed', text: 'Found x.' });
+    // The host's handler is asked first, the parent's own only after the host approved, and the host's refusal ends the
+    // second search before the parent's handler is asked.
+    expect(order).toEqual(['host search', 'own search', 'host search']);
+    expect(ran).toEqual(['x']);
+    expect(JSON.stringify(s2.seen[3].messages)).toContain('search is paused');
+    // Root, the seat's three steps, root.
+    expect(s2.seen).toHaveLength(5);
+    expect(composed.text).toBe('Team done.');
   });
 });
