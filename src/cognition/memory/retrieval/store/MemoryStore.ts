@@ -404,6 +404,8 @@ interface StoreRegistration {
 
 interface NamespaceCoordinator {
   deleteEpoch: number;
+  /** Counts the Brain rows `refileScope` moves, so a hydration reads a row again that a move changed since its read. */
+  refileEpoch: number;
   pendingOperations: number;
   operations: Map<string, TraceOperationState>;
   stores: Set<ReferenceLike<StoreCoordinationTarget>>;
@@ -429,6 +431,7 @@ function getNamespaceCoordinator(namespace: object): NamespaceCoordinator {
   if (!coordinator) {
     coordinator = {
       deleteEpoch: 0,
+      refileEpoch: 0,
       pendingOperations: 0,
       operations: new Map(),
       stores: new Set(),
@@ -605,8 +608,15 @@ async function reviveTrace(
   return outcomes.every(Boolean);
 }
 
-function getDeleteEpoch(namespace: object): number {
-  return getNamespaceCoordinator(namespace).deleteEpoch;
+/** The delete and refile counts of a namespace, taken when a hydration reads its rows. */
+interface HydrationEpochs {
+  deletes: number;
+  refiles: number;
+}
+
+function hydrationEpochs(namespace: object): HydrationEpochs {
+  const coordinator = getNamespaceCoordinator(namespace);
+  return { deletes: coordinator.deleteEpoch, refiles: coordinator.refileEpoch };
 }
 
 function isTraceDeletePending(namespace: object, traceId: string): boolean {
@@ -1245,7 +1255,7 @@ export class MemoryStore {
     const brain = this.brain;
     if (!brain) return;
     const namespace = this.coordinationNamespace;
-    const hydrationDeleteEpoch = getDeleteEpoch(namespace);
+    const epochs = hydrationEpochs(namespace);
     try {
       // Bound the per-instance load: a fresh facade (and on request-scoped
       // hosts, every request) hydrates, so we cap at the most-recent traces to
@@ -1261,7 +1271,7 @@ export class MemoryStore {
           LIMIT ?`,
         [brain.brainId, MemoryStore.HYDRATION_LIMIT],
       );
-      await this.hydrateRows(rows, brain, namespace, hydrationDeleteEpoch);
+      await this.hydrateRows(rows, brain, namespace, epochs);
     } catch {
       // Best-effort: durable hydration must never throw into recall.
     }
@@ -1271,39 +1281,47 @@ export class MemoryStore {
    * Loads Brain rows into this store's cache and vector index, one trace operation per row, skipping a row a delete
    * blocks, a row already cached and a row with no usable embedding.
    *
-   * @param hydrationDeleteEpoch - The namespace's delete epoch when the rows were read: a row read before a delete
-   *   that has since run is read again before it loads.
+   * @param epochs - The namespace's delete and refile counts when the rows were read: a row read before a delete or
+   *   a move (`refileScope`) that has since run is read again before it loads, and loads as the Brain holds it then.
    * @returns How many rows it loaded.
    */
   private async hydrateRows(
     rows: MemoryTraceRow[],
     brain: import('./Brain.js').Brain,
     namespace: object,
-    hydrationDeleteEpoch: number,
+    epochs: HydrationEpochs,
   ): Promise<number> {
     let loaded = 0;
-    for (const row of rows) {
+    for (const bulkRow of rows) {
+      const traceId = bulkRow.id;
       await withTraceOperation(
         namespace,
-        row.id,
+        traceId,
         'normal',
         async ({ blockedByDelete, isDeletePending }) => {
           if (
             blockedByDelete ||
-            this.tombstonedTraceIds.has(row.id) ||
-            this.traceCache.has(row.id)
+            this.tombstonedTraceIds.has(traceId) ||
+            this.traceCache.has(traceId)
           ) {
             return;
           }
 
-          // A delete may finish after the bulk SELECT but before this row's
-          // operation slot. Recheck only when deletion activity occurred.
-          if (getDeleteEpoch(namespace) !== hydrationDeleteEpoch) {
-            const stillActive = await brain.get<{ id: string }>(
-              'SELECT id FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0',
-              [brain.brainId, row.id],
+          // A delete or a move may finish after the bulk SELECT but before this
+          // row's operation slot. Read the row again only when one ran: a moved
+          // row loads under the scope id it holds now.
+          let row = bulkRow;
+          const current = hydrationEpochs(namespace);
+          if (current.deletes !== epochs.deletes || current.refiles !== epochs.refiles) {
+            const fresh = await brain.get<MemoryTraceRow>(
+              `SELECT id, type, scope, content, embedding, strength, created_at,
+                      last_accessed, retrieval_count, tags, emotions, metadata
+                 FROM memory_traces
+                WHERE brain_id = ? AND id = ? AND deleted = 0`,
+              [brain.brainId, traceId],
             );
-            if (!stillActive) return;
+            if (!fresh) return;
+            row = fresh;
           }
 
           const embedding = blobToEmbedding(row.embedding);
@@ -1340,9 +1358,9 @@ export class MemoryStore {
           ]);
           if ((upsertResult?.failedCount ?? 0) > 0) return;
 
-          if (isDeletePending() || this.tombstonedTraceIds.has(row.id)) {
+          if (isDeletePending() || this.tombstonedTraceIds.has(traceId)) {
             try {
-              await this.config.vectorStore.delete(collection, [row.id]);
+              await this.config.vectorStore.delete(collection, [traceId]);
             } catch {
               // The queued delete retries after this operation releases.
             }
@@ -2129,7 +2147,7 @@ export class MemoryStore {
     const brain = this.brain;
     if (!brain) return 0;
     const namespace = this.coordinationNamespace;
-    const epoch = getDeleteEpoch(namespace);
+    const epochs = hydrationEpochs(namespace);
     const rows = await brain.all<MemoryTraceRow>(
       `SELECT id, type, scope, content, embedding, strength, created_at,
               last_accessed, retrieval_count, tags, emotions, metadata
@@ -2139,7 +2157,7 @@ export class MemoryStore {
         LIMIT ?`,
       [brain.brainId, scope, scopeId, limit],
     );
-    return this.hydrateRows(rows, brain, namespace, epoch);
+    return this.hydrateRows(rows, brain, namespace, epochs);
   }
 
   /**
@@ -2160,7 +2178,9 @@ export class MemoryStore {
    * under a namespace reads `user:<namespace>/<userId>` and not the plain form filed before.
    *
    * A Brain row's metadata is written with a compare against what the move read, so a write another writer makes to
-   * the row meanwhile (a facade's recall, feedback or update) is read again and kept.
+   * the row meanwhile (a facade's recall, feedback or update) is read again and kept. A hydration of this store, or of
+   * another store on the same Brain in this process, that read a row before the move reads it again before it loads
+   * it, so the trace loads under the new id.
    *
    * @returns The number of traces moved: Brain rows, soft-deleted ones included, and the live traces the store held
    *   or the index listed under the old id with no row.
@@ -2267,7 +2287,10 @@ export class MemoryStore {
       }
     }
 
-    if (row && brain) await this.refileRow(brain, row.metadata, traceId, scope, fromScopeId, toScopeId);
+    if (row && brain && (await this.refileRow(brain, row.metadata, traceId, scope, fromScopeId, toScopeId))) {
+      // A hydration that read this row before the move reads it again before it loads it.
+      getNamespaceCoordinator(this.coordinationNamespace).refileEpoch += 1;
+    }
 
     if (live) await this.deleteMovedDocument(fromCollection, traceId);
     if (held) {
@@ -2295,6 +2318,7 @@ export class MemoryStore {
    * compares the metadata with what was read, so a write another writer made to the row since is read again and kept,
    * three reads at most. A row gone or filed elsewhere meanwhile is left as it is.
    *
+   * @returns Whether it wrote the row.
    * @throws When the row changed under each of three reads.
    */
   private async refileRow(
@@ -2304,7 +2328,7 @@ export class MemoryStore {
     scope: MemoryScope,
     fromScopeId: string,
     toScopeId: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     let current = metadata;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const next = parseTraceMetadata(current);
@@ -2314,12 +2338,12 @@ export class MemoryStore {
           WHERE brain_id = ? AND id = ? AND scope = ? AND scope_id = ? AND ${current === null ? 'metadata IS NULL' : 'metadata = ?'}`,
         [toScopeId, JSON.stringify(next), brain.brainId, traceId, scope, fromScopeId, ...(current === null ? [] : [current])],
       );
-      if (result.changes > 0) return;
+      if (result.changes > 0) return true;
       const reread = await brain.get<{ scope: string; scope_id: string | null; metadata: string | null }>(
         'SELECT scope, scope_id, metadata FROM memory_traces WHERE brain_id = ? AND id = ?',
         [brain.brainId, traceId],
       );
-      if (!reread || reread.scope !== scope || (reread.scope_id ?? '') !== fromScopeId) return;
+      if (!reread || reread.scope !== scope || (reread.scope_id ?? '') !== fromScopeId) return false;
       current = reread.metadata;
     }
     throw new Error(`MemoryStore.refileScope: trace ${traceId}'s row changed under each of three reads while it moved`);
@@ -2838,7 +2862,7 @@ export class MemoryStore {
       if (exists === true) throw error;
       const message = error instanceof Error ? error.message : String(error);
       console.warn(
-        `[MemoryStore] deleteScope read the vector index as holding nothing for a scope: the index cannot say whether ` +
+        `[MemoryStore] a scope's delete or move read the vector index as holding nothing: the index cannot say whether ` +
           `the collection exists, and its read failed: ${message}`,
       );
       return { traceIds: [], staleIds: [], read: 0 };

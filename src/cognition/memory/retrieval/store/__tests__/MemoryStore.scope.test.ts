@@ -5,9 +5,10 @@
  * cache, the vector index and the knowledge graph's copy, its soft-deleted rows, a trace held with no embedding and,
  * with no Brain, the documents another store filed into a durable index included, past stale copies at the front of
  * the old collection; recall under the old id finds none of them though the index failed to delete an old document,
- * and a write another writer makes to a moving trace's row is kept. A trace's `turnUserId` survives a restart, and
- * `deleteScope` with `turnUserId` deletes only that user's traces of the scope. An empty scope id is refused by
- * `refileScope` and `deleteScope`, and a limit that is not a positive integer by `hydrateScope`. Real SQLite Brains.
+ * a write another writer makes to a moving trace's row is kept, and a trace a hydration read before the move is
+ * loaded under the new id. A trace's `turnUserId` survives a restart, and `deleteScope` with `turnUserId` deletes
+ * only that user's traces of the scope. An empty scope id is refused by `refileScope` and `deleteScope`, and a limit
+ * that is not a positive integer by `hydrateScope`. Real SQLite Brains.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -260,6 +261,39 @@ describe('refileScope', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('files under the new id a trace that a hydration read before the refile moved it', async () => {
+    const brain = await openBrain(tempFile());
+    const first = await storeOver(brain);
+    await first.store(trace('t-1', '42', 1_000));
+    await first.store(trace('t-2', '42', 1_001));
+    const vectorStore = await vectorStoreOf4();
+    const store = await storeOver(brain, new KnowledgeGraph(), vectorStore);
+    const upsert = vectorStore.upsert.bind(vectorStore);
+    let held = false;
+    vectorStore.upsert = async (name, documents, options) => {
+      // The hydration loads its rows newest first. Its first load (t-2) waits until the refile has moved t-1's row,
+      // which the hydration read before the move.
+      if (!held && name === 'cogmem_user_42') {
+        held = true;
+        for (let i = 0; i < 200; i += 1) {
+          const row = await brain.get<{ scope_id: string }>('SELECT scope_id FROM memory_traces WHERE id = ?', ['t-1']);
+          if (row?.scope_id === 'A/42') break;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+      return upsert(name, documents, options);
+    };
+
+    const hydrating = store.hydrateScope('user', '42');
+    const moving = store.refileScope('user', '42', 'A/42');
+    expect(await hydrating).toBe(2);
+    expect(await moving).toBe(2);
+
+    expect((await store.getByScope('user', 'A/42')).map((t) => t.id).sort()).toEqual(['t-1', 't-2']);
+    expect(await store.getByScope('user', '42')).toEqual([]);
+    expect(await idsIn(vectorStore, 'cogmem_user_42')).toEqual([]);
   });
 
   it("keeps a write another writer makes to the trace's row while the trace moves", async () => {
