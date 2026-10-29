@@ -9,7 +9,11 @@
  * (a supersede, a prune) takes the trace's copy with it and keeps the Brain row as a tombstone. A real manager over a
  * real SQLite Brain; with no Brain, a manager started over a vector index another manager filed into finds the scope's
  * traces in the index, a second user's alone with `turnUserId`, whether it lists a collection a page at a time, pages
- * it by position, or answers similarity queries alone.
+ * it by position, or answers similarity queries alone. A trace deleted for good leaves none of its words in this
+ * process or the Brain: not in the cache of any store over the Brain, the archive's original, or the typed facts the
+ * manager extracted from it; a row an older release wrote under the scope is found too, an id that names no trace is
+ * skipped, and a document a scope's collection still holds of a trace filed under another scope since is neither read
+ * nor deleted under the scope.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -20,6 +24,8 @@ import { Brain } from '../retrieval/store/Brain.js';
 import { SqlKnowledgeGraph } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { KnowledgeGraph } from '../retrieval/graph/knowledge/KnowledgeGraph.js';
 import type { IKnowledgeGraph } from '../retrieval/graph/knowledge/IKnowledgeGraph.js';
+import { SqlStorageMemoryArchive } from '../archive/SqlStorageMemoryArchive.js';
+import { sha256Hex } from '../retrieval/store/tracePersistence.js';
 import { InMemoryVectorStore } from '../../rag/vector_stores/InMemoryVectorStore.js';
 import { InMemoryWorkingMemory } from '../../substrate/memory/InMemoryWorkingMemory.js';
 
@@ -39,7 +45,15 @@ function embed(text: string): number[] {
   return vector.map((value) => value + 0.01);
 }
 
-async function managerOver(filePath: string, graph: (brain: Brain) => IKnowledgeGraph): Promise<{ manager: CognitiveMemoryManager; brain: Brain; graph: IKnowledgeGraph }> {
+/**
+ * A manager over the file's Brain. `extra` adds to its config what a case needs (an archive, the typed network), and
+ * may read the Brain.
+ */
+async function managerOver(
+  filePath: string,
+  graph: (brain: Brain) => IKnowledgeGraph,
+  extra: (brain: Brain) => Promise<Record<string, unknown>> | Record<string, unknown> = () => ({}),
+): Promise<{ manager: CognitiveMemoryManager; brain: Brain; graph: IKnowledgeGraph }> {
   const brain = await Brain.openSqlite(filePath, { brainId: 'agent-1' });
   const knowledgeGraph = graph(brain);
   await knowledgeGraph.initialize();
@@ -61,6 +75,7 @@ async function managerOver(filePath: string, graph: (brain: Brain) => IKnowledge
     },
     encoding: { baseStrength: 0.5, flashbulbThreshold: 0.8, flashbulbStrengthMultiplier: 2, flashbulbStabilityMultiplier: 5, baseStabilityMs: 3_600_000 },
     brain,
+    ...(await extra(brain)),
   } as never);
   closers.push(async () => {
     await manager.shutdown();
@@ -310,5 +325,136 @@ describe('a graph without deleteMemories', () => {
     await manager.encode('Ana keeps bees on the roof.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
     expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 1, graph: 'not_supported' });
     expect(await brain.all('SELECT id FROM memory_traces')).toEqual([]);
+  });
+});
+
+describe('a trace deleted for good', () => {
+  const sqlGraph = (brain: Brain) => new SqlKnowledgeGraph(brain) as IKnowledgeGraph;
+
+  it("leaves none of its words in the cache of a store over the Brain, the deleting store's or another's", async () => {
+    const filePath = tempFile();
+    const { manager } = await managerOver(filePath, sqlGraph);
+    // A second manager over the same file, as a second facade or a request-scoped store of the host opens one.
+    const reader = await managerOver(filePath, sqlGraph);
+    const walnuts = await manager.encode('Ana is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    expect((await reader.manager.getStore().getByScope('user', 'ana')).map((trace) => trace.id)).toEqual([walnuts.id]);
+
+    expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 1, graph: 'reached' });
+
+    for (const store of [manager.getStore(), reader.manager.getStore()]) {
+      expect(JSON.stringify(store.listTraces())).not.toContain('walnuts');
+      expect(store.getTrace(walnuts.id)?.content ?? '').toBe('');
+      expect(await store.getByScope('user', 'ana')).toEqual([]);
+    }
+  });
+
+  it("takes its archived original with it, so rehydrate finds nothing of it", async () => {
+    let archive!: SqlStorageMemoryArchive;
+    const { manager, brain } = await managerOver(tempFile(), sqlGraph, async (brainOf) => {
+      archive = new SqlStorageMemoryArchive(brainOf.adapter, brainOf.features, brainOf.brainId);
+      await archive.initialize();
+      return { archive };
+    });
+    const walnuts = await manager.encode('Ana is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    const cello = await manager.encode('Bo plays the cello.', MOOD, 'neutral', { scope: 'user', scopeId: 'bo' });
+    // The originals a host's archive keeps of traces it gists, under the trace ids.
+    for (const trace of [walnuts, cello]) {
+      await archive.store({
+        traceId: trace.id,
+        agentId: 'agent-1',
+        verbatimContent: trace.content,
+        contentHash: await sha256Hex(trace.content),
+        traceType: trace.type,
+        emotionalContext: trace.emotionalContext,
+        entities: trace.entities,
+        tags: trace.tags,
+        createdAt: trace.createdAt,
+        archivedAt: Date.now(),
+        archiveReason: 'temporal_gist',
+      });
+    }
+    expect(await manager.rehydrate(walnuts.id)).toBe('Ana is allergic to walnuts.');
+
+    await manager.deleteScope('user', 'ana');
+    expect(await manager.rehydrate(walnuts.id)).toBeNull();
+    expect(await manager.rehydrate(cello.id)).toBe('Bo plays the cello.');
+    await manager.deleteTraces([cello.id]);
+    expect(await manager.rehydrate(cello.id)).toBeNull();
+    expect(await brain.all('SELECT trace_id FROM archived_traces')).toEqual([]);
+    expect(await brain.all('SELECT trace_id FROM archive_access_log')).toEqual([]);
+  });
+
+  it('takes the typed facts the manager extracted from it, and leaves those of another trace', async () => {
+    // The typed network's model, answering each encode with one fact of the text it was given.
+    const observerLLM = {
+      invoke: async ({ user }: { user: string }) =>
+        JSON.stringify({
+          facts: [user.includes('walnuts')
+            ? { text: 'Ana is allergic to walnuts', bank: 'WORLD', entities: ['Ana'] }
+            : { text: 'Bo plays the cello', bank: 'WORLD', entities: ['Bo'] }],
+        }),
+    };
+    const { manager } = await managerOver(tempFile(), sqlGraph, () => ({
+      typedNetwork: { variant: 'minimal', extractAtEncode: true, observerLLM },
+    }));
+    await manager.encode('Ana is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    const cello = await manager.encode('Bo plays the cello.', MOOD, 'neutral', { scope: 'user', scopeId: 'bo' });
+    const factTexts = () => [...manager.getTypedNetworkStore()!.iterateFacts()].map((fact) => fact.text).sort();
+    expect(factTexts()).toEqual(['Ana is allergic to walnuts', 'Bo plays the cello']);
+
+    await manager.deleteScope('user', 'ana');
+    expect(factTexts()).toEqual(['Bo plays the cello']);
+    await manager.deleteTraces([cello.id]);
+    expect(factTexts()).toEqual([]);
+  });
+
+  it('is found under its scope when an older release wrote it to the Brain after the Brain opened', async () => {
+    const { manager, brain } = await managerOver(tempFile(), sqlGraph);
+    await manager.encode('Ana keeps bees on the roof.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    // A release older than the scope_id column names no such column: its row gets the column's default.
+    await brain.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, strength, created_at, tags, emotions, metadata)
+       VALUES ('agent-1', 'mt_older_release', 'episodic', 'user', 'Ana is allergic to walnuts.', 0.5, ?, '[]', '{}', ?)`,
+      [Date.now(), JSON.stringify({ scopeId: 'ana' })],
+    );
+
+    expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 2, graph: 'reached' });
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([]);
+  });
+});
+
+describe('deleteTraces given an id that names no trace', () => {
+  it('skips it, and leaves the knowledge-graph entity that has that id', async () => {
+    const { manager, graph } = await managerOver(tempFile(), (brain) => new SqlKnowledgeGraph(brain));
+    await graph.upsertEntity({
+      id: 'vera',
+      type: 'person',
+      label: 'Vera',
+      properties: {},
+      confidence: 1,
+      source: { type: 'system', timestamp: new Date().toISOString() },
+    });
+
+    expect(await manager.deleteTraces(['vera'])).toEqual({ deleted: 0, graph: 'reached' });
+    expect(await graph.getEntity('vera')).toBeDefined();
+  });
+});
+
+describe('a scope whose collection still holds the document of a trace filed under another scope since', () => {
+  it('neither reads nor deletes that trace under the scope, with no Brain', async () => {
+    const vectorStore = new InMemoryVectorStore();
+    await vectorStore.initialize({ id: `delete-scope-${Math.random()}`, type: 'in_memory' });
+    const manager = await managerWithoutBrain(vectorStore, new KnowledgeGraph() as IKnowledgeGraph);
+    closers.push(() => manager.shutdown());
+    const bees = await manager.encode('Ana keeps bees on the roof.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    // Stored again under another scope id, the trace's document in Ana's collection stays there, as it does when a
+    // move's delete from the old collection fails.
+    await manager.getStore().store({ ...manager.getStore().getTrace(bees.id)!, scopeId: 'cy' });
+
+    expect(await manager.getStore().getByScope('user', 'ana')).toEqual([]);
+    const recalled = await manager.retrieve('bees on the roof', MOOD, { scopes: [{ scope: 'user', scopeId: 'ana' }] } as never);
+    expect(recalled.retrieved).toEqual([]);
+    expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 0, graph: 'reached' });
+    expect((await manager.getStore().getByScope('user', 'cy')).map((trace) => trace.id)).toEqual([bees.id]);
   });
 });
