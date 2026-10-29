@@ -43,7 +43,10 @@ export const LAUNCH_SETTLE_GRACE_MS = 5_000;
 export const LAUNCH_TEXT_CHARS = 16_000;
 /** The longest seat summary a launch returns. */
 export const SEAT_SUMMARY_CHARS = 1_000;
-/** The prompt's allowance in the smallest launch: a child's token cap must cover it plus one call's output estimate. */
+/**
+ * The prompt's allowance in the smallest launch: a child's token cap must cover it plus the output estimate of one call,
+ * the largest a seat of the team makes.
+ */
 export const MIN_LAUNCH_TOKENS = 2_000;
 /** The longest role: `delegate_to_<role>` stays within the 64 characters OpenAI allows a function name. */
 export const MAX_ROLE_CHARS = 52;
@@ -176,7 +179,9 @@ export type LaunchStatus = 'completed' | 'timed_out' | 'budget_exhausted' | 'can
  * - `unknown_member`: a seat names a member the surface does not have.
  * - `member_unavailable`: a member could not be seated.
  * - `duplicate_member`: two seats name one member.
- * - `budget_unavailable`: the launch's token cap cannot cover one call, or it has no dollars left.
+ * - `budget_unavailable`: the launch's token cap cannot cover one call of the seat whose calls are largest
+ *   (`MIN_LAUNCH_TOKENS` for the prompt and that seat's output estimate, on the route its calls run on), or it has no
+ *   dollars left.
  * - `parent_launch_closed`: the team the calling seat sits in is closing or gone.
  */
 export type LaunchRefusalCode =
@@ -293,6 +298,16 @@ export function isGmiHandle(value: unknown): value is Agent {
 /** The options a gmi() handle was built with, or undefined for any other value. */
 export function gmiOptionsOf(value: unknown): AgentOptions | undefined {
   return isGmiHandle(value) ? (value as { __config?: AgentOptions }).__config : undefined;
+}
+
+/**
+ * Reads the provider and model a gmi() handle's persona resolved (the pair its options name, else the environment's at
+ * its first build), or undefined for any other value. The read builds the agent's shared state, as its first session
+ * does.
+ */
+export function gmiRouteOf(value: unknown): (() => Promise<{ provider?: string; model?: string }>) | undefined {
+  const route = isGmiHandle(value) ? (value as { __route?: unknown }).__route : undefined;
+  return typeof route === 'function' ? (route as () => Promise<{ provider?: string; model?: string }>) : undefined;
 }
 
 /**

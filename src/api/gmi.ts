@@ -431,6 +431,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
   // `agencies`: every bound is checked here, `launch` on or off.
   const launchLimits = opts.agencies ? resolveLaunchLimits(opts.agencies) : undefined;
   const tools: ITool[] = adaptTools(opts.tools);
+  /**
+   * The provider and model the agent's persona resolved in the shared build: those its options name, else the pair its
+   * first call resolved from the environment. Its own launches route their coordinator and temporary seats on it, and a
+   * launch that seats this agent as a member counts a call of that seat on it (`__route` on the handle).
+   */
+  const resolvedRoute = async (): Promise<{ provider?: string; model?: string }> => {
+    const { persona } = await shared.get();
+    return { provider: persona.defaultProviderId, model: persona.defaultModelId };
+  };
   // With `agencies.launch`, launch_agency is one of the agent's tools: its persona lists it and its orchestrator runs it.
   if (launchLimits && opts.agencies?.launch === true) {
     if (tools.some((tool) => tool.name === LAUNCH_AGENCY_TOOL_NAME)) {
@@ -443,11 +452,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         tools: () => tools,
         ledger,
         createAgent: gmi,
-        // The pair the agent's persona resolved in the shared build, which every turn that can launch has built.
-        route: async () => {
-          const { persona } = await shared.get();
-          return { provider: persona.defaultProviderId, model: persona.defaultModelId };
-        },
+        // Every turn that can launch has built the shared build this pair comes from.
+        route: resolvedRoute,
       }),
     );
   }
@@ -1000,6 +1006,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
   Object.defineProperty(handle, '__config', { value: opts, enumerable: false, configurable: true });
   // The mark sessionSeat() and agencies.members read: this handle is a gmi() agent.
   Object.defineProperty(handle, '__gmiHandle', { value: true, enumerable: false, configurable: true });
+  // The pair its persona resolved, which a launch seating this agent as a member counts its seat's calls on.
+  Object.defineProperty(handle, '__route', { value: resolvedRoute, enumerable: false, configurable: true });
   return handle;
 }
 

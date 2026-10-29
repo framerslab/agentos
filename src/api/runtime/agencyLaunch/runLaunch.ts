@@ -72,7 +72,10 @@ export interface LaunchParent {
   turnId?: string;
   /** The hooks the parent turn's calls ran under, outermost first. */
   toolHooks: readonly ToolCallHook[];
-  /** The output tokens one call of the seats the launch builds is counted with: its one-call floor. */
+  /**
+   * The output tokens one call of a temporary seat the launch builds is counted with, on the route its host builds it
+   * on. The one-call floor counts it for each temporary seat; a persistent member's call is counted on its own route.
+   */
   outputEstimateTokens: number;
   /**
    * The root scope's id: the launching session as its agent knows it, never the calling GMI. On
@@ -99,6 +102,12 @@ export interface LaunchHost {
    * member's, not the root's). Unset, a nested launch counts the one its parent launch's entry holds.
    */
   outputEstimateTokens?(ctx: ToolExecutionContext): Promise<number>;
+  /**
+   * The output tokens one call of a persistent member's seat is counted with: its calls run on the member's own route
+   * (an `agentKey` member on gmi(), a `personaId` seat on the full runtime). Unset, or undefined for a member, the
+   * floor counts the parent's estimate for that seat.
+   */
+  memberOutputEstimateTokens?(ref: string): Promise<number | undefined>;
   /** A root launch's parent tool names; a nested launch reads its seat's from the entry. */
   parentToolNames(ctx: ToolExecutionContext, parent: LaunchParent): Promise<ReadonlySet<string>>;
   /** A tool of the parent's table by name, read for a composition's step tools. */
@@ -202,7 +211,7 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
   }
   const gate = ctx.callerTurn?.approvalGate ?? entry.approvalGate;
   const conversationId = ctx.sessionData?.conversationId;
-  // The floor counts a call of the seats this launch builds, which run on its host's route.
+  // The temporary seats this launch builds run on its host's route: the floor counts a call of one with its estimate.
   const outputEstimateTokens = host.outputEstimateTokens ? await host.outputEstimateTokens(ctx) : entry.outputEstimateTokens;
   return {
     frame,
@@ -228,6 +237,22 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
       scopeId: frame.launchId,
     },
   };
+}
+
+/**
+ * Step 4's one-call floor: the output tokens of the largest call one of the launch's seats makes, so the cap covers a
+ * call of any seat, counted alone. A temporary seat runs on the route its host builds it on
+ * (`parent.outputEstimateTokens`); a persistent member on its own, as its host counts it. A coordinator's call (a
+ * hierarchical manager's, a parallel or debate synthesizer's) is not in the floor: like every call, it is checked
+ * against the launch's budget before it is sent.
+ */
+async function seatsOutputEstimate(host: LaunchHost, parent: LaunchParent, seats: readonly ResolvedSeat[]): Promise<number> {
+  let estimate = 0;
+  for (const seat of seats) {
+    const own = seat.form === 'persistent' ? await host.memberOutputEstimateTokens?.(seat.ref) : undefined;
+    estimate = Math.max(estimate, own ?? parent.outputEstimateTokens);
+  }
+  return estimate;
 }
 
 /** Every tool the allowlists name and, for each composition, its step tools in turn, each read once. */
@@ -635,7 +660,7 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
     // A root launch's scope is the launching session as its host names it, never the calling GMI.
     const scopeKey = frame ? frame.launchId : `${host.surface}:${parent.scopeId}`;
     const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget);
-    const caps = childBudgetCaps(parent.budget, pool, parent.limits, args, parent.outputEstimateTokens);
+    const caps = childBudgetCaps(parent.budget, pool, parent.limits, args, await seatsOutputEstimate(host, parent, seats));
     if (isRefusal(caps)) return refused(caps);
     const state: LaunchState = { exhausted: false, timedOut: false, cancelled: false };
     const upstream = pool ?? parent.budget;
@@ -791,7 +816,8 @@ export function validateLaunchArgs(args: LaunchAgencyArgs): LaunchRefusal | unde
  * the least of `maxTokens`, the parent's remaining tokens times `budgetShare` (when it has a token cap) and the pool's
  * remaining tokens (`limits.maxLaunchTokens` when nothing else caps them).
  *
- * @param outputEstimateTokens - The output tokens one call is counted with.
+ * @param outputEstimateTokens - The output tokens the floor counts one call with: the largest a seat's call is counted
+ *   with.
  * @returns The caps, or `budget_unavailable` when the token cap cannot cover one call (`MIN_LAUNCH_TOKENS` plus the
  *   output estimate) or no dollars are left.
  */

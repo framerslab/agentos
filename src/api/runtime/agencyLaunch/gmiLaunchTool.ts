@@ -22,6 +22,7 @@ import { buildSessionSeat, descriptionOf, type InternalSeatOptions, type SeatHan
 import {
   LAUNCH_AGENCY_TOOL_NAME,
   gmiOptionsOf,
+  gmiRouteOf,
   type AgencyLaunchFrame,
   type LaunchAgencyArgs,
   type LaunchAgencyResult,
@@ -195,10 +196,29 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
   /**
    * The output tokens one call of a temporary seat is counted with, as the seat's own check counts it: the agent's
    * maxTokens, which the seat takes, held to the output ceiling of the model the persona resolved, which the seat runs
-   * on (4,096 when maxTokens is unset). The one-call floor of every launch this agent runs: its root launches, and the
-   * teams it launches from a seat it holds in another agent's team, whose seats it builds on this route too.
+   * on (4,096 when maxTokens is unset). The one-call floor counts it for the temporary seats of every launch this agent
+   * runs: its root launches, and the teams it launches from a seat it holds in another agent's team, whose seats it
+   * builds on this route too.
    */
   const seatOutputEstimate = async (): Promise<number> => outputEstimateTokens((await agentRoute()).model ?? '', opts.maxTokens);
+
+  /**
+   * The output tokens one call of a member's seat is counted with, as its own check counts it: the member runs as
+   * itself, so its maxTokens held to the output ceiling of the model its persona resolved (the model its options name
+   * when that pair cannot be read).
+   */
+  const memberOutputEstimate = async (ref: string): Promise<number | undefined> => {
+    const member = memberOf(ref);
+    if (!member) return undefined;
+    const config: Partial<AgentOptions> = gmiOptionsOf(member) ?? {};
+    let model = config.model;
+    try {
+      model = (await gmiRouteOf(member)?.())?.model ?? model;
+    } catch (error) {
+      logError(error, `launch_agency member ${ref} route`);
+    }
+    return outputEstimateTokens(model ?? '', config.maxTokens);
+  };
 
   const host: LaunchHost = {
     surface: 'gmi',
@@ -228,6 +248,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
     },
 
     outputEstimateTokens: seatOutputEstimate,
+
+    memberOutputEstimateTokens: memberOutputEstimate,
 
     async parentToolNames(ctx: ToolExecutionContext): Promise<ReadonlySet<string>> {
       // A seat's turn runs only its names; any other turn runs every tool of the agent.
