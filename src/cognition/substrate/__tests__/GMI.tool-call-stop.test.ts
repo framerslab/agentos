@@ -3,8 +3,8 @@
  * A GMI's tool call carries its turn's stop, which the caller's abort signal and the GMI's own shutdown() both abort,
  * on a host that hands the GMI a plain tool orchestrator, as the full runtime does: a call already running finishes,
  * with the stop as its context's signal; a call whose checks or approval finish after the turn stopped is refused
- * (STEP_ABORTED) before it runs; and a composed tool stops between its steps. The real ToolOrchestrator, ToolExecutor
- * and emergent engine run (the emergent suite's forge host); only the model provider is scripted.
+ * (STEP_ABORTED) before it runs; and a composed tool or a workflow stops between its steps. The real ToolOrchestrator,
+ * ToolExecutor and emergent engine run (the emergent suite's forge host); only the model provider is scripted.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { GMIOutputChunkType, type GMIOutputChunk, type ToolResultChunkPayload } from '../IGMI';
@@ -184,5 +184,56 @@ describe("a GMI's tool call carries its turn's stop", () => {
       isError: true,
       errorDetails: { details: { code: 'step_aborted', step: 'b', completed: ['a'] } },
     });
+  });
+
+  it('a workflow running when its turn stops finishes the step in flight, and its later steps are refused', async () => {
+    const ran: string[] = [];
+    const caller = new AbortController();
+    const step = (name: string, then?: () => void) =>
+      hostTool(name, true, async (args: Record<string, unknown>) => {
+        ran.push(name);
+        then?.();
+        return { success: true, output: { text: String(args.text) } };
+      });
+    const host = await makeForgeHost({
+      selfImprovement: true,
+      // step_a stops the turn as it runs, as a session's close() or a deadline would.
+      tools: [step('step_a', () => caller.abort()), step('step_b')],
+      config: { compose: { sideEffectingTools: ['step_a', 'step_b'] } },
+    });
+    const workflows = await host.orchestrator.getTool('create_workflow');
+    expect(workflows).toBeDefined();
+    // Stored under the session the GMI's calls name (their sessionData.sessionId).
+    const created = await workflows!.execute(
+      {
+        action: 'create',
+        name: 'a_then_b',
+        description: 'Runs step_a, then step_b.',
+        steps: [{ tool: 'step_a', args: { text: '$input' } }, { tool: 'step_b', args: { text: '$input' } }],
+      },
+      {
+        gmiId: 'gmi-test',
+        personaId: 'persona-test',
+        userContext: { userId: 'user-1' } as ToolExecutionContext['userContext'],
+        sessionData: { sessionId: 'session-1' },
+      },
+    );
+    // The workflow was stored (the precondition), and storing it ran neither step.
+    expect(created.success).toBe(true);
+    expect(ran).toEqual([]);
+    const { workflowId } = created.output as { workflowId: string };
+    const { gmi } = await createScriptedGmi({
+      provider: stoppingProvider([toolCallReply([{ id: 'call_w', name: 'create_workflow', args: { action: 'run', workflowId, input: 'go' } }])]),
+      config: { toolOrchestrator: host.orchestrator },
+    });
+
+    const { chunks } = await runTurn(gmi, textTurn('t1', 'Run it.', { options: { abortSignal: caller.signal } }));
+
+    // The step in flight finished; the step after it was refused before its tool ran.
+    expect(ran).toEqual(['step_a']);
+    const results = toolResults(chunks);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ name: 'create_workflow', isError: true });
+    expect(String((results[0].errorDetails as { message?: unknown } | undefined)?.message)).toContain('step_aborted');
   });
 });
