@@ -749,4 +749,40 @@ describe('launch_agency on gmi()', () => {
     expect(s.seen).toHaveLength(2);
     expect(result.text).toBe('Done.');
   });
+
+  it('the root launches of one turn share one pool, and the next turn launches from a fresh one', async () => {
+    const k = key();
+    const oneSeat = (role: string) => ({ goal: `Do the ${role} part.`, seats: [{ role, instructions: `Do the ${role} part.` }] });
+    const s = script('openai', k, {
+      replies: [
+        // Two launches in one step: the first spends 5,000 of the pool's 6,000.
+        reply.tools([{ id: 'a', name: 'launch_agency', args: oneSeat('first') }, { id: 'b', name: 'launch_agency', args: oneSeat('second') }]),
+        textCosting('First done.', 5_000),
+        // The turn's next step launches again, from the same pool.
+        launchStep(oneSeat('third'), 'c'),
+        reply.text('One of three ran.'),
+        launchStep(oneSeat('fourth')),
+        textCosting('Fourth done.', 5_000),
+        reply.text('Ran again.'),
+      ],
+    });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', maxTokens: 1_000, agencies: { launch: true, maxLaunchTokens: 6_000 } });
+    const session = parent.session('p1');
+
+    const first = await session.send('Go.');
+    expect(launchOf(first, 0)).toMatchObject({ status: 'completed', text: 'First done.' });
+    // The 1,000 left cannot cover one call, 2,000 for the prompt and 1,000 for the output, in the same step or the next.
+    const unavailable = "budget_unavailable: the launch's token cap, 1000, cannot cover one call (3000: 2000 for the prompt and 1000 for the output)";
+    expect(first.toolCalls.map((call) => call.error)).toEqual([undefined, unavailable, unavailable]);
+    expect(first.text).toBe('One of three ran.');
+    // The next turn draws on a pool of its own: its launch has the whole 6,000.
+    const second = await session.send('Go again.');
+    const out = launchOf(second);
+    expect(out).toMatchObject({ status: 'completed', text: 'Fourth done.' });
+    expect(out.provenance.budget).toMatchObject({ maxTotalTokens: 6_000, tokensUsed: 5_000 });
+    expect(second.text).toBe('Ran again.');
+    // The first turn's three steps and its one seat, then the second turn's two steps and its seat: the refused
+    // launches built no seat.
+    expect(s.seen).toHaveLength(7);
+  });
 });
