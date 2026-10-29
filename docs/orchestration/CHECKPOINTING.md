@@ -123,7 +123,7 @@ A resumed run restores `input`, `scratch`, `artifacts` and the list of completed
 
 - Every other node runs as in a fresh run.
 
-A node that fails records no result and writes nothing to `scratch` or `artifacts`, as an attempt its `retryPolicy` runs again does. The checkpoint of a failed run therefore holds the state the node ran on, and a resume executes the node again, whatever its `effectClass`. Declare `effectClass` on tool nodes to match what the node does; `toolNode()` defaults to `'external'` and `gmiNode()` to `'read'`:
+A node that fails records no result and writes nothing to `scratch` or `artifacts`, as an attempt its `retryPolicy` runs again does. The checkpoint of a failed run therefore holds the state the node ran on, and a resume executes the node again, whatever its `effectClass`. What a failed attempt did outside the graph, such as a call a tool made before it failed, is not undone, so a `write` or `external` node that runs again, by its `retryPolicy` or on resume, repeats it: such a node should be safe to repeat. Declare `effectClass` on tool nodes to match what the node does; `toolNode()` defaults to `'external'` and `gmiNode()` to `'read'`:
 
 ```typescript
 // web_search makes external calls (the toolNode default)

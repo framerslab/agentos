@@ -118,7 +118,7 @@ A step with none of these becomes a tool node for a tool named `unknown`.
 }
 ```
 
-`retryPolicy` reaches only `tool` steps, and the runtime retries only nodes that carry one (every failure, or the failures whose message contains an entry of `retryPolicy.retryOn`). `timeout` reaches every step but `gmi` and `subgraph` steps. Any failed step that is not retried, or that fails every attempt, stops the run: the runtime saves a checkpoint and emits `error`, `interrupt` and `run_end`. The failed step writes nothing, and a resume runs it again.
+`retryPolicy` reaches only `tool` steps, and the runtime retries only nodes that carry one (every failure, or the failures whose message contains an entry of `retryPolicy.retryOn`). `timeout` reaches every step but `gmi` and `subgraph` steps. Any failed step that is not retried, or that fails every attempt, stops the run: the runtime saves a checkpoint and emits `error`, `interrupt` and `run_end`. The failed step writes nothing to the run's state, and a resume runs it again. What a failed attempt did outside the run, such as a call a tool made before it failed, is not undone, so a step that runs again, by its `retryPolicy` or on resume, repeats it.
 
 ### branch()
 
