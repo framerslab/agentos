@@ -11,6 +11,13 @@ import { EventEmitter } from 'node:events';
 import { ReconnectingSTT, type ReconnectingSTTOptions, type SttGapEvent, type SttReconnectedEvent } from './ReconnectingSTT.js';
 import { describeReason, isError } from './describeReason.js';
 import type { AudioFrame, IEndpointDetector, IStreamingSTT, IStreamTransport, ITranscriptInputSink, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent, TranscriptInput, TranscriptTurn, TurnCompleteEvent, VadEvent } from './types.js';
+import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
+import { consumeReturnedRejection, isContentSafeTelemetryEnabled } from '../../core/logging/contentSafeTelemetry.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('listen_session');
+/** Fixed diagnostic words, never the provider's warning or a speaker's exception text. */
+export type ListenWarningKind = 'stt_warning' | 'speaker_failed';
 
 export type { ITranscriptSink, ITranscriptInputSink, TranscriptInput, TranscriptTurn } from './types.js';
 
@@ -47,11 +54,23 @@ export interface ListenSessionOverrides {
   /** Finals waiting for the sink before the transport is paused. Default 8. */
   sinkQueueLimit?: number;
   /**
-   * Names who spoke a turn, from the transcriber's final. A detector turn carries its text and no words,
-   * unless empty detector text uses the accumulated STT finals and their words. One that throws names no one:
-   * the throw is written as a console warning, and the turn is written with no speaker.
+   * Names the speaker from the final. A throw writes the turn without a speaker and reports speaker_failed to
+   * onWarning when supplied. Otherwise it uses the module's content-safe console, or the old warning when safe
+   * mode is off. Detector turns retain their existing final/word semantics.
    */
   speaker?: (event: TranscriptEvent) => string | undefined;
+  /**
+   * Receives stt_warning for a warning of the opened STT session and speaker_failed for a throwing speaker hook.
+   * No error, provider name, transcript or message is passed. A callback throw is swallowed. When the callback returns
+   * an object or function with a `then` method, that method is called at once with handlers that do nothing, so the
+   * rejection of an async callback's promise, a promise from another realm or a thenable is swallowed too. A `then`
+   * that throws when read or called is swallowed. A warning raised while the callback runs, or while that method runs,
+   * is not reported; one raised later, such as after an async callback's `await`, is reported as any other is.
+   * Omission preserves the provider's normal unlistened-warning behavior. Warnings emitted before startSession
+   * resolves cannot be observed by a listener on its returned session. The listener remains during drain and is
+   * detached on end.
+   */
+  onWarning?: (kind: ListenWarningKind) => void;
   /** How long a stop waits for the flushed final to arrive, before draining a pending detector turn. Default 250. */
   drainMs?: number;
 }
@@ -148,6 +167,33 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
   let endPromise: Promise<void> | undefined;
 
   const accepting = (): boolean => state === 'listening' || state === 'draining';
+  /** Capture this session's diagnostic receiver once, without holding a provider warning. */
+  const warningReceiver = overrides.onWarning;
+  /**
+   * Set while the callback runs and while the then of what it returned is called, so a warning raised in either is
+   * not reported. Cleared as that call returns, before a returned promise settles, so a later one is reported.
+   */
+  let reporting = false;
+  /** A diagnostic callback must not discard a turn, fail a provider event or leave a rejection unhandled. */
+  const reportWarning = (kind: ListenWarningKind): void => {
+    if (reporting) return;
+    // A callback that makes the transcriber warn again before it returns would otherwise call itself until the stack
+    // overflows. The void return type admits an async callback, which fails by rejecting instead of throwing. The then
+    // of what it returns is called here, under the same guard; Promise.resolve would call it in a later job, where a
+    // warning it raised would call the callback again, and a callback that returned another such thenable would loop
+    // without end. Nothing is awaited, so a speaker_failed raised while an async callback is pending is reported.
+    reporting = true;
+    try {
+      const returned: unknown = warningReceiver?.(kind);
+      consumeReturnedRejection(returned);
+    }
+    catch { /* A warning callback cannot change the hearing lifecycle. */ }
+    finally { reporting = false; }
+  };
+  /** Deliberately accepts no warning argument and never inspects an emitted value. */
+  const onSttWarning = (): void => {
+    if (accepting()) reportWarning('stt_warning');
+  };
 
   const resume = (): void => {
     if (!paused) return;
@@ -204,7 +250,8 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
       finals.length = 0;
       if (reason === 'purged') pending.length = 0;
       resume();
-      sttSession.close();
+      try { sttSession.close(); }
+      finally { sttSession.off('warning', onSttWarning); }
       detector?.reset();
       if (!fromWriter) await writing;
       transport.off('error', onTransportError);
@@ -214,13 +261,13 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
     return endPromise;
   };
 
-  // `speaker` is the host's code, run inside the transcriber's or the detector's event: a throw would lose the turn
-  // and go into that event's emitter, so it is written as a console warning and the turn is written with no speaker.
+  /** A speaker failure changes no turn content and reaches only the selected diagnostic boundary. */
   const speakerOf = (event: TranscriptEvent): string | undefined => {
-    try {
-      return overrides.speaker?.(event);
-    } catch (thrown) {
-      console.warn('[listen-session] the speaker option threw; the turn is written with no speaker:', describeReason(thrown));
+    try { return overrides.speaker?.(event); }
+    catch (thrown: unknown) {
+      if (typeof warningReceiver === 'function') reportWarning('speaker_failed');
+      else if (isContentSafeTelemetryEnabled()) console.warn();
+      else console.warn('[listen-session] the speaker option threw; the turn is written with no speaker:', describeReason(thrown));
       return undefined;
     }
   };
@@ -291,6 +338,7 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
     if (event.text.trim()) write(event.text, event);
   };
 
+  if (typeof warningReceiver === 'function') sttSession.on('warning', onSttWarning);
   sttSession.on('transcript', (event: TranscriptEvent) => {
     if (!accepting()) return;
     // A final with no words takes back interim text the transcriber showed: it is no turn, and it joins no empty

@@ -32,7 +32,10 @@ import {
   ProviderEmbeddingResponse,
 } from '../../core/llm/providers/IProvider';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js'; // Assuming a GMIError utility
-import { contentSafeConsole as console } from '../../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('embedding_manager');
 
 /**
  * Represents a cached embedding entry.
