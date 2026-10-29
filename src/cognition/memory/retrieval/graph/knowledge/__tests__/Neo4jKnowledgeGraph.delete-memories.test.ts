@@ -3,7 +3,8 @@
  * A memory trace's episodic copy on Neo4j: the copy carries its trace id (`traceId`, indexed), recording the trace
  * again replaces it, and `deleteMemories` finds a trace's copies through that id and a scope's by their stored
  * context, then detaches and deletes them and no other. A copy an older release recorded with no `traceId` gets one,
- * once per graph, at the first delete by trace id. CI runs no Neo4j server, so the graph runs over a session that
+ * once per graph, at the first delete by trace id; when that write fails, the delete still finds the trace's older
+ * copy by its stored context. CI runs no Neo4j server, so the graph runs over a session that
  * records each statement and answers the three reads `deleteMemories` makes from stored nodes (an integration run
  * needs a live database, which CI does not have).
  */
@@ -16,7 +17,8 @@ interface StoredCopy {
   context: string | null;
 }
 
-function recordingConnection(stored: StoredCopy[]) {
+function recordingConnection(stored: StoredCopy[], options: { failingBackfills?: number } = {}) {
+  let failingBackfills = options.failingBackfills ?? 0;
   const writes: Array<{ cypher: string; params: Record<string, unknown> }> = [];
   const reads: Array<{ cypher: string; params: Record<string, unknown> }> = [];
   const answer = (cypher: string, params: Record<string, unknown>) => {
@@ -38,6 +40,10 @@ function recordingConnection(stored: StoredCopy[]) {
   const tx = (mode: 'READ' | 'WRITE') => ({
     run: async (cypher: string, params: Record<string, unknown> = {}) => {
       if (mode === 'WRITE') {
+        if (params.copies !== undefined && failingBackfills > 0) {
+          failingBackfills -= 1;
+          throw new Error('Neo.TransientError.Transaction.LockClientStopped');
+        }
         writes.push({ cypher, params });
         // The backfill's write: each listed copy gets its trace id.
         for (const copy of (params.copies as Array<{ id: string; traceId: string }> | undefined) ?? []) {
@@ -145,6 +151,28 @@ describe('Neo4jKnowledgeGraph.deleteMemories', () => {
     expect(reads.map((read) => read.cypher.includes('m.traceId IN $traceIds'))).toEqual([true]);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.params.ids).toEqual(['m2']);
+  });
+
+  it("deletes a trace's older copy through its stored context when giving older copies their trace id fails", async () => {
+    const { connectionManager, writes } = recordingConnection(
+      [
+        { id: 'm1', context: context('t-1', 'user', 'ana') },
+        { id: 'm2', context: context('t-2', 'user', 'ana') },
+      ],
+      { failingBackfills: 1 },
+    );
+    const graph = new Neo4jKnowledgeGraph({ connectionManager: connectionManager as never });
+    await graph.initialize();
+    writes.length = 0;
+
+    expect(await graph.deleteMemories({ traceIds: ['t-1'] })).toBe(1);
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.cypher).toContain('DETACH DELETE m');
+    expect(writes[0]!.params.ids).toEqual(['m1']);
+    // The next delete by trace id gives the older copies left their trace id.
+    expect(await graph.deleteMemories({ traceIds: ['t-2'] })).toBe(1);
+    expect(writes.at(-1)!.params.ids).toEqual(['m2']);
   });
 
   it('runs nothing for an empty filter', async () => {
