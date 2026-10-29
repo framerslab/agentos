@@ -483,7 +483,8 @@ function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome
  * parent's stop ends the timer, so a deadline that passes while the team settles leaves the launch cancelled. The
  * launch then waits one grace for the run to settle and the team to close, together, and returns; a run that resolved
  * before any abort gets the whole grace for its close. Once the run has settled the signal aborts in any case, before
- * the seats close, so no seat's call runs on past its launch.
+ * the seats close, so no seat's call runs on past its launch. The launch's registry entry goes once every seat is
+ * released and every launch its seats started is gone; until then it stays closing.
  */
 async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<LaunchAgencyResult>> {
   const { host, parent, entry, controller, state } = launch;
@@ -590,6 +591,9 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
   } finally {
     clearTimeout(timer);
     parent.signal?.removeEventListener('abort', onParentStop);
+    // A team one of the seats launched holds seats of this tree too: the entry waits for each such launch to go, so a
+    // tool that hangs in a nested team holds this launch's scope as one in its own team does.
+    for (const nested of launchRegistry.nestedUnder(entry.launchId)) void hold(launchRegistry.whenRemoved(nested.launchId));
     // The entry goes once every seat is released. Until then it stays, closing: it admits nothing under it and
     // counts toward its scope's maxConcurrent, so retries against a tool that hangs past the deadline are refused
     // instead of piling up seats.
