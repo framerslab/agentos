@@ -216,6 +216,12 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
   private olderCopiesRekeyed: Promise<void> | null = null;
 
   /**
+   * The node ids of the copies an older release recorded whose move to their key failed in this instance's pass, by
+   * trace id: a delete by trace id deletes them where they are ({@link deleteMemories}).
+   */
+  private readonly unmovedOlderCopies = new Map<string, Set<string>>();
+
+  /**
    * @param brain - A Brain instance whose async StorageAdapter methods
    *                are used for all queries.
    */
@@ -646,10 +652,10 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
   /**
    * Delete the memory nodes that copy the filter's traces or scopes, with the relations that name them, as
    * `deleteEntity` deletes an entity's. A trace's copy is deleted by its key; the first delete by trace id of this
-   * instance first gives the copies an older release recorded their key ({@link rekeyOlderCopies}). A scope's copies
-   * are read by the text their stored JSON holds (`LIKE` with an escape clause, which on SQLite also matches the text
-   * in other letter cases) and matched exactly in code, so a malformed `properties` value is skipped rather than
-   * failing the delete.
+   * instance first gives the copies an older release recorded their key ({@link rekeyOlderCopies}), and a copy whose
+   * move failed in that pass is deleted by its node id. A scope's copies are read by the text their stored JSON holds
+   * (`LIKE` with an escape clause, which on SQLite also matches the text in other letter cases) and matched exactly in
+   * code, so a malformed `properties` value is skipped rather than failing the delete.
    */
   async deleteMemories(filter: MemoryCopyFilter): Promise<number> {
     if (isEmptyCopyFilter(filter)) return 0;
@@ -657,7 +663,10 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
     const traceIds = filterTraceIds(filter);
     if (traceIds.length > 0) {
       await this.rekeyOlderCopies();
-      deleted += await this.deleteMemoryNodes(traceIds.map(copyKey));
+      const ids = traceIds.map(copyKey);
+      for (const traceId of traceIds) ids.push(...(this.unmovedOlderCopies.get(traceId) ?? []));
+      deleted += await this.deleteMemoryNodes(ids);
+      for (const traceId of traceIds) this.unmovedOlderCopies.delete(traceId);
     }
     const scopes = filter.scopes ?? [];
     if (scopes.length > 0) {
@@ -704,9 +713,10 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
    * Give the trace copies an older release recorded under a random node id their trace's key, once per instance, so
    * a delete by trace id finds them by key ({@link moveOlderCopy}). Of two copies of one trace the newer takes the key
    * and the other is deleted, as a second record of a trace replaces the first; the relations that name either move
-   * to the key. A copy whose move fails keeps its node id, with a warning, and the next instance's pass moves it. A
-   * copy an older release writes into the same Brain after the pass, or an import brings in, gets its key from the
-   * next instance's pass; until then a delete by its scope finds it.
+   * to the key. A copy whose move fails keeps its node id, with a warning, and the next instance's pass moves it; a
+   * delete by its trace id in the meantime deletes it by that node id. A copy an older release writes into the same
+   * Brain after the pass, or an import brings in, gets its key from the next instance's pass; until then a delete by
+   * its scope finds it.
    */
   private rekeyOlderCopies(): Promise<void> {
     if (!this.olderCopiesRekeyed) {
@@ -740,12 +750,16 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
       } catch (error) {
         kept += 1;
         reason = error instanceof Error ? error.message : String(error);
+        const unmoved = this.unmovedOlderCopies.get(traceId) ?? new Set<string>();
+        unmoved.add(row.id);
+        this.unmovedOlderCopies.set(traceId, unmoved);
       }
     }
     if (kept > 0) {
       console.warn(
         `[SqlKnowledgeGraph] ${kept} trace copies an older release recorded in brain ${brainId} keep their node id, ` +
-          `and the next instance's first delete by trace id moves them: ${reason}`,
+          `where a delete by their trace id finds them, and the next instance's first delete by trace id moves them: ` +
+          reason,
       );
     }
   }
