@@ -5,17 +5,20 @@
  * post-approval check, as the strategy's text did: a replacement the check
  * blocks is refused as a blocked final text is, under generate() and stream(),
  * a replacement it passes is returned, and an approval without modifications
- * returns the strategy's text as before. With an output schema, `parsed` is
- * read from the text the caller receives: a replacement that matches the
- * schema is parsed, one that does not is returned once with `parsed`
- * undefined, and an approval without modifications leaves the validation
- * retry as it was. A replacement that hands the strategy's own text back
- * replaced nothing, and the retry runs as after an approval without
- * modifications; a replacement that does not match writes one line through
- * the host's logger. stream() runs no validation retry: a text that does not
- * match ends the stream with `parsed` undefined after one run. Without a
- * schema, a `parsed` a seat returned does not outlive a replacement that
- * changes the text.
+ * returns the strategy's text as before. A replacement does not clear a
+ * strategy text the check blocks: the check reads that text too, which the
+ * caller has received (stream() streams it before the approval) or still
+ * receives (the call records of sequential, graph and review-loop). With an
+ * output schema, `parsed` is read from the text the caller receives: a
+ * replacement that matches the schema is parsed, one that does not is
+ * returned once with `parsed` undefined, and an approval without
+ * modifications leaves the validation retry as it was. A replacement that
+ * hands the strategy's own text back replaced nothing, and the retry runs as
+ * after an approval without modifications; a replacement that does not match
+ * writes one line through the host's logger. stream() runs no validation
+ * retry: a text that does not match ends the stream with `parsed` undefined
+ * after one run. Without a schema, a `parsed` a seat returned does not
+ * outlive a replacement that changes the text.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -163,6 +166,27 @@ describe('a beforeReturn approval with modifications.output', () => {
     expect(result.text).toBe(REWRITTEN);
     expect(guardrailHitlOverride).not.toHaveBeenCalled();
     expect(outputGuardReports(guardrailResult)).toHaveLength(2);
+  });
+
+  it('a replacement does not clear a strategy text the check blocks: generate() rejects, and stream() ends with the override after streaming that text', async () => {
+    const leaked = 'Your SSN 123-45-6789 is on file.';
+    const sanitized = 'Your SSN is on file.';
+    serveAnswer(leaked);
+    const guardrailHitlOverride = vi.fn();
+    const handler = approve({ output: sanitized });
+    await expect(team(handler, { guardrailHitlOverride }).generate(PROMPT)).rejects.toThrow(OVERRIDDEN);
+    expect(handler.mock.calls[0][0].details).toEqual({ output: leaked });
+    expect(guardrailHitlOverride).toHaveBeenCalledWith(expect.objectContaining({ guardrailId: 'pii-redaction', toolName: 'return' }));
+
+    const s = team(approve({ output: sanitized }), {}).stream(PROMPT);
+    const parts: Json[] = [];
+    const drain = async (): Promise<void> => {
+      for await (const part of s.fullStream) parts.push(part);
+    };
+    await expect(drain()).rejects.toThrow(OVERRIDDEN);
+    await expect(s.text).rejects.toThrow(OVERRIDDEN);
+    // The strategy's text was streamed before the approval was asked for.
+    expect(parts.filter((part) => part.type === 'text').map((part) => part.text).join('')).toBe(leaked);
   });
 
   it('an approval without modifications returns the strategy text as before', async () => {

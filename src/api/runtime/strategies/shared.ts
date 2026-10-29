@@ -7,7 +7,7 @@
  * beside it for a caller that sends the input as given), so every strategy
  * compiler uses a single implementation. This avoids subtle divergence in how
  * configs are merged or how HITL gates are evaluated across the sequential,
- * parallel, debate, review-loop, hierarchical and graph strategies.
+ * parallel, debate, review-loop, hierarchical, graph and panel strategies.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects and invokes strategy compilers.
  */

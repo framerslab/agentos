@@ -1,5 +1,5 @@
 /**
- * The launch engine (spec 4.8), with a fake host and fake seats under the real agency(): validation, the child's
+ * The launch engine, with a fake host and fake seats under the real agency(): validation, the child's
  * caps, one case per refusal code, the run and its statuses, and the deadline and the grace. Pure engine logic; the
  * surfaces' own tests run the real seats.
  */
@@ -372,11 +372,50 @@ describe('runLaunch: the run and its result', () => {
 
   it("an agency() configuration error is invalid_arguments in agency()'s own words, and the seats are released", async () => {
     const made: FakeSeat[] = [];
+    const started: string[] = [];
+    const recorder: LaunchHost['recorder'] = {
+      start: (record) => {
+        started.push(record.agencyId);
+      },
+      close: () => undefined,
+    };
+    // The recorder hears of a launch whose team is built (the precondition).
+    const ran = (await runLaunch(fakeHost({ recorder }), args(), ctxFor())).output as LaunchAgencyResult;
+    expect(started).toEqual([ran.agencyId]);
     // parallel needs an agency-level route, which this host does not give.
-    const host = fakeHost({ route: {}, seat: (s) => { const f = fakeSeat(s.role); made.push(f); return f; } });
+    const host = fakeHost({ route: {}, recorder, seat: (s) => { const f = fakeSeat(s.role); made.push(f); return f; } });
     const refusal = await refusalOf(host, args({ strategy: 'parallel', seats: [seat('a'), seat('b')] }));
     expect(refusal).toMatchObject({ code: 'invalid_arguments', reason: expect.stringContaining('Parallel strategy requires') });
+    // The record starts once the child is built, so a team agency() refuses leaves none.
+    expect(started).toEqual([ran.agencyId]);
     await vi.waitFor(() => expect(made.every((f) => f.closed)).toBe(true));
+  });
+
+  it("the reason names the cap that refused: the launch's own token cap by its count once it is used up, any other refusal in its own words", async () => {
+    /** A seat that records `tokens` (and `usd`), asks for `ask` more tokens, and answers with what it has. */
+    const spender = (tokens: number, ask: number, usd?: number) => (s: ResolvedSeat, launch: LaunchEntry) =>
+      fakeSeat(s.role, async () => {
+        launch.budget.record(usd, tokens, 'test');
+        try {
+          launch.budget.assertCanSpend(usd === undefined ? undefined : 0.01, ask, 'test');
+        } catch {
+          // The seat stops spending and answers with what it has.
+        }
+        return 'Partial.';
+      });
+    const launched = async (seats: FakeHostOptions['seat'], extra: Parameters<typeof args>[0]): Promise<LaunchAgencyResult> =>
+      (await runLaunch(fakeHost({ seat: seats }), args(extra), ctxFor())).output as LaunchAgencyResult;
+
+    // A call too large for what the cap has left, before anything was spent: the refusal's words.
+    const early = await launched(spender(0, 9_000), { maxTokens: 8_000 });
+    expect(early.provenance.budget).toMatchObject({ maxTotalTokens: 8_000, tokensUsed: 0 });
+    expect(early).toMatchObject({ status: 'budget_exhausted', reason: "the launch's budget refused a call: 9000 tokens would pass 8000" });
+    // Calls that used the cap up: its count.
+    const spent = await launched(spender(9_000, 1), { maxTokens: 8_000 });
+    expect(spent).toMatchObject({ status: 'budget_exhausted', reason: "the launch's budget is spent: 9000 of 8000 tokens" });
+    // The launch's dollar cap: in its own words.
+    const dollars = await launched(spender(10, 1, 1), { budgetUsd: 0.5 });
+    expect(dollars).toMatchObject({ status: 'budget_exhausted', reason: "the launch's budget refused a call: Session cost $1.0100 would exceed limit $0.50" });
   });
 
   it('a recorder that throws and a close that rejects are logged; the launch completes and its entry goes', async () => {
@@ -507,6 +546,52 @@ describe("runLaunch: the deadline and the parent's stop", () => {
     expect(Date.now() - started).toBeLessThan(1_000 + 500);
     expect(made[0].closed).toBe(true);
   }, 10_000);
+
+  it("the parent's stop returns cancelled when the deadline passes while the team settles", async () => {
+    const parentTurn = new AbortController();
+    // Rejects 700 ms after its call's signal aborts: past the deadline, inside the grace.
+    const slow = fakeSeat('writer', (_input, opts) =>
+      new Promise<string>((_resolve, reject) => {
+        const signal = opts?.abortSignal as AbortSignal;
+        signal.addEventListener('abort', () => setTimeout(() => reject(signal.reason), 700), { once: true });
+      }),
+    );
+    const host = fakeHost({ seat: () => slow });
+    host.settleGraceMs = 1_500;
+    setTimeout(() => parentTurn.abort(), 500);
+    const out = (await runLaunch(host, args({ deadlineMs: 1_000 }), ctxFor({ signal: parentTurn.signal }))).output as LaunchAgencyResult;
+    // The deadline passed while the team settled (the precondition); the parent turn had stopped first.
+    expect(out.durationMs).toBeGreaterThan(1_000);
+    expect(out).toMatchObject({ status: 'cancelled', reason: 'the parent turn stopped' });
+    expect(out.seats[0].status).toBe('cut');
+  }, 10_000);
+
+  it('a seat whose build settles after the deadline is released, and a close of it that rejects is logged', async () => {
+    let finish!: (made: SeatHandle) => void;
+    const late = fakeSeat('slow', undefined, async () => {
+      throw new Error('close failed');
+    });
+    const host = fakeHost({ seat: () => new Promise<SeatHandle>((resolve) => { finish = resolve; }) });
+    const out = (await runLaunch(host, args({ deadlineMs: 1_000 }), ctxFor())).output as LaunchAgencyResult;
+    expect(out.status).toBe('timed_out');
+    finish(late);
+    // The late seat's close ran (the precondition), and its rejection is logged as every other close's is.
+    await vi.waitFor(() => expect(late.closed).toBe(true));
+    await vi.waitFor(() => expect(host.logged.map(([, where]) => where)).toContain('launch_agency close'));
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+  }, 10_000);
+
+  it('a launch whose parent turn has already stopped returns cancelled and builds no seat', async () => {
+    const host = fakeHost();
+    // A live turn's launch builds its seat (the precondition).
+    expect(((await runLaunch(host, args(), ctxFor())).output as LaunchAgencyResult).status).toBe('completed');
+    expect(host.built).toEqual(['writer']);
+    const out = (await runLaunch(host, args(), ctxFor({ signal: AbortSignal.abort() }))).output as LaunchAgencyResult;
+    expect(out).toMatchObject({ status: 'cancelled', reason: 'the parent turn stopped' });
+    expect(out.seats.map((r) => r.status)).toEqual(['not_run']);
+    expect(host.built).toEqual(['writer']);
+    expect(launchRegistry.get(out.agencyId)).toBeUndefined();
+  });
 });
 
 describe('runLaunch: the grace and the closing entry', () => {
@@ -535,5 +620,71 @@ describe('runLaunch: the grace and the closing entry', () => {
     expect((await refusalOf(host, args())).code).toBe('concurrency_exceeded');
     releaseClose();
     await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+  }, 10_000);
+
+  it('a run that resolves first and a close that hangs return within one grace, completed though the parent stops during the close', async () => {
+    let releaseClose!: () => void;
+    const hangingClose = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const parentTurn = new AbortController();
+    // The run resolves at once; the close hangs, and the parent turn stops while the launch waits for it.
+    const writer = fakeSeat('writer', async () => 'Done.', () => {
+      setTimeout(() => parentTurn.abort(), 50);
+      return hangingClose;
+    });
+    const host = fakeHost({ seat: () => writer });
+    const started = Date.now();
+    const out = (await runLaunch(host, args(), ctxFor({ signal: parentTurn.signal }))).output as LaunchAgencyResult;
+    // At most the grace for a close that still hangs; the parent's stop came during it (the precondition).
+    expect(Date.now() - started).toBeLessThan(200 + 300);
+    expect(writer.closed).toBe(true);
+    expect(parentTurn.signal.aborted).toBe(true);
+    // The status is what the run came to: a stop during the close does not change it.
+    expect(out).toMatchObject({ status: 'completed', text: 'Done.' });
+    expect(out.reason).toBeUndefined();
+    expect(launchRegistry.get(out.agencyId)?.state).toBe('closing');
+    releaseClose();
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+  }, 10_000);
+
+  it("a team a seat launched keeps the launch it came from closing while that team's seat outlives the grace, so the session's next launch waits for it", async () => {
+    let releaseWaiter!: () => void;
+    const waited = new Promise<string>((resolve) => {
+      releaseWaiter = () => resolve('Waited.');
+    });
+    // Its call runs on past every abort until released, as a seat whose tool hangs does.
+    const waiter = fakeSeat('waiter', () => waited);
+    let lead: FakeSeat | undefined;
+    let nested: LaunchAgencyResult | undefined;
+    const host: FakeHost = fakeHost({
+      seat: (s, launch) => {
+        if (s.role === 'waiter') return waiter;
+        if (s.role !== 'lead') return fakeSeat(s.role);
+        // The lead's call is a tool call that launches a team from its seat: a launch nested under the lead's team.
+        lead = fakeSeat('lead', async () => {
+          nested = (await runLaunch(host, args({ seats: [seat('waiter')] }), framed(launch, 'lead'))).output as LaunchAgencyResult;
+          return 'Lead done.';
+        });
+        return lead;
+      },
+    });
+    const out = (await runLaunch(host, args({ seats: [seat('lead')], deadlineMs: 1_000 }), ctxFor())).output as LaunchAgencyResult;
+    expect(out.status).toBe('timed_out');
+    // The lead's team stopped with its parent and came back while its waiter still holds its call (the precondition).
+    await vi.waitFor(() => expect(nested?.status).toBe('cancelled'));
+    expect(waiter.inputs).toHaveLength(1);
+    expect(launchRegistry.get(nested!.agencyId)?.state).toBe('closing');
+    // The lead itself is released: its call returned and its close ran, and every hold of either settles before the
+    // next task runs.
+    await vi.waitFor(() => expect(lead?.closed).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The launch stays closing for the seat its lead's team holds, and counts toward the session's one launch in flight.
+    expect(launchRegistry.get(out.agencyId)?.state).toBe('closing');
+    expect((await refusalOf(host, args())).code).toBe('concurrency_exceeded');
+    releaseWaiter();
+    await vi.waitFor(() => expect(launchRegistry.get(nested!.agencyId)).toBeUndefined());
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+    expect((await runLaunch(host, args(), ctxFor())).output).toMatchObject({ status: 'completed' });
   }, 10_000);
 });

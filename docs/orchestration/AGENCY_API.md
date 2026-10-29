@@ -318,7 +318,8 @@ that answered, and the record carries `fallback`. To pin every seat and the chai
 configured providers, pass `generate(prompt, { fallbackProviders: [] })`; to pin
 one seat, put a pre-built `agent({ ..., fallbackProviders: [] })` in the roster.
 
-The per-seat ledger `agentCalls` records each seat's name, input, output, tool
+The per-seat ledger `agentCalls` records each seat's name, input (the text the
+seat was sent, a `beforeAgent` approval's instructions included), output, tool
 calls, usage and duration; the chair's own call is not in it. The result's
 top-level `provider` and `model` are the chair's for parallel, debate and
 hierarchical, the last seat's for sequential, and the last result of the final

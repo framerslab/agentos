@@ -1,6 +1,6 @@
 /**
  * @file launchRegistry.ts
- * The launches in flight, process-wide (module scope, spec D8). An entry holds its tree's limits, its budget, its
+ * The launches in flight, process-wide (module scope). An entry holds its tree's limits, its budget, its
  * gate, its signal, its seats' tool names and the hooks its launch carried, so a nested launch from any seat of the
  * tree (a separate gmi() handle, a host's member, a runtime GMI) reads them from the frame its turn carries.
  * Admission is a synchronous check-and-insert. A root scope's turn draws all its launches on one pool.
@@ -36,13 +36,16 @@ export interface LaunchEntry {
    * runtime; '' for none.
    */
   namespace: string;
-  /** The hooks the launching turn ran under (spec D12). */
+  /** The hooks the launching turn ran under. */
   toolHooks: readonly ToolCallHook[];
-  /** Each seat's tool names, by role: a nested launch's parent tool names (spec D11). */
+  /** Each seat's tool names, by role: a nested launch's parent tool names. */
   seatTools: Map<string, ReadonlySet<string>>;
   /** The output tokens one call of the tree's route is counted with. */
   outputEstimateTokens: number;
-  /** 'closing': the run outlived the grace, or its seats are not released yet; admits nothing under it and still counts. */
+  /**
+   * 'closing': the run outlived the grace, or its seats, or those of a launch nested under it, are not released yet;
+   * admits nothing under it and still counts.
+   */
   state: 'running' | 'closing';
 }
 
@@ -50,6 +53,8 @@ export interface LaunchEntry {
 const MAX_POOL_SCOPES = 10_000;
 const entries = new Map<string, LaunchEntry>();
 const pools = new Map<string, { turnId: string | undefined; budget: SpendBudget }>();
+/** What waits for an entry's removal, by launch id. */
+const removalWaiters = new Map<string, Array<() => void>>();
 
 /** The launches in flight, by launch id, and each root scope's launch pool. */
 export const launchRegistry = {
@@ -63,7 +68,7 @@ export const launchRegistry = {
   },
 
   /**
-   * The launch pool of a root scope's current turn (spec D8, D9): made at the turn's first root launch with the tree's
+   * The launch pool of a root scope's current turn: made at the turn's first root launch with the tree's
    * `maxLaunchTokens` and `maxLaunchCostUSD` (no dollar cap: Infinity), `unpriced: 'allow'` and the turn's budget, when
    * it has one, as its parent, and replaced when a launch comes from a later turn id; a call with no turn id shares the
    * scope's current pool. A session runs one turn at a time, so a root scope's current turn is the only one that draws
@@ -102,8 +107,26 @@ export const launchRegistry = {
     if (entry) entry.state = 'closing';
   },
 
+  /** The launches in flight that the seats of a launch started: the entries whose scope is that launch. */
+  nestedUnder(launchId: string): LaunchEntry[] {
+    return [...entries.values()].filter((entry) => entry.scopeKey === launchId);
+  },
+
+  /** Resolves once the launch's entry is removed; at once for an id that has no entry. */
+  whenRemoved(launchId: string): Promise<void> {
+    if (!entries.has(launchId)) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const waiting = removalWaiters.get(launchId);
+      if (waiting) waiting.push(resolve);
+      else removalWaiters.set(launchId, [resolve]);
+    });
+  },
+
   /** Removes the launch's entry, which frees its place in its scope; an unknown id changes nothing. */
   remove(launchId: string): void {
     entries.delete(launchId);
+    const waiting = removalWaiters.get(launchId);
+    removalWaiters.delete(launchId);
+    for (const resolve of waiting ?? []) resolve();
   },
 };
