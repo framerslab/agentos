@@ -4,6 +4,8 @@ Record mode. A local stub answers every model, embedding, rerank and guard call 
 
 Section 3 of every report says that Z is reported in every table. Only legs 04 and 08 ran Z: the other eight reports show Z in the arms table alone, as not in the run, and their per-arm tables list only the arms that ran.
 
+Section 10's table "Checks on this run" lists the runner's error rows one row per kind, so a run that holds none shows the stray connections alone. None of the ten runs holds an error row.
+
 - Rendered by CI run 40723979292 of the private runner (public copies, scanned before upload).
 - Runs: record-leg-1, record-leg-2, record-leg-3, record-leg-4, record-leg-5, record-leg-6, record-leg-7, record-leg-8, record-leg-9, record-leg-10.
 - AgentOS 0.14.25; the agentos-bench gmi-vs-agent family (unpublished) at revision 8c0361f42073; protocol 0a SHA-256 10579b4e3eb9 as registered, and its addendum's SHA-256 684c21c83e02.
