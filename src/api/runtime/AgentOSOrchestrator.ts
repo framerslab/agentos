@@ -1137,6 +1137,9 @@ export class AgentOSOrchestrator {
       await this.dependencies.streamingManager.closeStream(agentOSStreamId, 'Processing complete.');
     } catch (error: any) {
       turnMetricsStatus = 'error';
+      // the stream closes below and no result continues it: a pause the turn saved before it failed ends below, so
+      // the stream's context goes and the turn settles as a failed turn
+      keepStreamContextActive = false;
       recordExceptionOnActiveSpan(error, `Error in orchestrateTurn for stream ${agentOSStreamId}`);
       const gmiErr =
         GMIError.wrap?.(
@@ -1208,8 +1211,9 @@ export class AgentOSOrchestrator {
         'Error during turn processing.'
       );
     } finally {
-      // The turn counts when it finished, when it asked for a tool (its continuation reserves nothing) or when any of
-      // its text reached the stream before an error; a turn that failed before any output is released.
+      // The turn counts when it finished, when it stopped for a tool the host runs (its continuation reserves nothing)
+      // or when any of its text reached the stream before an error; a turn that failed before any output is released,
+      // a turn that failed while it saved its pause included, since the host never read the request.
       if (spendMeter && meteredOperationId) {
         const outcome: SpendOutcome = keepStreamContextActive || turnMetricsStatus === 'ok' || outputReached ? 'consumed' : 'released';
         try {

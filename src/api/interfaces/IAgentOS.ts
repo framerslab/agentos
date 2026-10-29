@@ -80,11 +80,13 @@ export interface IAgentOS {
    * newer turn ended it), a result yields the closed stream's error chunk
    * (`TOOL_ERROR`). The GMI takes none of such results. A call of a pause
    * that the results leave out is answered with a tool result that says it has
-   * none (code `EXTERNAL_TOOL_NOT_RUN`), so pass every result of a pause
-   * together through `handleToolResults()`. A continuation that fails before
-   * the conversation records the results (the store refuses to save that the
-   * pause was taken, or a result has no JSON form) yields an error chunk and
-   * leaves the pause for `resumeExternalToolRequest()`.
+   * none (code `EXTERNAL_TOOL_NOT_RUN`), in the conversation and in the results
+   * the GMI reads when it takes results together (`IGMI.handleToolResults()`),
+   * so pass every result of a pause together through `handleToolResults()`. A
+   * continuation that fails before the conversation records the results (the
+   * store refuses to save that the pause was taken, or a result has no JSON
+   * form) yields an error chunk and leaves the pause for
+   * `resumeExternalToolRequest()`.
    */
   handleToolResult(
     streamId: string,

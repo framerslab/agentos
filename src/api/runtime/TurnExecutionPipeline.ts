@@ -113,8 +113,9 @@ export interface PreparedTurnContext {
 }
 
 /**
- * Ends the pause a conversation holds when a new turn starts on it, before the turn records its input (see
- * `ExternalToolResultHandler.endPendingExternalToolRequestForNewTurn`). It never throws.
+ * Ends the pause a conversation holds when a new turn starts on it, once the runtime has accepted the turn and before
+ * the turn records its input (see `ExternalToolResultHandler.endPendingExternalToolRequestForNewTurn`). It never
+ * throws.
  */
 export type EndSavedPauseCallback = (
   conversationContext: ConversationContext | undefined,
@@ -156,13 +157,13 @@ export interface TurnPipelineConfig {
  *
  * **Phase sequence:**
  * 1. Validate input (selectedPersonaId required)
- * 2. GMI acquisition via `getOrCreateGMIForSession`, then the end of a pause the conversation holds
+ * 2. GMI acquisition via `getOrCreateGMIForSession`
  * 3. Stream context registration
  * 4. GMI input construction (delegates to {@link GMIChunkTransformer})
  * 5. Turn planning via ITurnPlanner
  * 6. Adaptive execution policy application
  * 7. Organization context and long-term memory policy resolution
- * 8. Inbound message persistence
+ * 8. The end of a pause the conversation holds, then inbound message persistence
  * 9. Rolling summary compaction
  * 10. Prompt profile routing
  * 11. Long-term memory retrieval
@@ -184,8 +185,9 @@ export class TurnExecutionPipeline {
    * @param telemetry - For adaptive execution policy decisions.
    * @param resolveOrganizationContext - Callback to resolve tenant org context. It runs once per turn, before the
    *   GMI is acquired, and must have no side effects.
-   * @param endSavedPause - Ends the pause the turn's conversation holds, once the GMI is acquired and before the turn
-   *   records its input, so the turn's prompt holds no call of the pause without its result.
+   * @param endSavedPause - Ends the pause the turn's conversation holds, once the turn's organization and plan are
+   *   settled and before the turn records its input, so the turn's prompt holds no call of the pause without its
+   *   result and a turn refused before then leaves the pause as it was.
    */
   constructor(
     private readonly activeStreamContexts: Map<string, PipelineStreamContext>,
@@ -259,9 +261,6 @@ export class TurnExecutionPipeline {
     const conversationContext = gmiResult.conversationContext;
     const currentPersonaId = gmi.getCurrentPrimaryPersonaId();
     const gmiInstanceIdForChunks = gmi.getGMIId();
-    // The conversation moves on: a pause it still holds ends here, before Phase 8 records the input, so each call of
-    // the pause is answered right after the message that requested it.
-    await this.endSavedPause?.(conversationContext, agentOSStreamId);
 
     // -------------------------------------------------------------------
     // Phase 3: Stream context registration
@@ -430,6 +429,11 @@ export class TurnExecutionPipeline {
     // -------------------------------------------------------------------
     // Phase 8: Inbound message persistence
     // -------------------------------------------------------------------
+    // The runtime has accepted the turn (an organization it refuses and a plan that fails are raised above), so the
+    // conversation moves on: a pause it still holds ends here, before the input is recorded, so each call of the pause
+    // is answered right after the message that requested it. A turn refused before this point leaves the pause as it
+    // was, for its result or a resume.
+    await this.endSavedPause?.(conversationContext, agentOSStreamId);
     if (this.config.enableConversationalPersistence && conversationContext) {
       const persistContext = conversationContext;
       try {

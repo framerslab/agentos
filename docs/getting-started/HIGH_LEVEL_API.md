@@ -924,14 +924,17 @@ is being continued, or a result for a call the stream's next pause does not
 hold, yields one error chunk with the code `SYS_INVALID_STATE`; a result passed
 after the stream closed (a resume took the pause, a newer turn ended it, or the
 continuation finished) yields the closed stream's error chunk (`TOOL_ERROR`).
+A resume refused for these reasons is refused before it acquires the session's
+GMI, so it changes neither the conversation nor that GMI: the `preferredModelId` and
+`preferredProviderId` a refused resume names are not recorded. Read the pending
+request again with `getPendingExternalToolRequest(...)` before a retry.
+
 Pass every result of a pause together: a call the results leave out is answered
-with a tool result that says it has none (code `EXTERNAL_TOOL_NOT_RUN`), and so
-is each call of a pause a new turn ends, so the model never reads a call
-without its result. The resume is
-refused before it acquires the session's GMI, so it changes neither the
-conversation nor that GMI: the `preferredModelId` and `preferredProviderId` a
-refused resume names are not recorded. Read the pending request again with
-`getPendingExternalToolRequest(...)` before a retry.
+with a tool result that says it has none (code `EXTERNAL_TOOL_NOT_RUN`), in the
+conversation and in the results the GMI reads when it takes results together
+(`IGMI.handleToolResults()`, as the shipped `GMI` does), and so is each call of
+a pause a new turn ends, so the model never reads a call without its result. A
+GMI that takes one result at a time reads the host's result alone.
 
 A continuation that fails before the conversation records its results (the
 store refuses to save that the pause was taken, or a result has no JSON form,
@@ -940,7 +943,9 @@ stream and leaves the pause as it was: `getPendingExternalToolRequest(...)`
 returns it, `resumeExternalToolRequest(...)` continues it, and a new turn ends
 it. A resume whose `organizationId` the runtime refuses (a single-tenant
 runtime with `strictOrganizationIsolation` and another organization) leaves the
-pause as it was too. A continuation that fails after the conversation recorded
+pause as it was too, and so does a new turn the runtime refuses before it
+records its input, for such an organization or because its turn plan fails.
+A continuation that fails after the conversation recorded
 its results keeps them, and a pause that a turn or a continuation saved before
 it failed (the store refuses that save) ends the way a new turn ends one, since
 the host never read its request.

@@ -431,10 +431,11 @@ export class ExternalToolResultHandler {
    * Feeds `toolResults` to the stream's GMI and ends the continuation by the turn's rule: a pause for the calls of a
    * non-final output, one `FINAL_RESPONSE` otherwise. The caller has taken `takenPause`, the pause the results answer:
    * the store keeps that it was taken before the results reach the GMI, and a call of it the results leave out is
-   * answered as not run, so the history answers every call of the pause before the GMI writes again. A continuation
-   * that fails before the conversation records the results (the store refuses that save, or a result has no JSON form)
-   * puts the pause back, as the store holds it; one that fails later ends a pause it saved for its next calls, whose
-   * request the host never read, as a new turn ends a pause ({@link endPauseOfFailedStream}).
+   * answered as not run, in the conversation and, for a GMI that takes results together (`handleToolResults()`), in the
+   * results the GMI reads, so both histories answer every call of the pause before the GMI writes again. A
+   * continuation that fails before the conversation records the results (the store refuses that save, or a result has
+   * no JSON form) puts the pause back, as the store holds it; one that fails later ends a pause it saved for its next
+   * calls, whose request the host never read, as a new turn ends a pause ({@link endPauseOfFailedStream}).
    */
   private async continueWithToolResults(
     agentOSStreamId: StreamId,
@@ -520,13 +521,19 @@ export class ExternalToolResultHandler {
           }
 
           // The calls of the pause the results leave out never get a result: the next message the GMI writes ends the
-          // pause's tool round, which a provider accepts only when every call of it is answered.
+          // pause's tool round, which a provider accepts only when every call of it is answered. The conversation
+          // records them as not run here; the GMI reads them as not run when it takes the results below.
+          const leftOutCalls = (Array.isArray(takenPause.toolCalls) ? takenPause.toolCalls : []).filter(
+            (call) => !toolResults.some((tr) => tr.toolCallId === call.id),
+          );
+          const leftOutReason = (call: ToolCallRequest) =>
+            `The host passed back results for this pause without one for '${call.name}', so the call has none.`;
           if (this.enableConversationalPersistence && conversationContext) {
             answerAsNotRun(
               conversationContext,
               unansweredPauseCalls(conversationContext, takenPause),
               personaId,
-              (call) => `The host passed back results for this pause without one for '${call.name}', so the call has none.`,
+              leftOutReason,
             );
           }
 
@@ -563,7 +570,19 @@ export class ExternalToolResultHandler {
               );
               child?.setAttribute('agentos.tool_success', metricToolSuccess);
 
-              if (toolResults.length > 1) {
+              // The GMI continues on its own history, so it reads the calls the results leave out as not run beside
+              // the host's results; an IGMI that takes one result at a time reads the host's result alone.
+              const notRunResults = leftOutCalls.map((call) => {
+                const notRun = { code: EXTERNAL_TOOL_NOT_RUN_CODE, message: leftOutReason(call) };
+                return {
+                  toolCallId: call.id,
+                  toolName: call.name,
+                  output: notRun,
+                  isError: true,
+                  errorDetails: notRun,
+                };
+              });
+              if (toolResults.length > 1 || (notRunResults.length > 0 && gmi.handleToolResults)) {
                 if (!gmi.handleToolResults) {
                   throw new GMIError(
                     `GMI ${gmiInstanceIdForChunks} does not support batched external tool continuation.`,
@@ -580,27 +599,30 @@ export class ExternalToolResultHandler {
                 }
 
                 return gmi.handleToolResults(
-                  toolResults.map((tr) => ({
-                    toolCallId: tr.toolCallId,
-                    toolName: tr.toolName,
-                    output: tr.isSuccess
-                      ? tr.toolOutput
-                      : {
-                          code: 'EXTERNAL_TOOL_ERROR',
-                          message:
-                            tr.errorMessage ||
-                            `External tool '${tr.toolName}' execution failed.`,
-                        },
-                    isError: !tr.isSuccess,
-                    errorDetails: tr.isSuccess
-                      ? undefined
-                      : {
-                          code: 'EXTERNAL_TOOL_ERROR',
-                          message:
-                            tr.errorMessage ||
-                            `External tool '${tr.toolName}' execution failed.`,
-                        },
-                  })),
+                  [
+                    ...toolResults.map((tr) => ({
+                      toolCallId: tr.toolCallId,
+                      toolName: tr.toolName,
+                      output: tr.isSuccess
+                        ? tr.toolOutput
+                        : {
+                            code: 'EXTERNAL_TOOL_ERROR',
+                            message:
+                              tr.errorMessage ||
+                              `External tool '${tr.toolName}' execution failed.`,
+                          },
+                      isError: !tr.isSuccess,
+                      errorDetails: tr.isSuccess
+                        ? undefined
+                        : {
+                            code: 'EXTERNAL_TOOL_ERROR',
+                            message:
+                              tr.errorMessage ||
+                              `External tool '${tr.toolName}' execution failed.`,
+                          },
+                    })),
+                    ...notRunResults,
+                  ],
                   userId,
                   userApiKeys || {},
                   continuationOptions,

@@ -746,6 +746,14 @@ export interface IGMI {
     options?: GMIToolResultOptions,
   ): Promise<GMIOutput>;
 
+  /**
+   * Continues the turn with several tool results at once: a batch the host passes, or a pause the host answers in
+   * part. For a pause answered in part, the results hold, after the host's, one error result for each call of the
+   * pause the host left out (`isError: true`, `errorDetails.code` `EXTERNAL_TOOL_NOT_RUN`), so the GMI's own history
+   * answers every call of the pause before it writes again. An `IGMI` without it takes one result at a time: a pause
+   * answered in part continues it through `handleToolResult()` with the host's result alone, and a batch of several
+   * results ends the continuation with an error.
+   */
   handleToolResults?(
     toolResults: ToolCallResult[],
     userId: string,
