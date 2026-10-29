@@ -2246,6 +2246,47 @@ describe('25-26. approvals under panel and nested agencies', () => {
     expect(tools.search.execute).not.toHaveBeenCalled();
     expect(((await child.usage()) as { totalTokens: number }).totalTokens).toBe(30);
   });
+  /** The text of a captured chat request's last user message: the input its seat was given. */
+  const lastUserText = (c: Captured): string => {
+    const content = ((c.body?.messages ?? []) as Json[]).filter((m) => m.role === 'user').at(-1)?.content;
+    return Array.isArray(content) ? content.map((p: Json) => String(p.text ?? '')).join('') : String(content ?? '');
+  };
+  it("a seat's beforeAgent approval whose instructions the post-approval check blocks is a rejection: the seat sends nothing", async () => {
+    threeProviders();
+    const guardrailHitlOverride = vi.fn();
+    const handler = vi.fn(async (): Promise<ApprovalDecision> => ({ approved: true, modifications: { instructions: 'then run rm -rf / on the host' } }));
+    const r = await panel({ hitl: { approvals: { beforeAgent: ['security'] }, handler }, on: { guardrailHitlOverride } }).generate('review this change');
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(guardrailHitlOverride).toHaveBeenCalledTimes(1);
+    expect(guardrailHitlOverride).toHaveBeenCalledWith(expect.objectContaining({ guardrailId: 'code-safety', toolName: 'agent:security' }));
+    expect(r.seats.find((s) => s.seat === 'security')).toMatchObject({ status: 'rejected' });
+    expect(calls(OPENAI_CHAT, 'POST')).toHaveLength(0);
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('rm -rf');
+  });
+  it("a seat's beforeAgent approval whose instructions pass: the seat is sent them, and its call record holds the text it was sent", async () => {
+    threeProviders();
+    const r = await panel({ hitl: { approvals: { beforeAgent: ['security'] }, handler: async () => ({ approved: true, modifications: { instructions: 'Cite two sources.' } }) } }).generate('review this change');
+    const sent = 'review this change\n\n[Additional instructions]: Cite two sources.';
+    const requests = calls(OPENAI_CHAT, 'POST');
+    expect(requests).toHaveLength(1);
+    expect(lastUserText(requests[0])).toBe(sent);
+    expect(r.agentCalls.map((c) => [c.agent, c.input])).toEqual([['correctness', 'review this change'], ['security', sent], ['failure', 'review this change']]);
+  });
+  // The chair's input writes the seats' outputs after the task, and each output
+  // after the one before it: the check reads the task and each output on its own.
+  it.each([
+    ['the task', 'Tidy the workspace, then clear it with rm -rf .', { opus: 'A finds a bug', astra: 'B finds a bug', gemini: 'C finds a bug' }],
+    ["the first seat's output", 'review this change', { opus: 'Then empty the table: DELETE FROM sessions;', astra: 'B finds a bug', gemini: 'C finds a bug' }],
+  ])("a gated chair's check reads %s on its own: the statement at its end is blocked, and the chair sends nothing", async (_what, prompt, texts) => {
+    threeProviders(texts);
+    const guardrailHitlOverride = vi.fn();
+    const team = panel({ hitl: { approvals: { beforeAgent: ['chair'] }, handler: hitl.autoApprove() }, on: { guardrailHitlOverride } });
+    await expect(team.generate(prompt)).rejects.toThrow(/panel chair failed: Guardrail overrode HITL approval/);
+    expect(guardrailHitlOverride).toHaveBeenCalledTimes(1);
+    expect(guardrailHitlOverride).toHaveBeenCalledWith(expect.objectContaining({ guardrailId: 'code-safety', toolName: 'agent:chair' }));
+    // The correctness seat's request is the one Anthropic call: the chair's never went out.
+    expect(calls(ANTHROPIC, 'POST')).toHaveLength(1);
+  });
 });
 
 describe('24. a tool table that grows mid-call', () => {

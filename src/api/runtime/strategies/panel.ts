@@ -23,7 +23,7 @@ import type { FallbackSignal } from '../generateText.js';
 import {
   isAgent,
   mergeDefaults,
-  checkBeforeAgent,
+  checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
   callRecordExtras,
@@ -59,9 +59,9 @@ type Callbacks = NonNullable<AgencyOptions['on']>;
 
 type Notify = (event: unknown) => void;
 
-/** How one call of a seat or the chair ended. */
+/** How one call of a seat or the chair ended; a call that returned carries the input it was sent. */
 type Outcome =
-  | { kind: 'returned'; result: Record<string, unknown>; durationMs: number }
+  | { kind: 'returned'; result: Record<string, unknown>; durationMs: number; input: string }
   | { kind: 'threw'; error: unknown; durationMs: number }
   | { kind: 'timeout'; durationMs: number }
   | { kind: 'rejected'; reason: string; durationMs: number }
@@ -424,10 +424,13 @@ export function compilePanel(
 
     /**
      * Runs one seat or the chair: its `beforeAgent` gate, then its model call,
-     * under its deadline. The call carries the seat's own stop, which its
-     * deadline aborts, so a call that outlives the seat starts no further
-     * step, retry or fallback hop; the caller's abort reaches it through the
-     * same signal, and settles the seat at once, a pending approval included.
+     * under its deadline. The gate's post-approval check reads the input, the
+     * input with the approver's instructions the seat is sent, and each of
+     * `parts` on its own: the texts the chair's input is built from. The call
+     * carries the seat's own stop, which its deadline aborts, so a call that
+     * outlives the seat starts no further step, retry or fallback hop; the
+     * caller's abort reaches it through the same signal, and settles the seat
+     * at once, a pending approval included.
      */
     const runAgent = async (
       owner: string,
@@ -435,6 +438,7 @@ export function compilePanel(
       input: string,
       deadlineMs: number | undefined,
       slot: ApprovalSlot,
+      parts: readonly string[] = [],
     ): Promise<Outcome> => {
       const started = Date.now();
       const elapsed = (): number => Date.now() - started;
@@ -454,7 +458,8 @@ export function compilePanel(
       const work = (async (): Promise<Outcome> => {
         // A seat that takes its slot after the caller's abort asks no approval and sends nothing.
         if (signal.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
-        const decision = await checkBeforeAgent(owner, input, agentCalls.slice(), { ...agencyConfig, on: ownerOn });
+        const approval = await checkBeforeAgentInput(owner, input, agentCalls.slice(), { ...agencyConfig, on: ownerOn }, parts);
+        const decision = approval.decision;
         // An abort that landed while the approval was pending: the seat sends nothing, whatever the handler said.
         if (signal.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
         if (decision && !decision.approved) {
@@ -463,9 +468,8 @@ export function compilePanel(
         // No model call starts after the seat has settled.
         const left = remaining();
         if (slot.settled || left === 0) return { kind: 'timeout', durationMs: elapsed() };
-        const effective = decision?.modifications?.instructions
-          ? `${input}\n\n[Additional instructions]: ${decision.modifications.instructions}`
-          : input;
+        // The input the check read, the approver's instructions included.
+        const effective = approval.input;
         const cfg = isAgent(target) ? undefined : target;
         // A call with no chain of its own cannot be answered while the
         // breaker its key records under is open (each key has its own, so a
@@ -496,7 +500,7 @@ export function compilePanel(
         else if (requestTimeout !== callTimeout) delete agentOpts.__panelDeadline;
         on.agentStart?.({ agent: owner, input: effective, timestamp: Date.now() });
         const result = await instance.generate(effective, agentOpts);
-        return { kind: 'returned', result: isRecord(result) ? result : {}, durationMs: elapsed() };
+        return { kind: 'returned', result: isRecord(result) ? result : {}, durationMs: elapsed(), input: effective };
       })();
       work.catch(() => undefined);
       const raced = await withDeadline(work, remaining(), signal).finally(unlink);
@@ -553,7 +557,7 @@ export function compilePanel(
         addUsage(outcome.result.usage);
         callRecords.set(name, {
           agent: name,
-          input: prompt,
+          input: outcome.input,
           output: answered.text,
           toolCalls: toolCallsOf(outcome.result.toolCalls),
           usage: answered.usage,
@@ -671,7 +675,9 @@ export function compilePanel(
     const chairSlot = createApprovalSlot();
     let chairOutcome: Outcome;
     try {
-      chairOutcome = await runAgent('chair', chairCfg, chairInput, chairDeadlineMs, chairSlot);
+      // The chair's input writes more text after the task and after each output but the last, so its
+      // check also reads the task and each output on its own.
+      chairOutcome = await runAgent('chair', chairCfg, chairInput, chairDeadlineMs, chairSlot, [prompt, ...healthy.map((s) => s.text)]);
     } finally {
       chairSlot.settled = true;
     }
