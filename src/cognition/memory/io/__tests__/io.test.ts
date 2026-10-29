@@ -341,6 +341,41 @@ describe('JsonExporter + JsonImporter', () => {
     expect(second.imported).toBe(0);
   });
 
+  it('stores a node or edge whose properties or metadata are not an object with an object that names its import hash', async () => {
+    const brain = await openBrain();
+    const payload = JSON.stringify({
+      traces: [],
+      nodes: [
+        { id: 'kn_array', type: 'concept', label: 'Array node', properties: '["x"]', created_at: 1 },
+        { id: 'kn_null', type: 'concept', label: 'Null node', properties: 'null', created_at: 1 },
+      ],
+      edges: [
+        { id: 'ke_array', source_id: 'kn_array', target_id: 'kn_null', type: 'related_to', metadata: '["x"]', created_at: 1 },
+        { id: 'ke_null', source_id: 'kn_null', target_id: 'kn_array', type: 'related_to', metadata: 'null', created_at: 1 },
+      ],
+    });
+    /** Whether a stored JSON column holds an object that names an import hash. */
+    const hashed = (json: string): boolean => {
+      const parsed: unknown = JSON.parse(json);
+      return parsed !== null && typeof parsed === 'object' && typeof (parsed as { import_hash?: unknown }).import_hash === 'string';
+    };
+    const importer = new JsonImporter(brain);
+
+    expect(await importer.importFromString(payload)).toMatchObject({ imported: 4, errors: [] });
+    const nodes = await brain.all<{ id: string; properties: string }>('SELECT id, properties FROM knowledge_nodes ORDER BY id');
+    expect(nodes.map((node) => [node.id, hashed(node.properties)])).toEqual([
+      ['kn_array', true],
+      ['kn_null', true],
+    ]);
+    const edges = await brain.all<{ id: string; metadata: string }>('SELECT id, metadata FROM knowledge_edges ORDER BY id');
+    expect(edges.map((edge) => [edge.id, hashed(edge.metadata)])).toEqual([
+      ['ke_array', true],
+      ['ke_null', true],
+    ]);
+    // A second import finds each node and edge by its import hash.
+    expect(await importer.importFromString(payload)).toMatchObject({ imported: 0, skipped: 4, errors: [] });
+  });
+
   it('returns an error for invalid JSON file', async () => {
     const dir = tempDir();
     const badPath = path.join(dir, 'bad.json');
