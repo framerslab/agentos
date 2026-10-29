@@ -1,5 +1,5 @@
 /**
- * The launch registry (spec 4.7): admission counts the running and closing entries of a scope, and a root scope's
+ * The launch registry: admission counts the running and closing entries of a scope, and a root scope's
  * launch pool is one per turn. Pure logic over module state: every case uses scope keys of its own.
  */
 import { randomUUID } from 'node:crypto';
