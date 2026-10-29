@@ -113,6 +113,15 @@ export interface PreparedTurnContext {
 }
 
 /**
+ * Ends the pause a conversation holds when a new turn starts on it, before the turn records its input (see
+ * `ExternalToolResultHandler.endPendingExternalToolRequestForNewTurn`). It never throws.
+ */
+export type EndSavedPauseCallback = (
+  conversationContext: ConversationContext | undefined,
+  agentOSStreamId: StreamId,
+) => Promise<unknown>;
+
+/**
  * Resolved config shape consumed by the pipeline.
  * Extracted from the orchestrator's full resolved config to avoid coupling.
  */
@@ -147,7 +156,7 @@ export interface TurnPipelineConfig {
  *
  * **Phase sequence:**
  * 1. Validate input (selectedPersonaId required)
- * 2. GMI acquisition via `getOrCreateGMIForSession`
+ * 2. GMI acquisition via `getOrCreateGMIForSession`, then the end of a pause the conversation holds
  * 3. Stream context registration
  * 4. GMI input construction (delegates to {@link GMIChunkTransformer})
  * 5. Turn planning via ITurnPlanner
@@ -175,6 +184,8 @@ export class TurnExecutionPipeline {
    * @param telemetry - For adaptive execution policy decisions.
    * @param resolveOrganizationContext - Callback to resolve tenant org context. It runs once per turn, before the
    *   GMI is acquired, and must have no side effects.
+   * @param endSavedPause - Ends the pause the turn's conversation holds, once the GMI is acquired and before the turn
+   *   records its input, so the turn's prompt holds no call of the pause without its result.
    */
   constructor(
     private readonly activeStreamContexts: Map<string, PipelineStreamContext>,
@@ -184,6 +195,7 @@ export class TurnExecutionPipeline {
     private readonly chunkTransformer: GMIChunkTransformer,
     private readonly telemetry: TaskOutcomeTelemetryManager,
     private readonly resolveOrganizationContext: (inputOrganizationId: unknown) => string | undefined,
+    private readonly endSavedPause?: EndSavedPauseCallback,
   ) {}
 
   /**
@@ -247,6 +259,9 @@ export class TurnExecutionPipeline {
     const conversationContext = gmiResult.conversationContext;
     const currentPersonaId = gmi.getCurrentPrimaryPersonaId();
     const gmiInstanceIdForChunks = gmi.getGMIId();
+    // The conversation moves on: a pause it still holds ends here, before Phase 8 records the input, so each call of
+    // the pause is answered right after the message that requested it.
+    await this.endSavedPause?.(conversationContext, agentOSStreamId);
 
     // -------------------------------------------------------------------
     // Phase 3: Stream context registration

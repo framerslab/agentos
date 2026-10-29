@@ -2087,7 +2087,9 @@ export class GMI implements IGMI {
         uiCommands: aggregatedUiCommands.length > 0 ? aggregatedUiCommands : undefined, // Assuming GMI can populate these
         usage: aggregatedUsage,
         error: lastErrorForOutput,
-        ragSources: lastRagSources,
+        // a continuation retrieves nothing of its own: its reply carries the sources of the turn it continues, which
+        // its calls are judged with too
+        ragSources: lastRagSources ?? continuedTurnSources,
         ...(structuredResult ? { structuredOutput: structuredResult } : {}),
       };
       return finalTurnOutput; // Return the aggregated output

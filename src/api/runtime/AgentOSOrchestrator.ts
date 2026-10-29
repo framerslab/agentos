@@ -396,6 +396,7 @@ export class AgentOSOrchestrator {
       this.chunkTransformer,
       this.telemetry,
       this.resolveOrganizationContext.bind(this),
+      this.toolResultHandler.endPendingExternalToolRequestForNewTurn.bind(this.toolResultHandler),
     );
     await this.telemetry.loadPersistedWindows();
     this.initialized = true;

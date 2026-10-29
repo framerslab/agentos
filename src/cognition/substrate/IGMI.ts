@@ -545,9 +545,11 @@ export interface GMIOutput {
     error?: { code: string; message: string; details?: any };
     /**
      * Retrieved RAG chunks for the turn, populated when the GMI performed a
-     * RAG retrieval. Threaded into the FINAL_RESPONSE chunk so client code and
-     * the output-guardrail layer (Grounding Guard, Citation Verifier) can
-     * verify generated claims against the same sources the model saw.
+     * RAG retrieval; a tool continuation retrieves nothing of its own and
+     * carries the chunks of the user turn it continues. Threaded into the
+     * FINAL_RESPONSE chunk so client code and the output-guardrail layer
+     * (Grounding Guard, Citation Verifier) can verify generated claims against
+     * the same sources the model saw.
      */
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
     /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */

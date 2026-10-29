@@ -913,9 +913,17 @@ original process exits.
 
 A pause is resumed once. When the conversation no longer holds the pause the
 snapshot names (its results were passed on its stream, an output guardrail
-blocked its stream, or a newer pause replaced it), or another resume of it is
-under way, `resumeExternalToolRequest(...)` yields one error chunk with the
-code `SYS_INVALID_STATE` and the GMI takes none of the results. The resume is
+blocked its stream, a newer turn ended it, or a newer pause replaced it), or
+another resume of it is under way, `resumeExternalToolRequest(...)` yields one
+error chunk with the code `SYS_INVALID_STATE` and the GMI takes none of the
+results. A resume ends the stream the pause was saved on. The same rule holds
+on that stream: `handleToolResult(...)` and `handleToolResults(...)` continue
+the pause once, with results for its calls, and a retry, a result for a call
+the stream no longer waits on, or a result passed after a resume or a newer
+turn yields one error chunk with the code `SYS_INVALID_STATE`. A new turn on a
+conversation that holds a pause ends the pause: each of its calls is answered
+with a tool result that says it never ran (code `EXTERNAL_TOOL_NOT_RUN`), so the
+model never reads a call without its result. The resume is
 refused before it acquires the session's GMI, so it changes neither the
 conversation nor that GMI: the `preferredModelId` and `preferredProviderId` a
 refused resume names are not recorded. Read the pending request again with

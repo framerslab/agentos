@@ -72,6 +72,13 @@ export interface IAgentOS {
    * @returns {AsyncGenerator<AgentOSResponse, void, undefined>} An async generator that yields
    * response chunks after processing the tool result.
    * @throws {Error} If the `streamId` or `toolCallId` is invalid.
+   *
+   * A pause is continued once. When the conversation no longer holds the pause
+   * the stream stopped for (its results were passed already, it was resumed on
+   * another stream, a newer turn ended it, or the stream's next pause replaced
+   * it), or the result answers none of its calls, the stream yields one error
+   * chunk with the code `SYS_INVALID_STATE` and the GMI takes none of the
+   * results.
    */
   handleToolResult(
     streamId: string,
@@ -90,6 +97,11 @@ export interface IAgentOS {
    * @returns {AsyncGenerator<AgentOSResponse, void, undefined>} An async generator that yields
    * response chunks after processing the tool results.
    * @throws {Error} If the `streamId` is invalid or the tool result batch is empty.
+   *
+   * The batch continues the pause once, as `handleToolResult()` does: a batch
+   * for a pause the conversation no longer holds, or with a result for a call
+   * the stream does not wait on, yields one error chunk with the code
+   * `SYS_INVALID_STATE`.
    */
   handleToolResults?(
     streamId: string,
@@ -209,11 +221,12 @@ export interface IAgentOS {
    *
    * A pause is resumed once. When the conversation no longer holds the pause
    * the snapshot names (its results were passed on its stream, an output
-   * guardrail blocked its stream, or a newer pause replaced it) or another
-   * resume of it is under way, the stream yields one error chunk with the code
-   * `SYS_INVALID_STATE` and the GMI takes none of the results. Such a resume
-   * is refused before the session's GMI is acquired, so it changes neither the
-   * conversation nor that GMI.
+   * guardrail blocked its stream, a newer turn ended it, or a newer pause
+   * replaced it) or another resume of it is under way, the stream yields one
+   * error chunk with the code `SYS_INVALID_STATE` and the GMI takes none of the
+   * results. Such a resume is refused before the session's GMI is acquired, so
+   * it changes neither the conversation nor that GMI. A resume ends the stream
+   * the pause was saved on.
    *
    * The once-only rule holds within one AgentOS instance: instances that share
    * a conversation store do not see each other's resumes, so a deployment with
