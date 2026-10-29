@@ -2178,7 +2178,9 @@ export class MemoryStore {
    * under a namespace reads `user:<namespace>/<userId>` and not the plain form filed before.
    *
    * A Brain row's metadata is written with a compare against what the move read, so a write another writer makes to
-   * the row meanwhile (a facade's recall, feedback or update) is read again and kept.
+   * the row meanwhile (a facade's recall, feedback or update) is read again and kept. A hydration of this store, or of
+   * another store on the same Brain in this process, that read a row before the move reads it again before it loads
+   * it, so the trace loads under the new id.
    *
    * @returns The number of traces moved: Brain rows, soft-deleted ones included, and the live traces the store held
    *   or the index listed under the old id with no row.
