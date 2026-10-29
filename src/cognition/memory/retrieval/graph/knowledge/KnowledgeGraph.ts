@@ -398,24 +398,27 @@ export class KnowledgeGraph implements IKnowledgeGraph {
 
   /**
    * Delete the episodic records that copy the filter's traces or scopes: a trace's copy by its key, a scope's copies
-   * by the scope their stored context names.
+   * by the scope their stored context names. The relations that name a deleted record go with it, as an entity's do
+   * ({@link deleteEntity}): a host can relate a record, since `upsertRelation` takes any node id.
    */
   async deleteMemories(filter: MemoryCopyFilter): Promise<number> {
     if (isEmptyCopyFilter(filter)) return 0;
-    let deleted = 0;
+    const ids = new Set<string>();
     for (const traceId of filterTraceIds(filter)) {
-      if (this.memories.delete(copyKey(traceId))) deleted += 1;
+      if (this.memories.has(copyKey(traceId))) ids.add(copyKey(traceId));
     }
     if (filter.scopes?.length) {
       const byScope: MemoryCopyFilter = { scopes: filter.scopes };
       for (const [id, memory] of this.memories) {
-        if (isMemoryCopyOf(memory.context, byScope)) {
-          this.memories.delete(id);
-          deleted += 1;
-        }
+        if (isMemoryCopyOf(memory.context, byScope)) ids.add(id);
       }
     }
-    return deleted;
+    for (const id of ids) {
+      this.memories.delete(id);
+      const named = [...(this.relationsBySource.get(id) ?? []), ...(this.relationsByTarget.get(id) ?? [])];
+      for (const relationId of named) await this.deleteRelation(relationId);
+    }
+    return ids.size;
   }
 
   // ============================================================================
