@@ -3,11 +3,11 @@
  * One scope at a time: `hydrateScope` loads a returning user's oldest trace that the whole-brain hydration (the
  * 1,000 most recent traces) leaves out; `refileScope` moves a scope's traces to another scope id in the Brain, the
  * cache, the vector index and the knowledge graph's copy, its soft-deleted rows, a trace held with no embedding and,
- * with no Brain, the documents another store filed into a durable index included, recall under the old id finds none
- * of them though the index failed to delete an old document, and a write another writer makes to a moving trace's row
- * is kept; a trace's `turnUserId` survives a restart, and `deleteScope` with `turnUserId` deletes only that user's
- * traces of the scope. An empty scope id is refused by `refileScope` and `deleteScope`, and a limit that is not a
- * positive integer by `hydrateScope`. Real SQLite Brains.
+ * with no Brain, the documents another store filed into a durable index included, past stale copies at the front of
+ * the old collection; recall under the old id finds none of them though the index failed to delete an old document,
+ * and a write another writer makes to a moving trace's row is kept. A trace's `turnUserId` survives a restart, and
+ * `deleteScope` with `turnUserId` deletes only that user's traces of the scope. An empty scope id is refused by
+ * `refileScope` and `deleteScope`, and a limit that is not a positive integer by `hydrateScope`. Real SQLite Brains.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -206,6 +206,34 @@ describe('refileScope', () => {
     expect(copies.map((c) => [c.context?.memoryTraceId, c.context?.scopeId]).sort()).toEqual([
       ['t-1', 'A/42'], ['t-2', 'A/42'], ['t-3', '7'],
     ]);
+  });
+
+  it('with no Brain moves the traces after stale documents at the front of the old collection', async () => {
+    const vectorStore = await vectorStoreOf4();
+    // The index lists a collection two documents a read, from its start.
+    const scan = vectorStore.scanByMetadata.bind(vectorStore);
+    vectorStore.scanByMetadata = (name, options) => scan(name, { ...options, limit: Math.min(options?.limit ?? 100, 2) });
+    const graph = new KnowledgeGraph();
+    const store = storeWithoutBrain(vectorStore, graph);
+    await store.store(trace('t-1', '42', 1_000));
+    await store.store(trace('t-2', '42', 1_001));
+    // Stored again under another scope id, as a move whose delete from the old collection failed leaves them: the
+    // first documents of the old collection are stale copies of these two traces.
+    for (const id of ['t-1', 't-2']) await store.store({ ...store.getTrace(id)!, scopeId: '7' });
+    // Another store on the same index files two traces under the old id that this one never loads.
+    const other = storeWithoutBrain(vectorStore, graph);
+    await other.store(trace('t-3', '42', 1_002));
+    await other.store(trace('t-4', '42', 1_003));
+
+    expect(await store.refileScope('user', '42', 'A/42')).toBe(2);
+
+    const allIdsIn = async (collection: string) =>
+      (await InMemoryVectorStore.prototype.scanByMetadata.call(vectorStore, collection, { limit: 1000 })).documents
+        .map((document) => document.id)
+        .sort();
+    expect(await allIdsIn('cogmem_user_42')).toEqual([]);
+    expect(await allIdsIn('cogmem_user_A/42')).toEqual(['t-3', 't-4']);
+    expect(await allIdsIn('cogmem_user_7')).toEqual(['t-1', 't-2']);
   });
 
   it('keeps recall under the old id from a trace whose old document the index failed to delete', async () => {
