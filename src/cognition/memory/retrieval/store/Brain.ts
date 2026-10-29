@@ -1530,10 +1530,15 @@ export class Brain {
    * file. This means importing an `alice` snapshot into a Brain opened
    * with `brainId: 'alice-fork'` produces a fork with no shared identity.
    *
-   * **CAVEAT:** importing from a pre-0.3.0 SQLite file MUTATES the source
-   * file. Opening the source via `Brain.openSqlite` runs the v1 to v2
-   * migration in place. To preserve the source unchanged, copy the file to
-   * a temp path before calling this method.
+   * **CAVEAT:** importing from a file an older release wrote MUTATES the
+   * source file. Opening the source via `Brain.openSqlite` runs its pending
+   * migrations in place: v1 to v2 for a file from before 0.3.0, and v2 to v3,
+   * which adds `memory_traces.scope_id` and fills it, for a file from before
+   * 0.13.159. A release before 0.13.159 then fails to import the file into a
+   * table without the column, since its import copies every column it reads.
+   * The open also files the scope id of each source trace that a release
+   * older than the column wrote. To preserve the source unchanged, copy the
+   * file to a temp path before calling this method.
    *
    * @param sourcePath - Source SQLite file path (typically produced by
    *   `Brain.exportToSqlite`).
