@@ -18,7 +18,7 @@ import type { CompiledExecutionGraph, GraphNode, GraphState } from '../ir/types.
 import { START, END } from '../ir/types.js';
 import type { NodeExecutionResult, NodeExecutorDeps } from '../runtime/NodeExecutor.js';
 import { LoopController, type LoopChunk, type LoopOutput } from '../runtime/LoopController.js';
-import { gmiNode, humanNode } from '../builders/nodes.js';
+import { gmiNode, humanNode, toolNode } from '../builders/nodes.js';
 import type { GraphEvent } from '../events/GraphEvent.js';
 
 // ---------------------------------------------------------------------------
@@ -2083,5 +2083,379 @@ describe('GraphRuntime: a parallel batch in which two branches wait for a person
 
     expect(await runtime.resume(graph, runIdOf(run))).toEqual({ publish: 'Published.' });
     expect(model.calls).toEqual([PUBLISH]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A checkpoint keeps the results recorded when it was saved
+// ---------------------------------------------------------------------------
+//
+// A resume marks a human node complete from its recorded result. A checkpoint
+// saved before the node asked holds no result for it, so a resume or a fork
+// from that checkpoint asks again, however far the run went after it.
+
+/** The `checkpoint_saved` event the run yielded first for `nodeId`. */
+function firstCheckpointOf(
+  events: GraphEvent[],
+  nodeId: string,
+): Extract<GraphEvent, { type: 'checkpoint_saved' }> {
+  const saved = events.find(
+    (event): event is Extract<GraphEvent, { type: 'checkpoint_saved' }> =>
+      event.type === 'checkpoint_saved' && event.nodeId === nodeId,
+  );
+  if (!saved) throw new Error(`the run saved no checkpoint for ${nodeId}`);
+  return saved;
+}
+
+describe('GraphRuntime: a checkpoint keeps the results recorded when it was saved', () => {
+  it('asks the approval again when a run resumes or forks from a checkpoint saved before it', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = scriptedModel({ [DRAFT]: DRAFTED, [PUBLISH]: 'Published.' });
+    const runtime = runtimeOver(store, model.providerCall);
+    const draft: GraphNode = { ...draftNode(), checkpoint: 'after' };
+    const graph = makeLinearGraph('g-checkpoint-results', [draft, approveNode(), publishNode()]);
+
+    const afterDraft = firstCheckpointOf(await readAll(runtime.stream(graph, {})), 'draft');
+
+    expect(Object.keys((await store.get(afterDraft.checkpointId))?.nodeResults ?? {})).toEqual(['draft']);
+    const asksAgain = [
+      'run_start',
+      'node_start:approve',
+      'node_end:approve',
+      'interrupt:approve',
+      'checkpoint_saved:approve',
+      'run_end',
+    ];
+    expect(trace(await readAll(runtime.streamResume(graph, afterDraft.checkpointId)))).toEqual(asksAgain);
+    const forkRunId = await store.fork(afterDraft.checkpointId);
+    expect(trace(await readAll(runtime.streamResume(graph, forkRunId)))).toEqual(asksAgain);
+    expect(model.calls).toEqual([DRAFT]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The checkpoints a parallel batch saves under every_node
+// ---------------------------------------------------------------------------
+//
+// Under the every_node policy of workflow() and mission(), each node of a
+// batch saves a checkpoint after it runs, and the runtime saves one more after
+// the batch. A host can stop reading during the batch's events, or the process
+// can stop there, and a host can resume from any checkpoint by its id, so each
+// checkpoint has to hold what every node it lists as completed wrote, and no
+// result of a node it does not list.
+
+describe('GraphRuntime: the checkpoints a parallel batch saves under every_node', () => {
+  // START fans out to draft and notes, which both lead to publish. notes
+  // finishes after draft, so its checkpoint lists draft as completed.
+  const everyNodeBatch = (id: string, first: GraphNode = draftNode()) =>
+    makeParallelJoinGraph(id, first, notesNode(), publishNode(), { checkpointPolicy: 'every_node' });
+  const replies = { [DRAFT]: DRAFTED, [NOTES]: NOTED, [PUBLISH]: 'Published.' };
+
+  it('lets a host that stops reading during the batch resume by the run id with what every node wrote', async () => {
+    const model = recordingModel(replies, [NOTES]);
+    const runtime = runtimeOver(new InMemoryCheckpointStore(), model.providerCall);
+    const graph = everyNodeBatch('g-every-node-stop');
+
+    const seen = await readUntil(runtime.stream(graph, {}), 'node_end');
+    expect(trace(seen)).toEqual(['run_start', 'node_start:draft', 'node_end:draft']);
+
+    const artifacts = await runtime.resume(graph, runIdOf(seen));
+    expect(model.stateSeenBy(PUBLISH)?.artifacts).toEqual({ draft: DRAFTED, notes: NOTED });
+    expect(artifacts).toEqual({ draft: DRAFTED, notes: NOTED, publish: 'Published.' });
+  });
+
+  it('holds in the checkpoint a node saves what every node it lists as completed wrote', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel(replies, [NOTES]);
+    const runtime = runtimeOver(store, model.providerCall);
+    const graph = everyNodeBatch('g-every-node-branch');
+
+    // The first checkpoint named for notes is the one notes saved; the one
+    // the runtime saves after the batch is named for notes too and comes later.
+    const afterNotes = firstCheckpointOf(await readAll(runtime.stream(graph, {})), 'notes');
+    const checkpoint = await store.get(afterNotes.checkpointId);
+
+    expect(checkpoint?.visitedNodes).toEqual(['draft', 'notes']);
+    expect(checkpoint?.state.artifacts).toEqual({ draft: DRAFTED, notes: NOTED });
+    const callsBeforeResume = model.calls.length;
+    expect(await runtime.resume(graph, afterNotes.checkpointId)).toEqual({
+      draft: DRAFTED,
+      notes: NOTED,
+      publish: 'Published.',
+    });
+    expect(model.calls.slice(callsBeforeResume).map((call) => call.instructions)).toEqual([PUBLISH]);
+  });
+
+  it('holds no result of a node of the batch that waits for a person, so a resume from it asks', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel(replies, [NOTES]);
+    const runtime = runtimeOver(store, model.providerCall);
+    // approve waits for a person; notes, declared after it, finishes after it asked.
+    const graph = everyNodeBatch('g-every-node-waiting', approveNode());
+
+    const runId = runIdOf(await readAll(runtime.stream(graph, {})));
+    const afterNotes = await store.load(runId, 'notes');
+    if (!afterNotes) throw new Error('notes saved no checkpoint');
+
+    expect(afterNotes.visitedNodes).toEqual(['notes']);
+    expect(Object.keys(afterNotes.nodeResults)).toEqual(['notes']);
+    const resumed = trace(await readAll(runtime.streamResume(graph, afterNotes.id)));
+    expect(resumed.filter((step) => step.startsWith('interrupt'))).toEqual(['interrupt:approve']);
+    expect(model.stateSeenBy(PUBLISH)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A parallel batch that halts reports every node that completed
+// ---------------------------------------------------------------------------
+//
+// The run stops at the first node of the batch, in the order the nodes are
+// declared, that interrupted or failed, and the other nodes of the batch have
+// run as well. A host that follows the run by its node_end events reads every
+// node that completed, the ones declared after the halting node included,
+// before the run reports the stop.
+
+const CHECK = 'Check the release notes.';
+
+function checkNode(): GraphNode {
+  return { ...gmiNode({ instructions: CHECK }), id: 'check' };
+}
+
+describe('GraphRuntime: a parallel batch that halts reports every node that completed', () => {
+  it.each([
+    {
+      halting: 'approve, which waits for a person',
+      node: approveNode,
+      stop: ['node_start:approve', 'node_end:approve', 'interrupt:approve', 'checkpoint_saved:approve', 'run_end'],
+    },
+    {
+      halting: 'check, which fails',
+      node: checkNode,
+      stop: ['node_start:check', 'error:check', 'checkpoint_saved:check', 'interrupt:check', 'run_end'],
+    },
+  ])('yields the nodes declared after $halting before the stop', async ({ node, stop }) => {
+    const model = scriptedModel({ [DRAFT]: DRAFTED, [NOTES]: NOTED, [CHECK]: new Error('provider unavailable') });
+    const graph = makeWideParallelJoinGraph('g-batch-halt-reports', [draftNode(), node(), notesNode()], publishNode());
+
+    const events = await readAll(runtimeOver(new InMemoryCheckpointStore(), model.providerCall).stream(graph, {}));
+
+    expect(trace(events)).toEqual([
+      'run_start',
+      'node_start:draft',
+      'node_end:draft',
+      'edge_transition:draft->publish',
+      'node_start:notes',
+      'node_end:notes',
+      'edge_transition:notes->publish',
+      ...stop,
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A node that fails runs again when the run resumes
+// ---------------------------------------------------------------------------
+//
+// A node that fails stops the run, and a host resumes it once the cause is
+// fixed. The failed attempt writes nothing and leaves no result, as an attempt
+// the retry policy runs again does, so the resumed run executes the node
+// again, whatever its effectClass, from the state it ran on. The tool and the
+// search extension, like the model, are the host's and are scripted.
+
+const CHANGELOG = 'v2 ships the importer.';
+
+/** A tool node that fetches the changelog, external as toolNode() makes it by default. */
+function fetchNode(): GraphNode {
+  return { ...toolNode('fetch_changelog'), id: 'fetch' };
+}
+
+/** A tool orchestrator whose tool fails the first time it is called and then returns `output`. */
+function flakyTools(output: unknown): NonNullable<NodeExecutorDeps['toolOrchestrator']> & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    async processToolCall({ toolCallRequest }) {
+      calls.push(toolCallRequest.toolName);
+      return calls.length === 1
+        ? { success: false, error: 'changelog service unavailable' }
+        : { success: true, output };
+    },
+  };
+}
+
+describe('GraphRuntime: a node that fails runs again when the run resumes', () => {
+  it.each([
+    { where: 'a line', graph: () => makeLinearGraph('g-failed-tool-line', [fetchNode(), publishNode()]) },
+    {
+      where: 'a parallel batch',
+      graph: () => makeParallelJoinGraph('g-failed-tool-batch', draftNode(), fetchNode(), publishNode()),
+    },
+  ])('runs a failed external tool node again in $where, and the node after it reads its output', async ({ graph: build }) => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel({ [DRAFT]: DRAFTED, [PUBLISH]: 'Published.' });
+    const tools = flakyTools(CHANGELOG);
+    const runtime = new GraphRuntime({
+      checkpointStore: store,
+      nodeExecutor: new NodeExecutor({
+        loopController: new LoopController(),
+        providerCall: model.providerCall,
+        toolOrchestrator: tools,
+      }),
+    });
+    const graph = build();
+
+    const run = await readAll(runtime.stream(graph, {}));
+    expect(trace(run)).toContain('error:fetch');
+    expect((await store.latest(runIdOf(run)))?.nodeResults).not.toHaveProperty('fetch');
+
+    const artifacts = await runtime.resume(graph, runIdOf(run));
+
+    expect(tools.calls).toEqual(['fetch_changelog', 'fetch_changelog']);
+    expect(model.stateSeenBy(PUBLISH)?.artifacts).toMatchObject({ fetch: CHANGELOG });
+    expect(artifacts).toMatchObject({ fetch: CHANGELOG, publish: 'Published.' });
+  });
+
+  // outline lists the sources and refine adds one; refine fails the first
+  // time with what it found so far, and the next time succeeds.
+  it.each([
+    { where: 'a line', siblings: [] as Array<() => GraphNode> },
+    { where: 'a parallel batch', siblings: [notesNode] },
+  ])('keeps no write of a failed node in $where, so the write of its next run counts once', async ({ siblings }) => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel({ [NOTES]: NOTED, [PUBLISH]: 'Published.' });
+    let refineCalls = 0;
+    const runtime = new GraphRuntime({
+      checkpointStore: store,
+      nodeExecutor: new NodeExecutor({
+        loopController: new LoopController(),
+        providerCall: model.providerCall,
+        extensionExecutor: async (_extensionId, method) => {
+          if (method === 'list') return { success: true, output: { sources: ['CHANGELOG.md'] } };
+          refineCalls += 1;
+          return refineCalls === 1
+            ? { success: false, output: { sources: ['docs/importer.md'] }, error: 'index busy' }
+            : { success: true, output: { sources: ['docs/importer.md'] } };
+        },
+      }),
+    });
+    const branches = [extensionNode('refine', 'refine'), ...siblings.map((make) => make())];
+    const graph = graphOf(
+      `g-failed-write-${branches.length}`,
+      [extensionNode('outline', 'list'), ...branches, publishNode()],
+      [
+        [START, 'outline'],
+        ...branches.flatMap((branch): Array<[string, string]> => [
+          ['outline', branch.id],
+          [branch.id, 'publish'],
+        ]),
+        ['publish', END],
+      ],
+      { reducers: { 'scratch.sources': 'concat' } },
+    );
+
+    const runId = runIdOf(await readAll(runtime.stream(graph, {})));
+    expect((await store.latest(runId))?.state.scratch).toEqual({ sources: ['CHANGELOG.md'] });
+
+    await runtime.resume(graph, runId);
+    expect(refineCalls).toBe(2);
+    expect(model.stateSeenBy(PUBLISH)?.scratch).toEqual({ sources: ['CHANGELOG.md', 'docs/importer.md'] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A key named __proto__ stays a key of scratch
+// ---------------------------------------------------------------------------
+//
+// An extension's output can come from JSON the host parsed, where "__proto__"
+// is an ordinary key. Writing it to scratch has to keep it a key, as
+// updateArtifacts() does, and never set the prototype of the state the next
+// nodes read, which would give them values no node wrote.
+
+describe('GraphRuntime: a key named __proto__ stays a key of scratch', () => {
+  const found = JSON.parse('{"__proto__": {"approved": true}, "sources": ["CHANGELOG.md"]}') as Record<
+    string,
+    unknown
+  >;
+
+  it.each([
+    { where: 'a line', siblings: [] as Array<() => GraphNode> },
+    { where: 'a parallel batch', siblings: [notesNode] },
+  ])('gives the node after $where the key as written and no value no node wrote', async ({ siblings }) => {
+    const model = recordingModel({ [NOTES]: NOTED, [PUBLISH]: 'Published.' });
+    const runtime = runtimeWithExtension(new InMemoryCheckpointStore(), model.providerCall, { sources: found });
+    const branches = [searchNode(), ...siblings.map((make) => make())];
+    const graph = graphOf(`g-proto-key-${branches.length}`, [...branches, publishNode()], [
+      ...branches.flatMap((branch): Array<[string, string]> => [
+        [START, branch.id],
+        [branch.id, 'publish'],
+      ]),
+      ['publish', END],
+    ]);
+
+    await runtime.invoke(graph, {});
+
+    const scratch = model.stateSeenBy(PUBLISH)?.scratch as Record<string, unknown>;
+    expect(Object.getPrototypeOf(scratch)).toBe(Object.prototype);
+    expect(Object.keys(scratch)).toEqual(['__proto__', 'sources']);
+    expect(Object.getOwnPropertyDescriptor(scratch, '__proto__')?.value).toEqual({ approved: true });
+    expect(scratch.approved).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A guardrail node a mission expansion adds to a parallel batch
+// ---------------------------------------------------------------------------
+//
+// An expansion handler can add nodes while the run goes on, and the nodes it
+// adds can become ready together. A guardrail node among them that blocks
+// stops the run for a guardrail violation, as it does outside a batch.
+
+describe('GraphRuntime: a guardrail node a mission expansion adds to a parallel batch', () => {
+  it('stops the run for a guardrail violation when it blocks', async () => {
+    const executeMock = vi.fn().mockImplementation(async (node: GraphNode): Promise<NodeExecutionResult> => {
+      if (node.id === 'a') {
+        return {
+          success: true,
+          output: 'a-done',
+          expansionRequests: [{ trigger: 'agent_request', reason: 'Check the draft', request: {} }],
+        };
+      }
+      if (node.id === 'safety') return { success: false, error: 'blocked by policy' };
+      return { success: true, output: `${node.id}-done` };
+    });
+    // After a, the handler adds safety, a guardrail node, and notes, which
+    // both follow a and so run as one batch.
+    const expansionHandler = {
+      handle: vi.fn(async (context: { graph: CompiledExecutionGraph }) => ({
+        graph: {
+          ...context.graph,
+          nodes: [
+            ...context.graph.nodes,
+            makeNode('safety', {
+              type: 'guardrail',
+              executorConfig: { type: 'guardrail', guardrailIds: ['code-safety'], onViolation: 'block' },
+            }),
+            makeNode('notes'),
+          ],
+          edges: [
+            { id: 'start-a', source: START, target: 'a', type: 'static' as const },
+            { id: 'a-safety', source: 'a', target: 'safety', type: 'static' as const },
+            { id: 'a-notes', source: 'a', target: 'notes', type: 'static' as const },
+            { id: 'safety-end', source: 'safety', target: END, type: 'static' as const },
+            { id: 'notes-end', source: 'notes', target: END, type: 'static' as const },
+          ],
+        },
+      })),
+    };
+    const runtime = new GraphRuntime({
+      checkpointStore: new InMemoryCheckpointStore(),
+      nodeExecutor: makeExecutorWithMock(executeMock),
+      expansionHandler,
+    });
+
+    const events = await readAll(runtime.stream(makeLinearGraph('g-expanded-guardrail', [makeNode('a')]), {}));
+
+    expect(executeMock.mock.calls.map(([node]) => (node as GraphNode).id).sort()).toEqual(['a', 'notes', 'safety']);
+    expect(events).toContainEqual({ type: 'interrupt', nodeId: 'safety', reason: 'guardrail_violation' });
   });
 });
