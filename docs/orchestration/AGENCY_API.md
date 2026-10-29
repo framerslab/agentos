@@ -219,9 +219,10 @@ over the agency-level values, and each of the four is inherited on its own when
 the seat leaves it out. A seat `baseUrl` that is empty or whitespace alone is
 unset and counts as left out: the seat inherits the agency-level `baseUrl`
 under the rule below, as a seat with none does. A seat's `tools` are merged
-with the agency's `tools`. Nothing else is inherited: `effort`, `thinking`, `maxTokens` and `instructions`
-apply to the seat that sets them, and agency-level `effort`, `thinking` and
-`maxTokens` reach neither the seats nor the chair. Agency-level `instructions`
+with the agency's `tools`. Nothing else is inherited: `effort`, `thinking`,
+`maxTokens` and `instructions` apply to the seat that sets them, and
+agency-level `effort`, `thinking` and `maxTokens` reach neither the seats nor
+the chair. Agency-level `instructions`
 go to the chair (parallel), the judge (debate) and the coordinator
 (hierarchical). `output` is read at the agency level only: its schema is
 applied to the final text, and a seat's own `output` has no effect. A
