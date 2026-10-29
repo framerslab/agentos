@@ -149,7 +149,8 @@ async function backfill(adapter: Pick<StorageAdapter, 'all' | 'run'>, brainId: s
   // The first page starts at '' itself: an id can be the empty string (the JSON importer keeps a record's id "").
   let afterId: string | null = null;
   for (;;) {
-    const rows = await adapter.all<{ id: string; metadata: string | null }>(
+    // Typed here: the cursor below is read in this statement and set from these rows.
+    const rows: Array<{ id: string; metadata: string | null }> = await adapter.all<{ id: string; metadata: string | null }>(
       `SELECT id, metadata FROM memory_traces
         WHERE brain_id = ? AND scope_id = '' AND id ${afterId === null ? '>=' : '>'} ?${filter}
         ORDER BY id LIMIT ${PAGE}`,
