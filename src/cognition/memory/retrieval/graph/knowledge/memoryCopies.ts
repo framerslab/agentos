@@ -46,6 +46,15 @@ export function filterTraceIds(filter: MemoryCopyFilter): string[] {
 }
 
 /**
+ * Text a stored context's JSON holds when it names one of these traces: `"memoryTraceId":"<id>"`, as `JSON.stringify`
+ * writes it, each trace once. A delete by trace id reads the copies an older release recorded with it when the pass that
+ * gives such copies their key or trace id fails, and then applies {@link isMemoryCopyOf} to what it read.
+ */
+export function traceNeedles(traceIds: readonly string[]): string[] {
+  return [...new Set(traceIds.map((traceId) => `${TRACE_CONTEXT_MARKER}${JSON.stringify(traceId)}`))];
+}
+
+/**
  * Text a stored context's JSON holds when it names one of these scope ids: `"scopeId":"<id>"`, as `JSON.stringify`
  * writes it. A store narrows a scope read with it (`LIKE`, `CONTAINS`) and then applies {@link isMemoryCopyOf} to what
  * it read, so a needle that also matches elsewhere costs a row, never a wrong delete.
