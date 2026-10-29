@@ -546,7 +546,8 @@ export interface GMIOutput {
     /**
      * Retrieved RAG chunks for the turn, populated when the GMI performed a
      * RAG retrieval; a tool continuation retrieves nothing of its own and
-     * carries the chunks of the user turn it continues. Threaded into the
+     * carries the chunks of the user turn it continues, when the same GMI ran
+     * that turn (a pause stores no retrieved chunk). Threaded into the
      * FINAL_RESPONSE chunk so client code and the output-guardrail layer
      * (Grounding Guard, Citation Verifier) can verify generated claims against
      * the same sources the model saw.

@@ -81,7 +81,10 @@ export interface IAgentOS {
    * (`TOOL_ERROR`). The GMI takes none of such results. A call of a pause
    * that the results leave out is answered with a tool result that says it has
    * none (code `EXTERNAL_TOOL_NOT_RUN`), so pass every result of a pause
-   * together through `handleToolResults()`.
+   * together through `handleToolResults()`. A continuation that fails before
+   * the conversation records the results (the store refuses to save that the
+   * pause was taken, or a result has no JSON form) yields an error chunk and
+   * leaves the pause for `resumeExternalToolRequest()`.
    */
   handleToolResult(
     streamId: string,
@@ -225,11 +228,14 @@ export interface IAgentOS {
    * A pause is resumed once. When the conversation no longer holds the pause
    * the snapshot names (its results were passed on its stream, an output
    * guardrail blocked its stream, a newer turn ended it, or a newer pause
-   * replaced it) or another resume of it is under way, the stream yields one
-   * error chunk with the code `SYS_INVALID_STATE` and the GMI takes none of the
-   * results. Such a resume is refused before the session's GMI is acquired, so
-   * it changes neither the conversation nor that GMI. A resume ends the stream
-   * the pause was saved on.
+   * replaced it), another resume of it is under way, or a result answers a call
+   * the pause does not hold, the stream yields one error chunk with the code
+   * `SYS_INVALID_STATE` and the GMI takes none of the results. Such a resume
+   * is refused before the session's GMI is acquired, so it changes neither the
+   * conversation nor that GMI. A resume ends the stream the pause was saved
+   * on. A resume whose organization the runtime refuses, or whose continuation
+   * fails before the conversation records the results, leaves the pause as it
+   * was.
    *
    * The once-only rule holds within one AgentOS instance: instances that share
    * a conversation store do not see each other's resumes, so a deployment with

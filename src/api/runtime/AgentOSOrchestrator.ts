@@ -589,7 +589,7 @@ export class AgentOSOrchestrator {
   /**
    * Resumes a pause from its snapshot on a new stream. The pause is taken before the stream is made or the session's
    * GMI acquired, so a resume of a pause the conversation no longer holds, whose stream an output guardrail blocked, or
-   * that another resume holds, is refused with nothing changed.
+   * that another resume holds, or with a result for a call the pause does not hold, is refused with nothing changed.
    *
    * @returns The new stream's id.
    * @throws {GMIError} `INVALID_STATE` when the pause is not taken.
@@ -601,7 +601,7 @@ export class AgentOSOrchestrator {
     guards: AgentOSOrchestratorGuards = {}
   ): Promise<StreamId> {
     this.ensureInitialized();
-    const releasePause = await this.toolResultHandler.claimPendingExternalToolRequest(pendingRequest);
+    const releasePause = await this.toolResultHandler.claimPendingExternalToolRequest(pendingRequest, toolResults);
     let agentOSStreamId: StreamId;
     try {
       agentOSStreamId = await this.dependencies.streamingManager.createStream();
@@ -1200,7 +1200,9 @@ export class AgentOSOrchestrator {
         gmiErr.message,
         gmiErr.details
       );
-      await this.toolResultHandler.clearPendingExternalToolRequest(conversationContext);
+      // a pause the turn saved before it failed never reached the host: its calls are answered as not run, so the
+      // next turn sends the model no call without its result
+      await this.toolResultHandler.endPauseOfFailedStream(agentOSStreamId, conversationContext, currentPersonaId);
       await this.dependencies.streamingManager.closeStream(
         agentOSStreamId,
         'Error during turn processing.'

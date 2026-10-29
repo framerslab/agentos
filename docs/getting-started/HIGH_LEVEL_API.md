@@ -913,12 +913,13 @@ original process exits.
 
 A pause is resumed once. When the conversation no longer holds the pause the
 snapshot names (its results were passed on its stream, an output guardrail
-blocked its stream, a newer turn ended it, or a newer pause replaced it), or
-another resume of it is under way, `resumeExternalToolRequest(...)` yields one
-error chunk with the code `SYS_INVALID_STATE` and the GMI takes none of the
-results. A resume ends the stream the pause was saved on. The same rule holds
-on that stream: `handleToolResult(...)` and `handleToolResults(...)` continue
-the pause once, with results for its calls. A second delivery while the pause
+blocked its stream, a newer turn ended it, or a newer pause replaced it),
+another resume of it is under way, or a result answers a call the pause does
+not hold, `resumeExternalToolRequest(...)` yields one error chunk with the code
+`SYS_INVALID_STATE` and the GMI takes none of the results. A resume ends the
+stream the pause was saved on. The same rule holds on that stream:
+`handleToolResult(...)` and `handleToolResults(...)` continue the pause once,
+with results for its calls. A second delivery while the pause
 is being continued, or a result for a call the stream's next pause does not
 hold, yields one error chunk with the code `SYS_INVALID_STATE`; a result passed
 after the stream closed (a resume took the pause, a newer turn ended it, or the
@@ -932,12 +933,29 @@ conversation nor that GMI: the `preferredModelId` and `preferredProviderId` a
 refused resume names are not recorded. Read the pending request again with
 `getPendingExternalToolRequest(...)` before a retry.
 
+A continuation that fails before the conversation records its results (the
+store refuses to save that the pause was taken, or a result has no JSON form,
+as an output holding a `BigInt` has none) yields an error chunk, ends its
+stream and leaves the pause as it was: `getPendingExternalToolRequest(...)`
+returns it, `resumeExternalToolRequest(...)` continues it, and a new turn ends
+it. A resume whose `organizationId` the runtime refuses (a single-tenant
+runtime with `strictOrganizationIsolation` and another organization) leaves the
+pause as it was too. A continuation that fails after the conversation recorded
+its results keeps them, and a pause that a turn or a continuation saved before
+it failed (the store refuses that save) ends the way a new turn ends one, since
+the host never read its request.
+
 The once-only rule holds within one AgentOS instance. Each instance keeps a
 conversation in memory and saves it whole, so two instances that resume one
 pause at the same time both resume it, and the later save overwrites the
 earlier one. A deployment that runs several instances over one conversation
 store sends each conversation's turns, tool results and resumes to one
-instance at a time.
+instance at a time. Within one instance AgentOS does not queue a
+conversation's operations either: a turn, a continuation and a resume each
+start when the host calls them. Start a conversation's next turn once the
+stream of its continuation or resume has ended: a turn that starts while one
+runs finds no pause to end, and its input lands among the continuation's
+messages.
 
 `AgentOSConfig.learning` turns on the runtime's learning layer: every GMI sends its persona's personality section as a system prompt of its own on every turn, each session is bound to its user under the turn's resolved organization, and `AgentOS.getLearningLayer()` returns the layer (`undefined` while learning is off). [Learning](../GMI.md#learning) has the rules.
 
