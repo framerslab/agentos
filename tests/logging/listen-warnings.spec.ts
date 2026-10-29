@@ -196,3 +196,67 @@ it('reports no warning the then of a returned thenable raises, so the callback g
     await session.close('purged');
   }
 });
+
+it.each(['returns', 'throws'] as const)('reports no warning raised while the callback runs, so a callback that makes the transcriber warn again and %s gets each warning once', async (ending) => {
+  const native = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const source = provider(); const sink = new Sink(); const warnings: string[] = [];
+  /** Bounds the recursion, so a callback run outside the session's guard fails this test instead of overflowing the stack. */
+  const bound = 25;
+  const session = await startListenSession(transport(), sink, {
+    streamingSTT: source.peer, runId: 'fixture-run', reconnect: false, drainMs: 0,
+    /** Makes the transcriber warn again before it returns or throws. */
+    onWarning: (kind: string): void => {
+      warnings.push(kind);
+      if (warnings.length < bound) source.sessions[0].emit('warning', hostile());
+      if (ending === 'throws') throw new Error(PRIVATE);
+    },
+  });
+  try {
+    expect(() => source.sessions[0].emit('warning', hostile())).not.toThrow();
+    expect(warnings).toEqual(['stt_warning']);
+    // A provider warning after the callback has ended is a new one, and reaches the callback once.
+    expect(() => source.sessions[0].emit('warning', hostile())).not.toThrow();
+    expect(warnings).toEqual(['stt_warning', 'stt_warning']);
+    source.sessions[0].emit('transcript', final());
+    await vi.waitFor(() => expect(sink.turns).toHaveLength(1));
+    expect(session.state).toBe('listening');
+    expect(native).not.toHaveBeenCalled();
+  } finally { await session.close('purged'); }
+});
+
+it('delivers a speaker_failed raised while an asynchronous callback is still pending, and consumes its later rejection', async () => {
+  const native = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const escaped = vi.fn();
+  process.on('unhandledRejection', escaped);
+  const source = provider(); const sink = new Sink(); const warnings: string[] = [];
+  let release: () => void = () => undefined;
+  /** Keeps the stt_warning callback's promise pending until the test opens it. */
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const session = await startListenSession(transport(), sink, {
+    streamingSTT: source.peer, runId: 'fixture-run', reconnect: false, drainMs: 0,
+    /** Rejects for stt_warning only after the gate opens, so its promise is pending when the speaker fails. */
+    async onWarning(kind: string): Promise<void> {
+      warnings.push(kind);
+      if (kind === 'stt_warning') { await gate; throw new Error(PRIVATE); }
+    },
+    speaker: () => { throw hostile(); },
+  });
+  try {
+    source.sessions[0].emit('warning', hostile());
+    source.sessions[0].emit('transcript', final());
+    // The speaker runs as the final is written, before the first callback's promise has settled.
+    expect(warnings).toEqual(['stt_warning', 'speaker_failed']);
+    release();
+    await vi.waitFor(() => expect(sink.turns).toHaveLength(1));
+    // Node reports a rejection nothing handles once the microtasks of the turn have run.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(escaped).not.toHaveBeenCalled();
+    expect(sink.turns[0].speaker).toBeUndefined();
+    expect(session.state).toBe('listening');
+    expect(native).not.toHaveBeenCalled();
+  } finally {
+    process.off('unhandledRejection', escaped);
+    await session.close('purged');
+  }
+});
