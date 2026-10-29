@@ -12,7 +12,7 @@ import { ReconnectingSTT, type ReconnectingSTTOptions, type SttGapEvent, type St
 import { describeReason, isError } from './describeReason.js';
 import type { AudioFrame, IEndpointDetector, IStreamingSTT, IStreamTransport, ITranscriptInputSink, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent, TranscriptInput, TranscriptTurn, TurnCompleteEvent, VadEvent } from './types.js';
 import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
-import { isContentSafeTelemetryEnabled } from '../../core/logging/contentSafeTelemetry.js';
+import { consumeReturnedRejection, isContentSafeTelemetryEnabled } from '../../core/logging/contentSafeTelemetry.js';
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
 const console = createContentSafeConsole('listen_session');
@@ -61,11 +61,13 @@ export interface ListenSessionOverrides {
   speaker?: (event: TranscriptEvent) => string | undefined;
   /**
    * Receives stt_warning for a warning of the opened STT session and speaker_failed for a throwing speaker hook.
-   * No error, provider name, transcript or message is passed. A callback throw is swallowed, and an object or
-   * function the callback returns is resolved as `await` resolves it, so the rejection of an async callback's
-   * promise, a promise from another realm or a thenable is swallowed too. Omission preserves the provider's normal
-   * unlistened-warning behavior. Warnings emitted before startSession resolves cannot be observed by a listener on
-   * its returned session. The listener remains during drain and is detached on end.
+   * No error, provider name, transcript or message is passed. A callback throw is swallowed. When the callback returns
+   * an object or function with a `then` method, that method is called at once with handlers that do nothing, so the
+   * rejection of an async callback's promise, a promise from another realm or a thenable is swallowed too, and a
+   * warning raised while that method runs is not reported again. A `then` that throws when read or called is
+   * swallowed. Omission preserves the provider's normal unlistened-warning behavior. Warnings emitted before
+   * startSession resolves cannot be observed by a listener on its returned session. The listener remains during drain
+   * and is detached on end.
    */
   onWarning?: (kind: ListenWarningKind) => void;
   /** How long a stop waits for the flushed final to arrive, before draining a pending detector turn. Default 250. */
@@ -166,16 +168,20 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
   const accepting = (): boolean => state === 'listening' || state === 'draining';
   /** Capture this session's diagnostic receiver once, without holding a provider warning. */
   const warningReceiver = overrides.onWarning;
+  /** Set while the then of what the callback returned runs, so a warning raised there is not reported again. */
+  let consuming = false;
   /** A diagnostic callback must not discard a turn, fail a provider event or leave a rejection unhandled. */
   const reportWarning = (kind: ListenWarningKind): void => {
-    try {
-      // The void return type admits an async callback, which fails by rejecting instead of throwing. Resolving whatever
-      // object or function it returns, as await does, also catches a promise from another realm or a thenable, and a
-      // then that throws when read or called.
-      const returned: unknown = warningReceiver?.(kind);
-      if ((typeof returned === 'object' && returned !== null) || typeof returned === 'function') void Promise.resolve(returned).catch(() => undefined);
-    }
-    catch { /* A warning callback cannot change the hearing lifecycle. */ }
+    if (consuming) return;
+    let returned: unknown;
+    try { returned = warningReceiver?.(kind); }
+    catch { /* A warning callback cannot change the hearing lifecycle. */ return; }
+    // The void return type admits an async callback, which fails by rejecting instead of throwing. The then of what it
+    // returns runs here, under this session's guard; Promise.resolve would run it in a later job, where a warning it
+    // raised would call the callback again, and a callback that returned another such thenable would loop without end.
+    consuming = true;
+    try { consumeReturnedRejection(returned); }
+    finally { consuming = false; }
   };
   /** Deliberately accepts no warning argument and never inspects an emitted value. */
   const onSttWarning = (): void => {

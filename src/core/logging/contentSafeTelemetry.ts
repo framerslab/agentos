@@ -30,9 +30,10 @@ export interface ContentSafeLogEvent {
   readonly component: ContentSafeLogComponent;
 }
 /**
- * Called synchronously; reentrant library logs are dropped. A receiver throw is swallowed, and an object or function it
- * returns is resolved as `await` resolves it, so the rejection of an async receiver's promise, a promise from another
- * realm or a thenable is swallowed too.
+ * Called synchronously; reentrant library logs are dropped. A receiver throw is swallowed. When it returns an object or
+ * function with a `then` method, that method is called at once with handlers that do nothing, so the rejection of an
+ * async receiver's promise, a promise from another realm or a thenable is swallowed too, and a library log the method
+ * writes while it runs is dropped as a reentrant one. A `then` that throws when read or called is swallowed.
  */
 export type ContentSafeLogSink = (event: ContentSafeLogEvent) => void;
 /** Installation settings are copied once, with no runtime disable or replacement. */
@@ -64,6 +65,29 @@ function rank(level: ContentSafeLogLevel): number {
 function componentOf(value: unknown): ContentSafeLogComponent {
   if (typeof value === 'string' && (CONTENT_SAFE_COMPONENTS as readonly string[]).includes(value)) return value as ContentSafeLogComponent;
   return 'library';
+}
+/** Both handlers a returned value's then receives: a settlement, or a later call by a thenable, does nothing. */
+function ignore(): undefined { return undefined; }
+
+/**
+ * Consumes the rejection of what a diagnostic receiver returned, at once and in the caller's frame. An object or
+ * function has its `then` read once and, when that is a function, called with handlers that do nothing, so a native
+ * promise from any realm and a thenable both have their rejection handled. Whatever that `then` does synchronously, such
+ * as writing a library log, happens while the caller's reentrancy guard is still set; nothing is awaited, so no guard is
+ * held while an asynchronous receiver runs. A `then` that throws when read or called is swallowed, and any other value
+ * is left alone.
+ *
+ * @param value - Whatever the receiver returned.
+ * @internal
+ */
+export function consumeReturnedRejection(value: unknown): void {
+  if ((typeof value === 'object' && value !== null) || typeof value === 'function') {
+    try {
+      const then: unknown = (value as { readonly then?: unknown }).then;
+      if (typeof then === 'function') Reflect.apply(then, value, [ignore, ignore]);
+    }
+    catch { /* What a diagnostic receiver returned cannot fail its caller. */ }
+  }
 }
 
 /**
@@ -109,9 +133,10 @@ export function emitContentSafeLog(level: ContentSafeLogLevel, component: Conten
   emitting = true;
   try {
     const returned: unknown = target(Object.freeze({ kind: 'library_event', state, n: 1, component: componentOf(component) }));
-    // An async receiver fails by rejecting instead of throwing. Resolving whatever object or function it returns, as
-    // await does, also catches a promise from another realm or a thenable, and a then that throws when read or called.
-    if (typeof returned === 'function' || (typeof returned === 'object' && (returned === null) === false)) void Promise.resolve(returned).catch(() => undefined);
+    // An async receiver fails by rejecting instead of throwing. The then of what it returns runs here, while a library
+    // log it writes is still dropped; Promise.resolve would run it in a later job, after the guard is cleared, and a
+    // receiver that returned another such thenable would then be called again without end.
+    consumeReturnedRejection(returned);
   }
   catch { /* A diagnostic receiver cannot expose content or fail provider work. */ }
   finally { emitting = false; }
