@@ -586,7 +586,17 @@ const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|au
  * {@link resolveBaseUrl} gives, the first set source of the call's, the global
  * default's and the provider's base-URL variable, so an empty or
  * whitespace-only value at the call or the default never reaches the
- * comparison: the next source does. MiniMax's global root is https://api.minimax.io/v1
+ * comparison: the next source does. OpenAI's root is https://api.openai.com/v1,
+ * where agentos sends an OpenAI call with no base URL (OPENAI_DEFAULT_BASE_URL
+ * in OpenAIProvider.ts) and where OpenAI's API reference sends its requests
+ * (https://developers.openai.com/api/reference/resources/embeddings/methods/create).
+ * Its regional roots put a region's prefix before that host: OpenAI's data
+ * residency guide says to "add the domain prefix as defined in the table below
+ * to each request", its table names the us, eu, au, ca, jp, in, sg, kr, gb and
+ * ae prefixes, and its examples send to https://us.api.openai.com/v1 and
+ * https://eu.api.openai.com/v1
+ * (https://developers.openai.com/api/docs/guides/your-data, read 2026-10-29).
+ * MiniMax's global root is https://api.minimax.io/v1
  * (https://platform.minimax.io/docs/api-reference/text-openai-api; images at
  * https://platform.minimax.io/docs/api-reference/image-generation-t2i). Its
  * China root is https://api.minimax.cn/v1
@@ -601,6 +611,10 @@ const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|au
  * working.
  */
 const PROVIDER_API_ROOTS: Record<string, readonly string[]> = {
+  openai: [
+    'https://api.openai.com/v1',
+    ...['us', 'eu', 'au', 'ca', 'jp', 'in', 'sg', 'kr', 'gb', 'ae'].map((region) => `https://${region}.api.openai.com/v1`),
+  ],
   minimax: ['https://api.minimax.io/v1', 'https://api.minimax.cn/v1', 'https://api.minimaxi.com/v1'],
 };
 

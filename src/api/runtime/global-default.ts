@@ -39,13 +39,17 @@ export interface GlobalDefaultProvider {
    * else `baseUrl` here, else the provider's base-URL env var, each read as
    * `resolveBaseUrl` in `model.ts` reads it: an empty or whitespace-only one
    * is unset and the next source applies, and with none the call goes to the
-   * provider's own endpoint. MiniMax's API roots,
+   * provider's own endpoint. OpenAI's API root `https://api.openai.com/v1` and
+   * the regional roots OpenAI's data residency guide names
+   * (`https://us.api.openai.com/v1`, `https://eu.api.openai.com/v1` and the
+   * au, ca, jp, in, sg, kr, gb and ae ones), and MiniMax's API roots,
    * `https://api.minimax.io/v1`, the China root `https://api.minimax.cn/v1`
    * that MiniMax's China documentation names and the older China root
-   * `https://api.minimaxi.com/v1`, are its own endpoint, not a custom one,
-   * compared as fetch sends the URL: the letter case of the scheme and the
-   * host, a default port, surrounding whitespace and trailing slashes make
-   * no difference.
+   * `https://api.minimaxi.com/v1`, are the provider's own endpoint, not a
+   * custom one, whether the call, this default or the base-URL env var gives
+   * them, compared as fetch sends the URL: the letter case of the scheme and
+   * the host, a default port, surrounding whitespace and trailing slashes
+   * make no difference.
    */
   model?: string;
   /** API key used when no inline override is supplied. */
