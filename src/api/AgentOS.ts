@@ -2361,13 +2361,18 @@ export class AgentOS implements IAgentOS {
         }
       }
     } catch (error: unknown) {
+      // results the stream does not wait on (its pause continued, resumed, ended by a newer turn or replaced, or its
+      // stream blocked) are refused before the GMI takes them, and keep their code, as a refused resume does
+      const refused = error instanceof GMIError && error.code === GMIErrorCode.INVALID_STATE;
       const serviceError = AgentOSServiceError.wrap(
         error,
-        GMIErrorCode.TOOL_ERROR, // Default code for facade-level tool result errors
+        refused ? GMIErrorCode.INVALID_STATE : GMIErrorCode.TOOL_ERROR, // Default code for facade-level tool result errors
         `Error during AgentOS.handleToolResults for stream '${streamId}'`,
         'AgentOS.handleToolResults'
       );
-      console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      if (!refused) {
+        console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      }
 
       const errorChunk: AgentOSErrorChunk = {
         type: AgentOSResponseChunkType.ERROR,
