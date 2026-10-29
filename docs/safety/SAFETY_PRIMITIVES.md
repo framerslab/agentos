@@ -289,8 +289,8 @@ A persisted allowance per account and period, for a product that sells a number 
 | The period has no room | One error chunk, `BILLING_ALLOWANCE_EXHAUSTED` (402), with `reason`, `period` and `remaining` in `details` | none |
 | The same `operationId` again, still running or already counted | One error chunk, `SYS_ALREADY_EXISTS` | unchanged |
 | The meter's store does not answer within its retry policy | One error chunk, `SYS_SPEND_METER_UNAVAILABLE` (503) | none |
-| The turn finishes, or asks for a tool | The reply | `consumed`, with the turn's usage |
-| The turn fails before any text reached the stream | The error | `released` |
+| The turn finishes, or stops for a tool the host runs | The reply, or the request for the tool | `consumed`, with the turn's usage |
+| The turn fails before any text reached the stream, a turn that fails while it saves its pause for a tool included | The error | `released` |
 | The turn fails after some text reached the stream | The error | `consumed` |
 | An output guardrail blocks the reply | The guardrail's error chunk | refunded (`released`, outcome `replaced`) |
 | The process dies mid-turn | nothing more | settled by `reconcile()` once its lease runs out |
