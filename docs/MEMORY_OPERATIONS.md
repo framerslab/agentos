@@ -753,6 +753,8 @@ const result = await mem.importFrom('./data.json', {
 });
 ```
 
+An import files each record under the scope id its file names, in every format that carries one, so a file can add traces to any tenant's, user's or session's scope id in the brain. Import a file into a brain that several tenants share only when it comes from a source you trust, or set its scope ids yourself first.
+
 
 ### ImportResult
 
