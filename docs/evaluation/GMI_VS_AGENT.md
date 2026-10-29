@@ -6,7 +6,7 @@ description: "How AgentOS tests whether a GMI on the full runtime improves compa
 
 This study compares a GMI on the full AgentOS runtime with the `agent()`-based reply path of a reference product, the companion chat of wilds.ai, on the same model. It reads both against `agent()` on its own and against a bare loop that calls the model with no framework. [Generalized Mind Instances (GMIs)](../GMI.md) describes what a GMI adds over a plain agent, and [Two API Paths](../API_PATHS.md) describes the runtime and the lightweight helper the arms are built on. This page sets out the study's design and lists each report set once it is published. It states no measured number: measurements are published only in the report sets.
 
-Status: design published; protocol 0a registered 2026-10-28; record-mode reports published.
+Status: design published; protocol 0a registered 2026-10-29; record-mode reports published.
 
 ## The question
 
