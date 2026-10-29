@@ -1,8 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
+import { setLogger, resetLoggerFactory } from '../../../logging/loggerFactory.js';
 import { OpenRouterProvider } from '../implementations/OpenRouterProvider';
 import type { ChatMessage } from '../IProvider';
 
 const messages: ChatMessage[] = [{ role: 'user', content: 'hi' }];
+
+const logged: Record<string, unknown>[] = [];
+beforeEach(() => {
+  logged.length = 0;
+  setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+});
+afterEach(() => resetLoggerFactory());
 
 function okResponse() {
   return {
@@ -25,9 +34,8 @@ describe('OpenRouterProvider — per-call requestTimeout override (CR8)', () => 
       config: { requestTimeout: 60000, streamRequestTimeout: 120000 },
       makeApiRequest,
     });
-    // Streaming tests feed a non-stream mock to assert the timeout arg; silence
-    // the provider's expected SSE-parse error so output stays clean.
-    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Streaming tests feed a non-stream mock to assert the timeout arg; the
+    // provider's expected SSE-parse failure goes to the logger set above.
   });
 
   it('passes the per-call override as the makeApiRequest timeout (3rd arg), and the caller\'s signal last', async () => {

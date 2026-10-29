@@ -29,9 +29,12 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
 import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
+import { lazyLogger } from '../../../logging/loggerFactory.js';
+import { errorFields } from '../../../logging/events.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
+const log = lazyLogger('llm');
 
 /**
  * OpenRouter's API base URL, which requests go to when the config names no `baseURL`. `embedText` posts OpenRouter
@@ -163,9 +166,7 @@ export function defaultOpenRouterProviderPrefs(
     } else if (!warnedInvalidProviderSort) {
       // Warn once per process: this helper runs on every request payload.
       warnedInvalidProviderSort = true;
-      console.warn(
-        `OpenRouterProvider: Ignoring OPENROUTER_PROVIDER_SORT='${sortRaw}' — expected one of price, throughput, latency.`,
-      );
+      log.warn('llm.option_ignored', { provider: 'openrouter', reason: 'provider_sort' });
     }
   }
   const orderRaw = env.OPENROUTER_PROVIDER_ORDER?.trim();
@@ -437,7 +438,7 @@ export class OpenRouterProvider implements IProvider {
       // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
       // breaker holds still gets its keys back; the timer never keeps the process alive.
       if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
-      console.log(`OpenRouterProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via OpenRouter.`);
+      log.info('llm.provider_ready', { provider: 'openrouter', count: this.availableModelsCache.size });
     } catch (error: unknown) {
       this.isInitialized = false;
       const initError = error instanceof OpenRouterProviderError ? error :
@@ -447,7 +448,7 @@ export class OpenRouterProvider implements IProvider {
           { providerId: this.providerId },
           `OpenRouterProvider failed to initialize: ${error instanceof Error ? error.message : String(error)}`
         );
-      console.error(initError.message, initError.details || initError);
+      log.error('llm.provider_start_failed', { provider: 'openrouter', ...errorFields(initError) });
       throw initError;
     }
   }
@@ -466,7 +467,7 @@ export class OpenRouterProvider implements IProvider {
         this.availableModelsCache.set(modelInfo.modelId, modelInfo);
       });
     } else {
-      console.warn("OpenRouterProvider: Received no model data or malformed response from /models endpoint.");
+      log.warn('llm.models_empty', { provider: 'openrouter' });
     }
   }
 
@@ -799,10 +800,7 @@ export class OpenRouterProvider implements IProvider {
       error.httpStatus === 404 && /no endpoints/i.test(error.message);
     if (!noEndpoints) return false;
 
-    console.warn(
-      `OpenRouterProvider: no endpoint supports json_schema for model ` +
-        `'${String(payload.model)}' — degrading to json_object for this call.`,
-    );
+    log.warn('llm.format_fallback', { provider: 'openrouter', reason: 'json_schema' });
     payload.response_format = { type: 'json_object' };
     const schema = rf.json_schema?.schema;
     const messages = payload.messages as Array<Partial<ChatMessage>> | undefined;
@@ -1007,17 +1005,11 @@ export class OpenRouterProvider implements IProvider {
           try {
             apiChunk = JSON.parse(jsonData) as OpenRouterChatCompletionAPIResponse;
           } catch {
-            console.warn('OpenRouterProvider: Failed to parse stream chunk JSON, skipping chunk:', {
-              eventBytes: new TextEncoder().encode(jsonData).byteLength,
-              error: 'Invalid stream JSON.',
-            });
+            log.warn('llm.stream_invalid', { provider: 'openrouter', bytes: new TextEncoder().encode(jsonData).byteLength, reason: 'json' });
             continue;
           }
           if (!apiChunk || typeof apiChunk !== 'object') {
-            console.warn('OpenRouterProvider: Stream chunk is not a JSON object, skipping chunk:', {
-              eventBytes: new TextEncoder().encode(jsonData).byteLength,
-              error: 'Expected a JSON object.',
-            });
+            log.warn('llm.stream_invalid', { provider: 'openrouter', bytes: new TextEncoder().encode(jsonData).byteLength, reason: 'shape' });
             continue;
           }
 
@@ -1141,10 +1133,7 @@ export class OpenRouterProvider implements IProvider {
           try {
             mapped = this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
           } catch {
-            console.warn('OpenRouterProvider: Failed to map stream chunk, skipping chunk:', {
-              eventBytes: new TextEncoder().encode(jsonData).byteLength,
-              error: 'Invalid stream event shape.',
-            });
+            log.warn('llm.stream_invalid', { provider: 'openrouter', bytes: new TextEncoder().encode(jsonData).byteLength, reason: 'mapping' });
             continue;
           }
           if (mapped.responseTextDelta && yieldedText.length < yieldedTextCap) {
@@ -1209,7 +1198,7 @@ export class OpenRouterProvider implements IProvider {
 
     const modelInfo = await this.getModelInfo(modelId);
     if (modelInfo && !modelInfo.capabilities.includes('embeddings')) {
-      console.warn(`OpenRouterProvider: Model '${modelId}' is not explicitly listed with embedding capabilities. Attempting anyway.`);
+      log.warn('llm.option_ignored', { provider: 'openrouter', reason: 'embedding_capability' });
     }
 
     const payload: Record<string, unknown> = {
@@ -1253,7 +1242,7 @@ export class OpenRouterProvider implements IProvider {
       try {
         await this.refreshAvailableModels();
       } catch (refreshError) {
-        console.warn("OpenRouterProvider: Failed to refresh models during listAvailableModels call after finding empty cache:", refreshError);
+        log.warn('llm.models_failed', { provider: 'openrouter', ...errorFields(refreshError) });
       }
     }
     const models = Array.from(this.availableModelsCache.values());
@@ -1267,10 +1256,10 @@ export class OpenRouterProvider implements IProvider {
     this.ensureInitialized();
     if (!this.availableModelsCache.has(modelId)) {
       try {
-        console.log(`OpenRouterProvider: Model ${modelId} not in cache. Refreshing model list.`);
+        log.debug('llm.models_refresh', { provider: 'openrouter' });
         await this.refreshAvailableModels();
       } catch (error) {
-        console.warn(`OpenRouterProvider: Failed to refresh models list while trying to get info for ${modelId}:`, error);
+        log.warn('llm.models_failed', { provider: 'openrouter', ...errorFields(error) });
       }
     }
     return this.availableModelsCache.get(modelId);
@@ -1315,7 +1304,7 @@ export class OpenRouterProvider implements IProvider {
     await this.keyPool?.close();
     this.isInitialized = false;
     this.availableModelsCache.clear();
-    console.log('OpenRouterProvider shutdown: Instance marked as uninitialized and cache cleared.');
+    log.info('llm.provider_stopped', { provider: 'openrouter' });
   }
 
   private mapApiToCompletionResponse(
@@ -1654,10 +1643,7 @@ export class OpenRouterProvider implements IProvider {
             : 300 * 2 ** attempt + Math.floor(Math.random() * 200),
           OpenRouterProvider.MAX_RETRY_SLEEP_MS,
         );
-        console.warn(
-          `OpenRouterProvider: attempt ${attempt + 1}/${OpenRouterProvider.MAX_REQUEST_ATTEMPTS} ` +
-            `failed (${decoratedMessage.substring(0, 160)}); retrying in ${sleepMs}ms.`,
-        );
+        log.warn('llm.retry', { provider: 'openrouter', status: statusCode ?? 0, attempt: attempt + 1, waitMs: sleepMs });
         await new Promise((resolve) => setTimeout(resolve, sleepMs));
       }
     }
@@ -1999,7 +1985,7 @@ export class OpenRouterProvider implements IProvider {
       // A stream error can be an AxiosError holding the request config, so
       // only its description is logged and kept.
       const description = this.describeError(error);
-      console.error("OpenRouterProvider: Error reading or parsing SSE stream:", message, description);
+      log.error('llm.stream_failed', { provider: 'openrouter', ...errorFields(error) });
       if (error instanceof OpenRouterProviderError) throw error;
       throw new OpenRouterProviderError(message, 'STREAM_PARSING_ERROR', undefined, undefined, description);
     } finally {

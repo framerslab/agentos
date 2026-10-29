@@ -44,8 +44,11 @@ import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForMo
 import { computeRetryBackoffMs, waitForRetry } from './retry-backoff.js';
 import { redactUrlSecrets } from '../url-secrets.js';
 import { OPENAI_MODEL_PRICING, openAIModelPricing } from './openaiPricing.js';
+import { lazyLogger } from '../../../logging/loggerFactory.js';
+import { errorFields } from '../../../logging/events.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
 import { AttemptBudgetExhaustedError, CountingAttemptBudget } from '../../../../safety/runtime/ModelAttemptBudget.js';
+const log = lazyLogger('llm');
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
 // import fetch, { RequestInit, Response as FetchResponse, AbortController } from 'node-fetch'; // Example for Node
@@ -911,10 +914,7 @@ function reconcileStreamedCall(
       changed = true;
     } else if (call.finalArguments !== args) {
       call.finalArguments = args;
-      console.warn(
-        `OpenAIProvider: streamed arguments for tool call ${call.id || `#${call.index}`} ` +
-          'do not match the final function_call item; the final chunk carries the final arguments.',
-      );
+      log.warn('llm.output_mismatch', { provider: 'openai', reason: 'tool_arguments' });
     }
   }
   if (!changed) return undefined;
@@ -995,13 +995,10 @@ export class OpenAIProvider implements IProvider {
       // Failed keys are probed on the pool's own clock once the provider is up, so a provider the health
       // breaker holds still gets its keys back; the timer never keeps the process alive.
       if ((this.keyPool?.size ?? 0) > 1) this.keyPool?.startRechecks();
-      const env = typeof process !== 'undefined' ? process.env : undefined;
-      const debugOn = !!env && (env.AGENTOS_DEBUG === '1' || env.AGENTOS_DEBUG === 'true' || (env.AGENTOS_LOG_LEVEL ?? '').toLowerCase() === 'debug');
-      if (debugOn) {
-        console.log(`OpenAIProvider initialized successfully. Default model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models.`);
-      }
+      log.debug('llm.provider_ready', { provider: 'openai', count: this.availableModelsCache.size });
     } catch (error: unknown) {
       this.isInitialized = false;
+      log.error('llm.provider_start_failed', { provider: 'openai', ...errorFields(error) });
       if (error instanceof OpenAIProviderError) {
         throw error; // Re-throw if already an OpenAIProviderError
       }
@@ -1395,10 +1392,7 @@ export class OpenAIProvider implements IProvider {
         const apiChunk = JSON.parse(data) as OpenAIAPITypes.ChatCompletionStreamResponse;
         mapped = this.mapApiToStreamChunkResponse(apiChunk, accumulatedToolCalls);
       } catch {
-        console.warn('OpenAIProvider: Failed to parse stream chunk JSON:', {
-          eventBytes: new TextEncoder().encode(data).byteLength,
-          error: 'Invalid stream JSON.',
-        });
+        log.warn('llm.stream_invalid', { provider: 'openai', bytes: new TextEncoder().encode(data).byteLength, reason: 'json' });
         continue;
       }
       yield mapped;
@@ -1509,10 +1503,7 @@ export class OpenAIProvider implements IProvider {
       try {
         event = JSON.parse(data) as OpenAIAPITypes.ResponsesStreamEvent;
       } catch {
-        console.warn('OpenAIProvider: Failed to parse /responses stream event JSON:', {
-          eventBytes: new TextEncoder().encode(data).byteLength,
-          error: 'Invalid stream JSON.',
-        });
+        log.warn('llm.stream_invalid', { provider: 'openai', bytes: new TextEncoder().encode(data).byteLength, reason: 'json' });
         continue;
       }
 
@@ -1585,9 +1576,7 @@ export class OpenAIProvider implements IProvider {
             if (summary.text.startsWith(emittedText)) {
               missingText = summary.text.slice(emittedText.length);
             } else {
-              console.warn(
-                'OpenAIProvider: streamed /responses text does not match the final output; keeping the streamed text.',
-              );
+              log.warn('llm.output_mismatch', { provider: 'openai', reason: 'text' });
             }
           }
           if (missingText || corrections.length > 0) {
@@ -1629,7 +1618,7 @@ export class OpenAIProvider implements IProvider {
             toolCalls.length > 0,
           );
           if (emittedText.length === 0 && toolCalls.length === 0) {
-            this.warnReasoningOnlyOutput(response ?? { id: responseId, status }, modelId, finishReason);
+            this.warnReasoningOnlyOutput(response ?? { id: responseId, status });
           }
           yield chunk({
             ...(typeof response?.service_tier === 'string' ? { serviceTier: response.service_tier } : {}),
@@ -1787,7 +1776,7 @@ export class OpenAIProvider implements IProvider {
       try {
         await this.refreshAvailableModels();
       } catch (error) {
-        console.warn('OpenAIProvider: Failed to refresh models while listing them after finding an empty cache', error);
+        log.warn('llm.models_failed', { provider: 'openai', ...errorFields(error) });
       }
     }
 
@@ -1808,7 +1797,7 @@ export class OpenAIProvider implements IProvider {
         try {
             await this.refreshAvailableModels();
         } catch (error) {
-            console.warn(`OpenAIProvider: Failed to refresh models while fetching info for ${modelId}`, error);
+            log.warn('llm.models_failed', { provider: 'openai', ...errorFields(error) });
         }
     }
     return this.availableModelsCache.get(modelId);
@@ -1844,7 +1833,7 @@ export class OpenAIProvider implements IProvider {
     // persistent connections to close. If connection pooling or WebSockets
     // were used, they would be closed here.
     this.isInitialized = false; // Mark as not initialized
-    console.log('OpenAIProvider shutdown complete.');
+    log.info('llm.provider_stopped', { provider: 'openai' });
     // No explicit resources to release in this implementation.
   }
 
@@ -2016,9 +2005,7 @@ export class OpenAIProvider implements IProvider {
       if (retention) {
         Object.assign(payload, retention);
       } else {
-        console.debug(
-          `OpenAIProvider: promptCacheRetention '${options.promptCacheRetention}' unsupported on ${modelId}; omitted`,
-        );
+        log.debug('llm.option_ignored', { provider: 'openai', reason: 'cache_retention' });
       }
     }
     if (options.serviceTier) payload.service_tier = options.serviceTier;
@@ -2300,7 +2287,7 @@ export class OpenAIProvider implements IProvider {
     }
 
     if (assistantText.length === 0 && toolCalls.length === 0) {
-      this.warnReasoningOnlyOutput(apiResponse, modelId, finishReason);
+      this.warnReasoningOnlyOutput(apiResponse);
     }
 
     return {
@@ -2327,27 +2314,17 @@ export class OpenAIProvider implements IProvider {
 
   /**
    * Logs a `/v1/responses` turn that holds output items but no message and
-   * no function call: reasoning-only output. It is returned as an empty turn
-   * carrying the real finish reason (`length` when max_output_tokens capped
-   * it), so the caller can retry with a larger budget. Reasoning tokens come
-   * out of the same output budget as the visible answer, so a reasoning model
-   * needs a materially larger maxTokens than a non-reasoning one to leave
-   * room for a reply.
+   * no function call: reasoning-only output, written as `llm.output_empty`
+   * with the output token count. It is returned as an empty turn carrying
+   * the real finish reason (`length` when max_output_tokens capped it), so
+   * the caller can retry with a larger budget. Reasoning tokens come out of
+   * the same output budget as the visible answer, so a reasoning model needs
+   * a materially larger maxTokens than a non-reasoning one to leave room for
+   * a reply.
    * @private
    */
-  private warnReasoningOnlyOutput(
-    apiResponse: OpenAIAPITypes.ResponsesResponse,
-    modelId: string,
-    finishReason: string,
-  ): void {
-    const incompleteReason = apiResponse.incomplete_details?.reason;
-    console.warn(
-      `OpenAIProvider: /responses returned reasoning-only output for ${apiResponse.model ?? modelId} ` +
-      `(status: ${apiResponse.status ?? 'unknown'}${incompleteReason ? `, reason: ${incompleteReason}` : ''}` +
-      `${apiResponse.usage?.output_tokens !== undefined ? `, output_tokens: ${apiResponse.usage.output_tokens}` : ''}` +
-      `); returning an empty turn with finishReason '${finishReason}'. ` +
-      `Raise max output tokens: reasoning tokens consume the same budget as the reply.`
-    );
+  private warnReasoningOnlyOutput(apiResponse: OpenAIAPITypes.ResponsesResponse): void {
+    log.warn('llm.output_empty', { provider: 'openai', count: apiResponse.usage?.output_tokens ?? 0 });
   }
 
   /**
@@ -2841,23 +2818,28 @@ export class OpenAIProvider implements IProvider {
           }
           // For other server errors or rate limits, prepare for retry
           lastError = new OpenAIProviderError(errorMessage, 'API_SERVER_ERROR', errorCode || undefined, errorType, response.status, errorData);
-          if (response.status === 429) { // Rate limit
+          if (response.status === 429) {
             lastError = new OpenAIProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', errorCode || undefined, errorType, response.status, errorData);
             // On the last attempt the loop goes on to the budget's refusal, which ends it with lastError.
             if (!last) {
               // Retry-After is authoritative when present, as delay-seconds or an HTTP-date, bounded the way the
               // pool bounds a key's rest (maxRetryAfterMs, one hour); otherwise jittered backoff. The caller's
-              // abort ends the wait, and the loop's check then reports it.
+              // abort ends the wait, and the loop's check then reports it. The event carries the scheduled wait.
               const waitMs =
                 retryAfterMs(response.headers.get('retry-after'), undefined, this.config.keyPool?.maxRetryAfterMs) ??
                 computeRetryBackoffMs(attempt);
+              log.warn('llm.retry', { provider: 'openai', status: response.status, attempt: attempt + 1,
+                waitMs: Number.isFinite(waitMs) ? Math.round(waitMs) : 0 });
               await waitForRetry(waitMs, abortSignal);
             }
             continue; // Retry
           }
-          // Other retryable server errors
           if (response.status >= 500) {
-            if (!last) await waitForRetry(computeRetryBackoffMs(attempt), abortSignal); // jittered exponential backoff
+            if (!last) {
+              const waitMs = computeRetryBackoffMs(attempt); // jittered exponential backoff
+              log.warn('llm.retry', { provider: 'openai', status: response.status, attempt: attempt + 1, waitMs });
+              await waitForRetry(waitMs, abortSignal);
+            }
             continue; // Retry
           }
           throw lastError; // If not explicitly handled for retry, throw
@@ -2901,10 +2883,7 @@ export class OpenAIProvider implements IProvider {
         }
         // Equal-jitter exponential backoff for retries not handled by 429
         const delay = computeRetryBackoffMs(attempt);
-        // Keep retry logs concise — network errors are common and the stack trace is noise
-        const isNetwork = lastError instanceof OpenAIProviderError && lastError.code === 'NETWORK_ERROR';
-        const shortMsg = isNetwork ? 'Network unreachable' : lastError.message;
-        console.warn(`[LLM] Retry ${attempt + 1}/${allowed - 1} in ${(delay / 1000).toFixed(1)}s: ${shortMsg}`);
+        log.warn('llm.retry', { provider: 'openai', status: 0, attempt: attempt + 1, waitMs: delay });
         await waitForRetry(delay, abortSignal);
       } finally {
         abortSignal?.removeEventListener('abort', abortAttempt);
@@ -3009,10 +2988,7 @@ export class OpenAIProvider implements IProvider {
         // Sometimes the final [DONE] is not prefixed by "data: ".
         if (!sawData) {
           if (trailing === '[DONE]') yield '[DONE]';
-          else console.warn('OpenAIProvider: Trailing stream data not processed:', {
-            eventBytes: new TextEncoder().encode(buffer).byteLength,
-            error: 'Unrecognized stream framing.',
-          });
+          else log.warn('llm.stream_invalid', { provider: 'openai', bytes: new TextEncoder().encode(buffer).byteLength, reason: 'framing' });
         }
       }
 
@@ -3020,13 +2996,13 @@ export class OpenAIProvider implements IProvider {
         // A read that fails because the caller aborted is the abort, not a stream error.
         if (abortSignal?.aborted) return;
         const message = error instanceof Error ? error.message : 'Stream parsing error';
-        console.error('OpenAIProvider: Error reading or parsing SSE stream:', message, error);
+        log.error('llm.stream_failed', { provider: 'openai', ...errorFields(error) });
         throw new OpenAIProviderError(message, 'STREAM_PARSING_ERROR', undefined, undefined, undefined, error);
     } finally {
       abortSignal?.removeEventListener('abort', cancelOnAbort);
       // Ensure stream is closed if `break` or `return` is called within the generator
       if (!reader.closed) {
-          await reader.cancel().catch(err => console.error("OpenAIProvider: Error cancelling stream reader:", err));
+          await reader.cancel().catch(err => log.warn('llm.stream_cancel_failed', { provider: 'openai', ...errorFields(err) }));
       }
       // console.log("OpenAIProvider: SSE Stream parsing finished.");
     }

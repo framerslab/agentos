@@ -736,17 +736,19 @@ describe('8. keys on a hop', () => {
     // The manager's turns and the judge's review read the same key, in the usual order: the nameless default, then the variable.
     expect(sent.map((c) => header(c, 'Authorization'))).toEqual(sent.map(() => `Bearer ${nameless}`));
   });
-  it("a pooled seat's failover reaches a logger factory the host sets after import: fallback_fired names both providers and carries the provider's message masked", async () => {
+  it("a pooled seat's failover reaches a logger factory the host sets after import: llm.fallback_fired names both providers and carries no message", async () => {
     route([[ANTHROPIC, anthropicError(529, `overloaded ${K.ant}`)], [OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('rescued')]]);
     // The seat takes opus, the first entry, and fails over to astra, its next candidate.
     const team = agency({ modelPool: POOL(), agents: { one: { instructions: 'x' } }, strategy: 'sequential' } as never);
     const lines = await logLines(async () => {
       expect((await team.generate('go')).text).toBe('rescued');
     });
-    const fired = lines.filter((l) => l.meta?.event === 'fallback_fired');
+    // An event handle writes `(event, fields)` to the factory's logger.
+    const fired = lines.filter((l) => l.message === 'llm.fallback_fired');
     expect(fired.length).toBeGreaterThan(0);
     expect(fired[0].meta).toMatchObject({ primaryProvider: 'anthropic', fallbackProvider: 'openai' });
-    expect(String(fired[0].meta?.errorMessage)).toContain('overloaded [redacted]');
+    // The event names the error's type and code; the provider's message is not written, masked or not.
+    expect(JSON.stringify(fired)).not.toContain('overloaded');
     expect(JSON.stringify(lines)).not.toContain(K.ant);
   });
   it("under panel a fixed seat's own chain carries the keys the resolver wrote; a keyless hop is dropped and listed; the record carries fallback", async () => {
