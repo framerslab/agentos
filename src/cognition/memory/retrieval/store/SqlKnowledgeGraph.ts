@@ -164,6 +164,15 @@ function storedContext(properties: string): unknown {
   }
 }
 
+/**
+ * The trace a `knowledge_nodes` row copies, read from its `properties` (the stored context names it,
+ * `memoryTraceId`), or `undefined` for a row that copies no trace or whose properties do not parse. An importer reads
+ * a file's rows with it.
+ */
+export function storedCopyTraceId(properties: string | null | undefined): string | undefined {
+  return typeof properties === 'string' ? copiedTraceId(storedContext(properties)) : undefined;
+}
+
 /** The columns `recordMemory` writes, in order. */
 const MEMORY_NODE_COLUMNS = ['brain_id', 'id', 'type', 'label', 'properties', 'embedding', 'confidence', 'source', 'created_at'];
 
@@ -206,7 +215,7 @@ export async function keyTraceCopies(
     [brainId, `${likeLiteral(COPY_KEY_PREFIX)}%`, likeContaining(TRACE_CONTEXT_MARKER)],
   );
   for (const row of rows) {
-    const traceId = copiedTraceId(storedContext(row.properties));
+    const traceId = storedCopyTraceId(row.properties);
     if (traceId === undefined) continue;
     try {
       await moveCopyToKey(db, brainId, row.id, copyKey(traceId));
