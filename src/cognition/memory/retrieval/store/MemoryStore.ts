@@ -71,6 +71,11 @@ export function isUsableEmbedding(embedding: number[] | undefined): embedding is
   return Array.isArray(embedding) && embedding.length > 0;
 }
 
+/** Whether a value can be the size of a vector: a positive integer. */
+function isVectorSize(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -81,7 +86,12 @@ export interface MemoryStoreConfig {
   knowledgeGraph: IKnowledgeGraph;
   /** Collection name prefix. @default 'cogmem' */
   collectionPrefix: string;
-  /** Embedding dimension (auto-detected if possible). */
+  /**
+   * The size of the vectors in this store's collections. Unset, a collection is created with the size of the first
+   * embedding filed into it, and a read that matches no text (`getByScope()` with no trace of the scope cached)
+   * queries with the embedding model's size: the embedding manager's `getEmbeddingDimension()`, else the length of
+   * one probe embedding.
+   */
   embeddingDimension?: number;
   decayConfig?: DecayConfig;
   /** Optional cognitive mechanisms engine for retrieval-time hooks. */
@@ -806,6 +816,11 @@ export class MemoryStore {
   private disposed = false;
   /** Brain attachment is immutable once any memory operation has started. */
   private brainAttachmentLocked = false;
+  /**
+   * The embedding model's vector size, once {@link resolveVectorSize} has measured it; unset until then, and again
+   * after a measurement that failed.
+   */
+  private measuredVectorSize: Promise<number | undefined> | undefined;
 
   constructor(config: MemoryStoreConfig) {
     this.config = config;
@@ -1933,8 +1948,9 @@ export class MemoryStore {
    * Traces that were persisted to the vector store in a prior process lifetime
    * (or by another process) will only be returned if the cache is empty for this
    * scope, in which case we fall back to querying the vector store with a
-   * zero-vector and metadata filter. The fallback is approximate (limited by
-   * topK) and does not guarantee completeness.
+   * zero vector of the collection's size ({@link zeroQueryVector}) and a metadata
+   * filter. The fallback is approximate (limited by topK) and does not guarantee
+   * completeness.
    */
   async getByScope(scope: MemoryScope, scopeId: string, type?: MemoryType): Promise<MemoryTrace[]> {
     this.beginOperation();
@@ -1969,8 +1985,7 @@ export class MemoryStore {
     // Fallback: if cache is empty for this scope, query the vector store.
     if (results.length === 0) {
       try {
-        const dim = this.config.embeddingDimension ?? 1536;
-        const zeroVector = new Array(dim).fill(0);
+        const zeroVector = await this.zeroQueryVector();
         const filter: MetadataFilter = { isActive: 1 };
         if (type) {
           filter.type = type;
@@ -2032,6 +2047,50 @@ export class MemoryStore {
         !this.tombstonedTraceIds.has(trace.id) &&
         !isTraceDeletePending(namespace, trace.id),
     );
+  }
+
+  /**
+   * A zero vector of the size of the vectors in this store's collections ({@link resolveVectorSize}), for a read of
+   * a collection that matches no text. An index refuses a query vector of another size, and the read finds nothing.
+   */
+  private async zeroQueryVector(): Promise<number[]> {
+    return new Array<number>(await this.resolveVectorSize()).fill(0);
+  }
+
+  /**
+   * The size of the vectors in this store's collections: the configured `embeddingDimension`; else the embedding
+   * model's, as the embedding manager reports it (`getEmbeddingDimension()`); else the length of one probe embedding;
+   * else 1536. A measured size is kept for the store's life; a measurement that failed is tried again by the next
+   * read.
+   */
+  private async resolveVectorSize(): Promise<number> {
+    const configured = this.config.embeddingDimension;
+    if (isVectorSize(configured)) return configured;
+    this.measuredVectorSize ??= this.measureVectorSize();
+    const measuring = this.measuredVectorSize;
+    const measured = await measuring;
+    if (measured !== undefined) return measured;
+    if (this.measuredVectorSize === measuring) this.measuredVectorSize = undefined;
+    return 1536;
+  }
+
+  /** The embedding model's vector size, as its manager reports it or as one probe embedding measures it. */
+  private async measureVectorSize(): Promise<number | undefined> {
+    const embeddingManager = this.config.embeddingManager;
+    try {
+      const reported = await embeddingManager.getEmbeddingDimension();
+      if (isVectorSize(reported)) return reported;
+    } catch {
+      // A manager that cannot report its model's size; one embedding measures it.
+    }
+    try {
+      const probe = await embeddingManager.generateEmbeddings({ texts: 'dimension probe' });
+      const embedding = probe.embeddings[0];
+      if (isUsableEmbedding(embedding)) return embedding.length;
+    } catch {
+      // The embedding model cannot be reached; the next read measures again.
+    }
+    return undefined;
   }
 
   /**

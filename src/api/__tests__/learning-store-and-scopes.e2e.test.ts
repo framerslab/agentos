@@ -53,8 +53,12 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** The host's embedding model, fixed, returning vectors of `size` values. */
-function embedder(size: number): CognitiveMemoryConfig['embeddingManager'] {
+/**
+ * The host's embedding model, fixed, returning vectors of `size` values. With `reportsSize` false its manager cannot
+ * report the model's size: `getEmbeddingDimension()` throws, as the package's EmbeddingManager does for a model whose
+ * size is not configured.
+ */
+function embedder(size: number, reportsSize = true): CognitiveMemoryConfig['embeddingManager'] {
   return {
     generateEmbeddings: async (request: { texts: string | string[] }) => ({
       embeddings: (Array.isArray(request.texts) ? request.texts : [request.texts]).map(() => {
@@ -66,7 +70,10 @@ function embedder(size: number): CognitiveMemoryConfig['embeddingManager'] {
       providerId: 'fixed',
       usage: { totalTokens: 0 },
     }),
-    getEmbeddingDimension: async () => size,
+    getEmbeddingDimension: async () => {
+      if (!reportsSize) throw new Error("Embedding dimension for model 'fixed' is not configured.");
+      return size;
+    },
   } as unknown as CognitiveMemoryConfig['embeddingManager'];
 }
 
@@ -102,10 +109,17 @@ async function vectorIndex(dimension = DIMENSION): Promise<InMemoryVectorStore> 
 
 /**
  * A memory manager as a host builds one: its own knowledge graph, the given index (a new one by default), the given
- * Brain, and an embedding model of the given size (1536 by default).
+ * Brain, and an embedding model of the given size (1536 by default), whose manager reports that size unless
+ * `reportsSize` is false.
  */
 async function manager(
-  options: { brain?: Brain; index?: InMemoryVectorStore; persistAccessState?: boolean; dimension?: number } = {},
+  options: {
+    brain?: Brain;
+    index?: InMemoryVectorStore;
+    persistAccessState?: boolean;
+    dimension?: number;
+    reportsSize?: boolean;
+  } = {},
 ): Promise<CognitiveMemoryManager> {
   const knowledgeGraph = new KnowledgeGraph();
   await knowledgeGraph.initialize();
@@ -113,7 +127,7 @@ async function manager(
     workingMemory: workingMemory(),
     knowledgeGraph,
     vectorStore: options.index ?? (await vectorIndex(options.dimension)),
-    embeddingManager: embedder(options.dimension ?? DIMENSION),
+    embeddingManager: embedder(options.dimension ?? DIMENSION, options.reportsSize),
     agentId: 'qa-agent',
     traits: { honesty: 0.5, emotionality: 0.5, extraversion: 0.5, agreeableness: 0.5, conscientiousness: 0.5, openness: 0.5 },
     moodProvider: () => ({ ...NEUTRAL }),
@@ -563,6 +577,25 @@ describe('a trace keeps its reinforcement schedule across a restart, with no Bra
       id,
       content: "Ana's sister is Vera.",
       stability: accessed.stability,
+      accessCount: 1,
+      reinforcementInterval: TWO_HOURS,
+      nextReinforcementAt: accessed.nextReinforcementAt,
+    });
+  });
+
+  it("restores them through getByScope when the embedding manager cannot report the model's size, from the length of one embedding", async () => {
+    const index = await vectorIndex(768);
+    const first = await manager({ index, dimension: 768, reportsSize: false });
+    const id = (await tell(first)).id;
+    await recall(first);
+    const accessed = structuredClone(first.getStore().getTrace(id)!);
+    await stop(first);
+
+    const listing = await manager({ index, dimension: 768, reportsSize: false });
+    const [listed] = await listing.getStore().getByScope('user', 'ana');
+    expect(listed).toMatchObject({
+      id,
+      content: "Ana's sister is Vera.",
       accessCount: 1,
       reinforcementInterval: TWO_HOURS,
       nextReinforcementAt: accessed.nextReinforcementAt,
