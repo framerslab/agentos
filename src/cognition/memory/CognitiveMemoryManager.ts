@@ -281,7 +281,8 @@ export interface ICognitiveMemoryManager {
    * user filed as a second user on the session ({@link MemoryTrace.turnUserId}). Optional, so a host's own
    * implementation keeps compiling.
    *
-   * @throws TypeError when `turnUserId` is given and is not a non-empty string.
+   * @throws TypeError when `scopeId` is empty, so a caller's missing id never deletes every trace filed under no scope
+   *   id, or when `turnUserId` is given and is not a non-empty string.
    */
   deleteScope?(scope: MemoryScope, scopeId: string, options?: { turnUserId?: string }): Promise<MemoryDeletion>;
 
@@ -1592,6 +1593,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
    * of each trace in a batch goes before the batch's traces ({@link forgetTraces}), so a call that fails part way can
    * be made again and finds the same traces. With `turnUserId`, only the scope's traces that user filed as a second
    * user on the session.
+   *
+   * @throws TypeError when `scopeId` is empty, or when `turnUserId` is given and is not a non-empty string.
    */
   async deleteScope(scope: MemoryScope, scopeId: string, options: { turnUserId?: string } = {}): Promise<MemoryDeletion> {
     this.ensureInitialized();
