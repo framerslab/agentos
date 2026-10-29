@@ -7,7 +7,8 @@
  * retrieval feedback, the document chunk it was filed from), and a scope deleted again counts nothing. A soft delete
  * (a supersede, a prune) takes the trace's copy with it and keeps the Brain row as a tombstone. A real manager over a
  * real SQLite Brain; with no Brain, a manager started over a vector index another manager filed into finds the scope's
- * traces in the index, whether it lists a collection a page at a time or answers similarity queries alone.
+ * traces in the index, whether it lists a collection a page at a time, pages it by position, or answers similarity
+ * queries alone.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -207,6 +208,23 @@ function scanningTwoAtATime(store: InMemoryVectorStore): InMemoryVectorStore {
   return store;
 }
 
+/**
+ * An in-memory index whose metadata scan pages by position, as a host's store with an offset cursor does: two
+ * documents a read from the cursor's offset, and the offset of the next page while documents remain past it. A delete
+ * moves the documents after it forward, past a cursor taken before it.
+ */
+function pagingByPosition(store: InMemoryVectorStore): InMemoryVectorStore {
+  const scan = store.scanByMetadata.bind(store);
+  store.scanByMetadata = async (name, options) => {
+    const start = Number(options?.cursor ?? 0);
+    const { documents } = await scan(name, { ...options, limit: Number.MAX_SAFE_INTEGER });
+    const page = documents.slice(start, start + 2);
+    const next = start + page.length;
+    return next < documents.length ? { documents: page, nextCursor: String(next) } : { documents: page };
+  };
+  return store;
+}
+
 /** An in-memory index with no metadata scan, as a host's store that answers similarity queries alone. */
 function answeringQueriesAlone(store: InMemoryVectorStore): InMemoryVectorStore {
   (store as { scanByMetadata?: unknown }).scanByMetadata = undefined;
@@ -215,6 +233,7 @@ function answeringQueriesAlone(store: InMemoryVectorStore): InMemoryVectorStore 
 
 describe.each([
   ['an index that lists a collection two documents a read', scanningTwoAtATime],
+  ['an index that pages a collection by position, two documents a page', pagingByPosition],
   ['an index that answers similarity queries alone', answeringQueriesAlone],
 ])('deleteScope with no Brain, over %s', (_name, shape) => {
   it('finds in the vector index the traces another store filed before a restart, and deletes them, their copies and their nodes', async () => {
