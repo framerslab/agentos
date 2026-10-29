@@ -1,5 +1,5 @@
 /**
- * resolveLaunchLimits (spec 4.1): the defaults of every bound, a RangeError naming the field for a value outside its
+ * resolveLaunchLimits: the defaults of every bound, a RangeError naming the field for a value outside its
  * range, an AgencyConfigError for approvals with no handler, and the members rule. Pure logic.
  */
 import { describe, expect, it } from 'vitest';

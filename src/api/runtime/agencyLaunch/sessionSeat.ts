@@ -3,7 +3,7 @@
  * A roster member that runs one session of its own. `sessionSeat()` seats a persistent gmi() agent in an agency as
  * itself: its persona, cognition profile, tools and learning config, through a session of its own handle, never the
  * throwaway light GMI its `generate()` builds. `launch_agency` builds every seat of a launched team the same way
- * (`buildSessionSeat`). Every seat's session has memory scoped to the seat session and no learner (spec D5).
+ * (`buildSessionSeat`). Every seat's session has memory scoped to the seat session and no learner.
  */
 import { randomUUID } from 'node:crypto';
 import type { AgentOptions, AgentSession, SessionSendOptions } from '../../agent.js';
@@ -49,7 +49,10 @@ export interface SessionSeatOptions {
 export interface SeatHandle extends Agent, SeatMetadata {
   /** The seat's session id on its member. */
   readonly seatId: string;
-  /** What the seat did so far; read by the launch for its result. */
+  /**
+   * What the seat did so far; read by the launch for its result. A launch's seat with a call still running once its
+   * launch has stopped reads `cut`, with no error: the launch reports without that call's answer.
+   */
   record(): LaunchSeatRecord;
 }
 
@@ -62,7 +65,7 @@ export interface InternalSeatOptions extends SessionSeatOptions {
   memberRef?: string;
   /** The explicit user the seat's session runs as: the parent turn's. sessionSeat() names none. */
   userId?: string;
-  /** Memory scoped to the seat session and no learner (spec D5). Set when absent, so every seat's session is a seat session. */
+  /** Memory scoped to the seat session and no learner. Set when absent, so every seat's session is a seat session. */
   seat?: { memoryScope: 'session'; learner: 'none' };
   /** The frame each of the seat's turns carries (`metadata.agencyLaunch`). */
   frame?: AgencyLaunchFrame;
@@ -79,7 +82,10 @@ export interface InternalSeatOptions extends SessionSeatOptions {
   logError?: (error: unknown, where: string) => void;
   /** True for a temporary seat: close() also closes the member, which the launch built. */
   ownsMember?: boolean;
-  /** A launch's seat: true when a failed call was cut (the launch's signal aborted, or its budget is exhausted). */
+  /**
+   * A launch's seat: true once the launch has stopped (its signal aborted, or its budget is exhausted). A call that fails
+   * then was cut, and so is a call still running when the launch reads the seat's record.
+   */
   cutWhen?: () => boolean;
 }
 
@@ -116,7 +122,7 @@ function codeOf(error: unknown): string | undefined {
 /**
  * The error a launch's seat rejects with: the original's name and code alone. A provider's or a handler's message can
  * carry a URL or a credential, and a hierarchical manager's delegate tool hands a seat's rejection to the manager's
- * model (spec D16).
+ * model.
  */
 function seatError(name: string, code: string | undefined): Error {
   const error = new Error(code ? `${name} (${code})` : name);
@@ -229,6 +235,8 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
   let session: AgentSession | undefined;
   let closed = false;
   let closing: Promise<void> | undefined;
+  /** The seat's calls in flight. */
+  let running = 0;
 
   const open = (): AgentSession => {
     if (!session) {
@@ -289,6 +297,7 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
     async generate(prompt: string, opts?: Record<string, unknown>): Promise<GenerateTextResult> {
       if (closed) throw new Error('seat closed');
       record.calls += 1;
+      running += 1;
       const send = sendOptions(opts);
       try {
         const result = (await open().send(framed(prompt), send)) as GenerateTextResult;
@@ -297,6 +306,8 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
         return result;
       } catch (error) {
         throw failed(error, send.abortSignal);
+      } finally {
+        running -= 1;
       }
     },
 
@@ -310,6 +321,7 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
       } catch (error) {
         throw failed(error, send.abortSignal);
       }
+      running += 1;
       // A GMI stream resolves its text when its turn fails too, and ends with an error part: the finish reason says
       // which it was. Its usage resolves either way, failed attempts included.
       const settle = async (): Promise<void> => {
@@ -319,6 +331,8 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
           else answered(text);
         } catch (error) {
           failed(error, send.abortSignal);
+        } finally {
+          running -= 1;
         }
       };
       void settle().catch(() => undefined);
@@ -350,7 +364,12 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
     },
 
     record(): LaunchSeatRecord {
-      return { ...record, usage: { ...record.usage }, ...(record.error ? { error: { ...record.error } } : {}) };
+      // A call still running once the launch has stopped (its deadline, its parent's stop, its budget) is cut, whatever
+      // the seat's earlier calls came to: the launch reports without that call's answer, and without the error an
+      // earlier call failed with, which did not end this one.
+      const cut = running > 0 && options.cutWhen?.() === true;
+      const { error, ...withoutError } = record;
+      return { ...withoutError, ...(cut ? { status: 'cut' as const } : {}), usage: { ...record.usage }, ...(error && !cut ? { error: { ...error } } : {}) };
     },
   };
   return handle;
