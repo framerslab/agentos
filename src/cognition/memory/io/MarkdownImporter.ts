@@ -8,7 +8,11 @@
  *
  * Deduplication uses SHA-256 of the content body — files already present in
  * the target brain (same hash in `metadata.import_hash`, same scope, and the
- * scope id `''` a file carries) are skipped.
+ * scope id `''` a file carries) are skipped. A trace a release older than
+ * `memory_traces.scope_id` wrote holds `''` in that column whatever scope id
+ * its metadata names; the import files such traces under that scope id first
+ * (`fillScopeIds`), so another scope id's trace is not taken for a file's
+ * duplicate.
  *
  * @module memory/io/MarkdownImporter
  */
@@ -18,6 +22,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { readFrontMatter, type FrontMatterFile } from '../../../core/utils/frontMatter.js';
+import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -74,6 +79,9 @@ export class MarkdownImporter {
     const result: ImportResult = { imported: 0, skipped: 0, errors: [] };
 
     const files = await this._collectMarkdownFiles(sourceDir);
+
+    // A trace an older release wrote holds scope_id '': filed under its scope id first, it is not read as ''.
+    if (options?.dedup ?? true) await fillScopeIds(this.brain.adapter, this.brain.brainId);
 
     for (const filePath of files) {
       await this._processFile(filePath, result, options);

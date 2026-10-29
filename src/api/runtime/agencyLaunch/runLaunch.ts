@@ -13,7 +13,7 @@ import { AgencyConfigError } from '../../types.js';
 import { IDENTIFIER_PATTERN } from '../../../cognition/emergent/ToolName.js';
 import type { ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import type { ApprovalGateFn } from '../approval-gate.js';
-import { SpendBudget } from '../spendBudget.js';
+import { SpendBudget, type SpendLimitInfo } from '../spendBudget.js';
 import type { AgentOSUsageLedgerOptions } from '../usageLedger.js';
 import { launchRegistry, type LaunchEntry } from './launchRegistry.js';
 import type { SeatHandle } from './sessionSeat.js';
@@ -123,6 +123,8 @@ type RunOutcome = { kind: 'resolved'; text: string } | { kind: 'rejected'; error
 /** Why the launch stopped early, set by the budget's function, the deadline and the parent's stop. */
 interface LaunchState {
   exhausted: boolean;
+  /** The refusal that marked the launch exhausted: its own budget's, or that of a budget its calls draw on. */
+  refusal?: SpendLimitInfo;
   timedOut: boolean;
   cancelled: boolean;
 }
@@ -176,9 +178,10 @@ function frameIn(sessionData: Record<string, unknown> | undefined): AgencyLaunch
 }
 
 /**
- * Step 2: the parent. A frame naming a live entry gives the depth, the limits, the budget, the user, the namespace and
- * the calling seat's names; the call's own context gives the gate and the hooks it carries (the entry's then the
- * member's own), else the entry's. A frame naming a closing or missing entry is refused. No frame: the host's root.
+ * Step 2: the parent. A frame naming a live entry gives the depth, the limits, the user, the namespace and the calling
+ * seat's names; the call's own context gives the gate, the hooks it carries (the entry's then the member's own) and the
+ * budget (the seat's turn's: the entry's, held on gmi() beside a persistent member's own), else the entry's. A frame
+ * naming a closing or missing entry is refused. No frame: the host's root.
  */
 async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promise<{ parent: LaunchParent; toolNames: ReadonlySet<string>; frame?: AgencyLaunchFrame } | LaunchRefusal> {
   const frame = frameIn(ctx.sessionData);
@@ -203,7 +206,9 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
       ...(typeof conversationId === 'string' ? { conversationId } : {}),
       depth: entry.depth,
       limits: entry.limits,
-      budget: entry.budget,
+      // The seat's turn's budget draws on the entry's, so the tree stays under its root; a persistent member's own
+      // budget, held beside it, bounds the teams the member launches from its seat as it bounds the member's calls.
+      budget: ctx.callerTurn?.budget ?? entry.budget,
       ...(gate ? { approvalGate: gate } : {}),
       signal: ctx.signal ? AbortSignal.any([entry.signal, ctx.signal]) : entry.signal,
       ...(entry.providerUserId !== undefined ? { providerUserId: entry.providerUserId } : {}),
@@ -381,12 +386,18 @@ function statusOf(state: LaunchState, outcome: RunOutcome): LaunchStatus {
   return outcome.kind === 'resolved' ? 'completed' : 'failed';
 }
 
-function reasonOf(status: LaunchStatus, launch: AdmittedLaunch, seats: LaunchSeatRecord[], outcome: RunOutcome): string | undefined {
+function reasonOf(status: LaunchStatus, launch: AdmittedLaunch, seats: LaunchSeatRecord[], outcome: RunOutcome, state: LaunchState): string | undefined {
   switch (status) {
     case 'completed':
       return undefined;
-    case 'budget_exhausted':
+    case 'budget_exhausted': {
+      const refusal = state.refusal;
+      // A budget the launch draws on (its parent's, its pool) or one a seat's call draws on (a persistent member's own)
+      // names the cap that refused; the launch's own token cap reads from the launch's count.
+      if (refusal && refusal.budgetId !== launch.child.id) return `a budget the team draws on refused a call: ${refusal.reason}`;
+      if (refusal && refusal.capType !== 'tokens') return `the launch's budget refused a call: ${refusal.reason}`;
       return `the launch's budget is spent: ${launch.child.tokensUsed()} of ${launch.caps.maxTotalTokens} tokens`;
+    }
     case 'timed_out':
       return `the deadline of ${launch.deadlineMs} ms passed`;
     case 'cancelled':
@@ -419,7 +430,7 @@ function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome
     return sum;
   }, ZERO_USAGE());
   const status = statusOf(state, outcome);
-  const reason = reasonOf(status, launch, seats, outcome);
+  const reason = reasonOf(status, launch, seats, outcome, state);
   const text = outcome.kind === 'resolved' ? outcome.text : '';
   const truncated = text.length > LAUNCH_TEXT_CHARS;
   const closedAt = new Date();
@@ -594,7 +605,8 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
     const seats = await checkBounds(host, ctx, args, parent, toolNames);
     if (isRefusal(seats)) return refused(seats);
 
-    // 4. The budget: a root launch draws on its turn's pool; a nested one on its parent launch's budget.
+    // 4. The budget: a root launch draws on its turn's pool; a nested one on its parent launch's budget, and on a
+    // persistent member's own as well when the member launches it from its seat.
     // A root launch's scope is the launching session as its host names it, never the calling GMI.
     const scopeKey = frame ? frame.launchId : `${host.surface}:${parent.scopeId}`;
     const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget);
@@ -607,8 +619,10 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
       maxTotalTokens: caps.maxTotalTokens,
       unpriced: 'allow',
       ...(upstream ? { parent: upstream } : {}),
-      // Runs before every refusal, this budget's own or an ancestor's: the launch reads exhaustion from here.
-      onLimitReached: () => {
+      // Runs before every refusal, this budget's own, an ancestor's, or that of a persistent member's own budget held
+      // beside it on a seat's call: the launch reads exhaustion, and the first refusal, from here.
+      onLimitReached: (info) => {
+        state.refusal ??= info;
         state.exhausted = true;
       },
     });

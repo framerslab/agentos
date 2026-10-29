@@ -39,6 +39,7 @@ import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
+import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 
 // ---------------------------------------------------------------------------
 // ChatGPT export format types
@@ -133,6 +134,9 @@ export class ChatGptImporter {
       result.errors.push('Expected a JSON array at the top level of conversations.json');
       return result;
     }
+
+    // A trace an older release wrote holds scope_id '': filed under its scope id first, it is not read as ''.
+    if (options?.dedup ?? true) await fillScopeIds(this.brain.adapter, this.brain.brainId);
 
     // ---- Process each conversation ----
     for (const convo of conversations) {
@@ -275,7 +279,10 @@ export class ChatGptImporter {
    * Insert a single episodic memory trace derived from a message pair.
    *
    * Deduplication is based on SHA-256 of the combined `content` string, inside
-   * the `user` scope and the scope id `''` these traces file under.
+   * the `user` scope and the scope id `''` these traces file under. `import`
+   * first files the traces an older release wrote with `scope_id` `''` under
+   * the scope id their metadata names (`fillScopeIds`), so another scope id's
+   * trace is not taken for a duplicate.
    *
    * @param content        - The `[user]:...\n[assistant]:...` content string.
    * @param createdAt      - Unix timestamp (ms) of the user message.
