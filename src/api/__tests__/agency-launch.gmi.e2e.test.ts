@@ -13,6 +13,7 @@ import type { GenerateTextResult } from '../generateText';
 import { launchRegistry } from '../runtime/agencyLaunch/launchRegistry';
 import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
 import { getCapabilitySupport } from '../runtime/capabilityContract';
+import { SpendBudget } from '../runtime/spendBudget';
 import type { Agent, ApprovalDecision, ApprovalRequest } from '../types';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -35,6 +36,11 @@ const offered = (call: SeenCall): string[] =>
   ((call.options.tools as Array<{ function: { name: string } }> | undefined) ?? []).map((tool) => tool.function.name);
 /** A model step that calls launch_agency once with `args`. */
 const launchStep = (args: Record<string, unknown>, id = 'l1') => reply.tools([{ id, name: 'launch_agency', args }]);
+/** `reply.tools`, reporting `totalTokens` of usage. */
+const toolsCosting = (calls: Parameters<typeof reply.tools>[0], totalTokens: number) =>
+  reply.tools(calls).map((chunk) => ('usage' in chunk ? { ...chunk, usage: { promptTokens: totalTokens - 50, completionTokens: 50, totalTokens } } : chunk));
+/** `reply.text`, reporting `totalTokens` of usage. */
+const textCosting = (text: string, totalTokens: number) => reply.text(text, 'stub-model', { promptTokens: totalTokens - 50, completionTokens: 50, totalTokens });
 /** The output of a send's `i`-th tool call: a launch that started. */
 const launchOf = (result: GenerateTextResult, i = 0): LaunchAgencyResult => {
   const call = result.toolCalls[i];
@@ -541,4 +547,31 @@ describe('launch_agency on gmi()', () => {
     expect(asked).toEqual(['send_email']);
     expect(sendEmail).not.toHaveBeenCalled();
   }, 20_000);
+
+  it("a launch draws on the parent's budget", async () => {
+    const k = key();
+    const twoSeats = { goal: 'Two parts.', seats: [{ role: 'first', instructions: 'Part one.' }, { role: 'second', instructions: 'Part two.' }] };
+    const s = script('openai', k, {
+      replies: [
+        toolsCosting([{ id: 'l1', name: 'launch_agency', args: twoSeats }], 6_000),
+        textCosting('Part one done.', 6_000),
+        reply.text('Partial.'),
+      ],
+    });
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 20_000, unpriced: 'allow' });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', maxTokens: 2_000, budget, agencies: { launch: true } });
+
+    const out = launchOf(await parent.session('p1').send('Go.'));
+    expect(out.status).toBe('budget_exhausted');
+    // The parent's step (6,000) was recorded before its tool ran: the child's cap is half of the 14,000 left.
+    expect(out.provenance.budget.maxTotalTokens).toBe(7_000);
+    expect(out.seats.map((r) => [r.role, r.status])).toEqual([['first', 'completed'], ['second', 'cut']]);
+    // The launch's own cap refused the second seat's call (at least its 2,000 output tokens, with 1,000 left) before its
+    // request: the stub saw the parent's two steps and the first seat's call.
+    expect(out.reason).toBe("the launch's budget is spent: 6000 of 7000 tokens");
+    expect(out.provenance.budget.tokensUsed).toBe(6_000);
+    expect(s.seen).toHaveLength(3);
+    // The parent's budget holds its own two steps (6,000 and 15 tokens) and the first seat's 6,000.
+    expect(budget.tokensUsed()).toBe(12_015);
+  });
 });
