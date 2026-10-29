@@ -458,8 +458,8 @@ export function compilePanel(
       const work = (async (): Promise<Outcome> => {
         // A seat that takes its slot after the caller's abort asks no approval and sends nothing.
         if (signal.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
-        const gate = await checkBeforeAgentInput(owner, input, agentCalls.slice(), { ...agencyConfig, on: ownerOn }, parts);
-        const decision = gate.decision;
+        const approval = await checkBeforeAgentInput(owner, input, agentCalls.slice(), { ...agencyConfig, on: ownerOn }, parts);
+        const decision = approval.decision;
         // An abort that landed while the approval was pending: the seat sends nothing, whatever the handler said.
         if (signal.aborted) return { kind: 'threw', error: signal.reason, durationMs: elapsed() };
         if (decision && !decision.approved) {
@@ -469,7 +469,7 @@ export function compilePanel(
         const left = remaining();
         if (slot.settled || left === 0) return { kind: 'timeout', durationMs: elapsed() };
         // The input the check read, the approver's instructions included.
-        const effective = gate.input;
+        const effective = approval.input;
         const cfg = isAgent(target) ? undefined : target;
         // A call with no chain of its own cannot be answered while the
         // breaker its key records under is open (each key has its own, so a
