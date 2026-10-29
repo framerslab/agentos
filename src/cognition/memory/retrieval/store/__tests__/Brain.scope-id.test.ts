@@ -2,14 +2,15 @@
  * @file Brain.scope-id.test.ts
  * `memory_traces.scope_id`: the scope id of a trace as a column of its own. A Brain at schema version 2 gains the
  * column on open, filled from each row's metadata JSON (a malformed row stays ''), for every brain the file holds, with
- * one read of each row; a row a release without the column writes to a brain already at version 3 is filled at the
- * next open, a key spelled with a JSON escape included, by a fill that reads only the rows whose metadata can name a
- * scope id, through an index of those rows alone; a trace whose id is the empty string is filled as any other is; an
- * open that another connection beats to adding the column opens; the migration of a brain whose table already has the
- * column reads none of its rows and builds no index, which the open does once that migration has committed; a fresh
- * Brain has it; the index a per-scope read uses exists; every writer this file reaches sets it; and the importers file
- * by it and deduplicate inside one scope id, where a trace such a release wrote counts under the scope id its metadata
- * names. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them in production.
+ * one read of each row; a row a release without the column writes to a brain already at version 3 is filled at the next
+ * open, a key spelled with a JSON escape included, by a fill that reads only the rows whose metadata can name a scope
+ * id, through an index of those rows alone; a trace whose id is the empty string is filled as any other is; an open
+ * that another connection beats to adding the column opens and fills it for every brain; the migration of a brain whose
+ * table already has the column reads none of its rows and builds no index, which the open does once that migration has
+ * committed; a fresh Brain has it; the index a per-scope read uses exists; every writer this file reaches sets it; and
+ * the importers file by it and deduplicate inside one scope id, where a trace such a release wrote counts under the
+ * scope id its metadata names. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them in
+ * production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -319,17 +320,19 @@ describe('memory_traces.scope_id', () => {
     expect((await scopeIdsOf(b1))['']).toBe('cy');
   });
 
-  it('is added by an open that another connection beats to adding it', async () => {
+  it('is added, and filled for every brain, by an open that another connection beats to adding it', async () => {
     // A table another path made without the column, under a brain at schema version 3, so no migration runs.
     const filePath = tempFile();
     const raw = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3'], quiet: true });
     await raw.exec(SCHEMA_2_DDL);
     await raw.run(`INSERT INTO brain_meta (brain_id, key, value) VALUES ('b1', 'schema_version', '3')`);
-    await raw.run(
-      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata) VALUES ('b1', 't-1', 'episodic', 'user', 'x', 1, ?)`,
-      [JSON.stringify({ scopeId: 'cy' })],
-    );
-    // Another process's open adds the column once this open has looked for it.
+    for (const [brainId, id, scopeId] of [['b1', 't-1', 'cy'], ['b2', 't-2', 'bo']]) {
+      await raw.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata) VALUES (?, ?, 'episodic', 'user', 'x', 1, ?)`,
+        [brainId, id, JSON.stringify({ scopeId })],
+      );
+    }
+    // Another process adds the column once this open has looked for it, and stops before it fills the table.
     let beaten = false;
     const racing = new Proxy(raw, {
       get(target, prop) {
@@ -356,7 +359,8 @@ describe('memory_traces.scope_id', () => {
     try {
       brain = await Brain.openWithAdapter(racing, { brainId: 'b1' });
       expect(beaten).toBe(true);
-      expect(await scopeIdsOf(brain)).toEqual({ 't-1': 'cy' });
+      // b2 is not opened: its trace is filed with the table.
+      expect(await scopeIdsOf(brain)).toEqual({ 't-1': 'cy', 't-2': 'bo' });
     } finally {
       if (brain) await brain.close();
       else await raw.close();
