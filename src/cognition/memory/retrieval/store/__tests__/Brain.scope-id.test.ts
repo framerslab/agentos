@@ -12,8 +12,9 @@
  * scope id its metadata names; a Markdown or Obsidian file carries its trace's scope id out and back in, a CSV row
  * takes it from a `scope_id` cell, and a record whose metadata is not an object is stored with metadata that names its
  * scope id; and a trace no import wrote, with the hash `remember()` stores or no hash at all, is the duplicate of a
- * record of its text in its scope id. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens
- * them in production.
+ * record of its text in its scope id, and of its own Markdown or Obsidian note whatever whitespace surrounds its text
+ * and whatever tags and links the note adds after it; a trace the brain forgot stays forgotten through an import of
+ * its text. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -780,6 +781,58 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       );
       expect(await new ChatGptImporter(brain).import(filePath)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
       expect(await textsOf(brain)).toEqual(['[user]: Bare words.', '[user]: Kept words.']);
+    });
+
+    it('Markdown: a trace whose text begins or ends with whitespace is the duplicate of its own note', async () => {
+      const brain = await written('markdown-padded', 'A%2F42', '  Kept words.\n', '\tBare words.  ');
+      const dir = path.join(path.dirname(tempFile()), 'export');
+      expect((await new MarkdownExporter(brain).export(dir)).refused).toEqual([]);
+      expect(await new MarkdownImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['\tBare words.  ', '  Kept words.\n']);
+    });
+
+    it('Obsidian: a trace with tags and graph links is the duplicate of its own note', async () => {
+      const brain = await written('obsidian-linked', 'A%2F42', 'Kept words.', 'Bare words.');
+      await brain.run('UPDATE memory_traces SET tags = ? WHERE brain_id = ?', [JSON.stringify(['alpha', 'beta gamma']), brain.brainId]);
+      await brain.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at)
+         VALUES (?, 't-bare', 'trace', 'trace:t-bare', 1), (?, 'kn-target', 'concept', 'Target note', 1)`,
+        [brain.brainId, brain.brainId],
+      );
+      await brain.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+         VALUES (?, 'ke-target', 't-bare', 'kn-target', 'related_to', 1)`,
+        [brain.brainId],
+      );
+      const dir = path.join(path.dirname(tempFile()), 'vault');
+      expect((await new ObsidianExporter(brain).export(dir)).refused).toEqual([]);
+      // The note carries the trace's tags as a line of hashtags and its link as a Related list after the text.
+      const note = await fsp.readFile(path.join(dir, 'user', 'episodic', 't-bare.md'), 'utf8');
+      expect(readFrontMatter(note).content.trim()).toBe('Bare words.\n\n#alpha #beta-gamma\n\n**Related:**\n- [[Target note]]');
+
+      expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it('a trace the brain forgot: an import of an export taken before the forget brings it back in no format', async () => {
+      const memory = await Memory.createSqlite(tempFile(), { brainId: 'forgotten', graph: false });
+      closers.push(() => memory.close());
+      const trace = await memory.remember('Forgotten words.', { scope: 'user', scopeId: 'A%2F42' });
+      const brain = (memory as unknown as { _brain: Brain })._brain;
+      const exported = await new JsonExporter(brain).exportToString();
+      const dir = path.join(path.dirname(tempFile()), 'export');
+      expect((await new MarkdownExporter(brain).export(dir)).refused).toEqual([]);
+      await memory.forget(trace.id);
+
+      expect(await new JsonImporter(brain).importFromString(exported)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+      expect(await new MarkdownImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+      expect(
+        await new CsvImporter(brain).importFromString('content,scope,scope_id\n"Forgotten words.",user,A%2F42\n'),
+      ).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+      expect(await textsOf(brain)).toEqual([]);
+      // remember() stores the text again.
+      await memory.remember('Forgotten words.', { scope: 'user', scopeId: 'A%2F42' });
+      expect(await textsOf(brain)).toEqual(['Forgotten words.']);
     });
   });
 });
