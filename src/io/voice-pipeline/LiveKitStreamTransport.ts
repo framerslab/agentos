@@ -179,6 +179,11 @@ import { LIVEKIT_TRANSCRIPTION_TOPIC } from './transcriptLedger.js';
 import { PlayedTextTracker } from './ttsTextBoundaries.js';
 import { LiveKitRoomAudioSource, type LiveKitParticipantLike, type LiveKitRoomLike, type LiveKitRtcModule, type LiveKitTextStreamReaderLike } from '../hearing/LiveKitRoomAudioSource.js';
 import { LiveKitTranscriptionOutput } from '../hearing/LiveKitTranscriptionOutput.js';
+import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
+import { isContentSafeTelemetryEnabled } from '../../core/logging/contentSafeTelemetry.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('livekit_transport');
 
 /** The text stream topic of the control messages when none is configured. */
 export const LIVEKIT_TRANSPORT_DEFAULT_TOPIC = 'agentos.voice';
@@ -1005,24 +1010,21 @@ export class LiveKitStreamTransport extends EventEmitter implements IPlaybackTra
     if (isClientTextInputMessage(message)) this.emit('message', { type: 'text_input', text: message.text });
     else this.warnOf(new Error('livekit text input refused'));
   }
-  /**
-   * Emit `'error'` only when a listener exists: an unlistened EventEmitter
-   * `'error'` throws and takes the whole process down.
-   */
+  /** An error event belongs to its listener; an unobserved listen-only error uses the selected diagnostic sink. */
   private emitErrorSafe(error: Error): void {
     if (this.listenerCount('error')) this.emit('error', error);
-    else if (!this.publisher) this.warn('[livekit-stream-transport] error (no listener attached):', error.message);
+    else if (this.publisher === undefined) {
+      if (this.options.logger === undefined && isContentSafeTelemetryEnabled()) console.warn();
+      else this.warn('[livekit-stream-transport] error (no listener attached):', error.message);
+    }
   }
-  /**
-   * Reports a failure the transport goes on after, which `'error'` must not carry: `IStreamTransport` defines `'error'`
-   * as fatal, and a session on the transport ends on it. A `'warning'` listener gets the error; with none, it is one
-   * warning line (`LiveKitStreamTransport: <message>`). Its message is fixed and names no text.
-   */
+  /** Nonfatal warnings retain their event/logger path; the safe console fallback reads no error content. */
   private warnOf(warning: Error): void {
     if (this.listenerCount('warning')) this.emit('warning', warning);
+    else if (this.options.logger === undefined && isContentSafeTelemetryEnabled()) console.warn();
     else this.warn(`LiveKitStreamTransport: ${warning.message}`);
   }
-  /** Writes one warning line through the host's `logger`, else as a console warning. */
+  /** Preserve an explicit host logger and route only the console fallback through this module's safe binding. */
   private warn(...parts: string[]): void {
     if (this.options.logger) this.options.logger.warn(parts.join(' '));
     else console.warn(...parts);

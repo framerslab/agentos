@@ -8,6 +8,9 @@ const fixed = [
   'src/api/runtime/approval-gate.ts', 'src/api/runtime/spendBudget.ts', 'src/api/runtime/tool-emulation/loop.ts',
   'src/cognition/rag/EmbeddingManager.ts', 'src/core/safety/LLMProviderHealthRegistry.ts',
   'src/core/llm/providers/AIModelProviderManager.ts', 'src/core/llm/routing/ModelRouter.ts',
+  'src/io/voice-pipeline/ListenSession.ts', 'src/io/voice-pipeline/ReconnectingSTT.ts',
+  'src/io/voice-pipeline/providers/StreamingSTTChain.ts', 'src/io/voice-pipeline/LiveKitStreamTransport.ts',
+  'src/api/runtime/agencyLaunch/gmiLaunchTool.ts',
 ];
 const folder = 'src/core/llm/providers/implementations';
 
@@ -23,8 +26,9 @@ it('routes every executable console reference in the covered provider paths', ()
       if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)
         && node.moduleSpecifier.text.endsWith('/contentSafeConsole.js')) {
         const names = node.importClause?.namedBindings;
-        guarded = !!names && ts.isNamedImports(names) && names.elements.some((element) =>
-          element.name.text === 'console' && element.propertyName?.text === 'contentSafeConsole');
+        guarded = Boolean(names && ts.isNamedImports(names) && names.elements.some((element) =>
+          (element.name.text === 'console' && element.propertyName?.text === 'contentSafeConsole')
+          || element.name.text === 'createContentSafeConsole'));
       }
       if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)
         && node.expression.text === 'console') references++;
@@ -38,5 +42,9 @@ it('routes every executable console reference in the covered provider paths', ()
     };
     visit(tree);
     if (references > 0) expect(guarded, path).toBe(true);
+    // A factory import routes nothing until the module binds its console from it at the top level.
+    if (references > 0 && source.includes('createContentSafeConsole')) {
+      expect(/^const console = createContentSafeConsole\('[a-z_]+'\);$/m.test(source), path).toBe(true);
+    }
   }
 });

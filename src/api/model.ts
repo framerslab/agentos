@@ -14,7 +14,10 @@ import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderMan
 import { baseUrlCredentials } from '../core/llm/providers/url-secrets.js';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from './runtime/provider-defaults.js';
 import { getDefaultProvider } from './runtime/global-default.js';
-import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('model');
 
 /**
  * The result of splitting a `provider:model` string at the first colon.
