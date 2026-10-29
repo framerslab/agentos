@@ -203,6 +203,36 @@ describe("a GMI's tool call carries its turn's stop", () => {
     expect(output.error?.message).toMatch(/aborted/);
   });
 
+  it('a fail_closed turn whose running call fails when the turn stops ends as a stopped turn does, not with a tool failure', async () => {
+    const caller = new AbortController();
+    let sawStop = false;
+    // The turn stops while the call runs, as a session's close() or a launch's deadline would; the tool ends its own
+    // work at its signal, as a tool may, and reports a failure.
+    const slow = hostTool('slow', false, async (_args: Record<string, unknown>, context: ToolExecutionContext) => {
+      caller.abort();
+      sawStop = context.signal?.aborted === true;
+      return { success: false, error: 'cut short: the work was stopped' };
+    });
+    const host = await makeForgeHost({ tools: [slow] });
+    const { gmi } = await createScriptedGmi({
+      provider: stoppingProvider([toolCallReply([{ id: 'call_s', name: 'slow', args: {} }])]),
+      config: { toolOrchestrator: host.orchestrator },
+    });
+
+    const { chunks, output } = await runTurn(
+      gmi,
+      textTurn('t1', 'Run it.', { options: { abortSignal: caller.signal }, executionPolicy: { toolFailureMode: 'fail_closed' } }),
+    );
+
+    // The call was running when the turn stopped, and it failed (the precondition).
+    expect(sawStop).toBe(true);
+    expect(toolResults(chunks).map((result) => [result.name, result.isError])).toEqual([['slow', true]]);
+    // A call that fails once the turn has stopped is the stop's, not a tool failure: the turn ends with the stop's
+    // abort, as a stopped turn that runs no fail_closed policy does.
+    expect(output.error?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
+    expect(output.error?.message).toMatch(/aborted/);
+  });
+
   it('a composed tool running when its turn stops finishes the step in flight, and its later steps are refused', async () => {
     const ran: string[] = [];
     const caller = new AbortController();
