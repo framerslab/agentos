@@ -74,6 +74,7 @@ import {
   deleteTraceRows,
   type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
+import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
 import { ChunkingEngine } from '../ingestion/ChunkingEngine.js';
@@ -855,14 +856,22 @@ export class Memory {
    * the full-text index entries. With `turnUserId`, only the scope's traces whose metadata names that user, as a
    * memory write on another user's session records a second user. Account deletion calls it.
    *
-   * @throws TypeError when `turnUserId` is given and is not a non-empty string.
+   * It reads the rows by their `scope_id` column, after filing the brain's rows that hold `''` there while their
+   * metadata names a scope id: a release older than the column writes those, to a Brain this facade holds open too.
+   *
+   * @throws TypeError when `scopeId` is empty, so a caller's missing id never deletes every trace filed under no scope
+   *   id, or when `turnUserId` is given and is not a non-empty string.
    */
   async deleteScope(scope: string, scopeId: string, options: { turnUserId?: string } = {}): Promise<{ deleted: number }> {
+    if (typeof scopeId !== 'string' || scopeId === '') {
+      throw new TypeError('Memory.deleteScope: scopeId must be a non-empty string');
+    }
     const only = options.turnUserId;
     if (only !== undefined && (typeof only !== 'string' || only === '')) {
       throw new TypeError('Memory.deleteScope: turnUserId must be a non-empty string');
     }
     await this._initPromise;
+    await fillScopeIds(this._brain.adapter, this._brain.brainId);
     const rows = await this._brain.all<{ id: string; metadata: string | null }>(
       'SELECT id, metadata FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?',
       [this._brain.brainId, scope, scopeId],
@@ -915,7 +924,8 @@ export class Memory {
   /**
    * Brings one trace back to the state a snapshot holds (`readTraceSnapshot`): its content, tags, scope and
    * metadata, live again. A ledger revert of a memory tool's update, delete or merge calls it with the before-state
-   * its row recorded; a revert of an add calls {@link forget}.
+   * its row recorded; a revert of an add calls {@link forget}. The full-text index then matches the restored words:
+   * SQLite rebuilds its index, and Postgres re-indexes the restored row alone.
    *
    * @throws When the snapshot is of another trace.
    */
@@ -928,6 +938,16 @@ export class Memory {
     await this._brain.transaction(async (trx) => {
       await writeTraceSnapshot(trx, dialect.insertOrReplace.bind(dialect), this._brain.brainId, before);
     });
+    if (dialect.name === 'postgres') {
+      // The index is the row's own `_tsv` column, which the upsert leaves as it was: re-index the restored row alone.
+      try {
+        const rebuild = this._brain.fullTextRebuild();
+        await this._brain.run(`${rebuild.sql} AND id = ?`, [...rebuild.params, traceId]);
+      } catch {
+        // Best-effort, as every full-text sync of the facade is; an open fills a column left null.
+      }
+      return;
+    }
     await this._rebuildFtsIndex();
   }
 
