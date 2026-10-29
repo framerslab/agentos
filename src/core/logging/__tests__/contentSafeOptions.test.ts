@@ -138,10 +138,16 @@ const thenableRejection = (): unknown => {
   const wrapped = Promise.reject(new Error(PRIVATE));
   return { then: (onFulfilled?: any, onRejected?: any) => wrapped.then(onFulfilled, onRejected) };
 };
-/** What a sink can return besides a promise of this realm, each settling as a rejection. */
+/** An object whose then getter throws, which await turns into a rejection. */
+const throwingThenGetter = (): unknown => Object.defineProperty({}, 'then', { get() { throw new Error(PRIVATE); } });
+/** A thenable whose then throws when called, which await also turns into a rejection. */
+const throwingThenCall = (): unknown => ({ then(): never { throw new Error(PRIVATE); } });
+/** What a sink can return besides a promise of this realm, each rejecting when awaited. */
 const rejections: ReadonlyArray<[string, () => unknown]> = [
   ['a promise from another realm', foreignRejection],
   ['a thenable that is no native promise', thenableRejection],
+  ['an object whose then getter throws', throwingThenGetter],
+  ['a thenable whose then throws', throwingThenCall],
 ];
 
 it.each(rejections)('consumes the rejection of %s that the sink returns', async (_kind, rejection) => {
@@ -157,6 +163,43 @@ it.each(rejections)('consumes the rejection of %s that the sink returns', async 
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
     expect(states).toEqual(['warn', 'error']);
+    expect(escaped).not.toHaveBeenCalled();
+  } finally { process.off('unhandledRejection', escaped); }
+});
+
+it('drops a log the then of a returned thenable writes, so the sink gets each record once and no record loops back', async () => {
+  const api = await import('../contentSafeTelemetry.js');
+  const factory = await import('../loggerFactory.js');
+  const calls = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+  factory.setLoggerFactory(() => calls);
+  const logger = factory.createLogger(PRIVATE);
+  const escaped = vi.fn();
+  process.on('unhandledRejection', escaped);
+  try {
+    const states: string[] = [];
+    /** Bounds a loop, so a then run after the guard is cleared fails this test instead of starving the event loop. */
+    const bound = 25;
+    api.enableContentSafeTelemetry((event: ContentSafeLogEvent): unknown => {
+      states.push(event.state);
+      return {
+        /** Writes through an AgentOS logger, then settles as a rejection. */
+        then(_onFulfilled?: unknown, onRejected?: (reason: unknown) => unknown): void {
+          if (states.length < bound) logger.warn(PRIVATE);
+          onRejected?.(new Error(PRIVATE));
+        },
+      };
+    });
+    expect(api.emitContentSafeLog('error', 'listen_session')).toBe(true);
+    // A loop through promise jobs runs to the bound before the microtasks of the turn end.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(states).toEqual(['error']);
+    // A record written after the then has run is unrelated, and reaches the sink once.
+    logger.info(PRIVATE);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(states).toEqual(['error', 'info']);
+    for (const call of Object.values(calls)) expect(call).not.toHaveBeenCalled();
     expect(escaped).not.toHaveBeenCalled();
   } finally { process.off('unhandledRejection', escaped); }
 });

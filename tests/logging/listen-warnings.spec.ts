@@ -114,10 +114,16 @@ const thenableRejection = (): unknown => {
   const wrapped = Promise.reject(new Error(PRIVATE));
   return { then: (onFulfilled?: any, onRejected?: any) => wrapped.then(onFulfilled, onRejected) };
 };
-/** What a callback can return besides a promise of this realm, each settling as a rejection. */
+/** An object whose then getter throws, which await turns into a rejection. */
+const throwingThenGetter = (): unknown => Object.defineProperty({}, 'then', { get() { throw new Error(PRIVATE); } });
+/** A thenable whose then throws when called, which await also turns into a rejection. */
+const throwingThenCall = (): unknown => ({ then(): never { throw new Error(PRIVATE); } });
+/** What a callback can return besides a promise of this realm, each rejecting when awaited. */
 const rejections: ReadonlyArray<[string, () => unknown]> = [
   ['a promise from another realm', foreignRejection],
   ['a thenable that is no native promise', thenableRejection],
+  ['an object whose then getter throws', throwingThenGetter],
+  ['a thenable whose then throws', throwingThenCall],
 ];
 
 it.each(rejections)('consumes the rejection of %s that the callback returns, for both warning words', async (_kind, rejection) => {
@@ -142,6 +148,48 @@ it.each(rejections)('consumes the rejection of %s that the callback returns, for
     expect(escaped).not.toHaveBeenCalled();
     expect(sink.turns[0].speaker).toBeUndefined();
     expect(session.state).toBe('listening');
+    expect(native).not.toHaveBeenCalled();
+  } finally {
+    process.off('unhandledRejection', escaped);
+    await session.close('purged');
+  }
+});
+
+it('reports no warning the then of a returned thenable raises, so the callback gets each warning once and none loops back', async () => {
+  const native = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const escaped = vi.fn();
+  process.on('unhandledRejection', escaped);
+  const source = provider(); const sink = new Sink(); const warnings: string[] = [];
+  /** Bounds a loop, so a then run outside the session's guard fails this test instead of starving the event loop. */
+  const bound = 25;
+  const session = await startListenSession(transport(), sink, {
+    streamingSTT: source.peer, runId: 'fixture-run', reconnect: false, drainMs: 0,
+    onWarning: (kind: string): unknown => {
+      warnings.push(kind);
+      return {
+        /** Makes the transcriber warn again, then settles as a rejection. */
+        then(_onFulfilled?: unknown, onRejected?: (reason: unknown) => unknown): void {
+          if (warnings.length < bound) source.sessions[0].emit('warning', hostile());
+          onRejected?.(new Error(PRIVATE));
+        },
+      };
+    },
+  });
+  try {
+    source.sessions[0].emit('warning', hostile());
+    // A loop through promise jobs runs to the bound before the microtasks of the turn end.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(warnings).toEqual(['stt_warning']);
+    // A warning after the then has run is unrelated, and reaches the callback once.
+    source.sessions[0].emit('warning', hostile());
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(warnings).toEqual(['stt_warning', 'stt_warning']);
+    source.sessions[0].emit('transcript', final());
+    await vi.waitFor(() => expect(sink.turns).toHaveLength(1));
+    expect(session.state).toBe('listening');
+    expect(escaped).not.toHaveBeenCalled();
     expect(native).not.toHaveBeenCalled();
   } finally {
     process.off('unhandledRejection', escaped);
