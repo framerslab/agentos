@@ -2049,8 +2049,9 @@ export class GMI implements IGMI {
               callInFlight = undefined;
               toolExecutionResults.push(result);
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_RESULT, `Tool '${toolCallReq.name}' result. Success: ${!result.isError}`, { result });
-              // A call refused because the turn had stopped is the stop's, not a tool failure: the turn ends as a
-              // stopped turn does, with the stop's abort, under any failure mode.
+              // A call that fails once the turn has stopped (refused for the stop, or running when it came) is the
+              // stop's, not a tool failure: the turn ends as a stopped turn does, with the stop's abort, under any
+              // failure mode.
               if (result.isError && plannedToolFailureMode === 'fail_closed' && !stop.signal.aborted) {
                 throw new GMIError(
                   `Tool '${toolCallReq.name}' failed and execution policy is fail_closed.`,
