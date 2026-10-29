@@ -5,7 +5,8 @@
  * cache, the vector index and the knowledge graph's copy, its soft-deleted rows, a trace held with no embedding and,
  * with no Brain, the documents another store filed into a durable index included, and recall under the old id finds
  * none of them though the index failed to delete an old document; a trace's `turnUserId` survives a restart, and
- * `deleteScope` with `turnUserId` deletes only that user's traces of the scope. Real SQLite Brains.
+ * `deleteScope` with `turnUserId` deletes only that user's traces of the scope. An empty scope id is refused by
+ * `refileScope` and `deleteScope`, and a limit that is not a positive integer by `hydrateScope`. Real SQLite Brains.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -111,6 +112,16 @@ describe('hydrateScope', () => {
     expect(await scoped.hydrateScope('user', 'ana')).toBe(1);
     expect((await scoped.getByScope('user', 'ana')).map((t) => t.id)).toEqual(['t-ana']);
     expect(await scoped.hydrateScope('user', 'ana')).toBe(0);
+  });
+
+  it('refuses a limit that is not a positive integer', async () => {
+    const brain = await openBrain(tempFile());
+    await (await storeOver(brain)).store(trace('t-ana', 'ana', 1_000));
+    const store = await storeOver(brain);
+    for (const limit of [0, -1, 2.5, Number.NaN]) {
+      await expect(store.hydrateScope('user', 'ana', limit)).rejects.toThrow(RangeError);
+    }
+    expect(await store.hydrateScope('user', 'ana', 1)).toBe(1);
   });
 });
 
@@ -220,6 +231,32 @@ describe('refileScope', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('an empty scope id', () => {
+  it('is refused by refileScope on either side, so a missing id never moves the traces filed under none', async () => {
+    const brain = await openBrain(tempFile());
+    const store = await storeOver(brain);
+    await store.store(trace('t-none', '', 1_000));
+    await store.store(trace('t-42', '42', 1_001));
+
+    await expect(store.refileScope('user', '', 'A/42')).rejects.toThrow(TypeError);
+    await expect(store.refileScope('user', '42', '')).rejects.toThrow(TypeError);
+
+    const rows = await brain.all<{ id: string; scope_id: string }>('SELECT id, scope_id FROM memory_traces ORDER BY id');
+    expect(rows).toEqual([{ id: 't-42', scope_id: '42' }, { id: 't-none', scope_id: '' }]);
+    expect((await store.getByScope('user', '42')).map((t) => t.id)).toEqual(['t-42']);
+  });
+
+  it('is refused by deleteScope, so a missing id never deletes the traces filed under none', async () => {
+    const brain = await openBrain(tempFile());
+    const store = await storeOver(brain);
+    await store.store(trace('t-none', '', 1_000));
+
+    await expect(store.deleteScope('user', '')).rejects.toThrow(TypeError);
+
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([{ id: 't-none' }]);
   });
 });
 

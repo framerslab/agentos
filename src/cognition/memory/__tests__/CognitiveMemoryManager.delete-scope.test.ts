@@ -4,7 +4,7 @@
  * (a reload brings none back), the knowledge graph's episodic copy of each, in the in-memory graph and in
  * `SqlKnowledgeGraph`, and the memory graph's node of each; another scope's traces, copies and nodes stay.
  * `deleteTraces` does the same for the traces it names, and `deleteScope` with `turnUserId` for the traces a second
- * user filed on another user's session (`encode`'s `turnUserId`). The rows that name a deleted trace go or let go of it (its
+ * user filed on another user's session (`encode`'s `turnUserId`); an empty scope id is refused. The rows that name a deleted trace go or let go of it (its
  * retrieval feedback, the document chunk it was filed from), and a scope deleted again counts nothing. A soft delete
  * (a supersede, a prune) takes the trace's copy with it and keeps the Brain row as a tombstone. A real manager over a
  * real SQLite Brain; with no Brain, a manager started over a vector index another manager filed into finds the scope's
@@ -170,6 +170,15 @@ describe.each([
     expect(await copiesOf(knowledgeGraph)).toEqual([{ scopeId: '/s-1', text: 'The owner keeps notes.' }]);
     expect(await knowledgeGraph.getEntity(visitor.id)).toBeUndefined();
     expect(await knowledgeGraph.getEntity(owner.id)).toBeDefined();
+  });
+
+  it('refuses an empty scope id, so a missing id never deletes the traces filed under none', async () => {
+    const { manager, brain } = await managerOver(tempFile(), graph);
+    const unfiled = await manager.encode('A note filed under no scope id.', MOOD, 'neutral', { scope: 'user', scopeId: '' });
+
+    await expect(manager.deleteScope('user', '')).rejects.toThrow(TypeError);
+
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([{ id: unfiled.id }]);
   });
 });
 
