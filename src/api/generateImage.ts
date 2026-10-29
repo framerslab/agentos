@@ -23,7 +23,7 @@ import type {
   ImageModality,
   ImageOutputFormat,
 } from '../io/media/images/IImageProvider.js';
-import { resolveModelOption, resolveMediaProvider, type ModelOption } from './model.js';
+import { baseUrlIfSet, resolveModelOption, resolveMediaProvider, type ModelOption } from './model.js';
 import { getDefaultProvider } from './runtime/global-default.js';
 import {
   resolveProviderChain,
@@ -235,9 +235,17 @@ export interface GenerateImageOptions {
   outputCompression?: number;
   /** Whether the provider should return a URL or base64-encoded data. */
   responseFormat?: ImageResponseFormat;
-  /** Override the provider API key instead of reading from environment variables. */
+  /**
+   * Override the provider API key instead of reading from environment variables. With neither `provider` nor
+   * `model`, it is refused unless the global default names the provider the call goes to first: it is never sent
+   * to a provider detected from the environment.
+   */
   apiKey?: string;
-  /** Override the provider base URL. */
+  /**
+   * Override the provider base URL, refused as `apiKey` is with neither `provider` nor `model`. An empty or
+   * whitespace-only value is unset: it is not refused, the global default's URL and then the provider's base-URL
+   * variable apply as they do with no `baseUrl`, and with none the call goes to the provider's own endpoint.
+   */
   baseUrl?: string;
   /** Optional user identifier forwarded to the provider for moderation tracking. */
   userId?: string;
@@ -350,8 +358,10 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
         }
         // The call's own key or base URL goes only to a provider it names, or
         // the global default names: here the first provider was detected
-        // from the environment, and the key would go to it.
-        if ((opts.apiKey !== undefined || opts.baseUrl !== undefined) && providerChain[0] !== defaultImage?.providerId) {
+        // from the environment, and the key would go to it. An empty or
+        // whitespace-only baseUrl is unset (baseUrlIfSet in model.ts): it
+        // names no endpoint, so the call runs as one with no baseUrl does.
+        if ((opts.apiKey !== undefined || baseUrlIfSet(opts.baseUrl) !== undefined) && providerChain[0] !== defaultImage?.providerId) {
           throw new Error(
             "generateImage: an apiKey or baseUrl needs provider (or a model such as 'openai:gpt-image-2.5-flare'): " +
               `without one, the provider is detected from the environment (${providerChain[0]}) and the key would go to it.`,
