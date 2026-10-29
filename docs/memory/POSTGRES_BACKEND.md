@@ -351,6 +351,8 @@ const brain = await Brain.openWithAdapter(adapter, { brainId: 'companion-alice' 
 
 Schema migrations take a `pg_advisory_xact_lock` keyed on the `brainId`, which serializes concurrent first-opens of the same brain. The lock is per-brain (different brainIds boot in parallel; same brainId from two workers serializes), so pool sizing should account for one extra connection-second per brain at process startup.
 
+Opens of different brains, from one process or several, set up the tables they share at the same time, and each statement of that setup commits on its own. `CREATE ... IF NOT EXISTS` is not atomic on Postgres: when two opens make the same table, column or index, the one that writes the catalog second waits for the other, and fails once the other commits, with `unique_violation` (23505) on a `pg_catalog` index, `duplicate_table`, `duplicate_object` or `duplicate_column`. The open then runs that step again, which finds the object, and runs it again each time it loses such a race, up to eight runs. A step loses at most once for each object it makes; on a fresh database, the step that makes the two indexes of `memory_traces.scope_id` can lose once for each. A migration's transaction that loses a race rolls back and runs again the same way. A unique violation on any other table is not a race, and the open fails with it.
+
 ### Schema migration
 
 The first call to `Brain.openPostgres` (or `openSqlite`) on an existing v1 database runs an idempotent v1→v2 migration that adds the `brain_id` column to every brain-owned table and updates primary keys to `(brain_id, id)`. SQLite uses the recreate-table dance; Postgres uses `ALTER TABLE ADD COLUMN` + `ALTER TABLE ADD PRIMARY KEY`. Subsequent opens are no-ops once the schema is at v2.
