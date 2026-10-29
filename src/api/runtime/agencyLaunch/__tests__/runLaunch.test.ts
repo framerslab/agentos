@@ -1,5 +1,5 @@
 /**
- * The launch engine (spec 4.8), with a fake host and fake seats under the real agency(): validation, the child's
+ * The launch engine, with a fake host and fake seats under the real agency(): validation, the child's
  * caps, one case per refusal code, the run and its statuses, and the deadline and the grace. Pure engine logic; the
  * surfaces' own tests run the real seats.
  */

@@ -3,7 +3,7 @@
  * The launch engine: one run of `launch_agency` on either surface, through a host that knows the surface (gmi() or
  * the full runtime). It validates, resolves the parent (a frame naming a launch in flight, or the turn itself), applies
  * the bounds, sizes the child budget, admits the launch, builds the seats, runs the child agency once, settles under one
- * deadline and one grace, closes the team and returns one tool result. It never throws (spec 4.8).
+ * deadline and one grace, closes the team and returns one tool result. It never throws.
  * @internal
  */
 import { randomUUID } from 'node:crypto';
@@ -38,7 +38,7 @@ import {
   type ToolCallHook,
 } from './types.js';
 
-/** The six strategies a launch offers (spec D17). */
+/** The six strategies a launch offers. */
 const STRATEGIES: readonly AgencyStrategy[] = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'];
 const ARG_KEYS: ReadonlySet<string> = new Set(['goal', 'strategy', 'seats', 'budgetUsd', 'maxTokens', 'deadlineMs', 'maxRounds']);
 const SEAT_KEYS: ReadonlySet<string> = new Set(['role', 'instructions', 'agentKey', 'personaId', 'brief', 'tools', 'dependsOn']);
@@ -54,7 +54,7 @@ const MAX_BRIEF_CHARS = 1_000;
 
 const isStringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
 
-/** The launching turn, as a launch sees it (spec 4.8). */
+/** The launching turn, as a launch sees it. */
 export interface LaunchParent {
   gmiId: string;
   personaId: string;
@@ -70,7 +70,7 @@ export interface LaunchParent {
   namespace: string;
   /** ctx.correlationId: the parent turn, whose launch pool a root launch draws on. */
   turnId?: string;
-  /** The hooks the parent turn's calls ran under, outermost first (spec D12). */
+  /** The hooks the parent turn's calls ran under, outermost first. */
   toolHooks: readonly ToolCallHook[];
   /** The output tokens one call of the route is counted with. */
   outputEstimateTokens: number;
@@ -95,7 +95,7 @@ export interface LaunchHost {
   rootParent(ctx: ToolExecutionContext): Promise<LaunchParent | LaunchRefusal>;
   /** A root launch's parent tool names; a nested launch reads its seat's from the entry. */
   parentToolNames(ctx: ToolExecutionContext, parent: LaunchParent): Promise<ReadonlySet<string>>;
-  /** A tool of the parent's table by name, read for a composition's step tools (spec D11). */
+  /** A tool of the parent's table by name, read for a composition's step tools. */
   toolOf(ctx: ToolExecutionContext, name: string): Promise<SeatToolLike | undefined>;
   /** Whether a member exists: an agentKey on gmi(), a personaId on the runtime. */
   hasMember(ref: string): boolean;
@@ -159,8 +159,8 @@ function isRefusal(value: unknown): value is LaunchRefusal {
 
 /**
  * Logs through the host, ignoring a logger that throws: the launch's result and its seats' release come first, and
- * `runLaunch` never throws (spec 4.8, D16). A host's own logger, such as one passed to
- * `AgentOS.create`, makes no promise not to throw.
+ * `runLaunch` never throws. A host's own logger, such as one passed to `AgentOS.create`, makes no promise not to
+ * throw.
  */
 function logSafely(host: LaunchHost, error: unknown, where: string): void {
   try {
@@ -216,7 +216,7 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
       ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
       toolHooks: ctx.callerTurn?.toolHooks ?? entry.toolHooks,
       outputEstimateTokens: entry.outputEstimateTokens,
-      // A nested launch's scope is the launch its team comes from (spec D8).
+      // A nested launch's scope is the launch its team comes from.
       scopeId: frame.launchId,
     },
   };
@@ -344,7 +344,7 @@ function recordStart(launch: AdmittedLaunch, seats: SeatHandle[]): void {
   }
 }
 
-/** The child agency (spec D17): the parent's route as its own, the seats as its roster, the root's hitl at the root only. */
+/** The child agency: the parent's route as its own, the seats as its roster, the root's hitl at the root only. */
 async function childAgencyOptions(launch: AdmittedLaunch, seats: SeatHandle[]): Promise<AgencyOptions> {
   const route = await launch.host.agencyRoute(launch.parent);
   return {
@@ -386,6 +386,11 @@ function statusOf(state: LaunchState, outcome: RunOutcome): LaunchStatus {
   return outcome.kind === 'resolved' ? 'completed' : 'failed';
 }
 
+/**
+ * The result's reason, for every status but 'completed': whose budget refused a call and why, the deadline, the
+ * parent's stop, or what failed (the first failed seat by its error's name and code, else the team's error by its name
+ * and code, else that the team did not settle or that no seat ran). Never an error's message.
+ */
 function reasonOf(status: LaunchStatus, launch: AdmittedLaunch, seats: LaunchSeatRecord[], outcome: RunOutcome, state: LaunchState): string | undefined {
   switch (status) {
     case 'completed':
@@ -572,7 +577,7 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
       // aborts now: a run can reject while a seat still runs (a graph tier awaits its seats together and rejects at the
       // first that fails), and that seat stops instead of running on past its launch.
       if (!controller.signal.aborted) controller.abort(Object.assign(new Error('the launch has ended'), { name: 'LaunchEndedError' }));
-      // 9. Close: every seat once, every close attempted (spec D20). Not team.close(): agency().close() stops at the
+      // 9. Close: every seat once, every close attempted. Not team.close(): agency().close() stops at the
       // first member that rejects, which would free the scope with later seats open.
       const closing = hold(closeAll(built, host));
       await within(closing, graceEnds - Date.now());
@@ -587,7 +592,7 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
     parent.signal?.removeEventListener('abort', onParentStop);
     // The entry goes once every seat is released. Until then it stays, closing: it admits nothing under it and
     // counts toward its scope's maxConcurrent, so retries against a tool that hangs past the deadline are refused
-    // instead of piling up seats (spec R6).
+    // instead of piling up seats.
     if (holding.size === 0) launchRegistry.remove(entry.launchId);
     else {
       launchRegistry.markClosing(entry.launchId);
@@ -598,7 +603,7 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
 }
 
 /**
- * One run of `launch_agency` (spec 4.8): validate, resolve the parent, check the bounds, size the budget, admit, then
+ * One run of `launch_agency`: validate, resolve the parent, check the bounds, size the budget, admit, then
  * build, run, settle, close and report. Never throws: a refusal is `{ success: false, error: '<code>: <reason>',
  * details }`, every launch that started is `{ success: true, output }` whatever its status, and an unexpected error
  * before admission is logged and reported as a `failed` launch.
@@ -773,7 +778,7 @@ export function validateLaunchArgs(args: LaunchAgencyArgs): LaunchRefusal | unde
 }
 
 /**
- * Step 4: the child budget's caps (spec D9). Dollars: the least of `budgetUsd`, the parent's remaining dollars times
+ * Step 4: the child budget's caps. Dollars: the least of `budgetUsd`, the parent's remaining dollars times
  * `budgetShare` and, at a root launch, what the turn's launch pool has left (Infinity when none of them caps). Tokens:
  * the least of `maxTokens`, the parent's remaining tokens times `budgetShare` (when it has a token cap) and the pool's
  * remaining tokens (`limits.maxLaunchTokens` when nothing else caps them).

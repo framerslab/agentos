@@ -21,7 +21,7 @@ export const LAUNCH_CAPABILITY = 'agency:launch';
 /** The five self-modification tools, which a seat never gets. */
 export const SELF_MODIFICATION_TOOLS = ['forge_tool', 'create_workflow', 'manage_skills', 'self_evaluate', 'adapt_personality'] as const;
 /**
- * The memory tools: never in a seat's names (spec D5). The eight of src/cognition/memory/io/tools/, and the two
+ * The memory tools: never in a seat's names. The eight of src/cognition/memory/io/tools/, and the two
  * working-memory tools, which read and replace the agent's persistent markdown working memory (its profile of its
  * users and its notes across conversations).
  */
@@ -225,7 +225,10 @@ export interface LaunchSeatRecord {
   usage: LaunchUsage;
   /** Whether the seat's turns had a learner; unset when the launch does not report it. */
   learner?: 'bound' | 'none' | 'unavailable';
-  /** A failed seat's error, by name and code; never its message. */
+  /**
+   * The error that ended the seat's last call, a failed or a cut one, by name and code; never its message. Unset when
+   * that call answered, and when it was still running as the launch returned.
+   */
   error?: { name: string; code?: string };
 }
 
@@ -373,7 +376,7 @@ export interface SeatToolLike {
 
 /**
  * The step tools of a composed tool that `allowed` leaves out, nested compositions' steps included, first found first;
- * `[]` for a tool whose steps are all allowed, or that is no composition (spec D11: a composed tool is admitted only
+ * `[]` for a tool whose steps are all allowed, or that is no composition (a composed tool is admitted only
  * when every tool its steps call, and their steps' in turn, is in the same allowlist).
  *
  * @param tool - The tool, or undefined.
