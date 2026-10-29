@@ -3,6 +3,7 @@
  *
  * @module
  */
+import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ContentSafeLogEvent } from '../contentSafeTelemetry.js';
 
@@ -128,4 +129,50 @@ it('consumes the rejection of an asynchronous sink, so a failing receiver cannot
     expect(states).toEqual(['warn', 'error']);
     expect(escaped).not.toHaveBeenCalled();
   } finally { process.off('unhandledRejection', escaped); }
+});
+
+/** A rejected promise from another realm, which `instanceof Promise` does not recognize here. */
+const foreignRejection = (): unknown => runInNewContext('Promise.reject(new Error(text))', { text: PRIVATE });
+/** A thenable that is no native promise: its then settles through the rejected native promise it wraps. */
+const thenableRejection = (): unknown => {
+  const wrapped = Promise.reject(new Error(PRIVATE));
+  return { then: (onFulfilled?: any, onRejected?: any) => wrapped.then(onFulfilled, onRejected) };
+};
+/** What a sink can return besides a promise of this realm, each settling as a rejection. */
+const rejections: ReadonlyArray<[string, () => unknown]> = [
+  ['a promise from another realm', foreignRejection],
+  ['a thenable that is no native promise', thenableRejection],
+];
+
+it.each(rejections)('consumes the rejection of %s that the sink returns', async (_kind, rejection) => {
+  const api = await import('../contentSafeTelemetry.js');
+  const escaped = vi.fn();
+  process.on('unhandledRejection', escaped);
+  try {
+    const states: string[] = [];
+    api.enableContentSafeTelemetry((event: ContentSafeLogEvent): unknown => { states.push(event.state); return rejection(); });
+    expect(api.emitContentSafeLog('warn', 'listen_session')).toBe(true);
+    expect(api.emitContentSafeLog('error')).toBe(true);
+    // Node reports a rejection nothing handles once the microtasks of the turn have run.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(states).toEqual(['warn', 'error']);
+    expect(escaped).not.toHaveBeenCalled();
+  } finally { process.off('unhandledRejection', escaped); }
+});
+
+it('refuses an installation whose minLevel getter installs another sink, and keeps that sink', async () => {
+  const api = await import('../contentSafeTelemetry.js');
+  const outer: ContentSafeLogEvent[] = [];
+  const inner: ContentSafeLogEvent[] = [];
+  const first = (event: ContentSafeLogEvent): void => { outer.push(event); };
+  const second = (event: ContentSafeLogEvent): void => { inner.push(event); };
+  /** Reading the option installs the second sink while the call that installs the first one runs. */
+  const options = { get minLevel(): 'debug' { api.enableContentSafeTelemetry(second); return 'debug'; } };
+  expect(() => api.enableContentSafeTelemetry(first, options)).toThrow('content_safe_sink_already_set');
+  expect(api.emitContentSafeLog('warn', 'listen_session')).toBe(true);
+  expect(outer).toEqual([]);
+  expect(inner.map((event) => event.state)).toEqual(['warn']);
+  api.enableContentSafeTelemetry(second);
+  expect(() => api.enableContentSafeTelemetry(first)).toThrow('content_safe_sink_already_set');
 });

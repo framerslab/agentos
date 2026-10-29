@@ -3,6 +3,7 @@
  *
  * @module
  */
+import { runInNewContext } from 'node:vm';
 import { afterEach, expect, it, vi } from 'vitest';
 import { startListenSession } from '../../src/io/voice-pipeline/ListenSession.js';
 import { StreamingSTTChain } from '../../src/io/voice-pipeline/providers/StreamingSTTChain.js';
@@ -86,6 +87,48 @@ it('consumes the rejection of an asynchronous callback, so a failing callback ca
     streamingSTT: source.peer, runId: 'fixture-run', reconnect: false, drainMs: 0,
     /** The void return type admits an async callback, whose failure is a rejected promise rather than a throw. */
     async onWarning(kind: string): Promise<void> { warnings.push(kind); throw new Error(PRIVATE); },
+    speaker: () => { throw hostile(); },
+  });
+  try {
+    source.sessions[0].emit('warning', hostile());
+    source.sessions[0].emit('transcript', final());
+    await vi.waitFor(() => expect(sink.turns).toHaveLength(1));
+    // Node reports a rejection nothing handles once the microtasks of the turn have run.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(warnings).toEqual(['stt_warning', 'speaker_failed']);
+    expect(escaped).not.toHaveBeenCalled();
+    expect(sink.turns[0].speaker).toBeUndefined();
+    expect(session.state).toBe('listening');
+    expect(native).not.toHaveBeenCalled();
+  } finally {
+    process.off('unhandledRejection', escaped);
+    await session.close('purged');
+  }
+});
+
+/** A rejected promise from another realm, which `instanceof Promise` does not recognize here. */
+const foreignRejection = (): unknown => runInNewContext('Promise.reject(new Error(text))', { text: PRIVATE });
+/** A thenable that is no native promise: its then settles through the rejected native promise it wraps. */
+const thenableRejection = (): unknown => {
+  const wrapped = Promise.reject(new Error(PRIVATE));
+  return { then: (onFulfilled?: any, onRejected?: any) => wrapped.then(onFulfilled, onRejected) };
+};
+/** What a callback can return besides a promise of this realm, each settling as a rejection. */
+const rejections: ReadonlyArray<[string, () => unknown]> = [
+  ['a promise from another realm', foreignRejection],
+  ['a thenable that is no native promise', thenableRejection],
+];
+
+it.each(rejections)('consumes the rejection of %s that the callback returns, for both warning words', async (_kind, rejection) => {
+  const native = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const escaped = vi.fn();
+  process.on('unhandledRejection', escaped);
+  const source = provider(); const sink = new Sink(); const warnings: string[] = [];
+  const session = await startListenSession(transport(), sink, {
+    streamingSTT: source.peer, runId: 'fixture-run', reconnect: false, drainMs: 0,
+    /** The void return type admits any value; the rejection of what the callback returns must not reach the process. */
+    onWarning: (kind: string): unknown => { warnings.push(kind); return rejection(); },
     speaker: () => { throw hostile(); },
   });
   try {
