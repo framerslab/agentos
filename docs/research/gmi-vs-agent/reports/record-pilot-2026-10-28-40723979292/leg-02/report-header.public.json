@@ -1,0 +1,29 @@
+{
+  "version": "gva-report-header/1",
+  "study": "gmi-vs-agent",
+  "harness": {
+    "repository": "agentos-bench, gmi-vs-agent family (unpublished)",
+    "commit": "8c0361f42073d6170477e32c5aebcc5677493341",
+    "path": "src/benchmarks/gmi-vs-agent"
+  },
+  "runner": {
+    "repository": "private runner",
+    "commit": "2fdf749f5b558c2e2beb5a3deb5f0840f793d361",
+    "ciRunId": "40723979292"
+  },
+  "protocol": {
+    "file": "PROTOCOL-0a.md",
+    "sha256": "10579b4e3eb958f8fbc5e17983fdb121e53f764bc36e9d3bf1657912099dd186",
+    "addendum": {
+      "file": "PROTOCOL-0a-addendum.md",
+      "sha256": "684c21c83e02ea2e7dbbd181e17ea51b04976b3060ef881e568e682d663a4cc0"
+    }
+  },
+  "deviations": [
+    "Materials writer: Claude Code 2.1.289 with Claude Fable 5.1 at effort high, where the design named a Gemini model, which its client no longer offered on the day.",
+    "Routing: the runner sends every vendor call of the reference arm to the stub or the metering proxy by rewriting the vendors' hosts inside its own process, since the reference product's calls take no base address of their own.",
+    "The reference arm drives the product's streaming reply path, and its history is the last 50 stored messages the product reloads on every turn, where the other arms keep a window of 60.",
+    "A GMI turn stops its tool loop at 5 model steps where the reference arm allows 12; the pilot report counts the reference arm's turns past 5 steps.",
+    "The subject model was read from the reference product's reply records over the days they cover, a window shorter than the 30 days the design planned; every production setting along the reference arm's path is mirrored, beyond the list the design named."
+  ]
+}
