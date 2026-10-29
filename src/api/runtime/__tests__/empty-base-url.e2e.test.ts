@@ -9,8 +9,8 @@
  * browser's resolves against the page's own origin, with the key in the
  * request.
  *
- * Drives the public embedText, generateText, generateImage, agency and
- * importAgent entry points with only fetch stubbed: the provider, its key
+ * Drives the public embedText, generateText, generateImage, editImage, agency
+ * and importAgent entry points with only fetch stubbed: the provider, its key
  * and its base URL resolve from the call, the global default and the
  * environment as they do for a caller.
  */
@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent } from '../../agent.js';
 import { agency } from '../../agency.js';
 import { exportAgentConfig, importAgent } from '../../agentExport.js';
+import { editImage } from '../../editImage.js';
 import { embedText } from '../../embedText.js';
 import { generateImage } from '../../generateImage.js';
 import { generateText } from '../../generateText.js';
@@ -64,6 +65,12 @@ const BLANK_BASE_URLS = ['', ' \t\n '];
 /** OpenAI's API root and one of its regional roots, each serving OpenAI's own model names. */
 const OPENAI_API_ROOTS = ['https://api.openai.com/v1', 'https://eu.api.openai.com/v1'];
 
+/** A 1x1 PNG, the image the editImage cases edit. */
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+  'base64',
+);
+
 /** Each provider with an OpenAI-compatible embeddings endpoint of its own, a model it embeds with, its key variable and that endpoint. */
 const OWN_EMBEDDINGS_ENDPOINTS = [
   { provider: 'openai', model: 'text-embedding-3-small', keyVar: 'OPENAI_API_KEY', url: 'https://api.openai.com/v1/embeddings' },
@@ -78,7 +85,8 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 /** An answer in the shape of whatever endpoint the request went to, whatever host it went to. */
 function answer(url: string, init: RequestInit | undefined): Response {
-  const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+  // A multipart body (an image edit) carries no JSON to read.
+  const body = init?.body && !(init.body instanceof FormData) ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
   if (url.includes(':batchEmbedContents')) {
     const requests = body.requests as unknown[];
     return jsonResponse({
@@ -109,6 +117,12 @@ function answer(url: string, init: RequestInit | undefined): Response {
   }
   if (/\/images\/generations$/.test(url)) {
     return jsonResponse({ created: 100, data: [{ b64_json: 'aW1hZ2U=' }] });
+  }
+  if (/\/image_generation$/.test(url)) {
+    return jsonResponse({ data: { image_urls: ['https://images.example/panda.png'] }, base_resp: { status_code: 0 } });
+  }
+  if (/\/v2beta\/stable-image\//.test(url)) {
+    return jsonResponse({ image: 'aW1hZ2U=', seed: 1, finish_reason: 'SUCCESS' });
   }
   return jsonResponse({ error: `unexpected request ${url}` }, 404);
 }
@@ -494,6 +508,51 @@ describe('a blank baseUrl names no endpoint, so no refusal of credentials meant 
       ).rejects.toThrow('An apiKey or baseUrl for an image call needs provider');
 
       expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('provider detection reads an empty or whitespace-only base-URL variable as unset, as the call does, and picks the next configured provider', () => {
+  it.each(BLANK_BASE_URLS)(
+    "generateImage with no provider or model generates on MiniMax's key when STABLE_DIFFUSION_LOCAL_BASE_URL is %j",
+    async (baseUrl) => {
+      setEnv({ STABLE_DIFFUSION_LOCAL_BASE_URL: baseUrl, MINIMAX_API_KEY: 'minimax-env-key' });
+
+      const result = await generateImage({ prompt: 'A red panda on a rooftop.' });
+
+      expect(postsTo(/\/image_generation$/)).toEqual([
+        { url: 'https://api.minimax.io/v1/image_generation', authorization: 'Bearer minimax-env-key' },
+      ]);
+      expect(result.provider).toBe('minimax');
+      expect(result.model).toBe('image-01');
+    },
+  );
+
+  it.each(BLANK_BASE_URLS)(
+    "generateImage with a plain model and no provider generates on MiniMax's key when STABLE_DIFFUSION_LOCAL_BASE_URL is %j",
+    async (baseUrl) => {
+      setEnv({ STABLE_DIFFUSION_LOCAL_BASE_URL: baseUrl, MINIMAX_API_KEY: 'minimax-env-key' });
+
+      const result = await generateImage({ model: 'image-01', prompt: 'A red panda on a rooftop.' });
+
+      expect(postsTo(/\/image_generation$/)).toEqual([
+        { url: 'https://api.minimax.io/v1/image_generation', authorization: 'Bearer minimax-env-key' },
+      ]);
+      expect(result.provider).toBe('minimax');
+    },
+  );
+
+  it.each(BLANK_BASE_URLS)(
+    "editImage with no provider or model edits on Stability's key when OLLAMA_BASE_URL is %j",
+    async (baseUrl) => {
+      setEnv({ OLLAMA_BASE_URL: baseUrl, STABILITY_API_KEY: 'stability-env-key' });
+
+      const result = await editImage({ image: TINY_PNG, prompt: 'Add a hat.' });
+
+      expect(postsTo(/\/v2beta\/stable-image\//)).toEqual([
+        { url: 'https://api.stability.ai/v2beta/stable-image/generate/sd3', authorization: 'Bearer stability-env-key' },
+      ]);
+      expect(result.provider).toBe('stability');
     },
   );
 });
