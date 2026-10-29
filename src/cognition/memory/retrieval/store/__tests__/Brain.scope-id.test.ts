@@ -11,7 +11,9 @@
  * the importers file by it and deduplicate inside one scope id, where a trace such a release wrote counts under the
  * scope id its metadata names; a Markdown or Obsidian file carries its trace's scope id out and back in, a CSV row
  * takes it from a `scope_id` cell, and a record whose metadata is not an object is stored with metadata that names its
- * scope id. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them in production.
+ * scope id; and a trace no import wrote, with the hash `remember()` stores or no hash at all, is the duplicate of a
+ * record of its text in its scope id. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens
+ * them in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -24,6 +26,7 @@ import { fillScopeIds, v2ToV3 } from '../migrations/v2-to-v3.js';
 import { MemoryStore } from '../MemoryStore.js';
 import { Memory } from '../../../io/facade/Memory.js';
 import { MemoryAddTool } from '../../../io/tools/MemoryAddTool.js';
+import { JsonExporter } from '../../../io/JsonExporter.js';
 import { JsonImporter } from '../../../io/JsonImporter.js';
 import { SqliteImporter } from '../../../io/SqliteImporter.js';
 import { CsvImporter } from '../../../io/CsvImporter.js';
@@ -711,6 +714,72 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       expect(result.imported).toBe(0);
       expect(result.errors).toHaveLength(2);
       expect(await filedOf(brain)).toEqual([]);
+    });
+  });
+
+  describe('a trace no import wrote is the duplicate of a record of its text in its scope id', () => {
+    const closers: Array<() => Promise<void>> = [];
+    afterEach(async () => {
+      while (closers.length) await closers.pop()!();
+    });
+    /**
+     * A brain whose traces no import wrote: `remembered` through `remember()`, which stores the hash of its text as
+     * `content_hash`, and `bare` with no hash at all, as `MemoryStore` stores a trace; both under `user` and `scopeId`.
+     */
+    async function written(name: string, scopeId: string, remembered: string, bare: string): Promise<Brain> {
+      const memory = await Memory.createSqlite(tempFile(), { brainId: name, graph: false });
+      closers.push(() => memory.close());
+      await memory.remember(remembered, { scope: 'user', scopeId });
+      const brain = (memory as unknown as { _brain: Brain })._brain;
+      await brain.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, scope_id)
+         VALUES (?, 't-bare', 'episodic', 'user', ?, 1, ?, ?)`,
+        [brain.brainId, bare, JSON.stringify({ scopeId }), scopeId],
+      );
+      return brain;
+    }
+    const textsOf = async (brain: Brain) =>
+      (await brain.all<{ content: string }>('SELECT content FROM memory_traces WHERE deleted = 0 ORDER BY content')).map(
+        (row) => row.content,
+      );
+
+    it('JSON: an export imported into the brain it came from adds nothing', async () => {
+      const brain = await written('json-unhashed', 'A%2F42', 'Kept words.', 'Bare words.');
+      const exported = await new JsonExporter(brain).exportToString();
+      expect(await new JsonImporter(brain).importFromString(exported)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it('Markdown: an export imported into the brain it came from adds nothing', async () => {
+      const brain = await written('markdown-unhashed', 'A%2F42', 'Kept words.', 'Bare words.');
+      const dir = path.join(path.dirname(tempFile()), 'export');
+      expect((await new MarkdownExporter(brain).export(dir)).refused).toEqual([]);
+      expect(await new MarkdownImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it('CSV: a row of a text the brain holds in its scope id is a duplicate', async () => {
+      const brain = await written('csv-unhashed', 'A%2F42', 'Kept words.', 'Bare words.');
+      const rows = 'content,scope,scope_id\n"Kept words.",user,A%2F42\n"Bare words.",user,A%2F42\n';
+      expect(await new CsvImporter(brain).importFromString(rows)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it("ChatGPT: a message whose trace text the brain holds under '' is a duplicate", async () => {
+      const brain = await written('chatgpt-unhashed', '', '[user]: Kept words.', '[user]: Bare words.');
+      const filePath = path.join(path.dirname(tempFile()), 'conversations.json');
+      const conversation = (id: string, text: string) => ({
+        title: text,
+        create_time: 1,
+        mapping: { [id]: { id, parent: null, children: [], message: { author: { role: 'user' }, content: { parts: [text] }, create_time: 1 } } },
+      });
+      await fsp.writeFile(
+        filePath,
+        JSON.stringify([conversation('m1', 'Kept words.'), conversation('m2', 'Bare words.')]),
+        'utf8',
+      );
+      expect(await new ChatGptImporter(brain).import(filePath)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['[user]: Bare words.', '[user]: Kept words.']);
     });
   });
 });
