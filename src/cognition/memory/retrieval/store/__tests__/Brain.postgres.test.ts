@@ -16,6 +16,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  createStorageFeatures,
   PostgresAdapter,
   type StorageAdapter,
   type StorageCapability,
@@ -23,6 +24,7 @@ import {
   type StorageRunResult,
 } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
+import { MigrationRunner, MIGRATIONS, type Migration } from '../migrations/index.js';
 import { fillScopeIds } from '../migrations/v2-to-v3.js';
 import { PORTABLE_TABLES } from '../portable-tables.js';
 
@@ -603,9 +605,10 @@ describeIfPostgres('Brain.openPostgres', () => {
     }
   });
 
-  it('migrates a brain at version 2 whose migration loses the race for an index to another open', async () => {
+  it('migrates a brain at version 2 and makes the index its table lacks once the migration commits, though another open makes it first', async () => {
     // A brain at schema version 2 runs the v2 -> v3 migration in a transaction. memory_traces has scope_id and the
-    // per-scope index, and not the partial index, which another open makes while the migration makes it.
+    // per-scope index, and not the partial index. The migration of a table that has the column changes nothing, so the
+    // open makes the partial index after the migration commits, outside any transaction, while another open makes it.
     const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
     openedBrains.push(admin);
     const { schema, url } = await freshSchema(admin);
@@ -628,10 +631,67 @@ describeIfPostgres('Brain.openPostgres', () => {
         await loseRace(rival, admin, script, run);
       });
       brain = await Brain.openWithAdapter(racing, { brainId });
-      expect(lost).toEqual([true]);
+      expect(lost).toEqual([false]);
       expect(await brain.getMeta('schema_version')).toBe('3');
+      const indexes = await admin.all<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'memory_traces'`,
+        [schema],
+      );
+      expect(indexes.map((row) => row.indexname)).toContain('idx_memory_traces_unfiled_scope_id');
     } finally {
       await (brain ?? store).close().catch(() => undefined);
+      await rival.close().catch(() => undefined);
+      await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
+  it('runs a migration again when its transaction loses the race for an index to another open', async () => {
+    // A migration that makes an index in its transaction, as a later schema version's can, while another open of the
+    // database makes the same index and commits first. Postgres fails the migration's statement, the transaction rolls
+    // back, and the runner runs it again: the second run finds the index.
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    const { schema, url } = await freshSchema(admin);
+    const rival = new PostgresAdapter(url);
+    const store = new PostgresAdapter(url);
+    const brainId = uniqueBrainId();
+    try {
+      await rival.open();
+      await store.open();
+      const first = await Brain.openPostgres(url, { brainId });
+      await first.close();
+      const statement = 'CREATE INDEX IF NOT EXISTS idx_memory_traces_brain_strength ON memory_traces (brain_id, strength)';
+      let runs = 0;
+      const v4: Migration = {
+        version: 4,
+        async up(adapter) {
+          runs += 1;
+          await adapter.exec(statement);
+        },
+      };
+      // Whether each script that lost a race ran in a transaction.
+      const lost: boolean[] = [];
+      const racing = new RacingAdapter(store, async (script, run, inTransaction) => {
+        if (script !== statement || lost.length > 0) return run();
+        lost.push(inTransaction);
+        await loseRace(rival, admin, script, run);
+      });
+      const result = await MigrationRunner.runPending(racing, createStorageFeatures(racing), brainId, [...MIGRATIONS, v4]);
+      expect(lost).toEqual([true]);
+      expect(runs).toBe(2);
+      expect(result.applied).toEqual([4]);
+      const version = await admin.get<{ value: string }>(
+        `SELECT value FROM ${schema}.brain_meta WHERE brain_id = $1 AND key = 'schema_version'`,
+        [brainId],
+      );
+      expect(version?.value).toBe('4');
+      const indexes = await admin.all<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'memory_traces'`,
+        [schema],
+      );
+      expect(indexes.map((row) => row.indexname)).toContain('idx_memory_traces_brain_strength');
+    } finally {
+      await store.close().catch(() => undefined);
       await rival.close().catch(() => undefined);
       await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
     }
