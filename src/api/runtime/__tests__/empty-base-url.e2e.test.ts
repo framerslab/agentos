@@ -9,14 +9,15 @@
  * browser's resolves against the page's own origin, with the key in the
  * request.
  *
- * Drives the public embedText, generateText, generateImage and importAgent
- * entry points with only fetch stubbed: the provider, its key and its base URL
- * resolve from the call, the global default and the environment as they do
- * for a caller.
+ * Drives the public embedText, generateText, generateImage, agency and
+ * importAgent entry points with only fetch stubbed: the provider, its key
+ * and its base URL resolve from the call, the global default and the
+ * environment as they do for a caller.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { agent } from '../../agent.js';
+import { agency } from '../../agency.js';
 import { exportAgentConfig, importAgent } from '../../agentExport.js';
 import { embedText } from '../../embedText.js';
 import { generateImage } from '../../generateImage.js';
@@ -459,6 +460,29 @@ describe('a blank baseUrl names no endpoint, so no refusal of credentials meant 
       ).rejects.toThrow('An apiKey or baseUrl for an image call needs provider');
 
       expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("an agency seat whose baseUrl is blank takes the agency's URL, as a seat with none does", () => {
+  it.each(BLANK_BASE_URLS)(
+    "sends the agency's key to the agency's URL, never to OpenAI's own endpoint, for a seat baseUrl %j",
+    async (baseUrl) => {
+      const team = agency({
+        provider: 'openai',
+        model: 'gpt-4.1',
+        apiKey: 'agency-gateway-key',
+        baseUrl: 'https://agency-gateway.example/v1',
+        strategy: 'sequential',
+        agents: { writer: { instructions: 'Write.', baseUrl, fallbackProviders: [] } },
+      });
+
+      await team.generate('hi');
+
+      expect(postsTo(/\/chat\/completions$/)).toEqual([
+        { url: 'https://agency-gateway.example/v1/chat/completions', authorization: 'Bearer agency-gateway-key' },
+      ]);
+      expect(requestsSent().every(({ url }) => url.startsWith('https://agency-gateway.example/v1/'))).toBe(true);
     },
   );
 });
