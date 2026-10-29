@@ -10,6 +10,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { GMIOutputChunkType, type GMIOutputChunk, type ToolResultChunkPayload } from '../IGMI';
 import type { ITool, ToolExecutionContext } from '../../../core/tools/ITool';
+import { GMIErrorCode } from '../../../core/utils/errors';
 import type { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse } from '../../../core/llm/providers/IProvider';
 import type { ApprovalDecision, IHumanInteractionManager, PendingAction } from '../../../orchestration/hitl/IHumanInteractionManager';
 import { approvingHitl, callTool, makeForgeHost } from '../../emergent/__tests__/helpers/forge-host';
@@ -167,6 +168,39 @@ describe("a GMI's tool call carries its turn's stop", () => {
     expect(results[1].errorDetails).toMatchObject({ code: 'STEP_ABORTED' });
     expect(requestApproval).not.toHaveBeenCalled();
     expect(sent).toEqual([]);
+  });
+
+  it('a fail_closed turn that stopped ends as a stopped turn does, not with a tool failure, when its next call is refused', async () => {
+    const ran: string[] = [];
+    const caller = new AbortController();
+    // first stops the turn as it runs, as a session's close() or a launch's deadline would.
+    const first = hostTool('first', false, async () => {
+      ran.push('first');
+      caller.abort();
+      return { success: true, output: { text: 'first' } };
+    });
+    const second = hostTool('second', false, async () => {
+      ran.push('second');
+      return { success: true, output: { text: 'second' } };
+    });
+    const host = await makeForgeHost({ tools: [first, second] });
+    const { gmi } = await createScriptedGmi({
+      provider: stoppingProvider([toolCallReply([{ id: 'call_1', name: 'first', args: {} }, { id: 'call_2', name: 'second', args: {} }])]),
+      config: { toolOrchestrator: host.orchestrator },
+    });
+
+    const { chunks, output } = await runTurn(
+      gmi,
+      textTurn('t1', 'Run both.', { options: { abortSignal: caller.signal }, executionPolicy: { toolFailureMode: 'fail_closed' } }),
+    );
+
+    // The call after the stop was refused and never ran (the precondition).
+    expect(ran).toEqual(['first']);
+    expect(toolResults(chunks).map((result) => [result.name, result.isError])).toEqual([['first', false], ['second', true]]);
+    // The refusal is the stop's, not a tool's failure: the turn ends with the stop's abort, as a stopped turn that
+    // runs no fail_closed policy does.
+    expect(output.error?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
+    expect(output.error?.message).toMatch(/aborted/);
   });
 
   it('a composed tool running when its turn stops finishes the step in flight, and its later steps are refused', async () => {
