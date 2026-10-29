@@ -63,11 +63,12 @@ export interface ListenSessionOverrides {
    * Receives stt_warning for a warning of the opened STT session and speaker_failed for a throwing speaker hook.
    * No error, provider name, transcript or message is passed. A callback throw is swallowed. When the callback returns
    * an object or function with a `then` method, that method is called at once with handlers that do nothing, so the
-   * rejection of an async callback's promise, a promise from another realm or a thenable is swallowed too, and a
-   * warning raised while that method runs is not reported again. A `then` that throws when read or called is
-   * swallowed. Omission preserves the provider's normal unlistened-warning behavior. Warnings emitted before
-   * startSession resolves cannot be observed by a listener on its returned session. The listener remains during drain
-   * and is detached on end.
+   * rejection of an async callback's promise, a promise from another realm or a thenable is swallowed too. A `then`
+   * that throws when read or called is swallowed. A warning raised while the callback runs, or while that method runs,
+   * is not reported; one raised later, such as after an async callback's `await`, is reported as any other is.
+   * Omission preserves the provider's normal unlistened-warning behavior. Warnings emitted before startSession
+   * resolves cannot be observed by a listener on its returned session. The listener remains during drain and is
+   * detached on end.
    */
   onWarning?: (kind: ListenWarningKind) => void;
   /** How long a stop waits for the flushed final to arrive, before draining a pending detector turn. Default 250. */
@@ -168,20 +169,26 @@ export async function startListenSession(transport: IStreamTransport, sink: ITra
   const accepting = (): boolean => state === 'listening' || state === 'draining';
   /** Capture this session's diagnostic receiver once, without holding a provider warning. */
   const warningReceiver = overrides.onWarning;
-  /** Set while the then of what the callback returned runs, so a warning raised there is not reported again. */
-  let consuming = false;
+  /**
+   * Set while the callback runs and while the then of what it returned is called, so a warning raised in either is
+   * not reported. Cleared as that call returns, before a returned promise settles, so a later one is reported.
+   */
+  let reporting = false;
   /** A diagnostic callback must not discard a turn, fail a provider event or leave a rejection unhandled. */
   const reportWarning = (kind: ListenWarningKind): void => {
-    if (consuming) return;
-    let returned: unknown;
-    try { returned = warningReceiver?.(kind); }
-    catch { /* A warning callback cannot change the hearing lifecycle. */ return; }
-    // The void return type admits an async callback, which fails by rejecting instead of throwing. The then of what it
-    // returns runs here, under this session's guard; Promise.resolve would run it in a later job, where a warning it
-    // raised would call the callback again, and a callback that returned another such thenable would loop without end.
-    consuming = true;
-    try { consumeReturnedRejection(returned); }
-    finally { consuming = false; }
+    if (reporting) return;
+    // A callback that makes the transcriber warn again before it returns would otherwise call itself until the stack
+    // overflows. The void return type admits an async callback, which fails by rejecting instead of throwing. The then
+    // of what it returns is called here, under the same guard; Promise.resolve would call it in a later job, where a
+    // warning it raised would call the callback again, and a callback that returned another such thenable would loop
+    // without end. Nothing is awaited, so a speaker_failed raised while an async callback is pending is reported.
+    reporting = true;
+    try {
+      const returned: unknown = warningReceiver?.(kind);
+      consumeReturnedRejection(returned);
+    }
+    catch { /* A warning callback cannot change the hearing lifecycle. */ }
+    finally { reporting = false; }
   };
   /** Deliberately accepts no warning argument and never inspects an emitted value. */
   const onSttWarning = (): void => {
