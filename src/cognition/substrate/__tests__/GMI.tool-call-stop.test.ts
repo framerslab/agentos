@@ -3,15 +3,16 @@
  * A GMI's tool call carries its turn's stop, which the caller's abort signal and the GMI's own shutdown() both abort,
  * on a host that hands the GMI a plain tool orchestrator, as the full runtime does: a call already running finishes,
  * with the stop as its context's signal; a call whose checks or approval finish after the turn stopped is refused
- * (STEP_ABORTED) before it runs; and a composed tool or a workflow stops between its steps. The real ToolOrchestrator,
- * ToolExecutor and emergent engine run (the emergent suite's forge host); only the model provider is scripted.
+ * (STEP_ABORTED) before it runs, and a call or a step the turn reaches after it stopped is refused before its approval
+ * is asked; and a composed tool or a workflow stops between its steps. The real ToolOrchestrator, ToolExecutor and
+ * emergent engine run (the emergent suite's forge host); only the model provider is scripted.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { GMIOutputChunkType, type GMIOutputChunk, type ToolResultChunkPayload } from '../IGMI';
 import type { ITool, ToolExecutionContext } from '../../../core/tools/ITool';
 import type { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse } from '../../../core/llm/providers/IProvider';
 import type { ApprovalDecision, IHumanInteractionManager, PendingAction } from '../../../orchestration/hitl/IHumanInteractionManager';
-import { callTool, makeForgeHost } from '../../emergent/__tests__/helpers/forge-host';
+import { approvingHitl, callTool, makeForgeHost } from '../../emergent/__tests__/helpers/forge-host';
 import { TEXT_IN, TEXT_OUT } from '../../emergent/__tests__/helpers/seed-rows';
 import { createScriptedGmi, runTurn, textTurn, toolCallReply } from './helpers/scriptedGmi';
 
@@ -95,6 +96,8 @@ describe("a GMI's tool call carries its turn's stop", () => {
     expect(results.map((result) => [result.name, result.isError])).toEqual([['first', false], ['second', true]]);
     // Refused at delegation, after its checks: nothing ran.
     expect(results[1].errorDetails).toMatchObject({ code: 'STEP_ABORTED' });
+    // The history the next turn reads says the call was stopped: nothing expired.
+    expect(String((results[1].errorDetails as { message?: unknown }).message)).toMatch(/^step_aborted: the call to 'second' was stopped before it ran/);
   });
 
   it('a call whose approval arrives after its turn stopped is refused before it runs', async () => {
@@ -135,6 +138,35 @@ describe("a GMI's tool call carries its turn's stop", () => {
     expect(toolResults(chunks)).toEqual([
       expect.objectContaining({ name: 'send_email', isError: true, errorDetails: expect.objectContaining({ code: 'STEP_ABORTED' }) }),
     ]);
+  });
+
+  it('a call the turn reaches after it stopped is refused before its approval is asked', async () => {
+    const sent: string[] = [];
+    const caller = new AbortController();
+    // first stops the turn as it runs, as a session's close() or a launch's deadline would.
+    const first = hostTool('first', false, async () => {
+      caller.abort();
+      return { success: true, output: { text: 'first' } };
+    });
+    const sendEmail = hostTool('send_email', true, async (args: Record<string, unknown>) => {
+      sent.push(String(args.text));
+      return { success: true, output: { text: 'sent' } };
+    });
+    const { manager, requestApproval } = approvingHitl();
+    const host = await makeForgeHost({ tools: [first, sendEmail], hitlManager: manager, orchestratorConfig: { hitl: { enabled: true } } });
+    const { gmi } = await createScriptedGmi({
+      provider: stoppingProvider([toolCallReply([{ id: 'call_1', name: 'first', args: {} }, { id: 'call_e', name: 'send_email', args: { text: 'hi' } }])]),
+      config: { toolOrchestrator: host.orchestrator },
+    });
+
+    const { chunks } = await runTurn(gmi, textTurn('t1', 'Run both.', { options: { abortSignal: caller.signal } }));
+
+    // The call before the stop ran (the precondition); the call after it was refused, and no one was asked about it.
+    const results = toolResults(chunks);
+    expect(results.map((result) => [result.name, result.isError])).toEqual([['first', false], ['send_email', true]]);
+    expect(results[1].errorDetails).toMatchObject({ code: 'STEP_ABORTED' });
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
   });
 
   it('a composed tool running when its turn stops finishes the step in flight, and its later steps are refused', async () => {
@@ -184,6 +216,56 @@ describe("a GMI's tool call carries its turn's stop", () => {
       isError: true,
       errorDetails: { details: { code: 'step_aborted', step: 'b', completed: ['a'] } },
     });
+  });
+
+  it("a composed tool's step after its turn stopped is refused before its approval is asked", async () => {
+    const ran: string[] = [];
+    const caller = new AbortController();
+    const step = (name: string, then?: () => void) =>
+      hostTool(name, true, async (args: Record<string, unknown>) => {
+        ran.push(name);
+        then?.();
+        return { success: true, output: { text: String(args.text) } };
+      });
+    const { manager, requestApproval } = approvingHitl();
+    const host = await makeForgeHost({
+      // step_a stops the turn as it runs, as a session's close() or a deadline would.
+      tools: [step('step_a', () => caller.abort()), step('step_b')],
+      config: { compose: { sideEffectingTools: ['step_a', 'step_b'] } },
+      hitlManager: manager,
+      orchestratorConfig: { hitl: { enabled: true } },
+    });
+    const forged = await callTool(host.orchestrator, 'forge_tool', {
+      name: 'a_then_b',
+      description: 'Runs step_a, then step_b.',
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+      implementation: {
+        mode: 'compose',
+        steps: [
+          { name: 'a', tool: 'step_a', inputMapping: { text: '$input.text' } },
+          { name: 'b', tool: 'step_b', inputMapping: { text: '$prev.text' } },
+        ],
+      },
+      testCases: [{ input: { text: 'hi' }, stepOutputs: { a: { text: 'hi' }, b: { text: 'hi' } } }],
+    });
+    // The composition was forged (the precondition); only the run's own approvals count below.
+    expect(forged.isError).toBeFalsy();
+    requestApproval.mockClear();
+    const { gmi } = await createScriptedGmi({
+      provider: stoppingProvider([toolCallReply([{ id: 'call_c', name: 'a_then_b', args: { text: 'go' } }])]),
+      config: { toolOrchestrator: host.orchestrator },
+    });
+
+    const { chunks } = await runTurn(gmi, textTurn('t1', 'Run it.', { options: { abortSignal: caller.signal } }));
+
+    // Each side-effecting step is asked when it runs: step_a was, before the stop (the precondition); step_b, which the
+    // composition reached after the stop, was refused at the step gate without being asked, and never ran.
+    expect(ran).toEqual(['step_a']);
+    expect(requestApproval.mock.calls.map(([action]) => (action as PendingAction).context.toolName)).toEqual(['step_a']);
+    expect(toolResults(chunks)).toEqual([
+      expect.objectContaining({ name: 'a_then_b', isError: true, errorDetails: expect.objectContaining({ details: expect.objectContaining({ code: 'step_aborted', step: 'b' }) }) }),
+    ]);
   });
 
   it('a workflow running when its turn stops finishes the step in flight, and its later steps are refused', async () => {

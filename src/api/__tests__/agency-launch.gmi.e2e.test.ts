@@ -548,6 +548,51 @@ describe('launch_agency on gmi()', () => {
     expect(sendEmail).not.toHaveBeenCalled();
   }, 20_000);
 
+  it('a tool call the seat reaches after the deadline runs no hook and asks no approver', async () => {
+    const k = key();
+    const asked: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      return { approved: true };
+    };
+    const hooked: string[] = [];
+    const slowWrite = vi.fn(async () => {
+      await sleep(1_500);
+      return 'written';
+    });
+    const note = vi.fn(async () => 'noted');
+    script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Write, then note.', deadlineMs: 1_000, seats: [{ role: 'writer', instructions: 'Write, then note.', tools: ['slow_write', 'note'] }] }),
+        // The writer's step: slow_write runs past the 1,000 ms deadline; note comes after it in the same step.
+        reply.tools([{ id: 'w1', name: 'slow_write', args: {} }, { id: 'n1', name: 'note', args: {} }]),
+        reply.text('Parent done.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k), instructions: 'Coordinate.',
+      tools: {
+        slow_write: { description: 'Writes slowly.', parameters: { type: 'object', properties: {} }, execute: slowWrite },
+        note: { description: 'Notes.', parameters: { type: 'object', properties: {} }, execute: note },
+      },
+      // The parent's hook runs on its own calls and on every seat's.
+      onBeforeToolExecution: async (call) => {
+        hooked.push(call.name);
+        return call;
+      },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['slow_write', 'note'] }, handler } },
+    });
+
+    const result = await parent.session('p1').send('Go.');
+    expect(launchOf(result).status).toBe('timed_out');
+    // Before the deadline the hook ran and the approver was asked (the precondition); the call the seat reached after
+    // it was refused with neither, and never ran.
+    expect(slowWrite).toHaveBeenCalledOnce();
+    expect(asked).toEqual(['slow_write']);
+    expect(hooked).toEqual(['launch_agency', 'slow_write']);
+    expect(note).not.toHaveBeenCalled();
+  }, 20_000);
+
   it("a launch draws on the parent's budget", async () => {
     const k = key();
     const twoSeats = { goal: 'Two parts.', seats: [{ role: 'first', instructions: 'Part one.' }, { role: 'second', instructions: 'Part two.' }] };
