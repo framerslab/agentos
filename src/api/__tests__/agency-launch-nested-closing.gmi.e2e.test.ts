@@ -79,10 +79,11 @@ describe('a team launched from a seat', () => {
     const first = await session.send('Start.');
     const root = launchOf(first);
     expect(root.status).toBe('timed_out');
-    // The waiter's tool runs in the lead's team (the precondition), and that team is closing.
+    // The waiter's tool runs in the lead's team (the precondition), and that team, which stopped with the root's
+    // deadline and waited out its own grace, is closing.
     expect(frames).toEqual([expect.objectContaining({ role: 'waiter', depth: 2 })]);
     const nestedId = frames[0].launchId;
-    expect(launchRegistry.get(nestedId)?.state).toBe('closing');
+    await vi.waitFor(() => expect(launchRegistry.get(nestedId)?.state).toBe('closing'));
     // The root's own seat is released within microtasks of its team's result: half a second covers it.
     await new Promise((resolve) => setTimeout(resolve, 500));
     // The launch the lead's team came from stays closing for the waiter's seat, and counts toward the session's one
