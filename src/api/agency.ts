@@ -1949,7 +1949,10 @@ async function maybeApproveFinalResult(
   // Even after HITL approves, run guardrails as a final safety net. The
   // check reads the strategy's text, and the replacement beside it when the
   // approval carries one, so a replacement the check blocks is refused as a
-  // blocked final text is.
+  // blocked final text is. A replacement does not clear a strategy text the
+  // check blocks: stream() has streamed that text before the approval was
+  // asked for, and under sequential, graph and review-loop the result's call
+  // records still hold it.
   if (decision.approved && opts.hitl.guardrailOverride !== false) {
     const postGuardrails = opts.hitl.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'];
     const output = (result.text as string) ?? '';
@@ -2005,7 +2008,8 @@ export interface GuardrailHitlOverrideResult {
  * caller then overrides the approval. A check that throws is skipped. The
  * final output is checked as the strategy produced it and, when the
  * approval's `modifications.output` replaces it, as the replacement the
- * caller receives, after the agency's output guardrails have read it.
+ * caller receives, after the agency's output guardrails have read it; a
+ * replacement does not clear a strategy text a check blocks.
  *
  * @param toolName - The approved tool's name, `agent:<name>` for an agent
  *   approval, or `return` for the final output.
@@ -2013,9 +2017,10 @@ export interface GuardrailHitlOverrideResult {
  *   strategy's input, plus `sent`, the text the agent is sent, when the
  *   approval's instructions were appended to it, and `parts`, the task and
  *   the other agents' output the strategy built the input from, each on its
- *   own, under graph, review-loop and debate; for the final output,
- *   `{ output }` with the strategy's text, plus `returned`, the approval's
- *   replacement, when it carries one.
+ *   own, under sequential (after its first agent), graph, review-loop and
+ *   debate and for the panel's chair; for the final output, `{ output }` with
+ *   the strategy's text, plus `returned`, the approval's replacement, when it
+ *   carries one.
  * @param guardrailIds - Ordered list of check IDs to run.
  * @param callbacks - Optional event callback map; each check's result goes to
  *   `guardrailResult`.
@@ -2108,7 +2113,13 @@ export async function runPostApprovalGuardrails(
  *
  * - `code-safety` — blocks a payload that matches one of its destructive
  *   command and statement patterns (e.g., `rm -rf /`, `DROP TABLE`,
- *   `format C:`).
+ *   `format C:`). Two of them match a statement only at the end of a text:
+ *   `rm -rf .`, and a `DELETE FROM <table>` with nothing after the table but
+ *   whitespace and a semicolon. The payload holds its texts as JSON, where a
+ *   text ends at its closing quote and a line break or a tab inside it is
+ *   written `\n` or `\t`, so both read those as the whitespace they stand
+ *   for, and a statement with whitespace after it still ends its text. Both
+ *   read a run of whitespace once, in time linear in its length.
  * - `pii-redaction` — blocks a payload that contains what looks like an
  *   unredacted SSN or credit card number.
  *
@@ -2133,7 +2144,9 @@ function evaluatePostApprovalGuardrail(
         /rm\s+-rf\s+\//i,
         /rm\s+-rf\s+~\//i,
         /rm\s+-rf\s+\*/i,
-        /rm\s+-rf\s+\.(?:["'\s/]|$)/i,
+        // `rm -rf .` before a quote, whitespace (a line break or a tab
+        // escaped in JSON included), a slash, or the end.
+        /rm\s+-rf\s+\.(?:["'\s/]|\\[nrt]|$)/i,
         /rm\s+-rf\s+\.\//i,
         /mkfs\./i,
         /dd\s+if=.*of=\/dev/i,
@@ -2141,7 +2154,18 @@ function evaluatePostApprovalGuardrail(
         /DROP\s+TABLE/i,
         /DROP\s+DATABASE/i,
         /TRUNCATE\s+TABLE/i,
-        /DELETE\s+FROM\s+\S+\s*;?\s*$/im,
+        // A `DELETE FROM <table>` that ends its line, with whitespace and a
+        // semicolon after the table at most. A semicolon right after the
+        // table is part of `\S+`, and one apart from it has whitespace before
+        // it, so no run of whitespace can be split two ways and a long run is
+        // read once.
+        /DELETE\s+FROM\s+\S+(?:\s+;)?\s*$/im,
+        // The same statement at the end of a text in the JSON payload, with
+        // whitespace, real or escaped, before the text's closing quote. The
+        // table is read as JSON characters (an escaped quote is part of a
+        // quoted name), never as whitespace or a semicolon, so the parts of
+        // the pattern never overlap.
+        /DELETE\s+FROM\s+(?:[^\s;"\\]|\\[^nrt])+(?:\s|\\[nrt])*(?:;(?:\s|\\[nrt])*)?",?$/im,
         /format\s+[A-Z]:/i,
         />\s*\/dev\/sd[a-z]/i,
         /chmod\s+-R\s+777\s+\//i,
