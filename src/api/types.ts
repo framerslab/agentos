@@ -1411,7 +1411,8 @@ export interface BaseAgentConfig {
   apiKey?: string;
   /**
    * Override the provider base URL (useful for local proxies or Ollama). An empty or whitespace-only value is
-   * unset: a same-provider `setDefaultProvider()` URL, then the provider's URL variable, apply as with none.
+   * unset: a same-provider `setDefaultProvider()` URL, then the provider's URL variable, apply as with none. A seat
+   * of an agency with a blank value takes the agency-level `baseUrl` as a seat with none does.
    */
   baseUrl?: string;
   /**
