@@ -15,7 +15,13 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { PostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import {
+  PostgresAdapter,
+  type StorageAdapter,
+  type StorageCapability,
+  type StorageParameters,
+  type StorageRunResult,
+} from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
 import { fillScopeIds } from '../migrations/v2-to-v3.js';
 import { PORTABLE_TABLES } from '../portable-tables.js';
@@ -40,6 +46,112 @@ async function cleanup(brain: Brain): Promise<void> {
         process.stderr.write(`[Brain.postgres.test cleanup] ${table}: ${msg}\n`);
       }
     }
+  }
+}
+
+/**
+ * A schema of its own, which stands in for a fresh database, and the URL of a connection whose opens make their tables
+ * there: its search path puts the schema ahead of `public`.
+ */
+async function freshSchema(admin: Brain): Promise<{ schema: string; url: string }> {
+  const schema = `agentos_fresh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await admin.exec(`CREATE SCHEMA ${schema}`);
+  const url = new URL(POSTGRES_URL!);
+  url.searchParams.set('options', `-c search_path=${schema},public`);
+  return { schema, url: url.toString() };
+}
+
+/** The indexes `ensureScopeIdColumn` gives `memory_traces`, in the order an open makes them. */
+const SCOPE_ID_INDEXES = ['idx_memory_traces_brain_scope_id', 'idx_memory_traces_unfiled_scope_id'];
+
+/** The index a `CREATE INDEX IF NOT EXISTS` statement makes, or `undefined` for any other statement. */
+function indexCreatedBy(statement: string): string | undefined {
+  return /^\s*CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)\s/i.exec(statement)?.[1];
+}
+
+/** Waits until a statement of another session waits for a lock that the session `pid` holds. */
+async function waitUntilBlockedBy(observer: Brain, pid: number): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const row = await observer.get<{ blocked: boolean }>(
+      'SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND ? = ANY (pg_blocking_pids(pid))) AS blocked',
+      [pid],
+    );
+    if (row?.blocked === true) return;
+    if (Date.now() > deadline) throw new Error(`no statement waited for session ${pid} within 15 s`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/**
+ * Has `open`, an open's statement that makes the index `statement` makes, lose the race for that index to a session
+ * of `rival`'s, as it loses to another brain's open of the same database: the session makes the index in a
+ * transaction it holds open, `open` starts and waits for the session's row of the catalog, and the session commits.
+ * Postgres then fails `open` with unique_violation (23505) on pg_class_relname_nsp_index.
+ */
+async function loseRace(
+  rival: PostgresAdapter,
+  observer: Brain,
+  statement: string,
+  open: () => Promise<void>,
+): Promise<void> {
+  let losing: Promise<void> | undefined;
+  await rival.withConnection(async (session) => {
+    await session.exec('BEGIN');
+    await session.exec(statement);
+    const row = await session.get<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    losing = open();
+    // Awaited below, once the session has committed.
+    losing.catch(() => undefined);
+    await waitUntilBlockedBy(observer, Number(row?.pid));
+    await session.exec('COMMIT');
+  });
+  await losing;
+}
+
+/** How a script of an open runs: `run` runs it, and `inTransaction` tells whether it runs in a transaction. */
+type ScriptRace = (script: string, run: () => Promise<void>, inTransaction: boolean) => Promise<void>;
+
+/** A storage adapter that runs each script of `target`'s through `race`, in a transaction of `target`'s too. */
+class RacingAdapter implements StorageAdapter {
+  readonly kind: string;
+  readonly capabilities: ReadonlySet<StorageCapability>;
+
+  constructor(
+    private readonly target: StorageAdapter,
+    private readonly race: ScriptRace,
+    private readonly inTransaction = false,
+  ) {
+    this.kind = target.kind;
+    this.capabilities = target.capabilities;
+  }
+
+  open(): Promise<void> {
+    return this.target.open();
+  }
+
+  close(): Promise<void> {
+    return this.target.close();
+  }
+
+  run(statement: string, parameters?: StorageParameters): Promise<StorageRunResult> {
+    return this.target.run(statement, parameters);
+  }
+
+  get<T = unknown>(statement: string, parameters?: StorageParameters): Promise<T | null> {
+    return this.target.get<T>(statement, parameters);
+  }
+
+  all<T = unknown>(statement: string, parameters?: StorageParameters): Promise<T[]> {
+    return this.target.all<T>(statement, parameters);
+  }
+
+  exec(script: string): Promise<void> {
+    return this.race(script, () => this.target.exec(script), this.inTransaction);
+  }
+
+  transaction<T>(fn: (trx: StorageAdapter) => Promise<T>): Promise<T> {
+    return this.target.transaction((trx) => fn(new RacingAdapter(trx, this.race, true)));
   }
 }
 
@@ -277,45 +389,121 @@ describeIfPostgres('Brain.openPostgres', () => {
   });
 
   it('sets the shared schema up once when several brains first open a fresh database at once', async () => {
-    // A schema of its own stands in for a fresh database: the opens below create every table in it.
-    const schema = `agentos_fresh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
     openedBrains.push(admin);
-    await admin.exec(`CREATE SCHEMA ${schema}`);
-    const url = new URL(POSTGRES_URL!);
-    url.searchParams.set('options', `-c search_path=${schema},public`);
-    const fresh: Brain[] = [];
-    try {
-      // Different brains: their CREATE ... IF NOT EXISTS statements race on the shared tables, and
-      // one that loses (pg_type_typname_nsp_index) runs again and finds the object.
-      fresh.push(
-        ...(await Promise.all(
-          Array.from({ length: 6 }, () => Brain.openPostgres(url.toString(), { brainId: uniqueBrainId() })),
-        )),
-      );
-      for (const brain of fresh) {
-        expect(await brain.getMeta('schema_version')).toBe('3');
+    // Different brains: their CREATE ... IF NOT EXISTS statements race on the shared tables, and a create that loses
+    // (pg_type_typname_nsp_index, pg_class_relname_nsp_index) runs again and finds the object. Which opens lose, and
+    // for which objects, depends on how the opens interleave, so three rounds of ten first opens run, each round on a
+    // fresh schema.
+    for (let round = 0; round < 3; round += 1) {
+      const { schema, url } = await freshSchema(admin);
+      const fresh: Brain[] = [];
+      try {
+        const opens = await Promise.allSettled(
+          Array.from({ length: 10 }, () => Brain.openPostgres(url, { brainId: uniqueBrainId() })),
+        );
+        const failures: string[] = [];
+        for (const open of opens) {
+          if (open.status === 'fulfilled') fresh.push(open.value);
+          else failures.push(String(open.reason));
+        }
+        expect(failures).toEqual([]);
+        for (const brain of fresh) {
+          expect(await brain.getMeta('schema_version')).toBe('3');
+        }
+        const created = await admin.all<{ n: string | number }>(
+          `SELECT count(*) AS n FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'memory_traces'`,
+          [schema],
+        );
+        expect(Number(created[0]?.n)).toBe(1);
+        // The fresh schema gets the table's indexes too, though public, later on the search path and set up by
+        // the admin brain's open, already holds indexes of the same names.
+        const indexes = await admin.all<{ indexname: string }>(
+          `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'memory_traces'`,
+          [schema],
+        );
+        expect(indexes.map((row) => row.indexname)).toEqual(
+          expect.arrayContaining([
+            'idx_memory_traces_brain_type',
+            'idx_memory_traces_brain_scope',
+            ...SCOPE_ID_INDEXES,
+          ]),
+        );
+      } finally {
+        for (const brain of fresh) await brain.close().catch(() => undefined);
+        await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
       }
-      const created = await admin.all<{ n: string | number }>(
-        `SELECT count(*) AS n FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'memory_traces'`,
-        [schema],
-      );
-      expect(Number(created[0]?.n)).toBe(1);
-      // The fresh schema gets the table's indexes too, though public, later on the search path and set up by
-      // the admin brain's open, already holds indexes of the same names.
+    }
+  });
+
+  it('opens a brain whose open loses the race for each index of scope_id to another open', async () => {
+    // The tables are there, memory_traces with its scope_id column, and neither index of scope_id is. Another open of
+    // the database makes each index while this open makes it, and commits first, so this open loses the race for both
+    // in the one step that makes them, as one of the first opens of several brains can.
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    const { schema, url } = await freshSchema(admin);
+    const rival = new PostgresAdapter(url);
+    const store = new PostgresAdapter(url);
+    let brain: Brain | undefined;
+    try {
+      await rival.open();
+      await store.open();
+      const first = await Brain.openPostgres(url, { brainId: uniqueBrainId() });
+      await first.close();
+      for (const index of SCOPE_ID_INDEXES) await admin.exec(`DROP INDEX ${schema}.${index}`);
+      const lost: string[] = [];
+      const racing = new RacingAdapter(store, async (script, run) => {
+        const index = indexCreatedBy(script);
+        if (index === undefined || !SCOPE_ID_INDEXES.includes(index) || lost.includes(index)) return run();
+        lost.push(index);
+        await loseRace(rival, admin, script, run);
+      });
+      brain = await Brain.openWithAdapter(racing, { brainId: uniqueBrainId() });
+      expect(lost).toEqual(SCOPE_ID_INDEXES);
+      expect(await brain.getMeta('schema_version')).toBe('3');
       const indexes = await admin.all<{ indexname: string }>(
         `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'memory_traces'`,
         [schema],
       );
-      expect(indexes.map((row) => row.indexname)).toEqual(
-        expect.arrayContaining([
-          'idx_memory_traces_brain_type',
-          'idx_memory_traces_brain_scope',
-          'idx_memory_traces_brain_scope_id',
-        ]),
-      );
+      expect(indexes.map((row) => row.indexname)).toEqual(expect.arrayContaining(SCOPE_ID_INDEXES));
     } finally {
-      for (const brain of fresh) await brain.close().catch(() => undefined);
+      await (brain ?? store).close().catch(() => undefined);
+      await rival.close().catch(() => undefined);
+      await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
+  it('migrates a brain at version 2 whose migration loses the race for an index to another open', async () => {
+    // A brain at schema version 2 runs the v2 -> v3 migration in a transaction. memory_traces has scope_id and the
+    // per-scope index, and not the partial index, which another open makes while the migration makes it.
+    const admin = await Brain.openPostgres(POSTGRES_URL!, { brainId: uniqueBrainId() });
+    openedBrains.push(admin);
+    const { schema, url } = await freshSchema(admin);
+    const rival = new PostgresAdapter(url);
+    const store = new PostgresAdapter(url);
+    const brainId = uniqueBrainId();
+    let brain: Brain | undefined;
+    try {
+      await rival.open();
+      await store.open();
+      const first = await Brain.openPostgres(url, { brainId: uniqueBrainId() });
+      await first.run(`INSERT INTO brain_meta (brain_id, key, value) VALUES (?, 'schema_version', '2')`, [brainId]);
+      await first.close();
+      await admin.exec(`DROP INDEX ${schema}.idx_memory_traces_unfiled_scope_id`);
+      // Whether each script that lost a race ran in a transaction.
+      const lost: boolean[] = [];
+      const racing = new RacingAdapter(store, async (script, run, inTransaction) => {
+        if (indexCreatedBy(script) !== 'idx_memory_traces_unfiled_scope_id' || lost.length > 0) return run();
+        lost.push(inTransaction);
+        await loseRace(rival, admin, script, run);
+      });
+      brain = await Brain.openWithAdapter(racing, { brainId });
+      expect(lost).toEqual([true]);
+      expect(await brain.getMeta('schema_version')).toBe('3');
+    } finally {
+      await (brain ?? store).close().catch(() => undefined);
+      await rival.close().catch(() => undefined);
       await admin.exec(`DROP SCHEMA ${schema} CASCADE`);
     }
   });
