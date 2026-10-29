@@ -6,10 +6,12 @@
  * agent's output the check blocks turns the approval into a rejection, so it
  * never reaches the gated agent's request, and the strategy goes on as it does
  * after any rejection. An output the check passes reaches the agent, with the
- * approval's instructions after it. Where the strategy writes more text after
- * the task or after an earlier agent's output, the check also reads that task
- * or output on its own, so a statement it matches only at the end of a text
- * is blocked there too.
+ * approval's instructions after it, and the agent's call record holds the
+ * text it was sent. Where the strategy writes more text after the task or
+ * after an earlier agent's output (graph, review-loop, debate, and sequential
+ * after its first agent), the check also reads that task or output on its
+ * own, so a statement it matches only at the end of a text is blocked there
+ * too, whitespace after it included.
  * Real agent(), agency(), generateText, streamText and OpenAIProvider; only
  * fetch is stubbed.
  */
@@ -225,12 +227,14 @@ describe.each(CASES)('the beforeAgent gate under $name', ({ strategy, agents, ex
     serve(script(PASSING));
     const handler = approve({ instructions: BENIGN });
     const guardrailHitlOverride = vi.fn();
-    await run(team(strategy, agents, handler, { guardrailHitlOverride }, extra));
+    const outcome = await run(team(strategy, agents, handler, { guardrailHitlOverride }, extra));
 
     expect(guardrailHitlOverride).not.toHaveBeenCalled();
     const sent = userText(last(opsRequests()));
     expect(sent).toContain(PASSING);
     expect(sent).toBe(`${String(last(handler.mock.calls)[0].details.input)}\n\n${MARKER}: ${BENIGN}`);
+    // Each of ops's call records holds the text that call was sent, the instructions included.
+    expect(outcome.agentCalls.filter((c) => c.agent === 'ops').map((c) => c.input)).toEqual(opsRequests().map(userText));
   });
 });
 
@@ -241,7 +245,10 @@ describe.each(CASES)('the beforeAgent gate under $name', ({ strategy, agents, ex
  * strategy writes more after one of them it no longer ends the text read.
  */
 const TASK_ENDING_IN_RM = 'Tidy the build logs, then clear the workspace with rm -rf .';
+const TASK_ENDING_IN_DELETE = 'Tidy the build logs, then empty the table: DELETE FROM sessions;';
 const OUTPUT_ENDING_IN_DELETE = 'Then empty the table: DELETE FROM sessions;';
+/** The statement at the end of an output, with a space after it: still the end of that output. */
+const OUTPUT_ENDING_IN_DELETE_AND_SPACE = 'Then empty the table: DELETE FROM sessions; ';
 const REVIEW_APPROVED = JSON.stringify({ approved: true, feedback: 'Fine.' });
 
 /**
@@ -261,6 +268,28 @@ const TAIL_CASES: Array<{
   run: (team: Team, prompt: string) => Promise<Outcome>;
   refused: Outcome;
 }> = [
+  {
+    // After the first agent, sequential writes the previous agent's output after the task.
+    name: "sequential generate(), the task in the second agent's input",
+    strategy: 'sequential',
+    agents: { research: { instructions: RESEARCH }, ops: { instructions: OPS } },
+    prompt: TASK_ENDING_IN_DELETE,
+    statement: 'DELETE FROM sessions;',
+    script: { research: [PASSING], ops: ['ops done'] },
+    run: generated,
+    // ops is skipped, so research's result is the run's.
+    refused: { text: PASSING, agentCalls: [{ agent: 'research' }] },
+  },
+  {
+    name: "sequential stream(), the task in the second agent's input",
+    strategy: 'sequential',
+    agents: { research: { instructions: RESEARCH }, ops: { instructions: OPS } },
+    prompt: TASK_ENDING_IN_DELETE,
+    statement: 'DELETE FROM sessions;',
+    script: { research: [PASSING], ops: ['ops done'] },
+    run: streamed,
+    refused: { text: PASSING, agentCalls: [{ agent: 'research' }] },
+  },
   {
     name: 'graph generate(), the task',
     strategy: 'graph',
@@ -309,6 +338,20 @@ const TAIL_CASES: Array<{
     run: streamed,
     // stream() joins the text the agents that ran streamed.
     refused: { text: `${OUTPUT_ENDING_IN_DELETE}${PASSING}`, agentCalls: [{ agent: 'research' }, { agent: 'writer' }] },
+  },
+  {
+    name: "graph generate(), the first of two dependencies' outputs, a space after the statement",
+    strategy: 'graph',
+    agents: {
+      research: { instructions: RESEARCH },
+      writer: { instructions: WRITER, dependsOn: ['research'] },
+      ops: { instructions: OPS, dependsOn: ['research', 'writer'] },
+    },
+    prompt: PROMPT,
+    statement: OUTPUT_ENDING_IN_DELETE_AND_SPACE,
+    script: { research: [OUTPUT_ENDING_IN_DELETE_AND_SPACE], writer: [PASSING], ops: ['ops done'] },
+    run: generated,
+    refused: { text: PASSING, agentCalls: [{ agent: 'research' }, { agent: 'writer' }] },
   },
   {
     name: "review-loop, the reviewer's input: the task",
