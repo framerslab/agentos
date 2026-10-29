@@ -34,7 +34,10 @@ import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/Ge
 import { LiteLLMProvider, LiteLLMProviderConfig } from './implementations/LiteLLMProvider';
 import { MiniMaxProvider, MiniMaxProviderConfig } from './implementations/MiniMaxProvider';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
-import { contentSafeConsole as console } from '../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('provider_manager');
 
 /**
  * Configuration for a single AI model provider entry within the manager.

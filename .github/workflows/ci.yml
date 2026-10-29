@@ -197,17 +197,25 @@ jobs:
       - name: Built content-safe logging export
         run: |
           node --input-type=module <<'JS'
-          import { enableContentSafeTelemetry, createLogger, PinoLogger } from '@framers/agentos/logging';
+          import { enableContentSafeTelemetry, createLogger, PinoLogger, CONTENT_SAFE_COMPONENTS } from '@framers/agentos/logging';
           const events = [];
           const before = new PinoLogger().child({ opaque: 'fixture-private-binding' });
-          enableContentSafeTelemetry((event) => events.push(event));
+          const early = createLogger('fixture-private-component');
+          enableContentSafeTelemetry((event) => events.push(event), { minLevel: 'info' });
+          before.debug('fixture-private-content');
+          early.debug('fixture-private-content');
           before.error('fixture-private-content', { err: new Error('fixture-private-error') });
-          createLogger('fixture-private-component').warn('fixture-private-content');
-          if (events.length !== 2) throw new Error('missing_safe_events');
-          if (JSON.stringify(events).includes('fixture-private')) throw new Error('unsafe_event');
-          if (events.some((event) => Object.keys(event).sort().join(',') !== 'kind,n,state')) {
-            throw new Error('unexpected_safe_event_keys');
-          }
+          early.warn('fixture-private-content');
+          if (events.length === 2) {
+            if (events[0].component === 'pino_logger' && events[1].component === 'logger_factory') {
+              if (JSON.stringify(events).includes('fixture-private')) throw new Error('unsafe_event');
+              for (const event of events) {
+                if ((Object.keys(event).sort().join(',') === 'component,kind,n,state') === false) throw new Error('unexpected_safe_event_keys');
+                if (Object.isFrozen(event) === false) throw new Error('mutable_safe_event');
+              }
+            } else throw new Error('unexpected_component');
+          } else throw new Error('unexpected_safe_event_count');
+          if (Object.isFrozen(CONTENT_SAFE_COMPONENTS) === false || CONTENT_SAFE_COMPONENTS.includes('listen_session') === false) throw new Error('missing_component_contract');
           JS
 
       # The examples the text processing and search pages link to. They need no key and no
