@@ -89,6 +89,10 @@ const SA_DEFAULTS: Required<SpreadingActivationConfig> = {
 /** Node type discriminator stored in knowledge_nodes.type. */
 const NODE_TYPE = 'memory_graph';
 
+/** The `knowledge_edges.type` values of the memory graph's edges (the `MemoryEdgeType` values), as an SQL list. */
+const MEMORY_EDGE_TYPES_SQL = `'SHARED_ENTITY','TEMPORAL_SEQUENCE','SAME_TOPIC',
+         'CONTRADICTS','SUPERSEDES','CAUSED_BY','CO_ACTIVATED','SCHEMA_INSTANCE'`;
+
 // ---------------------------------------------------------------------------
 // SqlMemoryGraph
 // ---------------------------------------------------------------------------
@@ -179,10 +183,7 @@ export class SqlMemoryGraph implements IMemoryGraph {
     const edgeRows = await this.brain.all<EdgeRow>(
       `SELECT id, source_id, target_id, type, weight, created_at
        FROM knowledge_edges
-       WHERE brain_id = ? AND type IN (
-         'SHARED_ENTITY','TEMPORAL_SEQUENCE','SAME_TOPIC',
-         'CONTRADICTS','SUPERSEDES','CAUSED_BY','CO_ACTIVATED','SCHEMA_INSTANCE'
-       )`,
+       WHERE brain_id = ? AND type IN (${MEMORY_EDGE_TYPES_SQL})`,
       [this.brain.brainId],
     );
 
@@ -252,26 +253,23 @@ export class SqlMemoryGraph implements IMemoryGraph {
    * Remove a node and all its incident edges from the graph.
    *
    * Edges referencing the removed node are deleted from both SQLite and the
-   * in-memory cache to keep the graph consistent.
+   * in-memory cache to keep the graph consistent. The SQL delete takes every
+   * memory-graph edge that names the node, those another graph instance on the
+   * same Brain wrote after this one loaded included, so the node's own delete
+   * meets no edge that still references it.
    *
    * @param memoryId - ID of the node to remove.
    */
   async removeNode(memoryId: string): Promise<void> {
-    // Delete incident edges first (FK enforcement is ON, but we also want
-    // to clean up the in-memory cache).
-    const toDelete: string[] = [];
+    // Delete incident edges first: foreign keys are on, and an edge that names
+    // the node would refuse its delete.
+    await this.brain.run(
+      `DELETE FROM knowledge_edges
+        WHERE brain_id = ? AND (source_id = ? OR target_id = ?) AND type IN (${MEMORY_EDGE_TYPES_SQL})`,
+      [this.brain.brainId, memoryId, memoryId],
+    );
     for (const [key, edge] of this._edges) {
       if (edge.sourceId === memoryId || edge.targetId === memoryId) {
-        toDelete.push(key);
-      }
-    }
-
-    if (toDelete.length > 0) {
-      await this.brain.run(
-        `DELETE FROM knowledge_edges WHERE brain_id = ? AND (source_id = ? OR target_id = ?)`,
-        [this.brain.brainId, memoryId, memoryId],
-      );
-      for (const key of toDelete) {
         this._edges.delete(key);
       }
     }
@@ -751,10 +749,7 @@ export class SqlMemoryGraph implements IMemoryGraph {
     // Delete all knowledge_edges whose type is a MemoryEdgeType value.
     await this.brain.run(
       `DELETE FROM knowledge_edges
-       WHERE brain_id = ? AND type IN (
-         'SHARED_ENTITY','TEMPORAL_SEQUENCE','SAME_TOPIC',
-         'CONTRADICTS','SUPERSEDES','CAUSED_BY','CO_ACTIVATED','SCHEMA_INSTANCE'
-       )`,
+       WHERE brain_id = ? AND type IN (${MEMORY_EDGE_TYPES_SQL})`,
       [brainId],
     );
 

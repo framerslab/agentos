@@ -117,6 +117,16 @@ The brain has no re-embedding method. After a change of embedding model, stored 
 
 ---
 
+## Deleting and restoring traces
+
+`Memory.deleteScope(scope, scopeId, { turnUserId? })` and `Memory.deleteTraces(traceIds)` delete traces for good. The rows that name a trace go first, as the foreign keys require: its `retrieval_feedback` rows are deleted, and a `document_chunks` row it was filed from lets go of it (`trace_id` set to NULL) and keeps its text, which belongs to its document. Then the trace's row goes, with its memory-graph node and that node's edges, whichever facade on the Brain wrote them, and its knowledge-graph copy. On SQLite the full-text index is rebuilt from the rows that remain. `deleteScope` takes every row filed under the scope (`scope_id`), soft-deleted rows included, and every knowledge-graph copy filed under it; with `turnUserId` it takes only the rows whose metadata names that user (`metadata.turnUserId`: a second user's trace on another user's session) and leaves the scope's other rows and copies. An empty `turnUserId` is refused with a `TypeError`. Both return `{ deleted }`, the number of rows deleted, so a call made again counts none.
+
+`Memory.restoreTrace(traceId, snapshot)` writes back the row a snapshot holds, live again: content, tags, scope, scope id and metadata. `readTraceSnapshot(brain, brainId, traceId)` in `tracePersistence.ts` reads one, every column but the embedding. A row that still holds the snapshot's content keeps its embedding, so a restored delete is recalled as before; a row that holds other content is written with no embedding, and the trace gets one when it is next written. `Memory.brainId` names the brain the facade reads and writes.
+
+`remember(content, { metadata })` merges extra keys into the trace's stored metadata, under the keys the facade sets itself (`scopeId`, `content_hash`, `entities`, `decay`), which win. A trace whose metadata names a `turnUserId` is no duplicate of the same words filed under the same scope with another `turnUserId` or none: each user's words stay a trace of their own, so a delete of one user's traces leaves the other's.
+
+---
+
 ## Export and backup
 
 ```ts

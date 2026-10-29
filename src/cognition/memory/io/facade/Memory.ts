@@ -71,6 +71,7 @@ import {
   readPersistedDecayState,
   withPersistedDecayState,
   writeTraceSnapshot,
+  deleteTraceRows,
   type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
@@ -479,7 +480,9 @@ export class Memory {
     const type = options?.type ?? 'episodic';
     const scope = options?.scope ?? 'user';
     const scopeId = options?.scopeId ?? '';
-    const existing = await this._findExistingTraceByHash(contentHash, type, scope, scopeId);
+    const declaredUser = options?.metadata?.turnUserId;
+    const turnUserId = typeof declaredUser === 'string' ? declaredUser : '';
+    const existing = await this._findExistingTraceByHash(contentHash, type, scope, scopeId, turnUserId);
     if (existing) {
       return this._buildTrace(existing);
     }
@@ -878,36 +881,34 @@ export class Memory {
     return result;
   }
 
-  /** Deletes the given traces for good, as {@link deleteScope} does for a scope. Unknown ids are skipped. */
+  /**
+   * Deletes the given traces for good, as {@link deleteScope} does for a scope. The rows that name a trace go first,
+   * as the Brain's foreign keys require: its `retrieval_feedback` rows are deleted, and a `document_chunks` row it was
+   * filed from lets go of it and keeps its text. Each trace's memory-graph node goes with its edges, whichever facade
+   * on the Brain wrote them. Unknown ids are skipped.
+   *
+   * @returns How many trace rows it deleted, so a call made again counts none.
+   */
   async deleteTraces(traceIds: readonly string[]): Promise<{ deleted: number }> {
     await this._initPromise;
-    const brainId = this._brain.brainId;
-    let deleted = 0;
     const ids = [...new Set(traceIds)];
-    for (let offset = 0; offset < ids.length; offset += 400) {
-      const chunk = ids.slice(offset, offset + 400);
-      const placeholders = chunk.map(() => '?').join(', ');
-      const result = await this._brain.run(`DELETE FROM memory_traces WHERE brain_id = ? AND id IN (${placeholders})`, [brainId, ...chunk]);
-      deleted += result.changes;
-    }
-    if (ids.length > 0) {
-      for (const id of ids) {
-        if (this._config.graph) {
-          try {
-            await this._memoryGraph.removeNode(id);
-          } catch {
-            // No node for a trace the graph never held.
-          }
-        }
-        this._hnswSidecar?.remove(id);
-      }
+    if (ids.length === 0) return { deleted: 0 };
+    const deleted = await deleteTraceRows(this._brain, this._brain.brainId, ids);
+    for (const id of ids) {
       try {
-        await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+        await this._memoryGraph.removeNode(id);
       } catch {
-        // Non-critical, as for the store's deletes.
+        // A node another edge still names stays; its trace is gone.
       }
-      await this._rebuildFtsIndex();
+      this._hnswSidecar?.remove(id);
     }
+    try {
+      await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+    } catch {
+      // Non-critical, as for the store's deletes.
+    }
+    // Postgres keeps the index in each row's own column, which went with the row.
+    if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFtsIndex();
     return { deleted };
   }
 
@@ -1788,13 +1789,19 @@ export class Memory {
    *
    * Checks both the facade-native `content_hash` metadata key and the
    * importer-used `import_hash` key so dedup works across facade and import
-   * workflows. Another brain's trace of the same text is not a duplicate.
+   * workflows. Another brain's trace of the same text is not a duplicate, and
+   * neither is a trace another user filed (`metadata.turnUserId`): a second
+   * user's words stay a trace of their own beside the same words of the
+   * session's owner, so a deletion of either user's traces leaves the other's.
+   *
+   * @param turnUserId - The second user the new trace is filed for, or `''`.
    */
   private async _findExistingTraceByHash(
     contentHash: string,
     type: string,
     scope: string,
     scopeId: string,
+    turnUserId: string,
   ): Promise<TraceRow | undefined> {
     const { dialect } = this._brain.features;
     const row = await this._brain.get<TraceRow>(
@@ -1806,12 +1813,13 @@ export class Memory {
          AND type = ?
          AND scope = ?
          AND ${dialect.ifnull(dialect.jsonExtract('metadata', '$.scopeId'), "''")} = ?
+         AND ${dialect.ifnull(dialect.jsonExtract('metadata', '$.turnUserId'), "''")} = ?
          AND (
            ${dialect.jsonExtract('metadata', '$.content_hash')} = ?
            OR ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
          )
        LIMIT 1`,
-      [this._brain.brainId, type, scope, scopeId, contentHash, contentHash],
+      [this._brain.brainId, type, scope, scopeId, turnUserId, contentHash, contentHash],
     );
     return row ?? undefined;
   }
