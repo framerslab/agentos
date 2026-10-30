@@ -4,7 +4,8 @@
  * `@framers/agentos/cognition/rag`), the query embedded by embedText as an HTTP request to a local server that answers
  * as OpenAI's embeddings endpoint, so a request cancelled in flight is seen on the wire. On InMemoryVectorStore in
  * every run, and on PostgresVectorStore under a host's search settings when AGENTOS_TEST_POSTGRES_URL names a database
- * with pgvector (CI's Test & Lint job sets it), every statement the store sends recorded at its pool.
+ * with pgvector (CI's Test & Lint job sets it), every statement the store sends recorded at its pool. On the same path,
+ * an endpoint that answers no vector for the query fails the search after that one request.
  */
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -37,6 +38,8 @@ interface Received {
 const received: Received[] = [];
 /** While true, a request is left open until its `answer`, or until the client gives it up. */
 let holding = false;
+/** While true, the server answers 200 with an empty `data`: no vector for any text. */
+let noVectors = false;
 /** The cases waiting for the next request. */
 let waiting: Array<(request: Received) => void> = [];
 let server: http.Server;
@@ -159,7 +162,7 @@ beforeAll(async () => {
           res.end(
             JSON.stringify({
               object: 'list',
-              data: body.input.map((text, index) => ({ object: 'embedding', index, embedding: topicVector(text) })),
+              data: noVectors ? [] : body.input.map((text, index) => ({ object: 'embedding', index, embedding: topicVector(text) })),
               model: body.model,
               usage: { prompt_tokens: body.input.length, total_tokens: body.input.length },
             }),
@@ -187,12 +190,14 @@ afterAll(async () => {
 beforeEach(() => {
   received.length = 0;
   holding = false;
+  noVectors = false;
   waiting = [];
 });
 
 afterEach(() => {
   // A case that failed before its search settled leaves no request open, and the next suite's setup is answered.
   holding = false;
+  noVectors = false;
   for (const request of received) request.answer();
 });
 
@@ -219,6 +224,29 @@ describe('a search\'s signal on InMemoryVectorStore, its query embedded by embed
     expect(await cutWithin(request, 5_000)).toBe(true);
     await settle();
     expect(received).toHaveLength(1);
+    expect(query).not.toHaveBeenCalled();
+  }, CASE_MS);
+});
+
+describe('an embedding answer with no vector on InMemoryVectorStore, the query embedded by embedText over HTTP', () => {
+  it('fails a search of several narrowings after its one embedding request, with or without a signal, and asks the store nothing', async () => {
+    const store = new InMemoryVectorStore();
+    await store.initialize({ id: 'mem', type: 'in_memory' });
+    await store.createCollection('library', 4);
+    const index = new LibraryIndex({ store, collection: 'library', embed });
+    await index.indexSource(SESSION);
+    const query = vi.spyOn(store, 'query');
+
+    // The endpoint answers 200 with an empty `data`, so embedText answers no vector.
+    noVectors = true;
+    for (const signal of [undefined, new AbortController().signal]) {
+      received.length = 0;
+      await expect(
+        index.search({ text: TEXT, scope: ANN, mode: 'dense', anyOf: [{ kinds: ['session'] }, { tags: ['q3'] }], signal }),
+      ).rejects.toThrow('the embedder answered a different number of vectors than texts');
+      await settle();
+      expect(received.map((request) => request.input)).toEqual([[TEXT]]);
+    }
     expect(query).not.toHaveBeenCalled();
   }, CASE_MS);
 });
