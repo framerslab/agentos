@@ -641,8 +641,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
           });
           changed = true;
         }
-        // The tools the call offers: none on a structured send's calls, and
-        // only its names on a seat's turn.
+        // The tools the call offers: none on a structured send's calls, and on
+        // a seat's turn only the tools its tool names allow.
         const names = turn.toolNames;
         const offered = turn.structured ? [] : names ? tools.filter((tool) => names.has(tool.name)) : tools;
         // A call that offers no tool gets no chain-of-thought instruction, as
