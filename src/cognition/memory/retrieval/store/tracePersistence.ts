@@ -333,37 +333,52 @@ export async function deleteTraceRows(db: Pick<SnapshotDb, 'run'>, brainId: stri
   return deleted;
 }
 
+/** How many times {@link readTraceSnapshot} reads a row while a re-file changes the brain's form under it. */
+const SNAPSHOT_FORM_READS = 3;
+
 /**
- * Reads one row of a brain as a snapshot, with the form the brain's scope ids hold now
- * ({@link TraceSnapshot.scopeIdForm}); `undefined` when there is no such row.
+ * Reads one row of a brain as a snapshot, with the form its scope id was read in ({@link TraceSnapshot.scopeIdForm});
+ * `undefined` when there is no such row. The record is read before the row and, while it names the plain form, after
+ * it: a re-file writes the record in the transaction that moves the rows, once, so when both reads find the plain form
+ * the row was read in it. A re-file that commits between them leaves the row read in either form, and the row is read
+ * again.
+ *
+ * @throws When the brain's form changed under each of three reads of the row.
  */
 export async function readTraceSnapshot(db: SnapshotDb, brainId: string, traceId: string): Promise<TraceSnapshot | undefined> {
-  const row = await db.get<{
-    id: string; type: string; scope: string; scope_id: string | null; content: string; strength: number;
-    created_at: number; last_accessed: number | null; retrieval_count: number; tags: string; emotions: string;
-    metadata: string; deleted: number;
-  }>(
-    `SELECT id, type, scope, scope_id, content, strength, created_at, last_accessed, retrieval_count, tags, emotions, metadata, deleted
-       FROM memory_traces WHERE brain_id = ? AND id = ?`,
-    [brainId, traceId],
+  for (let read = 0; read < SNAPSHOT_FORM_READS; read += 1) {
+    const encoded = await holdsEncodedScopeIdForm(db, brainId);
+    const row = await db.get<{
+      id: string; type: string; scope: string; scope_id: string | null; content: string; strength: number;
+      created_at: number; last_accessed: number | null; retrieval_count: number; tags: string; emotions: string;
+      metadata: string; deleted: number;
+    }>(
+      `SELECT id, type, scope, scope_id, content, strength, created_at, last_accessed, retrieval_count, tags, emotions, metadata, deleted
+         FROM memory_traces WHERE brain_id = ? AND id = ?`,
+      [brainId, traceId],
+    );
+    if (!row) return undefined;
+    if (!encoded && (await holdsEncodedScopeIdForm(db, brainId))) continue;
+    return {
+      id: row.id,
+      type: row.type,
+      scope: row.scope,
+      scopeId: row.scope_id ?? '',
+      content: row.content,
+      strength: row.strength,
+      createdAt: row.created_at,
+      lastAccessed: row.last_accessed ?? null,
+      retrievalCount: row.retrieval_count ?? 0,
+      tags: row.tags,
+      emotions: row.emotions,
+      metadata: row.metadata,
+      deleted: row.deleted === 1 ? 1 : 0,
+      scopeIdForm: encoded ? 'encoded' : 'plain',
+    };
+  }
+  throw new Error(
+    `readTraceSnapshot: the scope-id form of brain ${brainId} changed under each of ${SNAPSHOT_FORM_READS} reads of trace ${traceId}`,
   );
-  if (!row) return undefined;
-  return {
-    id: row.id,
-    type: row.type,
-    scope: row.scope,
-    scopeId: row.scope_id ?? '',
-    content: row.content,
-    strength: row.strength,
-    createdAt: row.created_at,
-    lastAccessed: row.last_accessed ?? null,
-    retrievalCount: row.retrieval_count ?? 0,
-    tags: row.tags,
-    emotions: row.emotions,
-    metadata: row.metadata,
-    deleted: row.deleted === 1 ? 1 : 0,
-    scopeIdForm: (await holdsEncodedScopeIdForm(db, brainId)) ? 'encoded' : 'plain',
-  };
 }
 
 /**
