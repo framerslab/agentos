@@ -128,11 +128,12 @@ export interface AgencyLaunchOptions {
  */
 export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'members' | 'launch'> {
   /**
-   * Registers `launch_agency` among the runtime's config tools, for the personas granted `agency:launch`. Default
-   * false. A seat whose call fails rejects with its error's name and code alone, so a provider's or a handler's message
-   * reaches no model of the team and not the result; the error itself goes to the runtime's logger (the one
-   * `AgentOS.create` takes, else its own), at warn, under `launch_agency seat <role>`, as do the launch's other failures
-   * (a failed run under `launch_agency run`). A logger that throws fails no launch.
+   * Registers `launch_agency` among the runtime's config tools, for the personas granted `agency:launch`: a config tool
+   * of the host's own by that name then fails initialization. Default false. A seat whose call fails rejects with its
+   * error's name and code alone, so a provider's or a handler's message reaches no model of the team and not the
+   * result; the error itself goes to the runtime's logger (the one `AgentOS.create` takes, else its own), at warn,
+   * under `launch_agency seat <role>`, as do the launch's other failures (a failed run under `launch_agency run`). A
+   * logger that throws fails no launch.
    */
   launch?: boolean;
   /**

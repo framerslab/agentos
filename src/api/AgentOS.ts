@@ -179,7 +179,7 @@ import {
 } from './runtime/SelfImprovementSessionManager';
 import { RagMemoryInitializer } from './runtime/RagMemoryInitializer';
 import { createRuntimeLaunchTool } from './runtime/agencyLaunch/runtimeLaunchTool.js';
-import { resolveLaunchLimits, type LaunchLimits, type RuntimeAgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
+import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type LaunchLimits, type RuntimeAgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
 import type { TurnPlannerConfig } from '../orchestration/turn-planner/TurnPlanner';
 import type {
   CapabilityDescriptor,
@@ -795,7 +795,7 @@ export interface AgentOSConfig {
    * temporary `agency()` team whose seats are GMIs of this runtime (a registered persona by `personaId`, or one made
    * from the caller's for the seat's instructions), runs the goal once and returns one tool result, bounded by depth,
    * seats, launches in flight, one wall deadline and the caller's tools. The bounds are checked at initialization
-   * whenever this is set.
+   * whenever this is set; with `launch: true`, a config tool named `launch_agency` fails initialization too.
    * @default undefined (no tool)
    */
   agencies?: RuntimeAgencyLaunchOptions;
@@ -990,6 +990,16 @@ export class AgentOS implements IAgentOS {
     }
     const resolvedConfig = RagMemoryInitializer.resolveConfig(config);
     const normalizedConfigTools = adaptToolsToMap(resolvedConfig.tools);
+    // With `launch`, launch_agency joins the config tools after the host's own, and a tool of that name would be
+    // replaced without a word: the configuration is refused, as gmi() refuses it at construction.
+    if (launchLimits && config.agencies?.launch === true && normalizedConfigTools[LAUNCH_AGENCY_TOOL_NAME]) {
+      throw new AgentOSServiceError(
+        `The agencies option is not valid: agencies.launch registers '${LAUNCH_AGENCY_TOOL_NAME}', and the runtime's tools already hold a tool of that name.`,
+        GMIErrorCode.CONFIGURATION_ERROR,
+        { toolName: LAUNCH_AGENCY_TOOL_NAME },
+        'AgentOS.initialize',
+      );
+    }
     const normalizedExternalTools = normalizeExternalToolRegistry(resolvedConfig.externalTools);
     const {
       externalTools: _externalTools,
