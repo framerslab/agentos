@@ -475,8 +475,8 @@ export interface ExportOptions {
    * - `'json'`     – one JSON document: the brain's metadata, its traces (forgotten ones included), graph rows,
    *   documents with their chunks and images, and conversations with their messages.
    * - `'markdown'` – a folder of Markdown files, one per active trace, each with YAML front matter.
-   * - `'obsidian'` – the Markdown folder, each note's body followed by the trace's `#tags` and a **Related:** list of
-   *   `[[wikilinks]]` to the labels its knowledge-graph node links to.
+   * - `'obsidian'` – the Markdown folder, each note's body followed by the trace's tags as `#tags` and a **Related:**
+   *   list of `[[wikilinks]]` to the labels its knowledge-graph node links to, each when there are any.
    *
    * When omitted, the output path names the format: a `.json` path is JSON, a `.sqlite` or `.db` path SQLite, and any
    * other path a Markdown folder.
