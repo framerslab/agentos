@@ -361,7 +361,7 @@ describe('a spend budget on the GMI path', () => {
     const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Help.', maxTokens: 100, cognition: { sentiment: true, metaprompts: ['confusion_clarification'] }, memory: false, budget });
 
     await a.session('s1').send('I am confused and this is unclear. Please explain it again.');
-    expect(budget.tokensUsed()).toBe(15);
+    // The turn's 15 tokens, then the metaprompt's 15, which may already be in by the time the send returns.
     await vi.waitFor(() => expect(s.seen.filter((call) => !call.streamed)).toHaveLength(1));
     await vi.waitFor(() => expect(budget.tokensUsed()).toBe(30));
   });
