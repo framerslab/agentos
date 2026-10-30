@@ -259,6 +259,24 @@ export function bindingsFor(fragment: string, value: unknown): unknown[] {
 }
 
 /**
+ * The `brain_meta` key of the record of a brain's scope-id form, which a brain's re-file writes
+ * (`scopeIdForm.ts`, `refileBrainScopeIds`).
+ */
+export const SCOPE_ID_FORM_KEY = 'scope_id_form';
+
+/** The record's value for a brain whose `user` and `persona` scope ids hold the encoded form. */
+export const ENCODED_SCOPE_ID_FORM = 'encoded';
+
+/** Whether a brain holds the record of the encoded scope-id form ({@link SCOPE_ID_FORM_KEY} in `brain_meta`). */
+export async function holdsEncodedScopeIdForm(db: Pick<SnapshotDb, 'get'>, brainId: string): Promise<boolean> {
+  const record = await db.get<{ value: string }>('SELECT value FROM brain_meta WHERE brain_id = ? AND key = ?', [
+    brainId,
+    SCOPE_ID_FORM_KEY,
+  ]);
+  return record?.value === ENCODED_SCOPE_ID_FORM;
+}
+
+/**
  * A `memory_traces` row as a ledger row's before-state holds it: every column but the embedding. A restore keeps the
  * row's embedding where the row holds the snapshot's content ({@link writeTraceSnapshot}); a trace restored to other
  * content regains a vector when it is next written (as `memory_update` clears it when the content changes).
@@ -277,6 +295,14 @@ export interface TraceSnapshot {
   emotions: string;
   metadata: string;
   deleted: 0 | 1;
+  /**
+   * The form of the brain's `user` and `persona` scope ids when the snapshot was read: `'encoded'` once a learning
+   * layer re-filed the brain ({@link SCOPE_ID_FORM_KEY}), else `'plain'`. `Memory.restoreTrace` writes a plain
+   * snapshot into a brain re-filed since under the encoded id, as the re-file wrote the row: there a plain id that
+   * holds a `/` reads as a namespaced user's (`team/ana` names user `ana` of namespace `team`). Unset, a restore writes
+   * the scope id as the snapshot holds it.
+   */
+  scopeIdForm?: 'plain' | 'encoded';
 }
 
 /** The two calls of a storage adapter, a Brain or a transaction the snapshot helpers use. */
@@ -307,7 +333,10 @@ export async function deleteTraceRows(db: Pick<SnapshotDb, 'run'>, brainId: stri
   return deleted;
 }
 
-/** Reads one row of a brain as a snapshot; `undefined` when there is no such row. */
+/**
+ * Reads one row of a brain as a snapshot, with the form the brain's scope ids hold now
+ * ({@link TraceSnapshot.scopeIdForm}); `undefined` when there is no such row.
+ */
 export async function readTraceSnapshot(db: SnapshotDb, brainId: string, traceId: string): Promise<TraceSnapshot | undefined> {
   const row = await db.get<{
     id: string; type: string; scope: string; scope_id: string | null; content: string; strength: number;
@@ -333,13 +362,16 @@ export async function readTraceSnapshot(db: SnapshotDb, brainId: string, traceId
     emotions: row.emotions,
     metadata: row.metadata,
     deleted: row.deleted === 1 ? 1 : 0,
+    scopeIdForm: (await holdsEncodedScopeIdForm(db, brainId)) ? 'encoded' : 'plain',
   };
 }
 
 /**
  * Writes a snapshot back as the row's whole state, live (`deleted = 0`). The row keeps its embedding when it holds
  * the snapshot's content (a delete taken back), so a store over the Brain loads and recalls the trace again; any other
- * row is written with no embedding, since its vector is of other text.
+ * row is written with no embedding, since its vector is of other text. The scope id is written as the snapshot holds
+ * it; `Memory.restoreTrace` first puts a snapshot read before the brain's re-file in the encoded form
+ * (`snapshotInEncodedForm` in `scopeIdForm.ts`).
  *
  * @param insertOrReplace - The dialect's `insertOrReplace` (`brain.features.dialect.insertOrReplace`).
  */

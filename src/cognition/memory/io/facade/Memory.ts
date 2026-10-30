@@ -72,10 +72,11 @@ import {
   withPersistedDecayState,
   writeTraceSnapshot,
   deleteTraceRows,
+  holdsEncodedScopeIdForm,
   type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
-import { refileBrainScopeIds } from '../../retrieval/store/scopeIdForm.js';
+import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
 import { ChunkingEngine } from '../ingestion/ChunkingEngine.js';
@@ -929,6 +930,12 @@ export class Memory {
    * its row recorded; a revert of an add calls {@link forget}. The full-text index then matches the restored words:
    * SQLite rebuilds its index, and Postgres re-indexes the restored row alone.
    *
+   * A snapshot read before the Brain was re-filed in the encoded scope-id form ({@link ensureEncodedScopeIds}) is
+   * written under the encoded id, as the re-file wrote the row: once the Brain holds the record, the plain form of an
+   * id that holds a `/` names a namespaced user (`team/ana` is user `ana` of namespace `team`), so the trace stays the
+   * plain user's. On Postgres the restore reads the record under the lock a re-file takes, so a re-file another process
+   * makes meanwhile comes before or after it.
+   *
    * @throws When the snapshot is of another trace.
    */
   async restoreTrace(traceId: string, before: TraceSnapshot): Promise<void> {
@@ -937,8 +944,14 @@ export class Memory {
       throw new Error(`Memory.restoreTrace: the snapshot of trace ${before.id} cannot restore ${traceId}`);
     }
     const { dialect } = this._brain.features;
+    const brainId = this._brain.brainId;
     await this._brain.transaction(async (trx) => {
-      await writeTraceSnapshot(trx, dialect.insertOrReplace.bind(dialect), this._brain.brainId, before);
+      let snapshot = before;
+      if (before.scopeIdForm === 'plain') {
+        if (dialect.name === 'postgres') await takeScopeIdFormLock(trx, brainId);
+        if (await holdsEncodedScopeIdForm(trx, brainId)) snapshot = snapshotInEncodedForm(before);
+      }
+      await writeTraceSnapshot(trx, dialect.insertOrReplace.bind(dialect), brainId, snapshot);
     });
     if (dialect.name === 'postgres') {
       // The index is the row's own `_tsv` column, which the upsert leaves as it was: re-index the restored row alone.

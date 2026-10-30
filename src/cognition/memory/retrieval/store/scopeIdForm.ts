@@ -19,13 +19,16 @@
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import type { Brain } from './Brain.js';
 import { fillScopeIds } from './migrations/v2-to-v3.js';
-import { parseTraceMetadata, scopeIdOfMetadata } from './tracePersistence.js';
+import {
+  ENCODED_SCOPE_ID_FORM,
+  parseTraceMetadata,
+  SCOPE_ID_FORM_KEY,
+  scopeIdOfMetadata,
+  type TraceSnapshot,
+} from './tracePersistence.js';
 
-/** The `brain_meta` key of the record. */
-export const SCOPE_ID_FORM_KEY = 'scope_id_form';
-
-/** The record's value for a Brain that holds the encoded form. */
-export const ENCODED_SCOPE_ID_FORM = 'encoded';
+/** The `brain_meta` key of the record, and the record's value for a Brain that holds the encoded form. */
+export { ENCODED_SCOPE_ID_FORM, SCOPE_ID_FORM_KEY };
 
 const RESERVED = /[/%:]/;
 
@@ -83,6 +86,28 @@ export function encodePlainScopeId(scope: string, scopeId: string): string {
   const at = scopeId.lastIndexOf('::');
   if (at < 0) return encodePlainId(scopeId);
   return `${encodePlainId(scopeId.slice(0, at))}::${encodePlainId(scopeId.slice(at + 2))}`;
+}
+
+/**
+ * A snapshot read from a Brain in the plain form (`TraceSnapshot.scopeIdForm`), as a Brain re-filed since holds its
+ * row: the scope id in the encoded form, in the snapshot's column and in its metadata's `scopeId`, as the re-file
+ * writes a row. A scope id the rule keeps stays as it is.
+ */
+export function snapshotInEncodedForm(snapshot: TraceSnapshot): TraceSnapshot {
+  const to = encodePlainScopeId(snapshot.scope, snapshot.scopeId);
+  if (to === snapshot.scopeId) return { ...snapshot, scopeIdForm: ENCODED_SCOPE_ID_FORM };
+  const metadata = parseTraceMetadata(snapshot.metadata);
+  metadata.scopeId = to;
+  return { ...snapshot, scopeId: to, metadata: JSON.stringify(metadata), scopeIdForm: ENCODED_SCOPE_ID_FORM };
+}
+
+/**
+ * Takes the brain's scope-id form lock inside a Postgres transaction, the advisory lock a re-file takes first
+ * ({@link refileBrainScopeIds}): a write that reads the record in the same transaction then sees the record of a
+ * re-file another process commits meanwhile, or the re-file sees the write. It is released at COMMIT or ROLLBACK.
+ */
+export async function takeScopeIdFormLock(trx: Pick<StorageAdapter, 'run'>, brainId: string): Promise<void> {
+  await trx.run('SELECT pg_advisory_xact_lock(hashtext($1))', [`agentos_brain_scope_id_form:${brainId}`]);
 }
 
 /** One scope id the re-file moved. */
@@ -216,10 +241,8 @@ async function refileInTransaction(
   const traces: RefiledTrace[] = [];
   let alreadyEncoded = false;
   await brain.transaction(async (trx) => {
-    if (postgres) {
-      // Released at COMMIT or ROLLBACK; the record is read after it, so a re-file another process committed is seen.
-      await trx.run('SELECT pg_advisory_xact_lock(hashtext($1))', [`agentos_brain_scope_id_form:${brain.brainId}`]);
-    }
+    // Released at COMMIT or ROLLBACK; the record is read after it, so a re-file another process committed is seen.
+    if (postgres) await takeScopeIdFormLock(trx, brain.brainId);
     const record = await trx.get<{ value: string }>(
       'SELECT value FROM brain_meta WHERE brain_id = ? AND key = ?',
       [brain.brainId, SCOPE_ID_FORM_KEY],
