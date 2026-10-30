@@ -376,4 +376,18 @@ describe('a spend budget on the GMI path', () => {
     await expect(onLegacy.session('l').send('Hi.', { budget: tiny() })).rejects.toThrow(/Token cap exceeded/);
     expect(s.seen).toHaveLength(0);
   });
+  it('a session stream takes a per-stream budget, on the GMI engine and on the legacy one', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Unused.')], whole: true });
+    const tiny = () => new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 50, unpriced: 'allow' });
+    const onGmi = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100 });
+    const onLegacy = agent({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100 });
+
+    for (const result of [onGmi.session('g').stream('Hi.', { budget: tiny() }), onLegacy.session('l').stream('Hi.', { budget: tiny() })]) {
+      const parts: Array<{ type: string; error?: unknown }> = [];
+      for await (const part of result.fullStream) parts.push(part);
+      expect(parts.at(-1)).toMatchObject({ type: 'error', error: expect.objectContaining({ message: expect.stringContaining('Token cap exceeded') }) });
+    }
+    expect(s.seen).toHaveLength(0);
+  });
 });
