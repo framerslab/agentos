@@ -706,7 +706,8 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
 
 /**
  * Step 1: the arguments' own rules (types, required fields and the strategy's names are the input schema's too, so a
- * call the schema refuses never reaches here). Counts against a host's bounds are step 3's.
+ * call the schema refuses never reaches here). Counts against a host's bounds are step 3's. A `dependsOn` cycle is
+ * refused naming a seat on it, and a chain of any length is checked without recursion.
  *
  * @returns `invalid_arguments` naming the first problem, or undefined.
  */
@@ -758,19 +759,38 @@ export function validateLaunchArgs(args: LaunchAgencyArgs): LaunchRefusal | unde
     }
     dependsOn.set(seat.role, deps);
   }
-  // A cycle: a seat that, through dependsOn, waits for itself.
+  // A cycle: a seat that, through dependsOn, waits for itself. The refusal names the seat at which the walk meets one
+  // it is still visiting, which is on the cycle. The walk keeps its own stack: the seat count is bounded after this
+  // step (maxSeats), so a chain of any length must be walked without exhausting the call stack.
   const visiting = new Set<string>();
   const done = new Set<string>();
-  const cyclic = (role: string): boolean => {
-    if (done.has(role)) return false;
-    if (visiting.has(role)) return true;
-    visiting.add(role);
-    const found = (dependsOn.get(role) ?? []).some(cyclic);
-    visiting.delete(role);
-    done.add(role);
-    return found;
+  const cycleAt = (start: string): string | undefined => {
+    if (done.has(start)) return undefined;
+    const path: Array<{ role: string; next: number }> = [{ role: start, next: 0 }];
+    visiting.add(start);
+    while (path.length > 0) {
+      const top = path[path.length - 1];
+      const deps = dependsOn.get(top.role) ?? [];
+      if (top.next < deps.length) {
+        const dep = deps[top.next];
+        top.next += 1;
+        if (visiting.has(dep)) return dep;
+        if (!done.has(dep)) {
+          visiting.add(dep);
+          path.push({ role: dep, next: 0 });
+        }
+      } else {
+        path.pop();
+        visiting.delete(top.role);
+        done.add(top.role);
+      }
+    }
+    return undefined;
   };
-  for (const role of roles) if (cyclic(role)) return invalid(`dependsOn makes a cycle through '${role}'`);
+  for (const role of roles) {
+    const at = cycleAt(role);
+    if (at !== undefined) return invalid(`dependsOn makes a cycle through '${at}'`);
+  }
 
   if (strategy === 'review-loop' && args.seats.length !== 2) return invalid('review-loop takes exactly 2 seats');
   if ((strategy === 'parallel' || strategy === 'debate') && args.seats.length < 2) return invalid(`${strategy} takes at least 2 seats`);
