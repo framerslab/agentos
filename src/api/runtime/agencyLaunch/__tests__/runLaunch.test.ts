@@ -28,16 +28,21 @@ describe('validateLaunchArgs', () => {
     expect(validateLaunchArgs(args())).toBeUndefined();
     expect(validateLaunchArgs(args({ strategy: 'review-loop', seats: [seat('writer'), seat('critic')] }))).toBeUndefined();
     expect(validateLaunchArgs(args({ strategy: 'graph', seats: [seat('a'), seat('b', { dependsOn: ['a'] })] }))).toBeUndefined();
+    expect(validateLaunchArgs(args({ strategy: 'hierarchical' }))).toBeUndefined();
+    expect(validateLaunchArgs(args({ strategy: 'parallel', seats: [seat('a'), seat('b')] }))).toBeUndefined();
+    expect(validateLaunchArgs(args({ strategy: 'debate', seats: [seat('a'), seat('b')], maxRounds: 3 }))).toBeUndefined();
     expect(validateLaunchArgs(args({ seats: [{ role: 'tutor', agentKey: 'tutor', brief: 'Check the maths.' }] as LaunchAgencyArgs['seats'] }))).toBeUndefined();
   });
 
   it('refuses each malformed argument with invalid_arguments, naming the first problem', () => {
     const cases: Array<[LaunchAgencyArgs, RegExp]> = [
       [args({ goal: '' }), /goal/],
+      [args({ goal: '   ' }), /goal/],
       [args({ goal: 'x'.repeat(8_001) }), /goal/],
       [args({ extra: true }), /unknown argument 'extra'/],
       [args({ strategy: 'panel' as never }), /strategy/],
       [args({ seats: [] }), /at least one seat/],
+      [args({ seats: ['writer'] as never }), /seat 1 must be an object/],
       [args({ seats: [seat('writer', { colour: 'blue' })] }), /unknown key 'colour'/],
       [args({ seats: [seat('9lives')] }), /role/],
       [args({ seats: [seat('r'.repeat(53))] }), /52 characters/],
@@ -46,25 +51,44 @@ describe('validateLaunchArgs', () => {
       [args({ seats: [seat('writer'), seat('writer')] }), /unique/],
       [args({ seats: [{ role: 'writer' } as never] }), /exactly one of instructions, agentKey and personaId/],
       [args({ seats: [{ role: 'w', instructions: 'x', agentKey: 'k' } as never] }), /exactly one/],
+      [args({ seats: [{ role: 'w', instructions: '   ' } as never] }), /instructions must be a non-blank string/],
       [args({ seats: [seat('writer', { instructions: 'x'.repeat(8_193) })] }), /8,192/],
       [args({ seats: [{ role: 'tutor', agentKey: 'tutor', brief: 'x'.repeat(1_001) }] as never }), /1,000/],
       [args({ seats: [seat('writer', { brief: 'Short.' })] }), /brief/],
       [args({ seats: [seat('writer', { tools: 'search' })] }), /tools/],
       [args({ seats: [seat('a', { dependsOn: ['ghost'] })] }), /dependsOn names 'ghost'/],
+      [args({ seats: [seat('a', { dependsOn: 'b' }), seat('b')] }), /dependsOn must be a list of roles/],
+      [args({ seats: [seat('a', { dependsOn: ['a'] })] }), /dependsOn names 'a', which is not another seat/],
       [args({ strategy: 'graph', seats: [seat('a', { dependsOn: ['b'] }), seat('b', { dependsOn: ['a'] })] }), /cycle/],
+      // The refusal names a seat on the cycle, not the first seat from which the walk reached it.
+      [args({ strategy: 'graph', seats: [seat('a', { dependsOn: ['b'] }), seat('b', { dependsOn: ['c'] }), seat('c', { dependsOn: ['b'] })] }), /cycle through 'b'/],
       [args({ strategy: 'review-loop', seats: [seat('a'), seat('b'), seat('c')] }), /review-loop takes exactly 2 seats/],
       [args({ strategy: 'parallel' }), /parallel takes at least 2 seats/],
       [args({ strategy: 'debate' }), /debate takes at least 2 seats/],
       [args({ deadlineMs: 999 }), /deadlineMs/],
       [args({ maxRounds: 4 }), /maxRounds/],
+      [args({ maxRounds: 0 }), /maxRounds/],
+      [args({ maxRounds: 2.5 }), /maxRounds/],
       [args({ budgetUsd: 0 }), /budgetUsd/],
       [args({ maxTokens: -1 }), /maxTokens/],
+      [args({ deadlineMs: Number.NaN }), /deadlineMs/],
+      [args({ deadlineMs: Number.POSITIVE_INFINITY }), /deadlineMs/],
+      [args({ budgetUsd: Number.NaN }), /budgetUsd/],
+      [args({ budgetUsd: Number.POSITIVE_INFINITY }), /budgetUsd/],
+      [args({ maxTokens: Number.NaN }), /maxTokens/],
+      [args({ maxTokens: Number.POSITIVE_INFINITY }), /maxTokens/],
     ];
     for (const [input, reason] of cases) {
       const refusal = validateLaunchArgs(input);
       expect(refusal?.code, String(reason)).toBe('invalid_arguments');
       expect(refusal?.reason).toMatch(reason);
     }
+  });
+
+  it('walks a dependsOn chain of any length without overflowing the stack, so the seat count is what refuses it', () => {
+    // Each seat waits for the next: the walk from the first goes the whole chain deep.
+    const seats = Array.from({ length: 50_000 }, (_, i) => seat(`s${i}`, i < 49_999 ? { dependsOn: [`s${i + 1}`] } : {}));
+    expect(validateLaunchArgs(args({ strategy: 'graph', seats }))).toBeUndefined();
   });
 });
 
@@ -90,6 +114,15 @@ describe('childBudgetCaps', () => {
     const parent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
     parent.record(undefined, 4_000, 'step');
     expect(childBudgetCaps(parent, pool(), limits, {}, 1_000)).toEqual({ maxCostUSD: 0.5, maxTotalTokens: 3_000 });
+  });
+
+  it("holds the tokens to maxLaunchTokens, whatever the arguments ask, and floors the parent's share", () => {
+    // Nothing else caps the tokens: maxLaunchTokens does, and an explicit maxTokens above it is held to it.
+    expect(childBudgetCaps(undefined, undefined, limits, {}, 1_000)).toEqual({ maxCostUSD: Number.POSITIVE_INFINITY, maxTotalTokens: 200_000 });
+    expect(childBudgetCaps(undefined, undefined, limits, { maxTokens: 500_000 }, 1_000)).toEqual({ maxCostUSD: Number.POSITIVE_INFINITY, maxTotalTokens: 200_000 });
+    // Half of an odd remainder is floored: 30,001 left, 15,000 for the child.
+    const parent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 30_001, unpriced: 'allow' });
+    expect(childBudgetCaps(parent, pool(), limits, {}, 1_000)).toEqual({ maxCostUSD: 0.5, maxTotalTokens: 15_000 });
   });
 
   it('refuses a cap that cannot cover one call, and a spent parent', () => {

@@ -36,10 +36,10 @@ import { APPROVAL_GRANTED, askApprovalGate, composeReceivedGate, type ApprovalGa
 import { runCitationVerification } from './runtime/citationVerification.js';
 import { createCompletionGateway, type CompletionAttempt, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
-import { asSpendBudget, assertCallWithinBudget, bothBudgets, promptCharsOf, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
+import { asSpendBudget, assertCallWithinBudget, bothBudgets, outputEstimateTokens, promptCharsOf, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import { adaptTools } from './runtime/toolAdapter.js';
 import { withMembers } from './runtime/withMembers.js';
-import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type AgencyLaunchFrame, type CallerTurnContext, type ToolCallHook } from './runtime/agencyLaunch/types.js';
+import { LAUNCH_AGENCY_TOOL_NAME, MIN_LAUNCH_TOKENS, resolveLaunchLimits, type AgencyLaunchFrame, type CallerTurnContext, type ToolCallHook } from './runtime/agencyLaunch/types.js';
 import { createGmiLaunchTool } from './runtime/agencyLaunch/gmiLaunchTool.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions } from './runtime/gmiPersona.js';
@@ -476,6 +476,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
     if (tools.some((tool) => tool.name === LAUNCH_AGENCY_TOOL_NAME)) {
       throw new Error(`gmi(): agencies.launch registers '${LAUNCH_AGENCY_TOOL_NAME}', and the agent's tools already hold a tool of that name.`);
     }
+    // A launch is refused budget_unavailable when its token cap cannot cover one call of the route: a maxLaunchTokens
+    // below that refuses every launch, which the host hears of now rather than at the first launch.
+    const oneCall = MIN_LAUNCH_TOKENS + outputEstimateTokens(opts.model ?? '', opts.maxTokens);
+    if (launchLimits.maxLaunchTokens < oneCall) {
+      console.warn(
+        `[agentos] gmi(): agencies.maxLaunchTokens (${launchLimits.maxLaunchTokens}) cannot cover one call of this agent's route (${oneCall}: ${MIN_LAUNCH_TOKENS} for the prompt and ${oneCall - MIN_LAUNCH_TOKENS} for the output), so every launch is refused budget_unavailable.`,
+      );
+    }
     tools.push(
       createGmiLaunchTool({
         opts,
@@ -643,8 +651,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
           });
           changed = true;
         }
-        // The tools the call offers: none on a structured send's calls, and
-        // only its names on a seat's turn.
+        // The tools the call offers: none on a structured send's calls, and on
+        // a seat's turn only the tools its tool names allow.
         const names = turn.toolNames;
         const offered = turn.structured ? [] : names ? tools.filter((tool) => names.has(tool.name)) : tools;
         // A call that offers no tool gets no chain-of-thought instruction, as
