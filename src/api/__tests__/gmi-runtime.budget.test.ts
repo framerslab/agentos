@@ -20,6 +20,21 @@ const key = () => `k-budget-${++n}`;
 /** A reply whose usage is `total` tokens. */
 const costly = (text: string, total: number) => reply.text(text, 'stub-model', { promptTokens: total - 50, completionTokens: 50, totalTokens: total });
 
+/** A promise the test opens. */
+function opening(): { promise: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+/** A tool step whose usage is `total` tokens. */
+const costlyTools = (calls: Parameters<typeof reply.tools>[0], total: number) => {
+  const step = reply.tools(calls);
+  Object.assign(step[step.length - 1], { usage: { promptTokens: total - 50, completionTokens: 50, totalTokens: total } });
+  return step;
+};
+
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
   vi.restoreAllMocks();
@@ -56,6 +71,36 @@ describe('a spend budget on the GMI path', () => {
     expect(s.seen).toHaveLength(1);
     expect(s.seen[0].options.tools).toBeUndefined();
     expect(JSON.stringify(s.seen[0].messages).length).toBeLessThan(10_000);
+  });
+
+  it('a step after its turn was stopped in a tool round is not held to the budget: nothing is sent, and the turn ends stopped', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [costlyTools([{ id: 't1', name: 'wait', args: {} }], 2_950), reply.text('Unused.')] });
+    const onLimitReached = vi.fn();
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 3_000, unpriced: 'allow', onLimitReached });
+    const started = opening();
+    const release = opening();
+    const wait = {
+      description: 'Wait.',
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        started.open();
+        await release.promise;
+        return 'done';
+      },
+    };
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, budget, tools: { wait } });
+    const session = a.session('s1');
+
+    const outcome = session.send('Go.').then(() => 'resolved', (error: unknown) => error);
+    await started.promise;
+    // close() stops the turn while its tool runs; the next step's estimate would pass what the budget has left.
+    const closing = session.close();
+    release.open();
+    expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+    await closing;
+    expect(onLimitReached).not.toHaveBeenCalled();
+    expect(s.seen).toHaveLength(1);
   });
 
   it('a fallback hop is checked with the output cap it sends', async () => {
