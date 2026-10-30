@@ -78,4 +78,37 @@ describe('LibraryIndex.search with a signal', () => {
     expect(lexicalSearch).not.toHaveBeenCalled();
     expect(embed).not.toHaveBeenCalled();
   });
+
+  it('asks the store nothing once the signal aborts while the query is embedded, even when the embedding function ignores it', async () => {
+    const store = await makeStore();
+    const query = vi.spyOn(store, 'query');
+    const controller = new AbortController();
+    // The search is cancelled while its embedding runs, and this embedding function, which takes no options, answers anyway.
+    const embed = vi.fn(async (texts: string[]) => {
+      controller.abort(new Error('closed'));
+      return texts.map(() => [1, 0, 0]);
+    });
+    const index = new LibraryIndex({ store, collection: 'c', embed });
+    await expect(index.search({ text: 'budget', scope: SCOPE, mode: 'dense', signal: controller.signal })).rejects.toThrow('closed');
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('starts no later leg of a search of several narrowings once the signal aborts during an earlier store call', async () => {
+    const controller = new AbortController();
+    // The search is cancelled while the first narrowing's dense leg is with the store.
+    const query = vi.fn(async () => {
+      controller.abort(new Error('a newer question'));
+      return { documents: [] };
+    });
+    const lexicalSearch = vi.fn(async () => ({ documents: [] }));
+    const store = { query, lexicalSearch } as unknown as IVectorStore;
+    const embed = recordingEmbed();
+    const index = new LibraryIndex({ store, collection: 'c', embed });
+    const anyOf = [{ kinds: ['session'] }, { tags: ['q3'] }];
+    await expect(index.search({ text: 'budget', scope: SCOPE, mode: 'hybrid', anyOf, signal: controller.signal })).rejects.toThrow('a newer question');
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(lexicalSearch).not.toHaveBeenCalled();
+  });
 });
