@@ -14,6 +14,11 @@ import { AudioRingBuffer } from './AudioRingBuffer.js';
 import { TranscriptDedupe } from './TranscriptDedupe.js';
 import { openScopedReconnect } from './scopedReconnect.js';
 import type { AudioFrame, IStreamingSTT, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent, TranscriptWord } from './types.js';
+import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
+import { isContentSafeTelemetryEnabled } from '../../core/logging/contentSafeTelemetry.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('reconnecting_stt');
 
 /** Options of {@link ReconnectingSTT}. */
 export interface ReconnectingSTTOptions {
@@ -210,9 +215,9 @@ export class ReconnectingSTT implements IStreamingSTT {
       session.on('warning', (warning: Error) => {
         if (ended) return;
         activity();
-        // Listening here must not silence a warning: a provider session prints one nobody listens for, so the
-        // session prints it when its own caller does not listen either.
+        // Existing subscribers own the warning event; the fallback never reads its text in safe mode.
         if (facade.listenerCount('warning') > 0) facade.emit('warning', warning);
+        else if (isContentSafeTelemetryEnabled()) console.warn();
         else console.warn(`[${this.inner.providerId}] ${warning.message}`);
       });
       session.on('error', (err: Error) => {

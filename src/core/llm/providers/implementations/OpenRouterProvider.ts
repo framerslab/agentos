@@ -29,9 +29,12 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
 import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
-import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('openrouter_provider');
 
 /**
  * OpenRouter's API base URL, which requests go to when the config names no `baseURL`. `embedText` posts OpenRouter

@@ -40,7 +40,7 @@ import type {
   GeneratedImage,
   ImageGenerationResult,
 } from '../io/media/images/IImageProvider.js';
-import { knownProviderPrefixOf, resolveModelOption, resolveMediaProvider } from './model.js';
+import { baseUrlIfSet, knownProviderPrefixOf, resolveModelOption, resolveMediaProvider } from './model.js';
 import { OPENAI_IMAGE_EDIT_MODEL } from '../io/media/images/providers/OpenAIImageProvider.js';
 import { REPLICATE_STYLE_TRANSFER_MODELS } from '../io/media/images/providers/ReplicateImageProvider.js';
 import { FAL_STYLE_TRANSFER_MODELS } from '../io/media/images/providers/FalImageProvider.js';
@@ -114,7 +114,8 @@ export interface TransferStyleOptions {
    * Base URL for the provider, instead of its default or its environment
    * variable. Like `apiKey`, it needs `provider` or a provider-prefixed `model`:
    * it is not sent to a provider chosen from the environment, with that
-   * provider's key.
+   * provider's key. An empty or whitespace-only value is unset and needs
+   * neither: the provider's variable, then its default, apply as with none.
    */
   baseUrl?: string;
   /** Usage ledger configuration. */
@@ -194,8 +195,10 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
         );
       }
       // A base URL belongs to one vendor too: with no provider named it would
-      // receive whichever provider the environment selects, with its key.
-      if (opts.baseUrl && !namedProvider) {
+      // receive whichever provider the environment selects, with its key. An
+      // empty or whitespace-only one is unset (baseUrlIfSet in model.ts) and
+      // names no endpoint, so the call runs as one with no baseUrl does.
+      if (baseUrlIfSet(opts.baseUrl) !== undefined && !namedProvider) {
         throw new Error(
           'transferStyle: a baseUrl needs `provider`, or a model with a provider prefix such as "openai:gpt-image-2.5-sunburst"; it is not sent to a provider chosen from the environment, with that provider\'s key.',
         );

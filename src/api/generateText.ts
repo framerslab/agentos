@@ -30,7 +30,7 @@ import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { lazyLogger } from './runtime/lazyLogger.js';
 import { isCallMask } from './runtime/pool/redact.js';
-import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
@@ -115,6 +115,9 @@ import type {
   CacheDiagnostics,
   AttemptOutcome,
 } from '../core/llm/providers/IProvider.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('generate_text');
 
 // Re-export multimodal types for downstream consumers
 export type { MessageContent, MessageContentPart };
@@ -2320,6 +2323,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         }
       }
 
+      // A blank baseUrl counts here and changes nothing: resolveProvider drops it, so the record is the provider's own.
       const ownCredentials =
         providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
       // An agency seat resolves strictly: no provider-less default, no reroute.
@@ -3443,6 +3447,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // never reaches it), can keep the record of the key it sends
         // (providerHealthKey), which the call below reads before it sends;
         // a failure of another key skips none of them.
+        // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
         const legProvider = fallbackEntrySentAs(fb).provider;
         const legOnSharedCredentials =
           fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;

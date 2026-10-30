@@ -36,6 +36,14 @@ describe('resolveSeatCredentials', () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     expect(resolveSeatCredentials({ provider: 'anthropic', model: 'x', inherits: false }, a)).toMatchObject({ ok: true, value: { apiKey: undefined } });
   });
+  it('URL: a whitespace-only value counts as missing, as an empty one does, at every source', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'env-openai'); vi.stubEnv('OPENAI_BASE_URL', ' \t');
+    const a = agency({ provider: 'openai', model: 'gpt-4.1', apiKey: 'agency-key', baseUrl: 'https://agency.local/v1' });
+    expect(resolveSeatCredentials({ provider: 'openai', baseUrl: '  ', inherits: true }, a)).toMatchObject({ ok: true, value: { baseUrl: 'https://agency.local/v1' } });
+    expect(resolveSeatCredentials({ provider: 'openai', inherits: true }, agency({ provider: 'openai', model: 'gpt-4.1', apiKey: 'agency-key', baseUrl: ' ' }))).toMatchObject({ ok: true, value: { baseUrl: undefined } });
+    setDefaultProvider({ provider: 'openai', baseUrl: '\n' });
+    expect(resolveSeatCredentials({ provider: 'openai', inherits: false }, a)).toMatchObject({ ok: true, value: { apiKey: 'env-openai', baseUrl: undefined } });
+  });
   it('rejects a model prefix that disagrees with an explicit provider, except under ollama', () => {
     expect(resolveSeatCredentials({ provider: 'xai', model: 'anthropic:claude', inherits: true }, agency({}))).toMatchObject({ ok: false, reason: expect.stringMatching(/names provider "anthropic"/) });
     expect(resolveSeatCredentials({ provider: 'ollama', model: 'mistral:7b', baseUrl: 'http://127.0.0.1:11434', inherits: true }, agency({}))).toMatchObject({ ok: true, value: { provider: 'ollama', model: 'mistral:7b' } });

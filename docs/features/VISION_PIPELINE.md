@@ -152,7 +152,11 @@ interface VisionPipelineConfig {
    * provider, and when the two name different providers.
    */
   cloudApiKey?: string;
-  /** Base URL for the cloud provider, such as a proxy. */
+  /**
+   * Base URL for the cloud provider, such as a proxy. Refused as cloudApiKey
+   * is. An empty or whitespace-only value is unset: never refused, and the
+   * provider's base-URL variable, then its default, apply as with none.
+   */
   cloudBaseUrl?: string;
   /**
    * Providers the cloud tier may try, in order, after cloudProvider fails
