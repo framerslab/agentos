@@ -403,4 +403,25 @@ describe('a spend budget on the GMI path', () => {
     await expect(a.generate('x', { budget: { maxCostUSD: 1, maxTotalTokens: 1_000, unpriced: 'allow' } })).rejects.toThrow(/Token cap exceeded/);
     expect(s.seen).toHaveLength(1);
   });
+  it("a tool call that fails inside the tool executor's pipeline tells the model what failed, without the calling turn's live objects", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.tools([{ id: 't1', name: 'lookup', args: {} }]), reply.text('Done.')] });
+    const budget = new SpendBudget({ maxCostUSD: 1, unpriced: 'allow' });
+    // A capability list written as one string: the executor's capability check throws outside the tool's own catches.
+    const lookup = {
+      name: 'lookup',
+      description: 'Look up.',
+      inputSchema: { type: 'object', properties: {} },
+      requiredCapabilities: 'search' as unknown as string[],
+      execute: async () => ({ success: true, output: 'found' }),
+    };
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, budget, tools: [lookup] });
+
+    await expect(a.session('s1').send('Look it up.')).resolves.toMatchObject({ text: 'Done.' });
+    const toolMessages = JSON.stringify(s.seen[1].messages.filter((message) => message.role === 'tool'));
+    // The precondition: the pipeline's failure reached the model.
+    expect(toolMessages).toContain('internal pipeline');
+    expect(toolMessages).not.toContain('callerTurn');
+    expect(toolMessages).not.toContain(budget.id);
+  });
 });
