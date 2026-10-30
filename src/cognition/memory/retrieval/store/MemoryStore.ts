@@ -2435,8 +2435,8 @@ export class MemoryStore {
    * index fails to delete from the old collection stays, with a warning; recall under the old id does not return it,
    * since this store holds the trace under the new one. Another store open on the same Brain keeps what it holds under
    * the old id until it re-files the scope itself or loads it again. A trace this store holds under the old id whose
-   * row another store or process moved to another scope or a third id, before this move or while it runs, stays as
-   * this store holds it, and is not counted.
+   * row another store or process moved to another scope or a third id, or deleted for good, before this move or while
+   * it runs, stays as this store holds it, and is not counted: a deleted trace's words go into no collection.
    *
    * A host that starts passing an organization id re-files each user's earlier traces with it once, since a learner
    * under a namespace reads `user:<namespace>/<userId>` and not the plain form filed before.
@@ -2585,7 +2585,8 @@ export class MemoryStore {
    * live trace's vector document moves into the new collection, with the vector the store holds, its row's, or a new
    * embedding; then the store's copy takes the new id, and the trace's knowledge-graph copy is recorded again under it
    * where the graph holds one under another ({@link followGraphCopy}). A trace the store no longer holds under the old
-   * id is left as it is.
+   * id is left as it is, and so is one whose Brain row is gone, deleted for good by another store or process once the
+   * re-file committed: its words go into no collection.
    *
    * @returns Whether it moved the trace.
    */
@@ -2593,14 +2594,18 @@ export class MemoryStore {
     const scope = moved.scope as MemoryScope;
     const held = this.traceCache.get(moved.id);
     if (!held || held.scope !== scope || held.scopeId !== moved.from) return false;
+    let rowEmbedding: unknown;
+    if (this.brain) {
+      const durable = await this.getDurableTraceRows([moved.id]);
+      // A trace whose row is gone was deleted for good once the re-file committed, by another store or process: none
+      // of its words go into the new collection or the graph.
+      if (durable.ok && !durable.rows.has(moved.id)) return false;
+      rowEmbedding = durable.rows.get(moved.id)?.embedding;
+    }
     const live = held.isActive && !this.tombstonedTraceIds.has(moved.id);
     const trace: MemoryTrace = { ...held, scope, scopeId: moved.to };
     let embedding: number[] | undefined;
     if (live) {
-      const rowEmbedding =
-        this.embeddingCache.has(moved.id) || !this.brain
-          ? undefined
-          : (await this.getDurableTraceRows([moved.id])).rows.get(moved.id)?.embedding;
       embedding = await this.writeMovedDocument(trace, rowEmbedding, 'ensureEncodedScopeIds');
       await this.deleteMovedDocument(
         collectionName(this.config.collectionPrefix, scope, moved.from),
@@ -2672,7 +2677,8 @@ export class MemoryStore {
    * the Brain or in this store, is left as it is. A trace this store holds under the old id whose row is filed under
    * the new id already (a move of this scope that wrote the row and stopped before the vector) moves with its vector
    * document; one whose row is filed under another scope or a third id (a move another store or process made) stays as
-   * this store holds it.
+   * this store holds it, and so does one whose row is gone, before the move or while it runs (a delete for good another
+   * store or process made): its words go into no collection.
    *
    * @returns Whether it moved the trace.
    */
@@ -2693,17 +2699,18 @@ export class MemoryStore {
           WHERE brain_id = ? AND id = ?`,
         [brain.brainId, traceId],
       );
-      if (read) {
-        const filed = read.scope === scope ? (read.scope_id ?? '') : undefined;
-        if (filed !== fromScopeId && filed !== toScopeId) return false;
-        if (filed === fromScopeId) row = read;
-      }
+      // A trace with no row was deleted for good, by this store or another writer: none of its words go into the new
+      // collection or the graph.
+      if (!read) return false;
+      const filed = read.scope === scope ? (read.scope_id ?? '') : undefined;
+      if (filed !== fromScopeId && filed !== toScopeId) return false;
+      if (filed === fromScopeId) row = read;
     }
     const cached = this.traceCache.get(traceId);
     const held = cached && cached.scope === scope && cached.scopeId === fromScopeId ? cached : undefined;
     if (!row && !held) return false;
     const live = !this.tombstonedTraceIds.has(traceId) && (read ? read.deleted !== 1 : held!.isActive);
-    // A trace this store deleted, with no row left to move, stays as it is.
+    // A deleted trace with no row left under the old id to move stays as it is.
     if (!row && !live) return false;
     const trace: MemoryTrace = { ...(held ?? this.rowToTrace(row!)), scope, scopeId: toScopeId };
     const fromCollection = collectionName(this.config.collectionPrefix, scope, fromScopeId);
@@ -2718,12 +2725,12 @@ export class MemoryStore {
         getNamespaceCoordinator(this.coordinationNamespace).refileEpoch += 1;
       } else {
         // Another writer moved the row meanwhile: to the new id, a move of this scope, which this one finishes; to
-        // another scope or a third id, a move this one leaves.
+        // another scope or a third id, a move this one leaves. A row deleted meanwhile was deleted for good.
         const moved = await brain.get<{ scope: string; scope_id: string | null }>(
           'SELECT scope, scope_id FROM memory_traces WHERE brain_id = ? AND id = ?',
           [brain.brainId, traceId],
         );
-        if (moved && (moved.scope !== scope || (moved.scope_id ?? '') !== toScopeId)) return false;
+        if (!moved || moved.scope !== scope || (moved.scope_id ?? '') !== toScopeId) return false;
       }
     }
 
