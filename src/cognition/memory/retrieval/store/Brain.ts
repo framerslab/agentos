@@ -52,6 +52,15 @@ import { retryLostCreate } from './migrations/lost-create.js';
 import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 import { keyTraceCopies } from './SqlKnowledgeGraph.js';
+import {
+  ABSENT_BRAIN,
+  ENCODED_SCOPE_ID_FORM,
+  encodePlainScopeId,
+  readBrainScopeIdForm,
+  SCOPE_ID_FORM_KEY,
+  scopeIdFormHandshake,
+} from './scopeIdForm.js';
+import { parseTraceMetadata, scopeIdOfMetadata } from './tracePersistence.js';
 
 /**
  * Derive a stable brain identifier from the database file path.
@@ -1599,6 +1608,21 @@ export class Brain {
     const source = sourceBrainId
       ? await Brain.openSqlite(sourcePath, { brainId: sourceBrainId })
       : await Brain.openSqlite(sourcePath);
+
+    // The handshake of a Brain's scope-id form (scopeIdForm.ts). A replace empties this brain first, so only its form
+    // counts: an encoded brain stays encoded (the source's plain ids are encoded as they are written), whatever rows it
+    // held before.
+    const own = await readBrainScopeIdForm(this, this.#brainId);
+    const decision = scopeIdFormHandshake(
+      this.#brainId,
+      await readBrainScopeIdForm(source, source.brainId),
+      strategy === 'replace' ? { ...ABSENT_BRAIN, encoded: own.encoded } : own,
+      { encodeOnWrite: true },
+    );
+    if (decision.action === 'refuse') {
+      await source.close();
+      throw new Error(`Brain.importFromSqlite: ${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
+    }
     const tablesImported: Record<string, number> = {};
 
     try {
@@ -1625,8 +1649,22 @@ export class Brain {
         // Always use upsert to gracefully handle the brain_meta rows seeded
         // by `_seedMeta` during the receiving Brain's initialization (which
         // would otherwise collide with the source's schema_version/created_at).
-        await this._bulkCopy(this, table, rows, this.#brainId, { upsert: true });
+        const copied =
+          table === 'memory_traces' && decision.action === 'encode'
+            ? rows.map((row) => {
+                const scopeId = encodePlainScopeId(
+                  String(row.scope),
+                  typeof row.scope_id === 'string' && row.scope_id !== '' ? row.scope_id : scopeIdOfMetadata(row.metadata),
+                );
+                const metadata = parseTraceMetadata(row.metadata as string | null);
+                if (scopeId !== '') metadata.scopeId = scopeId;
+                return { ...row, scope_id: scopeId, metadata: JSON.stringify(metadata) };
+              })
+            : rows;
+        await this._bulkCopy(this, table, copied, this.#brainId, { upsert: true });
       }
+      // A replace deleted the record with this brain's other brain_meta rows, and a plain source brings none.
+      if (decision.action === 'encode') await this.setMeta(SCOPE_ID_FORM_KEY, ENCODED_SCOPE_ID_FORM);
       // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
       if ((tablesImported['knowledge_nodes'] ?? 0) > 0) {
         await this.transaction((trx) => keyTraceCopies(trx, this.#brainId));

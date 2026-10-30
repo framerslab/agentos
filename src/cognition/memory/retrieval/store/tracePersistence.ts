@@ -94,6 +94,17 @@ export function parseTraceMetadata(raw: string | null | undefined): Record<strin
 }
 
 /**
+ * The scope id a row's metadata names: its `scopeId` when that is a string, else `''`. Text is parsed first, and text
+ * that is not a JSON object reads as naming none; an object (a JSON column a driver hands back parsed) is read as it
+ * is. What `memory_traces.scope_id` is filled with where a row holds none.
+ */
+export function scopeIdOfMetadata(metadata: unknown): string {
+  const record = typeof metadata === 'string' ? parseTraceMetadata(metadata) : metadata;
+  if (!isRecord(record)) return '';
+  return typeof record.scopeId === 'string' ? record.scopeId : '';
+}
+
+/**
  * Read the decay fields persisted under `metadata.decay`, each one only where
  * it holds a finite number, so a reader with defaults of its own fills the
  * rest (`MemoryStore` loads an absent access count as 0 and an absent

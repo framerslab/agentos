@@ -62,6 +62,16 @@ import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from '
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
+import {
+  ABSENT_BRAIN,
+  ENCODED_SCOPE_ID_FORM,
+  encodePlainScopeId,
+  readBrainScopeIdForm,
+  readScopeIdForms,
+  SCOPE_ID_FORM_KEY,
+  scopeIdFormHandshake,
+  scopeIdFormRecordSql,
+} from '../retrieval/store/scopeIdForm.js';
 
 // ---------------------------------------------------------------------------
 // Internal row types (matched to Brain DDL)
@@ -175,11 +185,36 @@ export class SqliteImporter {
           ? [`SELECT * FROM ${table} WHERE brain_id = ?`, [brainIds[0]]]
           : [`SELECT * FROM ${table}`, []];
 
+      // The source's form: encoded when every brain of the file that holds traces has the record, plain when none has.
+      const sourceForms = [...(await readScopeIdForms(sourceAdapter)).values()].filter((form) => form.rows);
+      const encodedBrains = sourceForms.filter((form) => form.encoded).length;
+      if (encodedBrains > 0 && encodedBrains < sourceForms.length) {
+        result.errors.push(`${SCOPE_ID_FORM_KEY}: the source file mixes brains with and without the encoded scope-id form.`);
+        return result;
+      }
+      const decision = scopeIdFormHandshake(
+        this.brain.brainId,
+        { ...ABSENT_BRAIN, encoded: sourceForms.length > 0 && encodedBrains === sourceForms.length, rows: sourceForms.length > 0 },
+        await readBrainScopeIdForm(this.brain, this.brain.brainId),
+        { encodeOnWrite: true },
+      );
+      if (decision.action === 'refuse') {
+        result.errors.push(`${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
+        return result;
+      }
+
       let traces = { inserted: 0, retagged: 0 };
       await this.brain.transaction(async (trx) => {
+        if (decision.action === 'record') {
+          await trx.run(scopeIdFormRecordSql(this.brain.features.dialect.insertOrReplace.bind(this.brain.features.dialect)), [
+            this.brain.brainId,
+            SCOPE_ID_FORM_KEY,
+            ENCODED_SCOPE_ID_FORM,
+          ]);
+        }
         // A trace an older release wrote holds scope_id '': filed under its scope id first, it is matched there.
         if (options?.dedup ?? true) await fillScopeIds(trx, this.brain.brainId);
-        const merged = await this._mergeTraces(sourceAdapter, read, result, trx, options);
+        const merged = await this._mergeTraces(sourceAdapter, read, result, trx, options, decision.action === 'encode');
         traces = merged;
         const nodes = await this._mergeNodes(sourceAdapter, read, result, trx, merged.unfiled);
         await this._mergeEdges(sourceAdapter, read, result, trx, nodes.skipped);
@@ -234,6 +269,8 @@ export class SqliteImporter {
    * Insert the source's traces, or merge a duplicate's tags and time into
    * the trace the brain holds.
    *
+   * @param encodePlainIds - Encode the source's plain user and persona ids as
+   *   they are written (an import into an encoded Brain).
    * @returns How many traces it inserted, how many held traces a merge gave
    *   new tags, and the ids of the source traces it did not write under their
    *   own id (merged into a trace of another id, written under a new id, or
@@ -245,6 +282,7 @@ export class SqliteImporter {
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
     options?: Pick<ImportOptions, 'dedup'>,
+    encodePlainIds = false,
   ): Promise<{ inserted: number; retagged: number; unfiled: Set<string> }> {
     let inserted = 0;
     let retagged = 0;
@@ -281,7 +319,11 @@ export class SqliteImporter {
         // The metadata names the scope id, so it is read before the dedup check. Metadata that is not a JSON object
         // (malformed text, an array, null) starts fresh: the object stored names the scope id and the import hash.
         const meta = parseTraceMetadata(row.metadata);
-        const scopeId = importedScopeId(meta, row.scope_id);
+        let scopeId = importedScopeId(meta, row.scope_id);
+        if (encodePlainIds) {
+          scopeId = encodePlainScopeId(scope, scopeId);
+          if (scopeId !== '') meta.scopeId = scopeId;
+        }
 
         if (options?.dedup ?? true) {
           const existing = await trx.get<{ id: string; created_at: number; tags: string }>(
