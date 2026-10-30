@@ -140,7 +140,7 @@ await mem.export('./notes/', { format: 'markdown' });
 await mem.export('./vault/', { format: 'obsidian' });
 ```
 
-The `sqlite` export goes through [`Brain.exportToSqlite(targetPath)`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts), from a SQLite or a Postgres brain alike: it writes this brain's rows of every portable table, read from one consistent view of the database, to a new file, and throws when the target exists. Its `brain_meta` rows carry the brain's scope-id form record where the brain has one, so an import of the file keeps the form ([A Brain's scope-id form](../MEMORY_OPERATIONS.md#a-brains-scope-id-form)).
+The `sqlite` export goes through [`Brain.exportToSqlite(targetPath)`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts), from a SQLite or a Postgres brain alike: it writes this brain's rows of every portable table to a new file, and throws when the target exists. A Postgres brain, and a SQLite file in WAL mode as `Brain.openSqlite` opens one, are read from one consistent view of the database; a brain on one connection, such as an in-memory SQLite database, is read statement by statement. Its `brain_meta` rows carry the brain's scope-id form record where the brain has one, read before the rows and again after them, and the export copies again when a re-file commits while it reads, so the file's record names the form its rows are in and an import of the file keeps the form ([A Brain's scope-id form](../MEMORY_OPERATIONS.md#a-brains-scope-id-form)).
 
 The facade has no backup schedule; a host that wants one calls `export()` from a timer:
 
