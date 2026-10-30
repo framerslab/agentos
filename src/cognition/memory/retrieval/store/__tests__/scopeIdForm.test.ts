@@ -8,6 +8,9 @@
  * the open and the knowledge graph's copies with it, and leaves no trace or document under the plain id that another
  * store, opener or process held: once the record is written, the plain id `team/ana` names user `ana` of namespace
  * `team`, and a delete of her scope through a store that has not followed the re-file leaves the plain user's traces.
+ * An import takes its source's form from the source's own record (a JSON export's `meta`, a SQLite file's
+ * `brain_meta`): a plain source is encoded as it is written into a re-filed Brain, and a source with the record goes
+ * into a plain Brain only when that Brain holds no plain id the record would read as another.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -22,6 +25,9 @@ import {
   SCOPE_ID_FORM_KEY,
 } from '../scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../SqlKnowledgeGraph.js';
+import { JsonExporter } from '../../../io/JsonExporter.js';
+import { JsonImporter } from '../../../io/JsonImporter.js';
+import { SqliteImporter } from '../../../io/SqliteImporter.js';
 import { CognitiveMemoryManager } from '../../../CognitiveMemoryManager.js';
 import { KnowledgeGraph } from '../../graph/knowledge/KnowledgeGraph.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
@@ -551,5 +557,88 @@ describe("a manager's re-file", () => {
 
     expect(await manager.getStore().getByScope('user', 'team/ana')).toEqual([]);
     expect(await textsIn(index, 'cogmem_user_team/ana')).toEqual([]);
+  });
+});
+
+describe('an import takes its source form from its record', () => {
+  const scopeIdsOf = async (brain: Brain) =>
+    (await brain.all<{ scope: string; scope_id: string }>('SELECT scope, scope_id FROM memory_traces WHERE deleted = 0 ORDER BY scope, scope_id'))
+      .map((row) => `${row.scope}:${row.scope_id}`);
+
+  async function encodedBrain(filePath: string, brainId: string): Promise<Brain> {
+    const brain = await brainAt(filePath, brainId);
+    await refileBrainScopeIds(brain);
+    return brain;
+  }
+
+  it('JSON: an export of an encoded Brain is taken into a fresh Brain with its record', async () => {
+    const source = await encodedBrain(tempFile(), 'src');
+    await plainRow(source, 't-a', 'user', 'A/42');
+    const target = await brainAt(tempFile(), 'dst');
+    const result = await new JsonImporter(target).importFromString(await new JsonExporter(source).exportToString());
+    expect(result.errors).toEqual([]);
+    expect(await scopeIdsOf(target)).toEqual(['user:A/42']);
+    expect(await target.getMeta(SCOPE_ID_FORM_KEY)).toBe('encoded');
+  });
+
+  it('JSON: an export from before the layer is encoded as it is written into a re-filed Brain', async () => {
+    const source = await brainAt(tempFile(), 'src');
+    await plainRow(source, 't-a', 'user', 'team/ana');
+    await plainRow(source, 't-p', 'persona', 'team/ana::tutor');
+    const target = await encodedBrain(tempFile(), 'dst');
+    const result = await new JsonImporter(target).importFromString(await new JsonExporter(source).exportToString());
+    expect(result.errors).toEqual([]);
+    expect(await scopeIdsOf(target)).toEqual(['persona:team%2Fana::tutor', 'user:team%2Fana']);
+    const metadata = await target.all<{ metadata: string }>('SELECT metadata FROM memory_traces');
+    expect(metadata.map((row) => JSON.parse(row.metadata).scopeId).sort()).toEqual(['team%2Fana', 'team%2Fana::tutor']);
+  });
+
+  it('JSON: an encoded export into a plain Brain holding a reserved id is refused, naming the record', async () => {
+    const source = await encodedBrain(tempFile(), 'src');
+    await plainRow(source, 't-a', 'user', 'A/42');
+    const target = await brainAt(tempFile(), 'dst');
+    await plainRow(target, 't-b', 'user', 'team/bo');
+    const result = await new JsonImporter(target).importFromString(await new JsonExporter(source).exportToString());
+    expect(result.imported).toBe(0);
+    expect(result.errors.join('\n')).toMatch(/scope_id_form/);
+    expect(await scopeIdsOf(target)).toEqual(['user:team/bo']);
+    expect(await target.getMeta(SCOPE_ID_FORM_KEY)).toBeUndefined();
+  });
+
+  it('SQLite file: a plain source is encoded as it is written into a re-filed Brain', async () => {
+    const sourcePath = tempFile();
+    const source = await brainAt(sourcePath, 'src');
+    await plainRow(source, 't-a', 'user', 'team/ana');
+    await closers.pop()!();
+    const target = await encodedBrain(tempFile(), 'dst');
+    const result = await new SqliteImporter(target).import(sourcePath);
+    expect(result.errors).toEqual([]);
+    expect(await scopeIdsOf(target)).toEqual(['user:team%2Fana']);
+  });
+
+  it('Brain.importFromSqlite: encodes a plain source into a re-filed Brain, merged or replaced, and refuses an encoded one into a plain Brain with a reserved id', async () => {
+    const plainPath = tempFile();
+    const plain = await brainAt(plainPath, 'src');
+    await plainRow(plain, 't-a', 'user', 'team/ana');
+    await closers.pop()!();
+    const encodedTarget = await encodedBrain(tempFile(), 'dst');
+    await encodedTarget.importFromSqlite(plainPath);
+    expect(await scopeIdsOf(encodedTarget)).toEqual(['user:team%2Fana']);
+
+    // A replace empties the brain, its record among its brain_meta rows, and keeps the form a layer reads.
+    const replaced = await encodedBrain(tempFile(), 'dst3');
+    await plainRow(replaced, 't-r', 'user', 'bo');
+    await replaced.importFromSqlite(plainPath, { strategy: 'replace' });
+    expect(await scopeIdsOf(replaced)).toEqual(['user:team%2Fana']);
+    expect(await replaced.getMeta(SCOPE_ID_FORM_KEY)).toBe('encoded');
+
+    const encodedPath = tempFile();
+    const encodedSource = await encodedBrain(encodedPath, 'src2');
+    await plainRow(encodedSource, 't-e', 'user', 'A/42');
+    await closers.pop()!();
+    const plainTarget = await brainAt(tempFile(), 'dst2');
+    await plainRow(plainTarget, 't-b', 'user', 'team/bo');
+    await expect(plainTarget.importFromSqlite(encodedPath)).rejects.toThrow(/scope_id_form/);
+    expect(await scopeIdsOf(plainTarget)).toEqual(['user:team/bo']);
   });
 });
