@@ -295,7 +295,8 @@ export function gmiOptionsOf(value: unknown): AgentOptions | undefined {
 /**
  * Applies the defaults of `agencies` and checks every bound, at construction (`gmi()`, `AgentOS.initialize`).
  *
- * @param options - The `agencies` option, `launch` on or off.
+ * @param options - The `agencies` option, `launch` on or off. A field set to `null` is unset, as a JSON or YAML config
+ *   writes it, and takes its default.
  * @returns The limits of every launch tree rooted at this agent or runtime.
  * @throws {RangeError} Naming the field, for a value outside its range or a `members` value that is not a gmi()
  *   handle (or one whose `learning.agentKey` names another key).
@@ -303,7 +304,8 @@ export function gmiOptionsOf(value: unknown): AgentOptions | undefined {
  */
 export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgencyLaunchOptions): LaunchLimits {
   const integer = (field: string, value: number | undefined, fallback: number, min: number, max: number): number => {
-    if (value === undefined) return fallback;
+    // null is unset, as `??` reads it for the other fields.
+    if (value === undefined || value === null) return fallback;
     if (!Number.isInteger(value) || value < min || value > max) {
       throw new RangeError(`agencies.${field} must be an integer from ${min} to ${max}, not ${String(value)}`);
     }
@@ -320,7 +322,7 @@ export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgency
   const budgetShare = number('budgetShare', share, share > 0 && share <= 1, 'above 0 and at most 1');
   const tokens = options.maxLaunchTokens ?? 200_000;
   const maxLaunchTokens = number('maxLaunchTokens', tokens, tokens >= MIN_LAUNCH_TOKENS, `at least ${MIN_LAUNCH_TOKENS}`);
-  const dollars = options.maxLaunchCostUSD;
+  const dollars = options.maxLaunchCostUSD ?? undefined;
   if (dollars !== undefined) number('maxLaunchCostUSD', dollars, dollars > 0, 'a number above 0');
   const ceiling = options.maxDeadlineMs ?? 600_000;
   const maxDeadlineMs = number('maxDeadlineMs', ceiling, ceiling >= 1_000 && ceiling <= 3_600_000, 'from 1,000 to 3,600,000 ms');
