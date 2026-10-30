@@ -17,12 +17,13 @@
  * `metadata.import_hash` or `metadata.content_hash`, is skipped, whichever
  * writer stored that trace. So is a file whose front-matter `id` names a trace
  * there whose text, without its leading and trailing whitespace, is the body:
- * that trace's own note, as `MarkdownExporter` writes it. A trace the brain
- * forgot counts as any other, so deduplication never brings it back. A trace a
- * release older than `memory_traces.scope_id` wrote holds `''` in that column
- * whatever scope id its metadata names; the import files such traces under
- * that scope id first (`fillScopeIds`), so another scope id's trace is not
- * taken for a file's duplicate.
+ * that trace's own note, as `MarkdownExporter` writes it; `ObsidianImporter`
+ * adds to that trace the tags and links its note holds that the trace lacks. A
+ * trace the brain forgot counts as any other, so deduplication never brings it
+ * back. A trace a release older than `memory_traces.scope_id` wrote holds `''`
+ * in that column whatever scope id its metadata names; the import files such
+ * traces under that scope id first (`fillScopeIds`), so another scope id's
+ * trace is not taken for a file's duplicate.
  *
  * @module memory/io/MarkdownImporter
  */
@@ -55,6 +56,19 @@ export function withLfLineBreaks(text: string): string {
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
+
+/**
+ * A trace the brain holds whose own note an import has met: the note's
+ * front-matter `id` names it, and the note holds its text.
+ */
+export interface HeldTrace {
+  /** The trace's id, as the note's front matter names it. */
+  id: string;
+  /** The trace's text, as the brain holds it. */
+  content: string;
+  /** The trace's `tags` column, a JSON array as the brain holds it. */
+  tags: string;
+}
 
 /**
  * Parsed front-matter fields extracted from a Markdown trace file.
@@ -165,6 +179,21 @@ export class MarkdownImporter {
     return withLfLineBreaks(text).trim() === withLfLineBreaks(body);
   }
 
+  /**
+   * Add to a trace what its own note holds beyond the trace, once the import
+   * has found the note to be that trace's own note; the note then counts as
+   * skipped. The base implementation adds nothing: a Markdown note holds only
+   * the trace's text. `ObsidianImporter` adds the tags of the note's tag line
+   * and the links of its **Related:** list that the trace does not hold yet.
+   *
+   * @param _trace  - The trace the note is the note of.
+   * @param _body   - The note's body, without its leading and trailing whitespace.
+   * @param _result - Mutable result accumulator.
+   */
+  protected async addNoteToHeldTrace(_trace: HeldTrace, _body: string, _result: ImportResult): Promise<void> {
+    // No-op in base class.
+  }
+
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
@@ -254,7 +283,13 @@ export class MarkdownImporter {
         [this.brain.brainId, scope, scopeId, ...duplicateTraceParams(hash, body)],
       );
 
-      if (existing || (await this._isNoteOfHeldTrace(fm, scope, scopeId, body))) {
+      if (existing) {
+        result.skipped++;
+        return;
+      }
+      const held = await this._heldTraceOfNote(fm, scope, scopeId, body);
+      if (held) {
+        await this.addNoteToHeldTrace(held, body, result);
         result.skipped++;
         return;
       }
@@ -299,29 +334,31 @@ export class MarkdownImporter {
   }
 
   /**
-   * Whether a note is the note of a trace the brain holds: its front-matter
-   * `id` names a trace of the note's scope and scope id, and the note holds
-   * that trace's text (see {@link holdsTraceText}). An export writes each
-   * trace's id, so its import into the brain it came from adds nothing,
-   * whatever whitespace surrounds a trace's text.
+   * The trace the brain holds whose own note a note is: its front-matter `id`
+   * names a trace of the note's scope and scope id, and the note holds that
+   * trace's text (see {@link holdsTraceText}). An export writes each trace's
+   * id, so its import into the brain it came from adds nothing, whatever
+   * whitespace surrounds a trace's text.
    *
    * @param fm      - The note's front matter.
    * @param scope   - The scope the note files under.
    * @param scopeId - The scope id the note files under.
    * @param body    - The note's body, without its leading and trailing whitespace.
+   * @returns The trace, or `undefined` when the note is not the note of a trace the brain holds.
    */
-  private async _isNoteOfHeldTrace(
+  private async _heldTraceOfNote(
     fm: TraceFrontmatter,
     scope: string,
     scopeId: string,
     body: string,
-  ): Promise<boolean> {
-    if (typeof fm.id !== 'string' || !fm.id) return false;
-    const named = await this.brain.get<{ content: string }>(
-      'SELECT content FROM memory_traces WHERE brain_id = ? AND id = ? AND scope = ? AND scope_id = ? LIMIT 1',
+  ): Promise<HeldTrace | undefined> {
+    if (typeof fm.id !== 'string' || !fm.id) return undefined;
+    const named = await this.brain.get<{ content: string; tags: string }>(
+      'SELECT content, tags FROM memory_traces WHERE brain_id = ? AND id = ? AND scope = ? AND scope_id = ? LIMIT 1',
       [this.brain.brainId, fm.id, scope, scopeId],
     );
-    return named ? await this.holdsTraceText(named.content, body) : false;
+    if (!named || !(await this.holdsTraceText(named.content, body))) return undefined;
+    return { id: fm.id, content: named.content, tags: named.tags };
   }
 
   private async _resolveTraceId(preferredId: string): Promise<string> {

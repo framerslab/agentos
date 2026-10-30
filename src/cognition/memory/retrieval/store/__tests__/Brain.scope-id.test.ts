@@ -13,8 +13,9 @@
  * takes it from a `scope_id` cell, and a record whose metadata is not an object is stored with metadata that names its
  * scope id; and a trace no import wrote, with the hash `remember()` stores or no hash at all, is the duplicate of a
  * record of its text in its scope id, and of its own Markdown or Obsidian note whatever whitespace surrounds its text
- * and whatever tags and links the note adds after it; a trace the brain forgot stays forgotten through an import of
- * its text. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them in production.
+ * and whatever tags and links the note adds after it, an Obsidian note adding to its trace the tags and links it holds
+ * that the trace lacks; a trace the brain forgot stays forgotten through an import of its text. Real SQLite files
+ * through `@framers/sql-storage-adapter`, as the store opens them in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
