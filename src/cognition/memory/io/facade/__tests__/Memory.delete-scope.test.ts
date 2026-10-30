@@ -275,6 +275,32 @@ describe('Memory.deleteTraces and restoreTrace', () => {
     expect(await memory.deleteScope('user', 'team/ana')).toEqual({ deleted: 0 });
     expect(await contents(brain)).toEqual(['Ana keeps bees.']);
   });
+
+  it('reads a snapshot in the form its row was read in when the Brain is re-filed between its reads', async () => {
+    const { memory, brain } = await facade();
+    const plainUser = await memory.remember('Ana keeps bees.', { scope: 'user', scopeId: 'team/ana' });
+    // The re-file commits right after the snapshot's read of the row, before anything the read does next.
+    let moved: number | undefined;
+    const db = {
+      async get<T>(sql: string, params?: unknown[]): Promise<T | null | undefined> {
+        const result = await brain.get<T>(sql, params as Parameters<Brain['get']>[1]);
+        if (moved === undefined && sql.includes('FROM memory_traces')) moved = await memory.ensureEncodedScopeIds();
+        return result;
+      },
+      run: (sql: string, params?: unknown[]) => brain.run(sql, params as Parameters<Brain['run']>[1]),
+    };
+
+    const snapshot = (await readTraceSnapshot(db, brain.brainId, plainUser.id))!;
+    expect(moved).toBe(1);
+    await brain.run(`UPDATE memory_traces SET content = 'changed' WHERE brain_id = ?`, [brain.brainId]);
+    await memory.restoreTrace(plainUser.id, snapshot);
+
+    const row = await brain.get<{ scope_id: string; metadata: string }>(
+      'SELECT scope_id, metadata FROM memory_traces WHERE brain_id = ? AND id = ?',
+      [brain.brainId, plainUser.id],
+    );
+    expect([row?.scope_id, JSON.parse(row!.metadata).scopeId]).toEqual(['team%2Fana', 'team%2Fana']);
+  });
 });
 
 describe('Memory.restoreTrace on Postgres', () => {
