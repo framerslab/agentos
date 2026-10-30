@@ -75,6 +75,7 @@ import {
   type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
+import { refileBrainScopeIds } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
 import { ChunkingEngine } from '../ingestion/ChunkingEngine.js';
@@ -949,6 +950,18 @@ export class Memory {
       return;
     }
     await this._rebuildFtsIndex();
+  }
+
+  /**
+   * Re-files this facade's Brain in the encoded form a learning layer reads, once per Brain
+   * (`refileBrainScopeIds`). The layer calls it when it is first handed the facade.
+   *
+   * @returns How many traces it moved.
+   */
+  async ensureEncodedScopeIds(): Promise<number> {
+    await this._initPromise;
+    const { moved } = await refileBrainScopeIds(this._brain);
+    return moved.reduce((sum, pair) => sum + pair.traces, 0);
   }
 
   /**

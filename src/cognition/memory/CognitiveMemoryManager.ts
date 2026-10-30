@@ -292,6 +292,15 @@ export interface ICognitiveMemoryManager {
    */
   deleteTraces?(traceIds: readonly string[]): Promise<MemoryDeletion>;
 
+  /**
+   * Re-files the Brain's plain `user` and `persona` scope ids that hold a `/`, a `%` or a `:` in the encoded form a
+   * learning layer reads, once per Brain (`MemoryStore.ensureEncodedScopeIds`). The layer calls it when it first
+   * opens the manager. Optional, so a host's own implementation keeps compiling.
+   *
+   * @returns How many traces it moved.
+   */
+  ensureEncodedScopeIds?(): Promise<number>;
+
   /** Shutdown and release resources. */
   shutdown(): Promise<void>;
 }
@@ -1615,6 +1624,11 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       beforeDelete: (found) => this.forgetTraces(found),
     });
     return this.deletionOf(deleted);
+  }
+
+  async ensureEncodedScopeIds(): Promise<number> {
+    this.ensureInitialized();
+    return this.store.ensureEncodedScopeIds();
   }
 
   /**
