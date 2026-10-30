@@ -996,10 +996,14 @@ export class ToolOrchestrator implements IToolOrchestrator {
     } catch (executorPipelineError: any) {
       const errorMsg = `Critical error within ToolExecutor's internal pipeline while processing '${toolName}'. This is not an error from the tool's execute method itself.`;
       console.error(`${logPrefix} ${errorMsg}`, executorPipelineError);
+      // The failure's details go into the tool message the model receives and into the trace, both serialised: the
+      // request's facts, without the live objects a call carries (the calling turn's budget, gate, names and hooks, its
+      // stop, the resolved tool instance).
+      const { callerTurn: _callerTurn, signal: _signal, tool: _tool, ...requestFacts } = requestDetails;
       const wrappedError = createGMIErrorFromError(
         executorPipelineError,
         GMIErrorCode.TOOL_EXECUTION_FAILED,
-        requestDetails,
+        requestFacts,
         errorMsg
       );
       return {
