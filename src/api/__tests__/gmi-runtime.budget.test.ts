@@ -189,6 +189,35 @@ describe('a spend budget on the GMI path', () => {
     expect(embedFn).not.toHaveBeenCalled();
   });
 
+  it("stream() and a session stream whose signal has already aborted start no turn: the one error part carries the signal's reason", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Unused.')] });
+    const getContext = vi.fn(async () => ({ contextText: 'Remembered.' }));
+    const onBeforeGeneration = vi.fn(async () => undefined);
+    const onLimitReached = vi.fn();
+    const a = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100,
+      memoryProvider: { getContext },
+      onBeforeGeneration,
+      budget: new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 50, unpriced: 'allow', onLimitReached }),
+    });
+    const stopped = new AbortController();
+    const reason = new Error('stopped');
+    stopped.abort(reason);
+
+    for (const result of [a.stream('Hi.', { abortSignal: stopped.signal }), a.session('s1').stream('Hi.', { abortSignal: stopped.signal })]) {
+      const parts: Array<{ type: string; error?: unknown }> = [];
+      for await (const part of result.fullStream) parts.push(part);
+      expect(parts).toEqual([{ type: 'error', error: reason }]);
+      await expect(result.text).resolves.toBe('');
+    }
+    // Nothing of a turn ran: no memory context, no hook, no budget check, no request.
+    expect(getContext).not.toHaveBeenCalled();
+    expect(onBeforeGeneration).not.toHaveBeenCalled();
+    expect(onLimitReached).not.toHaveBeenCalled();
+    expect(s.seen).toHaveLength(0);
+  });
+
   it("a budget bounds a GMI's metaprompt calls, and the turn's reply stands", async () => {
     const k = key();
     // `whole` answers a metaprompt's unstreamed request, should one be sent.
