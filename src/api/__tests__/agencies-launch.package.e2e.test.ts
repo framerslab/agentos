@@ -14,7 +14,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (import
   OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai'),
 }));
 import { AgencyConfigError, LAUNCH_AGENCY_TOOL_NAME, SpendBudget, agency, agent, gmi } from '../../index';
-import type { AgencyLaunchOptions, AgentSession, ApprovalDecision, ApprovalRequest, GenerateTextResult, ITool, LaunchAgencyResult } from '../../index';
+import type { AgencyCallbacks, AgencyLaunchOptions, AgentSession, ApprovalDecision, ApprovalRequest, GenerateTextResult, ITool, LaunchAgencyResult } from '../../index';
 // The module the package's './emergent' entry serves: the parts a host builds a composition or a workflow from.
 import { ComposableToolBuilder, CreateWorkflowTool, createStepGate } from '../../cognition/emergent/index';
 import type { StepGate } from '../../cognition/emergent/index';
@@ -109,6 +109,10 @@ const sendUntilAdmitted = async (session: AgentSession, s: ProviderScript, repli
   }
   throw new Error('no launch was admitted in 50 tries');
 };
+/** The events a host's callbacks receive, typed from the root's AgencyCallbacks. */
+type StartEvent = Parameters<NonNullable<AgencyCallbacks['agentStart']>>[0];
+type EndEvent = Parameters<NonNullable<AgencyCallbacks['agentEnd']>>[0];
+type TeamErrorEvent = Parameters<NonNullable<AgencyCallbacks['error']>>[0];
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -1214,5 +1218,268 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     expect(toolText(s2.seen[3], 's2')).toContain('search is paused');
     // Root, the seat's three steps, root.
     expect(s2.seen).toHaveLength(5);
+  });
+
+  it("a gmi() agent's callbacks see each team it launches by its name, from its goal to its answer, a team one of its seats launches through the agent's own tool included, and the root team's agencies.hitl asks once for a level-2 seat's call and reports it to them", async () => {
+    const k = key();
+    const search = vi.fn(async () => 'found');
+    const asked: Array<[string, string]> = [];
+    const agentStart = vi.fn<(e: StartEvent) => void>();
+    const agentEnd = vi.fn<(e: EndEvent) => void>();
+    const approvalRequested = vi.fn<(e: ApprovalRequest) => void>();
+    const approvalDecided = vi.fn<(e: ApprovalDecision) => void>();
+    const error = vi.fn<(e: TeamErrorEvent) => void>();
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Plan the search.', seats: [{ role: 'lead', instructions: 'Lead.', tools: ['search', LAUNCH_AGENCY_TOOL_NAME] }] }),
+        launchStep({ goal: 'Search.', seats: [{ role: 'finder', instructions: 'Find.', tools: ['search'] }] }, 'n1'),
+        reply.tools([{ id: 's1', name: 'search', args: { q: 'x' } }]),
+        reply.text('Found.'),
+        reply.text('Lead done.'),
+        reply.text('All done.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: { q: { type: 'string' } } }, execute: search } },
+      on: { agentStart, agentEnd, approvalRequested, approvalDecided, error },
+      agencies: {
+        launch: true,
+        hitl: {
+          approvals: { beforeTool: ['search'] },
+          handler: async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+            asked.push([request.action, request.agent]);
+            return { approved: true };
+          },
+        },
+      },
+    });
+
+    const result = await parent.session('p1').send('Search for x.');
+    expect(result.text).toBe('All done.');
+    const root = launchOf(result);
+    expect(root).toMatchObject({ status: 'completed', text: 'Lead done.', provenance: { depth: 1 } });
+    // Root, the lead, the finder's two steps, the lead, root: the finder was offered search and called it (the precondition).
+    expect(s.seen).toHaveLength(6);
+    expect(systemText(s.seen[2])).toContain('Find.');
+    expect(offered(s.seen[2])).toEqual(['search']);
+    // The lead's launch made the level-2 team, read from the lead's next step.
+    const nested = JSON.parse(toolText(s.seen[4], 'n1')) as LaunchAgencyResult;
+    expect(nested).toMatchObject({ status: 'completed', text: 'Found.', provenance: { depth: 2 } });
+    const outer = `launch:${root.agencyId}`;
+    const inner = `launch:${nested.agencyId}`;
+    // The level-2 seat's search was asked once, by the root team's gate, which the level-2 team passed on, and ran once.
+    expect(asked).toEqual([['search', outer]]);
+    expect(search).toHaveBeenCalledTimes(1);
+    // The agent's callbacks saw the approval, from the root team's gate.
+    expect(approvalRequested).toHaveBeenCalledTimes(1);
+    expect(approvalRequested).toHaveBeenCalledWith(expect.objectContaining({ type: 'tool', agent: outer, action: 'search' }));
+    expect(approvalDecided).toHaveBeenCalledTimes(1);
+    expect(approvalDecided).toHaveBeenCalledWith(expect.objectContaining({ approved: true }));
+    // They saw each team by its name, from its goal to its answer, the lead's team inside the root's.
+    expect(agentStart.mock.calls.map(([e]) => [e.agent, e.input])).toEqual([[outer, 'Plan the search.'], [inner, 'Search.']]);
+    expect(agentEnd.mock.calls.map(([e]) => [e.agent, e.output])).toEqual([[inner, 'Found.'], [outer, 'Lead done.']]);
+    expect(agentEnd).toHaveBeenCalledWith(expect.objectContaining({ agent: outer, durationMs: expect.any(Number) }));
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("a member that launches from its seat reports that team to its own callbacks, the launching agent's see only the team it launched, and a callback that throws or rejects fails no launch", async () => {
+    const k = key();
+    const rootSaw: string[] = [];
+    const scoutSaw: string[] = [];
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Scout it.', seats: [{ role: 'scout', agentKey: 'scout', tools: [LAUNCH_AGENCY_TOOL_NAME] }] }),
+        // The member's seat turn launches through its own launch_agency.
+        launchStep({ goal: 'Look around.', seats: [{ role: 'eye', instructions: 'Look around.' }] }, 'n1'),
+        reply.text('Seen.'),
+        reply.text('Scouted.'),
+        reply.text('Done.'),
+      ],
+    });
+    const scout = gmi({
+      ...route(k),
+      name: 'Scout',
+      instructions: 'You scout.',
+      on: {
+        agentStart: (e: StartEvent) => scoutSaw.push(`start ${e.agent} ${e.input}`),
+        agentEnd: (e: EndEvent) => scoutSaw.push(`end ${e.agent} ${e.output}`),
+      },
+      agencies: { launch: true },
+    });
+    // The launching agent's callbacks record the event, then throw or reject.
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      on: {
+        agentStart: (e: StartEvent) => {
+          rootSaw.push(`start ${e.agent} ${e.input}`);
+          throw new Error('the host callback broke');
+        },
+        agentEnd: async (e: EndEvent) => {
+          rootSaw.push(`end ${e.agent} ${e.output}`);
+          throw new Error('the host callback broke');
+        },
+      },
+      agencies: { launch: true, maxDepth: 2, members: { scout } },
+    });
+
+    const result = await parent.session('p1').send('Scout it.');
+    // The callbacks that threw and rejected failed nothing: the launch completed and the parent's turn went on.
+    expect(result.text).toBe('Done.');
+    const root = launchOf(result);
+    expect(root).toMatchObject({ status: 'completed', text: 'Scouted.' });
+    expect(root.seats).toEqual([expect.objectContaining({ role: 'scout', form: 'persistent', member: 'scout', status: 'completed' })]);
+    // Root, the member's two steps around the eye's one call, root.
+    expect(s.seen).toHaveLength(5);
+    expect(systemText(s.seen[1])).toContain('You scout.');
+    const nested = JSON.parse(toolText(s.seen[3], 'n1')) as LaunchAgencyResult;
+    expect(nested).toMatchObject({ status: 'completed', text: 'Seen.', provenance: { depth: 2, parentSessionId: `seat:${root.agencyId}:scout` } });
+    // Each agent's callbacks saw the team its own tool launched, and only that team.
+    expect(rootSaw).toEqual([`start launch:${root.agencyId} Scout it.`, `end launch:${root.agencyId} Scouted.`]);
+    expect(scoutSaw).toEqual([`start launch:${nested.agencyId} Look around.`, `end launch:${nested.agencyId} Seen.`]);
+  });
+
+  it("a team whose agencies.hitl handler fails is reported to the agent's error callback by its name and never ends, and the launch returns failed with no word of the handler's message", async () => {
+    const k = key();
+    const search = vi.fn(async () => 'found');
+    const thrown = new Error('approver offline');
+    const agentStart = vi.fn<(e: StartEvent) => void>();
+    const agentEnd = vi.fn<(e: EndEvent) => void>();
+    const approvalRequested = vi.fn<(e: ApprovalRequest) => void>();
+    const approvalDecided = vi.fn<(e: ApprovalDecision) => void>();
+    const error = vi.fn<(e: TeamErrorEvent) => void>();
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Look it up.', seats: [{ role: 'finder', instructions: 'Find it.', tools: ['search'] }] }),
+        reply.tools([{ id: 's1', name: 'search', args: { q: 'x' } }]),
+        reply.text('No search.'),
+        reply.text('Handled.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: { q: { type: 'string' } } }, execute: search } },
+      on: { agentStart, agentEnd, approvalRequested, approvalDecided, error },
+      agencies: {
+        launch: true,
+        hitl: {
+          approvals: { beforeTool: ['search'] },
+          handler: async (): Promise<ApprovalDecision> => {
+            throw thrown;
+          },
+        },
+      },
+    });
+
+    const result = await parent.session('p1').send('Find x.');
+    // The parent's turn went on past the failed team.
+    expect(result.text).toBe('Handled.');
+    const out = launchOf(result);
+    expect(out.status).toBe('failed');
+    expect(out.reason ?? '').not.toContain('approver offline');
+    const team = `launch:${out.agencyId}`;
+    // Root, the seat's two steps, root. The seat's call was refused: the seat's model is told only that the handler failed.
+    expect(s.seen).toHaveLength(4);
+    expect(search).not.toHaveBeenCalled();
+    expect(toolText(s.seen[2], 's1')).toContain('the approval handler failed');
+    expect(toolText(s.seen[2], 's1')).not.toContain('approver offline');
+    expect(JSON.stringify(s.seen[3].messages)).not.toContain('approver offline');
+    // The agent's callbacks: the team started and asked; its handler's error went to error once, under the team's name;
+    // no decision came and the team never ended.
+    expect(agentStart.mock.calls.map(([e]) => [e.agent, e.input])).toEqual([[team, 'Look it up.']]);
+    expect(approvalRequested).toHaveBeenCalledTimes(1);
+    expect(approvalRequested).toHaveBeenCalledWith(expect.objectContaining({ agent: team, action: 'search' }));
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0][0]).toMatchObject({ agent: team });
+    expect(error.mock.calls[0][0].error).toBe(thrown);
+    expect(approvalDecided).not.toHaveBeenCalled();
+    expect(agentEnd).not.toHaveBeenCalled();
+  });
+
+  it("a stop that comes during the tool round of a turn's last step ends the send as it does in an earlier step: with the caller's reason, or the abort error after close()", async () => {
+    const state = (signal: AbortSignal | undefined) => (signal?.aborted === true ? 'stopped' : 'live');
+    // maxSteps 1: the tool round is the turn's last step, and no model call follows it to read the stop.
+    const k = key();
+    const caller = new AbortController();
+    const stopped = new Error('the caller stopped the turn');
+    const signals: string[] = [];
+    const s = script('openai', k, { replies: [reply.tools([{ id: 'w1', name: 'write', args: {} }]), reply.text('Still here.')] });
+    const writer = gmi({
+      ...route(k),
+      instructions: 'Write.',
+      maxSteps: 1,
+      tools: {
+        write: hostTool('write', async (_args, context) => {
+          signals.push(`start ${state(context.signal)}`);
+          caller.abort(stopped);
+          signals.push(`after the stop ${state(context.signal)}`);
+          return { success: true, output: 'written' };
+        }),
+      },
+    });
+    const session = writer.session('w1');
+
+    await expect(session.send('Go.', { abortSignal: caller.signal })).rejects.toBe(stopped);
+    // The running call finished with the stop on its signal; no request came after it.
+    expect(signals).toEqual(['start live', 'after the stop stopped']);
+    expect(s.seen).toHaveLength(1);
+    // The step is kept, marked partial, and the session stays open.
+    expect(lastKept(session)).toMatchObject({ role: 'tool', tool_call_id: 'w1', partial: true });
+    await expect(session.send('Again.')).resolves.toMatchObject({ text: 'Still here.' });
+
+    // The session's close(), which the running tool calls.
+    const k2 = key();
+    let closing!: AgentSession;
+    let closed: Promise<void> | undefined;
+    const s2 = script('openai', k2, { replies: [reply.tools([{ id: 'w1', name: 'write', args: {} }])] });
+    const closer = gmi({
+      ...route(k2),
+      instructions: 'Write.',
+      maxSteps: 1,
+      tools: {
+        write: hostTool('write', async () => {
+          closed = closing.close();
+          return { success: true, output: 'written' };
+        }),
+      },
+    });
+    closing = closer.session('c1');
+
+    await expect(closing.send('Go.')).rejects.toMatchObject({ code: 'LLM_PROVIDER_ERROR', message: expect.stringMatching(/abort/i) });
+    await expect(closed).resolves.toBeUndefined();
+    expect(s2.seen).toHaveLength(1);
+  });
+
+  it('a member that sets no maxTokens is floored on the controls.maxTotalTokens its calls are sent with, and one that sets both on its maxTokens', async () => {
+    const k = key();
+    const kl = key();
+    const kb = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([
+          { id: 'c1', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Answer.', maxTokens: 7_000, seats: [{ role: 'answerer', agentKey: 'long' }] } },
+          { id: 'c2', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Answer.', maxTokens: 5_000, seats: [{ role: 'answerer', agentKey: 'both' }] } },
+        ]),
+        reply.text('Done.'),
+      ],
+    });
+    const longCalls = script('openai', kl, { replies: [reply.text('A long answer.')] });
+    const bothCalls = script('openai', kb, { replies: [reply.text('Short answer.')] });
+    const long = gmi({ ...route(kl), instructions: 'Answer at length.', controls: { maxTotalTokens: 8_000 } });
+    const both = gmi({ ...route(kb), instructions: 'Answer briefly.', maxTokens: 1_000, controls: { maxTotalTokens: 8_000 } });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', maxTokens: 1_000, agencies: { launch: true, members: { long, both } } });
+
+    const result = await parent.session('p1').send('Go.');
+    // 7,000 cannot cover one call of the member whose calls are sent with its 8,000: refused before its seat is built.
+    expect(refusalOf(result, 0)).toBe("budget_unavailable: the launch's token cap, 7000, cannot cover one call (10000: 2000 for the prompt and 8000 for the output)");
+    expect(longCalls.seen).toHaveLength(0);
+    // A member that sets maxTokens sends its calls with it, and is floored on it: 5,000 covers 2,000 and its 1,000.
+    expect(launchOf(result, 1)).toMatchObject({ status: 'completed', text: 'Short answer.' });
+    expect(bothCalls.seen.map((call) => call.options.maxTokens)).toEqual([1_000]);
+    expect(s.seen).toHaveLength(2);
+    expect(result.text).toBe('Done.');
   });
 });
