@@ -112,7 +112,8 @@ export interface DecayResult {
  *
  * Follows the same `ensureSchema()` pattern as {@link EmergentToolRegistry}:
  * a cached promise guards against concurrent DDL execution, and all DML
- * methods await schema readiness before proceeding.
+ * methods await schema readiness before proceeding. A failed schema step is
+ * not cached: the next call runs it again.
  *
  * @example
  * ```ts
@@ -142,9 +143,17 @@ export class PersonalityMutationStore {
 
   /**
    * Cached schema initialization promise.
-   * Ensures DDL runs exactly once, even under concurrent access.
+   * Ensures DDL runs exactly once, even under concurrent access; cleared
+   * when it fails, so the next call runs the DDL again.
    */
   private schemaReady: Promise<void> | null = null;
+
+  /**
+   * Cached promise of the guard table's `owner_token` step
+   * ({@link addOwnerTokenColumn}), which {@link decayForAgent} alone awaits;
+   * cleared when it fails, so the next decay runs the step again.
+   */
+  private guardSchemaReady: Promise<void> | null = null;
 
   /**
    * Create a new PersonalityMutationStore.
@@ -165,10 +174,10 @@ export class PersonalityMutationStore {
    *
    * Creates the `personality_mutations` table and its agent/trait index, and
    * the `personality_decay_cycles` guard table of {@link decayForAgent}, if
-   * they don't already exist, then adds the guard table's `owner_token`
-   * column to a table an earlier release made without it. `owner_token`
-   * holds the token of the call that applied a cycle and `applied_at` the
-   * time it did, in milliseconds. Every statement runs on SQLite and on
+   * they don't already exist. `owner_token` holds the token of the call that
+   * applied a cycle and `applied_at` the time it did, in milliseconds; a
+   * guard table an earlier release made without `owner_token` gains it in
+   * {@link ensureGuardSchema}. Every statement runs on SQLite and on
    * PostgreSQL. Uses the adapter's `exec()` method when available (for
    * multi-statement DDL), falling back to individual `run()` calls for
    * adapters that don't support it.
@@ -177,7 +186,7 @@ export class PersonalityMutationStore {
    */
   private async ensureSchema(): Promise<void> {
     if (!this.schemaReady) {
-      this.schemaReady = (async () => {
+      const ready = (async () => {
         const ddl = `
           CREATE TABLE IF NOT EXISTS personality_mutations (
             id TEXT PRIMARY KEY,
@@ -209,10 +218,34 @@ export class PersonalityMutationStore {
             await this.db.run(stmt);
           }
         }
-        await this.addOwnerTokenColumn();
       })();
+      this.schemaReady = ready;
+      // A failed attempt is not kept: every call after it would fail with it.
+      ready.catch(() => {
+        if (this.schemaReady === ready) this.schemaReady = null;
+      });
     }
     return this.schemaReady;
+  }
+
+  /**
+   * The guard table's `owner_token` step, run once by {@link decayForAgent}
+   * before its transaction. Recording and loading mutations never wait on
+   * it, so a failed `ALTER` fails that decay alone (adapt_personality logs a
+   * failed decay and records the change), and the next decay runs the step
+   * again.
+   *
+   * @returns A promise that resolves when the guard table has `owner_token`.
+   */
+  private async ensureGuardSchema(): Promise<void> {
+    if (!this.guardSchemaReady) {
+      const ready = this.addOwnerTokenColumn();
+      this.guardSchemaReady = ready;
+      ready.catch(() => {
+        if (this.guardSchemaReady === ready) this.guardSchemaReady = null;
+      });
+    }
+    return this.guardSchemaReady;
   }
 
   /** True when the guard table has the `owner_token` column. */
@@ -413,7 +446,10 @@ export class PersonalityMutationStore {
    * and decays only when the row holds its own token; every other call for
    * that cycle returns `skipped`. A token belongs to one call, so two calls
    * in one millisecond never both own a cycle. A guard row an earlier release
-   * wrote has no `owner_token`, so its cycle stays applied.
+   * wrote has no `owner_token`, so its cycle stays applied. Before its
+   * transaction the first call adds `owner_token` to a guard table an earlier
+   * release made without it; when that `ALTER` fails, the call fails and the
+   * next one runs it again.
    *
    * @param agentId - The agent whose mutations decay (other agents' rows
    *   are untouched — the class defect in `decayAll`).
@@ -438,6 +474,7 @@ export class PersonalityMutationStore {
         'PersonalityMutationStore.decayForAgent requires a transaction-capable storage adapter',
       );
     }
+    await this.ensureGuardSchema();
     return this.db.transaction(async (tx) => {
       // Conflict-safe guard INSERT FIRST (no check-then-insert window): a
       // concurrent same-cycle caller's insert does nothing, and ownership is
