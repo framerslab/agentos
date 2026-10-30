@@ -55,6 +55,7 @@ import {
   type PersistedDecayState,
 } from './tracePersistence.js';
 import { fillScopeIds } from './migrations/v2-to-v3.js';
+import { refileBrainScopeIds } from './scopeIdForm.js';
 
 // ---------------------------------------------------------------------------
 // Embedding guard (CR4)
@@ -2218,6 +2219,27 @@ export class MemoryStore {
     );
     if (!stillFiled) this.knownScopes.delete(scopeKey(scope, fromScopeId));
     return moved;
+  }
+
+  /**
+   * Puts this store's Brain in the encoded form a learning layer reads the first time a layer opens it
+   * ({@link refileBrainScopeIds}), then moves the traces this store has cached under a moved id
+   * ({@link refileScope}, whose Brain update finds the rows moved already). A Brain that holds the record is left
+   * as it is; a store with no Brain has nothing to re-file.
+   *
+   * @returns How many Brain rows the re-file moved.
+   */
+  async ensureEncodedScopeIds(): Promise<number> {
+    this.beginOperation();
+    const brain = this.brain;
+    if (!brain) return 0;
+    const { moved } = await refileBrainScopeIds(brain);
+    let traces = 0;
+    for (const pair of moved) {
+      await this.refileScope(pair.scope as MemoryScope, pair.from, pair.to);
+      traces += pair.traces;
+    }
+    return traces;
   }
 
   /**
