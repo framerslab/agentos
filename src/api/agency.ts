@@ -1399,6 +1399,7 @@ interface AgencySession {
  *   for their synthesis step.
  * - `runtime`, the agency's and each config seat's (the panel's chair included), is `'legacy'` or `'gmi'` when
  *   set; `null` is unset.
+ * - Each seat's `dependsOn`, config or pre-built, is a list of seat names when set; `null` is unset.
  *
  * An agency with a pool or a panel is checked further by `validatePoolOptions`.
  *
@@ -1415,6 +1416,7 @@ function validateAgencyOptions(opts: AgencyOptions): void {
     throw new AgencyConfigError(`agency(): runtime must be 'legacy' or 'gmi', not ${printable(opts.runtime)}`);
   }
   // A seat's own runtime wins over the agency's, so a typo in it would run the seat on the legacy engine as silently.
+  // A `dependsOn` that is not a list of seat names would be dropped, and the seat would run without its dependencies.
   const seats: Array<[string, unknown]> = [
     ...Object.entries(opts.agents),
     ...(opts.chair !== undefined && opts.chair !== false ? [['chair', opts.chair] as [string, unknown]] : []),
@@ -1424,6 +1426,10 @@ function validateAgencyOptions(opts: AgencyOptions): void {
     const runtime = isAgent(seat as Agent) ? undefined : (seat as { runtime?: unknown }).runtime;
     if (!isRuntimeName(runtime)) {
       throw new AgencyConfigError(`agency(): seat '${name}': runtime must be 'legacy' or 'gmi', not ${printable(runtime)}`);
+    }
+    const dependsOn = (seat as { dependsOn?: unknown }).dependsOn;
+    if (dependsOn != null && !(Array.isArray(dependsOn) && dependsOn.every((dep) => typeof dep === 'string'))) {
+      throw new AgencyConfigError(`agency(): seat '${name}': dependsOn must be a list of seat names, not ${printable(dependsOn)}`);
     }
   }
 

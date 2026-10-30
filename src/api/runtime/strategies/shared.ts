@@ -60,26 +60,28 @@ export function isAgent(value: BaseAgentConfig | Agent): value is Agent {
 /**
  * What the strategies read about a seat besides running it: a config's `instructions` (as its description) and
  * `dependsOn`, or a pre-built member's own `description` and `dependsOn` when they are a non-blank string and an
- * array of strings ({@link SeatMetadata}).
+ * array of strings ({@link SeatMetadata}). `agency()` refuses a seat whose `dependsOn` is set and is not an array of
+ * strings, so none reaches a strategy.
  *
  * @param member - A seat config or a pre-built `Agent`.
- * @returns The seat's description and dependencies, each left out when the seat has none.
+ * @returns The seat's description and dependencies, each left out when the seat has none: an empty `dependsOn` lists
+ *   no seat and is left out.
  */
 export function seatMetadataOf(member: BaseAgentConfig | Agent): SeatMetadata {
+  const listed = (value: unknown): string[] | undefined =>
+    Array.isArray(value) && value.length > 0 && value.every((name) => typeof name === 'string') ? (value as string[]) : undefined;
   if (!isAgent(member)) {
     const config = member as BaseAgentConfig;
+    const dependsOn = listed(config.dependsOn);
     return {
       ...(config.instructions ? { description: config.instructions } : {}),
-      ...(Array.isArray(config.dependsOn) ? { dependsOn: config.dependsOn } : {}),
+      ...(dependsOn ? { dependsOn } : {}),
     };
   }
   const carried = member as Agent & { description?: unknown; dependsOn?: unknown };
   const description =
     typeof carried.description === 'string' && carried.description.trim() ? carried.description : undefined;
-  const dependsOn =
-    Array.isArray(carried.dependsOn) && carried.dependsOn.every((name) => typeof name === 'string')
-      ? (carried.dependsOn as string[])
-      : undefined;
+  const dependsOn = listed(carried.dependsOn);
   return { ...(description ? { description } : {}), ...(dependsOn ? { dependsOn } : {}) };
 }
 
