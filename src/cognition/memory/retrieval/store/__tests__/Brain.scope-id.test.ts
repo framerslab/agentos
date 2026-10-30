@@ -986,6 +986,80 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       expect(await textsOf(brain)).toEqual(['Bare words.\n\nA second line.', 'Kept words.\n\nA second line.']);
     });
 
+    it("Obsidian: a tag or a link added in Obsidian to a trace's own note is added to that trace, and an unedited note adds none", async () => {
+      const brain = await written('obsidian-note-edits', 'A%2F42', 'Met Ada at the library.', 'Bare words.');
+      await brain.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, scope_id)
+         VALUES (?, 't-plain', 'episodic', 'user', 'Plain words.', 1, ?, 'A%2F42')`,
+        [brain.brainId, JSON.stringify({ scopeId: 'A%2F42' })],
+      );
+      const met = (await brain.get<{ id: string }>('SELECT id FROM memory_traces WHERE brain_id = ? AND content = ?', [
+        brain.brainId,
+        'Met Ada at the library.',
+      ]))!.id;
+      const setTags = (id: string, tags: string[]) =>
+        brain.run('UPDATE memory_traces SET tags = ? WHERE brain_id = ? AND id = ?', [JSON.stringify(tags), brain.brainId, id]);
+      await setTags(met, ['people']);
+      await setTags('t-bare', ['beta gamma']);
+      await brain.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at)
+         VALUES (?, 't-bare', 'trace', 'trace:t-bare', 1), (?, 'kn-target', 'concept', 'Target note', 1)`,
+        [brain.brainId, brain.brainId],
+      );
+      await brain.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+         VALUES (?, 'ke-target', 't-bare', 'kn-target', 'related_to', 1)`,
+        [brain.brainId],
+      );
+      const dir = path.join(path.dirname(tempFile()), 'vault');
+      expect((await new ObsidianExporter(brain).export(dir)).refused).toEqual([]);
+      // In Obsidian a tag and a link are added to one note and a tag line to another; the note of t-bare is left as it is.
+      const edit = async (id: string, from: string, to: string) => {
+        const file = path.join(dir, 'user', 'episodic', `${id}.md`);
+        const note = await fsp.readFile(file, 'utf8');
+        expect(note).toContain(from);
+        await fsp.writeFile(file, note.replace(from, to), 'utf8');
+      };
+      await edit(met, 'Met Ada at the library.\n\n#people\n', 'Met Ada at the library.\n\n#people #work\n\n**Related:**\n- [[Grace]]\n');
+      await edit('t-plain', 'Plain words.\n', 'Plain words.\n\n#added\n');
+
+      expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 3, errors: [] });
+      const tagsOf = async (id: string) =>
+        JSON.parse(
+          (await brain.get<{ tags: string }>('SELECT tags FROM memory_traces WHERE brain_id = ? AND id = ?', [brain.brainId, id]))!
+            .tags,
+        );
+      expect(await tagsOf(met)).toEqual(['people', 'work']);
+      expect(await tagsOf('t-plain')).toEqual(['added']);
+      // The tag line writes the tag `beta gamma` as `#beta-gamma`: that is the tag the trace holds.
+      expect(await tagsOf('t-bare')).toEqual(['beta gamma']);
+      const linksOf = async (id: string) =>
+        (
+          await brain.all<{ label: string }>(
+            `SELECT kn.label FROM knowledge_edges ke
+               JOIN knowledge_nodes src ON src.brain_id = ke.brain_id AND src.id = ke.source_id
+               JOIN knowledge_nodes kn ON kn.brain_id = ke.brain_id AND kn.id = ke.target_id
+              WHERE ke.brain_id = ? AND COALESCE(json_extract(src.properties, '$.trace_id'), ke.source_id) = ?`,
+            [brain.brainId, id],
+          )
+        ).map((row) => row.label);
+      expect(await linksOf(met)).toEqual(['Grace']);
+      expect(await linksOf('t-bare')).toEqual(['Target note']);
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Met Ada at the library.', 'Plain words.']);
+      // A tag added to a trace is in the full-text index.
+      const indexed = await brain.get<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_traces_fts'",
+      );
+      if (indexed) {
+        const found = await brain.all<{ id: string }>(
+          `SELECT mt.id AS id FROM memory_traces_fts JOIN memory_traces mt ON mt.rowid = memory_traces_fts.rowid
+            WHERE memory_traces_fts MATCH ? AND mt.deleted = 0`,
+          ['"work"'],
+        );
+        expect(found.map((row) => row.id)).toEqual([met]);
+      }
+    });
+
     it("Obsidian: a note that holds more than its trace's text, tags and links is imported", async () => {
       const brain = await written('obsidian-edited', 'A%2F42', 'Kept words.', 'Bare words.');
       const dir = path.join(path.dirname(tempFile()), 'vault');
