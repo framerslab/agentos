@@ -233,6 +233,35 @@ describe("a GMI's tool call carries its turn's stop", () => {
     expect(output.error?.message).toMatch(/aborted/);
   });
 
+  it('a turn that stops during the tool calls of its last step ends with the stop\'s abort, though no model call follows', async () => {
+    const run = async (toolFailureMode: 'fail_open' | 'fail_closed', succeeds: boolean) => {
+      const caller = new AbortController();
+      // The turn stops while the call runs, as a session's close() or a launch's deadline would.
+      const slow = hostTool('slow', false, async () => {
+        caller.abort();
+        return succeeds ? { success: true, output: { text: 'done' } } : { success: false, error: 'cut short: the work was stopped' };
+      });
+      const host = await makeForgeHost({ tools: [slow] });
+      const { gmi } = await createScriptedGmi({
+        // One step: the model's tool call is the turn's last, so no model call comes after its round.
+        provider: stoppingProvider([toolCallReply([{ id: 'call_s', name: 'slow', args: {} }])]),
+        maxToolLoopIterations: 1,
+        config: { toolOrchestrator: host.orchestrator },
+      });
+      return runTurn(gmi, textTurn('t1', 'Run it.', { options: { abortSignal: caller.signal }, executionPolicy: { toolFailureMode } }));
+    };
+
+    for (const [mode, succeeds] of [['fail_closed', false], ['fail_open', false], ['fail_open', true]] as const) {
+      const { chunks, output } = await run(mode, succeeds);
+      // The call ran and its result is recorded (the precondition).
+      expect(toolResults(chunks).map((result) => [result.name, result.isError])).toEqual([['slow', !succeeds]]);
+      // The turn ends as a stopped turn whose next model call reads the stop does: with the stop's abort, never as a
+      // turn that ran out of steps, and never with the call's failure as a tool error.
+      expect(output.error?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
+      expect(output.error?.message).toMatch(/aborted/);
+    }
+  });
+
   it('a composed tool running when its turn stops finishes the step in flight, and its later steps are refused', async () => {
     const ran: string[] = [];
     const caller = new AbortController();
