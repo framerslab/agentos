@@ -314,4 +314,28 @@ describe('agency() seats served by GMIs', () => {
     expect(starts[1].input).toContain('[a]:\nFact A.');
     expect(lastUserText(s.seen[1])).toContain('[a]:\nFact A.');
   });
+
+  it('sessionSeat reads its own five options alone: an options object that carries other keys changes nothing', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.tools([{ id: 't1', name: 'search', args: {} }]), reply.text('Lesson.'), reply.text('Still open.')] });
+    const search = vi.fn(async () => 'found');
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], instructions: 'Tutor.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: {} }, execute: search } },
+    });
+    const mine = member.session('mine');
+    const hook = vi.fn(async () => null);
+    // An object, not a literal: the type check reads no key beyond SessionSeatOptions' own, as a host's shared object or
+    // a JavaScript caller passes them.
+    const o = { brief: 'Tutor the team.', ownsMember: true, userId: 'u1', toolHooks: [hook] };
+    const team = agency({ provider: 'openai', model: 'stub-model', apiKey: k, strategy: 'sequential', agents: { tutor: sessionSeat(member, o) } });
+    await team.generate('Teach.');
+    // No carried hook ran, the tool did, and the seat's requests name no user.
+    expect(hook).not.toHaveBeenCalled();
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(s.seen[0].options.userId).toBeUndefined();
+    // agency().close() leaves the member serving the session it opened before.
+    await team.close();
+    await expect(mine.send('Hello?')).resolves.toMatchObject({ text: 'Still open.' });
+  });
 });
