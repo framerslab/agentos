@@ -90,6 +90,29 @@ describe('maybeCompactConversationMessages', () => {
     expect(boundary).toBe(4);
   });
 
+  it('ends the summary on a message whose millisecond only an error shares, since the next turn never sends an error', async () => {
+    // The error shares r2's millisecond. The next turn's history leaves errors out, so a boundary at r2 hides nothing
+    // it would send; ending before r2 instead would leave less than the minimum and no summary at all.
+    const messages = [
+      message('q1', 1),
+      message('r1', 2, { role: MessageRole.ASSISTANT }),
+      message('q2', 3),
+      message('r2', 4, { role: MessageRole.ASSISTANT }),
+      message('failed', 4, { role: MessageRole.ERROR }),
+      message('q3', 5),
+      message('r3', 6, { role: MessageRole.ASSISTANT }),
+    ];
+
+    const { summarized, boundary } = await compact(messages, {
+      headMessagesToKeep: 2,
+      tailMessagesToKeep: 2,
+      minMessagesToSummarize: 2,
+    });
+
+    expect(summarized).toEqual([['q2', 'r2']]);
+    expect(boundary).toBe(4);
+  });
+
   it('summarizes a tool round past the limit for one pass when the limit cuts into it and leaving it out leaves too little', async () => {
     // The limit of two would end the summary after the first result. Ending it before the round leaves nothing, so the
     // round goes into the summary whole, and the next pass starts after it instead of at the same round again.
