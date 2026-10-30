@@ -301,6 +301,45 @@ describe('a spend budget on the GMI path', () => {
     expect(unstreamed()).toEqual([]);
   });
 
+  it('a queued metaprompt spends inside the budget of the turn that queued it, whenever it runs', async () => {
+    const k = key();
+    const firstMetaprompt = opening();
+    const thirdTurn = opening();
+    const s = script('openai', k, {
+      whole: true,
+      // In the order the requests arrive: turn 0, its metaprompt (held), turn 1, turn 2 (held), turn 1's metaprompt.
+      replies: [
+        reply.text('One.'),
+        reply.hold(reply.text('{"mood":"calm"}'), firstMetaprompt.promise),
+        reply.text('Two.'),
+        reply.hold([], thirdTurn.promise, reply.text('Three.')),
+        reply.text('{"mood":"calm"}'),
+      ],
+    });
+    // Sentiment tracking with the confusion metaprompt alone: each confused turn raises one.
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Help.', maxTokens: 100, cognition: { sentiment: true, metaprompts: ['confusion_clarification'] }, memory: false });
+    const session = a.session('s1');
+    const unstreamed = () => s.seen.filter((call) => !call.streamed);
+
+    await session.send('I am confused and this is unclear. Please explain it.');
+    await vi.waitFor(() => expect(unstreamed()).toHaveLength(1));
+    const first = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
+    await session.send('I am still confused. Explain it again.', { budget: first });
+    expect(first.tokensUsed()).toBe(15);
+    // Turn 1's metaprompt waits behind turn 0's; turn 2 starts and holds its request.
+    const third = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
+    const thirdSent = session.send('Go on.', { budget: third });
+    await vi.waitFor(() => expect(s.seen).toHaveLength(4));
+    firstMetaprompt.open();
+    // Turn 1's metaprompt runs while turn 2 runs, and its 15 tokens go to turn 1's budget.
+    await vi.waitFor(() => expect(unstreamed()).toHaveLength(2));
+    await vi.waitFor(() => expect(first.tokensUsed()).toBe(30));
+    expect(third.tokensUsed()).toBe(0);
+    thirdTurn.open();
+    await expect(thirdSent).resolves.toMatchObject({ text: 'Three.' });
+    await session.close();
+  });
+
   it('a session send takes a per-send budget, on the GMI engine and on the legacy one', async () => {
     const k = key();
     const s = script('openai', k, { replies: [reply.text('Unused.')], whole: true });

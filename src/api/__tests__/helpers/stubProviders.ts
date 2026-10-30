@@ -41,8 +41,9 @@ export interface ProviderScript {
   aborts: number;
   /**
    * True to answer `generateCompletion` as well, which agent()'s legacy path
-   * calls: the next reply's chunks folded into one response. Unset, it throws,
-   * because the GMI path streams.
+   * and a GMI's metaprompts call: the next reply's chunks folded into one
+   * response, a held reply's once its gate opens. Unset, it throws, because the
+   * GMI path streams.
    */
   whole?: boolean;
 }
@@ -219,10 +220,13 @@ export function stubProviderClass(providerId: string) {
       const next = s.replies.shift();
       if (!next) throw new Error(`${providerId}: unexpected model call`);
       if (next instanceof Error) throw next;
+      // A held reply (see `reply.hold`) is answered once its gate opens, with what it holds back.
+      const held = (next as { hold?: Hold }).hold;
+      if (held) await held.gate;
       // The streamed reply as one response: its last choice and its last usage.
       let choice: unknown;
       let usage: unknown;
-      for (const chunk of next) {
+      for (const chunk of held ? [...next, ...held.after] : next) {
         if (chunk instanceof Error) throw chunk;
         const choices = chunk.choices as unknown[] | undefined;
         if (choices?.length) choice = choices[0];
