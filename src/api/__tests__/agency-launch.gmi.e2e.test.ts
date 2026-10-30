@@ -992,4 +992,54 @@ describe('launch_agency on gmi()', () => {
     expect(agentStart.mock.calls.map(([e]) => [e.agent, e.input])).toEqual([[`launch:${out.agencyId}`, 'Plan the search.'], [nested, 'Search.']]);
     expect(agentEnd.mock.calls.map(([e]) => [e.agent, e.output])).toEqual([[nested, 'Found.'], [`launch:${out.agencyId}`, 'Lead done.']]);
   });
+
+  it("the parent's tool hook governs every seat, a member's included, and a temporary seat takes its generation hooks and request timeout", async () => {
+    const k = key();
+    const memberSend = vi.fn(async () => 'sent');
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Email the team.', seats: [{ role: 'mailer', agentKey: 'mailer', tools: ['send_email'] }, { role: 'writer', instructions: 'Write the note.' }] }),
+        reply.tools([{ id: 'e1', name: 'send_email', args: { to: 'team' } }]),
+        reply.text('Mail held.'),
+        reply.text('Note written.'),
+        reply.text('Done.'),
+      ],
+    });
+    const emailTool = (execute: () => Promise<string>) => ({ description: 'Sends an email.', parameters: { type: 'object', properties: { to: { type: 'string' } } }, execute });
+    const mailer = gmi({
+      ...route(k), name: 'Mailer', instructions: 'You send mail.',
+      tools: { send_email: emailTool(memberSend) },
+      // The member's own hook allows every call.
+      onBeforeToolExecution: async (info) => info,
+    });
+    const parent = gmi({
+      ...route(k), instructions: 'Coordinate.',
+      tools: { send_email: emailTool(async () => 'parent sent') },
+      // The parent's hook skips every email, its seats' included.
+      onBeforeToolExecution: async (info) => (info.name === 'send_email' ? null : info),
+      onBeforeGeneration: async (context) => ({ ...context, messages: [...context.messages, { role: 'system', content: 'Policy: no customer names.' }] }),
+      onAfterGeneration: async (step) => ({ ...step, text: step.text.replace('Note', 'Memo') }),
+      controls: { maxDurationMs: 45_000 },
+      agencies: { launch: true, members: { mailer } },
+    });
+
+    const result = await parent.session('p1').send('Send it.');
+    const out = launchOf(result);
+    expect(out.status).toBe('completed');
+    expect(result.text).toBe('Done.');
+    // Root, the member's two steps, the writer, root.
+    expect(s.seen).toHaveLength(5);
+    // The member's send_email was offered and called (the precondition), and the parent's hook skipped it.
+    expect(offered(s.seen[1])).toEqual(['send_email']);
+    expect(JSON.stringify(s.seen[2].messages)).toContain('Skipped by onBeforeToolExecution hook');
+    expect(memberSend).not.toHaveBeenCalled();
+    // The temporary seat's request carries the parent's onBeforeGeneration rewrite.
+    expect(systemText(s.seen[3])).toContain('Write the note.');
+    expect(systemText(s.seen[3])).toContain('Policy: no customer names.');
+    // Its answer, the team's, carries the parent's onAfterGeneration rewrite.
+    expect(out.text).toBe('Memo written.');
+    // It is sent with the parent's request timeout, as the parent's own calls are.
+    expect(s.seen[0].options.requestTimeout).toBe(45_000);
+    expect(s.seen[3].options.requestTimeout).toBe(45_000);
+  });
 });
