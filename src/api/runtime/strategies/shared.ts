@@ -356,7 +356,7 @@ export async function nestedStreamUnanswered(
  * merged additively: agency tools serve as a base layer and agent tools
  * override on name collision. This lets an agency provide a shared tool
  * set while individual agents can override or extend it.
- * The agency's `runtime` becomes the seat's when the seat names none.
+ * The agency's `runtime` becomes the seat's when the seat names none (`null` names none at either level).
  *
  * @param agentConfig - Per-agent configuration (takes precedence).
  * @param agencyConfig - Agency-level fallback values (base layer).
@@ -399,8 +399,8 @@ export function mergeDefaults(
   const seatRouted = routedProviderOf({ provider: used.provider, model: used.model });
   const agencyRouted = routedProviderOf(agencyConfig);
   const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
-  // The agency's runtime is the default engine of a config seat; the seat's own wins.
-  const runtime = (agentConfig as AgencySeatConfig).runtime ?? agencyConfig.runtime;
+  // The agency's runtime is the default engine of a config seat; the seat's own wins. `null` is unset at both levels.
+  const runtime = (agentConfig as AgencySeatConfig).runtime ?? agencyConfig.runtime ?? undefined;
   const agencyBaseUrl = otherVendor ? undefined : agencyConfig.baseUrl;
   // A seat's empty or whitespace-only baseUrl is unset, as every call reads
   // one (baseUrlIfSet in model.ts): the seat takes the agency's URL as a seat

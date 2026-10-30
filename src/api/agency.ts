@@ -1397,7 +1397,8 @@ interface AgencySession {
  * - `strategy: 'panel'` cannot be combined with `adaptive: true`.
  * - `parallel` and `debate` strategies require an agency-level `model` or `provider`
  *   for their synthesis step.
- * - `runtime`, when set, is `'legacy'` or `'gmi'`.
+ * - `runtime`, the agency's and each config seat's (the panel's chair included), is `'legacy'` or `'gmi'` when
+ *   set; `null` is unset.
  *
  * An agency with a pool or a panel is checked further by `validatePoolOptions`.
  *
@@ -1410,8 +1411,20 @@ function validateAgencyOptions(opts: AgencyOptions): void {
   }
 
   // `runtime` is the config seats' default engine; anything else would reach agent() and be ignored there.
-  if (opts.runtime !== undefined && opts.runtime !== 'legacy' && opts.runtime !== 'gmi') {
-    throw new AgencyConfigError(`agency(): runtime must be 'legacy' or 'gmi', not ${JSON.stringify(opts.runtime)}`);
+  if (!isRuntimeName(opts.runtime)) {
+    throw new AgencyConfigError(`agency(): runtime must be 'legacy' or 'gmi', not ${printable(opts.runtime)}`);
+  }
+  // A seat's own runtime wins over the agency's, so a typo in it would run the seat on the legacy engine as silently.
+  const seats: Array<[string, unknown]> = [
+    ...Object.entries(opts.agents),
+    ...(opts.chair !== undefined && opts.chair !== false ? [['chair', opts.chair] as [string, unknown]] : []),
+  ];
+  for (const [name, seat] of seats) {
+    if (seat === null || typeof seat !== 'object') continue;
+    const runtime = isAgent(seat as Agent) ? undefined : (seat as { runtime?: unknown }).runtime;
+    if (!isRuntimeName(runtime)) {
+      throw new AgencyConfigError(`agency(): seat '${name}': runtime must be 'legacy' or 'gmi', not ${printable(runtime)}`);
+    }
   }
 
   if (opts.emergent?.enabled && opts.strategy !== 'hierarchical' && !opts.adaptive) {
@@ -1453,6 +1466,33 @@ function validateAgencyOptions(opts: AgencyOptions): void {
     throw new AgencyConfigError(
       'Debate strategy requires an agency-level model or provider for synthesis',
     );
+  }
+}
+
+/** Whether `value` is unset (`undefined` or `null`), `'legacy'` or `'gmi'`. */
+function isRuntimeName(value: unknown): boolean {
+  return value == null || value === 'legacy' || value === 'gmi';
+}
+
+/**
+ * A value as a configuration error names it: JSON where JSON can print it, else its own text. Never throws, so a value
+ * JSON cannot print (a BigInt, a circular object) still reaches the caller in an `AgencyConfigError`.
+ */
+function printable(value: unknown): string {
+  if (typeof value === 'bigint') return `${value}n`;
+  if (typeof value === 'function') return 'a function';
+  if (typeof value !== 'symbol') {
+    try {
+      const json = JSON.stringify(value);
+      if (json !== undefined) return json;
+    } catch {
+      // Below: the value's own text.
+    }
+  }
+  try {
+    return String(value);
+  } catch {
+    return Object.prototype.toString.call(value);
   }
 }
 

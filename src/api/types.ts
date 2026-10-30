@@ -1763,7 +1763,9 @@ export interface AgencySeatConfig extends BaseAgentConfig {
   /**
    * Which engine serves the seat. `'legacy'` (the default) calls the model through
    * generateText and streamText; `'gmi'` serves each of the seat's calls with a
-   * Generalized Mind Instance (docs/GMI.md, "GMIs from agent()").
+   * Generalized Mind Instance (docs/GMI.md, "GMIs from agent()"). `agency()` throws
+   * `AgencyConfigError`, naming the seat, for any other value; `null` is unset, so the
+   * agency's `runtime` applies.
    */
   runtime?: 'legacy' | 'gmi';
   /**
@@ -1884,6 +1886,7 @@ export interface AgencyOptions extends BaseAgentConfig {
    * generateText and streamText, `'gmi'` serves each of the seat's calls with a Generalized Mind Instance
    * (docs/GMI.md, "GMIs from agent()"). A seat's own `runtime` wins. Pre-built seats keep the engine they were
    * built with, and the hierarchical manager and the parallel and debate synthesizers stay on the legacy engine.
+   * Any other value throws `AgencyConfigError`, here and on a seat; `null` is unset at both levels.
    * The agency itself takes no `cognition`: a strategy runs a config seat through its `generate()` or `stream()`,
    * which run the `'light'` profile; seat a persistent GMI with `sessionSeat()` to run its own profile.
    */
