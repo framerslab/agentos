@@ -554,7 +554,7 @@ async function tracesHoldReservedScopeIds(db: ScopeIdFormReader, brainId: string
 async function copiesHoldReservedScopeIds(db: ScopeIdFormReader, brainId: string): Promise<boolean> {
   let afterId: string | null = null;
   for (;;) {
-    const rows = await db.all<{ id: string; properties: unknown }>(
+    const rows: Array<{ id: string; properties: unknown }> = await db.all<{ id: string; properties: unknown }>(
       `SELECT id, properties FROM knowledge_nodes
         WHERE brain_id = ? AND type = 'memory' AND properties LIKE ? AND id ${afterId === null ? '>=' : '>'} ?
         ORDER BY id LIMIT ${PAGE}`,
