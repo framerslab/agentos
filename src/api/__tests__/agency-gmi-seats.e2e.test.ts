@@ -396,6 +396,10 @@ describe('agency() seats served by GMIs', () => {
     });
     expect(() => sessionSeat(member, { brief: 'x'.repeat(1_001) })).toThrow(TypeError);
     expect(() => sessionSeat(member, { brief: 'x'.repeat(1_000) })).not.toThrow();
+    // A brief that is not text, and dependencies that are not a list of seat names (one name, which a spread reads as its letters).
+    expect(() => sessionSeat(member, { brief: 7 as never })).toThrow(TypeError);
+    expect(() => sessionSeat(member, { dependsOn: 'ab' as never })).toThrow(TypeError);
+    expect(() => sessionSeat(member, { dependsOn: ['a', 1] as never })).toThrow(TypeError);
     expect(() => sessionSeat(member, { tools: ['forge_tool'] })).toThrow("'forge_tool' is a self-modification tool");
     expect(() => sessionSeat(member, { tools: ['launch_agency'] })).toThrow("'launch_agency' runs in a seat only when a launch gives it");
 
