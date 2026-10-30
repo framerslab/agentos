@@ -463,6 +463,8 @@ The `PromptEngine` measures the prompt against the model's context window (`opti
 
 The GMI's `ConversationHistoryManager` keeps a window of messages (20 by default) and nothing else; the persona fields `overflowStrategy` and `summarizationTriggerTokens` are not read.
 
+The conversation the full runtime records ([`ConversationContext`](https://github.com/framerslab/agentos/blob/master/src/core/conversation/ConversationContext.ts)) keeps `maxHistoryLengthMessages` messages (100 by default): past that it drops the oldest messages after the first `messagesToKeepVerbatimHead`, or summarizes them when `enableAutomaticSummarization` is on, and `getHistory(limit)` returns the newest `limit`. None of these cuts splits a tool round: a round the kept messages reach into is kept whole, past the limit.
+
 ### Built-in Metaprompt Handlers
 
 MetapromptExecutor includes pre-built handlers for common situations:

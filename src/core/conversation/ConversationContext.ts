@@ -11,6 +11,7 @@
  */
 
 import { ConversationMessage, MessageRole, createConversationMessage, MessageMetadata } from './ConversationMessage';
+import { toolRoundBounds, type ToolRoundBounds } from './toolRounds';
 import { IUtilityAI, SummarizationOptions } from '../../cognition/nlp/ai_utilities/IUtilityAI';
 import { uuidv4 } from '../utils/uuid.js';
 import { GMIError, GMIErrorCode } from '../utils/errors.js'; // Corrected path
@@ -24,13 +25,45 @@ const MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT = 5; // Don't try to summarize too 
 const DEFAULT_SUMMARIZATION_OPTIONS: SummarizationOptions = { desiredLength: 'medium', method: 'abstractive_llm' };
 
 /**
+ * Where to cut `messages` to keep their first `headCount` and their last `tailCount` messages. Providers refuse a tool
+ * call without its result and a tool result without its call, so neither cut falls inside a tool round (an assistant
+ * message that names tool calls, the tool messages that answer them and anything between, as `toolRoundBounds` finds
+ * them): a round the head reaches into is kept whole in the head, and a round the tail reaches into is kept whole in
+ * the tail. When that keeps more than `headCount` or `tailCount` messages, the round is kept whole anyway, as the
+ * prompt engine's token trim (`PromptEngine.truncateMessages`) keeps a round it cannot drop.
+ *
+ * @param messages - The messages, oldest first.
+ * @param headCount - How many of the first messages to keep.
+ * @param tailCount - How many of the last messages to keep.
+ * @param rounds - The tool rounds of `messages`, when the caller has them.
+ * @returns `headEnd`, the index after the kept head, and `tailStart`, the index of the kept tail's first message, never
+ * before `headEnd`. The cut leaves out the messages between them, none when the two are equal.
+ */
+function cutsKeepingToolRounds(
+  messages: ReadonlyArray<ConversationMessage>,
+  headCount: number,
+  tailCount: number,
+  rounds?: ToolRoundBounds,
+): { headEnd: number; tailStart: number } {
+  const head = Math.min(Math.floor(Math.max(0, headCount)), messages.length);
+  const tail = Math.min(Math.floor(Math.max(0, tailCount)), messages.length);
+  if (head + tail >= messages.length) {
+    return { headEnd: messages.length, tailStart: messages.length };
+  }
+  const bounds = rounds ?? toolRoundBounds(messages);
+  const headEnd = head > 0 ? bounds.end[head - 1] + 1 : 0;
+  const tailStart = tail > 0 ? bounds.start[messages.length - tail] : messages.length;
+  return { headEnd, tailStart: Math.max(headEnd, tailStart) };
+}
+
+/**
  * Configuration for the ConversationContext, defining its behavior and limits.
  * @interface ConversationContextConfig
- * @property {number} [maxHistoryLengthMessages=100] - Maximum number of messages to retain in the history.
+ * @property {number} [maxHistoryLengthMessages=100] - The number of messages the history keeps: past it, the oldest messages after the first `messagesToKeepVerbatimHead` are dropped, or summarized with `enableAutomaticSummarization`. A tool round the kept messages reach into is kept whole, past this number when it has to be.
  * @property {boolean} [enableAutomaticSummarization=false] - If true, attempts to summarize older parts of the conversation when history exceeds limits. Requires `utilityAI`.
- * @property {number} [messagesToKeepVerbatimTail=10] - Number of most recent messages to always keep verbatim (not summarized).
- * @property {number} [messagesToKeepVerbatimHead=2] - Number of earliest messages (e.g., system prompts, initial user query) to always keep verbatim.
- * @property {number} [summarizationChunkSize=20] - Number of messages to group for a single summarization pass.
+ * @property {number} [messagesToKeepVerbatimTail=10] - Number of most recent messages to always keep verbatim (not summarized), more when the oldest of them is part of a tool round.
+ * @property {number} [messagesToKeepVerbatimHead=2] - Number of earliest messages (e.g., system prompts, initial user query) to always keep verbatim, more when the last of them is part of a tool round.
+ * @property {number} [summarizationChunkSize=20] - Number of messages to group for a single summarization pass, more when the last of them is part of a tool round: the round is summarized whole.
  * @property {SummarizationOptions} [summarizationOptions] - Default options for the summarization process.
  * @property {IUtilityAI} [utilityAI] - Optional. An instance of `IUtilityAI` used for summarization and other NLP tasks.
  * @property {string} [defaultLanguage='en-US'] - Default language (BCP-47) for context-sensitive operations if not otherwise specified.
@@ -204,9 +237,16 @@ export class ConversationContext {
    * Retrieves a portion of the conversation history, optionally limited and filtered.
    * Returns readonly copies of the messages to prevent external modification.
    *
+   * With `limit`, the newest `limit` messages. Without it, the messages a trim to `maxHistoryLengthMessages` keeps:
+   * the first `messagesToKeepVerbatimHead` and the newest after them, `maxHistoryLengthMessages` in all. Providers
+   * refuse a tool call without its result and a tool result without its call, so neither cut falls inside a tool round
+   * (an assistant message that names tool calls, the tool messages that answer them and anything between): a round the
+   * returned messages reach into is returned whole, past the limit when it has to be, as the prompt engine's token
+   * trim keeps a round it cannot drop.
+   *
    * @public
-   * @param {number} [limit] - Optional. The maximum number of recent messages to return. Defaults to `config.maxHistoryLengthMessages`.
-   * @param {MessageRole[]} [excludeRoles] - Optional. An array of message roles to exclude from the returned history.
+   * @param {number} [limit] - Optional. The number of recent messages to return, more when the oldest of them is part of a tool round. Without it, the messages a trim to `config.maxHistoryLengthMessages` keeps.
+   * @param {MessageRole[]} [excludeRoles] - Optional. An array of message roles to exclude from the returned history. The other messages are the ones counted.
    * @returns {ReadonlyArray<Readonly<ConversationMessage>>} A readonly array of readonly message objects.
    */
   public getHistory(limit?: number, excludeRoles?: MessageRole[]): ReadonlyArray<Readonly<ConversationMessage>> {
@@ -216,11 +256,21 @@ export class ConversationContext {
       const rolesToExclude = new Set(excludeRoles);
       effectiveMessages = effectiveMessages.filter(msg => !rolesToExclude.has(msg.role));
     }
-    const actualLimit = limit !== undefined && limit > 0 ? limit : this.config.maxHistoryLengthMessages;
-    
+    let returned = effectiveMessages;
+    if (limit !== undefined && limit > 0) {
+      // the newest `limit` messages, from the first message of a tool round they reach into
+      const count = Math.floor(limit);
+      if (count > 0 && count < effectiveMessages.length) {
+        returned = effectiveMessages.slice(toolRoundBounds(effectiveMessages).start[effectiveMessages.length - count]);
+      }
+    } else if (this.config.maxHistoryLengthMessages > 0) {
+      const { headEnd, tailStart } = this.trimCuts(effectiveMessages, this.config.maxHistoryLengthMessages);
+      if (headEnd < tailStart) returned = [...effectiveMessages.slice(0, headEnd), ...effectiveMessages.slice(tailStart)];
+    }
+
     // Ensure both array and its elements are treated as readonly
     return Object.freeze(
-        effectiveMessages.slice(-actualLimit).map(m => Object.freeze({ ...m }) as Readonly<ConversationMessage>)
+        returned.map(m => Object.freeze({ ...m }) as Readonly<ConversationMessage>)
     ) as ReadonlyArray<Readonly<ConversationMessage>>;
   }
 
@@ -379,6 +429,12 @@ export class ConversationContext {
    * it attempts to summarize older messages. Otherwise, it falls back to simple truncation.
    * This method is called asynchronously after each new message is added.
    *
+   * A summary replaces a chunk of the messages between the first `messagesToKeepVerbatimHead` and the newest
+   * `messagesToKeepVerbatimTail`. None of the three ends inside a tool round: a round the head or the tail reaches into
+   * stays whole there, and a round the chunk reaches into is summarized whole, past `summarizationChunkSize`. The
+   * summary takes the chunk's place, so a message recorded while the summary is made stays after it, and the summary of
+   * a history cleared meanwhile is dropped.
+   *
    * @private
    * @async
    * @returns {Promise<void>}
@@ -400,24 +456,35 @@ export class ConversationContext {
           return; // Exit after simple truncation
         }
         
-        // Ensure there's a middle section to process
-        const middleSectionStartIndex = headCount;
-        const middleSectionEndIndex = this.messages.length - tailCount;
+        // Ensure there's a middle section to process. It starts after the kept head and ends before the kept tail, each
+        // moved to keep a tool round whole.
+        const messages = this.messages;
+        const rounds = toolRoundBounds(messages);
+        const { headEnd: middleSectionStartIndex, tailStart: middleSectionEndIndex } = cutsKeepingToolRounds(messages, headCount, tailCount, rounds);
         if (middleSectionStartIndex >= middleSectionEndIndex) {
              this.truncateHistorySimple(this.config.maxHistoryLengthMessages); // Not enough messages for a middle section
              return;
         }
 
-        const middleSection = this.messages.slice(middleSectionStartIndex, middleSectionEndIndex);
+        const middleSectionLength = middleSectionEndIndex - middleSectionStartIndex;
 
-        if (middleSection.length >= this.config.summarizationChunkSize && middleSection.length >= MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT) {
-          const messagesToSummarize = middleSection.slice(0, this.config.summarizationChunkSize);
+        if (middleSectionLength >= this.config.summarizationChunkSize && middleSectionLength >= MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT) {
+          // The chunk ends where its last message's tool round ends. No round crosses the middle section's end, so the
+          // chunk stays inside the middle section.
+          let chunkEndIndex = middleSectionStartIndex + Math.max(0, this.config.summarizationChunkSize);
+          if (chunkEndIndex > middleSectionStartIndex) chunkEndIndex = rounds.end[chunkEndIndex - 1] + 1;
+          const messagesToSummarize = messages.slice(middleSectionStartIndex, chunkEndIndex);
           const textToSummarize = messagesToSummarize
             .map(m => `${m.name || m.role}: ${typeof m.content === 'string' ? m.content : (m.tool_calls ? '[Tool Call Invoked]' : '[Structured Content]')}`)
             .join('\n\n');
 
           const summaryContent = await this.utilityAI.summarize(textToSummarize, this.config.summarizationOptions);
-          
+
+          // A history cleared while the summary was made no longer holds the messages it summarizes.
+          if (this.messages !== messages) {
+            return;
+          }
+
           const summaryMessageOptions: Partial<Omit<ConversationMessage, "id" | "timestamp" | "role" | "content">> = {
             // timestamp is removed from options, createConversationMessage will set it.
             originalMessagesSummarizedCount: messagesToSummarize.length,
@@ -433,16 +500,15 @@ export class ConversationContext {
 
           const summaryMessage = createConversationMessage(MessageRole.SUMMARY, summaryContent, summaryMessageOptions);
 
-          const headMessages = this.messages.slice(0, headCount);
-          const tailMessages = this.messages.slice(this.messages.length - tailCount);
-          const remainingMiddleAfterSummarizedChunk = middleSection.slice(this.config.summarizationChunkSize);
-          
-          this.messages = [...headMessages, summaryMessage, ...remainingMiddleAfterSummarizedChunk, ...tailMessages];
+          // The summary takes the chunk's place. While it was made the history could only grow, so the messages after
+          // the chunk, with any recorded meanwhile, stay as they are.
+          this.messages = [...messages.slice(0, middleSectionStartIndex), summaryMessage, ...messages.slice(chunkEndIndex)];
           console.log(`ConversationContext (ID: ${this.sessionId}): History summarized. New length: ${this.messages.length}.`);
 
           if (this.messages.length > this.config.maxHistoryLengthMessages) {
+            const remainingMiddleLength = middleSectionEndIndex - chunkEndIndex;
             // If still too long, recursively call or truncate if no more summarization is effective
-            if(remainingMiddleAfterSummarizedChunk.length >= MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT && remainingMiddleAfterSummarizedChunk.length >= this.config.summarizationChunkSize) {
+            if(remainingMiddleLength >= MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT && remainingMiddleLength >= this.config.summarizationChunkSize) {
                  await this.manageHistoryLength(); // Recursive call with safeguard
             } else {
                  this.truncateHistorySimple(this.config.maxHistoryLengthMessages);
@@ -463,31 +529,38 @@ export class ConversationContext {
   }
 
   /**
-   * Performs simple truncation of message history, primarily from the middle,
-   * preserving a configured number of head and tail messages.
+   * Where a trim to `targetMessageCount` messages cuts `messages`: it keeps the first `messagesToKeepVerbatimHead` (at
+   * most `targetMessageCount`) and the newest that fill the rest, and neither cut falls inside a tool round.
    *
    * @private
-   * @param {number} targetMessageCount - The desired maximum number of messages after truncation.
+   */
+  private trimCuts(messages: ReadonlyArray<ConversationMessage>, targetMessageCount: number): { headEnd: number; tailStart: number } {
+    const headCount = Math.max(0, Math.min(this.config.messagesToKeepVerbatimHead, targetMessageCount));
+    return cutsKeepingToolRounds(messages, headCount, Math.max(0, targetMessageCount - headCount));
+  }
+
+  /**
+   * Performs simple truncation of message history from the middle: it keeps the first `messagesToKeepVerbatimHead`
+   * messages (at most `targetMessageCount`) and the newest that fill the rest of `targetMessageCount`.
+   *
+   * Providers refuse a tool call without its result and a tool result without its call, so neither cut falls inside a
+   * tool round (an assistant message that names tool calls, the tool messages that answer them and anything between):
+   * a round the kept head or the kept newest messages reach into is kept whole. When keeping it whole passes
+   * `targetMessageCount`, the round is kept whole anyway and the history holds more messages, as the prompt engine's
+   * token trim (`PromptEngine.truncateMessages`) keeps a round it cannot drop. A round in the head stays; a round the
+   * newest messages reach into is left out whole by a later trim, once newer messages fill the rest.
+   *
+   * @private
+   * @param {number} targetMessageCount - The number of messages to keep, passed when a tool round stays whole.
    */
   private truncateHistorySimple(targetMessageCount: number): void {
     if (this.messages.length <= targetMessageCount) {
       return;
     }
 
-    const headCount = Math.max(0, Math.min(this.config.messagesToKeepVerbatimHead, targetMessageCount));
-    // Calculate how many tail messages can be kept to reach the targetMessageCount
-    const tailMessagesToKeepCount = Math.max(0, targetMessageCount - headCount);
-    
-    if (this.messages.length > headCount + tailMessagesToKeepCount) { // Check if truncation is actually needed
-        const headMessages = this.messages.slice(0, headCount);
-        const tailMessages = tailMessagesToKeepCount > 0 ? this.messages.slice(-tailMessagesToKeepCount) : [];
-        this.messages = [...headMessages, ...tailMessages];
-    }
-    // If targetMessageCount is very small, this might result in fewer messages than targetMessageCount if headCount itself exceeds it.
-    // Or if headCount + tailMessagesToKeepCount > this.messages.length (shouldn't happen if initial check passes).
-    // The logic prioritizes keeping head messages if targetCount is less than headCount.
-    if (this.messages.length > targetMessageCount) { // Final trim if somehow still over
-        this.messages.splice(targetMessageCount);
+    const { headEnd, tailStart } = this.trimCuts(this.messages, targetMessageCount);
+    if (headEnd < tailStart) {
+      this.messages = [...this.messages.slice(0, headEnd), ...this.messages.slice(tailStart)];
     }
 
     console.log(`ConversationContext (ID: ${this.sessionId}): History truncated simply. New length: ${this.messages.length}. Target: ${targetMessageCount}.`);
