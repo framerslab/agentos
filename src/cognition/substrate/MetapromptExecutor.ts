@@ -534,7 +534,8 @@ export class MetapromptExecutor {
   /**
    * Executes one batch of metaprompts in parallel using `Promise.allSettled`.
    *
-   * A failed metaprompt is recorded as an ERROR trace entry and does not stop
+   * A failed metaprompt is recorded as an ERROR trace entry and warned about on
+   * the console (its id and the error's name and message), and does not stop
    * the others. The batch never changes the GMI's lifecycle state: it runs in
    * the background, so the turn that triggered it may have finished and a
    * later turn may be in progress. {@link MetapromptExecutor.checkAndTriggerMetaprompts}
@@ -558,6 +559,11 @@ export class MetapromptExecutor {
 
       results.forEach((result, idx) => {
         if (result.status === 'rejected') {
+          // One line for the host as well, which may read no trace (gmi() exposes none): a provider's failure, or a spend
+          // budget's refusal, whose default calls nothing.
+          const reason: unknown = result.reason;
+          const described = reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason);
+          console.warn(`GMI (ID: ${this.config.getGmiId()}): metaprompt '${metaPrompts[idx].id}' failed: ${described}`);
           this.config.addTraceEntry(
             'ERROR',
             `Metaprompt '${metaPrompts[idx].id}' failed: ${result.reason}`,
