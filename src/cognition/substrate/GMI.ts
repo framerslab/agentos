@@ -2088,6 +2088,15 @@ export class GMI implements IGMI {
             yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TOOL_RESULT, toolResultPayload);
           }
           if (toolRoundFailure) throw toolRoundFailure.error;
+          // A turn that stopped during this round ends as a stopped turn: its next model call ends with the stop's
+          // abort. When this round is the turn's last step no model call follows, so the round ends it with that error.
+          if (stop.signal.aborted && safetyBreak >= maxToolLoopIterations) {
+            throw new GMIError(
+              "Turn aborted: it was stopped during its last step's tool calls.",
+              GMIErrorCode.LLM_PROVIDER_ERROR,
+              { turnId },
+            );
+          }
           if (ownsState()) this.state = GMIPrimeState.PROCESSING;
           continue main_processing_loop;
         }
