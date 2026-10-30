@@ -90,8 +90,12 @@ export function outputEstimateTokens(modelId: string, maxOutputTokens: number | 
   return cap === undefined || Number.isNaN(cap) ? DEFAULT_OUTPUT_ESTIMATE_TOKENS : cap;
 }
 
-/** The info of the budget that refused, by the error it threw, so a child learns of an ancestor's refusal. */
-const refusalInfo = new WeakMap<object, SpendLimitInfo>();
+/**
+ * The info of the budget that refused, by the error it threw and the check it was thrown in, so a child learns of an
+ * ancestor's refusal. An error object a limit function throws again in a later check (one shared error) names that
+ * check's refusal.
+ */
+const refusalInfo = new WeakMap<object, { info: SpendLimitInfo; run: number }>();
 /**
  * The refusal a thrown value that is not an object names (an `onLimitReached` function may throw a string), which the
  * WeakMap cannot hold: a check runs synchronously, so the value thrown in the check in progress is the one the
@@ -100,20 +104,40 @@ const refusalInfo = new WeakMap<object, SpendLimitInfo>();
 let primitiveRefusal: { error: unknown; info: SpendLimitInfo } | undefined;
 /** How deep the checks in progress go: a check asks its parent's, and a two-budget check asks both. */
 let checkDepth = 0;
+/** The outermost checks begun so far: the run a refusal was named in. */
+let checkRun = 0;
 
 /** Names `info` as the refusal `error` carries, unless the error already names one: the first budget to refuse names it. */
 function markRefusal(error: unknown, info: SpendLimitInfo): void {
   if (typeof error === 'object' && error !== null) {
-    if (!refusalInfo.has(error)) refusalInfo.set(error, info);
+    const held = refusalInfo.get(error);
+    if (!held || held.run !== checkRun) refusalInfo.set(error, { info, run: checkRun });
   } else if (!primitiveRefusal || !Object.is(primitiveRefusal.error, error)) {
     primitiveRefusal = { error, info };
   }
 }
 
-/** The refusal `error` names, an object's or a primitive's. */
+/** The refusal `error` names in the check in progress, an object's or a primitive's. */
 function refusalOf(error: unknown): SpendLimitInfo | undefined {
-  if (typeof error === 'object' && error !== null) return refusalInfo.get(error);
+  if (typeof error === 'object' && error !== null) {
+    const held = refusalInfo.get(error);
+    return held && held.run === checkRun ? held.info : undefined;
+  }
   return primitiveRefusal && Object.is(primitiveRefusal.error, error) ? primitiveRefusal.info : undefined;
+}
+
+/** Runs `work` as one check, or as part of the one in progress: the outermost begins a run, which names refusals afresh. */
+function withinCheck(work: () => void): void {
+  if (checkDepth === 0) {
+    primitiveRefusal = undefined;
+    checkRun += 1;
+  }
+  checkDepth += 1;
+  try {
+    work();
+  } finally {
+    checkDepth -= 1;
+  }
 }
 
 /**
@@ -272,14 +296,7 @@ export class SpendBudget {
     what: string,
     model?: { providerId: string; modelId: string },
   ): void {
-    // A new outermost check: no refusal of an earlier one is pending.
-    if (checkDepth === 0) primitiveRefusal = undefined;
-    checkDepth += 1;
-    try {
-      this.check(estimateUSD, estimateTokens, what, model);
-    } finally {
-      checkDepth -= 1;
-    }
+    withinCheck(() => this.check(estimateUSD, estimateTokens, what, model));
   }
 
   /** {@link SpendBudget.assertCanSpend}'s rules, inside the count of the checks in progress. */
@@ -417,7 +434,8 @@ class BothBudgets extends SpendBudget {
   }
 
   override assertCanSpend(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
-    reachOnce('check', () => {
+    // One check over both budgets: a refusal by the second is named in the run the first then hears of it in.
+    withinCheck(() => reachOnce('check', () => {
       this.first.assertCanSpend(estimateUSD, estimateTokens, what, model);
       try {
         this.second.assertCanSpend(estimateUSD, estimateTokens, what, model);
@@ -426,7 +444,7 @@ class BothBudgets extends SpendBudget {
         hearRefusal(this.first, error);
         throw error;
       }
-    });
+    }));
   }
 
   override record(costUSD: number | undefined, tokens: number, what: string): void {
