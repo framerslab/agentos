@@ -68,7 +68,11 @@ export interface AgencyLaunchOptions {
   maxConcurrent?: number;
   /** The share of what the launching turn's budget has left that one launch may spend: above 0, at most 1, default 0.5. */
   budgetShare?: number;
-  /** The token ceiling of all the root launches of one parent turn, their nested launches included: at least 2,000, default 200,000. */
+  /**
+   * The token ceiling of all the root launches of one parent turn, their nested launches included: at least 2,000,
+   * default 200,000. gmi() warns at construction when it cannot cover one call of the agent's route (2,000 for the
+   * prompt and the call's output estimate), since every launch is then refused `budget_unavailable`.
+   */
   maxLaunchTokens?: number;
   /** Their dollar ceiling, counted where a price row or a provider-reported cost exists; a number above 0. Default: none. */
   maxLaunchCostUSD?: number;
