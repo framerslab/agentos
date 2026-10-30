@@ -3,7 +3,8 @@
  * (spec batch-1 C6): agent scoping, cycle-id idempotency via the
  * guard-first transaction (a replay in the same millisecond included),
  * pre-existing sub-threshold pruning, post-decay pruning, atomicity on
- * mid-transaction failure, and the transaction-required error.
+ * mid-transaction failure, the transaction-required error, and the schema
+ * step that adds the guard table's owner_token column.
  *
  * The fake adapter emulates exactly the SQL statements the store issues
  * (two tables, verb + WHERE pattern matched) with snapshot-rollback
@@ -17,7 +18,7 @@ interface Row { id: string; agentId: string; strength: number }
 
 class FakeAdapter {
   rows = new Map<string, Row>();
-  /** Each guard row's applied_at as written: SQLite keeps a token there as text. */
+  /** Each guard row's owner_token as written. */
   cycles = new Map<string, unknown>();
   /** When set, the Nth write inside a transaction throws (1-based). */
   failOnWrite = 0;
@@ -37,10 +38,13 @@ class FakeAdapter {
   }
 
   async run(sql: string, params: unknown[] = []): Promise<unknown> {
-    if (sql.includes('INSERT OR IGNORE INTO personality_decay_cycles')) {
+    if (
+      sql.includes('INSERT INTO personality_decay_cycles') &&
+      sql.includes('ON CONFLICT (agent_id, cycle_id) DO NOTHING')
+    ) {
       this.bump();
       const key = `${params[0]}|${params[1]}`;
-      if (!this.cycles.has(key)) this.cycles.set(key, params[2]);
+      if (!this.cycles.has(key)) this.cycles.set(key, params[3]);
       return {};
     }
     if (sql.includes('DELETE FROM personality_mutations WHERE id = ?')) {
@@ -60,7 +64,7 @@ class FakeAdapter {
   async get(sql: string, params: unknown[] = []): Promise<unknown> {
     if (sql.includes('FROM personality_decay_cycles')) {
       const key = `${params[0]}|${params[1]}`;
-      return this.cycles.has(key) ? { applied_at: this.cycles.get(key) } : undefined;
+      return this.cycles.has(key) ? { owner_token: this.cycles.get(key) } : undefined;
     }
     return undefined;
   }
@@ -220,5 +224,65 @@ describe('rate validation', () => {
 
     expect(adapter.rows.get('m1')!.strength).toBe(1.0);
     expect(adapter.cycles.size).toBe(0);
+  });
+});
+
+describe('the guard table schema step', () => {
+  /**
+   * An adapter whose guard table has owner_token when `state.hasColumn` is
+   * set: reading the column fails until then, and `onAlter` decides what the
+   * ALTER that adds it does.
+   */
+  function scriptedAdapter(hasColumn: boolean, onAlter: (state: { hasColumn: boolean }) => void) {
+    const state = { hasColumn, alters: 0 };
+    const adapter = {
+      exec: async (_sql: string): Promise<void> => undefined,
+      run: async (sql: string): Promise<unknown> => {
+        if (sql.includes('ALTER TABLE personality_decay_cycles ADD COLUMN owner_token TEXT')) {
+          state.alters++;
+          onAlter(state);
+        }
+        return {};
+      },
+      get: async (sql: string): Promise<unknown> => {
+        if (sql.includes('SELECT owner_token FROM personality_decay_cycles') && !state.hasColumn) {
+          throw new Error('no such column: owner_token');
+        }
+        return undefined;
+      },
+      all: async (): Promise<unknown[]> => [],
+    };
+    return { adapter, state };
+  }
+
+  it('reads owner_token first: a guard table that has it gets no ALTER, one that lacks it gets one', async () => {
+    const current = scriptedAdapter(true, () => {
+      throw new Error('the column is there: no ALTER should run');
+    });
+    await new PersonalityMutationStore(current.adapter).loadForAgent('a1');
+    expect(current.state.alters).toBe(0);
+
+    const earlier = scriptedAdapter(false, (state) => {
+      state.hasColumn = true;
+    });
+    await new PersonalityMutationStore(earlier.adapter).loadForAgent('a1');
+    expect(earlier.state.alters).toBe(1);
+    expect(earlier.state.hasColumn).toBe(true);
+  });
+
+  it('a failed ALTER reads the column again: one another process added is kept, any other failure is thrown', async () => {
+    const raced = scriptedAdapter(false, (state) => {
+      // The other process's ALTER landed between this one's read and its ALTER.
+      state.hasColumn = true;
+      throw new Error('duplicate column name: owner_token');
+    });
+    await expect(new PersonalityMutationStore(raced.adapter).loadForAgent('a1')).resolves.toEqual([]);
+
+    const locked = scriptedAdapter(false, () => {
+      throw new Error('database is locked');
+    });
+    await expect(new PersonalityMutationStore(locked.adapter).loadForAgent('a1')).rejects.toThrow(
+      'database is locked',
+    );
   });
 });
