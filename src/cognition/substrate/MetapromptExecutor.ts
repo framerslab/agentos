@@ -123,6 +123,12 @@ function isGmiStateKey(key: string): boolean {
  */
 export interface MetapromptRun {
   isStale(): boolean;
+  /**
+   * The provider manager the unit's model calls go through, chosen when the unit was queued: the view the executor's
+   * manager makes for queued work when it makes one (a gmi() agent's binds the spend budget of the turn that queued
+   * the unit), else the executor's manager.
+   */
+  readonly llmProviderManager?: AIModelProviderManager;
 }
 
 /**
@@ -368,7 +374,8 @@ export class MetapromptExecutor {
   private enqueue(label: string, task: (run: MetapromptRun) => Promise<void>): Promise<void> {
     this.inFlight += 1;
     let overdue = false;
-    const run: MetapromptRun = { isStale: () => overdue || this.closed };
+    // The provider manager is chosen now, while the turn that queues the unit is in progress, not when the unit runs.
+    const run: MetapromptRun = { isStale: () => overdue || this.closed, llmProviderManager: this.providersForQueuedWork() };
     const unit = async (): Promise<void> => {
       if (this.closed) return;
       // A provider call that never settles would hold the queue forever;
@@ -403,6 +410,16 @@ export class MetapromptExecutor {
       });
     this.queueTail = settled;
     return settled;
+  }
+
+  /**
+   * The provider manager a unit of work queued now makes its calls through: the view the configured manager makes for
+   * queued work, when it makes one (a gmi() agent's binds the spend budget of the turn in progress), else the manager
+   * itself.
+   */
+  private providersForQueuedWork(): AIModelProviderManager {
+    const manager = this.config.llmProviderManager as AIModelProviderManager & { forQueuedWork?: () => AIModelProviderManager };
+    return typeof manager.forQueuedWork === 'function' ? manager.forQueuedWork() : manager;
   }
 
   /**
@@ -827,7 +844,7 @@ export class MetapromptExecutor {
       requestTimeout: this.runTimeoutMs,
     };
 
-    const provider = this.config.llmProviderManager.getProvider(providerId);
+    const provider = (run?.llmProviderManager ?? this.config.llmProviderManager).getProvider(providerId);
     if (!provider) {
       throw new GMIError(
         `Provider '${providerId}' not found for metaprompt '${metaPrompt.id}'.`,
@@ -1085,7 +1102,7 @@ export class MetapromptExecutor {
         reflectionMetaPromptDef.modelId,
         reflectionMetaPromptDef.providerId,
       );
-      const provider = this.config.llmProviderManager.getProvider(providerId);
+      const provider = (run?.llmProviderManager ?? this.config.llmProviderManager).getProvider(providerId);
       if (!provider) {
         throw new GMIError(
           `Provider '${providerId}' not found for self-reflection.`,
