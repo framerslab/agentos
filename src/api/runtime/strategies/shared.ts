@@ -60,26 +60,28 @@ export function isAgent(value: BaseAgentConfig | Agent): value is Agent {
 /**
  * What the strategies read about a seat besides running it: a config's `instructions` (as its description) and
  * `dependsOn`, or a pre-built member's own `description` and `dependsOn` when they are a non-blank string and an
- * array of strings ({@link SeatMetadata}).
+ * array of strings ({@link SeatMetadata}). `agency()` refuses a seat whose `dependsOn` is set and is not an array of
+ * strings, so none reaches a strategy.
  *
  * @param member - A seat config or a pre-built `Agent`.
- * @returns The seat's description and dependencies, each left out when the seat has none.
+ * @returns The seat's description and dependencies, each left out when the seat has none: an empty `dependsOn` lists
+ *   no seat and is left out.
  */
 export function seatMetadataOf(member: BaseAgentConfig | Agent): SeatMetadata {
+  const listed = (value: unknown): string[] | undefined =>
+    Array.isArray(value) && value.length > 0 && value.every((name) => typeof name === 'string') ? (value as string[]) : undefined;
   if (!isAgent(member)) {
     const config = member as BaseAgentConfig;
+    const dependsOn = listed(config.dependsOn);
     return {
       ...(config.instructions ? { description: config.instructions } : {}),
-      ...(Array.isArray(config.dependsOn) ? { dependsOn: config.dependsOn } : {}),
+      ...(dependsOn ? { dependsOn } : {}),
     };
   }
   const carried = member as Agent & { description?: unknown; dependsOn?: unknown };
   const description =
     typeof carried.description === 'string' && carried.description.trim() ? carried.description : undefined;
-  const dependsOn =
-    Array.isArray(carried.dependsOn) && carried.dependsOn.every((name) => typeof name === 'string')
-      ? (carried.dependsOn as string[])
-      : undefined;
+  const dependsOn = listed(carried.dependsOn);
   return { ...(description ? { description } : {}), ...(dependsOn ? { dependsOn } : {}) };
 }
 
@@ -356,7 +358,7 @@ export async function nestedStreamUnanswered(
  * merged additively: agency tools serve as a base layer and agent tools
  * override on name collision. This lets an agency provide a shared tool
  * set while individual agents can override or extend it.
- * The agency's `runtime` becomes the seat's when the seat names none.
+ * The agency's `runtime` becomes the seat's when the seat names none (`null` names none at either level).
  *
  * @param agentConfig - Per-agent configuration (takes precedence).
  * @param agencyConfig - Agency-level fallback values (base layer).
@@ -399,8 +401,8 @@ export function mergeDefaults(
   const seatRouted = routedProviderOf({ provider: used.provider, model: used.model });
   const agencyRouted = routedProviderOf(agencyConfig);
   const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
-  // The agency's runtime is the default engine of a config seat; the seat's own wins.
-  const runtime = (agentConfig as AgencySeatConfig).runtime ?? agencyConfig.runtime;
+  // The agency's runtime is the default engine of a config seat; the seat's own wins. `null` is unset at both levels.
+  const runtime = (agentConfig as AgencySeatConfig).runtime ?? agencyConfig.runtime ?? undefined;
   const agencyBaseUrl = otherVendor ? undefined : agencyConfig.baseUrl;
   // A seat's empty or whitespace-only baseUrl is unset, as every call reads
   // one (baseUrlIfSet in model.ts): the seat takes the agency's URL as a seat
