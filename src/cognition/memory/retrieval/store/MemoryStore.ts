@@ -2434,7 +2434,9 @@ export class MemoryStore {
    * store holds no embedding for is read from the trace's Brain row or from the index, or embedded again. A document the
    * index fails to delete from the old collection stays, with a warning; recall under the old id does not return it,
    * since this store holds the trace under the new one. Another store open on the same Brain keeps what it holds under
-   * the old id until it re-files the scope itself or loads it again.
+   * the old id until it re-files the scope itself or loads it again. A trace this store holds under the old id whose
+   * row another store or process moved to another scope or a third id, before this move or while it runs, stays as
+   * this store holds it, and is not counted.
    *
    * A host that starts passing an organization id re-files each user's earlier traces with it once, since a learner
    * under a namespace reads `user:<namespace>/<userId>` and not the plain form filed before.
@@ -2667,7 +2669,10 @@ export class MemoryStore {
 
   /**
    * Moves one trace of {@link refileScope}, inside the trace's operation. A trace no longer filed under the old id, in
-   * the Brain or in this store, is left as it is.
+   * the Brain or in this store, is left as it is. A trace this store holds under the old id whose row is filed under
+   * the new id already (a move of this scope that wrote the row and stopped before the vector) moves with its vector
+   * document; one whose row is filed under another scope or a third id (a move another store or process made) stays as
+   * this store holds it.
    *
    * @returns Whether it moved the trace.
    */
@@ -2678,21 +2683,26 @@ export class MemoryStore {
     toScopeId: string,
     brain: import('./Brain.js').Brain | null,
   ): Promise<boolean> {
+    let read: (MemoryTraceRow & { scope_id: string | null }) | null | undefined;
     let row: (MemoryTraceRow & { scope_id: string | null }) | null = null;
     if (brain) {
-      row = await brain.get<MemoryTraceRow & { scope_id: string | null }>(
+      read = await brain.get<MemoryTraceRow & { scope_id: string | null }>(
         `SELECT id, type, scope, content, embedding, strength, created_at,
                 last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
            FROM memory_traces
           WHERE brain_id = ? AND id = ?`,
         [brain.brainId, traceId],
       );
-      if (row && (row.scope !== scope || (row.scope_id ?? '') !== fromScopeId)) row = null;
+      if (read) {
+        const filed = read.scope === scope ? (read.scope_id ?? '') : undefined;
+        if (filed !== fromScopeId && filed !== toScopeId) return false;
+        if (filed === fromScopeId) row = read;
+      }
     }
     const cached = this.traceCache.get(traceId);
     const held = cached && cached.scope === scope && cached.scopeId === fromScopeId ? cached : undefined;
     if (!row && !held) return false;
-    const live = !this.tombstonedTraceIds.has(traceId) && (row ? row.deleted !== 1 : held!.isActive);
+    const live = !this.tombstonedTraceIds.has(traceId) && (read ? read.deleted !== 1 : held!.isActive);
     // A trace this store deleted, with no row left to move, stays as it is.
     if (!row && !live) return false;
     const trace: MemoryTrace = { ...(held ?? this.rowToTrace(row!)), scope, scopeId: toScopeId };
@@ -2702,15 +2712,25 @@ export class MemoryStore {
     // the old id would be stale to a store on the same Brain or index that reads the new id meanwhile, and such a store
     // deletes a stale document it reads ({@link query}, {@link getByScope}); with the row moved, it finds no document
     // there yet, and the old collection's document is stale.
-    if (row && brain && (await this.refileRow(brain, row.metadata, traceId, scope, fromScopeId, toScopeId))) {
-      // A hydration that read this row before the move reads it again before it loads it.
-      getNamespaceCoordinator(this.coordinationNamespace).refileEpoch += 1;
+    if (row && brain) {
+      if (await this.refileRow(brain, row.metadata, traceId, scope, fromScopeId, toScopeId)) {
+        // A hydration that read this row before the move reads it again before it loads it.
+        getNamespaceCoordinator(this.coordinationNamespace).refileEpoch += 1;
+      } else {
+        // Another writer moved the row meanwhile: to the new id, a move of this scope, which this one finishes; to
+        // another scope or a third id, a move this one leaves.
+        const moved = await brain.get<{ scope: string; scope_id: string | null }>(
+          'SELECT scope, scope_id FROM memory_traces WHERE brain_id = ? AND id = ?',
+          [brain.brainId, traceId],
+        );
+        if (moved && (moved.scope !== scope || (moved.scope_id ?? '') !== toScopeId)) return false;
+      }
     }
 
     // A live trace this store holds takes its document into the new collection. When that fails, its row is filed
     // under the new id already, this store reads the trace under neither id, and a call made again moves the document.
     let embedding: number[] | undefined;
-    if (live && held) embedding = await this.writeMovedDocument(trace, row?.embedding, 'refileScope');
+    if (live && held) embedding = await this.writeMovedDocument(trace, read?.embedding, 'refileScope');
 
     if (live) await this.deleteMovedDocument(fromCollection, traceId);
     if (held) {
@@ -2728,7 +2748,7 @@ export class MemoryStore {
       } catch {
         // The copy stays under the old id, where a delete by the trace's id still finds it.
       }
-      if (copies > 0) await this.recordGraphCopy(trace, embedding ?? blobToEmbedding(row?.embedding) ?? undefined);
+      if (copies > 0) await this.recordGraphCopy(trace, embedding ?? blobToEmbedding(read?.embedding) ?? undefined);
     }
     return true;
   }
