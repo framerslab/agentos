@@ -297,6 +297,13 @@ export class GMI implements IGMI {
    */
   private turnRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
 
+  /**
+   * The first message the input of the last turn added to the history, which
+   * `getLastTurnHistory()` reads the history from. A tool continuation belongs
+   * to the turn it continues, so it leaves this as it is.
+   */
+  private lastTurnInput: ChatMessage | undefined;
+
   /** The learner session the host passed (`GMIBaseConfig.learning`), when its learning option is on. */
   private learnerSession: ILearnerSession | undefined;
 
@@ -970,6 +977,28 @@ export class GMI implements IGMI {
   }
 
   /**
+   * The conversation history as this GMI holds it, as messages `hydrateConversationHistory()` takes back: the calls of
+   * its own tool rounds with their results, and the thinking blocks and thought signatures of its assistant turns.
+   */
+  public getConversationHistory(): ConversationMessage[] {
+    return this.conversationHistoryManager.buildForPrompt();
+  }
+
+  /**
+   * The messages of the conversation history from the input of this GMI's last turn on, as `getConversationHistory()`
+   * gives them: that input, the assistant turns and tool results of the turn's tool rounds, and what a tool
+   * continuation of the turn added. Empty when no turn ran, or when the history no longer holds that input (it was
+   * replaced, cleared or trimmed past it).
+   */
+  public getLastTurnHistory(): ConversationMessage[] {
+    const history = this.conversationHistoryManager.history;
+    const start = this.lastTurnInput ? history.indexOf(this.lastTurnInput) : -1;
+    return start < 0
+      ? []
+      : history.slice(start).map((message) => this.conversationHistoryManager.convertToConversationMessage(message));
+  }
+
+  /**
    * Makes `messages` the whole conversation history. An empty array is
    * authoritative: it empties the history (unlike
    * `metadata.conversationHistoryForPrompt`, which a turn ignores when empty).
@@ -991,19 +1020,42 @@ export class GMI implements IGMI {
     this.forgetTurnsOutside([]);
   }
 
+  /**
+   * Sets the turn a tool continuation goes on with: the ids its continuation runs under and the sources its tool
+   * calls and reply are judged with. A blank session or conversation id leaves the GMI's as it is; a blank
+   * organization means the turn has none, and clears the GMI's. `ragSources` replaces the sources the GMI keeps for
+   * the turn (an empty array clears them); without it they stay. A conversation other than the one of the GMI's last
+   * turn drops what the GMI kept for that turn, which a continuation would otherwise go on with: the model hop that
+   * served it, its memory scope, its tool-call gate, its learning preparation and its sources. The continuation then
+   * starts as on a GMI built for it: on the route's first hop that can start, with a learning preparation asked for the
+   * continuation.
+   */
   public hydrateTurnContext(context: {
     sessionId?: string;
     conversationId?: string;
     organizationId?: string;
+    ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
   }): void {
     if (typeof context.sessionId === 'string' && context.sessionId.trim()) {
       this.reasoningTrace.sessionId = context.sessionId.trim();
     }
     if (typeof context.conversationId === 'string' && context.conversationId.trim()) {
-      this.reasoningTrace.conversationId = context.conversationId.trim();
+      const conversationId = context.conversationId.trim();
+      if (conversationId !== this.reasoningTrace.conversationId) {
+        // the GMI's last turn was another conversation's: nothing it kept for that turn belongs to this one
+        this.turnResolution = undefined;
+        this.turnMemoryScope = undefined;
+        this.turnToolCallGate = undefined;
+        this.turnLearning = undefined;
+        this.turnRagSources = undefined;
+      }
+      this.reasoningTrace.conversationId = conversationId;
     }
-    if (typeof context.organizationId === 'string' && context.organizationId.trim()) {
-      this.reasoningTrace.organizationId = context.organizationId.trim();
+    if (typeof context.organizationId === 'string') {
+      this.reasoningTrace.organizationId = context.organizationId.trim() || undefined;
+    }
+    if (Array.isArray(context.ragSources)) {
+      this.turnRagSources = context.ragSources.length > 0 ? [...context.ragSources] : undefined;
     }
   }
 
@@ -1284,6 +1336,9 @@ export class GMI implements IGMI {
       const currentUserMessage = historyAtTurnStart.find(
         (message) => message.role === 'user' && !messagesBeforeInput.has(message),
       );
+      if (turnInput.metadata?.isToolContinuation !== true) {
+        this.lastTurnInput = historyAtTurnStart.find((message) => !messagesBeforeInput.has(message));
+      }
       // The turn's input, so a later replaceHistory() or clearHistory() can tell
       // whether the history still holds this turn. Bounded like the trace:
       // every turn on the trace has at least one entry there.
