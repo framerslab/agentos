@@ -22,7 +22,7 @@ import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
-import { MarkdownImporter } from './MarkdownImporter.js';
+import { MarkdownImporter, withLfLineBreaks } from './MarkdownImporter.js';
 
 // ---------------------------------------------------------------------------
 // Regex constants
@@ -207,7 +207,9 @@ export class ObsidianImporter extends MarkdownImporter {
    * and a trace with no text, are the duplicates of their own notes too, and
    * a vault exported from a brain and imported into it adds nothing. A note
    * that holds anything else after the text, such as a paragraph added in
-   * Obsidian before or after its links, is not the trace's own note.
+   * Obsidian before or after its links, is not the trace's own note. Line
+   * breaks are read as `\n` in the note, the text and the labels alike, so a
+   * note an editor saved again with CRLF line endings is its trace's own note.
    *
    * @param text - The text of the trace the note's `id` names.
    * @param body - The note's body, without its leading and trailing whitespace.
@@ -215,9 +217,10 @@ export class ObsidianImporter extends MarkdownImporter {
    */
   protected override async holdsTraceText(text: string, body: string): Promise<boolean> {
     if (await super.holdsTraceText(text, body)) return true;
-    const own = text.trim();
-    if (!body.startsWith(own)) return false;
-    const rest = body.slice(own.length);
+    const own = withLfLineBreaks(text).trim();
+    const note = withLfLineBreaks(body);
+    if (!note.startsWith(own)) return false;
+    const rest = note.slice(own.length);
     // The export writes a blank line between the text and what it adds; a trace with no text keeps none past the trim.
     if (own !== '' && !/^\s/.test(rest)) return false;
     const additions = rest.trim();
@@ -289,14 +292,14 @@ export class ObsidianImporter extends MarkdownImporter {
   /**
    * Read the labels of the brain's graph that hold a line break.
    *
-   * @returns The labels, as the brain holds them.
+   * @returns The labels, each line break in them as `\n`.
    */
   private async _readLabelsWithLineBreaks(): Promise<ReadonlySet<string>> {
     const rows = await this.brain.all<{ label: string }>(
-      'SELECT DISTINCT label FROM knowledge_nodes WHERE brain_id = ? AND label LIKE ?',
-      [this.brain.brainId, '%\n%'],
+      'SELECT DISTINCT label FROM knowledge_nodes WHERE brain_id = ? AND (label LIKE ? OR label LIKE ?)',
+      [this.brain.brainId, '%\n%', '%\r%'],
     );
-    return new Set(rows.map((row) => row.label));
+    return new Set(rows.map((row) => withLfLineBreaks(row.label)));
   }
 
   /**

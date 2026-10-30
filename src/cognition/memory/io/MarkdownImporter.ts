@@ -36,6 +36,23 @@ import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { duplicateTraceCondition, duplicateTraceParams } from './importScope.js';
 
 // ---------------------------------------------------------------------------
+// Line breaks
+// ---------------------------------------------------------------------------
+
+/**
+ * A text with each line break written as `\n`, for comparing a note with a
+ * trace's text: a note an editor saved again with CRLF or CR line endings
+ * reads as the note the export wrote. A note that is imported keeps the line
+ * endings its file holds.
+ *
+ * @param text - A note's body, a trace's text or a label.
+ * @returns The text with each `\r\n` and each `\r` as `\n`.
+ */
+export function withLfLineBreaks(text: string): string {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+// ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
 
@@ -131,7 +148,8 @@ export class MarkdownImporter {
 
   /**
    * Whether a note's body holds a trace's text: the text without its leading
-   * and trailing whitespace, which the import takes off a body, is the body.
+   * and trailing whitespace, which the import takes off a body, is the body,
+   * each line break in both read as `\n` (see {@link withLfLineBreaks}).
    * A note whose front-matter `id` names a trace of its scope and scope id
    * that it holds is that trace's own note, and so its duplicate, also when
    * the trace's text begins or ends with whitespace. `ObsidianImporter` also
@@ -144,7 +162,7 @@ export class MarkdownImporter {
    * @returns `true` when the note holds the trace's text, or a promise of the answer.
    */
   protected holdsTraceText(text: string, body: string): boolean | Promise<boolean> {
-    return text.trim() === body;
+    return withLfLineBreaks(text).trim() === withLfLineBreaks(body);
   }
 
   // -------------------------------------------------------------------------
