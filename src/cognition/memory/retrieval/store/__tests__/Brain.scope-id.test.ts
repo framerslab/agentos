@@ -814,6 +814,57 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
     });
 
+    it('Obsidian: a trace whose own text ends in a line of hashtags is the duplicate of its own note, with and without a link', async () => {
+      const brain = await written('obsidian-own-hashtags', 'A%2F42', 'Kept words.\n\n#idea\n', 'Bare words.\n\n#idea');
+      await brain.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at)
+         VALUES (?, 't-bare', 'trace', 'trace:t-bare', 1), (?, 'kn-target', 'concept', 'Target note', 1)`,
+        [brain.brainId, brain.brainId],
+      );
+      await brain.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+         VALUES (?, 'ke-target', 't-bare', 'kn-target', 'related_to', 1)`,
+        [brain.brainId],
+      );
+      const dir = path.join(path.dirname(tempFile()), 'vault');
+      expect((await new ObsidianExporter(brain).export(dir)).refused).toEqual([]);
+      // The hashtag line is the trace's own text: the trace has no tags, and the note adds only the link.
+      const note = await fsp.readFile(path.join(dir, 'user', 'episodic', 't-bare.md'), 'utf8');
+      expect(readFrontMatter(note).content.trim()).toBe('Bare words.\n\n#idea\n\n**Related:**\n- [[Target note]]');
+
+      expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.\n\n#idea', 'Kept words.\n\n#idea\n']);
+    });
+
+    it('Obsidian: a trace with no text, and one linked to a label that holds a line break, is the duplicate of its own note', async () => {
+      const brain = await written('obsidian-own-additions', 'A%2F42', '', 'Bare words.');
+      await brain.run('UPDATE memory_traces SET tags = ? WHERE brain_id = ?', [JSON.stringify(['alpha']), brain.brainId]);
+      await brain.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at)
+         VALUES (?, 't-bare', 'trace', 'trace:t-bare', 1), (?, 'kn-target', 'concept', ?, 1)`,
+        [brain.brainId, brain.brainId, 'Target\nnote'],
+      );
+      await brain.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+         VALUES (?, 'ke-target', 't-bare', 'kn-target', 'related_to', 1)`,
+        [brain.brainId],
+      );
+      const dir = path.join(path.dirname(tempFile()), 'vault');
+      expect((await new ObsidianExporter(brain).export(dir)).refused).toEqual([]);
+      const bodyOf = async (id: string) =>
+        readFrontMatter(await fsp.readFile(path.join(dir, 'user', 'episodic', `${id}.md`), 'utf8')).content.trim();
+      const blank = await brain.get<{ id: string }>('SELECT id FROM memory_traces WHERE brain_id = ? AND content = ?', [
+        brain.brainId,
+        '',
+      ]);
+      // The trace with no text writes its tag line alone, and the label's line break splits its link over two lines.
+      expect(await bodyOf(blank!.id)).toBe('#alpha');
+      expect(await bodyOf('t-bare')).toBe('Bare words.\n\n#alpha\n\n**Related:**\n- [[Target\nnote]]');
+
+      expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['', 'Bare words.']);
+    });
+
     it('a trace the brain forgot: an import of an export taken before the forget brings it back in no format', async () => {
       const memory = await Memory.createSqlite(tempFile(), { brainId: 'forgotten', graph: false });
       closers.push(() => memory.close());
