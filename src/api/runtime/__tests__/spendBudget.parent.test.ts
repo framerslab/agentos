@@ -46,6 +46,21 @@ describe('SpendBudget with a parent', () => {
     expect([child.spentUSD(), parent.spentUSD()]).toEqual([0.25, 0.25]);
   });
 
+  it("tells the budgets below an ancestor whose own function throws, and the call is refused with that function's error", () => {
+    const seen: string[] = [];
+    const root = new SpendBudget({
+      maxCostUSD: 1,
+      maxTotalTokens: 100,
+      onLimitReached: () => {
+        throw new Error('stop');
+      },
+    });
+    const middle = new SpendBudget({ maxCostUSD: 1, parent: root, onLimitReached: (info) => { seen.push(`middle:${info.budgetId}`); } });
+    const child = new SpendBudget({ maxCostUSD: 1, parent: middle, onLimitReached: (info) => { seen.push(`child:${info.budgetId}`); } });
+    expect(() => child.assertCanSpend(0, 500, 'step')).toThrow('stop');
+    expect(seen).toEqual([`middle:${root.id}`, `child:${root.id}`]);
+  });
+
   it("lets the child's own check decide when a parent only warns", () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const parent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10, onLimitReached: 'warn' });
