@@ -597,8 +597,10 @@ export interface ImportOptions {
  */
 export interface ImportResult {
   /**
-   * How many rows the import wrote: its traces, and, from a JSON file, its knowledge nodes and edges, documents,
-   * chunks, images, conversations and messages too; from a SQLite file, its knowledge nodes and edges too.
+   * How many traces the import wrote, and, from a JSON file, its knowledge nodes and edges, documents, chunks,
+   * images, conversations and messages too; from a SQLite file, its knowledge nodes and edges too. A JSON file's brain
+   * metadata, the knowledge nodes and edge an Obsidian note's wikilink adds, and the `conversations` row of each
+   * conversation in a ChatGPT export are written and not counted.
    */
   imported: number;
 
@@ -611,8 +613,8 @@ export interface ImportResult {
   skipped: number;
 
   /**
-   * Human-readable messages for the records that failed to import, and for a source that could not be read or
-   * parsed.
+   * Human-readable messages for the records that failed to import, for an Obsidian note's link or tag the import
+   * could not write, and for a source that could not be read or parsed.
    */
   errors: string[];
 }
