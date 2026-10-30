@@ -35,7 +35,8 @@ function answer(id: string, timestamp: number, callId: string): ConversationMess
 
 /**
  * Runs one compaction pass over `messages`, after an earlier pass that left its boundary at `previousBoundary` when
- * one is given, and returns the ids of the messages it summarized and the boundary it stored.
+ * one is given, and returns the ids of the messages it summarized, the turns it sent the compaction model and the
+ * boundary it stored.
  */
 async function compact(
   messages: ConversationMessage[],
@@ -43,6 +44,7 @@ async function compact(
   previousBoundary?: number,
 ) {
   const summarized: string[][] = [];
+  const sent: Array<Array<{ id: string; role: string; content: string }>> = [];
   const result = await maybeCompactConversationMessages({
     messages,
     sessionMetadata:
@@ -62,10 +64,11 @@ async function compact(
       const text = String(prompt[prompt.length - 1]?.content ?? '');
       const input = JSON.parse(text.slice(text.indexOf('INPUT_JSON:') + 'INPUT_JSON:'.length));
       summarized.push(input.new_turns.map((turn: { id: string }) => turn.id));
+      sent.push(input.new_turns);
       return JSON.stringify({ summary_markdown: '- The user reads notes.', memory_json: { facts: [] } });
     },
   });
-  return { summarized, boundary: result.summaryUptoTimestamp };
+  return { summarized, sent, boundary: result.summaryUptoTimestamp };
 }
 
 describe('maybeCompactConversationMessages', () => {
@@ -202,5 +205,30 @@ describe('maybeCompactConversationMessages', () => {
 
     expect(summarized).toEqual([['r1', 'q2', 'r2']]);
     expect(boundary).toBe(5);
+  });
+
+  it('sends a tool result the host returned empty with the call it answers, and may end the summary on it', async () => {
+    // The host returned nothing for c1, and the result still answers the call. With a limit of one message the pass
+    // takes the round and ends on the result; a pass that left the result out summarized the call with q2, sent the
+    // compaction model a call with no answer, and moved the boundary past the result.
+    const messages = [
+      message('q1', 1),
+      message('r1', 2, { role: MessageRole.ASSISTANT }),
+      call('call', 3, ['c1']),
+      message('empty', 4, { role: MessageRole.TOOL, tool_call_id: 'c1', name: 'read_file', content: '' }),
+      message('q2', 5),
+      message('r2', 6, { role: MessageRole.ASSISTANT }),
+      message('q3', 7),
+    ];
+
+    const { summarized, sent, boundary } = await compact(messages, {
+      headMessagesToKeep: 2,
+      tailMessagesToKeep: 2,
+      maxMessagesToSummarizePerPass: 1,
+    });
+
+    expect(summarized).toEqual([['call', 'empty']]);
+    expect(sent[0]?.[1]).toMatchObject({ id: 'empty', role: 'tool', content: '[empty result]' });
+    expect(boundary).toBe(4);
   });
 });

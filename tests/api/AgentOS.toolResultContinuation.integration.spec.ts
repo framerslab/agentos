@@ -1989,16 +1989,16 @@ describe('AgentOS tool-result continuations', () => {
 
     /**
      * Runs the conversation's first three turns on `rt`: two questions with their replies, then a turn the GMI stops
-     * for READ_CALL and WRITE_CALL, whose results the host passes back and whose continuation replies.
+     * for READ_CALL and WRITE_CALL, whose results (`results`) the host passes back and whose continuation replies.
      */
-    async function runToolRoundTurns(rt: Awaited<ReturnType<typeof runtime>>) {
+    async function runToolRoundTurns(rt: Awaited<ReturnType<typeof runtime>>, results = [READ_RESULT, WRITE_RESULT]) {
       await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question1 }));
       await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question2 }));
       const stopped = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question3 }));
       const request = stopped.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk;
       expect(request.toolCalls).toEqual([READ_CALL, WRITE_CALL]);
       await vi.waitFor(() => expect(rt.context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY)).toBeDefined());
-      const continued = await collect(rt.agentos.handleToolResults(request.streamId, [READ_RESULT, WRITE_RESULT]));
+      const continued = await collect(rt.agentos.handleToolResults(request.streamId, results));
       expect((continued.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.done);
     }
 
@@ -2104,6 +2104,39 @@ describe('AgentOS tool-result continuations', () => {
       ) as any;
       expect(metadata?.updates.rollingSummary).toMatchObject({ didCompact: true, summaryUptoTimestamp: boundary });
       expect(rt.context.getMetadata('rollingSummaryState')).toMatchObject({ summaryUptoTimestamp: boundary });
+    });
+
+    it('a later compaction sends the compaction model a result the host returned empty, with the call it answers', async () => {
+      // The host's read returned nothing. The conversation records the empty result, and the compaction that
+      // summarizes the round sends it with the call, so the compaction model reads no call without its answer.
+      const { rt, summarizedTurns } = await summaryRuntime('conv-summary-later-pass-empty-result', {
+        headMessagesToKeep: 2,
+        tailMessagesToKeep: 3,
+      });
+      const gmi = scriptedTurnsGmi([TEXTS.reply1, TEXTS.reply2, [READ_CALL, WRITE_CALL], TEXTS.reply4, TEXTS.reply5], {
+        isFinal: true,
+        responseText: TEXTS.done,
+      });
+      rt.useGmi(gmi);
+
+      await runToolRoundTurns(rt, [{ ...READ_RESULT, toolOutput: '' }, WRITE_RESULT]);
+      await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question4 }));
+      const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question5 }));
+
+      expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.reply5);
+      const stored = rt.context.getAllMessages();
+      const names = new Map(stored.map((message) => [message.id, nameOf(message)]));
+      expect(stored.find((message) => names.get(message.id) === 'read')?.content).toBe('');
+      expect(summarizedTurns.map((turns) => turns.map((turn) => names.get(turn.id)))).toEqual([
+        ['question2', 'reply2', 'question3'],
+        ['call', 'read', 'write', 'done'],
+      ]);
+      expect(summarizedTurns[1]?.find((turn) => names.get(turn.id) === 'read')).toMatchObject({
+        role: 'tool',
+        content: '[empty result]',
+      });
+      const history = gmi.histories[4] ?? [];
+      expect(history.map((message) => names.get(message.id))).toEqual(['question1', 'reply1', 'question4', 'reply4']);
     });
   });
 });
