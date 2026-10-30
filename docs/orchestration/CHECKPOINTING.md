@@ -123,6 +123,8 @@ A resumed run restores `input`, `scratch`, `artifacts` and the list of completed
 
 - Every other node runs as in a fresh run.
 
+A node marked complete with its recorded output does not run again, but its edges still decide where the run goes: they are evaluated on the state the run resumes with, as a node's edges are after it runs, the run follows the targets they pick and skips the others, and the resumed stream yields their `edge_transition` events after the node's `node_end`. A condition on such an edge can read a decision the host writes into the checkpoint it forks (see [Time-Travel with fork()](#time-travel-with-fork)).
+
 A node that fails records no result and writes nothing to `scratch` or `artifacts`, as an attempt its `retryPolicy` runs again does. The checkpoint of a failed run therefore holds the state the node ran on, and a resume executes the node again, whatever its `effectClass`. What a failed attempt did outside the graph, such as a call a tool made before it failed, is not undone, so a `write` or `external` node that runs again, by its `retryPolicy` or on resume, repeats it: such a node should be safe to repeat. Declare `effectClass` on tool nodes to match what the node does; `toolNode()` defaults to `'external'` and `gmiNode()` to `'read'`:
 
 ```typescript
@@ -181,6 +183,16 @@ The same API applies to compiled `workflow()` and `mission()` graphs. The `resum
 const result = await workflow.resume(checkpointId);
 const result = await missionCompiled.resume(checkpointId);
 ```
+
+## When a Save or an Edge Throws
+
+A store backed by a database or a network can refuse a save, and its `save()` rejects. A function on a conditional edge is the host's code, and it can throw. Either ends the run with that error: the runtime does not retry the save or pass over the edge, `stream()` and `streamResume()` throw the error where the runtime asked for the checkpoint or evaluated the edge, and `invoke()` and `resume()` reject with it.
+
+- The checkpoint of a node that interrupts or fails is saved before the node's events, so that a host that stops reading at `interrupt` or `error` can resume. When the store refuses that save, the error comes before those events, and the host reads the store's error instead of `interrupt` or `error`.
+- In a parallel batch, the other nodes of the batch run to the end, and save the checkpoints they save, before the error reaches the host, so no node of the run still runs once `stream()` has thrown. The error is the first in the order the nodes are declared, and none of the batch's events is yielded.
+- A node of a batch counts as completed once its edges are decided. A checkpoint another node of the batch saves before then leaves it out, so a node whose edges threw is in no checkpoint's `visitedNodes`, and a resume runs it again and follows the edge it picks then.
+
+A resume by the run id from `run_start` continues from the last checkpoint the store saved, and runs again every node that completed after it.
 
 ## Time-Travel with fork()
 
@@ -300,6 +312,8 @@ class PostgresCheckpointStore implements ICheckpointStore {
 ```
 
 The runtime can save several checkpoints of one run in the same millisecond, such as the checkpoints of a parallel batch's nodes and the one it saves after the batch, so `load()` and `latest()` return the checkpoint saved last of those with the latest `timestamp`, and `list()` puts it first. The example's `checkpoints` table has a `seq bigserial` column to order them: it takes the next value at each insert, and `save()` sets it again (`seq = DEFAULT`) when it saves a checkpoint again under its id, so that save counts as the last. `InMemoryCheckpointStore` orders them by each checkpoint's last save.
+
+A `save()` that rejects ends the run with its error (see [When a Save or an Edge Throws](#when-a-save-or-an-edge-throws)).
 
 The order a store has to keep is that of saves that do not overlap. The runtime starts each save once the one before it has finished, except the saves of a parallel batch's nodes, which run together; a checkpoint it saves after them, such as the one after the batch or the one of a batch that halts, starts once they have all finished. In the example, a save that starts after another has finished takes the larger `seq`, since a sequence with the default `CACHE 1` hands out its values in the order they are asked for.
 
