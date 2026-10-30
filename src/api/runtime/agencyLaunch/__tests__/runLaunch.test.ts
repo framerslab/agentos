@@ -116,6 +116,15 @@ describe('childBudgetCaps', () => {
     expect(childBudgetCaps(parent, pool(), limits, {}, 1_000)).toEqual({ maxCostUSD: 0.5, maxTotalTokens: 3_000 });
   });
 
+  it("holds the tokens to maxLaunchTokens, whatever the arguments ask, and floors the parent's share", () => {
+    // Nothing else caps the tokens: maxLaunchTokens does, and an explicit maxTokens above it is held to it.
+    expect(childBudgetCaps(undefined, undefined, limits, {}, 1_000)).toEqual({ maxCostUSD: Number.POSITIVE_INFINITY, maxTotalTokens: 200_000 });
+    expect(childBudgetCaps(undefined, undefined, limits, { maxTokens: 500_000 }, 1_000)).toEqual({ maxCostUSD: Number.POSITIVE_INFINITY, maxTotalTokens: 200_000 });
+    // Half of an odd remainder is floored: 30,001 left, 15,000 for the child.
+    const parent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 30_001, unpriced: 'allow' });
+    expect(childBudgetCaps(parent, pool(), limits, {}, 1_000)).toEqual({ maxCostUSD: 0.5, maxTotalTokens: 15_000 });
+  });
+
   it('refuses a cap that cannot cover one call, and a spent parent', () => {
     expect(childBudgetCaps(undefined, pool(2_500), limits, {}, 1_000)).toMatchObject({ code: 'budget_unavailable' });
     expect(childBudgetCaps(undefined, pool(3_000), limits, {}, 1_000)).toEqual({ maxCostUSD: Number.POSITIVE_INFINITY, maxTotalTokens: 3_000 });
