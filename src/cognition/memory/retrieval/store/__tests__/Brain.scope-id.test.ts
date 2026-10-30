@@ -951,6 +951,41 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       expect(linked.map((row) => row.label)).toEqual(['New\nYork']);
     });
 
+    it('Markdown and Obsidian: a note saved again with CRLF line endings is the duplicate of its trace', async () => {
+      const brain = await written('crlf', 'A%2F42', 'Kept words.\n\nA second line.', 'Bare words.\n\nA second line.');
+      await brain.run('UPDATE memory_traces SET tags = ? WHERE brain_id = ?', [JSON.stringify(['alpha']), brain.brainId]);
+      await brain.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at)
+         VALUES (?, 't-bare', 'trace', 'trace:t-bare', 1), (?, 'kn-target', 'concept', ?, 1)`,
+        [brain.brainId, brain.brainId, 'Target\nnote'],
+      );
+      await brain.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+         VALUES (?, 'ke-target', 't-bare', 'kn-target', 'related_to', 1)`,
+        [brain.brainId],
+      );
+      const root = path.dirname(tempFile());
+      const markdown = path.join(root, 'markdown');
+      const vault = path.join(root, 'vault');
+      expect((await new MarkdownExporter(brain).export(markdown)).refused).toEqual([]);
+      expect((await new ObsidianExporter(brain).export(vault)).refused).toEqual([]);
+      // Each note saved again with CRLF line endings, as an editor on Windows saves it.
+      for (const dir of [markdown, vault]) {
+        const folder = path.join(dir, 'user', 'episodic');
+        for (const name of await fsp.readdir(folder)) {
+          const file = path.join(folder, name);
+          await fsp.writeFile(file, (await fsp.readFile(file, 'utf8')).replace(/\n/g, '\r\n'), 'utf8');
+        }
+      }
+      expect(await fsp.readFile(path.join(vault, 'user', 'episodic', 't-bare.md'), 'utf8')).toContain(
+        'Bare words.\r\n\r\nA second line.\r\n\r\n#alpha\r\n\r\n**Related:**\r\n- [[Target\r\nnote]]',
+      );
+
+      expect(await new MarkdownImporter(brain).import(markdown)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await new ObsidianImporter(brain).import(vault)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.\n\nA second line.', 'Kept words.\n\nA second line.']);
+    });
+
     it("Obsidian: a note that holds more than its trace's text, tags and links is imported", async () => {
       const brain = await written('obsidian-edited', 'A%2F42', 'Kept words.', 'Bare words.');
       const dir = path.join(path.dirname(tempFile()), 'vault');
