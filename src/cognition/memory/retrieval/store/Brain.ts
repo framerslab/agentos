@@ -1500,10 +1500,7 @@ export class Brain {
 
             // Upsert so source rows override the brain_meta defaults
             // (schema_version, created_at) seeded during target initialisation.
-            // One transaction per table, for bulk-insert speed and atomicity.
-            await target._adapter.transaction((trx) =>
-              this._bulkCopy(trx, target, table, rows, this.#brainId, { upsert: true }),
-            );
+            await this._bulkCopy(target, table, rows, this.#brainId, { upsert: true });
           }
         });
         // Fold the write-ahead log into the file, so the one file moved into
@@ -1754,7 +1751,7 @@ export class Brain {
       // by `_seedMeta` during the receiving Brain's initialization (which
       // would otherwise collide with the source's schema_version/created_at).
       const copied = decision.action === 'encode' ? encodedSourceRows(table, rows) : rows;
-      await this._bulkCopy(trx, this, table, copied, this.#brainId, { upsert: true });
+      await this._bulkCopy(this, table, copied, this.#brainId, { upsert: true, db: trx });
     }
     // A replace deletes the record with this brain's other brain_meta rows, and a plain source brings none.
     if (decision.action === 'encode' || decision.action === 'record') await writeScopeIdFormRecord(trx, this);
@@ -1765,18 +1762,19 @@ export class Brain {
   }
 
   /**
-   * Internal helper: bulk-insert `rows` into `target.<table>` through `db`, a
-   * transaction on `target`'s adapter, rewriting `brain_id` on each row to
-   * `targetBrainId`. When `opts.upsert` is true, uses
-   * `dialect.insertOrReplace` so PK collisions overwrite (idempotent).
+   * Internal helper: bulk-insert `rows` into `target.<table>`, rewriting
+   * `brain_id` on each row to `targetBrainId`. When `opts.upsert` is true,
+   * uses `dialect.insertOrReplace` so PK collisions overwrite (idempotent).
+   * The rows go through `opts.db`, a transaction the caller holds on
+   * `target`'s adapter, when it is given; otherwise through a transaction of
+   * their own, one per table.
    */
   private async _bulkCopy(
-    db: StorageAdapter,
     target: Brain,
     table: string,
     rows: Record<string, unknown>[],
     targetBrainId: string,
-    opts: { upsert?: boolean } = {},
+    opts: { upsert?: boolean; db?: StorageAdapter } = {},
   ): Promise<void> {
     if (rows.length === 0) return;
 
@@ -1799,15 +1797,24 @@ export class Brain {
         )
       : `INSERT INTO ${table} (${colList}) VALUES (${placeholders})`;
 
-    // `db` is a transaction from adapter.transaction(), never a raw exec
-    // BEGIN/COMMIT, so all writes pin to one pooled connection on Postgres.
-    // Raw BEGIN against a pool connection would land each query on a
-    // different connection, breaking the transactional guarantee silently.
-    for (const row of rows) {
-      const values = columns.map((c) =>
-        c === 'brain_id' ? targetBrainId : row[c],
-      );
-      await db.run(stmt, values as never[]);
+    // Single transaction per table for bulk-insert performance + atomicity,
+    // unless the caller holds one. Either is a transaction from
+    // adapter.transaction() (not raw exec BEGIN/COMMIT), so all writes pin to
+    // one pooled connection on Postgres. Raw BEGIN against a pool connection
+    // would land each query on a different connection, breaking the
+    // transactional guarantee silently.
+    const write = async (db: StorageAdapter): Promise<void> => {
+      for (const row of rows) {
+        const values = columns.map((c) =>
+          c === 'brain_id' ? targetBrainId : row[c],
+        );
+        await db.run(stmt, values as never[]);
+      }
+    };
+    if (opts.db) {
+      await write(opts.db);
+    } else {
+      await target._adapter.transaction(write);
     }
   }
 

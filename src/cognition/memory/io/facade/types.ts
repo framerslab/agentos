@@ -616,8 +616,9 @@ export interface ImportResult {
   skipped: number;
 
   /**
-   * Human-readable messages for the records that failed to import, and for a source that could not be read or
-   * parsed.
+   * Human-readable messages for the records that failed to import, for a source that could not be read or parsed,
+   * and for a source, or a Markdown or Obsidian note, that the brain's scope-id form refuses (the message names
+   * `scope_id_form`).
    */
   errors: string[];
 }
