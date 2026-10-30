@@ -338,4 +338,19 @@ describe('agency() seats served by GMIs', () => {
     await team.close();
     await expect(mine.send('Hello?')).resolves.toMatchObject({ text: 'Still open.' });
   });
+
+  it("a seat sends the call's maxTokens, and warns once about each per-call option it does not apply", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('One.'), reply.text('Two.')] });
+    const member = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Tutor.', maxTokens: 500 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const team = agency({ provider: 'openai', model: 'stub-model', apiKey: k, strategy: 'sequential', agents: { tutor: sessionSeat(member) } });
+    await team.generate('Teach.', { maxTokens: 32, temperature: 0.1 });
+    await team.generate('Again.', { maxTokens: 32, temperature: 0.1 });
+    expect(s.seen.map((call) => call.options.maxTokens)).toEqual([32, 32]);
+    // The member's own temperature holds; the warning names the option once for the seat.
+    const lines = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("'temperature'"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('sessionSeat()');
+  });
 });
