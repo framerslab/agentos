@@ -591,14 +591,17 @@ export function gmi(opts: GmiOptions): GmiHandle {
       completionGateway: {
         resolve: gateway.resolve,
         stream: (resolution, messages, options, responseSchema, schemaName, schemaInPrompt) => {
-          // The turn's budget is checked before every attempt; a refusal sends nothing.
+          // The turn's budget is checked before every attempt; a refusal sends nothing. An attempt of a turn that has
+          // stopped (a session's close() or the caller's signal during a tool round) is not checked: the gateway sends
+          // nothing and ends it with the stop, and the budget hears of no refusal for a call that would not be sent.
           const budget = turn.budget;
-          if (budget) {
+          if (budget && !options.abortSignal?.aborted) {
             // The options the gateway sends for this hop: a fallback hop's overrides raise maxTokens by its headroom
-            // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap.
+            // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap. A structured request goes
+            // without the tool definitions, so they are not counted.
             const sent = { ...options, ...resolution.optionOverrides };
             try {
-              assertCallWithinBudget(budget, resolution, promptCharsOf(messages, undefined, sent.tools), sent.maxTokens, 'gmi.step');
+              assertCallWithinBudget(budget, resolution, promptCharsOf(messages, undefined, responseSchema ? undefined : sent.tools), sent.maxTokens, 'gmi.step');
             } catch (refusal) {
               return refusedAttempt(refusal);
             }
@@ -630,10 +633,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
           });
           changed = true;
         }
-        // A structured send's calls go without tools, and agent() then sends
-        // no chain-of-thought instruction; every other call of an agent with
-        // tools gets it first in its system prompt.
-        if (chainOfThought && !turn.structured) {
+        // The tools the call offers: none on a structured send's calls, and
+        // only its names on a seat's turn.
+        const names = turn.toolNames;
+        const offered = turn.structured ? [] : names ? tools.filter((tool) => names.has(tool.name)) : tools;
+        // A call that offers no tool gets no chain-of-thought instruction, as
+        // agent() sends none with a structured send's calls; every call that
+        // offers tools gets it first in its system prompt.
+        if (chainOfThought && offered.length > 0) {
           messages = withLeadingSystemText(messages, chainOfThought);
           changed = true;
         }
@@ -648,7 +655,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             const modified = await opts.onBeforeGeneration({
               messages: messages as unknown as Message[],
               system: typeof persona.baseSystemPrompt === 'string' ? persona.baseSystemPrompt : undefined,
-              tools,
+              tools: offered,
               model: ctx.modelId,
               provider: ctx.providerId,
               step: ctx.stepIndex,
@@ -749,10 +756,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
   }
 
   /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, and its gate. */
-  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'budget' | 'approvalGate'> => {
+  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'callerSignal' | 'budget' | 'approvalGate'> => {
     const budget = asSpendBudget(extra?.budget) ?? agentBudget;
     return {
-      ...(extra?.abortSignal ? { abortSignal: extra.abortSignal } : {}),
+      // The call's signal is its only stop, and the caller's own.
+      ...(extra?.abortSignal ? { abortSignal: extra.abortSignal, callerSignal: extra.abortSignal } : {}),
       ...(budget ? { budget } : {}),
       ...(extra?.__approvalGate ? { approvalGate: extra.__approvalGate } : {}),
     };
@@ -764,14 +772,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const callerSignal = extra?.abortSignal;
       // A call whose signal has already aborted starts no turn, as a session's send does.
       callerSignal?.throwIfAborted();
-      let result: GenerateTextResult;
-      try {
-        result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options, ...callTurn(extra) });
-      } catch (error) {
-        // Once the caller's signal has aborted, the call rejects with its reason, as a session's send does.
-        if (callerSignal?.aborted) throw callerSignal.reason;
-        throw error;
-      }
+      // A turn the caller's signal stopped rejects with its reason, as a session's send does, and a failure that came
+      // before the stop keeps its own error: sendGmiTurn decides when the turn's failure is recorded.
+      const result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options, ...callTurn(extra) });
+      // A signal that aborted once the turn had ended rejects the call too, and no source is retrieved for it.
+      callerSignal?.throwIfAborted();
       // As agent().generate() does: the answer checked against the sources retrieved for the input.
       if (opts.verifyCitations) {
         const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
@@ -782,8 +787,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
       const options = overridesOf(extra);
-      // A signal that has already aborted stops the turn before its first request (streamGmiTurn), and the stream
-      // ends with an error part.
+      // A signal that has already aborted starts no turn (streamGmiTurn): the stream ends at once with an error part
+      // that carries the signal's reason.
       return streamGmiTurn(oneShotDeps('agent.stream', extra), prompt, { options, ...callTurn(extra) });
     },
 
@@ -926,28 +931,26 @@ export function gmi(opts: GmiOptions): GmiHandle {
               maxTokens: sendOpts?.maxTokens,
             }).filter(([, v]) => v !== undefined),
           );
-          try {
-            return await sendGmiTurn(deps('agent.session.send', sendOpts), input, {
-              options,
-              responseSchema: sendOpts?.responseSchema,
-              schemaName: sendOpts?.schemaName,
-              blockLabel: sendOpts?.blockLabel,
-              abortSignal: turnSignal(callerSignal),
-              budget: turnBudget(sendOpts?.budget),
-              ...seatTurnOf(sendOpts),
-            });
-          } catch (error) {
-            // Once the caller's signal has aborted, the send rejects with its
-            // reason, as agent()'s send does; a turn that close() alone ended
-            // keeps the GMI's error.
-            if (callerSignal?.aborted) throw callerSignal.reason;
-            throw error;
-          }
+          // A turn the caller's signal stopped rejects with its reason, as
+          // agent()'s send does, and a failure that came before the stop keeps
+          // its own error (sendGmiTurn decides when the turn's failure is
+          // recorded); a turn that close() alone ended keeps the GMI's error.
+          return sendGmiTurn(deps('agent.session.send', sendOpts), input, {
+            options,
+            responseSchema: sendOpts?.responseSchema,
+            schemaName: sendOpts?.schemaName,
+            blockLabel: sendOpts?.blockLabel,
+            abortSignal: turnSignal(callerSignal),
+            ...(callerSignal ? { callerSignal } : {}),
+            budget: turnBudget(sendOpts?.budget),
+            ...seatTurnOf(sendOpts),
+          });
         },
         // As in send(), the turn takes the caller's budget and the gate, tool names and hooks a seat puts on its calls.
         stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
           streamGmiTurn(deps('agent.session.stream', streamOpts), input, {
             abortSignal: turnSignal(streamOpts?.abortSignal),
+            ...(streamOpts?.abortSignal ? { callerSignal: streamOpts.abortSignal } : {}),
             budget: turnBudget(streamOpts?.budget),
             ...seatTurnOf(streamOpts),
           }),
