@@ -126,7 +126,15 @@ export interface AgencyLaunchOptions {
  * runtime's tools that lists and runs its allowlist alone, as the parent turn's user and organization, with no
  * cognitive memory, no retrieval and no learner.
  */
-export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'members'> {
+export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'members' | 'launch'> {
+  /**
+   * Registers `launch_agency` among the runtime's config tools, for the personas granted `agency:launch`. Default
+   * false. A seat whose call fails rejects with its error's name and code alone, so a provider's or a handler's message
+   * reaches no model of the team and not the result; the error itself goes to the runtime's logger (the one
+   * `AgentOS.create` takes, else its own), at warn, under `launch_agency seat <role>`, as do the launch's other failures
+   * (a failed run under `launch_agency run`). A logger that throws fails no launch.
+   */
+  launch?: boolean;
   /**
    * The route of a launched team's manager and synthesizers (they call generateText). Default: the provider and model
    * of the persona of the GMI that launched the team, else the GMIs' defaults
