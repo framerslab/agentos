@@ -998,8 +998,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
       console.error(`${logPrefix} ${errorMsg}`, executorPipelineError);
       // The failure's details go into the tool message the model receives and into the trace, both serialised: the
       // request's facts, without the live objects a call carries (the calling turn's budget, gate, names and hooks, its
-      // stop, the resolved tool instance).
-      const { callerTurn: _callerTurn, signal: _signal, tool: _tool, ...requestFacts } = requestDetails;
+      // stop, the resolved tool instance) or the session data its caller supplied, which can hold any value.
+      const { callerTurn: _callerTurn, signal: _signal, tool: _tool, sessionData: _sessionData, ...requestFacts } = requestDetails;
       const wrappedError = createGMIErrorFromError(
         executorPipelineError,
         GMIErrorCode.TOOL_EXECUTION_FAILED,
