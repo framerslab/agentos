@@ -134,8 +134,9 @@ export class MarkdownImporter {
    * and trailing whitespace, which the import takes off a body, is the body.
    * A note whose front-matter `id` names a trace of its scope and scope id
    * that it holds is that trace's own note, and so its duplicate, also when
-   * the trace's text begins or ends with whitespace. `ObsidianImporter` first
-   * takes off the tags and links `ObsidianExporter` writes after the text.
+   * the trace's text begins or ends with whitespace. `ObsidianImporter` also
+   * reads past the tag line and the links `ObsidianExporter` writes after the
+   * text.
    *
    * @param text - The text of the trace the note's `id` names.
    * @param body - The note's body, without its leading and trailing whitespace.

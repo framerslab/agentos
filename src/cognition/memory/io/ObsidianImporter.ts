@@ -20,7 +20,7 @@
 
 import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
-import type { ImportResult } from './facade/types.js';
+import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { MarkdownImporter } from './MarkdownImporter.js';
 
@@ -48,11 +48,16 @@ const EMBED_RE = /!\[\[[^\]]+\]\]/g;
 const HASHTAG_RE = /(?<![[#])#([\w-]+)/g;
 
 /**
- * What `ObsidianExporter` writes after a trace's text, at the end of a note's
- * body: the line of the trace's `#tags`, then the **Related:** list of its
- * `[[links]]`, each after a blank line and each only when the trace has some.
+ * The line of a trace's tags `ObsidianExporter` writes after its text: each
+ * tag as a `#tag` word, a space between two.
  */
-const EXPORTED_ADDITIONS_RE = /(?:\n\n#\S*(?: #\S*)*)?(?:\n\n\*\*Related:\*\*(?:\n- \[\[[^\n]*\]\])+)?$/;
+const TAG_LINE_RE = /^#\S*(?: #\S*)*/;
+
+/** The heading `ObsidianExporter` writes above the list of a trace's links. */
+const RELATED_HEADING = '**Related:**';
+
+/** What opens each item of the **Related:** list: a line break and the opening of its link. */
+const RELATED_ITEM = '\n- [[';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -86,6 +91,13 @@ interface TraceFrontmatter {
  */
 export class ObsidianImporter extends MarkdownImporter {
   /**
+   * The labels of the brain's graph that hold a line break, read when an
+   * import starts. A note's link to such a label runs over the label's line
+   * breaks when a vault holds the label as the brain does.
+   */
+  private _labelsWithLineBreaks: ReadonlySet<string> = new Set();
+
+  /**
    * @param brain - The target `Brain` to import into.
    */
   constructor(brain: Brain) {
@@ -93,22 +105,54 @@ export class ObsidianImporter extends MarkdownImporter {
   }
 
   // -------------------------------------------------------------------------
+  // Public API
+  // -------------------------------------------------------------------------
+
+  /**
+   * Recursively walk `sourceDir` and import every `.md` file as
+   * `MarkdownImporter` does, reading each note's `#tags` and `[[wikilinks]]`
+   * as well. With deduplication on, the labels of the brain's graph that hold
+   * a line break are read first, so a trace's own note is found when its
+   * **Related:** list links to one of them (see {@link holdsTraceText}).
+   *
+   * @param sourceDir - Directory to recursively scan for `.md` files.
+   * @param options   - `dedup` (default `true`) skips a note the brain holds.
+   * @returns `ImportResult` with counts of imported, skipped, and errored items.
+   */
+  override async import(sourceDir: string, options?: Pick<ImportOptions, 'dedup'>): Promise<ImportResult> {
+    if (options?.dedup ?? true) this._labelsWithLineBreaks = await this._readLabelsWithLineBreaks();
+    return super.import(sourceDir, options);
+  }
+
+  // -------------------------------------------------------------------------
   // Overridden hooks
   // -------------------------------------------------------------------------
 
   /**
-   * Whether a note's body holds a trace's text: the body, without the tag line
-   * and the **Related:** list `ObsidianExporter` writes after the text, holds
-   * it as a Markdown note does. A trace with tags or graph links is then the
-   * duplicate of its own note, and a vault exported from a brain and imported
-   * into it adds nothing.
+   * Whether a note's body holds a trace's text: the body is the text, as a
+   * Markdown note's is, or it opens with the text, without its leading and
+   * trailing whitespace, and holds after it, past whitespace, only what
+   * `ObsidianExporter` writes there: the tag line, the **Related:** list, or
+   * the tag line, a blank line and the list. Each link of the list is a line
+   * `- [[label]]`, or runs over the line breaks of a label the brain's graph
+   * holds. The text is read whole, so a trace whose own text ends in a line of
+   * hashtags, and a trace with no text, are the duplicates of their own notes
+   * too, and a vault exported from a brain and imported into it adds nothing.
+   * A note that holds anything else after the text, such as a paragraph added
+   * in Obsidian before or after its links, is not the trace's own note.
    *
    * @param text - The text of the trace the note's `id` names.
    * @param body - The note's body, without its leading and trailing whitespace.
    * @returns `true` when the note holds the trace's text.
    */
   protected override holdsTraceText(text: string, body: string): boolean {
-    return super.holdsTraceText(text, body.replace(EXPORTED_ADDITIONS_RE, '').trim());
+    if (super.holdsTraceText(text, body)) return true;
+    const own = text.trim();
+    if (!body.startsWith(own)) return false;
+    const rest = body.slice(own.length);
+    // The export writes a blank line between the text and what it adds; a trace with no text keeps none past the trim.
+    if (own !== '' && !/^\s/.test(rest)) return false;
+    return this._isExportedAdditions(rest.trim());
   }
 
   /**
@@ -168,6 +212,65 @@ export class ObsidianImporter extends MarkdownImporter {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /**
+   * Read the labels of the brain's graph that hold a line break.
+   *
+   * @returns The labels, as the brain holds them.
+   */
+  private async _readLabelsWithLineBreaks(): Promise<ReadonlySet<string>> {
+    const rows = await this.brain.all<{ label: string }>(
+      'SELECT DISTINCT label FROM knowledge_nodes WHERE brain_id = ? AND label LIKE ?',
+      [this.brain.brainId, '%\n%'],
+    );
+    return new Set(rows.map((row) => row.label));
+  }
+
+  /**
+   * Whether `additions` is what `ObsidianExporter` writes after a trace's
+   * text: the tag line, the **Related:** list, or the tag line, a blank line
+   * and the list.
+   *
+   * @param additions - What a note holds after a trace's text, without the whitespace around it.
+   * @returns `true` when the note holds nothing else there.
+   */
+  private _isExportedAdditions(additions: string): boolean {
+    let at = 0;
+    const tagLine = TAG_LINE_RE.exec(additions);
+    if (tagLine) {
+      at = tagLine[0].length;
+      if (at === additions.length) return true;
+      if (!additions.startsWith('\n\n', at)) return false;
+      at += 2;
+    }
+    if (!additions.startsWith(RELATED_HEADING, at)) return false;
+    return this._isRelatedListFrom(additions, at + RELATED_HEADING.length, new Set());
+  }
+
+  /**
+   * Whether `additions`, from `at` to its end, is one or more links of a
+   * **Related:** list: each a line break, `- [[`, a label and `]]`. A label is
+   * the rest of its line when that line ends in `]]`, or a label of the
+   * brain's graph that holds a line break.
+   *
+   * @param additions - What a note holds after a trace's text, without the whitespace around it.
+   * @param at        - Where the next link starts.
+   * @param failed    - The places already found to start no list that runs to the end.
+   * @returns `true` when the links run to the end of `additions`.
+   */
+  private _isRelatedListFrom(additions: string, at: number, failed: Set<number>): boolean {
+    if (failed.has(at) || !additions.startsWith(RELATED_ITEM, at)) return false;
+    const start = at + RELATED_ITEM.length;
+    const lineBreak = additions.indexOf('\n', start);
+    const lineEnd = lineBreak === -1 ? additions.length : lineBreak;
+    const ends = additions.slice(start, lineEnd).endsWith(']]') ? [lineEnd] : [];
+    for (const label of this._labelsWithLineBreaks) {
+      if (additions.startsWith(`${label}]]`, start)) ends.push(start + label.length + 2);
+    }
+    if (ends.some((end) => end === additions.length || this._isRelatedListFrom(additions, end, failed))) return true;
+    failed.add(at);
+    return false;
+  }
 
   /**
    * Merge a list of inline hashtag names into a trace's `tags` JSON column.

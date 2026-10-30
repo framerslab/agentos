@@ -638,7 +638,7 @@ await mem.export('./vault', { format: 'obsidian' });
 Produces:
 
 - `#tags` in the body for every tag on the trace.
-- A **Related:** list of `[[wikilinks]]` to the labels of the knowledge-graph nodes the trace's node links to in the brain's own graph (empty when the graph has no edges for it). Another brain in the same database never adds a link, though node ids repeat across brains.
+- A **Related:** list of `[[wikilinks]]` to the labels of the knowledge-graph nodes the trace's node links to in the brain's own graph (empty when the graph has no edges for it), one link a line. A line break in a label, with the whitespace around it, is written as a space, since an Obsidian link holds no line break. Another brain in the same database never adds a link, though node ids repeat across brains.
 - The same YAML front-matter and `{scope}/{type}/` folders as the Markdown export, with the same rule for the names a trace's folders and file take, and the same `refused` list.
 
 Example output:
@@ -704,7 +704,7 @@ const result = await mem.importFrom('./my-vault/', { format: 'obsidian' });
 - `#tags` in the body are extracted and added to the trace's tag array.
 - Embedded images (`![[image.png]]`) are not imported.
 - The folder a note sits in does not set its type: a note without `type` in its front-matter is imported as `episodic`.
-- A note whose `id` names a trace of its scope and scope id is that trace's own note, and is skipped, when its body without the tag line and the **Related:** list the Obsidian export writes after the text is the trace's text, so a vault exported from a brain and imported into it adds nothing.
+- A note whose `id` names a trace of its scope and scope id is that trace's own note, and is skipped, when its body is the trace's text without its leading and trailing whitespace, followed by nothing but what the Obsidian export writes after it: the tag line, the **Related:** list, or both, a blank line apart. So a vault exported from a brain and imported into it adds nothing. The trace's text is read whole, a line of hashtags it ends in included. Each link of the list is a line `- [[label]]`, or runs over the line breaks of a label the brain's graph holds. A note with anything else after the text, such as a paragraph added in Obsidian before or after its links, is not the trace's own note. A trace's own note is skipped whole, so a tag or link added to it in Obsidian is not imported.
 
 ### ChatGPT Export
 
