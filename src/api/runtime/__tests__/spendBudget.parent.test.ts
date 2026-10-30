@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { CostCapExceededError, CostGuard } from '../../../safety/runtime/CostGuard.js';
-import { DEFAULT_OUTPUT_ESTIMATE_TOKENS, SpendBudget, outputEstimateTokens, type SpendLimitInfo } from '../spendBudget.js';
+import { DEFAULT_OUTPUT_ESTIMATE_TOKENS, SpendBudget, bothBudgets, outputEstimateTokens, type SpendLimitInfo } from '../spendBudget.js';
 
 describe('SpendBudget with a parent', () => {
   it('asks the parent first and records into both', () => {
@@ -59,6 +59,29 @@ describe('SpendBudget with a parent', () => {
     const child = new SpendBudget({ maxCostUSD: 1, parent: middle, onLimitReached: (info) => { seen.push(`child:${info.budgetId}`); } });
     expect(() => child.assertCanSpend(0, 500, 'step')).toThrow('stop');
     expect(seen).toEqual([`middle:${root.id}`, `child:${root.id}`]);
+  });
+
+  it('tells the budgets below an ancestor whose own function throws a value that is not an object', () => {
+    const seen: string[] = [];
+    const stop = () => {
+      throw 'stop';
+    };
+    const thrownBy = (check: () => void): unknown => {
+      try {
+        check();
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    };
+    const root = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100, onLimitReached: stop });
+    const child = new SpendBudget({ maxCostUSD: 1, parent: root, onLimitReached: (info) => { seen.push(`child:${info.budgetId}`); } });
+    expect(thrownBy(() => child.assertCanSpend(0, 500, 'step'))).toBe('stop');
+    // Held to two budgets, the first hears of the second's refusal the same way.
+    const capped = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100, onLimitReached: stop });
+    const first = new SpendBudget({ maxCostUSD: 1, onLimitReached: (info) => { seen.push(`first:${info.budgetId}`); } });
+    expect(thrownBy(() => bothBudgets(first, capped).assertCanSpend(0, 500, 'step'))).toBe('stop');
+    expect(seen).toEqual([`child:${root.id}`, `first:${capped.id}`]);
   });
 
   it("lets the child's own check decide when a parent only warns", () => {
