@@ -25,6 +25,18 @@
  * traces under that scope id first (`fillScopeIds`), so another scope id's
  * trace is not taken for a file's duplicate.
  *
+ * A Brain a learning layer serves holds its plain `user` and `persona` scope
+ * ids in the encoded form (`scopeIdForm.ts`). A note that front matter marks
+ * `scopeIdForm: encoded` was written by such a Brain's export, and its scope
+ * id is taken as it is written; every other note's scope id is plain. Into a
+ * Brain that holds the record, a plain note's id is encoded as it is written;
+ * a marked note goes into a Brain without the record, which then gets it,
+ * unless that Brain holds a plain id the record would read as another, in a
+ * trace or a knowledge-graph copy: then the note is not imported and `errors`
+ * names the record. Each note is written in a transaction of its own, which
+ * reads the Brain's form first (on Postgres under the brain's form lock), so a
+ * re-file or another import of the Brain that commits first is followed.
+ *
  * @module memory/io/MarkdownImporter
  */
 
@@ -34,6 +46,13 @@ import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { readFrontMatter, type FrontMatterFile } from '../../../core/utils/frontMatter.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import {
+  ENCODED_SCOPE_ID_FORM,
+  encodePlainScopeId,
+  importScopeIdFormDecision,
+  SCOPE_ID_FORM_KEY,
+  writeScopeIdFormRecord,
+} from '../retrieval/store/scopeIdForm.js';
 import { duplicateTraceCondition, duplicateTraceParams } from './importScope.js';
 
 // ---------------------------------------------------------------------------
@@ -83,6 +102,8 @@ interface TraceFrontmatter {
   createdAt?: number;
   /** The scope id the trace is filed under; a value that is not a string is ignored. */
   scopeId?: string;
+  /** `encoded` on a note an encoded Brain's export wrote: its scope id is in the encoded form already. */
+  scopeIdForm?: string;
   [key: string]: unknown;
 }
 
@@ -127,8 +148,10 @@ export class MarkdownImporter {
     // A trace an older release wrote holds scope_id '': filed under its scope id first, it is not read as ''.
     if (options?.dedup ?? true) await fillScopeIds(this.brain.adapter, this.brain.brainId);
 
+    // What one note's handshake found in a Brain without the record, shared with the notes after it.
+    const reserved: { found?: boolean } = {};
     for (const filePath of files) {
-      await this._processFile(filePath, result, options);
+      await this._processFile(filePath, result, reserved, options);
     }
 
     return result;
@@ -236,10 +259,13 @@ export class MarkdownImporter {
    *
    * @param filePath - Absolute path to the `.md` file.
    * @param result   - Mutable `ImportResult` accumulator.
+   * @param reserved - What the import's handshakes have found in a Brain
+   *   without the record.
    */
   private async _processFile(
     filePath: string,
     result: ImportResult,
+    reserved: { found?: boolean },
     options?: Pick<ImportOptions, 'dedup'>,
   ): Promise<void> {
     const fs = await import('node:fs/promises');
@@ -271,61 +297,83 @@ export class MarkdownImporter {
     const hash = await sha256(body);
     const scope = typeof fm.scope === 'string' ? fm.scope : 'user';
     // The front matter names the scope id; a file that names none, or names one that is not a string, files under ''.
-    const scopeId = typeof fm.scopeId === 'string' ? fm.scopeId : '';
+    const namedScopeId = typeof fm.scopeId === 'string' ? fm.scopeId : '';
+    const tags: string[] = Array.isArray(fm.tags) ? (fm.tags as string[]) : [];
 
-    // Dedup check, inside the file's scope and scope id.
-    if (options?.dedup ?? true) {
-      const existing = await this.brain.get<{ id: string }>(
-        `SELECT id FROM memory_traces
-          WHERE brain_id = ? AND scope = ? AND scope_id = ?
-            AND ${duplicateTraceCondition(this.brain)}
-          LIMIT 1`,
-        [this.brain.brainId, scope, scopeId, ...duplicateTraceParams(hash, body)],
-      );
+    // The note is written in a transaction of its own, which reads the Brain's scope-id form first.
+    let written: { traceId: string } | { held: HeldTrace } | 'skipped' | 'refused';
+    try {
+      written = await this.brain.transaction(async (trx) => {
+        const decision = await importScopeIdFormDecision(
+          trx,
+          this.brain,
+          { encoded: fm.scopeIdForm === ENCODED_SCOPE_ID_FORM },
+          { reserved },
+        );
+        if (decision.action === 'refuse') {
+          result.errors.push(`${filePath}: ${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
+          return 'refused' as const;
+        }
+        const scopeId = decision.action === 'encode' ? encodePlainScopeId(scope, namedScopeId) : namedScopeId;
 
-      if (existing) {
-        result.skipped++;
-        return;
-      }
-      const held = await this._heldTraceOfNote(fm, scope, scopeId, body);
-      if (held) {
-        await this.addNoteToHeldTrace(held, body, result);
-        result.skipped++;
-        return;
-      }
+        // Dedup check, inside the file's scope and scope id.
+        if (options?.dedup ?? true) {
+          const existing = await trx.get<{ id: string }>(
+            `SELECT id FROM memory_traces
+              WHERE brain_id = ? AND scope = ? AND scope_id = ?
+                AND ${duplicateTraceCondition(this.brain)}
+              LIMIT 1`,
+            [this.brain.brainId, scope, scopeId, ...duplicateTraceParams(hash, body)],
+          );
+          if (existing) return 'skipped' as const;
+          const held = await this._heldTraceOfNote(trx, fm, scope, scopeId, body);
+          if (held) return { held };
+        }
+
+        if (decision.action === 'record') await writeScopeIdFormRecord(trx, this.brain);
+        const traceId = await this._resolveTraceId(trx, (typeof fm.id === 'string' && fm.id) ? fm.id : `mt_${uuidv4()}`);
+        const meta: Record<string, unknown> = { import_hash: hash, source_file: filePath };
+        // A trace loaded from the Brain reads its scope id in its metadata, so the metadata names it as the column does.
+        if (scopeId !== '') meta.scopeId = scopeId;
+        await trx.run(
+          `INSERT INTO memory_traces
+               (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
+                retrieval_count, tags, emotions, metadata, deleted, scope_id)
+             VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0, ?, '{}', ?, 0, ?)`,
+          [
+            this.brain.brainId,
+            traceId,
+            typeof fm.type === 'string' ? fm.type : 'episodic',
+            scope,
+            body,
+            typeof fm.strength === 'number' ? fm.strength : 1.0,
+            typeof fm.createdAt === 'number' ? fm.createdAt : Date.now(),
+            JSON.stringify(tags),
+            JSON.stringify(meta),
+            scopeId,
+          ],
+        );
+        return { traceId };
+      });
+    } catch (err) {
+      result.errors.push(`Insert error for ${filePath}: ${String(err)}`);
+      return;
+    }
+    if (written === 'refused') return;
+    if (written === 'skipped') {
+      result.skipped++;
+      return;
+    }
+    if ('held' in written) {
+      // The trace's own note: what it holds beyond the trace is added once the note's transaction has ended.
+      await this.addNoteToHeldTrace(written.held, body, result);
+      result.skipped++;
+      return;
     }
 
-    const traceId = await this._resolveTraceId(
-      (typeof fm.id === 'string' && fm.id) ? fm.id : `mt_${uuidv4()}`,
-    );
-
-    const tags: string[] = Array.isArray(fm.tags) ? (fm.tags as string[]) : [];
-    const meta: Record<string, unknown> = { import_hash: hash, source_file: filePath };
-    // A trace loaded from the Brain reads its scope id in its metadata, so the metadata names it as the column does.
-    if (scopeId !== '') meta.scopeId = scopeId;
-
     try {
-      await this.brain.run(
-        `INSERT INTO memory_traces
-             (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
-              retrieval_count, tags, emotions, metadata, deleted, scope_id)
-           VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0, ?, '{}', ?, 0, ?)`,
-        [
-          this.brain.brainId,
-          traceId,
-          typeof fm.type === 'string' ? fm.type : 'episodic',
-          scope,
-          body,
-          typeof fm.strength === 'number' ? fm.strength : 1.0,
-          typeof fm.createdAt === 'number' ? fm.createdAt : Date.now(),
-          JSON.stringify(tags),
-          JSON.stringify(meta),
-          scopeId,
-        ],
-      );
-
       // Give subclasses a chance to handle wikilinks, extra tags, etc.
-      await this.postProcess(filePath, fm, body, result, traceId);
+      await this.postProcess(filePath, fm, body, result, written.traceId);
 
       result.imported++;
     } catch (err) {
@@ -340,6 +388,7 @@ export class MarkdownImporter {
    * id, so its import into the brain it came from adds nothing, whatever
    * whitespace surrounds a trace's text.
    *
+   * @param trx     - The note's transaction.
    * @param fm      - The note's front matter.
    * @param scope   - The scope the note files under.
    * @param scopeId - The scope id the note files under.
@@ -347,13 +396,14 @@ export class MarkdownImporter {
    * @returns The trace, or `undefined` when the note is not the note of a trace the brain holds.
    */
   private async _heldTraceOfNote(
+    trx: { get: Brain['get'] },
     fm: TraceFrontmatter,
     scope: string,
     scopeId: string,
     body: string,
   ): Promise<HeldTrace | undefined> {
     if (typeof fm.id !== 'string' || !fm.id) return undefined;
-    const named = await this.brain.get<{ content: string; tags: string }>(
+    const named = await trx.get<{ content: string; tags: string }>(
       'SELECT content, tags FROM memory_traces WHERE brain_id = ? AND id = ? AND scope = ? AND scope_id = ? LIMIT 1',
       [this.brain.brainId, fm.id, scope, scopeId],
     );
@@ -361,8 +411,8 @@ export class MarkdownImporter {
     return { id: fm.id, content: named.content, tags: named.tags };
   }
 
-  private async _resolveTraceId(preferredId: string): Promise<string> {
-    const existing = await this.brain.get<{ id: string }>(
+  private async _resolveTraceId(trx: { get: Brain['get'] }, preferredId: string): Promise<string> {
+    const existing = await trx.get<{ id: string }>(
       'SELECT id FROM memory_traces WHERE brain_id = ? AND id = ? LIMIT 1',
       [this.brain.brainId, preferredId],
     );

@@ -24,6 +24,16 @@
  * another id because its id names another trace, or does not write, is
  * skipped, with the edges that name it.
  *
+ * A Brain a learning layer serves holds its plain `user` and `persona` scope
+ * ids in the encoded form (`scopeIdForm.ts`), and its export's `meta` names
+ * the record (`scope_id_form`). An export without it is in the plain form:
+ * into a Brain that holds the record, its ids are encoded as they are written,
+ * each trace's knowledge-graph copy with it. An export with the record goes
+ * into a Brain without it, which then gets the record, unless that Brain holds
+ * a plain id the record would read as another, in a trace or a copy: then
+ * nothing is imported and `errors` names the record. The Brain's form is read
+ * in the transaction the import writes in.
+ *
  * @module memory/io/JsonImporter
  */
 
@@ -37,13 +47,12 @@ import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import {
-  ABSENT_BRAIN,
   ENCODED_SCOPE_ID_FORM,
+  encodedCopyProperties,
   encodePlainScopeId,
-  readBrainScopeIdForm,
+  importScopeIdFormDecision,
   SCOPE_ID_FORM_KEY,
-  scopeIdFormHandshake,
-  scopeIdFormRecordSql,
+  writeScopeIdFormRecord,
 } from '../retrieval/store/scopeIdForm.js';
 
 // ---------------------------------------------------------------------------
@@ -166,7 +175,10 @@ interface MessageRecord {
 
 interface ImportContext {
   dedup: boolean;
-  /** Encode the source's plain user and persona ids as they are written (an import into an encoded Brain). */
+  /**
+   * Encode the source's plain user and persona ids as they are written, in each trace and in each trace's
+   * knowledge-graph copy (an import into a Brain that holds the encoded form).
+   */
   encodePlainIds: boolean;
   traceIds: Map<string, string>;
   /** The payload's trace ids. */
@@ -279,22 +291,13 @@ export class JsonImporter {
     }
 
     // The source's form comes from its own record; an import encodes a plain source as it writes it, so the source's
-    // ids are not read here.
-    const decision = scopeIdFormHandshake(
-      this.brain.brainId,
-      { ...ABSENT_BRAIN, encoded: payload.meta?.[SCOPE_ID_FORM_KEY] === ENCODED_SCOPE_ID_FORM, rows: payload.traces.length > 0 },
-      await readBrainScopeIdForm(this.brain, this.brain.brainId),
-      { encodeOnWrite: true },
-    );
-    if (decision.action === 'refuse') {
-      result.errors.push(`${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
-      return result;
-    }
+    // ids are not read.
+    const sourceEncoded = payload.meta?.[SCOPE_ID_FORM_KEY] === ENCODED_SCOPE_ID_FORM;
 
     // ---- Import in a single transaction for atomicity ----
     const context: ImportContext = {
       dedup: options?.dedup ?? true,
-      encodePlainIds: decision.action === 'encode',
+      encodePlainIds: false,
       traceIds: new Map<string, string>(),
       sourceTraceIds: new Set<string>(),
       filedTraceIds: new Set<string>(),
@@ -306,14 +309,16 @@ export class JsonImporter {
     };
 
     await this.brain.transaction(async (trx) => {
-      await this._importMeta(trx, payload.meta);
-      if (decision.action === 'record') {
-        await trx.run(scopeIdFormRecordSql(this.brain.features.dialect.insertOrReplace.bind(this.brain.features.dialect)), [
-          this.brain.brainId,
-          SCOPE_ID_FORM_KEY,
-          ENCODED_SCOPE_ID_FORM,
-        ]);
+      // The target's form is read in the transaction the import writes in, so a re-file or another import that commits
+      // first is followed (on Postgres the import waits for the brain's form lock).
+      const decision = await importScopeIdFormDecision(trx, this.brain, { encoded: sourceEncoded });
+      if (decision.action === 'refuse') {
+        result.errors.push(`${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
+        return;
       }
+      context.encodePlainIds = decision.action === 'encode';
+      await this._importMeta(trx, payload.meta);
+      if (decision.action === 'record') await writeScopeIdFormRecord(trx, this.brain);
       // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
       if (context.dedup) await fillScopeIds(trx, this.brain.brainId);
       await this._importTraces(trx, payload.traces, result, context);
@@ -521,7 +526,12 @@ export class JsonImporter {
         }
 
         // Properties that are not a JSON object (malformed text, an array, null) start fresh and keep the import hash.
-        const props = parseTraceMetadata(n.properties);
+        // A trace's copy is filed under its trace's scope id, encoded with it.
+        const props = parseTraceMetadata(
+          context.encodePlainIds && n.type === 'memory' && typeof n.properties === 'string'
+            ? encodedCopyProperties(n.properties)
+            : n.properties,
+        );
         props['import_hash'] = hash;
 
         let embeddingBuf: Uint8Array | null = null;

@@ -614,7 +614,7 @@ createdAt: 1711234567890
 User prefers TypeScript over Python
 ```
 
-A trace filed under a scope id also writes it, as `scopeId` after `scope`, so an import files the note under it. The scope id is the trace's metadata `scopeId`, else its `scope_id` column, as a JSON import reads the trace's row. A trace filed under `''`, like the one above, writes no `scopeId`.
+A trace filed under a scope id also writes it, as `scopeId` after `scope`, so an import files the note under it. The scope id is the trace's metadata `scopeId`, else its `scope_id` column, as a JSON import reads the trace's row. A trace filed under `''`, like the one above, writes no `scopeId`. A Brain a learning layer serves holds its plain `user` and `persona` scope ids in the encoded form ([A Brain's scope-id form](#a-brains-scope-id-form)), and each note it exports says so after `scopeId` (`scopeIdForm: encoded`), so an import takes the note's scope id as it is written.
 
 A trace's scope and type name its folders and its id names its file, so each must be a safe file or folder name: not empty; no slash, backslash or colon, none of `"`, `*`, `<`, `>`, `?` and `|`, and no control character; not starting with a dot; not starting or ending with a space, or ending with a dot; at most 200 bytes in UTF-8. The ids, scopes and types AgentOS makes all are. A trace imported or added with any other value is left out of the export, and `export()` lists it in `refused` with the field and the reason. Below the export folder, folders are made one name at a time and no folder or file is written through a link: a trace whose folder or file there is a symbolic link, or whose file there has a second name (a hard link), is left out too (`problem: 'link'`). The export folder itself may be a link; to export into a linked folder, pass it as the export folder. A trace whose file's place holds anything but a regular file, such as a folder, a named pipe, a socket or a device, is left out as well (`problem: 'special'`): the export opens a file without waiting, so a named pipe that no process reads never holds it up. Of two traces whose files would be one file, the older is written and the newer left out (`problem: 'collision'`). On every platform, that includes two names that differ only in case or Unicode form, which macOS and Windows treat as one name (`mt_case` and `MT_CASE`, or the long s `ſ` and `s`); names they keep apart, such as `ß` and `ss`, are both written. It also includes two names the file system resolves to one file in another way, such as a Windows short name; the export finds those by comparing the files it opens. Every other trace is written, and no file is written outside the export folder. An error opening or writing a file for any other reason, such as a full disk, rejects `export()` once every other trace has been tried. The checks run as each folder is made and each file opened, so they do not stop another process that swaps a folder below the export folder for a link while the export runs:
 
@@ -757,6 +757,25 @@ const result = await mem.importFrom('./data.json', {
 ```
 
 An import files each record under the scope id its file names, in every format that carries one, so a file can add traces to any tenant's, user's or session's scope id in the brain, and tags and graph links to the traces there: a SQLite file merges tags into the traces its records match, an Obsidian note adds tags and links to the trace it names, and a JSON or SQLite file adds graph rows. Import a file into a brain that several tenants share only when it comes from a source you trust, or set its scope ids yourself first.
+
+### A Brain's scope-id form
+
+A Brain a learning layer serves holds its plain `user` and `persona` scope ids in the encoded form: a plain id that holds a `/`, a `%` or a `:` is percent-encoded (`team/ana` is filed `team%2Fana`), and the Brain records it in `brain_meta` (`scope_id_form` = `encoded`). [The written form of a plain id](./memory/COGNITIVE_MEMORY.md#the-written-form-of-a-plain-id-and-a-brains-re-file) gives the rule and the re-file that writes the record. Every import reads its source's form from the source's own record and keeps the Brain's:
+
+| Source | Its form |
+|---|---|
+| JSON export | encoded when its `meta` holds the record |
+| SQLite file | encoded when the brain it holds has the record in `brain_meta` |
+| Markdown or Obsidian note | encoded when its front matter says `scopeIdForm: encoded` |
+| CSV file, ChatGPT export | plain |
+
+- A plain source goes into a Brain that holds the record with each `user` and `persona` scope id encoded as it is written, in the trace's `scope_id` column and its metadata, and in each trace's knowledge-graph copy.
+- A source with the record goes into a Brain that holds the record as it is written.
+- A source with the record goes into a Brain without it when that Brain holds no plain id the encoded form changes, in a trace or in a knowledge-graph memory node, and the Brain then gets the record. A persona id is read part by part, so the `::` between its user id and its persona id counts for neither. Otherwise nothing of the source is imported and `errors` names the record (`scope_id_form`); a Markdown or Obsidian folder is weighed note by note, and `Brain.importFromSqlite` throws.
+- An import reads the Brain's form in the transaction it writes in (each Markdown or Obsidian note in a transaction of its own), so a re-file of the Brain, or another import into it, that commits first is followed. On Postgres the import first takes the brain's advisory lock, as a re-file does.
+- An export reads its Brain's record and its rows in one form: when a re-file commits while the export reads, it reads again. The SQLite importer reads its source file the same way, and `Brain.importFromSqlite` copies again when its source's record changed while it copied.
+
+A source and a Brain that both lack the record take each other as they are, so where no learning layer has opened any Brain involved, every import files its ids as they are written.
 
 
 ### ImportResult

@@ -29,6 +29,13 @@
  * whatever scope id its metadata names; the import files such traces under
  * that scope id before its first duplicate check (`fillScopeIds`).
  *
+ * A CSV file's scope ids are plain. A Brain a learning layer serves holds its
+ * plain `user` and `persona` scope ids in the encoded form (`scopeIdForm.ts`):
+ * into such a Brain each row's scope id is encoded as it is written, in the
+ * column and in the metadata. The Brain's form is read in the transaction the
+ * import writes in (on Postgres under the brain's form lock), so a re-file of
+ * the Brain that commits first is followed.
+ *
  * @module memory/io/CsvImporter
  */
 
@@ -38,6 +45,7 @@ import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { encodePlainScopeId, importScopeIdFormDecision } from '../retrieval/store/scopeIdForm.js';
 
 /**
  * Imports a flat CSV file into a `Brain`.
@@ -133,6 +141,8 @@ export class CsvImporter {
        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, '{}', ?, ?, ?)`;
 
     await this.brain.transaction(async (trx) => {
+      // A plain source: into a Brain that holds the encoded form its ids are encoded as they are written.
+      const encodePlainIds = (await importScopeIdFormDecision(trx, this.brain, { encoded: false })).action === 'encode';
       // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
       if (options?.dedup ?? true) await fillScopeIds(trx, brainId);
       for (const row of dataRows) {
@@ -165,7 +175,11 @@ export class CsvImporter {
             metadata = parsed as Record<string, unknown>;
           }
           // The metadata's scopeId comes first, then the scope_id cell, as for a JSON or SQLite record.
-          const scopeId = importedScopeId(metadata, this._readCell(row, scopeIdIndex));
+          let scopeId = importedScopeId(metadata, this._readCell(row, scopeIdIndex));
+          if (encodePlainIds) {
+            scopeId = encodePlainScopeId(scope, scopeId);
+            if (scopeId !== '') metadata.scopeId = scopeId;
+          }
 
           if (options?.dedup ?? true) {
             const existing = await trx.get<{ id: string }>(checkSql, [
