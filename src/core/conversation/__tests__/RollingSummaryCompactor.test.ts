@@ -33,12 +33,29 @@ function answer(id: string, timestamp: number, callId: string): ConversationMess
   return message(id, timestamp, { role: MessageRole.TOOL, tool_call_id: callId, name: 'read_file' });
 }
 
-/** Runs one compaction pass over `messages` and returns the ids of the messages it summarized and the boundary it stored. */
-async function compact(messages: ConversationMessage[], config: Partial<RollingSummaryCompactionConfig>) {
+/**
+ * Runs one compaction pass over `messages`, after an earlier pass that left its boundary at `previousBoundary` when
+ * one is given, and returns the ids of the messages it summarized and the boundary it stored.
+ */
+async function compact(
+  messages: ConversationMessage[],
+  config: Partial<RollingSummaryCompactionConfig>,
+  previousBoundary?: number,
+) {
   const summarized: string[][] = [];
   const result = await maybeCompactConversationMessages({
     messages,
-    sessionMetadata: {},
+    sessionMetadata:
+      previousBoundary === undefined
+        ? {}
+        : {
+            rollingSummaryState: {
+              updatedAt: 500,
+              summaryText: '- The user keeps notes.',
+              summaryJson: null,
+              summaryUptoTimestamp: previousBoundary,
+            },
+          },
     config: { ...CONFIG, ...config },
     now: 1_000,
     llmCaller: async ({ messages: prompt }) => {
@@ -98,5 +115,48 @@ describe('maybeCompactConversationMessages', () => {
 
     expect(summarized).toEqual([['call', 'a1', 'a2', 'a3']]);
     expect(boundary).toBe(6);
+  });
+
+  it('starts a later pass at the boundary of the earlier one, since the next turn keeps the head of the conversation', async () => {
+    // An earlier pass summarized s1 and s2. The next turn sends h1, h2 and the messages after the boundary, so a pass
+    // that kept back the first messages after the boundary as its head would leave the round out of the summary and
+    // out of the history.
+    const messages = [
+      message('h1', 1),
+      message('h2', 2, { role: MessageRole.ASSISTANT }),
+      message('s1', 3),
+      message('s2', 4, { role: MessageRole.ASSISTANT }),
+      call('call', 5, ['c1', 'c2']),
+      answer('result1', 6, 'c1'),
+      answer('result2', 7, 'c2'),
+      message('done', 8, { role: MessageRole.ASSISTANT }),
+      message('tail1', 9),
+      message('tail2', 10, { role: MessageRole.ASSISTANT }),
+    ];
+
+    const { summarized, boundary } = await compact(messages, { headMessagesToKeep: 2, tailMessagesToKeep: 2 }, 4);
+
+    expect(summarized).toEqual([['call', 'result1', 'result2', 'done']]);
+    expect(boundary).toBe(8);
+  });
+
+  it('counts the kept head as the next turn does, a message no pass summarizes among it', async () => {
+    // The next turn keeps the first two messages of the history it sends: the summary message and q1. A head counted
+    // over the messages a pass may summarize would keep back r1 too, which would then reach neither the summary nor
+    // the history.
+    const messages = [
+      message('earlier', 1, { role: MessageRole.SUMMARY }),
+      message('q1', 2),
+      message('r1', 3, { role: MessageRole.ASSISTANT }),
+      message('q2', 4),
+      message('r2', 5, { role: MessageRole.ASSISTANT }),
+      message('q3', 6),
+      message('r3', 7, { role: MessageRole.ASSISTANT }),
+    ];
+
+    const { summarized, boundary } = await compact(messages, { headMessagesToKeep: 2, tailMessagesToKeep: 2 });
+
+    expect(summarized).toEqual([['r1', 'q2', 'r2']]);
+    expect(boundary).toBe(5);
   });
 });
