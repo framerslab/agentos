@@ -6,9 +6,13 @@
  * Admission is a synchronous check-and-insert. A root scope's turn draws all its launches on one pool.
  * @internal
  */
+import { createContentSafeConsole } from '../../../core/logging/contentSafeConsole.js';
 import type { ApprovalGateFn } from '../approval-gate.js';
 import { SpendBudget } from '../spendBudget.js';
 import type { LaunchLimits, ToolCallHook } from './types.js';
+
+/** This module's fixed diagnostic origin (the launch's); no runtime name enters telemetry. */
+const console = createContentSafeConsole('gmi_launch_tool');
 
 /** One launch in flight. */
 export interface LaunchEntry {
@@ -49,10 +53,33 @@ export interface LaunchEntry {
   state: 'running' | 'closing';
 }
 
-/** The most root scopes whose launch pool is kept; the least recently used goes first. */
-const MAX_POOL_SCOPES = 10_000;
+/**
+ * The most root scopes whose launch pool is kept. Past it, the least recently used scope with no launch in flight
+ * loses its pool: a scope whose turn is still launching keeps it, so all that turn's launches draw on one pool.
+ */
+export const MAX_POOL_SCOPES = 10_000;
 const entries = new Map<string, LaunchEntry>();
 const pools = new Map<string, { turnId: string | undefined; budget: SpendBudget }>();
+/** The pools dropped so far, for the warning about them: the first drop, then every thousandth. */
+let droppedPools = 0;
+
+/** Drops the least recently used pools past {@link MAX_POOL_SCOPES}, keeping `current` and every scope in flight. */
+function dropIdlePools(current: string): void {
+  // The scopes with a launch in flight (their running and closing entries' scope keys).
+  const busy = new Set<string>();
+  for (const entry of entries.values()) busy.add(entry.scopeKey);
+  for (const scope of pools.keys()) {
+    if (pools.size <= MAX_POOL_SCOPES) return;
+    if (scope === current || busy.has(scope)) continue;
+    pools.delete(scope);
+    droppedPools += 1;
+    if (droppedPools === 1 || droppedPools % 1_000 === 0) {
+      console.warn(
+        `[agentos] launch_agency: ${droppedPools} launch pool(s) dropped so far, past ${MAX_POOL_SCOPES} root scopes; a scope that launches again starts a new pool.`,
+      );
+    }
+  }
+}
 /** What waits for an entry's removal, by launch id. */
 const removalWaiters = new Map<string, Array<() => void>>();
 
@@ -72,7 +99,8 @@ export const launchRegistry = {
    * `maxLaunchTokens` and `maxLaunchCostUSD` (no dollar cap: Infinity), `unpriced: 'allow'` and the turn's budget, when
    * it has one, as its parent, and replaced when a launch comes from a later turn id; a call with no turn id shares the
    * scope's current pool. A session runs one turn at a time, so a root scope's current turn is the only one that draws
-   * on it.
+   * on it. Past {@link MAX_POOL_SCOPES} scopes, the least recently used scope with no launch in flight loses its pool,
+   * with a warning.
    */
   rootPool(scopeKey: string, turnId: string | undefined, limits: LaunchLimits, turnBudget?: SpendBudget): SpendBudget {
     const current = pools.get(scopeKey);
@@ -88,11 +116,7 @@ export const launchRegistry = {
       ...(turnBudget ? { parent: turnBudget } : {}),
     });
     pools.set(scopeKey, { turnId, budget });
-    while (pools.size > MAX_POOL_SCOPES) {
-      const oldest = pools.keys().next().value;
-      if (oldest === undefined) break;
-      pools.delete(oldest);
-    }
+    if (pools.size > MAX_POOL_SCOPES) dropIdlePools(scopeKey);
     return budget;
   },
 
