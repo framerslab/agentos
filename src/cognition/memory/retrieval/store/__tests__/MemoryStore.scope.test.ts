@@ -55,8 +55,9 @@ function storeWithoutBrain(vectorStore: InMemoryVectorStore, graph: KnowledgeGra
   return new MemoryStore({ vectorStore, embeddingManager: fixedEmbedder, knowledgeGraph: graph, collectionPrefix: 'cogmem' });
 }
 
-/** The ids of the documents one collection of the index holds. */
+/** The ids of the documents one collection of the index holds: none for a collection the index does not hold. */
 async function idsIn(vectorStore: InMemoryVectorStore, collection: string): Promise<string[]> {
+  if (!(await vectorStore.collectionExists(collection))) return [];
   return (await vectorStore.scanByMetadata(collection, { limit: 100 })).documents.map((document) => document.id).sort();
 }
 
