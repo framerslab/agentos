@@ -559,9 +559,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       completionGateway: {
         resolve: gateway.resolve,
         stream: (resolution, messages, options, responseSchema, schemaName, schemaInPrompt) => {
-          // The turn's budget is checked before every attempt; a refusal sends nothing.
+          // The turn's budget is checked before every attempt; a refusal sends nothing. An attempt of a turn that has
+          // stopped (a session's close() or the caller's signal during a tool round) is not checked: the gateway sends
+          // nothing and ends it with the stop, and the budget hears of no refusal for a call that would not be sent.
           const budget = turn.budget;
-          if (budget) {
+          if (budget && !options.abortSignal?.aborted) {
             // The options the gateway sends for this hop: a fallback hop's overrides raise maxTokens by its headroom
             // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap. A structured request goes
             // without the tool definitions, so they are not counted.
