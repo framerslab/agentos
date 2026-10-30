@@ -196,6 +196,28 @@ describe('ToolOrchestrator', () => {
     expect(result.errorDetails?.details?.reason).toBe('fail');
   });
 
+  it("reports a failure inside the executor's pipeline with the request's facts, not the live or caller-supplied values it carried", async () => {
+    await orchestrator.registerTool(buildEchoTool());
+    (executor as any).executeTool = vi.fn(async () => {
+      throw new Error('pipeline broke');
+    });
+    // Session data a caller made circular, and the calling turn's objects.
+    const loop: Record<string, unknown> = { name: 'loop' };
+    loop.self = loop;
+    const result = await orchestrator.processToolCall({
+      ...makeRequest('echo'),
+      sessionData: { client: loop },
+      callerTurn: { toolHooks: [] } as never,
+    });
+
+    expect(result.isError).toBe(true);
+    // The tool message and the trace serialise the details.
+    const serialised = JSON.stringify(result.errorDetails);
+    expect(serialised).toContain('pipeline broke');
+    expect(serialised).not.toContain('callerTurn');
+    expect(serialised).not.toContain('sessionData');
+  });
+
   it('aggregates dependency health', async () => {
     const unhealthyExecutor = createToolExecutor();
     (unhealthyExecutor as any).checkHealth = vi.fn(async () => ({
