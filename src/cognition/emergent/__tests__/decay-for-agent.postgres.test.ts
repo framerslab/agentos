@@ -66,6 +66,63 @@ describe.skipIf(!url)('PersonalityMutationStore.decayForAgent on PostgreSQL', ()
     return (await store.loadForAgent('a1'))[0]?.strength;
   }
 
+  /**
+   * `db`, with each transaction's guard-row claim held, once it has been
+   * sent, until `calls` claims have been sent: the claims of that many
+   * concurrent decays reach PostgreSQL while all of their transactions are
+   * open, so a later claim meets an earlier one's uncommitted row. A held
+   * claim fails after 10 s when fewer claims arrive.
+   */
+  function claimsSentTogether(db: StorageAdapter, calls: number): StorageAdapter {
+    let sent = 0;
+    let release!: () => void;
+    const allSent = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waitForAll = async (): Promise<void> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`fewer than ${calls} guard claims were sent while their transactions were open`)),
+          10_000,
+        );
+      });
+      try {
+        await Promise.race([allSent, late]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const bound = (target: object, prop: string | symbol): unknown => {
+      const value: unknown = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    };
+    const holding = (trx: StorageAdapter): StorageAdapter =>
+      new Proxy(trx, {
+        get(target, prop) {
+          if (prop !== 'run') return bound(target, prop);
+          return async (...args: Parameters<StorageAdapter['run']>) => {
+            const claim = target.run(...args);
+            if (args[0].includes('INSERT INTO personality_decay_cycles')) {
+              // Handled here too, so a claim that fails while it is held is not reported as unhandled.
+              claim.catch(() => undefined);
+              sent += 1;
+              if (sent === calls) release();
+              await waitForAll();
+            }
+            return claim;
+          };
+        },
+      });
+    return new Proxy(db, {
+      get(target, prop) {
+        if (prop !== 'transaction') return bound(target, prop);
+        return <T>(fn: (trx: StorageAdapter) => Promise<T>): Promise<T> =>
+          target.transaction((trx) => fn(holding(trx)));
+      },
+    });
+  }
+
   /** The data type of the guard table's owner_token column, or undefined when the table has none. */
   async function ownerTokenType(db: StorageAdapter): Promise<string | undefined> {
     const column = await db.get<{ data_type: string }>(
@@ -119,8 +176,8 @@ describe.skipIf(!url)('PersonalityMutationStore.decayForAgent on PostgreSQL', ()
     expect(await strengthOf(store)).toBeCloseTo(0.95);
   });
 
-  it('two calls for one cycle at once, each in a transaction on its own connection: one decays, the other is skipped', async () => {
-    const store = await storeWithOneMutation(await openSegment());
+  it('two calls for one cycle at once, each in a transaction on its own connection, the second claim sent while the first is uncommitted: one decays, the other is skipped', async () => {
+    const store = await storeWithOneMutation(claimsSentTogether(await openSegment(), 2));
 
     const results = await Promise.all([
       store.decayForAgent('a1', 0.05, 'day:2026-10-28'),
