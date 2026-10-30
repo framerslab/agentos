@@ -41,6 +41,8 @@ interface TraceRow {
   tags: string;
   /** The trace's scope id; `''` for a trace filed under none. */
   scope_id: string;
+  /** `encoded` for a trace of a Brain that holds the encoded scope-id form, whose note says so. */
+  scopeIdForm?: string;
 }
 
 /** Result row when joining edges → nodes. */

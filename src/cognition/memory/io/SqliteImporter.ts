@@ -49,6 +49,20 @@
  * whose rows carry several brain ids, naming them in `errors`. A file older
  * than the `brain_id` column holds one brain, and every row of it is read.
  *
+ * ## A Brain's scope-id form
+ * A Brain a learning layer serves holds its plain `user` and `persona` scope
+ * ids in the encoded form, and says so in `brain_meta` (`scope_id_form`; see
+ * `scopeIdForm.ts`). The source's form is the record of the brain it holds:
+ * its rows are read with the record read before and after them, and read
+ * again when a re-file of the file committed in between. A plain source goes
+ * into a Brain that holds the record with its ids encoded as they are written,
+ * each trace's knowledge-graph copy with it. A source with the record goes
+ * into a Brain without it, which then gets the record, unless that Brain holds
+ * a plain id the record would read as another, in a trace or a copy: then
+ * nothing is imported and `errors` names the record. The Brain's form is read
+ * in the transaction the import writes in, so a re-file or another import of
+ * the Brain that commits first is followed.
+ *
  * @module memory/io/SqliteImporter
  */
 
@@ -63,14 +77,13 @@ import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import {
-  ABSENT_BRAIN,
-  ENCODED_SCOPE_ID_FORM,
+  encodedCopyProperties,
   encodePlainScopeId,
-  readBrainScopeIdForm,
-  readScopeIdForms,
+  importScopeIdFormDecision,
+  readInOneScopeIdForm,
+  readScopeIdFormRecord,
   SCOPE_ID_FORM_KEY,
-  scopeIdFormHandshake,
-  scopeIdFormRecordSql,
+  writeScopeIdFormRecord,
 } from '../retrieval/store/scopeIdForm.js';
 
 // ---------------------------------------------------------------------------
@@ -123,6 +136,13 @@ type SourceTable = (typeof SOURCE_TABLES)[number];
 
 /** The statement and parameters that read a source table's rows. */
 type SourceRead = (table: SourceTable) => [sql: string, params: unknown[]];
+
+/** The source's rows of each table it reads; `null` for a table the file does not hold or that cannot be read. */
+interface SourceRows {
+  traces: TraceRow[] | null;
+  nodes: NodeRow[] | null;
+  edges: EdgeRow[] | null;
+}
 
 // ---------------------------------------------------------------------------
 // SqliteImporter
@@ -185,39 +205,35 @@ export class SqliteImporter {
           ? [`SELECT * FROM ${table} WHERE brain_id = ?`, [brainIds[0]]]
           : [`SELECT * FROM ${table}`, []];
 
-      // The source's form: encoded when every brain of the file that holds traces has the record, plain when none has.
-      const sourceForms = [...(await readScopeIdForms(sourceAdapter)).values()].filter((form) => form.rows);
-      const encodedBrains = sourceForms.filter((form) => form.encoded).length;
-      if (encodedBrains > 0 && encodedBrains < sourceForms.length) {
-        result.errors.push(`${SCOPE_ID_FORM_KEY}: the source file mixes brains with and without the encoded scope-id form.`);
-        return result;
-      }
-      const decision = scopeIdFormHandshake(
-        this.brain.brainId,
-        { ...ABSENT_BRAIN, encoded: sourceForms.length > 0 && encodedBrains === sourceForms.length, rows: sourceForms.length > 0 },
-        await readBrainScopeIdForm(this.brain, this.brain.brainId),
-        { encodeOnWrite: true },
+      // The source's form is its brain's record. Its rows are read with the record read before and after them, and
+      // read again when a re-file of the file committed in between, so they are in the form the record names.
+      const sourceBrainId = brainIds.length === 1 ? brainIds[0]! : undefined;
+      const { value: rows, encoded: sourceEncoded } = await readInOneScopeIdForm(
+        async () => sourceBrainId !== undefined && (await readScopeIdFormRecord(sourceAdapter, sourceBrainId)),
+        async (): Promise<SourceRows> => ({
+          traces: await this._readSource<TraceRow>(sourceAdapter, read, 'memory_traces'),
+          nodes: await this._readSource<NodeRow>(sourceAdapter, read, 'knowledge_nodes'),
+          edges: await this._readSource<EdgeRow>(sourceAdapter, read, 'knowledge_edges'),
+        }),
       );
-      if (decision.action === 'refuse') {
-        result.errors.push(`${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
-        return result;
-      }
 
       let traces = { inserted: 0, retagged: 0 };
       await this.brain.transaction(async (trx) => {
-        if (decision.action === 'record') {
-          await trx.run(scopeIdFormRecordSql(this.brain.features.dialect.insertOrReplace.bind(this.brain.features.dialect)), [
-            this.brain.brainId,
-            SCOPE_ID_FORM_KEY,
-            ENCODED_SCOPE_ID_FORM,
-          ]);
+        // The Brain's form is read in the transaction the import writes in, so a re-file or another import that
+        // commits first is followed (on Postgres the import waits for the brain's form lock).
+        const decision = await importScopeIdFormDecision(trx, this.brain, { encoded: sourceEncoded });
+        if (decision.action === 'refuse') {
+          result.errors.push(`${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
+          return;
         }
+        if (decision.action === 'record') await writeScopeIdFormRecord(trx, this.brain);
+        const encodePlainIds = decision.action === 'encode';
         // A trace an older release wrote holds scope_id '': filed under its scope id first, it is matched there.
         if (options?.dedup ?? true) await fillScopeIds(trx, this.brain.brainId);
-        const merged = await this._mergeTraces(sourceAdapter, read, result, trx, options, decision.action === 'encode');
+        const merged = await this._mergeTraces(rows.traces, result, trx, options, encodePlainIds);
         traces = merged;
-        const nodes = await this._mergeNodes(sourceAdapter, read, result, trx, merged.unfiled);
-        await this._mergeEdges(sourceAdapter, read, result, trx, nodes.skipped);
+        const nodes = await this._mergeNodes(rows.nodes, result, trx, merged.unfiled, encodePlainIds);
+        await this._mergeEdges(rows.edges, result, trx, nodes.skipped);
         // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
         if (nodes.memoryNodes > 0) await keyTraceCopies(trx, this.brain.brainId);
       });
@@ -265,36 +281,41 @@ export class SqliteImporter {
     return crossSha256(s);
   }
 
+  /** One source table's rows, or `null` when the file does not hold the table or it cannot be read. */
+  private async _readSource<T>(src: StorageAdapter, read: SourceRead, table: SourceTable): Promise<T[] | null> {
+    try {
+      return await src.all<T>(...read(table));
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Insert the source's traces, or merge a duplicate's tags and time into
    * the trace the brain holds.
    *
+   * @param sourceRows - The source's traces; `null` when it holds none it
+   *   can read.
    * @param encodePlainIds - Encode the source's plain user and persona ids as
-   *   they are written (an import into an encoded Brain).
+   *   they are written (an import into a Brain that holds the encoded form).
    * @returns How many traces it inserted, how many held traces a merge gave
    *   new tags, and the ids of the source traces it did not write under their
    *   own id (merged into a trace of another id, written under a new id, or
    *   not written), whose copies stay out.
    */
   private async _mergeTraces(
-    src: StorageAdapter,
-    read: SourceRead,
+    sourceRows: TraceRow[] | null,
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
-    options?: Pick<ImportOptions, 'dedup'>,
-    encodePlainIds = false,
+    options: Pick<ImportOptions, 'dedup'> | undefined,
+    encodePlainIds: boolean,
   ): Promise<{ inserted: number; retagged: number; unfiled: Set<string> }> {
     let inserted = 0;
     let retagged = 0;
     const seen = new Set<string>();
     const filed = new Set<string>();
     const unfiledOf = (): Set<string> => new Set([...seen].filter((id) => !filed.has(id)));
-    let sourceRows: TraceRow[];
-    try {
-      sourceRows = await src.all<TraceRow>(...read('memory_traces'));
-    } catch {
-      return { inserted, retagged, unfiled: unfiledOf() };
-    }
+    if (!sourceRows) return { inserted, retagged, unfiled: unfiledOf() };
 
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id, created_at, tags
@@ -405,26 +426,25 @@ export class SqliteImporter {
    * under its own id is skipped: it would name a trace the brain does not
    * hold under that id.
    *
+   * @param sourceRows - The source's nodes; `null` when it holds none it can
+   *   read.
    * @param unfiled - The source trace ids the trace merge did not write
    *   under their own id.
+   * @param encodePlainIds - Write a trace's copy under its trace's scope id
+   *   in the encoded form, as the trace merge writes the trace.
    * @returns How many of the nodes it wrote are of type `memory`, and the ids
    *   of the copies it skipped, whose edges stay out too.
    */
   private async _mergeNodes(
-    src: StorageAdapter,
-    read: SourceRead,
+    sourceRows: NodeRow[] | null,
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
     unfiled: ReadonlySet<string>,
+    encodePlainIds: boolean,
   ): Promise<{ memoryNodes: number; skipped: Set<string> }> {
     let memoryNodes = 0;
     const skipped = new Set<string>();
-    let sourceRows: NodeRow[];
-    try {
-      sourceRows = await src.all<NodeRow>(...read('knowledge_nodes'));
-    } catch {
-      return { memoryNodes, skipped };
-    }
+    if (!sourceRows) return { memoryNodes, skipped };
 
     const checkSql = `SELECT id FROM knowledge_nodes WHERE brain_id = ? AND label = ? AND type = ? LIMIT 1`;
 
@@ -452,12 +472,13 @@ export class SqliteImporter {
           continue;
         }
 
+        const properties = row.properties ?? '{}';
         await trx.run(insertSql, [
           brainId,
           row.id ?? `kn_${uuidv4()}`,
           row.type ?? 'concept',
           row.label ?? '',
-          row.properties ?? '{}',
+          encodePlainIds && row.type === 'memory' && typeof properties === 'string' ? encodedCopyProperties(properties) : properties,
           row.embedding ?? null,
           row.confidence ?? 1.0,
           row.source ?? '{}',
@@ -479,18 +500,12 @@ export class SqliteImporter {
    * merge skipped.
    */
   private async _mergeEdges(
-    src: StorageAdapter,
-    read: SourceRead,
+    sourceRows: EdgeRow[] | null,
     result: ImportResult,
     trx: { run: Brain['run']; get: Brain['get'] },
     skippedNodes: ReadonlySet<string>,
   ): Promise<void> {
-    let sourceRows: EdgeRow[];
-    try {
-      sourceRows = await src.all<EdgeRow>(...read('knowledge_edges'));
-    } catch {
-      return;
-    }
+    if (!sourceRows) return;
 
     const checkSql = `SELECT id FROM knowledge_edges
        WHERE brain_id = ? AND source_id = ? AND target_id = ? AND type = ?

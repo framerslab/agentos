@@ -140,7 +140,7 @@ await mem.export('./notes/', { format: 'markdown' });
 await mem.export('./vault/', { format: 'obsidian' });
 ```
 
-On a SQLite brain, the `sqlite` export runs `VACUUM INTO '<path>'`, which writes a compacted copy of the whole file, including every brain it holds, while the source stays open. [`Brain.exportToSqlite(targetPath)`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) writes one brain to a new file and throws when the target exists.
+The `sqlite` export goes through [`Brain.exportToSqlite(targetPath)`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts), from a SQLite or a Postgres brain alike: it writes this brain's rows of every portable table, read from one consistent view of the database, to a new file, and throws when the target exists. Its `brain_meta` rows carry the brain's scope-id form record where the brain has one, so an import of the file keeps the form ([A Brain's scope-id form](../MEMORY_OPERATIONS.md#a-brains-scope-id-form)).
 
 The facade has no backup schedule; a host that wants one calls `export()` from a timer:
 
@@ -214,6 +214,6 @@ Every count is of the brain's own rows, a number on SQLite and Postgres alike; a
 | [`retrieval/store/SqlKnowledgeGraph.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/SqlKnowledgeGraph.ts) | `IKnowledgeGraph` over the graph tables |
 | [`retrieval/store/SqlMemoryGraph.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/SqlMemoryGraph.ts) | `IMemoryGraph` with spreading activation and co-activation edges |
 | [`retrieval/store/tracePersistence.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/tracePersistence.ts) | FTS query builder, trace metadata and decay-state helpers |
-| [`io/SqliteExporter.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/SqliteExporter.ts) | `VACUUM INTO` export |
+| [`io/SqliteExporter.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/SqliteExporter.ts) | One brain's rows to a new SQLite file, through `Brain.exportToSqlite` |
 
 All paths are under `src/cognition/memory/`.
