@@ -119,6 +119,9 @@ export interface MemoryStoreConfig {
    * every access write them into the row's metadata JSON under `decay` (the
    * object the `Memory` facade, its consolidation and the memory tools read
    * and write; the row's other keys are kept), and a load reads them back.
+   * An access that finds the row's `decay` changed since the store took the
+   * trace or last wrote it (the facade's recall or feedback, another store on
+   * the same Brain) counts on top of the row's state.
    * The vector metadata carries the interval and the next reinforcement time
    * as well, so a store with no Brain restores them with a trace; a document
    * that holds no interval restores with one hour. Default `true`.
@@ -246,6 +249,93 @@ function decayStateOf(trace: MemoryTrace): PersistedDecayState {
       ? { nextReinforcementAt: trace.nextReinforcementAt }
       : {}),
   };
+}
+
+/**
+ * The decay state of a Brain row, as a store loads a trace from the row: each field the row's `decay` lacks from the
+ * store's defaults (the stability the row's metadata names, else 0.5; no access; a one-hour interval).
+ *
+ * @param meta - The row's metadata object.
+ * @param accessState - Whether the store persists access state (`persistAccessState`). Without it, the row's `decay`
+ *   is not read.
+ */
+function rowDecayState(meta: Record<string, any>, accessState: boolean): PersistedDecayState {
+  const decay: Partial<PersistedDecayState> = accessState ? readPersistedDecayFields(meta) : {};
+  return {
+    stability: decay.stability ?? (typeof meta.stability === 'number' ? meta.stability : 0.5),
+    accessCount: decay.accessCount ?? 0,
+    reinforcementInterval: decay.reinforcementInterval ?? DEFAULT_REINFORCEMENT_INTERVAL_MS,
+    ...(decay.nextReinforcementAt !== undefined ? { nextReinforcementAt: decay.nextReinforcementAt } : {}),
+  };
+}
+
+/** Whether two decay states hold the same stability, access count, interval and next reinforcement time. */
+function sameDecayState(a: PersistedDecayState, b: PersistedDecayState): boolean {
+  return (
+    a.stability === b.stability &&
+    a.accessCount === b.accessCount &&
+    a.reinforcementInterval === b.reinforcementInterval &&
+    a.nextReinforcementAt === b.nextReinforcementAt
+  );
+}
+
+/**
+ * For each trace object a store holds, the decay state its Brain row held when the store took the trace (from the
+ * row, from the trace's vector document, or from a caller through `store()`) or last wrote the row. An access that
+ * finds another decay state in the row, which another writer gave it in between (the `Memory` facade's recall or
+ * feedback, another store on the same Brain, a consolidation merge), counts on top of the row's state.
+ */
+const syncedDecayStates = new WeakMap<MemoryTrace, PersistedDecayState>();
+
+/** A Brain row's access columns, which an access counted on top of the row's state reads. */
+interface AccessColumns {
+  strength: number | null;
+  retrieval_count: number | null;
+  last_accessed: number | null;
+  created_at: number | null;
+}
+
+/** The number, where it is a finite one; else the fallback. */
+function finiteOr(value: unknown, fallback: number): number {
+  const number = typeof value === 'string' ? Number(value) : value;
+  return typeof number === 'number' && Number.isFinite(number) ? number : fallback;
+}
+
+/**
+ * The trace after `accesses` accesses at the time of its last access, counted on top of the state its Brain row
+ * holds: the row's decay state and its `strength`, `retrieval_count` and `last_accessed` columns.
+ */
+function accessedOnTopOf(
+  trace: MemoryTrace,
+  decay: PersistedDecayState,
+  columns: AccessColumns,
+  accesses: number,
+): MemoryTrace {
+  let state: MemoryTrace = {
+    ...trace,
+    stability: decay.stability,
+    accessCount: decay.accessCount,
+    reinforcementInterval: decay.reinforcementInterval,
+    nextReinforcementAt: decay.nextReinforcementAt,
+    encodingStrength: finiteOr(columns.strength, trace.encodingStrength),
+    retrievalCount: finiteOr(columns.retrieval_count, 0),
+    lastAccessedAt: finiteOr(columns.last_accessed, finiteOr(columns.created_at, trace.lastAccessedAt)),
+  };
+  for (let made = 0; made < accesses; made += 1) {
+    state = { ...state, ...updateOnRetrieval(state, trace.lastAccessedAt) };
+  }
+  return state;
+}
+
+/** Gives a cached trace the access state of `from`: its strength, stability, counts and reinforcement schedule. */
+function takeAccessState(trace: MemoryTrace, from: MemoryTrace): void {
+  trace.encodingStrength = from.encodingStrength;
+  trace.stability = from.stability;
+  trace.retrievalCount = from.retrievalCount;
+  trace.lastAccessedAt = from.lastAccessedAt;
+  trace.accessCount = from.accessCount;
+  trace.reinforcementInterval = from.reinforcementInterval;
+  trace.nextReinforcementAt = from.nextReinforcementAt;
 }
 
 /**
@@ -1073,6 +1163,8 @@ export class MemoryStore {
         emotionalContext: { ...trace.emotionalContext },
         associatedTraceIds: [...trace.associatedTraceIds],
       };
+      const synced = syncedDecayStates.get(trace);
+      if (synced) syncedDecayStates.set(revivedTrace, synced);
       this.traceCache.set(trace.id, revivedTrace);
       this.embeddingCache.set(trace.id, [...embedding]);
       this.registerScope(trace.scope, trace.scopeId);
@@ -1386,9 +1478,7 @@ export class MemoryStore {
    */
   private rowToTrace(row: MemoryTraceRow): MemoryTrace {
     const meta = (row.metadata ? safeParseJson<Record<string, any>>(row.metadata) : undefined) ?? {};
-    const decay: Partial<PersistedDecayState> = this.persistsAccessState
-      ? readPersistedDecayFields(meta)
-      : {};
+    const decay = rowDecayState(meta, this.persistsAccessState);
     const emotions =
       (row.emotions ? safeParseJson<MemoryTrace['emotionalContext']>(row.emotions) : undefined) ?? {
         valence: 0,
@@ -1398,7 +1488,7 @@ export class MemoryStore {
         gmiMood: '',
       };
     const tags = (row.tags ? safeParseJson<string[]>(row.tags) : undefined) ?? [];
-    return {
+    const trace = {
       id: row.id,
       type: row.type as MemoryType,
       scope: row.scope as MemoryScope,
@@ -1414,11 +1504,11 @@ export class MemoryStore {
       },
       emotionalContext: emotions,
       encodingStrength: row.strength,
-      stability: decay.stability ?? (typeof meta.stability === 'number' ? meta.stability : 0.5),
+      stability: decay.stability,
       retrievalCount: row.retrieval_count ?? 0,
       lastAccessedAt: row.last_accessed ?? row.created_at,
-      accessCount: decay.accessCount ?? 0,
-      reinforcementInterval: decay.reinforcementInterval ?? DEFAULT_REINFORCEMENT_INTERVAL_MS,
+      accessCount: decay.accessCount,
+      reinforcementInterval: decay.reinforcementInterval,
       ...(decay.nextReinforcementAt !== undefined
         ? { nextReinforcementAt: decay.nextReinforcementAt }
         : {}),
@@ -1430,6 +1520,8 @@ export class MemoryStore {
       structuredData: meta.structuredData,
       ...(typeof meta.turnUserId === 'string' && meta.turnUserId ? { turnUserId: meta.turnUserId } : {}),
     } as MemoryTrace;
+    syncedDecayStates.set(trace, decay);
+    return trace;
   }
 
   // =========================================================================
@@ -1582,6 +1674,7 @@ export class MemoryStore {
         if (result.changes === 0) {
           throw new Error('durable write affected no rows');
         }
+        syncedDecayStates.set(trace, decayStateOf(trace));
       } catch {
         trace.isActive = false;
         // The SQL error is ambiguous: another process may already have
@@ -1811,6 +1904,7 @@ export class MemoryStore {
           }
 
           if (!cached) {
+            syncedDecayStates.set(trace, decayStateOf(trace));
             this.traceCache.set(trace.id, trace);
           }
           if (trace.scope && trace.scopeId) {
@@ -1909,6 +2003,7 @@ export class MemoryStore {
     if (this.tombstonedTraceIds.has(traceId) || !trace?.isActive) return null;
 
     const now = Date.now();
+    const before = decayStateOf(trace);
     const update = updateOnRetrieval(trace, now);
 
     // Apply updates to cached trace
@@ -1976,34 +2071,57 @@ export class MemoryStore {
     // Write-through: update access metadata in the durable SQL store
     if (brain) {
       try {
-        await this.persistAccess(brain, trace);
+        await this.persistAccess(brain, trace, before);
       } catch {
         // Best-effort persistence
       }
     }
 
-    return trace.isActive ? update : null;
+    if (!trace.isActive) return null;
+    // An access counted on top of another writer's row state (persistAccess) leaves the trace's values, not the update's.
+    return {
+      encodingStrength: trace.encodingStrength,
+      stability: trace.stability,
+      retrievalCount: trace.retrievalCount,
+      lastAccessedAt: trace.lastAccessedAt,
+      accessCount: trace.accessCount,
+      reinforcementInterval: trace.reinforcementInterval,
+      nextReinforcementAt: trace.nextReinforcementAt ?? update.nextReinforcementAt,
+    };
   }
 
   /**
    * Writes an accessed trace's state to its Brain row: `last_accessed`, `retrieval_count` and
    * `strength`, and, with `persistAccessState` on, its decay state merged into the row's own
-   * metadata JSON under `decay`, every other key of the row kept. The merge is a compare-and-set
-   * on the JSON text it read, tried twice, so a key another writer set in between is not lost;
-   * after two lost races, and for a row whose metadata is not a JSON object, the columns alone
-   * are written and the metadata is left as it is.
+   * metadata JSON under `decay`, every other key of the row kept. When the row's decay state is no
+   * longer the one the store took the trace with or last wrote, another writer changed it in
+   * between (the `Memory` facade's recall or feedback, another store on the same Brain, a
+   * consolidation merge): the accesses the store made since then count on top of the row's decay
+   * state and its three columns, and the cached trace takes the result. The merge is a
+   * compare-and-set on the JSON text it read, tried twice, so a key another writer set in between
+   * is not lost; after two lost races, and for a row whose metadata is not a JSON object, the
+   * columns alone are written and the metadata is left as it is.
+   *
+   * @param before - The trace's decay state before this access, which the access counts from when
+   *   the store holds no state it took the trace with.
    */
-  private async persistAccess(brain: import('./Brain.js').Brain, trace: MemoryTrace): Promise<void> {
-    const columns = [trace.lastAccessedAt, trace.retrievalCount, trace.encodingStrength];
+  private async persistAccess(
+    brain: import('./Brain.js').Brain,
+    trace: MemoryTrace,
+    before: PersistedDecayState,
+  ): Promise<void> {
     const writeColumns = () =>
       brain.run(
         'UPDATE memory_traces SET last_accessed = ?, retrieval_count = ?, strength = ? WHERE brain_id = ? AND id = ? AND deleted = 0',
-        [...columns, brain.brainId, trace.id],
+        [trace.lastAccessedAt, trace.retrievalCount, trace.encodingStrength, brain.brainId, trace.id],
       );
     if (!this.persistsAccessState) {
       await writeColumns();
       return;
     }
+    const synced = syncedDecayStates.get(trace) ?? before;
+    const made = trace.accessCount - synced.accessCount;
+    const accesses = Number.isFinite(made) && made > 1 ? made : 1;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const row = await brain.get<{ metadata: string | null }>(
         'SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0',
@@ -2012,7 +2130,18 @@ export class MemoryStore {
       if (!row) return;
       const meta: unknown = row.metadata ? safeParseJson<unknown>(row.metadata) : {};
       if (!isJsonObject(meta)) break;
-      const next = JSON.stringify(withPersistedDecayState(meta, decayStateOf(trace)));
+      let written = trace;
+      const held = rowDecayState(meta, true);
+      if (!sameDecayState(held, synced)) {
+        const heldColumns = await brain.get<AccessColumns>(
+          'SELECT strength, retrieval_count, last_accessed, created_at FROM memory_traces WHERE brain_id = ? AND id = ? AND deleted = 0',
+          [brain.brainId, trace.id],
+        );
+        if (!heldColumns) return;
+        written = accessedOnTopOf(trace, held, heldColumns, accesses);
+      }
+      const next = JSON.stringify(withPersistedDecayState(meta, decayStateOf(written)));
+      const columns = [written.lastAccessedAt, written.retrievalCount, written.encodingStrength];
       const result = row.metadata === null
         ? await brain.run(
             `UPDATE memory_traces SET last_accessed = ?, retrieval_count = ?, strength = ?, metadata = ?
@@ -2024,7 +2153,11 @@ export class MemoryStore {
               WHERE brain_id = ? AND id = ? AND deleted = 0 AND metadata = ?`,
             [...columns, next, brain.brainId, trace.id, row.metadata],
           );
-      if (result.changes > 0) return;
+      if (result.changes > 0) {
+        if (written !== trace) takeAccessState(trace, written);
+        syncedDecayStates.set(trace, decayStateOf(trace));
+        return;
+      }
     }
     await writeColumns();
   }
@@ -2112,6 +2245,7 @@ export class MemoryStore {
             // A document of this collection is a trace of its scope.
             const trace: MemoryTrace = { ...this.traceFromVectorDocument(doc), scope, scopeId };
             if (!trace.isActive) continue;
+            syncedDecayStates.set(trace, decayStateOf(trace));
             this.traceCache.set(trace.id, trace);
             results.push(trace);
           }
@@ -2911,7 +3045,9 @@ export class MemoryStore {
       const trace = this.traceFromVectorDocument(document);
       // A trace this store deleted before, whose eviction failed, counts once: it is cached as deleted.
       const isActive = trace.isActive && !this.tombstonedTraceIds.has(document.id);
-      this.traceCache.set(document.id, { ...trace, scope, scopeId, isActive });
+      const filed: MemoryTrace = { ...trace, scope, scopeId, isActive };
+      syncedDecayStates.set(filed, decayStateOf(filed));
+      this.traceCache.set(document.id, filed);
     }
     return { traceIds, staleIds, read: documents.length, nextCursor };
   }
