@@ -66,6 +66,8 @@ export interface GmiTurnFolderOptions {
    * streamText report it: it is the thread key for the next request's diagnostics.
    */
   cacheDiagnostics?: boolean;
+  /** Called once, when the turn's failure is first recorded (an ERROR chunk or a thrown error). */
+  onFailure?: () => void;
 }
 
 /**
@@ -122,11 +124,13 @@ export class GmiTurnFolder {
       }
       case GMIOutputChunkType.ERROR: {
         const details = chunk.errorDetails as { code?: unknown; details?: unknown } | undefined;
+        const first = this.failure === undefined;
         this.failure = {
           code: typeof details?.code === 'string' ? details.code : undefined,
           message: String(chunk.content),
           details: details?.details,
         };
+        if (first) this.options.onFailure?.();
         break;
       }
       default:
@@ -136,11 +140,13 @@ export class GmiTurnFolder {
 
   /** Marks the turn failed by a thrown error (the turn's generator itself threw). An ERROR chunk already seen wins. */
   fail(error: unknown): void {
-    this.failure ??= {
+    if (this.failure !== undefined) return;
+    this.failure = {
       code: error instanceof GMIError ? String(error.code) : undefined,
       message: error instanceof Error ? error.message : String(error),
       details: error instanceof GMIError ? error.details : undefined,
     };
+    this.options.onFailure?.();
   }
 
   /**
@@ -302,8 +308,9 @@ export interface GmiStreamOptions {
   stop?: () => void;
   /**
    * The error the stream's `error` part carries in place of the turn's when the
-   * caller's signal stopped the turn (its reason), read when the part is made;
-   * undefined to keep the turn's error.
+   * caller's signal stopped the turn (its reason); undefined to keep the turn's
+   * error. Read when the part is made, so the caller decides the stop when the
+   * turn's failure is recorded (`GmiTurnFolderOptions.onFailure`).
    */
   stoppedBy?: () => Error | undefined;
 }

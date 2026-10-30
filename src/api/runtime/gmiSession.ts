@@ -73,8 +73,9 @@ export interface GmiTurnOptions {
   /**
    * The caller's own signal among the turn's stops (`abortSignal` also carries a session's close()): a stream whose
    * caller's signal has already aborted starts no turn and ends at once with an error part that carries the signal's
-   * reason, a stream the signal stops ends with that reason in its error part, and a turn whose signal aborts after its
-   * last request (while a hook runs) ends with the reason too.
+   * reason, a stream the signal stops ends with that reason in its error part (a failure that came before the stop
+   * keeps its own error), and a turn whose signal aborts after its last request (while a hook runs) ends with the
+   * reason too.
    */
   callerSignal?: AbortSignal;
   /**
@@ -639,7 +640,16 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
     const refused: AsyncIterable<GMIOutputChunk> = { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(reason) }) };
     return streamFromGmiTurn(refused);
   }
-  const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
+  // Whether the caller's signal had aborted when the turn's failure was recorded: then the stop ended the turn, and its
+  // error part carries the signal's reason. A failure that came first (a provider's error, a budget's refusal) keeps
+  // its own error, whatever the signal does after it.
+  let stoppedBy: Error | undefined;
+  const folder = new GmiTurnFolder({
+    cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics),
+    onFailure: () => {
+      if (callerSignal?.aborted) stoppedBy = abortReasonError(callerSignal);
+    },
+  });
   // The turn stops when the caller's signal aborts (a session's close()) or when
   // the consumer stops reading. The listener on the caller's signal, which
   // outlives the turn, goes once the turn has ended.
@@ -658,9 +668,5 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
   // A turn the caller's signal stopped ends with the signal's reason in its error part, as streamText reports it,
   // whatever error the GMI made of the abort.
-  return streamFromGmiTurn(chunks, {
-    folder,
-    stop: () => stop.abort(),
-    stoppedBy: () => (callerSignal?.aborted ? abortReasonError(callerSignal) : undefined),
-  });
+  return streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy });
 }
