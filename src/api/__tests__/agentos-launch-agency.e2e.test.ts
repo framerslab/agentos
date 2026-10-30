@@ -164,6 +164,17 @@ afterEach(async () => {
 });
 
 describe('launch_agency on the full runtime', () => {
+  it('with launch off the runtime registers no launch_agency, and a bound outside its range fails initialization, launch on or off', async () => {
+    booted = await boot({ agencies: { maxDepth: 3 } });
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-off' });
+    // The lead's table is offered (the precondition), without launch_agency though the lead is granted agency:launch.
+    expect(provider.seen[0].tools).toContain('search');
+    expect(provider.seen[0].tools).not.toContain('launch_agency');
+
+    await expect(boot({ agencies: { maxDepth: 9 } })).rejects.toThrow('agencies.maxDepth must be an integer from 1 to 4, not 9');
+    await expect(boot({ agencies: { launch: true, maxSeats: 0 } })).rejects.toThrow('agencies.maxSeats must be an integer from 1 to 12, not 0');
+  });
+
   it('a persona without agency:launch neither lists nor calls the tool, and one with it lists and calls it', async () => {
     booted = await boot();
     provider.replies.push(toolStep(['launch_agency', { goal: 'x', seats: [{ role: 'w', instructions: 'Write.' }] }]));
