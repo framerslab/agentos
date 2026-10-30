@@ -4,7 +4,9 @@
  * file (a restart) loads the stability, access count, reinforcement interval and next reinforcement time the access
  * left, and the provenance, entities, associated trace ids and structured data the trace was stored with. The store
  * keeps that state where the `Memory` facade keeps it, so the facade's feedback on the row between the access and the
- * restart is what the restarted store loads. With `persistAccessState: false` the store writes and loads as it did
+ * restart is what the restarted store loads, and an access another writer gives the row while the store holds the trace
+ * (the facade's feedback, another store on the same file) is kept by the store's next access, which counts on top of
+ * it. With `persistAccessState: false` the store writes and loads as it did
  * before the fix. A real SQLite Brain; the vector store is the in-memory one, rebuilt for each store, as a restarted
  * process rebuilds it. With no Brain, a store started later over the same vector store restores the reinforcement
  * schedule from the document's metadata.
@@ -154,6 +156,105 @@ describe('a trace after an access and a restart', () => {
     const { reloaded } = await accessThenRestart({ persistAccessState: false });
     expect(reloaded).toMatchObject({ stability: 7_200_000, accessCount: 0, reinforcementInterval: 3_600_000, retrievalCount: 1 });
     expect(reloaded.nextReinforcementAt).toBeUndefined();
+  });
+});
+
+/** Gives the row of `t-vera` in the file the `Memory` facade's feedback, through a second handle on the file. */
+async function facadeFeedback(filePath: string, signal: 'used' | 'ignored'): Promise<void> {
+  const memory = await Memory.createSqlite(filePath, { brainId: 'b' });
+  try {
+    await memory.feedback('t-vera', signal);
+  } finally {
+    await memory.close();
+  }
+}
+
+// Another writer can change the row while a store holds the trace: the Memory facade on the same
+// file (its recall and feedback), or another store over the file, as another process is. The
+// store's next access counts on top of what the row holds then.
+describe('an access after another writer changed the row the store holds the trace of', () => {
+  it("keeps the access the Memory facade's feedback gave the row, and adds its own", async () => {
+    const filePath = brainFile();
+    const brain = await Brain.openSqlite(filePath, { brainId: 'b' });
+    try {
+      const store = await storeOver(brain);
+      await store.store(trace(Date.now()));
+      await facadeFeedback(filePath, 'used');
+      expect(await store.recordAccess('t-vera')).not.toBeNull();
+      // The feedback took the interval from one hour to two; the store's access doubles that.
+      expect(store.getTrace('t-vera')).toMatchObject({ accessCount: 2, reinforcementInterval: 14_400_000, retrievalCount: 2 });
+    } finally {
+      await brain.close();
+    }
+    expect(await reload(filePath)).toMatchObject({
+      accessCount: 2, reinforcementInterval: 14_400_000, retrievalCount: 2, ...storedWith,
+    });
+  });
+
+  it("keeps the penalty the Memory facade's 'ignored' feedback gave the row", async () => {
+    const now = Date.now();
+    const accessed = async (feedback: boolean): Promise<MemoryTrace> => {
+      const filePath = brainFile();
+      const brain = await Brain.openSqlite(filePath, { brainId: 'b' });
+      try {
+        const store = await storeOver(brain);
+        await store.store(trace(now));
+        if (feedback) await facadeFeedback(filePath, 'ignored');
+        expect(await store.recordAccess('t-vera')).not.toBeNull();
+      } finally {
+        await brain.close();
+      }
+      return reload(filePath);
+    };
+    const plain = await accessed(false);
+    const penalized = await accessed(true);
+    // The penalty halves the stability the access then grows.
+    expect(penalized.stability).toBeLessThan(plain.stability * 0.75);
+    expect(penalized.accessCount).toBe(1);
+  });
+
+  it('keeps the access another store on the same file made, and adds its own', async () => {
+    const filePath = brainFile();
+    const first = await Brain.openSqlite(filePath, { brainId: 'b' });
+    const second = await Brain.openSqlite(filePath, { brainId: 'b' });
+    try {
+      const writer = await storeOver(first);
+      await writer.store(trace(Date.now()));
+      const reader = await storeOver(second);
+      // The second store loads the trace from its row.
+      expect((await reader.getByScope('user', 'ana')).map((held) => held.id)).toEqual(['t-vera']);
+      expect(await writer.recordAccess('t-vera')).not.toBeNull();
+      expect(await reader.recordAccess('t-vera')).not.toBeNull();
+      expect(reader.getTrace('t-vera')).toMatchObject({ accessCount: 2, reinforcementInterval: 14_400_000, retrievalCount: 2 });
+    } finally {
+      await second.close();
+      await first.close();
+    }
+    expect(await reload(filePath)).toMatchObject({ accessCount: 2, reinforcementInterval: 14_400_000, retrievalCount: 2 });
+  });
+
+  it('keeps the accesses the row holds beyond those of a trace the store restored from the vector store', async () => {
+    const filePath = brainFile();
+    const first = await Brain.openSqlite(filePath, { brainId: 'b' });
+    const second = await Brain.openSqlite(filePath, { brainId: 'b' });
+    try {
+      const vectorStore = await vectorStoreOf4();
+      const writer = storeWith(vectorStore);
+      writer.setBrain(first);
+      const reader = storeWith(vectorStore);
+      reader.setBrain(second);
+      // The reader loads its Brain while it is empty, so it later restores the trace from the index.
+      expect(await reader.getByScope('user', 'ana')).toEqual([]);
+      await writer.store(trace(Date.now()));
+      expect((await reader.getByScope('user', 'ana')).map((held) => held.accessCount)).toEqual([0]);
+      await facadeFeedback(filePath, 'used');
+      expect(await reader.recordAccess('t-vera')).not.toBeNull();
+      expect(reader.getTrace('t-vera')).toMatchObject({ accessCount: 2, reinforcementInterval: 14_400_000, retrievalCount: 2 });
+    } finally {
+      await second.close();
+      await first.close();
+    }
+    expect(await reload(filePath)).toMatchObject({ accessCount: 2, reinforcementInterval: 14_400_000, retrievalCount: 2 });
   });
 });
 
