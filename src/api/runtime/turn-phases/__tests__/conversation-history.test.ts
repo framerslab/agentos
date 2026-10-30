@@ -227,5 +227,61 @@ describe('assembleConversationHistory', () => {
       expect(ids.length).toBe(2);
       expect(new Set(ids).size).toBe(2); // no duplicates
     });
+
+    // A boundary an earlier release stored can fall inside a tool round: on the call, or with the head ending on it.
+    it.each([
+      ['the boundary falls on the call', 2, 'call'],
+      ['the head ends on the call', 3, 'r2'],
+    ])('keeps a tool round whole when %s', (_label, headMessagesToKeep, boundaryId) => {
+      const now = Date.now();
+      const messages = [
+        makeMessage({ id: 'h1', role: MessageRole.SYSTEM, content: 'system', timestamp: now - 9000 }),
+        makeMessage({ id: 'h2', role: MessageRole.USER, content: 'Read both files.', timestamp: now - 8000 }),
+        {
+          id: 'call',
+          role: MessageRole.ASSISTANT,
+          content: null,
+          tool_calls: [
+            { id: 'c1', name: 'read_file', arguments: { path: 'a.txt' } },
+            { id: 'c2', name: 'read_file', arguments: { path: 'b.txt' } },
+          ],
+          timestamp: now - 7000,
+        },
+        { id: 'r1', role: MessageRole.TOOL, content: 'a', tool_call_id: 'c1', name: 'read_file', timestamp: now - 6000 },
+        { id: 'r2', role: MessageRole.TOOL, content: 'b', tool_call_id: 'c2', name: 'read_file', timestamp: now - 5000 },
+        makeMessage({ id: 'a1', role: MessageRole.ASSISTANT, content: 'Both read.', timestamp: now - 4000 }),
+        makeMessage({ id: 'q1', role: MessageRole.USER, content: 'And now?', timestamp: now - 1000 }),
+      ];
+      const boundary = messages.find((m) => m.id === boundaryId)!.timestamp;
+
+      const result = assembleConversationHistory(
+        makeBaseInput({
+          conversationContext: makeConversationContext(messages as any),
+          rollingSummaryEnabled: true,
+          rollingSummaryResult: {
+            enabled: true,
+            didCompact: false,
+            summaryText: 'Summary',
+            summaryJson: null,
+            summaryUptoTimestamp: boundary,
+            summaryUpdatedAt: now,
+          },
+          rollingSummaryText: 'Summary',
+          rollingSummaryConfigForTurn: {
+            enabled: true,
+            modelId: 'gpt-4o-mini',
+            cooldownMs: 60000,
+            headMessagesToKeep,
+            tailMessagesToKeep: 12,
+            minMessagesToSummarize: 4,
+            maxMessagesToSummarizePerPass: 48,
+            maxOutputTokens: 900,
+          },
+        }),
+      );
+
+      // the call and both of its results reach the prompt together
+      expect(result!.map((m: any) => m.id)).toEqual(['h1', 'h2', 'call', 'r1', 'r2', 'a1', 'q1']);
+    });
   });
 });
