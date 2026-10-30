@@ -178,6 +178,8 @@ import {
   resolveGMIForToolContext,
 } from './runtime/SelfImprovementSessionManager';
 import { RagMemoryInitializer } from './runtime/RagMemoryInitializer';
+import { createRuntimeLaunchTool } from './runtime/agencyLaunch/runtimeLaunchTool.js';
+import { resolveLaunchLimits, type LaunchLimits, type RuntimeAgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
 import type { TurnPlannerConfig } from '../orchestration/turn-planner/TurnPlanner';
 import type {
   CapabilityDescriptor,
@@ -785,6 +787,18 @@ export interface AgentOSConfig {
    * @default false
    */
   learning?: boolean | LearningConfig;
+
+  /**
+   * Teams a persona's GMI may launch from a turn (`launch_agency`). With `launch: true` the runtime registers the
+   * tool, which requires the `agency:launch` capability, so only a persona whose `allowedCapabilities` names it lists
+   * and calls it (with `toolPermissionManagerConfig.strictCapabilityChecking`, on by default). Each call builds a
+   * temporary `agency()` team whose seats are GMIs of this runtime (a registered persona by `personaId`, or one made
+   * from the caller's for the seat's instructions), runs the goal once and returns one tool result, bounded by depth,
+   * seats, launches in flight, one wall deadline and the caller's tools. The bounds are checked at initialization
+   * whenever this is set.
+   * @default undefined (no tool)
+   */
+  agencies?: RuntimeAgencyLaunchOptions;
 }
 
 export interface AgentOSActiveConversationSnapshot {
@@ -967,6 +981,13 @@ export class AgentOS implements IAgentOS {
 
     this.validateConfiguration(config);
     this.assertLearningConfig(config);
+    // `agencies`: its bounds are checked whenever it is set; the tool is registered only with `launch: true`.
+    let launchLimits: LaunchLimits | undefined;
+    try {
+      launchLimits = config.agencies ? resolveLaunchLimits(config.agencies) : undefined;
+    } catch (error) {
+      throw AgentOSServiceError.wrap(error, GMIErrorCode.CONFIGURATION_ERROR, 'The agencies option is not valid', 'AgentOS.initialize');
+    }
     const resolvedConfig = RagMemoryInitializer.resolveConfig(config);
     const normalizedConfigTools = adaptToolsToMap(resolvedConfig.tools);
     const normalizedExternalTools = normalizeExternalToolRegistry(resolvedConfig.externalTools);
@@ -1201,6 +1222,19 @@ export class AgentOS implements IAgentOS {
           }
         : undefined;
       const initialConfigTools = adaptTools(this.config.tools);
+      const agencies = this.config.agencies;
+      if (launchLimits && agencies?.launch === true) {
+        initialConfigTools.push(
+          createRuntimeLaunchTool({
+            getGmiManager: () => this.gmiManager,
+            getToolOrchestrator: () => this.toolOrchestrator,
+            options: agencies,
+            limits: launchLimits,
+            gmiDefaults: this.config.gmiManagerConfig.defaultGMIBaseConfigDefaults,
+            logger: this.logger,
+          }),
+        );
+      }
 
       await this.toolOrchestrator.initialize(
         this.config.toolOrchestratorConfig,
@@ -1259,6 +1293,10 @@ export class AgentOS implements IAgentOS {
           ...this.config.gmiManagerConfig,
           personaLoaderConfig: personaSource.personaLoaderConfig,
           ...(this.learningLayer ? { learningLayer: this.learningLayer } : {}),
+          // The seats of launched teams get a prompt engine of their own, which makes no model call.
+          ...(this.config.agencies && !this.config.gmiManagerConfig.agencySeatPromptEngineConfig
+            ? { agencySeatPromptEngineConfig: this.config.promptEngineConfig }
+            : {}),
         },
         this.subscriptionService,
         this.authService,

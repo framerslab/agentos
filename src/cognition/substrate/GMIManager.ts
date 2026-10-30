@@ -23,9 +23,11 @@ import { InMemoryWorkingMemory } from './memory/InMemoryWorkingMemory';
 import { ConversationManager } from '../../core/conversation/ConversationManager';
 import { ConversationContext } from '../../core/conversation/ConversationContext';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/utils/errors.js';
-import { IPromptEngine } from '../../core/llm/IPromptEngine';
+import type { IPromptEngine, PromptEngineConfig } from '../../core/llm/IPromptEngine';
+import { PromptEngine } from '../../core/llm/PromptEngine';
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI } from '../nlp/ai_utilities/IUtilityAI';
+import { StatisticalUtilityAI } from '../nlp/ai_utilities/StatisticalUtilityAI';
 import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
 import { IRetrievalAugmentor } from '../rag/IRetrievalAugmentor';
 import { PersonaOverlayManager } from './persona_overlays/PersonaOverlayManager';
@@ -36,6 +38,7 @@ import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.j
 import { feedbackTraceMessage, normalizeUserFeedback } from './userFeedback';
 import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
 import { normalizeHexacoTraits } from './personas/hexaco';
+import { normalizePersonaDefinition } from './personas/personaNormalization';
 import { traitOverlayPatch } from './personas/personalityPrompt';
 import { deferLearnerSession } from '../learning/LearnerSession.js';
 import type { ILearnerSession, ILearningLayer, LearnerContext } from '../learning/types.js';
@@ -79,6 +82,12 @@ export interface GMIManagerConfig {
    * section on every turn. Without it the manager builds GMIs as it did before the layer existed.
    */
   learningLayer?: ILearningLayer;
+  /**
+   * The prompt-engine config of the GMIs `createAgencySeat` builds for the teams a GMI launches (`launch_agency` on the
+   * full runtime). Their engine gets no utility AI, so it truncates history and makes no model call. AgentOS sets it
+   * from its own `promptEngineConfig` when `agencies` is set.
+   */
+  agencySeatPromptEngineConfig?: PromptEngineConfig;
 }
 
 /** What the manager knows, when it builds a GMI, for the learning layer. */
@@ -119,11 +128,30 @@ export interface GMIAgencyContextOptions {
 }
 
 /**
+ * One seat of a team a GMI launched on the full runtime (`launch_agency`): what {@link GMIManager.createAgencySeat}
+ * builds. The launch passes the views the seat runs through, so the manager imports nothing of the launch.
+ */
+export interface AgencySeatSpec {
+  /** `seat:<agencyId>:<role>`; refused when a GMI already serves it. */
+  seatSessionId: string;
+  /** The parent turn's user: the seat's tools and the tier check see it. */
+  userId: string;
+  /** A registered persona, by id (a persistent member), or the definition a launch made for a temporary seat. */
+  persona: { personaId: string } | { definition: IPersonaDefinition };
+  /** The seat's tool orchestrator: a view the launch makes over the shared one. */
+  toolView: (base: IToolOrchestrator) => IToolOrchestrator;
+  /** The seat's provider manager: a view the launch makes over the runtime's; the runtime's own when absent. */
+  providerManager?: (base: AIModelProviderManager) => AIModelProviderManager;
+  /** The seat's step limit; the GMI's default when absent. */
+  maxToolLoopIterations?: number;
+}
+
+/**
  * Manages the lifecycle of Generalized Mind Instances (GMIs).
  */
 export class GMIManager {
-  private config!: Required<Omit<GMIManagerConfig, 'defaultGMIBaseConfigDefaults' | 'personaValidationStrict' | 'cognitiveMemoryFactory' | 'learningLayer'>> &
-    Pick<GMIManagerConfig, 'defaultGMIBaseConfigDefaults' | 'personaValidationStrict' | 'cognitiveMemoryFactory' | 'learningLayer'>;
+  private config!: Required<Omit<GMIManagerConfig, 'defaultGMIBaseConfigDefaults' | 'personaValidationStrict' | 'cognitiveMemoryFactory' | 'learningLayer' | 'agencySeatPromptEngineConfig'>> &
+    Pick<GMIManagerConfig, 'defaultGMIBaseConfigDefaults' | 'personaValidationStrict' | 'cognitiveMemoryFactory' | 'learningLayer' | 'agencySeatPromptEngineConfig'>;
   private personaLoader: IPersonaLoader;
   private allPersonaDefinitions: Map<string, IPersonaDefinition>;
   private allPersonaRecords: Map<string, LoadedPersonaRecord>;
@@ -176,6 +204,7 @@ export class GMIManager {
       cognitiveMemoryFactory: config.cognitiveMemoryFactory,
       shutdownTimeoutMs: shutdownTimeoutOrDefault(config.shutdownTimeoutMs),
       learningLayer: config.learningLayer,
+      agencySeatPromptEngineConfig: config.agencySeatPromptEngineConfig,
     };
 
     this.subscriptionService = subscriptionService;
@@ -788,6 +817,121 @@ export class GMIManager {
   public async deactivateGMIForSession(sessionId: string): Promise<boolean> {
     this.ensureInitialized();
     return this.deactivateSession(sessionId);
+  }
+
+  /** The seat GMIs' prompt engine: built once, with no utility AI; a build that fails is not kept. */
+  private agencySeatEngine?: Promise<IPromptEngine>;
+
+  private agencySeatPromptEngine(): Promise<IPromptEngine> {
+    const config = this.config.agencySeatPromptEngineConfig;
+    if (!config) {
+      return Promise.reject(
+        new GMIManagerError('GMIManagerConfig.agencySeatPromptEngineConfig is not set; AgentOS sets it with agencies.', GMIErrorCode.CONFIGURATION_ERROR),
+      );
+    }
+    this.agencySeatEngine ??= (async () => {
+      const engine = new PromptEngine();
+      // No utility AI: the engine truncates the history and summarizes nothing, so it makes no model call.
+      await engine.initialize(config);
+      return engine;
+    })().catch((error: unknown) => {
+      this.agencySeatEngine = undefined;
+      throw error;
+    });
+    return this.agencySeatEngine;
+  }
+
+  /** A seat's persona: the definition a launch made, or a registered one the user may use. */
+  private async agencySeatPersona(spec: AgencySeatSpec): Promise<IPersonaDefinition> {
+    if ('definition' in spec.persona) return normalizePersonaDefinition(spec.persona.definition);
+    const personaId = spec.persona.personaId;
+    const persona = this.getPersonaDefinition(personaId);
+    if (!persona) {
+      throw new GMIManagerError(`Persona '${personaId}' not found.`, GMIErrorCode.PERSONA_NOT_FOUND, { personaId });
+    }
+    const record = this.allPersonaRecords.get(personaId);
+    const strict = this.config.personaValidationStrict;
+    if (strict?.enabled && !strict.shadowMode && record?.status === 'invalid') {
+      throw new GMIManagerError(`Persona '${personaId}' is invalid and blocked by strict validation.`, GMIErrorCode.PERMISSION_DENIED, { personaId });
+    }
+    if (!(await this.userMeetsPersonaTier(spec.userId, persona))) {
+      throw new GMIManagerError(`Access denied: Persona '${personaId}' requires tier '${persona.minSubscriptionTier}'.`, GMIErrorCode.PERMISSION_DENIED, { personaId, userId: spec.userId });
+    }
+    return persona;
+  }
+
+  /**
+   * Builds and registers the GMI of one seat of a team a GMI launched (`launch_agency` on the full runtime): the
+   * registered persona a `personaId` seat names, checked as a session's persona is (strict validation, the user's
+   * tier), or the definition the launch made for a temporary seat. The GMI has no cognitive memory and no retrieval
+   * augmentor (its input is a manager's or a sibling's text, spec D5), a prompt engine and a statistical utility that
+   * make no model call, the tool view and provider manager the launch gives it, and, with the runtime's learning layer,
+   * no learner (a workflow seat's source): it still renders its persona's traits, and with the layer off it sends no
+   * personality section. It is registered under the seat session id, so its own tool calls resolve it; `release()`
+   * shuts it down and takes it out of the manager.
+   *
+   * @throws {GMIManagerError} `PERSONA_NOT_FOUND` for an unknown persona; `PERMISSION_DENIED` for one the user's tier or
+   *   strict validation refuses; `INVALID_STATE` for a session that already has a GMI; `CONFIGURATION_ERROR` without
+   *   `agencySeatPromptEngineConfig`; `NOT_INITIALIZED` when the manager is not, or shuts down while the seat is built.
+   * @throws {GMIError} `GMI_INITIALIZATION_ERROR` when the GMI does not initialize.
+   */
+  public async createAgencySeat(spec: AgencySeatSpec): Promise<{ gmi: IGMI; personaId: string; release(): Promise<void> }> {
+    this.ensureInitialized();
+    const taken = (): GMIManagerError =>
+      new GMIManagerError(`Session '${spec.seatSessionId}' already has a GMI; a seat runs in a session of its own.`, GMIErrorCode.INVALID_STATE, { sessionId: spec.seatSessionId });
+    if (this.gmiSessionMap.has(spec.seatSessionId)) throw taken();
+    const persona = await this.agencySeatPersona(spec);
+    const promptEngine = await this.agencySeatPromptEngine();
+    const gmiInstanceId = `gmi-instance-${uuidv4()}`;
+    const utilityAI = new StatisticalUtilityAI(`agency-seat-utility-${gmiInstanceId}`);
+    await utilityAI.initialize({ utilityId: `agency-seat-utility-${gmiInstanceId}` });
+    const config: GMIBaseConfig = {
+      workingMemory: new InMemoryWorkingMemory(),
+      promptEngine,
+      llmProviderManager: spec.providerManager ? spec.providerManager(this.llmProviderManager) : this.llmProviderManager,
+      utilityAI,
+      toolOrchestrator: spec.toolView(this.toolOrchestrator),
+      defaultLlmProviderId: persona.defaultProviderId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmProviderId,
+      defaultLlmModelId: persona.defaultModelId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmModelId,
+      defaultReasoningTraceMaxEntries: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxEntries,
+      defaultReasoningTraceMaxMessageLength: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxMessageLength,
+      customSettings: persona.customFields,
+      // A GMI waits as long for the turns its shutdown stops as the manager waits for the GMI.
+      shutdownTimeoutMs: this.config.shutdownTimeoutMs,
+      ...(spec.maxToolLoopIterations !== undefined ? { maxToolLoopIterations: spec.maxToolLoopIterations } : {}),
+      // A workflow seat's source: with a learning layer, the seat's turns have no learner.
+      ...(await this.assembleLearning(persona, { gmiInstanceId, sessionId: spec.seatSessionId, userId: spec.userId }, { registryPersona: persona, workflowSeat: true })),
+    };
+    const gmi = new GMI(gmiInstanceId);
+    try {
+      await gmi.initialize(persona, config);
+    } catch (error: any) {
+      // The GMI never runs, so the learner session made for it ends here; a failure to end it is not the error.
+      await Promise.resolve()
+        .then(() => config.learning?.endSession())
+        .catch(() => undefined);
+      throw createGMIErrorFromError(error, GMIErrorCode.GMI_INITIALIZATION_ERROR, { gmiInstanceId }, `Failed to initialize the agency seat GMI ${gmiInstanceId}.`);
+    }
+    if (!this.isInitialized) {
+      // shutdown() began while the seat was built: it is shut down here and never registered.
+      await this.shutDownGMI(gmi, gmiInstanceId, spec.seatSessionId);
+      throw new GMIManagerError(`GMIManager (ID: ${this.managerId}) shut down while the agency seat ${spec.seatSessionId} was being created.`, GMIErrorCode.NOT_INITIALIZED, { sessionId: spec.seatSessionId });
+    }
+    if (this.gmiSessionMap.has(spec.seatSessionId)) {
+      // Another build took the session while this one ran: this GMI is shut down and never registered.
+      await this.shutDownGMI(gmi, gmiInstanceId, spec.seatSessionId);
+      throw taken();
+    }
+    this.activeGMIs.set(gmiInstanceId, gmi);
+    this.gmiSessionMap.set(spec.seatSessionId, gmiInstanceId);
+    let released: Promise<void> | undefined;
+    return {
+      gmi,
+      personaId: persona.id,
+      // Once: a second call waits for the first. It skips the initialization check, so a seat closed while the manager
+      // shuts down is still released.
+      release: () => (released ??= this.deactivateSession(spec.seatSessionId).then(() => undefined)),
+    };
   }
 
   /**

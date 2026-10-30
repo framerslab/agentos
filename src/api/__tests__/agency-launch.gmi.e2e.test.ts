@@ -171,9 +171,9 @@ describe('launch_agency on gmi()', () => {
     expect(gmiWarning).toContain('gmi() accepted config it does not enforce yet: rag.');
     expect(gmiWarning).not.toContain('agencies');
     expect(getCapabilitySupport('gmi', 'agencies')).toBe('enforced');
-    // The full runtime's AgentOSConfig declares no agencies option, so the contract defers the field there, as it does
-    // security. A config that gains the option fails the type check on this line, and the row moves to enforced with it.
-    const runtimeTakesAgencies: 'agencies' extends keyof AgentOSConfig ? true : false = false;
+    // The full runtime's AgentOSConfig declares agencies, so the contract enforces the field there. A config that drops
+    // the option fails the type check on this line.
+    const runtimeTakesAgencies: 'agencies' extends keyof AgentOSConfig ? true : false = true;
     expect(getCapabilitySupport('runtime', 'agencies')).toBe(runtimeTakesAgencies ? 'enforced' : 'accepted_but_deferred');
     expect(getCapabilitySupport('agent', 'agencies')).toBe('accepted_but_deferred');
     expect(getCapabilitySupport('generation', 'agencies')).toBe('runtime_only');

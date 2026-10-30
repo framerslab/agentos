@@ -14,7 +14,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentOptions } from '../../agent.js';
 import type { Agent } from '../../types.js';
-import type { ITool, JSONSchemaObject, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
+import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import { createContentSafeConsole } from '../../../core/logging/contentSafeConsole.js';
 import { callMaxTokensOf } from '../gmiPersona.js';
 import { outputEstimateTokens } from '../spendBudget.js';
@@ -27,6 +27,8 @@ import {
   LAUNCH_AGENCY_TOOL_NAME,
   gmiOptionsOf,
   gmiRouteOf,
+  launchAgencyDescription,
+  launchAgencyInputSchema,
   type AgencyLaunchFrame,
   type LaunchAgencyArgs,
   type LaunchAgencyResult,
@@ -112,63 +114,6 @@ function memberToolNames(member: Agent): Set<string> {
   return names;
 }
 
-/** The input schema the model is offered. Counts, unknown keys and the forms' rules are the engine's, with its codes. */
-function inputSchemaFor(limits: LaunchLimits, memberKeys: string[]): JSONSchemaObject {
-  const names = { type: 'array', items: { type: 'string' } };
-  const seat: JSONSchemaObject = {
-    type: 'object',
-    properties: {
-      role: { type: 'string', description: "The seat's name in the team, unique: a letter, then letters, digits, '_' or '-', at most 52 characters." },
-      instructions: { type: 'string', description: 'Who the seat is and what it does: the system prompt of an agent made for this team.' },
-      ...(memberKeys.length > 0
-        ? {
-            agentKey: { type: 'string', description: `A persistent member to seat as itself, in place of instructions: one of ${memberKeys.join(', ')}.` },
-            brief: { type: 'string', description: "A member's brief for this team, at most 1,000 characters; only with agentKey." },
-          }
-        : {}),
-      tools: {
-        ...names,
-        description: `The names of your own tools this seat may use${memberKeys.length > 0 ? '; for a member, only those it also has' : ''}. A seat given none uses none.`,
-      },
-      dependsOn: { ...names, description: 'For the graph strategy: the roles this seat waits for; their outputs are its input.' },
-    },
-    required: ['role'],
-  };
-  return {
-    type: 'object',
-    properties: {
-      goal: { type: 'string', description: 'What the team must produce, in full: its members see nothing of this conversation. At most 8,000 characters.' },
-      strategy: {
-        type: 'string',
-        enum: ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'],
-        description:
-          "How the seats work together. sequential (the default): each seat receives the task and the previous seat's output. parallel: every seat answers at once, and one answer is made from theirs. debate: the seats argue in rounds, and their arguments are summed up. review-loop: exactly two seats, the first writes and the second reviews until it approves. hierarchical: a manager delegates to the seats. graph: a seat runs once the seats its dependsOn names have answered.",
-      },
-      seats: { type: 'array', items: seat, description: `The team, at most ${limits.maxSeats} seats.` },
-      budgetUsd: { type: 'number', description: 'The most the team may spend, in US dollars; the launch takes the least of this and its own bounds.' },
-      maxTokens: { type: 'number', description: 'The most tokens the team may use; the launch takes the least of this and its own bounds.' },
-      deadlineMs: { type: 'number', description: `The team's deadline in milliseconds, at least 1,000; default ${limits.defaultDeadlineMs}, at most ${limits.maxDeadlineMs}.` },
-      maxRounds: { type: 'integer', description: 'The rounds of debate and review-loop: 1, 2 or 3 (the default).' },
-    },
-    required: ['goal', 'seats'],
-  };
-}
-
-/** What the model reads about the tool. */
-function descriptionFor(limits: LaunchLimits, memberKeys: string[]): string {
-  const members = memberKeys.length > 0 ? `, or a member you seat as itself by agentKey (${memberKeys.join(', ')})` : '';
-  return [
-    "Launches a temporary team of agents on one goal and returns the team's answer as this call's result.",
-    `Each seat is an agent with the instructions you give it${members}.`,
-    'One seat makes a subagent.',
-    "The team sees nothing of this conversation, so put everything it needs in the goal and each seat's instructions.",
-    "A seat uses only the tools its tools list names, from your own tools.",
-    ...(memberKeys.length > 0 ? ["A member's seat may name only tools the member also has."] : []),
-    `At most ${limits.maxSeats} seats; the team runs within a share of this turn's budget and a deadline.`,
-    'A launch that is refused returns an error that starts with its code, such as too_many_seats or invalid_arguments.',
-  ].join(' ');
-}
-
 /**
  * The `launch_agency` tool of a gmi() agent with `agencies.launch`.
  *
@@ -184,6 +129,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
   // puts in its record later, under a new key or an old one, never takes a seat.
   const members: Readonly<Record<string, Agent>> = Object.freeze({ ...opts.agencies?.members });
   const memberKeys = Object.keys(members);
+  // The members the schema and the description offer by agentKey: none when the record names none.
+  const memberForm = memberKeys.length > 0 ? ({ field: 'agentKey', keys: memberKeys } as const) : undefined;
   const learning = opts.learning;
   const namespace = typeof learning === 'object' && learning !== null && typeof learning.namespace === 'string' ? learning.namespace : '';
 
@@ -388,8 +335,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
     id: `launch-agency-${agentScope}`,
     name: LAUNCH_AGENCY_TOOL_NAME,
     displayName: 'Launch agency',
-    description: descriptionFor(limits, memberKeys),
-    inputSchema: inputSchemaFor(limits, memberKeys),
+    description: launchAgencyDescription(limits, memberForm),
+    inputSchema: launchAgencyInputSchema(limits, memberForm),
     category: 'agency',
     hasSideEffects: true,
     async execute(args: LaunchAgencyArgs, ctx: ToolExecutionContext): Promise<ToolExecutionResult<LaunchAgencyResult>> {
