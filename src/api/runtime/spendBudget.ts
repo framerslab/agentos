@@ -92,10 +92,28 @@ export function outputEstimateTokens(modelId: string, maxOutputTokens: number | 
 
 /** The info of the budget that refused, by the error it threw, so a child learns of an ancestor's refusal. */
 const refusalInfo = new WeakMap<object, SpendLimitInfo>();
+/**
+ * The refusal a thrown value that is not an object names (an `onLimitReached` function may throw a string), which the
+ * WeakMap cannot hold: a check runs synchronously, so the value thrown in the check in progress is the one the
+ * budgets below meet. Cleared when the next outermost check begins.
+ */
+let primitiveRefusal: { error: unknown; info: SpendLimitInfo } | undefined;
+/** How deep the checks in progress go: a check asks its parent's, and a two-budget check asks both. */
+let checkDepth = 0;
 
 /** Names `info` as the refusal `error` carries, unless the error already names one: the first budget to refuse names it. */
 function markRefusal(error: unknown, info: SpendLimitInfo): void {
-  if (typeof error === 'object' && error !== null && !refusalInfo.has(error)) refusalInfo.set(error, info);
+  if (typeof error === 'object' && error !== null) {
+    if (!refusalInfo.has(error)) refusalInfo.set(error, info);
+  } else if (!primitiveRefusal || !Object.is(primitiveRefusal.error, error)) {
+    primitiveRefusal = { error, info };
+  }
+}
+
+/** The refusal `error` names, an object's or a primitive's. */
+function refusalOf(error: unknown): SpendLimitInfo | undefined {
+  if (typeof error === 'object' && error !== null) return refusalInfo.get(error);
+  return primitiveRefusal && Object.is(primitiveRefusal.error, error) ? primitiveRefusal.info : undefined;
 }
 
 /**
@@ -113,7 +131,7 @@ function runLimitFunction(on: (info: SpendLimitInfo) => void, info: SpendLimitIn
 
 /** Runs `budget`'s own `onLimitReached` function, when it is one, with the info of the budget that refused with `error`. */
 function hearRefusal(budget: SpendBudget, error: unknown): void {
-  const info = typeof error === 'object' && error !== null ? refusalInfo.get(error) : undefined;
+  const info = refusalOf(error);
   const on = budget.options.onLimitReached;
   if (info && typeof on === 'function') runLimitFunction(on, info);
 }
@@ -254,6 +272,18 @@ export class SpendBudget {
     what: string,
     model?: { providerId: string; modelId: string },
   ): void {
+    // A new outermost check: no refusal of an earlier one is pending.
+    if (checkDepth === 0) primitiveRefusal = undefined;
+    checkDepth += 1;
+    try {
+      this.check(estimateUSD, estimateTokens, what, model);
+    } finally {
+      checkDepth -= 1;
+    }
+  }
+
+  /** {@link SpendBudget.assertCanSpend}'s rules, inside the count of the checks in progress. */
+  private check(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
     // Under a call held to two budgets, a budget both draw on is asked once.
     if (reachedBefore('check', this)) return;
     const parent = this.options.parent;
