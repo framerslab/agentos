@@ -15,7 +15,7 @@ import { launchRegistry } from '../runtime/agencyLaunch/launchRegistry';
 import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
 import { getCapabilitySupport } from '../runtime/capabilityContract';
 import { SpendBudget } from '../runtime/spendBudget';
-import type { Agent, ApprovalDecision, ApprovalRequest } from '../types';
+import type { Agent, AgentEndEvent, AgentStartEvent, ApprovalDecision, ApprovalRequest } from '../types';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import type { ITool } from '../../core/tools/ITool';
@@ -889,5 +889,58 @@ describe('launch_agency on gmi()', () => {
     // Root, the seat's three steps, root.
     expect(s2.seen).toHaveLength(5);
     expect(composed.text).toBe('Team done.');
+  });
+
+  it("agencies.hitl and the host's callbacks see a launched team, and a level-2 seat is asked once", async () => {
+    const k = key();
+    const search = vi.fn(async () => 'found');
+    const asked: string[] = [];
+    const askedBy: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      askedBy.push(request.agent);
+      return { approved: true };
+    };
+    const agentStart = vi.fn<(e: AgentStartEvent) => void>();
+    const agentEnd = vi.fn<(e: AgentEndEvent) => void>();
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Plan the search.', seats: [{ role: 'lead', instructions: 'Lead.', tools: ['search', 'launch_agency'] }] }),
+        launchStep({ goal: 'Search.', seats: [{ role: 'finder', instructions: 'Find.', tools: ['search'] }] }, 'n1'),
+        reply.tools([{ id: 's1', name: 'search', args: { q: 'x' } }]),
+        reply.text('Found.'),
+        reply.text('Lead done.'),
+        reply.text('All done.'),
+      ],
+    });
+    const parent = gmi({
+      ...route(k), instructions: 'Coordinate.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: { q: { type: 'string' } } }, execute: search } },
+      on: { agentStart, agentEnd },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['search'] }, handler } },
+    });
+
+    const result = await parent.session('p1').send('Search for x.');
+    const out = launchOf(result);
+    expect(out.status).toBe('completed');
+    expect(result.text).toBe('All done.');
+    // Root, the lead, the finder's two steps, the lead, root: the finder was offered search and called it (the precondition).
+    expect(s.seen).toHaveLength(6);
+    expect(systemText(s.seen[2])).toContain('Find.');
+    expect(offered(s.seen[2])).toEqual(['search']);
+    // The level-2 seat's search ran once and was asked once: the nested launch passes the gate it received, uncomposed.
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(asked).toEqual(['search']);
+    // The gate that asked is that of the team the parent launched; the level-2 team, with no hitl of its own, passed it on.
+    expect(askedBy).toEqual([`launch:${out.agencyId}`]);
+    // The parent's callbacks see the team it launched, by its name.
+    expect(agentStart).toHaveBeenCalledWith(expect.objectContaining({ agent: `launch:${out.agencyId}` }));
+    expect(agentEnd).toHaveBeenCalledWith(expect.objectContaining({ agent: `launch:${out.agencyId}` }));
+    // They carry its goal and its answer, and see the team its lead launched through the parent's own tool, inside it.
+    const nested = agentStart.mock.calls[1]?.[0].agent;
+    expect(nested).toMatch(/^launch:agency-/);
+    expect(nested).not.toBe(`launch:${out.agencyId}`);
+    expect(agentStart.mock.calls.map(([e]) => [e.agent, e.input])).toEqual([[`launch:${out.agencyId}`, 'Plan the search.'], [nested, 'Search.']]);
+    expect(agentEnd.mock.calls.map(([e]) => [e.agent, e.output])).toEqual([[nested, 'Found.'], [`launch:${out.agencyId}`, 'Lead done.']]);
   });
 });
