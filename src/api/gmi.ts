@@ -563,10 +563,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
           const budget = turn.budget;
           if (budget) {
             // The options the gateway sends for this hop: a fallback hop's overrides raise maxTokens by its headroom
-            // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap.
+            // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap. A structured request goes
+            // without the tool definitions, so they are not counted.
             const sent = { ...options, ...resolution.optionOverrides };
             try {
-              assertCallWithinBudget(budget, resolution, promptCharsOf(messages, undefined, sent.tools), sent.maxTokens, 'gmi.step');
+              assertCallWithinBudget(budget, resolution, promptCharsOf(messages, undefined, responseSchema ? undefined : sent.tools), sent.maxTokens, 'gmi.step');
             } catch (refusal) {
               return refusedAttempt(refusal);
             }
