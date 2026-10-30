@@ -4,6 +4,9 @@
  * gmi(), provider manager, completion gateway, GMI and tool orchestrator run; only the provider classes are
  * stubbed (helpers/stubProviders.ts), at their module boundary.
  */
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import { agency } from '../agency';
@@ -414,5 +417,27 @@ describe('agency() seats served by GMIs', () => {
     await seat.close();
     // The host's turn and the seat's, 15 tokens each, stay under the id.
     expect((await member.usage('seat:lesson-1')).totalTokens).toBe(30);
+  });
+
+  it("a seat session's ledger rows name its ledger's own source, else the session's, and the member's own session keeps its source", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agentos-seat-ledger-'));
+    try {
+      const rowsOf = (path: string): Array<Record<string, unknown>> =>
+        readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+      const k = key();
+      script('openai', k, { replies: [reply.text('A.'), reply.text('B.'), reply.text('C.')] });
+      const named = join(dir, 'named.jsonl');
+      const member = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Help.', usageLedger: { enabled: true, path: named, source: 'launch_agency' } });
+      await buildSessionSeat(member, { form: 'temporary', role: 'r' }).generate('Hi.');
+      await member.session('s').send('Hi.');
+      expect(rowsOf(named).map((row) => row.source)).toEqual(['launch_agency', 'agent.session.send']);
+      // A ledger that names no source: the seat's row names the session's.
+      const unnamed = join(dir, 'unnamed.jsonl');
+      const plain = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Help.', usageLedger: { enabled: true, path: unnamed } });
+      await buildSessionSeat(plain, { form: 'temporary', role: 'r' }).generate('Hi.');
+      expect(rowsOf(unnamed).map((row) => row.source)).toEqual(['agent.session.send']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
