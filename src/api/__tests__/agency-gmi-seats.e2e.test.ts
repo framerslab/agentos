@@ -294,6 +294,10 @@ describe('agency() seats served by GMIs', () => {
       expect(build).toThrow(AgencyConfigError);
       expect(build).toThrow(named);
     }
+    // A value no conversion can print (a revoked proxy throws on JSON, on String() and on its own tag) is refused the same way.
+    const { proxy: revoked, revoke } = Proxy.revocable({}, {});
+    revoke();
+    expect(() => agency({ ...base, runtime: revoked as 'gmi', agents: { a: { instructions: 'x' } } })).toThrow(AgencyConfigError);
     // null is unset at both levels: an agency's null leaves its seats on agent()'s default, and a seat's null takes the agency's runtime.
     expect(() => agency({ ...base, runtime: null as unknown as 'gmi', agents: { a: { instructions: 'x' } } })).not.toThrow();
     const team = agency({ ...base, runtime: 'gmi', strategy: 'sequential', agents: { a: { runtime: null as unknown as 'gmi', instructions: 'x' } } });
