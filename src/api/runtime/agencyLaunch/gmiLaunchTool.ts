@@ -70,6 +70,7 @@ const SEAT_OPTION_KEYS = [
   'thinking',
   'effort',
   'customModelParams',
+  'cache',
   'maxSteps',
   'chainOfThought',
 ] as const satisfies ReadonlyArray<keyof AgentOptions>;
