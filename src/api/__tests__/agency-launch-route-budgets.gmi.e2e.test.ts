@@ -230,4 +230,16 @@ describe('launch_agency on gmi(): the coordinator route and the budgets of a sea
     expect(host.tokensUsed()).toBe(44);
     expect(result.text).toBe('Priced.');
   });
+
+  it('an agent whose maxLaunchTokens cannot cover one call of its route is warned about at construction', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const lines = () => warn.mock.calls.map((call) => call.map(String).join(' ')).filter((line) => line.includes('maxLaunchTokens'));
+    // A route that names no maxTokens counts a call's output at 4,096: one call needs 6,096 tokens, more than 4,000.
+    gmi({ ...route(key()), instructions: 'Lead.', agencies: { launch: true, maxLaunchTokens: 4_000 } });
+    expect(lines()).toHaveLength(1);
+    expect(lines()[0]).toContain('6096');
+    // With 1,000 output tokens a call needs 3,000, which 4,000 covers.
+    gmi({ ...route(key()), instructions: 'Lead.', maxTokens: 1_000, agencies: { launch: true, maxLaunchTokens: 4_000 } });
+    expect(lines()).toHaveLength(1);
+  });
 });
