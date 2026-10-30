@@ -339,16 +339,42 @@ interface SeatSendKeys {
   __onUsage?: (usage: TokenUsage) => void;
 }
 
+/** A hook that skips every tool call: what hooks a send carries in a shape no hook can be read from become. */
+const skipEveryCall: ToolCallHook = async () => null;
+
+/**
+ * A seat's tool names as its send carries them: a set (from any realm). Anything else present names no tool, so the turn
+ * lists and runs none, and is warned about: a seat's names are its limit, and a turn must not run every tool for want
+ * of them.
+ */
+function receivedToolNames(value: unknown): ReadonlySet<string> {
+  if (value instanceof Set || Object.prototype.toString.call(value) === '[object Set]') return value as ReadonlySet<string>;
+  console.warn("[agentos] gmi(): a send's __toolNames is not a Set; the turn lists and runs no tool.");
+  return new Set<string>();
+}
+
+/**
+ * A seat's carried hooks as its send carries them: a list of functions. Anything else present becomes one hook that
+ * skips every call, and is warned about: the carried hooks may refuse a call, and a turn must not run it for want of
+ * them.
+ */
+function receivedToolHooks(value: unknown): readonly ToolCallHook[] {
+  if (Array.isArray(value) && value.every((hook) => typeof hook === 'function')) return value as ToolCallHook[];
+  console.warn("[agentos] gmi(): a send's __toolHooks is not a list of functions; every tool call of the turn is skipped.");
+  return [skipEveryCall];
+}
+
 /** The turn options a seat's send carries. */
 function seatTurnOf(sendOpts: unknown): Pick<GmiTurnOptions, 'approvalGate' | 'toolNames' | 'toolHooks' | 'launchFrame'> {
   const keys = (sendOpts ?? {}) as SeatSendKeys;
-  // A gate that is present but not a function refuses every tool, as a gate received from a parent agency does.
+  // A gate that is present but not a function refuses every tool, as a gate received from a parent agency does; names
+  // and hooks in another shape fail closed the same way.
   const gate = composeReceivedGate(keys.__approvalGate);
   const frame = keys.__launchFrame;
   return {
     ...(gate ? { approvalGate: gate } : {}),
-    ...(keys.__toolNames instanceof Set ? { toolNames: keys.__toolNames } : {}),
-    ...(Array.isArray(keys.__toolHooks) ? { toolHooks: keys.__toolHooks } : {}),
+    ...(keys.__toolNames !== undefined ? { toolNames: receivedToolNames(keys.__toolNames) } : {}),
+    ...(keys.__toolHooks !== undefined ? { toolHooks: receivedToolHooks(keys.__toolHooks) } : {}),
     // A launched team's seat: the frame its turn's calls carry, copied as the send gave it.
     ...(frame && typeof frame.launchId === 'string' && typeof frame.role === 'string' && typeof frame.depth === 'number'
       ? { launchFrame: { launchId: frame.launchId, role: frame.role, depth: frame.depth } }
