@@ -513,9 +513,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
   async function learnerSessionFor(sessionId: string, personaId: string, userId: string | undefined, noLearner = false): Promise<ILearnerSession | undefined> {
     const active = layer;
     if (!active) return undefined;
-    const context: LearnerContext = { sessionId, personaId, authoredTraits };
-    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone. A seat session
-    // (sessionSeat(), launch_agency) has no learner: a team turn's input is a manager's or a sibling's text.
+    // A seat session (sessionSeat(), launch_agency) has no learner: a team turn's input is a manager's or a sibling's
+    // text. The manifest and the trace count its turns as a seat's, whatever user it runs as.
+    const context: LearnerContext = { sessionId, personaId, authoredTraits, ...(noLearner ? { noLearnerReason: 'workflow_seat' as const } : {}) };
+    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone.
     const learnerKey = userId === undefined || noLearner ? null : { namespace: '', agentKey: opts.name?.trim() ? personaId : '', userId };
     const open = (): Promise<ILearnerSession> => active.forLearner(learnerKey, context);
     try {
