@@ -27,6 +27,7 @@ import {
   type ToolCallRequest,
 } from '../../src/cognition/substrate/IGMI.js';
 import { InMemoryWorkingMemory } from '../../src/cognition/substrate/memory/InMemoryWorkingMemory.js';
+import type { ILearningLayer, TurnInputForLearning, TurnPreparation } from '../../src/cognition/learning/types';
 import { ConversationContext } from '../../src/core/conversation/ConversationContext';
 import { PromptEngine } from '../../src/core/llm/PromptEngine';
 import type { ChatMessage, ModelCompletionResponse } from '../../src/core/llm/providers/IProvider';
@@ -118,6 +119,20 @@ function unansweredToolCallIds(
       ? message.tool_calls
           .filter((call) => !messages.slice(index + 1).some((later) => later.role === 'tool' && later.tool_call_id === call.id))
           .map((call) => call.id)
+      : [],
+  );
+}
+
+/** The ids of the tool messages of `messages` that answer a call no assistant message before them names. */
+function resultsWithoutCall(
+  messages: ReadonlyArray<{ role: string; tool_calls?: ReadonlyArray<{ id: string }> | null; tool_call_id?: string | null }>,
+): string[] {
+  return messages.flatMap((message, index) =>
+    message.role === 'tool' &&
+    !messages
+      .slice(0, index)
+      .some((earlier) => earlier.role === 'assistant' && earlier.tool_calls?.some((call) => call.id === message.tool_call_id))
+      ? [String(message.tool_call_id)]
       : [],
   );
 }
@@ -1923,8 +1938,13 @@ describe('AgentOS tool-result continuations', () => {
      * Each GMI is the shipped one, on a provider that gives `replies` and a retrieval that finds NOTES_SOURCE for the
      * notes question and TRAVEL_SOURCE for the travel question. The host's tool layer stops each user turn of the notes
      * conversation for READ_CALL once the GMI's turn ends, as a host that adds a tool of its own to the shipped GMI does.
+     * `learningLayer` gives the manager a learning layer.
      */
-    async function sharedSessionRuntime(overrides: Partial<AgentOSConfig> = {}, replies: ModelReply[] = REPLIES) {
+    async function sharedSessionRuntime(
+      overrides: Partial<AgentOSConfig> = {},
+      replies: ModelReply[] = REPLIES,
+      learningLayer?: ILearningLayer,
+    ) {
       const agentos = new AgentOS();
       openAgents.push(agentos);
       await agentos.initialize(createConfig(overrides));
@@ -1939,12 +1959,13 @@ describe('AgentOS tool-result continuations', () => {
         return { queryText, retrievedChunks: sources, augmentedContext: sources.map((source) => source.content).join('\n') };
       });
       const personas = [NOTES_PERSONA, TRAVEL_PERSONA];
+      const promptEngine = { ...historyPromptEngine(), estimateTokenCount: async () => 10 };
       const manager = new GMIManager(
-        { personaLoaderConfig: { personaSource: 'in-memory' } },
+        { personaLoaderConfig: { personaSource: 'in-memory' }, ...(learningLayer ? { learningLayer } : {}) },
         undefined,
         undefined,
         agentos.getConversationManager(),
-        { ...historyPromptEngine(), estimateTokenCount: async () => 10 },
+        promptEngine,
         {
           getModelInfo: vi.fn().mockResolvedValue({
             modelId: 'mock-model',
@@ -2005,7 +2026,7 @@ describe('AgentOS tool-result continuations', () => {
         return { request: request!, saved };
       }
 
-      return { agentos, manager, promptCalls, retrieveContext, ask, pending, pauseNotesTurn };
+      return { agentos, manager, promptEngine, promptCalls, retrieveContext, ask, pending, pauseNotesTurn };
     }
 
     it.each([
@@ -2126,6 +2147,144 @@ describe('AgentOS tool-result continuations', () => {
       // the session keeps the travel persona's GMI, and the pause waits for a new turn to end it
       expect(rt.manager.getGMIByInstanceId(travelReply.gmiInstanceId)?.getCurrentState()).not.toBe(GMIPrimeState.SHUTDOWN);
       expect((await rt.pending())?.toolCalls).toEqual([READ_CALL]);
+    });
+
+    it('a continuation on the stream keeps the calls the GMI ran itself in the paused turn when a turn of another conversation ran on the session meanwhile', async () => {
+      const lookup = vi.fn(async () => ({ success: true, output: { notes: ['Standup moved to 10:00.'] } }));
+      const rt = await sharedSessionRuntime(
+        {
+          tools: new Map([
+            [
+              'lookup_notes',
+              {
+                description: 'Search the notes of the user.',
+                inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+                execute: lookup,
+              },
+            ],
+          ]),
+        },
+        [{ toolCalls: [LOOKUP_CALL] }, { text: 'I will read the notes file first.' }, { text: TRAVEL_REPLY }, { text: NOTES_REPLY }],
+      );
+      // the notes turn runs lookup_notes itself, then stops for READ_CALL
+      const { request } = await rt.pauseNotesTurn();
+      expect(lookup).toHaveBeenCalledTimes(1);
+      // while the host runs READ_CALL, the session's GMI runs a turn of the travel conversation
+      const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION);
+      expect((travel.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TRAVEL_REPLY);
+
+      const continuation = await collect(
+        rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      );
+
+      const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+      expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+      expect(last.finalResponseText).toBe(NOTES_REPLY);
+      // the model read the paused turn as the GMI ran it: lookup_notes's call and result, then READ_CALL's result once
+      const prompt = rt.promptCalls[3] ?? [];
+      expect(userMessagesOf(prompt)).toEqual([NOTES_QUESTION]);
+      expect(
+        prompt.some((m) => m.role === 'assistant' && m.tool_calls?.some((call) => call.id === LOOKUP_CALL.id)),
+      ).toBe(true);
+      expect(String(prompt.find((m) => m.role === 'tool' && m.tool_call_id === LOOKUP_CALL.id)?.content)).toContain(
+        'Standup moved to 10:00.',
+      );
+      expect(prompt.filter((m) => m.role === 'tool' && m.tool_call_id === READ_CALL.id).map((m) => m.content)).toEqual([
+        READ_RESULT.toolOutput,
+      ]);
+      // and nothing of the travel conversation; every call has its result and every result its call
+      expect(contentsOf(prompt)).not.toContain(TRAVEL_REPLY);
+      expect(unansweredToolCallIds(prompt)).toEqual([]);
+      expect(resultsWithoutCall(prompt)).toEqual([]);
+      expect(last.ragSources).toEqual([NOTES_SOURCE]);
+      expect(lookup).toHaveBeenCalledTimes(1);
+      expect(await rt.pending()).toBeNull();
+    });
+
+    it("a continuation on the stream that comes while the manager still retires the GMI it paused on completes on a live GMI for the pause's persona", async () => {
+      const rt = await sharedSessionRuntime({}, [{ text: 'I will read the notes file first.' }, { text: NOTES_REPLY }]);
+      const { request } = await rt.pauseNotesTurn();
+      const pausedGmi = rt.manager.getGMIByInstanceId(request.gmiInstanceId)!;
+      // the paused GMI's shutdown stops at closing its working memory until the case lets it end
+      let endShutdown!: () => void;
+      const shutdownHeld = new Promise<void>((resolve) => {
+        endShutdown = resolve;
+      });
+      vi.spyOn(InMemoryWorkingMemory.prototype, 'close').mockImplementationOnce(() => shutdownHeld);
+      // the manager deactivates the session's GMI, as its idle cleanup or a turn that asks for another persona does:
+      // the GMI stays bound to the session until its shutdown ends
+      const retirement = rt.manager.deactivateGMIForSession('session-shared');
+      expect(pausedGmi.getCurrentState()).toBe(GMIPrimeState.SHUTTING_DOWN);
+      const acquisitions = vi.mocked(GMIManager.prototype.getOrCreateGMIForSession).mock.calls.length;
+
+      const continuation = collect(
+        rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      );
+      // the continuation asks for the session's GMI while the retired one is still shutting down
+      await vi.waitFor(() =>
+        expect(vi.mocked(GMIManager.prototype.getOrCreateGMIForSession).mock.calls.length).toBeGreaterThan(acquisitions),
+      );
+      endShutdown();
+      await retirement;
+      const responses = await continuation;
+
+      expect(responses.filter((r) => r.type === AgentOSResponseChunkType.ERROR)).toEqual([]);
+      const last = responses.at(-1) as AgentOSFinalResponseChunk;
+      expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+      expect(last.finalResponseText).toBe(NOTES_REPLY);
+      // it ran on the GMI the session holds now, for the pause's persona, and never on the one that was shutting down
+      expect(last.gmiInstanceId).not.toBe(request.gmiInstanceId);
+      expect(pausedGmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+      expect(rt.manager.gmiSessionMap.get('session-shared')).toBe(last.gmiInstanceId);
+      expect(rt.manager.getGMIByInstanceId(last.gmiInstanceId)?.getPersona().id).toBe(NOTES_PERSONA.id);
+      const prompt = rt.promptCalls[1] ?? [];
+      expect(userMessagesOf(prompt)).toEqual([NOTES_QUESTION]);
+      expect(contentsOf(prompt)).toContain(READ_RESULT.toolOutput);
+      expect(unansweredToolCallIds(prompt)).toEqual([]);
+      expect(resultsWithoutCall(prompt)).toEqual([]);
+      expect(last.ragSources).toEqual([NOTES_SOURCE]);
+      expect(await rt.pending()).toBeNull();
+    });
+
+    it("a continuation on the stream sends none of the learning preparation of the turn another conversation ran on the session meanwhile, and asks for its own", async () => {
+      // a learning layer whose preparation names the turn it was made for
+      const prepareTurn = vi.fn(
+        async (input: TurnInputForLearning): Promise<TurnPreparation> => ({
+          systemPrompts: [
+            {
+              content: `Learner section for ${input.continuation ? 'a continuation' : input.text}`,
+              priority: 2,
+              source: 'learning:personality',
+            },
+          ],
+          learner: 'bound',
+          mode: 'on',
+        }),
+      );
+      const learningLayer = {
+        manifest: vi.fn(),
+        forLearner: vi.fn(async () => ({ prepareTurn, endSession: vi.fn(async () => undefined), currentTraits: () => ({}) })),
+        close: vi.fn(async () => undefined),
+      } as unknown as ILearningLayer;
+      const rt = await sharedSessionRuntime({}, REPLIES, learningLayer);
+      const { request } = await rt.pauseNotesTurn();
+      // while the host runs READ_CALL, the session's GMI runs a turn of the travel conversation, prepared for its question
+      const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION);
+      expect((travel.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TRAVEL_REPLY);
+      expect(prepareTurn).toHaveBeenLastCalledWith(expect.objectContaining({ text: TRAVEL_QUESTION }));
+
+      const continuation = await collect(
+        rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      );
+
+      expect((continuation.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(NOTES_REPLY);
+      // the continuation's model request carries the section prepared for it, never the travel turn's
+      const sections = (rt.promptEngine.constructPrompt.mock.calls.at(-1)?.[0]?.systemPrompts ?? []).map(
+        (prompt: { content: string }) => prompt.content,
+      );
+      expect(sections).toContain('Learner section for a continuation');
+      expect(sections).not.toContain(`Learner section for ${TRAVEL_QUESTION}`);
+      expect(prepareTurn).toHaveBeenLastCalledWith(expect.objectContaining({ continuation: true, text: null }));
     });
   });
 });
