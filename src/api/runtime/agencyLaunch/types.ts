@@ -87,7 +87,12 @@ export interface AgencyLaunchOptions {
    * when the agent is built: a member put in it afterwards, under a new key or an old one, is never seated.
    */
   members?: Record<string, Agent>;
-  /** The approval policy every launched team runs under after the gate the launching turn carries; applied at a root launch and inherited below it. */
+  /**
+   * The approval policy of the team a root launch builds, asked after the gate the launching turn carries. A nested
+   * launch passes that team's gate on, so `beforeTool` covers the seats of every team below it, each tool call asked
+   * once. `beforeAgent` and `beforeReturn` are asked in the root team alone: no nested team's seat or answer waits
+   * for them.
+   */
   hitl?: HitlConfig;
 }
 
