@@ -218,6 +218,29 @@ describe('a spend budget on the GMI path', () => {
     expect(s.seen).toHaveLength(0);
   });
 
+  it("a stream whose signal aborts mid-turn ends with the signal's reason in its error part, one-shot and in a session", async () => {
+    const k = key();
+    const never = opening();
+    const delta = reply.text('Partial')[0];
+    const s = script('openai', k, { replies: [reply.hold([delta], never.promise), reply.hold([delta], never.promise)] });
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100 });
+    const session = a.session('s1');
+
+    for (const [index, start] of [(signal: AbortSignal) => a.stream('Hi.', { abortSignal: signal }), (signal: AbortSignal) => session.stream('Hi.', { abortSignal: signal })].entries()) {
+      const stop = new AbortController();
+      const result = start(stop.signal);
+      // The request is out and held: the abort comes during it.
+      await vi.waitFor(() => expect(s.seen).toHaveLength(index + 1));
+      const reason = new Error('custom stop');
+      stop.abort(reason);
+      const parts: Array<{ type: string; error?: unknown }> = [];
+      for await (const part of result.fullStream) parts.push(part);
+      expect(parts.at(-1)).toEqual({ type: 'error', error: reason });
+      await expect(result.text).resolves.toBe('Partial');
+    }
+    expect(s.aborts).toBe(2);
+  });
+
   it("a budget bounds a GMI's metaprompt calls, and the turn's reply stands", async () => {
     const k = key();
     // `whole` answers a metaprompt's unstreamed request, should one be sent.
