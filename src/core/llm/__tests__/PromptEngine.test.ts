@@ -252,6 +252,30 @@ describe('PromptEngine history budgeting', () => {
     expect(prompt.slice(2).map((message) => message.tool_call_id)).toEqual(['call_a', 'call_b']);
   });
 
+  it('keeps the call before the turn when the turn begins with its result and the earlier history must go', async () => {
+    const engine = await truncatingEngine();
+    // A 1000-token window leaves history 350 tokens. The turn is the result alone, and it runs over the budget by
+    // itself, so nothing before the turn fits: dropping the earlier history whole would send the result without the
+    // call it answers.
+    const history = [
+      createConversationMessage(MessageRole.USER, 'Read a.txt.'),
+      createConversationMessage(MessageRole.ASSISTANT, null, {
+        tool_calls: [{ id: 'call_a', name: 'read_file', arguments: { path: 'a.txt' } }],
+      }),
+      createConversationMessage(MessageRole.TOOL, 'a'.repeat(1600), { tool_call_id: 'call_a', name: 'read_file' }),
+    ];
+
+    const result = await engine.constructPrompt(
+      { systemPrompts: [{ content: 'Base instructions' }], conversationHistory: history, currentTurnMessageCount: 1 },
+      modelWith(1000),
+      baseExecutionContext,
+    );
+
+    const prompt = result.prompt as ChatMessage[];
+    expect(prompt.map((message) => message.role)).toEqual(['system', 'assistant', 'tool']);
+    expect(prompt[1]?.tool_calls?.map((toolCall) => toolCall.id)).toEqual(['call_a']);
+  });
+
   it('keeps as much earlier history as its budget allows when the prompt runs over', async () => {
     const engine = await truncatingEngine();
     // 2000-token window: history gets 700. Ten 250-token messages come

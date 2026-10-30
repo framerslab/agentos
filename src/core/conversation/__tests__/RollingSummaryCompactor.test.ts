@@ -163,6 +163,27 @@ describe('maybeCompactConversationMessages', () => {
     expect(boundary).toBe(8);
   });
 
+  it('reads a tool round from its call when the boundary an earlier release stored falls on the call', async () => {
+    // An earlier release could end a summary on the call. The next turn sends the round whole, and the pass that
+    // summarizes the round sends the compaction model the call with its results, not the results alone.
+    const messages = [
+      message('h1', 1),
+      message('h2', 2, { role: MessageRole.ASSISTANT }),
+      message('s1', 3),
+      call('call', 4, ['c1', 'c2']),
+      answer('result1', 5, 'c1'),
+      answer('result2', 6, 'c2'),
+      message('done', 7, { role: MessageRole.ASSISTANT }),
+      message('tail1', 8),
+      message('tail2', 9, { role: MessageRole.ASSISTANT }),
+    ];
+
+    const { summarized, boundary } = await compact(messages, { headMessagesToKeep: 2, tailMessagesToKeep: 2 }, 4);
+
+    expect(summarized).toEqual([['call', 'result1', 'result2', 'done']]);
+    expect(boundary).toBe(7);
+  });
+
   it('counts the kept head as the next turn does, a message no pass summarizes among it', async () => {
     // The next turn keeps the first two messages of the history it sends: the summary message and q1. A head counted
     // over the messages a pass may summarize would keep back r1 too, which would then reach neither the summary nor
