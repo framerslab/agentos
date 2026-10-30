@@ -21,6 +21,7 @@ import type { LaunchHost, LaunchParent, ResolvedSeat } from './runLaunch.js';
 import { buildSessionSeat, descriptionOf, type InternalSeatOptions, type SeatHandle } from './sessionSeat.js';
 import {
   LAUNCH_AGENCY_TOOL_NAME,
+  LAUNCH_STRATEGIES,
   gmiOptionsOf,
   type AgencyLaunchFrame,
   type LaunchAgencyArgs,
@@ -120,7 +121,7 @@ function inputSchemaFor(limits: LaunchLimits, memberKeys: string[]): JSONSchemaO
       goal: { type: 'string', description: 'What the team must produce, in full: its members see nothing of this conversation. At most 8,000 characters.' },
       strategy: {
         type: 'string',
-        enum: ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'],
+        enum: [...LAUNCH_STRATEGIES],
         description:
           "How the seats work together. sequential (the default): each seat receives the task and the previous seat's output. parallel: every seat answers at once, and one answer is made from theirs. debate: the seats argue in rounds, and their arguments are summed up. review-loop: exactly two seats, the first writes and the second reviews until it approves. hierarchical: a manager delegates to the seats. graph: a seat runs once the seats its dependsOn names have answered.",
       },
@@ -207,6 +208,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
         ...(caller?.providerUserId !== undefined ? { providerUserId: caller.providerUserId } : {}),
         namespace,
         ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
+        // The GMI's tool view: the turn's launch pool lasts as long as the GMI that runs the turn.
+        ...(caller?.dispatch ? { poolOwner: caller.dispatch } : {}),
         toolHooks: caller?.toolHooks ?? [],
         outputEstimateTokens: outputEstimateTokens(opts.model ?? '', opts.maxTokens),
         scopeId: `${agentScope}:${sessionId}`,
