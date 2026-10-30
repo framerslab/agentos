@@ -58,6 +58,8 @@ describe('resolveLaunchLimits', () => {
       defaultDeadlineMs: null,
     } as unknown as AgencyLaunchOptions;
     expect(resolveLaunchLimits(nulls)).toEqual(resolveLaunchLimits({}));
+    // null members and hitl are unset too.
+    expect(resolveLaunchLimits({ members: null, hitl: null } as unknown as AgencyLaunchOptions)).toEqual(resolveLaunchLimits({}));
   });
 
   it('refuses approvals with no handler, as agency() does', () => {
