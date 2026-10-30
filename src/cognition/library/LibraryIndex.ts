@@ -107,14 +107,23 @@ export interface LibrarySearch {
   /** For the lexical leg, alone or in a hybrid search: every word or any word (default), and whether a stored word may only begin with a query word. */
   match?: 'all' | 'any';
   prefix?: boolean;
+  /**
+   * Cancels the search: checked before the query is embedded, and handed to the embedding function. A search whose
+   * signal has aborted rejects with the signal's reason before it asks the embedder or the store.
+   */
+  signal?: AbortSignal;
 }
 
 /** What the index is made of. */
 export interface LibraryIndexOptions {
   store: IVectorStore;
   collection: string;
-  /** One vector per text, in order. The caller wires its model, its budget and its deadline. */
-  embed: (texts: string[]) => Promise<number[][]>;
+  /**
+   * One vector per text, in order. The caller wires its model, its budget and its deadline. A search hands it the
+   * search's `signal` as `options.signal`, so a request in flight is cancelled with the search; indexing, and a search
+   * with no signal, pass no options.
+   */
+  embed: (texts: string[], options?: { signal?: AbortSignal }) => Promise<number[][]>;
   /** How many passages one `embed` call and one upsert carry. @default 64 */
   batchSize?: number;
 }
@@ -188,7 +197,7 @@ function findsNothing(query: Pick<LibrarySearch, 'folderId' | 'folderIds' | 'sou
 export class LibraryIndex {
   private readonly store: IVectorStore;
   private readonly collection: string;
-  private readonly embed: (texts: string[]) => Promise<number[][]>;
+  private readonly embed: (texts: string[], options?: { signal?: AbortSignal }) => Promise<number[][]>;
   private readonly batchSize: number;
 
   /** An index over a collection the store already holds; the index makes no collection. */
@@ -279,9 +288,12 @@ export class LibraryIndex {
    * Searches what the scope may see. The store's filter selects the passages, and the index keeps only those whose
    * metadata meets the scope and the narrowing: a store whose filter drops or ignores a condition cannot widen the
    * answer, which can then hold fewer than `topK` passages. With `anyOf`, each narrowing is searched leg by leg under
-   * the same scope and the answers are ranked as one search's ({@link LibrarySearch.anyOf}).
+   * the same scope and the answers are ranked as one search's ({@link LibrarySearch.anyOf}). A search whose `signal`
+   * has aborted rejects with the signal's reason before it asks the embedder or the store
+   * ({@link LibrarySearch.signal}).
    */
   async search(query: LibrarySearch): Promise<LibraryPassage[]> {
+    query.signal?.throwIfAborted();
     if (!query.scope.tenantId || query.scope.aclGroups.length === 0) {
       throw new Error('LibraryIndex.search needs a tenant and at least one access group.');
     }
@@ -300,7 +312,7 @@ export class LibraryIndex {
     // A hybrid answer's score is a rank among one branch's own candidates, so a choice of several branches is searched
     // leg by leg, each leg's score the passage's own, and the two legs are fused once over every branch.
     const pool = dense && lexical ? topK * 3 : topK;
-    const vector = dense ? (await this.embed([base.text]))[0] : undefined;
+    const vector = dense ? await this.embedQuery(base.text, base.signal) : undefined;
     const byDense = new Map<string, LibraryPassage>();
     const byLexical = new Map<string, LibraryPassage>();
     for (const narrowed of branches) {
@@ -318,6 +330,16 @@ export class LibraryIndex {
         const passage = byDense.get(id) ?? byLexical.get(id);
         return passage === undefined ? [] : [{ ...passage, score }];
       });
+  }
+
+  /**
+   * The query's embedding. None is asked for once the search's signal has aborted: the search rejects with the
+   * signal's reason. The embedding function receives the signal, when the search gives one, to cancel its request.
+   */
+  private async embedQuery(text: string, signal: AbortSignal | undefined): Promise<number[]> {
+    signal?.throwIfAborted();
+    const [vector] = signal === undefined ? await this.embed([text]) : await this.embed([text], { signal });
+    return vector;
   }
 
   /**
@@ -343,7 +365,7 @@ export class LibraryIndex {
       if (typeof this.store.lexicalSearch !== 'function') throw new Error('LibraryIndex: the store has no lexicalSearch.');
       result = await this.store.lexicalSearch(this.collection, query.text, { topK: options.topK, match: query.match ?? 'any', prefix: query.prefix === true, includeMetadata: true, includeTextContent: true, filter });
     } else {
-      const [embedded] = vector === undefined ? await this.embed([query.text]) : [vector];
+      const embedded = vector === undefined ? await this.embedQuery(query.text, query.signal) : vector;
       result =
         mode === 'hybrid' && typeof this.store.hybridSearch === 'function'
           ? await this.store.hybridSearch(this.collection, embedded, query.text, { ...options, match: query.match ?? 'any', prefix: query.prefix === true })
