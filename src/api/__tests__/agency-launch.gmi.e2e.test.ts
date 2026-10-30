@@ -1096,17 +1096,26 @@ describe('launch_agency on gmi()', () => {
     const k = key();
     const canary = 'sk-CANARY-5151';
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const failure = () => Object.assign(new Error(`upstream refused key ${canary}`), { name: 'ProviderError', code: 'E_UPSTREAM' });
     const s = script('openai', k, {
       replies: [
-        launchStep({ goal: 'Check the claim.', seats: [{ role: 'checker', instructions: 'Check claims.' }] }),
-        // The checker's request fails, and with it the sequential team.
-        Object.assign(new Error(`upstream refused key ${canary}`), { name: 'ProviderError', code: 'E_UPSTREAM' }),
+        launchStep({
+          goal: 'Check the claim.',
+          strategy: 'parallel',
+          seats: [
+            { role: 'checker', instructions: 'Check claims.' },
+            { role: 'verifier', instructions: 'Verify claims.' },
+          ],
+        }),
+        // Both seats' requests fail, and with them the parallel team.
+        failure(),
+        failure(),
         reply.text('The team failed.'),
       ],
     });
     const thrown = new Error('the error callback broke');
     const rejected = new Error('the error callback rejected');
-    // The seat's report throws; every other report rejects.
+    // The checker's report throws; every other report rejects.
     const onError = vi.fn((event: HostErrorEvent): void | Promise<void> => {
       if (event.agent === 'launch_agency seat checker') throw thrown;
       return Promise.reject(rejected);
@@ -1116,18 +1125,70 @@ describe('launch_agency on gmi()', () => {
     const result = await parent.session('p1').send('Check it.');
     // What the callback did failed neither the launch nor the parent's turn.
     expect(result.text).toBe('The team failed.');
-    expect(s.seen).toHaveLength(3);
+    // Root, the two seats' failed requests, root.
+    expect(s.seen).toHaveLength(4);
     const out = launchOf(result);
     expect(out.status).toBe('failed');
-    expect(out.seats).toMatchObject([{ role: 'checker', status: 'failed', error: { name: 'GMIError', code: 'LLM_PROVIDER_ERROR' } }]);
-    // The launch reported the seat's failure, whose callback threw, and the run's, whose callback rejected (the precondition).
-    expect(onError.mock.calls.map(([event]) => event.agent).filter((agent) => agent.startsWith('launch_agency'))).toEqual(['launch_agency seat checker', 'launch_agency run']);
-    // The console received each callback's failure and the error the callback was handed: the seat's original, and the
-    // run's, which carries the seat's error by name and code.
+    expect(out.seats).toMatchObject([
+      { role: 'checker', status: 'failed', error: { name: 'GMIError', code: 'LLM_PROVIDER_ERROR' } },
+      { role: 'verifier', status: 'failed', error: { name: 'GMIError', code: 'LLM_PROVIDER_ERROR' } },
+    ]);
+    // The launch reported each seat's failure: the checker's, whose callback threw, and the verifier's, whose callback
+    // rejected (the precondition). The team's failure reached the callback once, from the team.
+    const agents = onError.mock.calls.map(([event]) => event.agent);
+    expect(agents.filter((agent) => agent.startsWith('launch_agency')).sort()).toEqual(['launch_agency seat checker', 'launch_agency seat verifier']);
+    expect(agents.filter((agent) => agent === `launch:${out.agencyId}`)).toHaveLength(1);
+    // The console received each callback's failure and the error the callback was handed: each seat's original.
     await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.any(String), rejected));
     expect(warn).toHaveBeenCalledWith(expect.any(String), thrown);
-    const logged = warn.mock.calls.map(([, value]) => value).filter((value): value is Error => value instanceof Error);
-    expect(logged.some((error) => error.message.includes(canary))).toBe(true);
-    expect(logged.some((error) => error.message === 'GMIError (LLM_PROVIDER_ERROR)')).toBe(true);
+    const handed = (what: string): unknown[] => warn.mock.calls.filter(([line]) => typeof line === 'string' && line.includes(what)).map(([, value]) => value);
+    expect(handed('launch_agency seat checker')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
+    expect(handed('launch_agency seat verifier')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
+  });
+
+  it("a team's failure reaches the agent's error callback once, from the team under its own name, after the seat's own error; callbacks with no error callback leave both to the console", async () => {
+    const k = key();
+    const canary = 'sk-CANARY-6363';
+    const failure = () => Object.assign(new Error(`upstream refused key ${canary}`), { name: 'ProviderError', code: 'E_UPSTREAM' });
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Check the claim.', seats: [{ role: 'checker', instructions: 'Check claims.' }] }),
+        // The checker's request fails, and with it the sequential team.
+        failure(),
+        reply.text('The team failed.'),
+        // The same launch, by an agent whose callbacks hold no error callback.
+        launchStep({ goal: 'Check the claim.', seats: [{ role: 'checker', instructions: 'Check claims.' }] }),
+        failure(),
+        reply.text('The team failed again.'),
+      ],
+    });
+    const onError = vi.fn<(event: HostErrorEvent) => void>();
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', on: { error: onError }, agencies: { launch: true } });
+
+    const result = await parent.session('p1').send('Check it.');
+    expect(result.text).toBe('The team failed.');
+    const out = launchOf(result);
+    expect(out).toMatchObject({ status: 'failed', reason: "seat 'checker' failed: GMIError (LLM_PROVIDER_ERROR)" });
+    // The seat's original error under the seat's name, then the team's, once, under the team's name, as agency()
+    // reports a failed call: the error the team rejected with, which names the seat's by its name and code.
+    const reports = onError.mock.calls.map(([event]) => event);
+    expect(reports.map((event) => event.agent)).toEqual(['launch_agency seat checker', `launch:${out.agencyId}`]);
+    expect(reports[0].error.message).toContain(canary);
+    expect(reports[1].error).toMatchObject({ name: 'GMIError', code: 'LLM_PROVIDER_ERROR', message: 'GMIError (LLM_PROVIDER_ERROR)' });
+
+    // The team fires these callbacks too (the precondition), and with no error callback the console has the seat's
+    // failure and the run's.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const agentStart = vi.fn<(event: AgentStartEvent) => void>();
+    const quiet = gmi({ ...route(k), instructions: 'Coordinate.', on: { agentStart }, agencies: { launch: true } });
+    const again = await quiet.session('p2').send('Check it.');
+    expect(again.text).toBe('The team failed again.');
+    const second = launchOf(again);
+    expect(second.status).toBe('failed');
+    expect(agentStart.mock.calls.map(([event]) => event.agent)).toEqual([`launch:${second.agencyId}`]);
+    expect(s.seen).toHaveLength(6);
+    const logged = (what: string): unknown[] => warn.mock.calls.filter(([line]) => typeof line === 'string' && line.includes(what)).map(([, value]) => value);
+    expect(logged('launch_agency seat checker')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
+    expect(logged('launch_agency run')).toEqual([expect.objectContaining({ name: 'GMIError', message: 'GMIError (LLM_PROVIDER_ERROR)' })]);
   });
 });

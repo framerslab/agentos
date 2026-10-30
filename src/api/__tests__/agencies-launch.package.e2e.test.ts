@@ -1727,7 +1727,7 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     expect(on.reports[0].timestamp).toEqual(expect.any(Number));
   });
 
-  it("a team that fails with a member's seat reports the seat's error, the team's and the run's to the launching agent's error callback, names the seat's error by its name and code alone, and with no error callback writes each report to the console", async () => {
+  it("a team that fails with a member's seat reports the seat's error and then the team's, once, to the launching agent's error callback, names the seat's error by its name and code alone, and with no error callback writes the seat's report and the run's to the console", async () => {
     const k = key();
     const canary = 'sk-CANARY-7171';
     const s = script('openai', k, {
@@ -1767,9 +1767,9 @@ describe('agencies and launch_agency, as a host uses the package', () => {
       expect.objectContaining({ role: 'checker', form: 'persistent', member: 'tutor', status: 'failed', calls: 1, error: { name: 'GMIError', code: 'LLM_PROVIDER_ERROR' } }),
     ]);
     expectNoWordOf(canary, [JSON.stringify(out), JSON.stringify(s.seen[2].messages)]);
-    // The launching agent's error callback heard the seat's original error, then the team's and the run's, which carry
-    // the seat's by its name and code alone.
-    expect(errors.map((e) => e.agent)).toEqual(['launch_agency seat checker', `launch:${out.agencyId}`, 'launch_agency run']);
+    // The launching agent's error callback heard the seat's original error, then the team's, once, which carries the
+    // seat's by its name and code alone.
+    expect(errors.map((e) => e.agent)).toEqual(['launch_agency seat checker', `launch:${out.agencyId}`]);
     expect(errors[0].error).toMatchObject({ name: 'GMIError', code: 'LLM_PROVIDER_ERROR' });
     expect(errors[0].error.message).toContain(canary);
     for (const e of errors.slice(1)) {
@@ -1797,7 +1797,16 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const s = script('openai', k, {
       replies: [
-        launchStep({ goal: 'Check the claim.', seats: [{ role: 'checker', instructions: 'Check claims.' }] }),
+        launchStep({
+          goal: 'Check the claim.',
+          strategy: 'parallel',
+          seats: [
+            { role: 'checker', instructions: 'Check claims.' },
+            { role: 'verifier', instructions: 'Verify claims.' },
+          ],
+        }),
+        // Both seats' requests fail, and with them the parallel team.
+        providerFailure(canary),
         providerFailure(canary),
         reply.text('The team failed.'),
         reply.text('Still here.'),
@@ -1810,11 +1819,11 @@ describe('agencies and launch_agency, as a host uses the package', () => {
       ...route(k),
       instructions: 'Coordinate.',
       on: {
-        // The seat's report throws; the run's rejects.
+        // The checker's report throws; the verifier's rejects.
         error: (e: TeamErrorEvent) => {
           heard.push(e.agent);
           if (e.agent === 'launch_agency seat checker') throw thrown;
-          if (e.agent === 'launch_agency run') return Promise.reject(rejected);
+          if (e.agent === 'launch_agency seat verifier') return Promise.reject(rejected);
           return undefined;
         },
       },
@@ -1825,18 +1834,20 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     const result = await session.send('Check it.');
     // What the callback did failed neither the launch nor the parent's turn, and the session answers again.
     expect(result.text).toBe('The team failed.');
-    expect(launchOf(result)).toMatchObject({ status: 'failed', reason: "seat 'checker' failed: GMIError (LLM_PROVIDER_ERROR)" });
-    // The callback was handed the seat's report and the run's (the precondition).
-    expect(heard.filter((agent) => agent.startsWith(LAUNCH_AGENCY_TOOL_NAME))).toEqual(['launch_agency seat checker', 'launch_agency run']);
+    const out = launchOf(result);
+    expect(out).toMatchObject({ status: 'failed', reason: "seat 'checker' failed: GMIError (LLM_PROVIDER_ERROR)" });
+    // The callback was handed both seats' reports (the precondition), and the team's failure once, from the team.
+    expect(heard.filter((agent) => agent.startsWith(LAUNCH_AGENCY_TOOL_NAME)).sort()).toEqual(['launch_agency seat checker', 'launch_agency seat verifier']);
+    expect(heard.filter((agent) => agent === `launch:${out.agencyId}`)).toHaveLength(1);
     expect((await session.send('Are you there?')).text).toBe('Still here.');
-    expect(s.seen).toHaveLength(4);
-    // The console received each callback's failure and the error the callback was handed: the seat's original, and the
-    // run's, which carries the seat's error by its name and code.
+    // Root, the two seats' failed requests, root, root.
+    expect(s.seen).toHaveLength(5);
+    // The console received each callback's failure and the error the callback was handed: each seat's original.
     await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.any(String), rejected));
     expect(warn).toHaveBeenCalledWith(expect.any(String), thrown);
     const handed = (what: string): unknown[] =>
       warn.mock.calls.filter(([line]) => typeof line === 'string' && line.includes(what)).map(([, error]) => error);
     expect(handed('launch_agency seat checker')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
-    expect(handed('launch_agency run')).toEqual([expect.objectContaining({ message: 'GMIError (LLM_PROVIDER_ERROR)' })]);
+    expect(handed('launch_agency seat verifier')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
   });
 });
