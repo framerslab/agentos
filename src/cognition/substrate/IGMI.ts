@@ -762,13 +762,23 @@ export interface IGMI {
   ): Promise<GMIOutput>;
 
   /**
-   * Makes `conversationHistory` the whole conversation history. The runtime calls it with the conversation's stored
-   * history before a resume continues a pause, and before results on the paused stream continue it on a GMI whose
-   * own history holds a turn of another conversation, or that replaced the GMI the turn paused on.
+   * Makes `conversationHistory` the whole conversation history. The runtime calls it before a resume continues a
+   * pause, and before results on the paused stream continue it on a GMI whose own history holds a turn of another
+   * conversation, or that replaced the GMI the turn paused on: with the history the paused GMI's
+   * `getConversationHistory()` returned when the turn paused, with the pause's calls, when the runtime kept one, and
+   * with the conversation's stored history otherwise.
    */
   hydrateConversationHistory?(
     conversationHistory: ConversationMessage[],
   ): void;
+
+  /**
+   * The conversation history as the GMI holds it, the calls of its own tool rounds, their results and the assistant
+   * turns' thinking blocks included; `hydrateConversationHistory()` sets it back. With conversational persistence on,
+   * the runtime reads it when a turn stops for the host on a GMI whose history holds only that turn's conversation,
+   * and keeps it with the turn's stream for the continuation.
+   */
+  getConversationHistory?(): ConversationMessage[];
 
   /**
    * Makes `messages` the whole conversation history. An empty array is authoritative.
@@ -784,7 +794,9 @@ export interface IGMI {
    * under, and the sources the paused turn retrieved (`ragSources`), which its tool calls and reply are judged with.
    * The runtime calls it when it calls `hydrateConversationHistory()`, and also when the conversation holds no history
    * to set. A blank organization means the turn has none; an empty `ragSources` means it retrieved none; a field left
-   * out keeps what the GMI holds.
+   * out keeps what the GMI holds. A conversation other than the one of the GMI's last turn also drops what `GMI` kept
+   * for that turn (its memory scope, tool-call gate, learning preparation, model hop and sources), so the continuation
+   * starts as on a GMI built for it.
    */
   hydrateTurnContext?(
     context: {

@@ -970,6 +970,14 @@ export class GMI implements IGMI {
   }
 
   /**
+   * The conversation history as this GMI holds it, as messages `hydrateConversationHistory()` takes back: the calls of
+   * its own tool rounds with their results, and the thinking blocks and thought signatures of its assistant turns.
+   */
+  public getConversationHistory(): ConversationMessage[] {
+    return this.conversationHistoryManager.buildForPrompt();
+  }
+
+  /**
    * Makes `messages` the whole conversation history. An empty array is
    * authoritative: it empties the history (unlike
    * `metadata.conversationHistoryForPrompt`, which a turn ignores when empty).
@@ -995,7 +1003,11 @@ export class GMI implements IGMI {
    * Sets the turn a tool continuation goes on with: the ids its continuation runs under and the sources its tool
    * calls and reply are judged with. A blank session or conversation id leaves the GMI's as it is; a blank
    * organization means the turn has none, and clears the GMI's. `ragSources` replaces the sources the GMI keeps for
-   * the turn (an empty array clears them); without it they stay.
+   * the turn (an empty array clears them); without it they stay. A conversation other than the one of the GMI's last
+   * turn drops what the GMI kept for that turn, which a continuation would otherwise go on with: the model hop that
+   * served it, its memory scope, its tool-call gate, its learning preparation and its sources. The continuation then
+   * starts as on a GMI built for it: on the route's first hop that can start, with a learning preparation asked for the
+   * continuation.
    */
   public hydrateTurnContext(context: {
     sessionId?: string;
@@ -1007,7 +1019,16 @@ export class GMI implements IGMI {
       this.reasoningTrace.sessionId = context.sessionId.trim();
     }
     if (typeof context.conversationId === 'string' && context.conversationId.trim()) {
-      this.reasoningTrace.conversationId = context.conversationId.trim();
+      const conversationId = context.conversationId.trim();
+      if (conversationId !== this.reasoningTrace.conversationId) {
+        // the GMI's last turn was another conversation's: nothing it kept for that turn belongs to this one
+        this.turnResolution = undefined;
+        this.turnMemoryScope = undefined;
+        this.turnToolCallGate = undefined;
+        this.turnLearning = undefined;
+        this.turnRagSources = undefined;
+      }
+      this.reasoningTrace.conversationId = conversationId;
     }
     if (typeof context.organizationId === 'string') {
       this.reasoningTrace.organizationId = context.organizationId.trim() || undefined;
