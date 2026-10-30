@@ -13,6 +13,7 @@ import type { AgentOptions } from '../../agent.js';
 import type { Agent } from '../../types.js';
 import type { ITool, JSONSchemaObject, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import { createContentSafeConsole } from '../../../core/logging/contentSafeConsole.js';
+import { callMaxTokensOf } from '../gmiPersona.js';
 import { outputEstimateTokens } from '../spendBudget.js';
 import { adaptTools } from '../toolAdapter.js';
 import type { AgentOSUsageLedgerOptions } from '../usageLedger.js';
@@ -207,8 +208,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
 
   /**
    * The output tokens one call of a member's seat is counted with, as its own check counts it: the member runs as
-   * itself, so its maxTokens held to the output ceiling of the model its persona resolved (the model its options name
-   * when that pair cannot be read).
+   * itself, so the cap its calls are sent with (its maxTokens, else its controls.maxTotalTokens) held to the output
+   * ceiling of the model its persona resolved (the model its options name when that pair cannot be read).
    */
   const memberOutputEstimate = async (ref: string): Promise<number | undefined> => {
     const member = memberOf(ref);
@@ -220,7 +221,7 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
     } catch (error) {
       logError(error, `launch_agency member ${ref} route`);
     }
-    return outputEstimateTokens(model ?? '', config.maxTokens);
+    return outputEstimateTokens(model ?? '', callMaxTokensOf(config));
   };
 
   const host: LaunchHost = {
