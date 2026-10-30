@@ -15,7 +15,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Agent, AgentOptions, AgentSession, AgentSessionOptions, SessionSendOptions } from './agent.js';
-import { extractTextFromContent, resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
+import { extractTextFromContent, resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent, type TokenUsage } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
 import type { GMIBaseConfig, IGMI, ToolCallRequest, ToolCallResult } from '../cognition/substrate/IGMI.js';
@@ -335,6 +335,8 @@ interface SeatSendKeys {
   __toolNames?: ReadonlySet<string>;
   __toolHooks?: readonly ToolCallHook[];
   __launchFrame?: AgencyLaunchFrame;
+  /** Receives the usage of the send's turn once it ends, failed or not, and any usage reported for it later. */
+  __onUsage?: (usage: TokenUsage) => void;
 }
 
 /** The turn options a seat's send carries. */
@@ -824,7 +826,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
           .catch((error: unknown) => console.warn('[agentos] gmi(): could not clear the session GMI history:', error));
       };
 
-      const deps = (source: 'agent.session.send' | 'agent.session.stream'): GmiSessionDeps => ({
+      const deps = (source: 'agent.session.send' | 'agent.session.stream', sendOpts?: unknown): GmiSessionDeps => ({
         // Tools, the user context and the reasoning trace see the id the caller
         // opened and the user id (that session id unless the caller named one).
         sessionId,
@@ -848,6 +850,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
         onUsage: (u) => {
           accumulateUsage(tally, u);
           accumulateUsage(agentTally, u);
+          // A seat's record of its calls, which a send's result does not carry when its turn fails.
+          const toSeat = (sendOpts as SeatSendKeys | undefined)?.__onUsage;
+          if (typeof toSeat === 'function') {
+            try {
+              toSeat({ ...u });
+            } catch (error) {
+              console.warn("[agentos] gmi(): a seat's usage hand-off failed:", error);
+            }
+          }
         },
       });
 
@@ -884,7 +895,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             }).filter(([, v]) => v !== undefined),
           );
           try {
-            return await sendGmiTurn(deps('agent.session.send'), input, {
+            return await sendGmiTurn(deps('agent.session.send', sendOpts), input, {
               options,
               responseSchema: sendOpts?.responseSchema,
               schemaName: sendOpts?.schemaName,
@@ -903,7 +914,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         },
         // As in send(), the turn takes the caller's budget and the gate, tool names and hooks a seat puts on its calls.
         stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
-          streamGmiTurn(deps('agent.session.stream'), input, {
+          streamGmiTurn(deps('agent.session.stream', streamOpts), input, {
             abortSignal: turnSignal(streamOpts?.abortSignal),
             budget: turnBudget(streamOpts?.budget),
             ...seatTurnOf(streamOpts),

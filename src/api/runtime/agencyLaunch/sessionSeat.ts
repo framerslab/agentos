@@ -102,6 +102,8 @@ type SeatSendOptions = SessionSendOptions & {
   __launchFrame?: AgencyLaunchFrame;
   __toolNames?: ReadonlySet<string>;
   __toolHooks?: readonly ToolCallHook[];
+  /** Receives the usage of the send's turn once it ends, failed or not, and any usage reported for it later. */
+  __onUsage?: (usage: unknown) => void;
 };
 
 /** The per-send generation overrides a session's send takes, which a seat's `generate()` passes on. */
@@ -281,10 +283,11 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
 
   /**
    * What the seat puts on a send: the call's stop and gate, the launch's budget (else the call's), on `generate()` the
-   * call's per-send generation overrides, the frame, names and hooks. Warns once about each other per-call option, which
+   * call's per-send generation overrides, the frame, names and hooks, and the hand-off of the turn's usage to the
+   * seat's record (`call.handed` says whether the session used it). Warns once about each other per-call option, which
    * the member's own settings replace.
    */
-  const sendOptions = (opts: Record<string, unknown> | undefined, kind: 'generate' | 'stream'): SeatSendOptions => {
+  const sendOptions = (opts: Record<string, unknown> | undefined, kind: 'generate' | 'stream', call: { handed: boolean }): SeatSendOptions => {
     const signal = opts?.abortSignal as AbortSignal | undefined;
     const gate = opts?.__approvalGate as ApprovalGateFn | undefined;
     const budget = options.budget ?? (opts?.budget as SpendBudget | SpendBudgetOptions | undefined);
@@ -308,6 +311,11 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
       ...(options.frame ? { __launchFrame: options.frame } : {}),
       ...(toolNames ? { __toolNames: toolNames } : {}),
       ...(options.toolHooks && options.toolHooks.length > 0 ? { __toolHooks: options.toolHooks } : {}),
+      // Every turn's usage, a turn that failed after billed steps included, and a report that arrives after a stop.
+      __onUsage: (usage: unknown) => {
+        call.handed = true;
+        addUsage(record.usage, usage);
+      },
     };
   };
 
@@ -339,11 +347,14 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
       if (closed) throw new Error('seat closed');
       record.calls += 1;
       running += 1;
-      const send = sendOptions(opts, 'generate');
+      const call = { handed: false };
+      const send = sendOptions(opts, 'generate', call);
       try {
+        // The turn's usage reaches the record through the send's `__onUsage`, whether the turn answers or fails; a
+        // session that does not hand it over leaves the result's.
         const result = (await open().send(framed(prompt), send)) as GenerateTextResult;
         answered(result.text ?? '');
-        addUsage(record.usage, result.usage);
+        if (!call.handed) addUsage(record.usage, result.usage);
         return result;
       } catch (error) {
         throw failed(error, send.abortSignal);
@@ -355,7 +366,8 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
     stream(prompt: string, opts?: Record<string, unknown>): StreamTextResult {
       if (closed) throw new Error('seat closed');
       record.calls += 1;
-      const send = sendOptions(opts, 'stream');
+      const call = { handed: false };
+      const send = sendOptions(opts, 'stream', call);
       let result: StreamTextResult;
       try {
         result = open().stream(framed(prompt), send as { abortSignal?: AbortSignal });
@@ -364,7 +376,8 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
       }
       running += 1;
       // A GMI stream resolves its text when its turn fails too, and ends with an error part: the finish reason says
-      // which it was. Its usage resolves either way, failed attempts included.
+      // which it was. Its usage reaches the record through the send's `__onUsage` either way, failed attempts included;
+      // a session that does not hand it over leaves the stream's.
       const settle = async (): Promise<void> => {
         try {
           const [text, finishReason] = await Promise.all([result.text, result.finishReason]);
@@ -378,7 +391,9 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
       };
       void settle().catch(() => undefined);
       void Promise.resolve(result.usage).then(
-        (usage) => addUsage(record.usage, usage),
+        (usage) => {
+          if (!call.handed) addUsage(record.usage, usage);
+        },
         () => undefined,
       );
       return result;
