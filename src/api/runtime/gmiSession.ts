@@ -73,7 +73,7 @@ export interface GmiTurnOptions {
   /**
    * The caller's own signal among the turn's stops (`abortSignal` also carries a session's close()): a stream whose
    * caller's signal has already aborted starts no turn and ends at once with an error part that carries the signal's
-   * reason.
+   * reason, and a stream the signal stops ends with that reason in its error part.
    */
   callerSignal?: AbortSignal;
   /**
@@ -651,5 +651,11 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
     }
   })();
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
-  return streamFromGmiTurn(chunks, { folder, stop: () => stop.abort() });
+  // A turn the caller's signal stopped ends with the signal's reason in its error part, as streamText reports it,
+  // whatever error the GMI made of the abort.
+  return streamFromGmiTurn(chunks, {
+    folder,
+    stop: () => stop.abort(),
+    stoppedBy: () => (callerSignal?.aborted ? abortReasonError(callerSignal) : undefined),
+  });
 }

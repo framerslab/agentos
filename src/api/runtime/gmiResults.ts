@@ -300,6 +300,12 @@ export interface GmiStreamOptions {
    * `fullStream` before the turn ended (a `break`, or `return()` on the iterator).
    */
   stop?: () => void;
+  /**
+   * The error the stream's `error` part carries in place of the turn's when the
+   * caller's signal stopped the turn (its reason), read when the part is made;
+   * undefined to keep the turn's error.
+   */
+  stoppedBy?: () => Error | undefined;
 }
 
 /**
@@ -313,7 +319,8 @@ export interface GmiStreamOptions {
  *
  * `textStream` yields every TEXT_DELTA as it arrives. `fullStream` maps
  * TEXT_DELTA to `text`, TOOL_CALL_REQUEST to `tool-call`, TOOL_RESULT to
- * `tool-result` and ERROR (or a thrown error) to a final `error` part. `text`
+ * `tool-result` and ERROR (or a thrown error) to a final `error` part, whose
+ * error is `options.stoppedBy`'s when it gives one. `text`
  * is the latest step's text; after an error it is the text the failed step
  * delivered, as streamText resolves it.
  *
@@ -387,7 +394,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
             break;
           }
           case GMIOutputChunkType.ERROR:
-            parts.push({ type: 'error', error: folder.toError() ?? new Error(String(chunk.content)) });
+            parts.push({ type: 'error', error: options.stoppedBy?.() ?? folder.toError() ?? new Error(String(chunk.content)) });
             break;
           default:
             break;
@@ -396,7 +403,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       }
     } catch (error) {
       folder.fail(error);
-      parts.push({ type: 'error', error: error instanceof Error ? error : new Error(String(error)) });
+      parts.push({ type: 'error', error: options.stoppedBy?.() ?? (error instanceof Error ? error : new Error(String(error))) });
     } finally {
       const last = folder.steps.at(-1);
       p.text.resolve(folder.error() && stepDelivered ? stepDelivered : folder.text());
