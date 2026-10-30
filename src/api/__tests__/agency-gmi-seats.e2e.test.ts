@@ -261,4 +261,28 @@ describe('agency() seats served by GMIs', () => {
     const offered = ((s.seen[0].options.tools as Array<{ function: { name: string } }> | undefined) ?? []).map((tool) => tool.function.name);
     expect(offered).not.toContain('launch_agency');
   });
+
+  it("refuses a seat's runtime that is neither 'legacy' nor 'gmi', names a value JSON cannot print, and reads null as unset", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Done.')] });
+    const base = { provider: 'openai', model: 'stub-model', apiKey: k } as const;
+    // A seat's typo, which agent() would run on the legacy engine without a word, is refused as the agency's is.
+    const typo = () => agency({ ...base, runtime: 'gmi', agents: { a: { runtime: 'GMI' as 'gmi', instructions: 'x' } } });
+    expect(typo).toThrow(AgencyConfigError);
+    expect(typo).toThrow("seat 'a'");
+    // A value JSON.stringify cannot print is refused with the agency's own error, which names it.
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const unprintable: Array<[unknown, string]> = [[1n, '1n'], [circular, '[object Object]'], [Symbol('gmi'), 'Symbol(gmi)']];
+    for (const [runtime, named] of unprintable) {
+      const build = () => agency({ ...base, runtime: runtime as 'gmi', agents: { a: { instructions: 'x' } } });
+      expect(build).toThrow(AgencyConfigError);
+      expect(build).toThrow(named);
+    }
+    // null is unset at both levels: an agency's null leaves its seats on agent()'s default, and a seat's null takes the agency's runtime.
+    expect(() => agency({ ...base, runtime: null as unknown as 'gmi', agents: { a: { instructions: 'x' } } })).not.toThrow();
+    const team = agency({ ...base, runtime: 'gmi', strategy: 'sequential', agents: { a: { runtime: null as unknown as 'gmi', instructions: 'x' } } });
+    await team.generate('Go.');
+    expect(s.seen.map((call) => call.streamed)).toEqual([true]);
+  });
 });
