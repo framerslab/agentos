@@ -258,6 +258,29 @@ describe('a spend budget on the GMI path', () => {
     expect(s.seen).toHaveLength(1);
   });
 
+  it("generate() with a signal that has already aborted runs no hook, and one its signal stops before the request rejects with the signal's reason", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Answer.'), reply.text('Unused.')] });
+    let stopInHook: AbortController | undefined;
+    const onBeforeGeneration = vi.fn(async () => {
+      stopInHook?.abort(new Error('stopped in the hook'));
+    });
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, onBeforeGeneration });
+
+    const stopped = new AbortController();
+    stopped.abort(new Error('stopped by the caller'));
+    await expect(a.generate('Hi.', { abortSignal: stopped.signal })).rejects.toThrow('stopped by the caller');
+    expect(onBeforeGeneration).not.toHaveBeenCalled();
+    await expect(a.generate('Hi.')).resolves.toMatchObject({ text: 'Answer.' });
+    expect(onBeforeGeneration).toHaveBeenCalledTimes(1);
+
+    // The signal aborts during the turn, before its request: nothing is sent, and the call rejects with the reason.
+    stopInHook = new AbortController();
+    await expect(a.generate('Hi.', { abortSignal: stopInHook.signal })).rejects.toThrow('stopped in the hook');
+    expect(onBeforeGeneration).toHaveBeenCalledTimes(2);
+    expect(s.seen).toHaveLength(1);
+  });
+
   it("a budget bounds a GMI's metaprompt calls, and the turn's reply stands", async () => {
     const k = key();
     // `whole` answers a metaprompt's unstreamed request, should one be sent.
