@@ -179,6 +179,19 @@ describe('launch_agency on the full runtime', () => {
     await expect(boot({ agencies: { launch: true, maxSeats: 0 } })).rejects.toThrow('agencies.maxSeats must be an integer from 1 to 12, not 0');
   });
 
+  it('with launch on, a config tool of the host named launch_agency fails initialization; with launch off the runtime keeps it', async () => {
+    const own = () => hostTool('launch_agency', async () => 'the host ran its own');
+    await expect(boot({ tools: { search: search(), launch_agency: own() } })).rejects.toThrow(
+      "agencies.launch registers 'launch_agency', and the runtime's tools already hold a tool of that name.",
+    );
+    booted = await boot({ tools: { search: search(), launch_agency: own() }, agencies: { maxDepth: 3 } });
+    provider.replies.push(toolStep(['launch_agency', {}]), textStep('Done.'));
+    await send(booted, { selectedPersonaId: 'helper', sessionId: 's-own' });
+    // The helper, granted nothing, lists the host's own tool and runs it.
+    expect(provider.seen[0].tools).toContain('launch_agency');
+    expect(toolMessages(provider.seen[1].messages)[0]).toContain('the host ran its own');
+  });
+
   it('a persona without agency:launch neither lists nor calls the tool, and one with it lists and calls it', async () => {
     booted = await boot();
     provider.replies.push(toolStep(['launch_agency', { goal: 'x', seats: [{ role: 'w', instructions: 'Write.' }] }]));
