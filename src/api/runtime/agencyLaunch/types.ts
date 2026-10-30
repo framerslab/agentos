@@ -70,12 +70,17 @@ export interface AgencyLaunchOptions {
    * and temporary seats run on the provider and model the agent's first call resolved: those its options name, else the
    * environment's pair at that call, whatever the environment names later. A call that names its own provider or model
    * runs on that pair alone; a team it launches runs on the agent's. A temporary seat also takes the agent's other route
-   * and completion settings, its `onBeforeGeneration` and `onAfterGeneration` hooks and its `controls.maxDurationMs`;
-   * every seat's tool calls run the `onBeforeToolExecution` hooks of the turn that launched the team, a member's before
-   * its own. A seat whose call fails rejects with its error's name and code alone, so a provider's or a handler's
-   * message reaches no model of the team and not the result; the error itself goes to the agent's `on.error`, under
-   * `launch_agency seat <role>` (the console without one), as do the launch's other failures. A callback that throws
-   * or rejects fails no launch.
+   * and completion settings, its `onBeforeGeneration` and `onAfterGeneration` hooks and, of its controls,
+   * `controls.maxDurationMs` alone: a cap the agent's calls take from `controls.maxTotalTokens` does not reach a seat's
+   * calls, which the launch's budget bounds. Every seat's tool calls run the `onBeforeToolExecution` hooks of the turn
+   * that launched the team, a member's before its own. The manager and synthesizers, which agency() builds on agent(),
+   * take that pair with the agent's key and base URL alone: none of its hooks and no request timeout reach their calls,
+   * which the launch's deadline and budget bound. A seat whose call fails rejects with its error's name and code alone,
+   * so a provider's or a handler's message reaches no model of the team and not the result; the error itself goes to
+   * the agent's `on.error`, under `launch_agency seat <role>` (the console without one), as do the launch's other
+   * failures, a failed run apart: the team reports its run once, under `launch:<agencyId>`, with the error it rejected
+   * with. A seat's name holds its role and not its team, so two teams' seats of one role report under one name. A
+   * callback that throws or rejects fails no launch.
    */
   launch?: boolean;
   /** The deepest team level a launch tree reaches: an integer from 1 to 4, default 2. */

@@ -7,8 +7,8 @@
  * learner, and closed with the seat; a persistent seat runs a member of `agencies.members` as itself, through a session
  * of its own. Every seat's tool calls run the tool hooks of the turn that launched the team before the seat's own. A
  * seat whose call fails rejects with its error's name and code alone, and the error itself goes to the agent's
- * `on.error`, else to the console. The engine, and agency() with it, is imported on the first launch, so building an
- * agent loads neither.
+ * `on.error`, else to the console; a team whose run fails is reported to that callback once, by the team. The engine,
+ * and agency() with it, is imported on the first launch, so building an agent loads neither.
  * @internal
  */
 import { randomUUID } from 'node:crypto';
@@ -38,6 +38,9 @@ import {
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
 const console = createContentSafeConsole('gmi_launch_tool');
+
+/** What the engine names a team's failed run when it reports it (runLaunch). */
+const RUN_FAILED = `${LAUNCH_AGENCY_TOOL_NAME} run`;
 
 /** What gmi() hands the tool. */
 export interface GmiLaunchToolOptions {
@@ -133,14 +136,22 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
   const memberForm = memberKeys.length > 0 ? ({ field: 'agentKey', keys: memberKeys } as const) : undefined;
   const learning = opts.learning;
   const namespace = typeof learning === 'object' && learning !== null && typeof learning.namespace === 'string' ? learning.namespace : '';
+  /**
+   * The agent's callbacks as it was built with them, which the child agency of every launch fires as
+   * `launch:<agencyId>`: a team whose run fails reports it to their `error` itself.
+   */
+  const callbacks = opts.on;
 
   /**
    * Where a launch's failures go: a seat's failed call, whose original error the seat keeps from the team's models and
    * from the result (it rejects with the error's name and code alone), and a route, a run or a close that failed. The
    * agent's `on.error` receives each, under `launch_agency` and what failed (`launch_agency seat <role>`,
-   * `launch_agency run`), with the agent's `on` object as `this`, as agency() calls its callbacks; without it, the
-   * console does. A callback that throws or rejects fails no launch: its error and the one it was handed go to the
-   * console. Never throws: a seat reports its failed call through it.
+   * `launch_agency close`), with the agent's `on` object as `this`, as agency() calls its callbacks; without it, the
+   * console does. A run that fails is reported to `on.error` once, by the team, which hands it the error it rejects
+   * with under its own name; the launch reports the run (`launch_agency run`) only where the team has not: to the
+   * console when those callbacks hold no error callback, and to an `on` the agent's options took after it was built. A
+   * callback that throws or rejects fails no launch: its error and the one it was handed go to the console. Never
+   * throws: a seat reports its failed call through it.
    */
   const logError = (error: unknown, where: string): void => {
     const agent = where.startsWith(LAUNCH_AGENCY_TOOL_NAME) ? where : `${LAUNCH_AGENCY_TOOL_NAME} ${where}`;
@@ -159,6 +170,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
       // Read at each report, as agency() reads its callbacks, so one set or replaced after the agent was built runs.
       const on = opts.on;
       const onError = on?.error;
+      // The team handed its failed run to this very callback, under its own name.
+      if (where === RUN_FAILED && on === callbacks && typeof onError === 'function') return;
       if (typeof onError !== 'function') {
         warn(`[agentos] gmi(): ${agent} failed:`, error);
         return;
@@ -326,7 +339,7 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
 
     // The agent's callbacks, for the child agency, which fires them as `launch:<agencyId>`: the agent's `on` sees every
     // team it launches, a team one of its temporary seats launches through the agent's own tool included.
-    ...(opts.on ? { callbacks: opts.on } : {}),
+    ...(callbacks ? { callbacks } : {}),
     ...(ledger ? { usageLedger: ledger } : {}),
     // gmi() keeps no registry of running teams.
     recorder: { start: () => undefined, close: () => undefined },
