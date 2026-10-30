@@ -781,7 +781,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (cognition.memory && !seat) openedSessionIds.add(sessionId);
       const userId = sessionOptions?.userId ?? sessionId;
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
-      if (!sessionTallies.has(sessionId)) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
+      // A tally the agent's own earlier session of this id left is kept: a seat session adds to it and leaves it at close.
+      const ownsTally = !sessionTallies.has(sessionId);
+      if (ownsTally) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
       const tally = sessionTallies.get(sessionId)!;
       const lock = new TurnLock();
       let closing: Promise<void> | undefined;
@@ -943,8 +945,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
         close: () =>
           (closing ??= (async () => {
             if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
-            // A seat session's tally goes with it: the agent's tally holds its usage (each turn adds to both).
-            if (seat) sessionTallies.delete(sessionId);
+            // A seat session's tally goes with it: the agent's tally holds its usage (each turn adds to both). One the
+            // agent's own earlier session of this id left stays.
+            if (seat && ownsTally && sessionTallies.get(sessionId) === tally) sessionTallies.delete(sessionId);
             stopTurns.abort();
             const release = await lock.acquire();
             try {
