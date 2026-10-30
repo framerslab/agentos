@@ -64,7 +64,7 @@ const pools = new Map<string, { turnId: string | undefined; budget: SpendBudget 
 let droppedPools = 0;
 
 /** Drops the least recently used pools past {@link MAX_POOL_SCOPES}, keeping `current` and every scope in flight. */
-function dropIdlePools(current: string): void {
+function dropIdlePools(current?: string): void {
   // The scopes with a launch in flight (their running and closing entries' scope keys).
   const busy = new Set<string>();
   for (const entry of entries.values()) busy.add(entry.scopeKey);
@@ -146,9 +146,13 @@ export const launchRegistry = {
     });
   },
 
-  /** Removes the launch's entry, which frees its place in its scope; an unknown id changes nothing. */
+  /**
+   * Removes the launch's entry, which frees its place in its scope; an unknown id changes nothing. A registry past
+   * {@link MAX_POOL_SCOPES} while busy scopes kept their pools is brought back to the bound as their launches end.
+   */
   remove(launchId: string): void {
     entries.delete(launchId);
+    if (pools.size > MAX_POOL_SCOPES) dropIdlePools();
     const waiting = removalWaiters.get(launchId);
     removalWaiters.delete(launchId);
     for (const resolve of waiting ?? []) resolve();
