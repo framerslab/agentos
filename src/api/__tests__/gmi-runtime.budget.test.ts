@@ -165,6 +165,30 @@ describe('a spend budget on the GMI path', () => {
     expect(s.seen).toHaveLength(1);
   });
 
+  it("generate() and a session send reject with the reason of a signal that aborts after the turn's last request, and verify no citations", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Answer.'), reply.text('Answer.')] });
+    let stop = new AbortController();
+    const retrieve = vi.fn(async () => [{ content: 'Answer.' }]);
+    const embedFn = vi.fn(async (texts: string[]) => texts.map(() => [1, 0]));
+    const a = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100,
+      // The last step's hook runs after its request: the abort comes once nothing more is sent.
+      onAfterGeneration: async () => {
+        stop.abort(new Error('late stop'));
+      },
+      verifyCitations: { retrieve, embedFn },
+    });
+
+    await expect(a.generate('Hi.', { abortSignal: stop.signal })).rejects.toThrow('late stop');
+    stop = new AbortController();
+    await expect(a.session('s1').send('Hi.', { abortSignal: stop.signal })).rejects.toThrow('late stop');
+    // Each request went out (the precondition), and no source was retrieved or embedded after the abort.
+    expect(s.seen).toHaveLength(2);
+    expect(retrieve).not.toHaveBeenCalled();
+    expect(embedFn).not.toHaveBeenCalled();
+  });
+
   it("a budget bounds a GMI's metaprompt calls, and the turn's reply stands", async () => {
     const k = key();
     // `whole` answers a metaprompt's unstreamed request, should one be sent.
