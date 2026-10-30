@@ -27,7 +27,7 @@
  * @module memory/retrieval/store/migrations/v2-to-v3
  */
 import type { StorageAdapter, StorageFeatures } from '@framers/sql-storage-adapter';
-import { parseTraceMetadata } from '../tracePersistence.js';
+import { scopeIdOfMetadata } from '../tracePersistence.js';
 import type { Migration } from './types.js';
 
 /** The index a per-scope read uses. */
@@ -83,12 +83,6 @@ async function hasColumn(adapter: StorageAdapter, table: string, column: string)
   }
   const rows = await adapter.all<{ name: string }>(`PRAGMA table_info(${table})`);
   return rows.some((row) => row.name === column);
-}
-
-/** The scope id a row's metadata JSON holds, or `''`. */
-function scopeIdOfMetadata(metadata: string | null | undefined): string {
-  const scopeId = parseTraceMetadata(metadata).scopeId;
-  return typeof scopeId === 'string' ? scopeId : '';
 }
 
 /**

@@ -36,6 +36,15 @@ import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from '
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
+import {
+  ABSENT_BRAIN,
+  ENCODED_SCOPE_ID_FORM,
+  encodePlainScopeId,
+  readBrainScopeIdForm,
+  SCOPE_ID_FORM_KEY,
+  scopeIdFormHandshake,
+  scopeIdFormRecordSql,
+} from '../retrieval/store/scopeIdForm.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -157,6 +166,8 @@ interface MessageRecord {
 
 interface ImportContext {
   dedup: boolean;
+  /** Encode the source's plain user and persona ids as they are written (an import into an encoded Brain). */
+  encodePlainIds: boolean;
   traceIds: Map<string, string>;
   /** The payload's trace ids. */
   sourceTraceIds: Set<string>;
@@ -267,9 +278,23 @@ export class JsonImporter {
       return result;
     }
 
+    // The source's form comes from its own record; an import encodes a plain source as it writes it, so the source's
+    // ids are not read here.
+    const decision = scopeIdFormHandshake(
+      this.brain.brainId,
+      { ...ABSENT_BRAIN, encoded: payload.meta?.[SCOPE_ID_FORM_KEY] === ENCODED_SCOPE_ID_FORM, rows: payload.traces.length > 0 },
+      await readBrainScopeIdForm(this.brain, this.brain.brainId),
+      { encodeOnWrite: true },
+    );
+    if (decision.action === 'refuse') {
+      result.errors.push(`${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
+      return result;
+    }
+
     // ---- Import in a single transaction for atomicity ----
     const context: ImportContext = {
       dedup: options?.dedup ?? true,
+      encodePlainIds: decision.action === 'encode',
       traceIds: new Map<string, string>(),
       sourceTraceIds: new Set<string>(),
       filedTraceIds: new Set<string>(),
@@ -282,6 +307,13 @@ export class JsonImporter {
 
     await this.brain.transaction(async (trx) => {
       await this._importMeta(trx, payload.meta);
+      if (decision.action === 'record') {
+        await trx.run(scopeIdFormRecordSql(this.brain.features.dialect.insertOrReplace.bind(this.brain.features.dialect)), [
+          this.brain.brainId,
+          SCOPE_ID_FORM_KEY,
+          ENCODED_SCOPE_ID_FORM,
+        ]);
+      }
       // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
       if (context.dedup) await fillScopeIds(trx, this.brain.brainId);
       await this._importTraces(trx, payload.traces, result, context);
@@ -317,7 +349,9 @@ export class JsonImporter {
   /**
    * Restore brain metadata keys from the export payload.
    *
-   * `exported_at` is export-specific and intentionally ignored on import.
+   * `exported_at` is export-specific and intentionally ignored on import. The
+   * scope-id form record (`scope_id_form`) is the handshake's to write: it is
+   * written only where the target can take the source's form.
    */
   private async _importMeta(
     trx: { run: Brain['run'] },
@@ -333,7 +367,7 @@ export class JsonImporter {
     );
 
     for (const [key, value] of Object.entries(meta)) {
-      if (key === 'exported_at') continue;
+      if (key === 'exported_at' || key === SCOPE_ID_FORM_KEY) continue;
       await trx.run(upsertSql, [this.brain.brainId, key, value]);
     }
   }
@@ -377,7 +411,11 @@ export class JsonImporter {
         // The metadata names the scope id, so it is read before the dedup check. Metadata that is not a JSON object
         // (malformed text, an array, null) starts fresh: the object stored names the scope id and the import hash.
         const meta = parseTraceMetadata(t.metadata);
-        const scopeId = importedScopeId(meta, t.scope_id);
+        let scopeId = importedScopeId(meta, t.scope_id);
+        if (context.encodePlainIds) {
+          scopeId = encodePlainScopeId(scope, scopeId);
+          if (scopeId !== '') meta.scopeId = scopeId;
+        }
 
         if (context.dedup) {
           const existing = await trx.get<{ id: string }>(checkSql, [

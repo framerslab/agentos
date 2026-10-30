@@ -19,7 +19,13 @@
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import type { Brain } from './Brain.js';
 import { fillScopeIds } from './migrations/v2-to-v3.js';
-import { ENCODED_SCOPE_ID_FORM, parseTraceMetadata, SCOPE_ID_FORM_KEY, type TraceSnapshot } from './tracePersistence.js';
+import {
+  ENCODED_SCOPE_ID_FORM,
+  parseTraceMetadata,
+  SCOPE_ID_FORM_KEY,
+  scopeIdOfMetadata,
+  type TraceSnapshot,
+} from './tracePersistence.js';
 
 /** The `brain_meta` key of the record, and the record's value for a Brain that holds the encoded form. */
 export { ENCODED_SCOPE_ID_FORM, SCOPE_ID_FORM_KEY };
@@ -401,4 +407,154 @@ function refiledCopyProperties(properties: string): string | undefined {
     fields._participants = fields._participants.map((participant) => (participant === scopeId ? to : participant));
   }
   return JSON.stringify(stored);
+}
+
+// ---------------------------------------------------------------------------
+// The form of a source: imports and the RAG migration
+// ---------------------------------------------------------------------------
+
+export { scopeIdOfMetadata };
+
+/** What one side of an import or a migration holds for one brain. */
+export interface BrainScopeIdForm {
+  /** The brain holds the record (`scope_id_form` = `encoded`). */
+  encoded: boolean;
+  /** The brain holds at least one trace. */
+  rows: boolean;
+  /** One of its `user` or `persona` scope ids holds a `/`, a `%` or a `:`. */
+  reserved: boolean;
+}
+
+/** A brain one side does not hold. */
+export const ABSENT_BRAIN: BrainScopeIdForm = { encoded: false, rows: false, reserved: false };
+
+/**
+ * What an import or a migration does with one brain: `take` it as it is; `encode` the source's plain ids as they are
+ * written (an import into a Brain with the record); `record`: take it and give the target the record; `clear`: take
+ * it and remove the target's record (a migration into a brain that holds the record and no trace, from a source
+ * without it); `refuse`, naming the record.
+ */
+export type ScopeIdFormDecision =
+  | { action: 'take' }
+  | { action: 'encode' }
+  | { action: 'record' }
+  | { action: 'clear' }
+  | { action: 'refuse'; reason: string };
+
+/**
+ * The scope-id form handshake for one brain. An import encodes a plain source's ids as it writes them
+ * (`encodeOnWrite: true`); the RAG migration copies rows as they are and so refuses instead.
+ */
+export function scopeIdFormHandshake(
+  brainId: string,
+  source: BrainScopeIdForm,
+  target: BrainScopeIdForm,
+  options: { encodeOnWrite: boolean },
+): ScopeIdFormDecision {
+  if (source.encoded === target.encoded) return { action: 'take' };
+  if (target.encoded) {
+    if (options.encodeOnWrite) return { action: 'encode' };
+    if (!target.rows) return { action: 'clear' };
+    if (!source.reserved) return { action: 'take' };
+    return {
+      action: 'refuse',
+      reason:
+        `brain '${brainId}': the target holds the encoded scope-id form ('${SCOPE_ID_FORM_KEY}' = '${ENCODED_SCOPE_ID_FORM}' ` +
+        `in brain_meta) and the source holds plain user or persona scope ids with '/', '%' or ':'. Open the source ` +
+        `under a learning layer, which re-files it, then copy again.`,
+    };
+  }
+  if (!target.reserved) return { action: 'record' };
+  return {
+    action: 'refuse',
+    reason:
+      `brain '${brainId}': the source holds the encoded scope-id form ('${SCOPE_ID_FORM_KEY}' = '${ENCODED_SCOPE_ID_FORM}' ` +
+      `in brain_meta) and the target holds plain user or persona scope ids with '/', '%' or ':'. Open the target ` +
+      `under a learning layer, which re-files it, then import again.`,
+  };
+}
+
+/** The `get` and `all` of a Brain, a transaction, a storage adapter, or a driver wrapped to look like one. */
+export interface ScopeIdFormReader {
+  get<T>(sql: string, params?: unknown[]): Promise<T | null | undefined>;
+  all<T>(sql: string, params?: unknown[]): Promise<T[]>;
+}
+
+/** Whether one brain's `user` or `persona` scope ids hold a reserved character; pages by id and stops at the first. */
+async function holdsReservedScopeIds(db: ScopeIdFormReader, brainId: string): Promise<boolean> {
+  let afterId = '';
+  for (;;) {
+    let rows: Array<{ id: string; scope_id?: string | null; metadata?: string | null }>;
+    try {
+      rows = await db.all<{ id: string; scope_id?: string | null; metadata?: string | null }>(
+        `SELECT id, scope_id, metadata FROM memory_traces
+          WHERE brain_id = ? AND scope IN ('user', 'persona') AND id > ? ORDER BY id LIMIT ${PAGE}`,
+        [brainId, afterId],
+      );
+    } catch {
+      // A table from before the scope_id column: read the id from the metadata.
+      rows = await db.all<{ id: string; metadata?: string | null }>(
+        `SELECT id, metadata FROM memory_traces
+          WHERE brain_id = ? AND scope IN ('user', 'persona') AND id > ? ORDER BY id LIMIT ${PAGE}`,
+        [brainId, afterId],
+      );
+    }
+    for (const row of rows) {
+      const scopeId = typeof row.scope_id === 'string' && row.scope_id !== '' ? row.scope_id : scopeIdOfMetadata(row.metadata);
+      if (holdsReservedCharacter(scopeId)) return true;
+    }
+    if (rows.length < PAGE) return false;
+    afterId = rows[rows.length - 1]!.id;
+  }
+}
+
+/** One brain's form as a store holds it. A store whose tables lack a brain id reads as not holding the brain. */
+export async function readBrainScopeIdForm(db: ScopeIdFormReader, brainId: string): Promise<BrainScopeIdForm> {
+  let encoded = false;
+  try {
+    const record = await db.get<{ value: string }>('SELECT value FROM brain_meta WHERE brain_id = ? AND key = ?', [
+      brainId,
+      SCOPE_ID_FORM_KEY,
+    ]);
+    encoded = record?.value === ENCODED_SCOPE_ID_FORM;
+  } catch {
+    encoded = false;
+  }
+  let rows = false;
+  try {
+    rows = Boolean(await db.get<{ id: string }>('SELECT id FROM memory_traces WHERE brain_id = ? LIMIT 1', [brainId]));
+  } catch {
+    rows = false;
+  }
+  return { encoded, rows, reserved: rows ? await holdsReservedScopeIds(db, brainId) : false };
+}
+
+/**
+ * Every brain a store holds (in `brain_meta` or `memory_traces`), with its form; or, given brain ids, those brains
+ * alone, whether or not the store holds them.
+ */
+export async function readScopeIdForms(
+  db: ScopeIdFormReader,
+  brainIds?: readonly string[],
+): Promise<Map<string, BrainScopeIdForm>> {
+  const ids = new Set<string>(brainIds ?? []);
+  if (!brainIds) {
+    for (const sql of ['SELECT DISTINCT brain_id FROM brain_meta', 'SELECT DISTINCT brain_id FROM memory_traces']) {
+      try {
+        for (const row of await db.all<{ brain_id: string | null }>(sql)) {
+          if (typeof row.brain_id === 'string') ids.add(row.brain_id);
+        }
+      } catch {
+        // A store without the table, or one from before brain ids, holds no brain this handshake can name.
+      }
+    }
+  }
+  const forms = new Map<string, BrainScopeIdForm>();
+  for (const id of [...ids].sort()) forms.set(id, await readBrainScopeIdForm(db, id));
+  return forms;
+}
+
+/** The SQL of the record's upsert, in a dialect's words. */
+export function scopeIdFormRecordSql(insertOrReplace: (table: string, columns: string[], values: string[], conflict: string) => string): string {
+  return insertOrReplace('brain_meta', ['brain_id', 'key', 'value'], ['?', '?', '?'], 'brain_id, key');
 }
