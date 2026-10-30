@@ -15,7 +15,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Agent, AgentOptions, AgentSession, AgentSessionOptions, SessionSendOptions } from './agent.js';
-import { extractTextFromContent, resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
+import { extractTextFromContent, resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent, type TokenUsage } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
 import type { GMIBaseConfig, IGMI, ToolCallRequest, ToolCallResult } from '../cognition/substrate/IGMI.js';
@@ -335,18 +335,49 @@ interface SeatSendKeys {
   __toolNames?: ReadonlySet<string>;
   __toolHooks?: readonly ToolCallHook[];
   __launchFrame?: AgencyLaunchFrame;
+  /** Receives the usage of the send's turn once it ends, failed or not, and any usage reported for it later. */
+  __onUsage?: (usage: TokenUsage) => void;
+}
+
+/** A hook that skips every tool call: what hooks a send carries in a shape no hook can be read from become. */
+const skipEveryCall: ToolCallHook = async () => null;
+
+/**
+ * A seat's tool names as its send carries them: a set (from any realm, so its string tag is read, and its `has` is
+ * checked, since a tag alone proves nothing). Anything else present names no tool, so the turn lists and runs none, and
+ * is warned about: a seat's names are its limit, and a turn must not run every tool for want of them.
+ */
+function receivedToolNames(value: unknown): ReadonlySet<string> {
+  const isSet =
+    value instanceof Set ||
+    (typeof (value as { has?: unknown } | null)?.has === 'function' && Object.prototype.toString.call(value) === '[object Set]');
+  if (isSet) return value as ReadonlySet<string>;
+  console.warn("[agentos] gmi(): a send's __toolNames is not a Set; the turn lists and runs no tool.");
+  return new Set<string>();
+}
+
+/**
+ * A seat's carried hooks as its send carries them: a list of functions. Anything else present becomes one hook that
+ * skips every call, and is warned about: the carried hooks may refuse a call, and a turn must not run it for want of
+ * them.
+ */
+function receivedToolHooks(value: unknown): readonly ToolCallHook[] {
+  if (Array.isArray(value) && value.every((hook) => typeof hook === 'function')) return value as ToolCallHook[];
+  console.warn("[agentos] gmi(): a send's __toolHooks is not a list of functions; every tool call of the turn is skipped.");
+  return [skipEveryCall];
 }
 
 /** The turn options a seat's send carries. */
 function seatTurnOf(sendOpts: unknown): Pick<GmiTurnOptions, 'approvalGate' | 'toolNames' | 'toolHooks' | 'launchFrame'> {
   const keys = (sendOpts ?? {}) as SeatSendKeys;
-  // A gate that is present but not a function refuses every tool, as a gate received from a parent agency does.
+  // A gate that is present but not a function refuses every tool, as a gate received from a parent agency does; names
+  // and hooks in another shape fail closed the same way.
   const gate = composeReceivedGate(keys.__approvalGate);
   const frame = keys.__launchFrame;
   return {
     ...(gate ? { approvalGate: gate } : {}),
-    ...(keys.__toolNames instanceof Set ? { toolNames: keys.__toolNames } : {}),
-    ...(Array.isArray(keys.__toolHooks) ? { toolHooks: keys.__toolHooks } : {}),
+    ...(keys.__toolNames !== undefined ? { toolNames: receivedToolNames(keys.__toolNames) } : {}),
+    ...(keys.__toolHooks !== undefined ? { toolHooks: receivedToolHooks(keys.__toolHooks) } : {}),
     // A launched team's seat: the frame its turn's calls carry, copied as the send gave it.
     ...(frame && typeof frame.launchId === 'string' && typeof frame.role === 'string' && typeof frame.depth === 'number'
       ? { launchFrame: { launchId: frame.launchId, role: frame.role, depth: frame.depth } }
@@ -519,9 +550,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
   async function learnerSessionFor(sessionId: string, personaId: string, userId: string | undefined, noLearner = false): Promise<ILearnerSession | undefined> {
     const active = layer;
     if (!active) return undefined;
-    const context: LearnerContext = { sessionId, personaId, authoredTraits };
-    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone. A seat session
-    // (sessionSeat(), launch_agency) has no learner: a team turn's input is a manager's or a sibling's text.
+    // A seat session (sessionSeat(), launch_agency) has no learner: a team turn's input is a manager's or a sibling's
+    // text. The manifest and the trace count its turns as a seat's, whatever user it runs as.
+    const context: LearnerContext = { sessionId, personaId, authoredTraits, ...(noLearner ? { noLearnerReason: 'workflow_seat' as const } : {}) };
+    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone.
     const learnerKey = userId === undefined || noLearner ? null : { namespace: '', agentKey: opts.name?.trim() ? personaId : '', userId };
     const open = (): Promise<ILearnerSession> => active.forLearner(learnerKey, context);
     try {
@@ -787,7 +819,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       if (cognition.memory && !seat) openedSessionIds.add(sessionId);
       const userId = sessionOptions?.userId ?? sessionId;
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
-      if (!sessionTallies.has(sessionId)) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
+      // A tally the agent's own earlier session of this id left is kept: a seat session adds to it and leaves it at close.
+      const ownsTally = !sessionTallies.has(sessionId);
+      if (ownsTally) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
       const tally = sessionTallies.get(sessionId)!;
       const lock = new TurnLock();
       let closing: Promise<void> | undefined;
@@ -832,7 +866,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
           .catch((error: unknown) => console.warn('[agentos] gmi(): could not clear the session GMI history:', error));
       };
 
-      const deps = (source: 'agent.session.send' | 'agent.session.stream'): GmiSessionDeps => ({
+      const deps = (source: 'agent.session.send' | 'agent.session.stream', sendOpts?: unknown): GmiSessionDeps => ({
         // Tools, the user context and the reasoning trace see the id the caller
         // opened and the user id (that session id unless the caller named one).
         sessionId,
@@ -856,6 +890,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
         onUsage: (u) => {
           accumulateUsage(tally, u);
           accumulateUsage(agentTally, u);
+          // A seat's record of its calls, which a send's result does not carry when its turn fails.
+          const toSeat = (sendOpts as SeatSendKeys | undefined)?.__onUsage;
+          if (typeof toSeat === 'function') {
+            try {
+              toSeat({ ...u });
+            } catch (error) {
+              console.warn("[agentos] gmi(): a seat's usage hand-off failed:", error);
+            }
+          }
         },
       });
 
@@ -892,7 +935,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             }).filter(([, v]) => v !== undefined),
           );
           try {
-            return await sendGmiTurn(deps('agent.session.send'), input, {
+            return await sendGmiTurn(deps('agent.session.send', sendOpts), input, {
               options,
               responseSchema: sendOpts?.responseSchema,
               schemaName: sendOpts?.schemaName,
@@ -911,7 +954,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         },
         // As in send(), the turn takes the caller's budget and the gate, tool names and hooks a seat puts on its calls.
         stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
-          streamGmiTurn(deps('agent.session.stream'), input, {
+          streamGmiTurn(deps('agent.session.stream', streamOpts), input, {
             abortSignal: turnSignal(streamOpts?.abortSignal),
             budget: turnBudget(streamOpts?.budget),
             ...seatTurnOf(streamOpts),
@@ -940,8 +983,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
         close: () =>
           (closing ??= (async () => {
             if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
-            // A seat session's tally goes with it: the agent's tally holds its usage (each turn adds to both).
-            if (seat) sessionTallies.delete(sessionId);
+            // A seat session's tally goes with it: the agent's tally holds its usage (each turn adds to both). One the
+            // agent's own earlier session of this id left stays.
+            if (seat && ownsTally && sessionTallies.get(sessionId) === tally) sessionTallies.delete(sessionId);
             stopTurns.abort();
             const release = await lock.acquire();
             try {
