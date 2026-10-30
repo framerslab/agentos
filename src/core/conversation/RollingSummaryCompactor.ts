@@ -173,12 +173,20 @@ function normalizeContentForCompactor(message: ConversationMessage): string {
   }
 }
 
+/**
+ * The text the compaction model reads for `message`. A tool result with no text, as a tool with no output returns,
+ * still answers its call, so it reads as `[empty result]`: a pass summarizes it with its call and may end on it.
+ */
+function compactorText(message: ConversationMessage): string {
+  const text = normalizeContentForCompactor(message).trim();
+  return text.length === 0 && message.role === 'tool' ? '[empty result]' : text;
+}
+
 function isEligibleForRollingSummary(message: ConversationMessage): boolean {
   if (message.role === 'thought' || message.role === 'error' || message.role === 'summary') {
     return false;
   }
-  const content = normalizeContentForCompactor(message).trim();
-  return content.length > 0;
+  return compactorText(message).length > 0;
 }
 
 /**
@@ -215,7 +223,7 @@ function buildTurnsForCompactor(messages: ConversationMessage[]): Array<{ id: st
       id: m.id,
       role: m.role,
       name: m.name,
-      content: normalizeContentForCompactor(m).trim(),
+      content: compactorText(m),
     }))
     .filter((m) => m.content.length > 0);
 }
@@ -241,7 +249,8 @@ function resolveStateKey(stateKey?: string): string {
  * the kept head takes the rest of a round it reaches into, and the summary ends where a round ends and where the next
  * message the next turn sends is newer than the last one summarized, so no message it sends shares the boundary's
  * millisecond on the kept side. A boundary an earlier release stored inside a round leaves the rest of the round to
- * the next pass, which reads the round from its call.
+ * the next pass, which reads the round from its call. A tool result with no text reads as `[empty result]`, so the
+ * compaction model reads each call it summarizes with its results.
  *
  * @param params - The conversation's messages, oldest first; its metadata, which holds the summary state under
  *   `stateKey`; the compaction settings; and the call that runs the compaction model.
