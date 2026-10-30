@@ -405,7 +405,9 @@ export interface VisionPipelineConfig {
   /**
    * Base URL for the cloud vision provider, such as a proxy or a local
    * OpenAI-compatible server. When unset, the provider's default is used.
-   * Needs a named provider, as `cloudApiKey` does.
+   * Needs a named provider, as `cloudApiKey` does. An empty or whitespace-only
+   * value is unset: it needs no provider, and the provider's base-URL
+   * variable, then its default, apply as with none.
    */
   cloudBaseUrl?: string;
 

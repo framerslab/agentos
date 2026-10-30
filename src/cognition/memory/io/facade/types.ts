@@ -305,8 +305,11 @@ export interface RememberOptions {
   scope?: string;
 
   /**
-   * Identifier for the scope (e.g. thread ID, user ID).
-   * Required when `scope` is set.
+   * Identifier for the scope (e.g. thread ID, user ID). The trace is filed
+   * under it, in the `scope_id` column and in its metadata, and a trace of the
+   * same text, type and scope counts as its duplicate only under the same
+   * scope id. A call that names none files the trace under `''`, whatever its
+   * `scope`.
    */
   scopeId?: string;
 

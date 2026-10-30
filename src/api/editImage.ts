@@ -91,9 +91,20 @@ export interface EditImageOptions {
   seed?: number;
   /** Number of output images. */
   n?: number;
-  /** Override the provider API key instead of reading from env vars. */
+  /**
+   * Override the provider API key instead of reading from env vars. Refused
+   * when no provider is named (by `provider`, a model such as
+   * `'openai:gpt-image-2.5-sunburst'` or the global default), and when the
+   * model's `provider:` prefix names another provider than `provider`: it is
+   * never sent to a provider the call did not name for it.
+   */
   apiKey?: string;
-  /** Override the provider base URL. */
+  /**
+   * Override the provider base URL, refused where `apiKey` is. An empty or
+   * whitespace-only value is unset: it is not refused, the global default's
+   * URL and then the provider's base-URL variable apply as they do with no
+   * `baseUrl`, and with none the edit goes to the provider's own endpoint.
+   */
   baseUrl?: string;
   /** Arbitrary provider-specific options. */
   providerOptions?: ImageProviderOptionBag | Record<string, unknown>;

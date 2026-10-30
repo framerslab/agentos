@@ -5,12 +5,14 @@
  * merges traces, graph rows, documents, document chunks/images, conversations,
  * and messages into a target `Brain`.
  *
- * Trace deduplication is performed via SHA-256 content hash inside the trace's
- * scope and scope id by default, but it can be disabled via `{ dedup: false }`
- * on the importer or `Memory.importFrom`. A trace a release older than
- * `memory_traces.scope_id` wrote holds `''` in that column whatever scope id
- * its metadata names; the import files such traces under that scope id before
- * its first duplicate check (`fillScopeIds`).
+ * Trace deduplication is performed inside the trace's scope and scope id by
+ * default: a trace there whose text is the record's, or whose metadata names
+ * the SHA-256 of that text as `import_hash` or `content_hash`, is the record's
+ * duplicate, whichever writer stored it. It can be disabled via
+ * `{ dedup: false }` on the importer or `Memory.importFrom`. A trace a release
+ * older than `memory_traces.scope_id` wrote holds `''` in that column whatever
+ * scope id its metadata names; the import files such traces under that scope
+ * id before its first duplicate check (`fillScopeIds`).
  *
  * A trace's episodic copy written under another node id than its trace's key
  * (an export from a release older than keyed copies, or a copy whose key the
@@ -30,9 +32,10 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { base64ToBytes } from './base64.js';
-import { importedScopeId } from './importScope.js';
+import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
+import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -199,10 +202,10 @@ export class JsonImporter {
    * - The top-level object must contain a `traces` array.
    *
    * Deduplication:
-   * - For `memory_traces`: SHA-256 of `content` is used as the dedup key,
-   *   inside the trace's scope and scope id. Existing rows of that scope and
-   *   scope id with the same hash are skipped; a row of another scope id is not
-   *   a duplicate.
+   * - For `memory_traces`: inside the trace's scope and scope id, a row whose
+   *   `content` is the record's, or whose metadata names the SHA-256 of that
+   *   text as `import_hash` or `content_hash`, makes the record a duplicate,
+   *   and it is skipped; a row of another scope id is not a duplicate.
    * - For `knowledge_nodes`: SHA-256 of `label` + `type`.
    * - For `knowledge_edges`: SHA-256 of `source_id` + `target_id` + `type`.
    *
@@ -339,9 +342,9 @@ export class JsonImporter {
    * Import memory trace records into `memory_traces`.
    *
    * Each trace is filed under its scope and scope id (see `importedScopeId`)
-   * and deduplicated by the SHA-256 of its `content` field inside them: if a
-   * trace of the same scope and scope id has the same content hash, the record
-   * is skipped and its id maps to that trace's.
+   * and deduplicated inside them (see `duplicateTraceCondition`): if a trace of
+   * the same scope and scope id holds the record's text, or names its hash, the
+   * record is skipped and its id maps to that trace's.
    *
    * @param trx    - Transactional storage adapter.
    * @param traces - Array of serialised trace objects from the export.
@@ -353,11 +356,10 @@ export class JsonImporter {
     result: ImportResult,
     context: ImportContext,
   ): Promise<void> {
-    const { dialect } = this.brain.features;
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id FROM memory_traces
        WHERE brain_id = ? AND scope = ? AND scope_id = ?
-         AND ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
+         AND ${duplicateTraceCondition(this.brain)}
        LIMIT 1`;
 
     const insertSql = `INSERT INTO memory_traces
@@ -372,17 +374,15 @@ export class JsonImporter {
         const sourceId = t.id;
         const scope = t.scope ?? 'user';
 
-        // The metadata names the scope id, so it is read before the dedup check.
-        let meta: Record<string, unknown> = {};
-        try {
-          meta = JSON.parse(t.metadata ?? '{}') as Record<string, unknown>;
-        } catch {
-          // If metadata is malformed, start fresh.
-        }
+        // The metadata names the scope id, so it is read before the dedup check. Metadata that is not a JSON object
+        // (malformed text, an array, null) starts fresh: the object stored names the scope id and the import hash.
+        const meta = parseTraceMetadata(t.metadata);
         const scopeId = importedScopeId(meta, t.scope_id);
 
         if (context.dedup) {
-          const existing = await trx.get<{ id: string }>(checkSql, [brainId, scope, scopeId, hash]);
+          const existing = await trx.get<{ id: string }>(checkSql, [
+            brainId, scope, scopeId, ...duplicateTraceParams(hash, t.content),
+          ]);
           if (existing) {
             if (sourceId) context.traceIds.set(sourceId, existing.id);
             if (sourceId && existing.id === sourceId) context.filedTraceIds.add(sourceId);
@@ -482,12 +482,8 @@ export class JsonImporter {
           continue;
         }
 
-        let props: Record<string, unknown> = {};
-        try {
-          props = JSON.parse(n.properties ?? '{}') as Record<string, unknown>;
-        } catch {
-          // ignore malformed JSON
-        }
+        // Properties that are not a JSON object (malformed text, an array, null) start fresh and keep the import hash.
+        const props = parseTraceMetadata(n.properties);
         props['import_hash'] = hash;
 
         let embeddingBuf: Uint8Array | null = null;
@@ -571,12 +567,8 @@ export class JsonImporter {
           continue;
         }
 
-        let meta: Record<string, unknown> = {};
-        try {
-          meta = JSON.parse(e.metadata ?? '{}') as Record<string, unknown>;
-        } catch {
-          // ignore malformed JSON
-        }
+        // Metadata that is not a JSON object (malformed text, an array, null) starts fresh, so the import hash is kept.
+        const meta = parseTraceMetadata(e.metadata);
         meta['import_hash'] = hash;
 
         await trx.run(insertSql, [

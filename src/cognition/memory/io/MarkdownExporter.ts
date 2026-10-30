@@ -4,8 +4,8 @@
  * Creates a directory of Markdown files — one per live memory trace of the
  * brain, never another brain's in the same database — organised into a
  * `{output}/{scope}/{type}/` folder hierarchy.  Each file contains
- * YAML front-matter (id, type, scope, strength, tags, createdAt) followed
- * by the plain-text trace content.
+ * YAML front-matter (id, type, scope, scopeId when the trace is filed under
+ * one, strength, tags, createdAt) followed by the plain-text trace content.
  *
  * The `gray-matter` library is used to serialise the front-matter block so
  * that the same library can later round-trip back via `MarkdownImporter`.
@@ -47,6 +47,8 @@ import type { Brain } from '../retrieval/store/Brain.js';
 import { writeFrontMatter } from '../../../core/utils/frontMatter.js';
 import { makeFoldersOutsideLinks, openFileOutsideLinks } from '../../../core/utils/linkFreeWrite.js';
 import { pathNameProblem, resolveInsideFolder, type PathNameProblem } from '../../../core/utils/pathName.js';
+import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
+import { importedScopeId } from './importScope.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -61,6 +63,11 @@ interface TraceRow {
   strength: number;
   created_at: number;
   tags: string;
+  /**
+   * The trace's scope id, as an import of its JSON row reads it: its metadata's `scopeId`, else its `scope_id`
+   * column; `''` for a trace filed under none.
+   */
+  scope_id: string;
 }
 
 /** The trace fields a file's path is built from. */
@@ -130,11 +137,17 @@ export class MarkdownExporter {
    */
   async export(outputDir: string, _options?: ExportOptions): Promise<ExportResult> {
     // Oldest first, so of two traces whose files would be one, the older is written.
-    const traces = await this.brain.all<TraceRow>(
-      `SELECT id, type, scope, content, strength, created_at, tags FROM memory_traces
+    const rows = await this.brain.all<TraceRow & { metadata: string | null }>(
+      `SELECT id, type, scope, content, strength, created_at, tags, scope_id, metadata FROM memory_traces
        WHERE brain_id = ? AND deleted = 0 ORDER BY created_at, id`,
       [this.brain.brainId],
     );
+    // The metadata is read for the scope id alone: a row a release older than the column wrote after this brain
+    // opened holds '' there and names its scope id in the metadata, where reads find it.
+    const traces: TraceRow[] = rows.map(({ metadata, ...trace }) => ({
+      ...trace,
+      scope_id: importedScopeId(parseTraceMetadata(metadata), trace.scope_id),
+    }));
 
     // Every trace is placed before any folder is made or file written.
     const refused: RefusedExportTrace[] = [];
@@ -254,14 +267,28 @@ export class MarkdownExporter {
 
     // gray-matter writes the YAML block. The trace's content is written as it
     // is and never read for front matter of its own.
-    return writeFrontMatter(trace.content, {
+    return writeFrontMatter(trace.content, this.frontMatterOf(trace, tags));
+  }
+
+  /**
+   * The front-matter fields of a trace's file, which `MarkdownImporter` reads
+   * back: its id, type, scope, strength, tags and creation time, and its scope
+   * id as `scopeId` when the trace is filed under one. A trace filed under
+   * `''` writes no `scopeId`, and its import files it under `''`.
+   *
+   * @param trace - The trace row.
+   * @param tags  - The trace's tags, parsed.
+   */
+  protected frontMatterOf(trace: TraceRow, tags: string[]): Record<string, unknown> {
+    return {
       id: trace.id,
       type: trace.type,
       scope: trace.scope,
+      ...(trace.scope_id ? { scopeId: trace.scope_id } : {}),
       strength: trace.strength,
       tags,
       createdAt: trace.created_at,
-    });
+    };
   }
 
   /**

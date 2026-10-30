@@ -41,7 +41,7 @@
 
 Ollama serves no image generation: `provider: 'ollama'` throws, since no image provider is registered under that id.
 
-**Provider choice and fallback.** With `provider` (or a `provider:model` string in `model`), that provider serves the call. With neither, `generateImage()` takes the image model of a global default set with `setDefaultProvider()`, then the first provider whose key is in the environment, in the table's order (`providerPreferences` reorders or filters that chain). Either way, the other providers with keys in the environment become fallbacks: when the chosen provider fails, the next one is tried with its default model.
+**Provider choice and fallback.** With `provider` (or a `provider:model` string in `model`), that provider serves the call. With neither, `generateImage()` takes the image model of a global default set with `setDefaultProvider()`, then the first provider whose key is in the environment, in the table's order (`providerPreferences` reorders or filters that chain). An empty or whitespace-only `STABLE_DIFFUSION_LOCAL_BASE_URL` is unset there, as the call reads it, so the local server is left out of the chain and the next provider serves the call. Either way, the other providers with keys in the environment become fallbacks: when the chosen provider fails, the next one is tried with its default model.
 
 **Mature content:** pass `policyTier: 'mature'` or `'private-adult'` and
 `generateImage` reroutes through the uncensored catalog (Replicate

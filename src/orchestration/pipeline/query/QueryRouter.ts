@@ -58,7 +58,7 @@ import { QueryGenerator } from './QueryGenerator.js';
 import { TopicExtractor } from './TopicExtractor.js';
 import { KeywordFallback } from './KeywordFallback.js';
 import { CitationVerifier } from '../../../cognition/rag/citation/CitationVerifier.js';
-import { providerEnvVars } from '../../../api/model.js';
+import { baseUrlIfSet, providerEnvVars } from '../../../api/model.js';
 import {
   DEFAULT_QUERY_ROUTER_CONFIG,
   DEFAULT_STRATEGY_CONFIG,
@@ -1597,7 +1597,10 @@ export class QueryRouter {
   }
 
   private getEmbeddingBaseUrl(): string | undefined {
-    if (this.config.embeddingBaseUrl !== undefined) {
+    // An empty or whitespace-only URL is unset, as generateText reads one
+    // (baseUrlIfSet in model.ts): the next source applies, as with none, so
+    // an OpenRouter key never goes to OpenAI's endpoint for want of a URL.
+    if (baseUrlIfSet(this.config.embeddingBaseUrl) !== undefined) {
       return this.config.embeddingBaseUrl as string;
     }
 
@@ -1609,7 +1612,7 @@ export class QueryRouter {
     // generator; they reach embeddings only when embeddings use one of those
     // providers.
     if (this.embeddingSharesLlmCredentials()) {
-      if (this.config.baseUrl !== undefined) {
+      if (baseUrlIfSet(this.config.baseUrl) !== undefined) {
         return this.config.baseUrl as string;
       }
 
@@ -1700,7 +1703,9 @@ export class QueryRouter {
    * @param provider - The provider the call goes to, when it names one.
    */
   private getLlmBaseUrl(provider?: string): string | undefined {
-    if (this.config.baseUrl !== undefined) {
+    // An empty or whitespace-only URL is unset, as generateText reads one: the
+    // OpenRouter URL below still goes with the OpenRouter key it picks.
+    if (baseUrlIfSet(this.config.baseUrl) !== undefined) {
       return this.config.baseUrl as string;
     }
 
