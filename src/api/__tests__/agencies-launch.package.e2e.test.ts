@@ -113,6 +113,23 @@ const sendUntilAdmitted = async (session: AgentSession, s: ProviderScript, repli
 type StartEvent = Parameters<NonNullable<AgencyCallbacks['agentStart']>>[0];
 type EndEvent = Parameters<NonNullable<AgencyCallbacks['agentEnd']>>[0];
 type TeamErrorEvent = Parameters<NonNullable<AgencyCallbacks['error']>>[0];
+/** A provider's error whose message holds a credential, as a provider's message can. */
+const providerFailure = (canary: string): Error =>
+  Object.assign(new Error(`upstream refused key ${canary}`), { name: 'ProviderError', code: 'E_UPSTREAM' });
+/** None of `texts` carries a word of a failure's message (see `providerFailure`). */
+const expectNoWordOf = (canary: string, texts: string[]): void => {
+  for (const text of texts) {
+    expect(text).not.toContain('upstream refused');
+    expect(text).not.toContain(canary);
+  }
+};
+/** A host's callbacks as an instance of its own class, whose error method reads `this`. */
+class HostCallbacks {
+  readonly reports: TeamErrorEvent[] = [];
+  error(event: TeamErrorEvent): void {
+    this.reports.push(event);
+  }
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -1655,5 +1672,171 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     expect(hooked).toEqual(['root launch_agency', 'root launch_agency', 'scout launch_agency', 'root search', 'scout search']);
     // The eye ran the scout's own search, the tool instance of the agent that launched its team.
     expect(ran).toEqual(['scout x']);
+  });
+
+  it("a seat whose call fails hands its team the error's name and code alone: a hierarchical manager's next request, the result and the parent's next request carry no word of its message, and the agent's error callback receives the original once, under the seat's name", async () => {
+    const k = key();
+    const canary = 'sk-CANARY-7070';
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Check the claim.', strategy: 'hierarchical', seats: [{ role: 'checker', instructions: 'Check claims.' }] }),
+        // The manager, on agent()'s path, which asks for whole responses, delegates to the checker.
+        reply.tools([{ id: 'd1', name: 'delegate_to_checker', args: { task: 'Check it.' } }]),
+        // The checker's request fails with a message that holds a credential.
+        providerFailure(canary),
+        reply.text('The checker could not run.'),
+        reply.text('Reported.'),
+      ],
+      whole: true,
+    });
+    const on = new HostCallbacks();
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', on, agencies: { launch: true } });
+    const session = parent.session('p1');
+
+    const result = await session.send('Check it.');
+    expect(result.text).toBe('Reported.');
+    // Root, the manager, the checker's failed request, the manager, root: the seat's call failed (the precondition).
+    expect(s.seen.map((call) => call.streamed)).toEqual([true, false, true, false, true]);
+    expect(offered(s.seen[1])).toContain('delegate_to_checker');
+    expect(systemText(s.seen[2])).toContain('Check claims.');
+    // The manager's next request reads the delegation's error by its name and code.
+    const delegated = toolText(s.seen[3], 'd1');
+    expect(delegated).toContain('GMIError (LLM_PROVIDER_ERROR)');
+    const out = launchOf(result);
+    expect(out).toMatchObject({ status: 'completed', text: 'The checker could not run.' });
+    expect(out.seats).toEqual([
+      expect.objectContaining({ role: 'checker', form: 'temporary', status: 'failed', calls: 1, error: { name: 'GMIError', code: 'LLM_PROVIDER_ERROR' } }),
+    ]);
+    // No word of the message reaches the manager, the result, the parent's next request, the send or the session.
+    expectNoWordOf(canary, [
+      delegated,
+      JSON.stringify(s.seen[3].messages),
+      JSON.stringify(out),
+      JSON.stringify(s.seen[4].messages),
+      JSON.stringify(result.toolCalls),
+      JSON.stringify(session.messages()),
+    ]);
+    // The manager's two calls (14 and 15 tokens) are the coordinator's, charged to the launch's budget.
+    expect(out.coordinatorUsage.totalTokens).toBe(29);
+    expect(out.provenance.budget.tokensUsed).toBeGreaterThanOrEqual(29);
+    // The agent's error callback received the original error, once, under the seat's name, called on the host's own
+    // object: the instance's method found its own reports.
+    expect(on.reports).toHaveLength(1);
+    expect(on.reports[0]).toMatchObject({ agent: 'launch_agency seat checker', error: { name: 'GMIError', code: 'LLM_PROVIDER_ERROR' } });
+    expect(on.reports[0].error.message).toContain(canary);
+    expect(on.reports[0].timestamp).toEqual(expect.any(Number));
+  });
+
+  it("a team that fails with a member's seat reports the seat's error, the team's and the run's to the launching agent's error callback, names the seat's error by its name and code alone, and with no error callback writes each report to the console", async () => {
+    const k = key();
+    const canary = 'sk-CANARY-7171';
+    const s = script('openai', k, {
+      replies: [
+        // A sequential team of one member seat, launched by an agent with an error callback.
+        launchStep({ goal: 'Check the claim.', seats: [{ role: 'checker', agentKey: 'tutor' }] }),
+        providerFailure(canary),
+        reply.text('The team failed.'),
+        // The same team, launched by an agent with no callbacks.
+        launchStep({ goal: 'Check the claim.', seats: [{ role: 'checker', agentKey: 'tutor' }] }),
+        providerFailure(canary),
+        reply.text('The team failed again.'),
+      ],
+    });
+    const tutorErrors = vi.fn<(e: TeamErrorEvent) => void>();
+    const tutor = gmi({ ...route(k), name: 'Tutor', instructions: 'You check claims.', on: { error: tutorErrors } });
+    const errors: TeamErrorEvent[] = [];
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      on: {
+        error: (e: TeamErrorEvent) => {
+          errors.push(e);
+        },
+      },
+      agencies: { launch: true, members: { tutor } },
+    });
+
+    const result = await parent.session('p1').send('Check it.');
+    expect(result.text).toBe('The team failed.');
+    // Root, the member's failed request, root: the seat ran as the member and its call failed (the precondition).
+    expect(s.seen).toHaveLength(3);
+    expect(systemText(s.seen[1])).toContain('You check claims.');
+    const out = launchOf(result);
+    expect(out).toMatchObject({ status: 'failed', reason: "seat 'checker' failed: GMIError (LLM_PROVIDER_ERROR)" });
+    expect(out.seats).toEqual([
+      expect.objectContaining({ role: 'checker', form: 'persistent', member: 'tutor', status: 'failed', calls: 1, error: { name: 'GMIError', code: 'LLM_PROVIDER_ERROR' } }),
+    ]);
+    expectNoWordOf(canary, [JSON.stringify(out), JSON.stringify(s.seen[2].messages)]);
+    // The launching agent's error callback heard the seat's original error, then the team's and the run's, which carry
+    // the seat's by its name and code alone.
+    expect(errors.map((e) => e.agent)).toEqual(['launch_agency seat checker', `launch:${out.agencyId}`, 'launch_agency run']);
+    expect(errors[0].error).toMatchObject({ name: 'GMIError', code: 'LLM_PROVIDER_ERROR' });
+    expect(errors[0].error.message).toContain(canary);
+    for (const e of errors.slice(1)) {
+      expect(e.error).toMatchObject({ name: 'GMIError', code: 'LLM_PROVIDER_ERROR', message: 'GMIError (LLM_PROVIDER_ERROR)' });
+    }
+    // The member's own callbacks hear nothing of a seat it holds in another agent's team.
+    expect(tutorErrors).not.toHaveBeenCalled();
+
+    // With no error callback, the console receives each report with its error.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const quiet = gmi({ ...route(k), instructions: 'Coordinate.', agencies: { launch: true, members: { tutor } } });
+    const again = await quiet.session('p2').send('Check it.');
+    expect(again.text).toBe('The team failed again.');
+    expect(launchOf(again)).toMatchObject({ status: 'failed', reason: "seat 'checker' failed: GMIError (LLM_PROVIDER_ERROR)" });
+    const reported = (what: string): unknown[] =>
+      warn.mock.calls.filter(([line]) => typeof line === 'string' && line.includes(what)).map(([, error]) => error);
+    expect(reported('launch_agency seat checker')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
+    expect(reported('launch_agency run')).toEqual([expect.objectContaining({ name: 'GMIError', message: 'GMIError (LLM_PROVIDER_ERROR)' })]);
+    expect(tutorErrors).not.toHaveBeenCalled();
+  });
+
+  it("an error callback that throws or rejects fails no launch: the parent's turn goes on, and the console gets the callback's error and the error it was handed", async () => {
+    const k = key();
+    const canary = 'sk-CANARY-7272';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Check the claim.', seats: [{ role: 'checker', instructions: 'Check claims.' }] }),
+        providerFailure(canary),
+        reply.text('The team failed.'),
+        reply.text('Still here.'),
+      ],
+    });
+    const thrown = new Error('the error callback broke');
+    const rejected = new Error('the error callback rejected');
+    const heard: string[] = [];
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      on: {
+        // The seat's report throws; the run's rejects.
+        error: (e: TeamErrorEvent) => {
+          heard.push(e.agent);
+          if (e.agent === 'launch_agency seat checker') throw thrown;
+          if (e.agent === 'launch_agency run') return Promise.reject(rejected);
+          return undefined;
+        },
+      },
+      agencies: { launch: true },
+    });
+    const session = parent.session('p1');
+
+    const result = await session.send('Check it.');
+    // What the callback did failed neither the launch nor the parent's turn, and the session answers again.
+    expect(result.text).toBe('The team failed.');
+    expect(launchOf(result)).toMatchObject({ status: 'failed', reason: "seat 'checker' failed: GMIError (LLM_PROVIDER_ERROR)" });
+    // The callback was handed the seat's report and the run's (the precondition).
+    expect(heard.filter((agent) => agent.startsWith(LAUNCH_AGENCY_TOOL_NAME))).toEqual(['launch_agency seat checker', 'launch_agency run']);
+    expect((await session.send('Are you there?')).text).toBe('Still here.');
+    expect(s.seen).toHaveLength(4);
+    // The console received each callback's failure and the error the callback was handed: the seat's original, and the
+    // run's, which carries the seat's error by its name and code.
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.any(String), rejected));
+    expect(warn).toHaveBeenCalledWith(expect.any(String), thrown);
+    const handed = (what: string): unknown[] =>
+      warn.mock.calls.filter(([line]) => typeof line === 'string' && line.includes(what)).map(([, error]) => error);
+    expect(handed('launch_agency seat checker')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
+    expect(handed('launch_agency run')).toEqual([expect.objectContaining({ message: 'GMIError (LLM_PROVIDER_ERROR)' })]);
   });
 });
