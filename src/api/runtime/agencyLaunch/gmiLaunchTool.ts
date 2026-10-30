@@ -208,6 +208,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
         ...(caller?.providerUserId !== undefined ? { providerUserId: caller.providerUserId } : {}),
         namespace,
         ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
+        // The GMI's tool view: the turn's launch pool lasts as long as the GMI that runs the turn.
+        ...(caller?.dispatch ? { poolOwner: caller.dispatch } : {}),
         toolHooks: caller?.toolHooks ?? [],
         outputEstimateTokens: outputEstimateTokens(opts.model ?? '', opts.maxTokens),
         scopeId: `${agentScope}:${sessionId}`,

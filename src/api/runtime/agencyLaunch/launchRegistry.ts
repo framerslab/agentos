@@ -54,12 +54,28 @@ export interface LaunchEntry {
 }
 
 /**
- * The most root scopes whose launch pool is kept. Past it, the least recently used scope with no launch in flight
- * loses its pool: a scope whose turn is still launching keeps it, so all that turn's launches draw on one pool.
+ * The most root scopes whose launch pool the registry keeps by scope (a host that names no owner for its turns'
+ * pools). Past it, the least recently used scope with no launch in flight loses its pool: a scope whose turn is still
+ * launching keeps it, so all that turn's launches draw on one pool; a turn between two launches can lose it.
  */
 export const MAX_POOL_SCOPES = 10_000;
 const entries = new Map<string, LaunchEntry>();
 const pools = new Map<string, { turnId: string | undefined; budget: SpendBudget }>();
+/**
+ * The pools of the turns whose host names an owner (on gmi(), the GMI that runs the turn), by that owner: a pool lasts
+ * as long as its owner, so no bound drops it while its turn can still launch, and it goes with the owner.
+ */
+const ownedPools = new WeakMap<object, { scopeKey: string; turnId: string | undefined; budget: SpendBudget }>();
+
+/** A root scope's new launch pool, under the tree's limits and the turn's budget when it has one. */
+function newPool(limits: LaunchLimits, turnBudget: SpendBudget | undefined): SpendBudget {
+  return new SpendBudget({
+    maxCostUSD: limits.maxLaunchCostUSD ?? Number.POSITIVE_INFINITY,
+    maxTotalTokens: limits.maxLaunchTokens,
+    unpriced: 'allow',
+    ...(turnBudget ? { parent: turnBudget } : {}),
+  });
+}
 /** The pools dropped so far, for the warning about them: the first drop, then every thousandth. */
 let droppedPools = 0;
 
@@ -99,22 +115,26 @@ export const launchRegistry = {
    * `maxLaunchTokens` and `maxLaunchCostUSD` (no dollar cap: Infinity), `unpriced: 'allow'` and the turn's budget, when
    * it has one, as its parent, and replaced when a launch comes from a later turn id; a call with no turn id shares the
    * scope's current pool. A session runs one turn at a time, so a root scope's current turn is the only one that draws
-   * on it. Past {@link MAX_POOL_SCOPES} scopes, the least recently used scope with no launch in flight loses its pool,
-   * with a warning.
+   * on it. With an `owner` (an object that lives as long as the GMI that runs the turn), the owner keeps the pool,
+   * however many other scopes launch meanwhile. Without one, the registry keeps it by scope: past
+   * {@link MAX_POOL_SCOPES} scopes, the least recently used scope with no launch in flight loses its pool, with a
+   * warning.
    */
-  rootPool(scopeKey: string, turnId: string | undefined, limits: LaunchLimits, turnBudget?: SpendBudget): SpendBudget {
+  rootPool(scopeKey: string, turnId: string | undefined, limits: LaunchLimits, turnBudget?: SpendBudget, owner?: object): SpendBudget {
+    if (owner) {
+      const held = ownedPools.get(owner);
+      if (held && held.scopeKey === scopeKey && (turnId === undefined || held.turnId === turnId)) return held.budget;
+      const budget = newPool(limits, turnBudget);
+      ownedPools.set(owner, { scopeKey, turnId, budget });
+      return budget;
+    }
     const current = pools.get(scopeKey);
     pools.delete(scopeKey);
     if (current && (turnId === undefined || current.turnId === turnId)) {
       pools.set(scopeKey, current);
       return current.budget;
     }
-    const budget = new SpendBudget({
-      maxCostUSD: limits.maxLaunchCostUSD ?? Number.POSITIVE_INFINITY,
-      maxTotalTokens: limits.maxLaunchTokens,
-      unpriced: 'allow',
-      ...(turnBudget ? { parent: turnBudget } : {}),
-    });
+    const budget = newPool(limits, turnBudget);
     pools.set(scopeKey, { turnId, budget });
     if (pools.size > MAX_POOL_SCOPES) dropIdlePools(scopeKey);
     return budget;

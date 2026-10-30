@@ -82,6 +82,12 @@ export interface LaunchParent {
    * launch's scope is its parent launch.
    */
   scopeId: string;
+  /**
+   * An object that lives as long as the GMI that runs the launching turn (on gmi(), the tool view the call came
+   * through, `callerTurn.dispatch`): a root launch's turn pool is kept by it, so no bound on root scopes drops the pool
+   * between two launches of a turn. Unset, the registry keeps the pool by scope, under that bound.
+   */
+  poolOwner?: object;
 }
 
 /** One seat after step 3: its form, its member, its names. */
@@ -631,7 +637,7 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
     // persistent member's own as well when the member launches it from its seat.
     // A root launch's scope is the launching session as its host names it, never the calling GMI.
     const scopeKey = frame ? frame.launchId : `${host.surface}:${parent.scopeId}`;
-    const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget);
+    const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget, parent.poolOwner);
     const caps = childBudgetCaps(parent.budget, pool, parent.limits, args, parent.outputEstimateTokens);
     if (isRefusal(caps)) return refused(caps);
     const state: LaunchState = { exhausted: false, timedOut: false, cancelled: false };
