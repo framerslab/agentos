@@ -404,6 +404,8 @@ describe('agency() seats served by GMIs', () => {
     expect(() => sessionSeat(member, { brief: 7 as never })).toThrow(TypeError);
     expect(() => sessionSeat(member, { dependsOn: 'ab' as never })).toThrow(TypeError);
     expect(() => sessionSeat(member, { dependsOn: ['a', 1] as never })).toThrow(TypeError);
+    // null is unset, as agency() reads a seat's dependsOn.
+    expect(sessionSeat(member, { dependsOn: null as never }).dependsOn).toBeUndefined();
     expect(() => sessionSeat(member, { tools: ['forge_tool'] })).toThrow("'forge_tool' is a self-modification tool");
     expect(() => sessionSeat(member, { tools: ['launch_agency'] })).toThrow("'launch_agency' runs in a seat only when a launch gives it");
 
