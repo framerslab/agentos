@@ -376,6 +376,7 @@ describe('a spend budget on the GMI path', () => {
     await expect(onLegacy.session('l').send('Hi.', { budget: tiny() })).rejects.toThrow(/Token cap exceeded/);
     expect(s.seen).toHaveLength(0);
   });
+
   it('a session stream takes a per-stream budget, on the GMI engine and on the legacy one', async () => {
     const k = key();
     const s = script('openai', k, { replies: [reply.text('Unused.')], whole: true });
@@ -390,6 +391,7 @@ describe('a spend budget on the GMI path', () => {
     }
     expect(s.seen).toHaveLength(0);
   });
+
   it("a legacy agent's generate() holds the budget its settings make across the validation retries of the call", async () => {
     const k = key();
     // Three answers that do not parse, 900 tokens each: the second attempt's estimate passes what the first left.
@@ -403,6 +405,7 @@ describe('a spend budget on the GMI path', () => {
     await expect(a.generate('x', { budget: { maxCostUSD: 1, maxTotalTokens: 1_000, unpriced: 'allow' } })).rejects.toThrow(/Token cap exceeded/);
     expect(s.seen).toHaveLength(1);
   });
+
   it("a tool call that fails inside the tool executor's pipeline tells the model what failed, without the calling turn's live objects", async () => {
     const k = key();
     const s = script('openai', k, { replies: [reply.tools([{ id: 't1', name: 'lookup', args: {} }]), reply.text('Done.')] });
