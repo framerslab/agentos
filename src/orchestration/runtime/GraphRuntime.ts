@@ -909,10 +909,11 @@ export class GraphRuntime {
    * records as `write`, `external`, or `human` effect-class (the node that
    * interrupted the run) is replayed from its stored output to avoid duplicate
    * side-effects; all other nodes are re-executed. A replayed node's edges are
-   * evaluated on the restored state, as a node's are after it runs, so the run
-   * follows the targets they pick and skips the others. A node that failed
-   * recorded no result and wrote nothing, so it runs again, from the state it
-   * ran on.
+   * evaluated on the restored state with the node's visit recorded
+   * (`currentNodeId` names the node and `visitedNodes` lists it), as a node's
+   * are after it runs, so the run follows the targets they pick and skips the
+   * others. A node that failed recorded no result and wrote nothing, so it runs
+   * again, from the state it ran on.
    *
    * @param graph - The same compiled graph that was originally invoked.
    * @param runOrCheckpointId - Either the original run id or an exact checkpoint id.
@@ -1025,7 +1026,10 @@ export class GraphRuntime {
           // run goes, as after a node that runs: a condition reads the state
           // the run resumed with, such as the decision a host wrote into the
           // checkpoint it forked, and the targets the node does not pick are
-          // skipped.
+          // skipped. That state records the node's visit, as the state after
+          // a node runs does: `currentNodeId` names the node and
+          // `visitedNodes` lists it.
+          state = stateManager.recordNodeVisit(state, nodeId);
           const replayedEdges = activeGraph.edges.filter(e => e.source === nodeId);
           const replayedTargets = await this.evaluateEdges(
             replayedEdges,
