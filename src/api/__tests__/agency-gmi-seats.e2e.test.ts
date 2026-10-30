@@ -447,4 +447,31 @@ describe('agency() seats served by GMIs', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('a send whose seat names are not a set runs no tool, and one whose hooks are not a list skips every tool, each with a warning', async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([{ id: 't1', name: 'search', args: {} }]),
+        reply.text('Not run.'),
+        reply.tools([{ id: 't2', name: 'search', args: {} }]),
+        reply.text('Skipped.'),
+      ],
+    });
+    const search = vi.fn(async () => 'found');
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], instructions: 'Look it up.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: {} }, execute: search } },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // A list where a seat sends a set: the turn offers no tool, and the call the model makes anyway does not run.
+    await member.session('s1').send('Go.', { __toolNames: ['search'] } as never);
+    expect(s.seen[0].options.tools ?? []).toEqual([]);
+    // An object where a seat sends a list of hooks: every call is skipped.
+    await member.session('s2').send('Go.', { __toolHooks: { first: async () => null } } as never);
+    expect(search).not.toHaveBeenCalled();
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.filter((line) => line.includes('__toolNames'))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes('__toolHooks'))).toHaveLength(1);
+  });
 });
