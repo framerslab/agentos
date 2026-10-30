@@ -223,6 +223,35 @@ describe('PromptEngine history budgeting', () => {
     expect(prompt.some((message) => message.role === 'tool')).toBe(false);
   });
 
+  it('keeps a tool round whole when the history must keep a message and the round alone runs over its budget', async () => {
+    const engine = await truncatingEngine();
+    // A 1000-token window leaves history 350 tokens. No request travels as userInput and no message is the turn's, as
+    // on a turn that hands the GMI tool results, so the history keeps at least one message. The two results alone run
+    // over the budget: dropping the oldest messages one at a time would keep the second result without its call.
+    const history = [
+      createConversationMessage(MessageRole.USER, 'Read both files.'),
+      createConversationMessage(MessageRole.ASSISTANT, null, {
+        tool_calls: [
+          { id: 'call_a', name: 'read_file', arguments: { path: 'a.txt' } },
+          { id: 'call_b', name: 'read_file', arguments: { path: 'b.txt' } },
+        ],
+      }),
+      createConversationMessage(MessageRole.TOOL, 'a'.repeat(800), { tool_call_id: 'call_a', name: 'read_file' }),
+      createConversationMessage(MessageRole.TOOL, 'b'.repeat(800), { tool_call_id: 'call_b', name: 'read_file' }),
+    ];
+
+    const result = await engine.constructPrompt(
+      { systemPrompts: [{ content: 'Base instructions' }], conversationHistory: history },
+      modelWith(1000),
+      baseExecutionContext,
+    );
+
+    const prompt = result.prompt as ChatMessage[];
+    expect(prompt.map((message) => message.role)).toEqual(['system', 'assistant', 'tool', 'tool']);
+    expect(prompt[1]?.tool_calls?.map((toolCall) => toolCall.id)).toEqual(['call_a', 'call_b']);
+    expect(prompt.slice(2).map((message) => message.tool_call_id)).toEqual(['call_a', 'call_b']);
+  });
+
   it('keeps as much earlier history as its budget allows when the prompt runs over', async () => {
     const engine = await truncatingEngine();
     // 2000-token window: history gets 700. Ten 250-token messages come
