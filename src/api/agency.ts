@@ -1481,8 +1481,9 @@ function isRuntimeName(value: unknown): boolean {
 }
 
 /**
- * A value as a configuration error names it: JSON where JSON can print it, else its own text. Never throws, so a value
- * JSON cannot print (a BigInt, a circular object) still reaches the caller in an `AgencyConfigError`.
+ * A value as a configuration error names it: JSON where JSON can print it, else its own text, else its tag. Never
+ * throws, so a value JSON cannot print (a BigInt, a circular object), or one no conversion can (a revoked proxy), still
+ * reaches the caller in an `AgencyConfigError`.
  */
 function printable(value: unknown): string {
   if (typeof value === 'bigint') return `${value}n`;
@@ -1498,7 +1499,12 @@ function printable(value: unknown): string {
   try {
     return String(value);
   } catch {
+    // Below: its tag, which a revoked proxy refuses as well.
+  }
+  try {
     return Object.prototype.toString.call(value);
+  } catch {
+    return 'a value that cannot be printed';
   }
 }
 
