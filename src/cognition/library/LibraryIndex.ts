@@ -108,10 +108,10 @@ export interface LibrarySearch {
   match?: 'all' | 'any';
   prefix?: boolean;
   /**
-   * Cancels the search: checked before the query is embedded and before and after each call to the store, and handed
-   * to the embedding function. Once it has aborted, the search starts no further call to the embedder or the store and
-   * rejects with the signal's reason, or with the embedding function's error when the signal cancelled its request; a
-   * store call that has started runs to its end, and its answer is dropped.
+   * Cancels the search: checked before and after the query is embedded and before and after each call to the store,
+   * and handed to the embedding function. Once it has aborted, the search starts no further call to the embedder or the
+   * store and rejects with the signal's reason, or with the embedding function's error when the signal cancelled its
+   * request; a store call that has started runs to its end, and its answer is dropped.
    */
   signal?: AbortSignal;
 }
