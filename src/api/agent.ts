@@ -1029,6 +1029,8 @@ export function agent(opts: AgentOptions): Agent {
         const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
         const genOpts: Partial<GenerateTextOptions> = {
           ...callOptions(extra),
+          // Settings become one budget here, so the call's validation retries are charged to the same one.
+          ...(extra?.budget !== undefined ? { budget: asSpendBudget(extra.budget) } : {}),
           usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
             source: extra?.usageLedger?.source ?? 'agent.generate',
           }),
