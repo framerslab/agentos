@@ -765,11 +765,13 @@ Every import operation returns a summary:
 
 ```ts
 interface ImportResult {
-  imported: number;  // Traces successfully written
-  skipped: number;   // Traces skipped (dedup or format mismatch)
-  errors: string[];  // Human-readable error messages for failures
+  imported: number;  // Rows written
+  skipped: number;   // Records not written
+  errors: string[];  // Human-readable messages for failures
 }
 ```
+
+`imported` counts the rows the import wrote: its traces, and, from a JSON file, its knowledge nodes and edges, documents, chunks, images, conversations and messages too; from a SQLite file, its knowledge nodes and edges too. `skipped` counts the records it did not write: a duplicate trace (see SHA-256 Deduplication), a graph, document, chunk, image, conversation or message row the brain holds already, a Markdown or Obsidian note whose body is blank, a CSV row whose `content` is blank, and a row that lacks a field it needs, such as an edge with no source or target. `errors` holds a message for each record that failed to import, and for a source that could not be read or parsed.
 
 After an import whose `imported` count is above zero, `importFrom` and `importFromString` rebuild the brain's HNSW index, when the brain has one, from the brain's embedded traces, and its full-text index; a SQLite or Obsidian import rebuilds the full-text index itself, also after an import that inserted nothing but gave a trace the brain holds new tags, so `importFrom` does not rebuild it again.
 
@@ -778,28 +780,32 @@ After an import whose `imported` count is above zero, `importFrom` and `importFr
 
 ```ts
 interface ExportOptions {
-  /** Serialisation format. Default: 'json'. */
+  /** Serialisation format. When omitted, the output path names it (see below). */
   format?: 'sqlite' | 'json' | 'markdown' | 'obsidian';
 
-  /** Include raw embedding vectors. Default: false. */
+  /** Include raw embedding vectors in a JSON export. Default: false. */
   includeEmbeddings?: boolean;
 
-  /** Include conversation turn traces. Default: true. */
+  /** Include the conversation and message rows in a JSON export. Default: true. */
   includeConversations?: boolean;
 }
 ```
+
+With no `format`, a `.json` output path writes JSON, a `.sqlite` or `.db` path SQLite, and any other path a Markdown folder. A SQLite export always holds the embeddings and the conversation rows, as it holds every portable table; a Markdown or Obsidian export holds neither.
 
 ### ImportOptions Reference
 
 ```ts
 interface ImportOptions {
-  /** Source format. Default: 'auto' (detect from extension/magic bytes). */
+  /** Source format. Default: 'auto', read from the source (see below). */
   format?: 'auto' | 'sqlite' | 'json' | 'markdown' | 'obsidian' | 'chatgpt' | 'csv';
 
-  /** Skip traces whose content hash already exists. Default: true. */
+  /** Skip a record a trace of its scope and scope id duplicates (see SHA-256 Deduplication). Default: true. */
   dedup?: boolean;
 }
 ```
+
+With `format: 'auto'`, a `.json` file is read as a ChatGPT export when its text holds `"mapping"` and `"conversation_id"`, and as JSON otherwise; a `.sqlite` or `.db` file as SQLite, a `.csv` file as CSV, a folder as Markdown, and any other path as JSON. An Obsidian vault is a folder too: name `format: 'obsidian'` to read its tags and wikilinks. `importFromString` takes the format, `'json'` or `'csv'`, as its own argument and `dedup` alone in its options.
 
 
 ### Source Files
