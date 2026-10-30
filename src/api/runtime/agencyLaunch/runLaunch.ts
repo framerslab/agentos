@@ -804,8 +804,8 @@ export function validateLaunchArgs(args: LaunchAgencyArgs): LaunchRefusal | unde
 /**
  * Step 4: the child budget's caps. Dollars: the least of `budgetUsd`, the parent's remaining dollars times
  * `budgetShare` and, at a root launch, what the turn's launch pool has left (Infinity when none of them caps). Tokens:
- * the least of `maxTokens`, the parent's remaining tokens times `budgetShare` (when it has a token cap) and the pool's
- * remaining tokens (`limits.maxLaunchTokens` when nothing else caps them).
+ * the least of `maxTokens`, the parent's remaining tokens times `budgetShare` (when it has a token cap), the pool's
+ * remaining tokens and `limits.maxLaunchTokens`.
  *
  * @param outputEstimateTokens - The output tokens one call is counted with.
  * @returns The caps, or `budget_unavailable` when the token cap cannot cover one call (`MIN_LAUNCH_TOKENS` plus the
@@ -828,7 +828,8 @@ export function childBudgetCaps(
   if (args.maxTokens !== undefined) tokens = Math.min(tokens, args.maxTokens);
   if (parentLeft?.tokens !== undefined) tokens = Math.min(tokens, Math.floor(parentLeft.tokens * limits.budgetShare));
   if (poolLeft?.tokens !== undefined) tokens = Math.min(tokens, poolLeft.tokens);
-  if (!Number.isFinite(tokens)) tokens = limits.maxLaunchTokens;
+  // Never past the tree's own bound, whatever the arguments ask, and that bound when nothing else caps the tokens.
+  tokens = Math.min(tokens, limits.maxLaunchTokens);
   const floor = MIN_LAUNCH_TOKENS + outputEstimateTokens;
   if (tokens < floor) {
     return { code: 'budget_unavailable', reason: `the launch's token cap, ${tokens}, cannot cover one call (${floor}: ${MIN_LAUNCH_TOKENS} for the prompt and ${outputEstimateTokens} for the output)` };
