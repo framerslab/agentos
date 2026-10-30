@@ -723,6 +723,10 @@ The coordinator decides which agents to invoke and in what order at runtime.
 Required for emergent agent synthesis. A delegate its approver rejects, or a
 nested agency that no seat of its own answered, returns a refusal the
 coordinator reads ("gave no answer" for the latter) and adds no call record.
+The coordinator's roster and each `delegate_to_<name>` tool describe a config
+agent by its `instructions`, and a pre-built agent by its own `description`
+when the handle carries a non-blank one (a `sessionSeat()` handle's, or a
+property set on a handle); any other agent reads "General purpose".
 
 ```typescript
 const team = agency({
@@ -747,13 +751,22 @@ in order. An agent with dependencies receives the original user prompt plus the
 plain-text outputs of its direct dependencies; an agent without any receives the
 prompt alone.
 
-**Auto-detection:** when _any_ agent in the roster has a `dependsOn` array, the
-strategy is automatically set to `'graph'` — you don't need to specify it
-explicitly (though doing so is fine).
+**Auto-detection:** when _any_ agent in the roster has a `dependsOn` array that
+names at least one agent, and the agency names no strategy and is not adaptive,
+the strategy is automatically set to `'graph'` — you don't need to specify it
+explicitly (though doing so is fine). An empty `dependsOn` names no agent. A
+pre-built agent in the roster counts too: a built `Agent` that carries its own
+`dependsOn` array of names (a `sessionSeat()` handle given `dependsOn`, or a
+property set on a handle) selects the graph and waits for those agents, on
+`generate()` and `stream()` alike. The handles `agent()`, `agency()`, `gmi()`
+and `importAgent()` return carry none.
 
 **Cycle detection:** `agency()` validates the dependency DAG when it is called
 and throws `AgencyConfigError` for a cycle or for a `dependsOn` entry that names
-no agent in the roster.
+no agent in the roster. It also throws `AgencyConfigError`, naming the agent, for
+a `dependsOn` that is set and is not a list of agent names (one name written as
+a string, a number among the names), on a config and a pre-built agent alike;
+`null` counts as unset.
 
 **Context passing:** an agent with dependencies receives:
 
@@ -777,7 +790,7 @@ rejected, or a nested agency that no seat of its own answered, is passed on as
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `dependsOn` | `string[]` | `[]` | Names of agents in the same agency that must complete before this agent runs.  Agents with no `dependsOn` are roots and execute first. |
+| `dependsOn` | `string[]` | `[]` | Names of agents in the same agency that must complete before this agent runs.  Agents with no `dependsOn`, or an empty one, are roots and execute first. Anything but a list of names throws `AgencyConfigError`. |
 
 #### Full example — research team
 
