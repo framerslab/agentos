@@ -1605,6 +1605,7 @@ describe('GraphRuntime: the checkpoint a halted run resumes from', () => {
     expect(trace(resumed)).toEqual([
       'run_start',
       'node_end:approve',
+      'edge_transition:approve->publish',
       'node_start:publish',
       'node_end:publish',
       'edge_transition:publish->announce',
@@ -2642,5 +2643,62 @@ describe('GraphRuntime: a node of a parallel batch whose edges throw', () => {
       publish: 'Published.',
     });
     expect(model.calls.slice(callsBeforeResume).map((call) => call.instructions)).toEqual([AUDIT, PUBLISH]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A node a resume marks complete from its recorded result
+// ---------------------------------------------------------------------------
+//
+// A resume does not ask a person again: it marks the human node that
+// interrupted the run complete with its recorded result. The node's edges
+// still decide where the run goes, read from the state the run resumes with,
+// such as the decision a host writes into the checkpoint it forks.
+
+describe('GraphRuntime: a node a resume marks complete from its recorded result', () => {
+  it('follows the edge its condition picks, and only that edge', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = scriptedModel({ [PUBLISH]: 'Published.', [REVISE]: 'Revised.' });
+    const runtime = runtimeOver(store, model.providerCall);
+    // approve's edges route on the decision the host records in scratch.
+    const decision = (state: GraphState): string =>
+      (state.scratch as { decision?: string }).decision === 'publish' ? 'publish' : 'revise';
+    const graph = graphOf('g-replayed-edges', [approveNode(), publishNode(), reviseNode()], [
+      [START, 'approve'],
+      ['publish', END],
+      ['revise', END],
+    ]);
+    graph.edges.push(
+      {
+        id: 'approve-publish',
+        source: 'approve',
+        target: 'publish',
+        type: 'conditional',
+        condition: { type: 'function', fn: decision },
+      },
+      {
+        id: 'approve-revise',
+        source: 'approve',
+        target: 'revise',
+        type: 'conditional',
+        condition: { type: 'function', fn: decision },
+      },
+    );
+
+    const runId = runIdOf(await readAll(runtime.stream(graph, {})));
+    const halted = await store.latest(runId);
+    if (!halted) throw new Error('the run saved no checkpoint');
+    // The person approves, and the host forks the checkpoint with the decision.
+    const approved = await store.fork(halted.id, { scratch: { decision: 'publish' } });
+
+    expect(trace(await readAll(runtime.streamResume(graph, approved)))).toEqual([
+      'run_start',
+      'node_end:approve',
+      'edge_transition:approve->publish',
+      'node_start:publish',
+      'node_end:publish',
+      'run_end',
+    ]);
+    expect(model.calls).toEqual([PUBLISH]);
   });
 });
