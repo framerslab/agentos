@@ -601,10 +601,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
           });
           changed = true;
         }
-        // A structured send's calls go without tools, and agent() then sends
-        // no chain-of-thought instruction; every other call of an agent with
-        // tools gets it first in its system prompt.
-        if (chainOfThought && !turn.structured) {
+        // The tools the call offers: none on a structured send's calls, and
+        // only its names on a seat's turn.
+        const names = turn.toolNames;
+        const offered = turn.structured ? [] : names ? tools.filter((tool) => names.has(tool.name)) : tools;
+        // A call that offers no tool gets no chain-of-thought instruction, as
+        // agent() sends none with a structured send's calls; every call that
+        // offers tools gets it first in its system prompt.
+        if (chainOfThought && offered.length > 0) {
           messages = withLeadingSystemText(messages, chainOfThought);
           changed = true;
         }
@@ -619,7 +623,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             const modified = await opts.onBeforeGeneration({
               messages: messages as unknown as Message[],
               system: typeof persona.baseSystemPrompt === 'string' ? persona.baseSystemPrompt : undefined,
-              tools,
+              tools: offered,
               model: ctx.modelId,
               provider: ctx.providerId,
               step: ctx.stepIndex,
