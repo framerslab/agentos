@@ -58,6 +58,14 @@ async function strengthOf(store: PersonalityMutationStore): Promise<number | und
   return (await store.loadForAgent('a1'))[0]?.strength;
 }
 
+/** The declared type of the guard table's owner_token column, or undefined when the table has none. */
+async function ownerTokenType(db: StorageAdapter): Promise<string | undefined> {
+  const column = await db.get<{ type: string }>(
+    "SELECT type FROM pragma_table_info('personality_decay_cycles') WHERE name = 'owner_token'",
+  );
+  return column?.type;
+}
+
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const db of databases.splice(0)) await db.close();
@@ -114,7 +122,7 @@ describe.each(['better-sqlite3', 'sqljs'] as const)('PersonalityMutationStore.de
     expect(owned?.owner_token).toMatch(UUID);
   });
 
-  it('a guard table an earlier release made keeps its cycles applied, a stamp or a token in applied_at alike, and gains owner_token', async () => {
+  it('a guard table an earlier release made keeps its cycles applied, a stamp or a token in applied_at alike, and gains owner_token at the first decay', async () => {
     const db = await openDatabase(engine);
     await db.exec(EARLIER_GUARD_TABLE);
     // Releases through 0.15.32 wrote a millisecond stamp; from 0.15.33 a token went into applied_at.
@@ -129,15 +137,15 @@ describe.each(['better-sqlite3', 'sqljs'] as const)('PersonalityMutationStore.de
       '3f2a1c9e-4b7d-4e2a-9c1f-6d8b5a7e0c21',
     ]);
     const store = await storeWithOneMutation(db);
+    // Recording and loading a mutation leave the guard table as it is.
+    expect(await strengthOf(store)).toBe(1);
+    expect(await ownerTokenType(db)).toBeUndefined();
 
     expect(await store.decayForAgent('a1', 0.05, 'day:2026-10-27')).toEqual({ decayed: 0, pruned: 0, skipped: true });
     expect(await store.decayForAgent('a1', 0.05, 'day:2026-10-28')).toEqual({ decayed: 0, pruned: 0, skipped: true });
     expect(await strengthOf(store)).toBe(1);
 
-    const column = await db.get<{ type: string }>(
-      "SELECT type FROM pragma_table_info('personality_decay_cycles') WHERE name = 'owner_token'",
-    );
-    expect(column?.type).toBe('TEXT');
+    expect(await ownerTokenType(db)).toBe('TEXT');
     expect(await store.decayForAgent('a1', 0.05, 'day:2026-10-29')).toEqual({ decayed: 1, pruned: 0 });
     expect(await strengthOf(store)).toBeCloseTo(0.95);
   });

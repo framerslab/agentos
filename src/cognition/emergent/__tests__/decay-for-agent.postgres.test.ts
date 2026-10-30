@@ -66,6 +66,15 @@ describe.skipIf(!url)('PersonalityMutationStore.decayForAgent on PostgreSQL', ()
     return (await store.loadForAgent('a1'))[0]?.strength;
   }
 
+  /** The data type of the guard table's owner_token column, or undefined when the table has none. */
+  async function ownerTokenType(db: StorageAdapter): Promise<string | undefined> {
+    const column = await db.get<{ data_type: string }>(
+      `SELECT data_type FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'personality_decay_cycles' AND column_name = 'owner_token'`,
+    );
+    return column?.data_type;
+  }
+
   afterEach(async () => {
     vi.restoreAllMocks();
     for (const db of databases.splice(0)) await db.close();
@@ -125,7 +134,7 @@ describe.skipIf(!url)('PersonalityMutationStore.decayForAgent on PostgreSQL', ()
     expect(await strengthOf(store)).toBeCloseTo(0.95);
   });
 
-  it('a guard table an earlier release made: its cycle at the stamp 1793194099407 stays applied, and the table gains owner_token', async () => {
+  it('a guard table an earlier release made: its cycle at the stamp 1793194099407 stays applied, and the table gains owner_token at the first decay', async () => {
     const db = await openSegment();
     await db.exec(EARLIER_GUARD_TABLE);
     await db.run('INSERT INTO personality_decay_cycles (agent_id, cycle_id, applied_at) VALUES (?, ?, ?)', [
@@ -134,15 +143,14 @@ describe.skipIf(!url)('PersonalityMutationStore.decayForAgent on PostgreSQL', ()
       1_793_194_099_407,
     ]);
     const store = await storeWithOneMutation(db);
+    // Recording and loading a mutation leave the guard table as it is.
+    expect(await strengthOf(store)).toBe(1);
+    expect(await ownerTokenType(db)).toBeUndefined();
 
     expect(await store.decayForAgent('a1', 0.05, 'day:2026-10-28')).toEqual({ decayed: 0, pruned: 0, skipped: true });
     expect(await strengthOf(store)).toBe(1);
 
-    const column = await db.get<{ data_type: string }>(
-      `SELECT data_type FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name = 'personality_decay_cycles' AND column_name = 'owner_token'`,
-    );
-    expect(column?.data_type).toBe('text');
+    expect(await ownerTokenType(db)).toBe('text');
 
     // The next cycle's guard row holds its owner's token in owner_token and the time in applied_at.
     const before = Date.now();

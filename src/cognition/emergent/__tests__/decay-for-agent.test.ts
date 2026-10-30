@@ -3,8 +3,9 @@
  * (spec batch-1 C6): agent scoping, cycle-id idempotency via the
  * guard-first transaction (a replay in the same millisecond included),
  * pre-existing sub-threshold pruning, post-decay pruning, atomicity on
- * mid-transaction failure, the transaction-required error, and the schema
- * step that adds the guard table's owner_token column.
+ * mid-transaction failure, the transaction-required error, the schema step
+ * that adds the guard table's owner_token column (run by a decay alone), and
+ * a failed schema step that the next call runs again.
  *
  * The fake adapter emulates exactly the SQL statements the store issues
  * (two tables, verb + WHERE pattern matched) with snapshot-rollback
@@ -13,6 +14,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { PersonalityMutationStore } from '../PersonalityMutationStore.js';
+import type { IStorageAdapter } from '../EmergentToolRegistry.js';
 
 interface Row { id: string; agentId: string; strength: number }
 
@@ -227,45 +229,77 @@ describe('rate validation', () => {
   });
 });
 
+/** A mutation for agent a1, as adapt_personality records one. */
+const SEED = {
+  agentId: 'a1',
+  trait: 'openness',
+  delta: 0.1,
+  reasoning: 'seed',
+  baselineValue: 0.5,
+  mutatedValue: 0.6,
+};
+
 describe('the guard table schema step', () => {
   /**
    * An adapter whose guard table has owner_token when `state.hasColumn` is
    * set: reading the column fails until then, and `onAlter` decides what the
-   * ALTER that adds it does.
+   * ALTER that adds it does. A guard row keeps the first token written to it;
+   * the adapter holds no mutations.
    */
-  function scriptedAdapter(hasColumn: boolean, onAlter: (state: { hasColumn: boolean }) => void) {
+  function scriptedAdapter(
+    hasColumn: boolean,
+    onAlter: (state: { hasColumn: boolean; alters: number }) => void,
+  ) {
     const state = { hasColumn, alters: 0 };
-    const adapter = {
+    const guards = new Map<string, unknown>();
+    const run = async (sql: string, params: unknown[] = []): Promise<unknown> => {
+      if (sql.includes('ALTER TABLE personality_decay_cycles ADD COLUMN owner_token TEXT')) {
+        state.alters++;
+        onAlter(state);
+      } else if (sql.includes('INSERT INTO personality_decay_cycles')) {
+        const key = `${params[0]}|${params[1]}`;
+        if (!guards.has(key)) guards.set(key, params[3]);
+      }
+      return {};
+    };
+    const get = async (sql: string, params: unknown[] = []): Promise<unknown> => {
+      if (sql.includes('SELECT owner_token FROM personality_decay_cycles')) {
+        if (!state.hasColumn) throw new Error('no such column: owner_token');
+        const key = `${params[0]}|${params[1]}`;
+        return guards.has(key) ? { owner_token: guards.get(key) } : undefined;
+      }
+      return undefined;
+    };
+    const all = async (_sql: string, _params: unknown[] = []): Promise<unknown[]> => [];
+    const adapter: IStorageAdapter = {
       exec: async (_sql: string): Promise<void> => undefined,
-      run: async (sql: string): Promise<unknown> => {
-        if (sql.includes('ALTER TABLE personality_decay_cycles ADD COLUMN owner_token TEXT')) {
-          state.alters++;
-          onAlter(state);
-        }
-        return {};
-      },
-      get: async (sql: string): Promise<unknown> => {
-        if (sql.includes('SELECT owner_token FROM personality_decay_cycles') && !state.hasColumn) {
-          throw new Error('no such column: owner_token');
-        }
-        return undefined;
-      },
-      all: async (): Promise<unknown[]> => [],
+      run,
+      get,
+      all,
+      transaction: async <T>(
+        fn: (tx: Pick<IStorageAdapter, 'run' | 'get' | 'all'>) => Promise<T>,
+      ): Promise<T> => fn({ run, get, all }),
     };
     return { adapter, state };
   }
 
-  it('reads owner_token first: a guard table that has it gets no ALTER, one that lacks it gets one', async () => {
+  it('recording and loading leave the guard table as it is; a decay reads owner_token first and adds it only when it is missing', async () => {
     const current = scriptedAdapter(true, () => {
       throw new Error('the column is there: no ALTER should run');
     });
-    await new PersonalityMutationStore(current.adapter).loadForAgent('a1');
+    await expect(
+      new PersonalityMutationStore(current.adapter).decayForAgent('a1', 0.05, 'day:2026-10-30'),
+    ).resolves.toEqual({ decayed: 0, pruned: 0 });
     expect(current.state.alters).toBe(0);
 
     const earlier = scriptedAdapter(false, (state) => {
       state.hasColumn = true;
     });
-    await new PersonalityMutationStore(earlier.adapter).loadForAgent('a1');
+    const store = new PersonalityMutationStore(earlier.adapter);
+    await store.record(SEED);
+    await store.loadForAgent('a1');
+    expect(earlier.state.alters).toBe(0);
+    await expect(store.decayForAgent('a1', 0.05, 'day:2026-10-30')).resolves.toEqual({ decayed: 0, pruned: 0 });
     expect(earlier.state.alters).toBe(1);
     expect(earlier.state.hasColumn).toBe(true);
   });
@@ -276,13 +310,49 @@ describe('the guard table schema step', () => {
       state.hasColumn = true;
       throw new Error('duplicate column name: owner_token');
     });
-    await expect(new PersonalityMutationStore(raced.adapter).loadForAgent('a1')).resolves.toEqual([]);
+    await expect(
+      new PersonalityMutationStore(raced.adapter).decayForAgent('a1', 0.05, 'day:2026-10-30'),
+    ).resolves.toEqual({ decayed: 0, pruned: 0 });
 
     const locked = scriptedAdapter(false, () => {
       throw new Error('database is locked');
     });
-    await expect(new PersonalityMutationStore(locked.adapter).loadForAgent('a1')).rejects.toThrow(
-      'database is locked',
-    );
+    await expect(
+      new PersonalityMutationStore(locked.adapter).decayForAgent('a1', 0.05, 'day:2026-10-30'),
+    ).rejects.toThrow('database is locked');
+  });
+
+  it('an ALTER that fails once ("database is locked") fails that decay alone: recording and loading go on, and the next decay runs the ALTER again', async () => {
+    const flaky = scriptedAdapter(false, (state) => {
+      if (state.alters === 1) throw new Error('database is locked');
+      state.hasColumn = true;
+    });
+    const store = new PersonalityMutationStore(flaky.adapter);
+
+    await expect(store.record(SEED)).resolves.toMatch(/^pm_/);
+    await expect(store.decayForAgent('a1', 0.05, 'day:2026-10-30')).rejects.toThrow('database is locked');
+    await expect(store.record(SEED)).resolves.toMatch(/^pm_/);
+    await expect(store.loadForAgent('a1')).resolves.toEqual([]);
+    expect(flaky.state.alters).toBe(1);
+
+    await expect(store.decayForAgent('a1', 0.05, 'day:2026-10-30')).resolves.toEqual({ decayed: 0, pruned: 0 });
+    expect(flaky.state.alters).toBe(2);
+    expect(flaky.state.hasColumn).toBe(true);
+  });
+});
+
+describe('the schema step', () => {
+  it('a CREATE that fails once ("database is locked") is run again by the next call', async () => {
+    const adapter = new FakeAdapter();
+    let execs = 0;
+    adapter.exec = async (_sql: string): Promise<void> => {
+      execs++;
+      if (execs === 1) throw new Error('database is locked');
+    };
+    const store = new PersonalityMutationStore(adapter);
+
+    await expect(store.record(SEED)).rejects.toThrow('database is locked');
+    await expect(store.record(SEED)).resolves.toMatch(/^pm_/);
+    expect(execs).toBe(2);
   });
 });
