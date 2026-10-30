@@ -354,6 +354,18 @@ describe('a spend budget on the GMI path', () => {
     expect(s.seen.filter((call) => !call.streamed)).toEqual([]);
   });
 
+  it('a metaprompt answered inside its budget is charged what its answer used', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('I hear you.'), reply.text('{"mood":"calm"}')], whole: true });
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Help.', maxTokens: 100, cognition: { sentiment: true, metaprompts: ['confusion_clarification'] }, memory: false, budget });
+
+    await a.session('s1').send('I am confused and this is unclear. Please explain it again.');
+    expect(budget.tokensUsed()).toBe(15);
+    await vi.waitFor(() => expect(s.seen.filter((call) => !call.streamed)).toHaveLength(1));
+    await vi.waitFor(() => expect(budget.tokensUsed()).toBe(30));
+  });
+
   it('a session send takes a per-send budget, on the GMI engine and on the legacy one', async () => {
     const k = key();
     const s = script('openai', k, { replies: [reply.text('Unused.')], whole: true });
