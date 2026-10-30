@@ -66,9 +66,12 @@ export function assembleConversationHistory(input: ConversationHistoryPhaseInput
     // also sends whole a round that a boundary stored by an earlier release cut through.
     const rounds = toolRoundBounds(historyForPrompt);
     const keep = [...inHeadOrTail];
+    // Each round is marked once, from its first kept message: a later kept message of it is already marked.
+    let markedThrough = -1;
     inHeadOrTail.forEach((kept, index) => {
-      if (!kept) return;
+      if (!kept || index <= markedThrough) return;
       for (let member = rounds.start[index]; member <= rounds.end[index]; member += 1) keep[member] = true;
+      markedThrough = rounds.end[index];
     });
     const merged: any[] = [];
     const seen = new Set<string>();
