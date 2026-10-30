@@ -16,6 +16,8 @@ export type { SeatMetadata } from '../../types.js';
 
 /** The tool's name on every surface. */
 export const LAUNCH_AGENCY_TOOL_NAME = 'launch_agency';
+/** The six strategies a launch offers: the tool's input schema lists them and the engine accepts them. */
+export const LAUNCH_STRATEGIES = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'] as const satisfies readonly AgencyStrategy[];
 /** The capability a full-runtime persona's grant would name for the tool. No code reads it: gmi() is the one surface that registers `launch_agency`. */
 export const LAUNCH_CAPABILITY = 'agency:launch';
 /** The five self-modification tools, which a seat never gets. */

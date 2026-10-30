@@ -20,6 +20,7 @@ import type { SeatHandle } from './sessionSeat.js';
 import {
   LAUNCH_AGENCY_TOOL_NAME,
   LAUNCH_SETTLE_GRACE_MS,
+  LAUNCH_STRATEGIES,
   LAUNCH_TEXT_CHARS,
   MAX_ROLE_CHARS,
   MIN_LAUNCH_TOKENS,
@@ -38,8 +39,8 @@ import {
   type ToolCallHook,
 } from './types.js';
 
-/** The six strategies a launch offers. */
-const STRATEGIES: readonly AgencyStrategy[] = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'];
+/** The six strategies a launch offers, the list the tool's input schema names. */
+const STRATEGIES: readonly AgencyStrategy[] = LAUNCH_STRATEGIES;
 const ARG_KEYS: ReadonlySet<string> = new Set(['goal', 'strategy', 'seats', 'budgetUsd', 'maxTokens', 'deadlineMs', 'maxRounds']);
 const SEAT_KEYS: ReadonlySet<string> = new Set(['role', 'instructions', 'agentKey', 'personaId', 'brief', 'tools', 'dependsOn']);
 /**
