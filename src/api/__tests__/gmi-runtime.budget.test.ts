@@ -54,6 +54,11 @@ describe('a spend budget on the GMI path', () => {
     // 2,950 counted: the next step's estimate (its prompt and its 100 output tokens) passes 3,000.
     await expect(session.send('Second.')).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringContaining('Token cap exceeded') });
     expect(s.seen).toHaveLength(1);
+    // The session's stream is held to the agent's budget too: it ends with the refusal.
+    const parts: Array<{ type: string; error?: unknown }> = [];
+    for await (const part of session.stream('Third.').fullStream) parts.push(part);
+    expect(parts.at(-1)).toMatchObject({ type: 'error', error: expect.objectContaining({ message: expect.stringContaining('Token cap exceeded') }) });
+    expect(s.seen).toHaveLength(1);
   });
 
   it('a structured send is estimated without the tool definitions its requests leave out', async () => {
