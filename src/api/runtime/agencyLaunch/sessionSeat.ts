@@ -45,6 +45,13 @@ export interface SessionSeatOptions {
  * A roster member that runs one session of its own; built by {@link sessionSeat} and by launch_agency. Its first call
  * opens the session, and fails when the member already serves a session under the seat's id: `generate()` rejects and
  * `stream()` throws, with the `TypeError` that names the id (a launch's seat, with that error's name alone).
+ *
+ * Of the per-call options an agency passes to its members, a seat applies the call's `abortSignal`, `budget` and
+ * tool-approval gate, and on `generate()` the per-send generation overrides a session's send takes (`maxTokens`,
+ * `requestTimeout`, `toolChoice`, `cacheDiagnostics`, `cache`); its session's `stream()` takes none of those. Its
+ * member's own ledger records the seat's calls, so a call's `usageLedger` is not applied. The seat warns once about each
+ * other per-call option it is given (`temperature`, `model`, `provider` and the rest), which its member's own settings
+ * replace.
  */
 export interface SeatHandle extends Agent, SeatMetadata {
   /** The seat's session id on its member. */
@@ -95,7 +102,14 @@ type SeatSendOptions = SessionSendOptions & {
   __launchFrame?: AgencyLaunchFrame;
   __toolNames?: ReadonlySet<string>;
   __toolHooks?: readonly ToolCallHook[];
+  /** Receives the usage of the send's turn once it ends, failed or not, and any usage reported for it later. */
+  __onUsage?: (usage: unknown) => void;
 };
+
+/** The per-send generation overrides a session's send takes, which a seat's `generate()` passes on. */
+const SEND_OVERRIDES = ['maxTokens', 'requestTimeout', 'toolChoice', 'cacheDiagnostics', 'cache'] as const;
+/** The per-call options a seat reads on every call, and the ledger option its member's own ledger stands in for. */
+const READ_ON_EVERY_CALL = new Set(['abortSignal', 'budget', 'usageLedger']);
 
 /** A gmi() handle's session opener, which takes the internal `__seat` setting. */
 type SeatSessionOpener = (id: string, options: { userId?: string; __seat: { memoryScope: 'session'; learner: 'none' } }) => AgentSession;
@@ -163,15 +177,23 @@ async function streamErrorOf(result: StreamTextResult): Promise<unknown> {
  * @param member - A gmi() handle (gmi() or agent({ runtime: 'gmi' })).
  * @param options - The seat's session id, description, dependencies, tool names and brief.
  * @returns A roster member for `agency({ agents })`.
- * @throws {TypeError} For a member that is not a gmi() handle, a brief over 1,000 characters, or a `tools` entry the
- *   member does not have, that never runs in a seat (a self-modification or memory tool), that is launch_agency (only a
- *   launch gives a seat that tool), or that is a composed tool whose steps are not all among `tools`.
+ * @throws {TypeError} For a member that is not a gmi() handle, a brief that is not text or is over 1,000 characters, a
+ *   `dependsOn` that is not a list of seat names (`null` is unset), or a `tools` entry the member does not have, that never runs in a seat
+ *   (a self-modification or memory tool), that is launch_agency (only a launch gives a seat that tool), or that is a
+ *   composed tool whose steps are not all among `tools`. Only these five options are read: an options object's other
+ *   keys change nothing.
  */
 export function sessionSeat(member: Agent, options: SessionSeatOptions = {}): SeatHandle {
   if (!isGmiHandle(member)) {
     throw new TypeError("sessionSeat(): the member must be a gmi() agent (gmi() or agent({ runtime: 'gmi' })); a legacy agent's session takes no approval gate or frame per send, and its sessions are not GMIs");
   }
+  if (options.brief !== undefined && typeof options.brief !== 'string') throw new TypeError('sessionSeat(): brief is text');
   if (options.brief !== undefined && options.brief.length > 1_000) throw new TypeError('sessionSeat(): brief is at most 1,000 characters');
+  // null is unset, as agency() reads a seat's dependsOn.
+  const dependsOn: unknown = options.dependsOn;
+  if (dependsOn != null && !(Array.isArray(dependsOn) && dependsOn.every((name) => typeof name === 'string'))) {
+    throw new TypeError('sessionSeat(): dependsOn is a list of seat names');
+  }
   const config: Partial<AgentOptions> = gmiOptionsOf(member) ?? {};
   const own: SeatToolLike[] = adaptTools(config.tools);
   const byName = new Map<string, SeatToolLike>(own.map((tool) => [tool.name, tool]));
@@ -205,12 +227,15 @@ export function sessionSeat(member: Agent, options: SessionSeatOptions = {}): Se
   }
 
   const description = options.description ?? descriptionOf(config);
+  // The five options of SessionSeatOptions alone: an options object that carries an internal key (a user to run as,
+  // hooks, a budget, the member's ownership) seats the member as any other does.
   return buildSessionSeat(member, {
-    ...options,
     sessionId: `seat:${options.sessionId ?? randomUUID()}`,
     form: 'persistent',
     tools: names,
     ...(description ? { description } : {}),
+    ...(options.dependsOn ? { dependsOn: options.dependsOn } : {}),
+    ...(options.brief !== undefined ? { brief: options.brief } : {}),
   });
 }
 
@@ -237,6 +262,8 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
   let closing: Promise<void> | undefined;
   /** The seat's calls in flight. */
   let running = 0;
+  /** The per-call options the seat has warned it does not apply: one line for each. */
+  const warned = new Set<string>();
 
   const open = (): AgentSession => {
     if (!session) {
@@ -255,18 +282,41 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
     return `${lead}\n\n${input}`;
   };
 
-  /** What the seat puts on a send: the call's stop and gate, the launch's budget (else the call's), the frame, names and hooks. */
-  const sendOptions = (opts: Record<string, unknown> | undefined): SeatSendOptions => {
+  /**
+   * What the seat puts on a send: the call's stop and gate, the launch's budget (else the call's), on `generate()` the
+   * call's per-send generation overrides, the frame, names and hooks, and the hand-off of the turn's usage to the
+   * seat's record (`call.handed` says whether the session used it). Warns once about each other per-call option, which
+   * the member's own settings replace.
+   */
+  const sendOptions = (opts: Record<string, unknown> | undefined, kind: 'generate' | 'stream', call: { handed: boolean }): SeatSendOptions => {
     const signal = opts?.abortSignal as AbortSignal | undefined;
     const gate = opts?.__approvalGate as ApprovalGateFn | undefined;
     const budget = options.budget ?? (opts?.budget as SpendBudget | SpendBudgetOptions | undefined);
+    const overrides: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(opts ?? {})) {
+      // The agency's own keys (`__approvalGate`, a panel's deadline flag) are not the caller's options.
+      if (value === undefined || key.startsWith('__') || READ_ON_EVERY_CALL.has(key)) continue;
+      if (kind === 'generate' && (SEND_OVERRIDES as readonly string[]).includes(key)) {
+        overrides[key] = value;
+        continue;
+      }
+      if (warned.has(key)) continue;
+      warned.add(key);
+      console.warn(`[agentos] sessionSeat(): seat '${record.role}' does not apply the per-call option '${key}' on ${kind}(); its member's own setting holds.`);
+    }
     return {
+      ...overrides,
       ...(signal ? { abortSignal: signal } : {}),
       ...(budget ? { budget } : {}),
       ...(gate ? { __approvalGate: gate } : {}),
       ...(options.frame ? { __launchFrame: options.frame } : {}),
       ...(toolNames ? { __toolNames: toolNames } : {}),
       ...(options.toolHooks && options.toolHooks.length > 0 ? { __toolHooks: options.toolHooks } : {}),
+      // Every turn's usage, a turn that failed after billed steps included, and a report that arrives after a stop.
+      __onUsage: (usage: unknown) => {
+        call.handed = true;
+        addUsage(record.usage, usage);
+      },
     };
   };
 
@@ -298,11 +348,14 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
       if (closed) throw new Error('seat closed');
       record.calls += 1;
       running += 1;
-      const send = sendOptions(opts);
+      const call = { handed: false };
+      const send = sendOptions(opts, 'generate', call);
       try {
+        // The turn's usage reaches the record through the send's `__onUsage`, whether the turn answers or fails; a
+        // session that does not hand it over leaves the result's.
         const result = (await open().send(framed(prompt), send)) as GenerateTextResult;
         answered(result.text ?? '');
-        addUsage(record.usage, result.usage);
+        if (!call.handed) addUsage(record.usage, result.usage);
         return result;
       } catch (error) {
         throw failed(error, send.abortSignal);
@@ -314,7 +367,8 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
     stream(prompt: string, opts?: Record<string, unknown>): StreamTextResult {
       if (closed) throw new Error('seat closed');
       record.calls += 1;
-      const send = sendOptions(opts);
+      const call = { handed: false };
+      const send = sendOptions(opts, 'stream', call);
       let result: StreamTextResult;
       try {
         result = open().stream(framed(prompt), send as { abortSignal?: AbortSignal });
@@ -323,7 +377,8 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
       }
       running += 1;
       // A GMI stream resolves its text when its turn fails too, and ends with an error part: the finish reason says
-      // which it was. Its usage resolves either way, failed attempts included.
+      // which it was. Its usage reaches the record through the send's `__onUsage` either way, failed attempts included;
+      // a session that does not hand it over leaves the stream's.
       const settle = async (): Promise<void> => {
         try {
           const [text, finishReason] = await Promise.all([result.text, result.finishReason]);
@@ -337,7 +392,9 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
       };
       void settle().catch(() => undefined);
       void Promise.resolve(result.usage).then(
-        (usage) => addUsage(record.usage, usage),
+        (usage) => {
+          if (!call.handed) addUsage(record.usage, usage);
+        },
         () => undefined,
       );
       return result;
