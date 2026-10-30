@@ -52,6 +52,8 @@ describe('validateLaunchArgs', () => {
       [args({ seats: [seat('writer', { tools: 'search' })] }), /tools/],
       [args({ seats: [seat('a', { dependsOn: ['ghost'] })] }), /dependsOn names 'ghost'/],
       [args({ strategy: 'graph', seats: [seat('a', { dependsOn: ['b'] }), seat('b', { dependsOn: ['a'] })] }), /cycle/],
+      // The refusal names a seat on the cycle, not the first seat from which the walk reached it.
+      [args({ strategy: 'graph', seats: [seat('a', { dependsOn: ['b'] }), seat('b', { dependsOn: ['c'] }), seat('c', { dependsOn: ['b'] })] }), /cycle through 'b'/],
       [args({ strategy: 'review-loop', seats: [seat('a'), seat('b'), seat('c')] }), /review-loop takes exactly 2 seats/],
       [args({ strategy: 'parallel' }), /parallel takes at least 2 seats/],
       [args({ strategy: 'debate' }), /debate takes at least 2 seats/],
