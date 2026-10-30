@@ -470,20 +470,30 @@ describe.skipIf(!POSTGRES_URL)('a search\'s signal on PostgresVectorStore as a h
     }
   }, CASE_MS);
 
-  it('ends a search at its deadline: a signal joined from the request\'s own and a timeout cancels the embedding request in flight and rejects with the TimeoutError', async () => {
+  it('ends a search at its deadline: a signal joined from the request\'s own and a deadline\'s cancels the embedding request in flight and rejects with the TimeoutError', async () => {
     holding = true;
     const page = new AbortController();
-    const signal = AbortSignal.any([page.signal, AbortSignal.timeout(750)]);
-    const error = await index.search({ text: TEXT, scope: ANN, mode: 'dense', signal }).then(
+    const deadline = new AbortController();
+    // The search's one signal, joined from the page's own and the deadline's, as a host joins them.
+    const signal = AbortSignal.any([page.signal, deadline.signal]);
+    const arrival = nextRequest();
+    const search = started(index.search({ text: TEXT, scope: ANN, mode: 'dense', signal }));
+    const request = await arrival;
+    // The deadline runs out once the request is in flight, however long the worker took to send it: an
+    // AbortSignal.timeout started now ends the deadline with its TimeoutError.
+    const timer = AbortSignal.timeout(50);
+    timer.addEventListener('abort', () => deadline.abort(timer.reason), { once: true });
+
+    const error = await search.then(
       () => undefined,
       (rejected: unknown) => rejected,
     );
-
+    expect(error).toBe(timer.reason);
     expect(error).toBe(signal.reason);
     expect((error as { name?: unknown }).name).toBe('TimeoutError');
-    expect(received).toHaveLength(1);
-    expect(await cutWithin(received[0], 5_000)).toBe(true);
+    expect(await cutWithin(request, 5_000)).toBe(true);
     await settle();
+    expect(received).toHaveLength(1);
     expect(statements).toEqual([]);
   }, CASE_MS);
 });
