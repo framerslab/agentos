@@ -297,6 +297,13 @@ export class GMI implements IGMI {
    */
   private turnRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
 
+  /**
+   * The first message the input of the last turn added to the history, which
+   * `getLastTurnHistory()` reads the history from. A tool continuation belongs
+   * to the turn it continues, so it leaves this as it is.
+   */
+  private lastTurnInput: ChatMessage | undefined;
+
   /** The learner session the host passed (`GMIBaseConfig.learning`), when its learning option is on. */
   private learnerSession: ILearnerSession | undefined;
 
@@ -978,6 +985,20 @@ export class GMI implements IGMI {
   }
 
   /**
+   * The messages of the conversation history from the input of this GMI's last turn on, as `getConversationHistory()`
+   * gives them: that input, the assistant turns and tool results of the turn's tool rounds, and what a tool
+   * continuation of the turn added. Empty when no turn ran, or when the history no longer holds that input (it was
+   * replaced, cleared or trimmed past it).
+   */
+  public getLastTurnHistory(): ConversationMessage[] {
+    const history = this.conversationHistoryManager.history;
+    const start = this.lastTurnInput ? history.indexOf(this.lastTurnInput) : -1;
+    return start < 0
+      ? []
+      : history.slice(start).map((message) => this.conversationHistoryManager.convertToConversationMessage(message));
+  }
+
+  /**
    * Makes `messages` the whole conversation history. An empty array is
    * authoritative: it empties the history (unlike
    * `metadata.conversationHistoryForPrompt`, which a turn ignores when empty).
@@ -1315,6 +1336,9 @@ export class GMI implements IGMI {
       const currentUserMessage = historyAtTurnStart.find(
         (message) => message.role === 'user' && !messagesBeforeInput.has(message),
       );
+      if (turnInput.metadata?.isToolContinuation !== true) {
+        this.lastTurnInput = historyAtTurnStart.find((message) => !messagesBeforeInput.has(message));
+      }
       // The turn's input, so a later replaceHistory() or clearHistory() can tell
       // whether the history still holds this turn. Bounded like the trace:
       // every turn on the trace has at least one entry there.

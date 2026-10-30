@@ -764,9 +764,10 @@ export interface IGMI {
   /**
    * Makes `conversationHistory` the whole conversation history. The runtime calls it before a resume continues a
    * pause, and before results on the paused stream continue it on a GMI whose own history holds a turn of another
-   * conversation, or that replaced the GMI the turn paused on: with the history the paused GMI's
-   * `getConversationHistory()` returned when the turn paused, with the pause's calls, when the runtime kept one, and
-   * with the conversation's stored history otherwise.
+   * conversation, or that replaced the GMI the turn paused on: with the history the paused GMI held of the turn when
+   * it paused (what its `getConversationHistory()` returned, or the conversation's stored history before the turn and
+   * what its `getLastTurnHistory()` returned), with the pause's calls, when the runtime kept one, and with the
+   * conversation's stored history otherwise.
    */
   hydrateConversationHistory?(
     conversationHistory: ConversationMessage[],
@@ -779,6 +780,16 @@ export interface IGMI {
    * and keeps it with the turn's stream for the continuation.
    */
   getConversationHistory?(): ConversationMessage[];
+
+  /**
+   * The messages of the conversation history from the input of the GMI's last turn on, as `getConversationHistory()`
+   * gives them: that input, the assistant turns and tool results of the turn's tool rounds, and what a tool
+   * continuation of the turn added; empty when no turn ran, or when the history no longer holds that input. With
+   * conversational persistence on, the runtime reads it when a turn stops for the host on a GMI whose history also
+   * holds a turn of another conversation, and keeps the conversation's stored history before the turn, followed by
+   * these messages, with the turn's stream for the continuation.
+   */
+  getLastTurnHistory?(): ConversationMessage[];
 
   /**
    * Makes `messages` the whole conversation history. An empty array is authoritative.
