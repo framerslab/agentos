@@ -16,6 +16,7 @@ import { AgencyConfigError } from '../types';
 import type { ApprovalDecision, ApprovalRequest } from '../types';
 import { SpendBudget } from '../runtime/spendBudget';
 import { buildSessionSeat, sessionSeat } from '../runtime/agencyLaunch/sessionSeat';
+import type { CallerTurnContext, ToolCallHook } from '../runtime/agencyLaunch/types';
 import { seatMetadataOf } from '../runtime/strategies/shared';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -473,5 +474,87 @@ describe('agency() seats served by GMIs', () => {
     const lines = warn.mock.calls.map((call) => String(call[0]));
     expect(lines.filter((line) => line.includes('__toolNames'))).toHaveLength(1);
     expect(lines.filter((line) => line.includes('__toolHooks'))).toHaveLength(1);
+  });
+
+  it("a seat's send carries the call's gate, the seat's names and its hooks, which run before the member's own, and a tool reads the calling turn", async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([
+          { id: 'c1', name: 'send_email', args: { to: 'team' } },
+          { id: 'c2', name: 'search', args: {} },
+          { id: 'c3', name: 'lookup', args: {} },
+          { id: 'c4', name: 'archive', args: {} },
+        ]),
+        reply.text('Done.'),
+      ],
+    });
+    const ran: string[] = [];
+    const hooked: string[] = [];
+    let turn: CallerTurnContext | undefined;
+    const tool = (name: string) => ({
+      description: `${name}.`,
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        ran.push(name);
+        return 'ok';
+      },
+    });
+    // A tool that reads the context its call carries.
+    const lookup = {
+      description: 'Look up.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async (_args: unknown, ctx?: { callerTurn?: CallerTurnContext }) => {
+        ran.push('lookup');
+        turn = ctx?.callerTurn;
+        return 'ok';
+      },
+    };
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], instructions: 'Work.',
+      tools: { send_email: tool('send_email'), search: tool('search'), archive: tool('archive'), lookup: lookup as never },
+      onBeforeToolExecution: async (info) => {
+        hooked.push(`own:${info.name}`);
+        return info;
+      },
+    });
+    // The hook a launching turn ran under, carried to the seat: null skips archive.
+    const carried: ToolCallHook = async (info) => {
+      hooked.push(`carried:${info.name}`);
+      return info.name === 'archive' ? null : info;
+    };
+    const asked: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      return { approved: false, reason: 'mail is paused' };
+    };
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100_000, unpriced: 'allow' });
+    const seat = buildSessionSeat(member, { form: 'persistent', role: 'worker', tools: ['send_email', 'lookup', 'archive'], toolHooks: [carried], userId: 'u1' });
+    const team = agency({
+      provider: 'openai', model: 'stub-model', apiKey: k, strategy: 'sequential',
+      hitl: { approvals: { beforeTool: ['send_email'] }, handler },
+      agents: { worker: seat },
+    });
+
+    const result = (await team.generate('Do the work.', { budget })) as { text: string };
+    expect(result.text).toBe('Done.');
+    expect(s.seen).toHaveLength(2);
+    // The gate the call carried was asked about the tool its list names, after both hooks, and refused it.
+    expect(asked).toEqual(['send_email']);
+    expect(hooked.filter((entry) => entry.endsWith(':send_email'))).toEqual(['carried:send_email', 'own:send_email']);
+    // A name outside the seat's ran no hook and no tool.
+    expect(hooked.some((entry) => entry.endsWith(':search'))).toBe(false);
+    // The carried hook runs first; its null skips the call before the member's own hook.
+    expect(hooked.filter((entry) => entry.endsWith(':lookup'))).toEqual(['carried:lookup', 'own:lookup']);
+    expect(hooked.filter((entry) => entry.endsWith(':archive'))).toEqual(['carried:archive']);
+    expect(ran).toEqual(['lookup']);
+    // The tool read the calling turn: the call's budget and gate, the seat's user, names and hooks, and the view's dispatch.
+    expect(turn?.budget).toBe(budget);
+    expect(typeof turn?.approvalGate).toBe('function');
+    expect(turn?.providerUserId).toBe('u1');
+    expect([...(turn?.toolNames ?? [])].sort()).toEqual(['archive', 'lookup', 'send_email']);
+    expect(turn?.toolHooks).toHaveLength(2);
+    expect(turn?.toolHooks?.[0]).toBe(carried);
+    expect(typeof turn?.dispatch).toBe('function');
   });
 });
