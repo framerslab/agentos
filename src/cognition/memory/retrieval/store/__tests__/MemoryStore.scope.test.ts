@@ -8,7 +8,8 @@
  * a write another writer makes to a moving trace's row is kept, a trace a hydration read before the move is loaded
  * under the new id, and the document a trace moves into stays when another store reads the new id during the move.
  * A store that still holds a moved trace under the old id deletes nothing of it with that id, moves nothing of it to a
- * third id, and its delete for good takes the document the trace moved into in another process. A trace's
+ * third id, and its delete for good takes the document the trace moved into in another process. Neither a move nor a
+ * Brain's re-file writes the words of a trace another process deleted for good into any collection. A trace's
  * `turnUserId` survives a restart, and `deleteScope` with `turnUserId` deletes only that user's traces of the scope.
  * An empty scope id is refused by `refileScope` and `deleteScope`, and a limit that is not a positive integer by
  * `hydrateScope`. Real SQLite Brains.
@@ -425,6 +426,43 @@ describe('refileScope', () => {
     expect(await brain.all('SELECT id, scope_id FROM memory_traces')).toEqual([{ id: 't-1', scope_id: 'B/42' }]);
     expect(await idsIn(vectorStore, 'cogmem_user_A/42')).toEqual([]);
   });
+
+  it('writes nowhere the words of a trace another process deleted for good, which this store still holds', async () => {
+    const filePath = tempFile();
+    const brain = await openBrain(filePath);
+    // One vector index both processes keep, as a durable one is.
+    const vectorStore = await vectorStoreOf4();
+    const here = await storeOver(brain, new KnowledgeGraph(), vectorStore);
+    await here.store(trace('t-1', '42', 1_000));
+    const otherProcess = await Brain.openSqlite(filePath, { brainId: 'b', coordinationToken: {} });
+    brains.push(otherProcess);
+    const there = await storeOver(otherProcess, new KnowledgeGraph(), vectorStore);
+    expect(await there.deleteTraces(['t-1'])).toBe(1);
+    expect(await idsIn(vectorStore, 'cogmem_user_42')).toEqual([]);
+
+    expect(await here.refileScope('user', '42', 'A/42')).toBe(0);
+
+    expect(await idsIn(vectorStore, 'cogmem_user_A/42')).toEqual([]);
+  });
+
+  it('writes nowhere the words of a trace whose row another process deletes for good while this store moves it', async () => {
+    const brain = await openBrain(tempFile());
+    const vectorStore = await vectorStoreOf4();
+    const store = await storeOver(brain, new KnowledgeGraph(), vectorStore);
+    await store.store(trace('t-1', '42', 1_000));
+    // Another process's delete for good commits right before this move writes the row.
+    let deleted = false;
+    beforeRowMove(brain, async () => {
+      if (deleted) return;
+      deleted = true;
+      await brain.run(`DELETE FROM memory_traces WHERE id = 't-1'`);
+    });
+
+    expect(await store.refileScope('user', '42', 'A/42')).toBe(0);
+
+    expect(deleted).toBe(true);
+    expect(await idsIn(vectorStore, 'cogmem_user_A/42')).toEqual([]);
+  });
 });
 
 describe('an empty scope id', () => {
@@ -471,5 +509,28 @@ describe('turnUserId', () => {
     expect(await restarted.deleteScope('user', '/s-1', { turnUserId: 'bo' })).toBe(1);
     const rows = await brain.all<{ id: string }>('SELECT id FROM memory_traces ORDER BY id');
     expect(rows.map((r) => r.id)).toEqual(['t-owner']);
+  });
+});
+
+describe("a Brain's re-file", () => {
+  it('writes nowhere the words of a trace this store holds that another process deletes for good once the re-file commits', async () => {
+    const brain = await openBrain(tempFile());
+    const vectorStore = await vectorStoreOf4();
+    const store = await storeOver(brain, new KnowledgeGraph(), vectorStore);
+    await store.store(trace('t-1', 'team/ana', 1_000));
+    // Another process's delete for good, waiting on the row the re-file moves, goes through the moment it commits.
+    const transaction = brain.transaction.bind(brain);
+    Object.assign(brain, {
+      transaction: async (work: Parameters<Brain['transaction']>[0]) => {
+        const result = await transaction(work);
+        await brain.run(`DELETE FROM memory_traces WHERE id = 't-1'`);
+        return result;
+      },
+    });
+
+    expect(await store.ensureEncodedScopeIds()).toBe(1);
+
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([]);
+    expect(await idsIn(vectorStore, 'cogmem_user_team%2Fana')).toEqual([]);
   });
 });
