@@ -94,6 +94,20 @@ describe('LibraryIndex.search with a signal', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
+  it('rejects with the signal\'s reason, not the miscount, when an embedding function that ignores the signal answers no vector after the abort', async () => {
+    const query = vi.fn(async () => ({ documents: [] }));
+    const controller = new AbortController();
+    const embed = vi.fn(async () => {
+      controller.abort(new Error('closed'));
+      return [] as number[][];
+    });
+    const index = new LibraryIndex({ store: { query } as unknown as IVectorStore, collection: 'c', embed });
+    const anyOf = [{ kinds: ['session'] }, { tags: ['q3'] }];
+    await expect(index.search({ text: 'budget', scope: SCOPE, mode: 'dense', anyOf, signal: controller.signal })).rejects.toThrow('closed');
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('starts no later leg of a search of several narrowings once the signal aborts during an earlier store call', async () => {
     const controller = new AbortController();
     // The search is cancelled while the first narrowing's dense leg is with the store.
