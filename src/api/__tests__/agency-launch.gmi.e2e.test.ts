@@ -96,6 +96,21 @@ describe('launch_agency on gmi()', () => {
     expect(s.seen).toHaveLength(4);
   });
 
+  it("a temporary seat's calls carry the launching agent's prompt-cache setting, as they carry the rest of its route", async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [launchStep({ goal: 'Answer.', seats: [{ role: 'answerer', instructions: 'Answer.' }] }), reply.text('Answered.'), reply.text('Done.')],
+    });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', maxTokens: 1_000, cache: { ttl: '1h' }, agencies: { launch: true } });
+
+    const result = await parent.session('p1').send('Go.');
+    expect(launchOf(result)).toMatchObject({ status: 'completed', text: 'Answered.' });
+    // The agent's own call carries the setting (the precondition); its seat's call carries it with the route's maxTokens.
+    expect(s.seen[0].options.cache).toEqual({ ttl: '1h' });
+    expect(s.seen[1].options).toMatchObject({ maxTokens: 1_000, cache: { ttl: '1h' } });
+    expect(s.seen).toHaveLength(3);
+  });
+
   it('invalid arguments are a tool error, never a throw, and the parent turn finishes', async () => {
     const k = key();
     const seat = (role: string) => ({ role, instructions: `Be the ${role}.` });
