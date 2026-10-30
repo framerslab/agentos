@@ -177,6 +177,12 @@ export class GMIManager {
    * the call returns or throws. shutdown() waits for them.
    */
   private readonly creationsInFlight = new Set<Promise<void>>();
+  /**
+   * The deactivation running for each session. The GMI it shuts down stays in
+   * the maps until its shutdown has ended, so an acquisition for the session
+   * waits for it and never hands out a GMI that is shutting down.
+   */
+  private readonly deactivations = new Map<string, Promise<boolean>>();
 
   constructor(
     config: GMIManagerConfig,
@@ -718,6 +724,15 @@ export class GMIManager {
       agencyOptions,
     );
 
+    // A GMI being deactivated (a persona refresh, the idle cleanup) stays bound to the session until its shutdown has
+    // ended: the acquisition waits for that, so it finds the session without a GMI rather than the GMI shutting down.
+    let deactivation = this.deactivations.get(sessionId);
+    while (deactivation) {
+      await deactivation.catch(() => false);
+      this.ensureInitialized();
+      deactivation = this.deactivations.get(sessionId);
+    }
+
     let gmiInstanceId = this.gmiSessionMap.get(sessionId);
     let gmi: IGMI | undefined = gmiInstanceId ? this.activeGMIs.get(gmiInstanceId) : undefined;
 
@@ -938,12 +953,25 @@ export class GMIManager {
    * Shuts down the GMI bound to a session and removes it from both maps. It
    * skips the initialization check because `shutdown()` marks the manager
    * uninitialized first, so that no new work starts, and then calls this for
-   * every session.
+   * every session. A call made while the session's deactivation runs waits for
+   * that one, and so does an acquisition for the session
+   * (`getOrCreateGMIForSession()`).
    *
    * @param sessionId - The session whose GMI is shut down.
    * @returns `true` when the session had an active GMI, `false` when it had none.
    */
-  private async deactivateSession(sessionId: string): Promise<boolean> {
+  private deactivateSession(sessionId: string): Promise<boolean> {
+    const running = this.deactivations.get(sessionId);
+    if (running) return running;
+    const deactivation = this.shutDownSessionGMI(sessionId).finally(() => {
+      if (this.deactivations.get(sessionId) === deactivation) this.deactivations.delete(sessionId);
+    });
+    this.deactivations.set(sessionId, deactivation);
+    return deactivation;
+  }
+
+  /** The work of {@link GMIManager.deactivateSession}, run once at a time for a session. */
+  private async shutDownSessionGMI(sessionId: string): Promise<boolean> {
     const gmiInstanceId = this.gmiSessionMap.get(sessionId);
     if (!gmiInstanceId) {
         console.warn(`GMIManager (ID: ${this.managerId}): No GMI instance ID found for session ${sessionId} during deactivation attempt.`);
