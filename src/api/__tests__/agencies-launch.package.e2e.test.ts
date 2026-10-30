@@ -1483,4 +1483,177 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     expect(s.seen).toHaveLength(2);
     expect(result.text).toBe('Done.');
   });
+
+  it("every tool call of a launched team runs the launching turn's tool hooks first, a member's before its own: the parent's rewrite reaches the member's hook and tool, its skip is final, and a temporary seat runs the parent's hook once", async () => {
+    const k = key();
+    const hooked: string[] = [];
+    const ran: string[] = [];
+    const parentSend = vi.fn(async () => 'parent sent');
+    const clerkSend = vi.fn(async () => 'clerk sent');
+    const sendTool = (execute: () => Promise<string>) => ({ description: 'Sends an email.', parameters: { type: 'object', properties: { to: { type: 'string' } } }, execute });
+    const lookupTool = (owner: string) => ({
+      description: 'Looks up a record.',
+      parameters: { type: 'object', properties: { q: { type: 'string' } } },
+      execute: async (args: { q?: string }) => {
+        ran.push(`${owner} ${String(args.q)}`);
+        return 'found';
+      },
+    });
+    const s = script('openai', k, {
+      replies: [
+        launchStep({
+          goal: 'Mail and check.',
+          seats: [
+            { role: 'clerk', agentKey: 'clerk', tools: ['send_email', 'lookup'] },
+            { role: 'writer', instructions: 'Write it up.', tools: ['lookup'] },
+          ],
+        }),
+        reply.tools([{ id: 'e1', name: 'send_email', args: { to: 'team' } }, { id: 'q1', name: 'lookup', args: { q: 'x' } }]),
+        reply.text('Clerk done.'),
+        reply.tools([{ id: 'w1', name: 'lookup', args: { q: 'y' } }]),
+        reply.text('Writer done.'),
+        reply.text('Done.'),
+      ],
+    });
+    const clerk = gmi({
+      ...route(k),
+      name: 'Clerk',
+      instructions: 'You file mail.',
+      tools: { send_email: sendTool(clerkSend), lookup: lookupTool('clerk') },
+      // The member's own hook allows every call.
+      onBeforeToolExecution: async (info) => {
+        hooked.push(`clerk ${info.name}${info.args.q !== undefined ? ` ${String(info.args.q)}` : ''}`);
+        return info;
+      },
+    });
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      tools: { send_email: sendTool(parentSend), lookup: lookupTool('parent') },
+      // The parent's hook skips every email and marks every lookup.
+      onBeforeToolExecution: async (info) => {
+        hooked.push(`parent ${info.name}${info.args.q !== undefined ? ` ${String(info.args.q)}` : ''}`);
+        if (info.name === 'send_email') return null;
+        return info.name === 'lookup' ? { ...info, args: { ...info.args, q: `${String(info.args.q)} (checked)` } } : info;
+      },
+      agencies: { launch: true, members: { clerk } },
+    });
+
+    const result = await parent.session('p1').send('Mail the team and check x.');
+    expect(result.text).toBe('Done.');
+    expect(launchOf(result)).toMatchObject({ status: 'completed', text: 'Writer done.' });
+    // Root, the clerk's two steps, the writer's two steps, root.
+    expect(s.seen).toHaveLength(6);
+    // The clerk was offered both tools and called both (the precondition).
+    expect([...offered(s.seen[1])].sort()).toEqual(['lookup', 'send_email']);
+    // The parent's hook ran first on each of the team's calls: its skip was final (the clerk's hook never saw the email),
+    // and its rewrite is what the clerk's hook and tool received. The writer's call ran the parent's hook once.
+    expect(hooked).toEqual(['parent launch_agency', 'parent send_email', 'parent lookup x', 'clerk lookup x (checked)', 'parent lookup y']);
+    expect(clerkSend).not.toHaveBeenCalled();
+    expect(parentSend).not.toHaveBeenCalled();
+    expect(toolText(s.seen[2], 'e1')).toContain('Skipped by onBeforeToolExecution hook');
+    // Each seat ran its own tool instances: the clerk its own, the writer the parent's.
+    expect(ran).toEqual(['clerk x (checked)', 'parent y (checked)']);
+  });
+
+  it("a temporary seat runs under the launching agent's generation hooks and request timeout, and a member runs as itself under its own", async () => {
+    const k = key();
+    const policy = 'Policy: no customer names.';
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Send the note.', seats: [{ role: 'mailer', agentKey: 'mailer' }, { role: 'writer', instructions: 'Write the note.' }] }),
+        reply.text('Note sent.'),
+        reply.text('Note written.'),
+        reply.text('Done.'),
+      ],
+    });
+    const mailer = gmi({ ...route(k), name: 'Mailer', instructions: 'You send mail.' });
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      onBeforeGeneration: async (context) => ({ ...context, messages: [...context.messages, { role: 'system', content: policy }] }),
+      onAfterGeneration: async (step) => ({ ...step, text: step.text.replace('Note', 'Memo') }),
+      controls: { maxDurationMs: 45_000 },
+      agencies: { launch: true, members: { mailer } },
+    });
+
+    const result = await parent.session('p1').send('Send it.');
+    expect(result.text).toBe('Done.');
+    const out = launchOf(result);
+    // Root, the mailer, the writer, root.
+    expect(s.seen).toHaveLength(4);
+    // The parent's own calls run under its hooks and its request timeout (the precondition).
+    expect(systemText(s.seen[0])).toContain(policy);
+    expect(s.seen[0].options.requestTimeout).toBe(45_000);
+    // The writer, a temporary seat, runs under them too: its request carries the rewrite and the timeout, and its answer,
+    // the team's, the parent's onAfterGeneration rewrite.
+    expect(systemText(s.seen[2])).toContain('Write the note.');
+    expect(systemText(s.seen[2])).toContain(policy);
+    expect(s.seen[2].options.requestTimeout).toBe(45_000);
+    expect(out).toMatchObject({ status: 'completed', text: 'Memo written.' });
+    // The mailer, a member, runs as itself: none of the parent's hooks or its timeout reach its call or its answer.
+    expect(systemText(s.seen[1])).toContain('You send mail.');
+    expect(systemText(s.seen[1])).not.toContain(policy);
+    expect(s.seen[1].options.requestTimeout).not.toBe(45_000);
+    expect(out.seats.map((seat) => [seat.role, seat.summary])).toEqual([['mailer', 'Note sent.'], ['writer', 'Memo written.']]);
+  });
+
+  it("a team a member launches from its seat runs the tool hooks that seat's turn ran under, the root's and then the member's, once each", async () => {
+    const k = key();
+    const hooked: string[] = [];
+    const ran: string[] = [];
+    const searchTool = (owner: string) => ({
+      description: 'Search.',
+      parameters: { type: 'object', properties: { q: { type: 'string' } } },
+      execute: async (args: { q?: string }) => {
+        ran.push(`${owner} ${String(args.q)}`);
+        return 'found';
+      },
+    });
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Scout it.', seats: [{ role: 'scout', agentKey: 'scout', tools: [LAUNCH_AGENCY_TOOL_NAME, 'search'] }] }),
+        // The member's seat turn launches through its own launch_agency.
+        launchStep({ goal: 'Look.', seats: [{ role: 'eye', instructions: 'Look.', tools: ['search'] }] }, 'n1'),
+        reply.tools([{ id: 'x1', name: 'search', args: { q: 'x' } }]),
+        reply.text('Seen.'),
+        reply.text('Scouted.'),
+        reply.text('Done.'),
+      ],
+    });
+    const scout = gmi({
+      ...route(k),
+      name: 'Scout',
+      instructions: 'You scout.',
+      tools: { search: searchTool('scout') },
+      onBeforeToolExecution: async (info) => {
+        hooked.push(`scout ${info.name}`);
+        return info;
+      },
+      agencies: { launch: true },
+    });
+    const parent = gmi({
+      ...route(k),
+      instructions: 'Coordinate.',
+      tools: { search: searchTool('parent') },
+      onBeforeToolExecution: async (info) => {
+        hooked.push(`root ${info.name}`);
+        return info;
+      },
+      agencies: { launch: true, maxDepth: 2, members: { scout } },
+    });
+
+    const result = await parent.session('p1').send('Scout it.');
+    expect(result.text).toBe('Done.');
+    expect(launchOf(result)).toMatchObject({ status: 'completed', text: 'Scouted.' });
+    // Root, the scout's two steps around the eye's two, root.
+    expect(s.seen).toHaveLength(6);
+    const nested = JSON.parse(toolText(s.seen[4], 'n1')) as LaunchAgencyResult;
+    expect(nested).toMatchObject({ status: 'completed', text: 'Seen.', provenance: { depth: 2 } });
+    // The root's turn ran the root's hook; the scout's seat turn ran the root's, then its own; the eye's call, in the team
+    // the scout launched, ran those two in that order, once each: the eye, a temporary seat, has no tool hook of its own.
+    expect(hooked).toEqual(['root launch_agency', 'root launch_agency', 'scout launch_agency', 'root search', 'scout search']);
+    // The eye ran the scout's own search, the tool instance of the agent that launched its team.
+    expect(ran).toEqual(['scout x']);
+  });
 });
