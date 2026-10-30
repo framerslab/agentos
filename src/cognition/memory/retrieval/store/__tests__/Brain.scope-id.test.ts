@@ -857,16 +857,15 @@ describe('the importers file by scope id and deduplicate inside one', () => {
         brain.brainId,
         '',
       ]);
-      // The trace with no text writes its tag line alone, and the label's line break is written as a space: an
-      // Obsidian link holds none.
+      // The trace with no text writes its tag line alone, and the label's line break splits its link over two lines.
       expect(await bodyOf(blank!.id)).toBe('#alpha');
-      expect(await bodyOf('t-bare')).toBe('Bare words.\n\n#alpha\n\n**Related:**\n- [[Target note]]');
+      expect(await bodyOf('t-bare')).toBe('Bare words.\n\n#alpha\n\n**Related:**\n- [[Target\nnote]]');
 
       expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
       expect(await textsOf(brain)).toEqual(['', 'Bare words.']);
     });
 
-    it('Obsidian: a note whose link runs over the line break its label holds, as earlier exports wrote it, is the duplicate of its trace', async () => {
+    it('Obsidian: a note whose link to a label with a line break sits between two other links is the duplicate of its trace', async () => {
       const brain = await written('obsidian-spanning-link', 'A%2F42', 'Kept words.', 'Bare words.');
       await brain.run('UPDATE memory_traces SET tags = ? WHERE brain_id = ? AND id = ?', [
         JSON.stringify(['alpha']),
@@ -887,7 +886,7 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       );
       const dir = path.join(path.dirname(tempFile()), 'vault');
       await fsp.mkdir(dir);
-      // An earlier export wrote a label as the brain holds it, so the link to the label with a line break spans two lines.
+      // The export writes a label as the brain holds it, so the link to the label with a line break spans two lines.
       await fsp.writeFile(
         path.join(dir, 't-bare.md'),
         "---\nid: t-bare\nscope: user\nscopeId: 'A%2F42'\n---\nBare words.\n\n#alpha\n\n**Related:**\n- [[Other note]]\n- [[Target\nnote]]\n- [[Last note]]\n",
@@ -895,6 +894,61 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       );
       expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
       expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it('Obsidian: a note whose Related list holds twenty thousand links is the duplicate of its trace', async () => {
+      const brain = await written('obsidian-long-list', 'A%2F42', 'Kept words.', 'Bare words.');
+      await brain.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at) VALUES (?, 't-bare', 'trace', 'trace:t-bare', 1)`,
+        [brain.brainId],
+      );
+      await brain.run(
+        `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 19999)
+         INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at) SELECT ?, 'kn-' || i, 'concept', 'Link ' || i, 1 FROM n`,
+        [brain.brainId],
+      );
+      await brain.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+         SELECT brain_id, 'ke-' || id, 't-bare', id, 'related_to', 1 FROM knowledge_nodes WHERE brain_id = ? AND type = 'concept'`,
+        [brain.brainId],
+      );
+      const dir = path.join(path.dirname(tempFile()), 'vault');
+      expect((await new ObsidianExporter(brain).export(dir)).refused).toEqual([]);
+      const note = await fsp.readFile(path.join(dir, 'user', 'episodic', 't-bare.md'), 'utf8');
+      expect(readFrontMatter(note).content.split('\n- [[').length - 1).toBe(20_000);
+
+      expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it('Obsidian: a link to a label with a line break keeps that label in the brain a vault is imported into', async () => {
+      const source = await written('obsidian-label-source', 'A%2F42', 'Kept words.', 'Bare words.');
+      await source.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at)
+         VALUES (?, 't-bare', 'trace', 'trace:t-bare', 1), (?, 'kn-target', 'concept', ?, 1)`,
+        [source.brainId, source.brainId, 'New\nYork'],
+      );
+      await source.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+         VALUES (?, 'ke-target', 't-bare', 'kn-target', 'related_to', 1)`,
+        [source.brainId],
+      );
+      const dir = path.join(path.dirname(tempFile()), 'vault');
+      expect((await new ObsidianExporter(source).export(dir)).refused).toEqual([]);
+
+      // The brain the vault goes into holds the same words on one line as another node's label.
+      const target = await open(tempFile(), 'obsidian-label-target');
+      await target.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at) VALUES (?, 'kn-one-line', 'concept', 'New York', 1)`,
+        [target.brainId],
+      );
+      expect(await new ObsidianImporter(target).import(dir)).toMatchObject({ imported: 2, skipped: 0, errors: [] });
+      const linked = await target.all<{ label: string }>(
+        `SELECT kn.label FROM knowledge_edges ke JOIN knowledge_nodes kn ON kn.brain_id = ke.brain_id AND kn.id = ke.target_id
+          WHERE ke.brain_id = ? AND ke.type = 'related_to'`,
+        [target.brainId],
+      );
+      expect(linked.map((row) => row.label)).toEqual(['New\nYork']);
     });
 
     it("Obsidian: a note that holds more than its trace's text, tags and links is imported", async () => {
