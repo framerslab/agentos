@@ -247,6 +247,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
         ...(caller?.providerUserId !== undefined ? { providerUserId: caller.providerUserId } : {}),
         namespace,
         ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
+        // The GMI's tool view: the turn's launch pool lasts as long as the GMI that runs the turn.
+        ...(caller?.dispatch ? { poolOwner: caller.dispatch } : {}),
         // The hooks the launching turn's calls ran under, outermost first: any it carried, then the agent's own. Every
         // seat's tool calls run them before the seat's own hook, a member's included.
         toolHooks: caller?.toolHooks ?? [],

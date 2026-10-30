@@ -18,6 +18,8 @@ export type { SeatMetadata } from '../../types.js';
 
 /** The tool's name on every surface. */
 export const LAUNCH_AGENCY_TOOL_NAME = 'launch_agency';
+/** The six strategies a launch offers: the tool's input schema lists them and the engine accepts them. */
+export const LAUNCH_STRATEGIES = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'] as const satisfies readonly AgencyStrategy[];
 /**
  * The capability the full runtime's `launch_agency` requires (`requiredCapabilities`): only a persona whose
  * `allowedCapabilities` names it lists and calls the tool, while the runtime checks capabilities strictly (its
@@ -84,7 +86,11 @@ export interface AgencyLaunchOptions {
   maxConcurrent?: number;
   /** The share of what the launching turn's budget has left that one launch may spend: above 0, at most 1, default 0.5. */
   budgetShare?: number;
-  /** The token ceiling of all the root launches of one parent turn, their nested launches included: at least 2,000, default 200,000. */
+  /**
+   * The token ceiling of all the root launches of one parent turn, their nested launches included: at least 2,000,
+   * default 200,000. gmi() warns at construction when it cannot cover one call of the agent's route (2,000 for the
+   * prompt and the call's output estimate), since every launch is then refused `budget_unavailable`.
+   */
   maxLaunchTokens?: number;
   /** Their dollar ceiling, counted where a price row or a provider-reported cost exists; a number above 0. Default: none. */
   maxLaunchCostUSD?: number;
@@ -343,7 +349,8 @@ export function gmiRouteOf(value: unknown): (() => Promise<{ provider?: string; 
 /**
  * Applies the defaults of `agencies` and checks every bound, at construction (`gmi()`, `AgentOS.initialize`).
  *
- * @param options - The `agencies` option, `launch` on or off.
+ * @param options - The `agencies` option, `launch` on or off. A field set to `null` is unset, as a JSON or YAML config
+ *   writes it, and takes its default.
  * @returns The limits of every launch tree rooted at this agent or runtime.
  * @throws {RangeError} Naming the field, for a value outside its range or a `members` value that is not a gmi()
  *   handle (or one whose `learning.agentKey` names another key).
@@ -351,7 +358,8 @@ export function gmiRouteOf(value: unknown): (() => Promise<{ provider?: string; 
  */
 export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgencyLaunchOptions): LaunchLimits {
   const integer = (field: string, value: number | undefined, fallback: number, min: number, max: number): number => {
-    if (value === undefined) return fallback;
+    // null is unset, as `??` reads it for the other fields.
+    if (value === undefined || value === null) return fallback;
     if (!Number.isInteger(value) || value < min || value > max) {
       throw new RangeError(`agencies.${field} must be an integer from ${min} to ${max}, not ${String(value)}`);
     }
@@ -368,7 +376,7 @@ export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgency
   const budgetShare = number('budgetShare', share, share > 0 && share <= 1, 'above 0 and at most 1');
   const tokens = options.maxLaunchTokens ?? 200_000;
   const maxLaunchTokens = number('maxLaunchTokens', tokens, tokens >= MIN_LAUNCH_TOKENS, `at least ${MIN_LAUNCH_TOKENS}`);
-  const dollars = options.maxLaunchCostUSD;
+  const dollars = options.maxLaunchCostUSD ?? undefined;
   if (dollars !== undefined) number('maxLaunchCostUSD', dollars, dollars > 0, 'a number above 0');
   const ceiling = options.maxDeadlineMs ?? 600_000;
   const maxDeadlineMs = number('maxDeadlineMs', ceiling, ceiling >= 1_000 && ceiling <= 3_600_000, 'from 1,000 to 3,600,000 ms');
@@ -388,7 +396,7 @@ export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgency
     throw new AgencyConfigError('agencies.hitl: HITL approvals configured but no handler provided');
   }
 
-  const members = (options as AgencyLaunchOptions).members;
+  const members = (options as AgencyLaunchOptions).members ?? undefined;
   if (members !== undefined) {
     if (typeof members !== 'object' || members === null) throw new RangeError('agencies.members must be a record of gmi() handles');
     for (const [key, member] of Object.entries(members)) {
@@ -475,7 +483,7 @@ export function launchAgencyInputSchema(limits: LaunchLimits, members?: LaunchMe
       goal: { type: 'string', description: 'What the team must produce, in full: its members see nothing of this conversation. At most 8,000 characters.' },
       strategy: {
         type: 'string',
-        enum: ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'],
+        enum: [...LAUNCH_STRATEGIES],
         description:
           "How the seats work together. sequential (the default): each seat receives the task and the previous seat's output. parallel: every seat answers at once, and one answer is made from theirs. debate: the seats argue in rounds, and their arguments are summed up. review-loop: exactly two seats, the first writes and the second reviews until it approves. hierarchical: a manager delegates to the seats. graph: a seat runs once the seats its dependsOn names have answered.",
       },

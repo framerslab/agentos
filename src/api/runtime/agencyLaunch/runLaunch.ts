@@ -20,6 +20,7 @@ import type { SeatHandle } from './sessionSeat.js';
 import {
   LAUNCH_AGENCY_TOOL_NAME,
   LAUNCH_SETTLE_GRACE_MS,
+  LAUNCH_STRATEGIES,
   LAUNCH_TEXT_CHARS,
   MAX_ROLE_CHARS,
   MIN_LAUNCH_TOKENS,
@@ -38,8 +39,8 @@ import {
   type ToolCallHook,
 } from './types.js';
 
-/** The six strategies a launch offers. */
-const STRATEGIES: readonly AgencyStrategy[] = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'];
+/** The six strategies a launch offers, the list the tool's input schema names. */
+const STRATEGIES: readonly AgencyStrategy[] = LAUNCH_STRATEGIES;
 const ARG_KEYS: ReadonlySet<string> = new Set(['goal', 'strategy', 'seats', 'budgetUsd', 'maxTokens', 'deadlineMs', 'maxRounds']);
 const SEAT_KEYS: ReadonlySet<string> = new Set(['role', 'instructions', 'agentKey', 'personaId', 'brief', 'tools', 'dependsOn']);
 /**
@@ -84,6 +85,12 @@ export interface LaunchParent {
    * launch's scope is its parent launch.
    */
   scopeId: string;
+  /**
+   * An object that lives as long as the GMI that runs the launching turn (on gmi(), the tool view the call came
+   * through, `callerTurn.dispatch`): a root launch's turn pool is kept by it, so no bound on root scopes drops the pool
+   * between two launches of a turn. Unset, the registry keeps the pool by scope, under that bound.
+   */
+  poolOwner?: object;
 }
 
 /** One seat after step 3: its form, its member, its names. */
@@ -663,7 +670,7 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
     // persistent member's own as well when the member launches it from its seat.
     // A root launch's scope is the launching session as its host names it, never the calling GMI.
     const scopeKey = frame ? frame.launchId : `${host.surface}:${parent.scopeId}`;
-    const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget);
+    const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget, parent.poolOwner);
     const caps = childBudgetCaps(parent.budget, pool, parent.limits, args, await seatsOutputEstimate(host, parent, seats));
     if (isRefusal(caps)) return refused(caps);
     const state: LaunchState = { exhausted: false, timedOut: false, cancelled: false };
@@ -739,7 +746,8 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
 
 /**
  * Step 1: the arguments' own rules (types, required fields and the strategy's names are the input schema's too, so a
- * call the schema refuses never reaches here). Counts against a host's bounds are step 3's.
+ * call the schema refuses never reaches here). Counts against a host's bounds are step 3's. A `dependsOn` cycle is
+ * refused naming a seat on it, and a chain of any length is checked without recursion.
  *
  * @returns `invalid_arguments` naming the first problem, or undefined.
  */
@@ -791,19 +799,38 @@ export function validateLaunchArgs(args: LaunchAgencyArgs): LaunchRefusal | unde
     }
     dependsOn.set(seat.role, deps);
   }
-  // A cycle: a seat that, through dependsOn, waits for itself.
+  // A cycle: a seat that, through dependsOn, waits for itself. The refusal names the seat at which the walk meets one
+  // it is still visiting, which is on the cycle. The walk keeps its own stack: the seat count is bounded after this
+  // step (maxSeats), so a chain of any length must be walked without exhausting the call stack.
   const visiting = new Set<string>();
   const done = new Set<string>();
-  const cyclic = (role: string): boolean => {
-    if (done.has(role)) return false;
-    if (visiting.has(role)) return true;
-    visiting.add(role);
-    const found = (dependsOn.get(role) ?? []).some(cyclic);
-    visiting.delete(role);
-    done.add(role);
-    return found;
+  const cycleAt = (start: string): string | undefined => {
+    if (done.has(start)) return undefined;
+    const path: Array<{ role: string; next: number }> = [{ role: start, next: 0 }];
+    visiting.add(start);
+    while (path.length > 0) {
+      const top = path[path.length - 1];
+      const deps = dependsOn.get(top.role) ?? [];
+      if (top.next < deps.length) {
+        const dep = deps[top.next];
+        top.next += 1;
+        if (visiting.has(dep)) return dep;
+        if (!done.has(dep)) {
+          visiting.add(dep);
+          path.push({ role: dep, next: 0 });
+        }
+      } else {
+        path.pop();
+        visiting.delete(top.role);
+        done.add(top.role);
+      }
+    }
+    return undefined;
   };
-  for (const role of roles) if (cyclic(role)) return invalid(`dependsOn makes a cycle through '${role}'`);
+  for (const role of roles) {
+    const at = cycleAt(role);
+    if (at !== undefined) return invalid(`dependsOn makes a cycle through '${at}'`);
+  }
 
   if (strategy === 'review-loop' && args.seats.length !== 2) return invalid('review-loop takes exactly 2 seats');
   if ((strategy === 'parallel' || strategy === 'debate') && args.seats.length < 2) return invalid(`${strategy} takes at least 2 seats`);
@@ -817,8 +844,8 @@ export function validateLaunchArgs(args: LaunchAgencyArgs): LaunchRefusal | unde
 /**
  * Step 4: the child budget's caps. Dollars: the least of `budgetUsd`, the parent's remaining dollars times
  * `budgetShare` and, at a root launch, what the turn's launch pool has left (Infinity when none of them caps). Tokens:
- * the least of `maxTokens`, the parent's remaining tokens times `budgetShare` (when it has a token cap) and the pool's
- * remaining tokens (`limits.maxLaunchTokens` when nothing else caps them).
+ * the least of `maxTokens`, the parent's remaining tokens times `budgetShare` (when it has a token cap), the pool's
+ * remaining tokens and `limits.maxLaunchTokens`.
  *
  * @param outputEstimateTokens - The output tokens the floor counts one call with: the largest a seat's call is counted
  *   with.
@@ -842,7 +869,8 @@ export function childBudgetCaps(
   if (args.maxTokens !== undefined) tokens = Math.min(tokens, args.maxTokens);
   if (parentLeft?.tokens !== undefined) tokens = Math.min(tokens, Math.floor(parentLeft.tokens * limits.budgetShare));
   if (poolLeft?.tokens !== undefined) tokens = Math.min(tokens, poolLeft.tokens);
-  if (!Number.isFinite(tokens)) tokens = limits.maxLaunchTokens;
+  // Never past the tree's own bound, whatever the arguments ask, and that bound when nothing else caps the tokens.
+  tokens = Math.min(tokens, limits.maxLaunchTokens);
   const floor = MIN_LAUNCH_TOKENS + outputEstimateTokens;
   if (tokens < floor) {
     return { code: 'budget_unavailable', reason: `the launch's token cap, ${tokens}, cannot cover one call (${floor}: ${MIN_LAUNCH_TOKENS} for the prompt and ${outputEstimateTokens} for the output)` };
