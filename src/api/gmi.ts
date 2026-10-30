@@ -720,10 +720,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
   }
 
   /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, and its gate. */
-  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'budget' | 'approvalGate'> => {
+  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'callerSignal' | 'budget' | 'approvalGate'> => {
     const budget = asSpendBudget(extra?.budget) ?? agentBudget;
     return {
-      ...(extra?.abortSignal ? { abortSignal: extra.abortSignal } : {}),
+      // The call's signal is its only stop, and the caller's own.
+      ...(extra?.abortSignal ? { abortSignal: extra.abortSignal, callerSignal: extra.abortSignal } : {}),
       ...(budget ? { budget } : {}),
       ...(extra?.__approvalGate ? { approvalGate: extra.__approvalGate } : {}),
     };
@@ -753,8 +754,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
       const options = overridesOf(extra);
-      // A signal that has already aborted stops the turn before its first request (streamGmiTurn), and the stream
-      // ends with an error part.
+      // A signal that has already aborted starts no turn (streamGmiTurn): the stream ends at once with an error part
+      // that carries the signal's reason.
       return streamGmiTurn(oneShotDeps('agent.stream', extra), prompt, { options, ...callTurn(extra) });
     },
 
@@ -893,6 +894,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               schemaName: sendOpts?.schemaName,
               blockLabel: sendOpts?.blockLabel,
               abortSignal: turnSignal(callerSignal),
+              ...(callerSignal ? { callerSignal } : {}),
               budget: turnBudget(sendOpts?.budget),
               ...seatTurnOf(sendOpts),
             });
@@ -908,6 +910,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
           streamGmiTurn(deps('agent.session.stream'), input, {
             abortSignal: turnSignal(streamOpts?.abortSignal),
+            ...(streamOpts?.abortSignal ? { callerSignal: streamOpts.abortSignal } : {}),
             budget: turnBudget(streamOpts?.budget),
             ...seatTurnOf(streamOpts),
           }),

@@ -38,6 +38,12 @@ import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 
+/** A signal's reason as an error, as streamText reports a stop: the reason itself when it is an Error. */
+function abortReasonError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error ? reason : new Error(String(reason));
+}
+
 /** Serialises turns: `acquire()` resolves with a release function once every earlier holder released. */
 export class TurnLock {
   private tail: Promise<void> = Promise.resolve();
@@ -64,6 +70,12 @@ export interface GmiTurnOptions {
   blockLabel?: string;
   /** Stops the turn: the model call in progress is aborted, and the turn ends with the abort error. */
   abortSignal?: AbortSignal;
+  /**
+   * The caller's own signal among the turn's stops (`abortSignal` also carries a session's close()): a stream whose
+   * caller's signal has already aborted starts no turn and ends at once with an error part that carries the signal's
+   * reason.
+   */
+  callerSignal?: AbortSignal;
   /**
    * The turn's spend budget: the completion gateway checks it before each model call of the turn (a refusal ends the
    * turn), the GMI's provider manager before each metaprompt and self-reflection call, and the turn records each
@@ -614,6 +626,14 @@ export async function sendGmiTurn(
  * consumer stops its generator: the model call in progress is aborted.
  */
 export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn: GmiTurnOptions): StreamTextResult {
+  // A stream whose caller's signal has already aborted starts no turn, as streamText ends before anything is set up:
+  // no lock, GMI, memory context, hook or budget check, and one error part that carries the signal's reason.
+  const callerSignal = turn.callerSignal;
+  if (callerSignal?.aborted) {
+    const reason = abortReasonError(callerSignal);
+    const refused: AsyncIterable<GMIOutputChunk> = { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(reason) }) };
+    return streamFromGmiTurn(refused);
+  }
   const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
   // The turn stops when the caller's signal aborts (a session's close()) or when
   // the consumer stops reading. The listener on the caller's signal, which
