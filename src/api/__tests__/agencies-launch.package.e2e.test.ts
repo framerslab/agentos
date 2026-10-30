@@ -5,7 +5,7 @@
  * boundary, so the real gmi(), agent(), agency(), launch engine, provider manager, completion gateway, GMI and tool
  * orchestrator run, with no network and no key. Each case reads only what a host can observe: the tools a model call is
  * offered, the requests the provider receives, a send's tool calls and their results, the context a host's own tool is
- * handed, a session's kept messages, budgets, warnings and construction errors.
+ * handed, a session's kept messages, the events an agent's callbacks receive, budgets, warnings and construction errors.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // The provider class alone is replaced: the package root reads the module's other exports (its default base URL).
