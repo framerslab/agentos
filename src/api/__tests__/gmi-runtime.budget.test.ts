@@ -189,6 +189,25 @@ describe('a spend budget on the GMI path', () => {
     expect(embedFn).not.toHaveBeenCalled();
   });
 
+  it("a session send keeps its turn's own failure when the caller's signal aborts after it", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [costlyTools([{ id: 't1', name: 'lookup', args: {} }], 2_950), reply.text('Unused.')] });
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 3_000, unpriced: 'allow' });
+    const lookup = { description: 'Look up.', parameters: { type: 'object', properties: {} }, execute: async () => 'found' };
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, budget, tools: { lookup } });
+    const stop = new AbortController();
+
+    // The budget refuses the step after the tool round, which ends the turn. The turn hands over its usage once that
+    // failure is recorded, before the send settles: the caller's signal aborts then.
+    const options = { abortSignal: stop.signal, __onUsage: () => stop.abort(new Error('stopped late')) };
+    await expect(a.session('s1').send('Go.', options as never)).rejects.toMatchObject({
+      code: GMIErrorCode.LLM_PROVIDER_ERROR,
+      message: expect.stringContaining('Token cap exceeded'),
+    });
+    expect(stop.signal.aborted).toBe(true);
+    expect(s.seen).toHaveLength(1);
+  });
+
   it("stream() and a session stream whose signal has already aborted start no turn: the one error part carries the signal's reason", async () => {
     const k = key();
     const s = script('openai', k, { replies: [reply.text('Unused.')] });
