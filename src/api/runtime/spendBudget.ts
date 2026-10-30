@@ -37,7 +37,8 @@ export interface SpendBudgetOptions {
   /**
    * What a call that would pass the budget does: `'throw'` (the default) refuses it with
    * {@link CostCapExceededError}; `'warn'` logs once per call and lets it run; a function is told
-   * what was about to be refused and the call is then refused as with `'throw'`.
+   * what was about to be refused and the call is then refused as with `'throw'`. A function that throws refuses the
+   * call with its own error, and the budgets that draw on this one hear of the refusal as of any other.
    */
   onLimitReached?: 'throw' | 'warn' | ((info: SpendLimitInfo) => void);
   /**
@@ -92,11 +93,29 @@ export function outputEstimateTokens(modelId: string, maxOutputTokens: number | 
 /** The info of the budget that refused, by the error it threw, so a child learns of an ancestor's refusal. */
 const refusalInfo = new WeakMap<object, SpendLimitInfo>();
 
+/** Names `info` as the refusal `error` carries, unless the error already names one: the first budget to refuse names it. */
+function markRefusal(error: unknown, info: SpendLimitInfo): void {
+  if (typeof error === 'object' && error !== null && !refusalInfo.has(error)) refusalInfo.set(error, info);
+}
+
+/**
+ * Runs `on` with `info`. A function that throws refuses the call with its own error, which then names `info` as its
+ * refusal, so the budgets below still hear of it.
+ */
+function runLimitFunction(on: (info: SpendLimitInfo) => void, info: SpendLimitInfo): void {
+  try {
+    on(info);
+  } catch (error) {
+    markRefusal(error, info);
+    throw error;
+  }
+}
+
 /** Runs `budget`'s own `onLimitReached` function, when it is one, with the info of the budget that refused with `error`. */
 function hearRefusal(budget: SpendBudget, error: unknown): void {
   const info = typeof error === 'object' && error !== null ? refusalInfo.get(error) : undefined;
   const on = budget.options.onLimitReached;
-  if (info && typeof on === 'function') on(info);
+  if (info && typeof on === 'function') runLimitFunction(on, info);
 }
 
 let budgets = 0;
@@ -323,12 +342,12 @@ export class SpendBudget {
       console.warn(`[agentos] spend budget ${info.budgetId}: ${info.what} would pass the budget (${info.reason}); running it`);
       return;
     }
-    if (typeof on === 'function') on(info);
+    if (typeof on === 'function') runLimitFunction(on, info);
     try {
       thrower();
     } catch (error) {
       // The first budget to refuse names the refusal; the budgets below it read it (assertCanSpend).
-      if (typeof error === 'object' && error !== null && !refusalInfo.has(error)) refusalInfo.set(error, info);
+      markRefusal(error, info);
       throw error;
     }
   }
