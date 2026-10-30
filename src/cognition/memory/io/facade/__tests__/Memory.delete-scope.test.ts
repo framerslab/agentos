@@ -250,6 +250,31 @@ describe('Memory.deleteTraces and restoreTrace', () => {
       [namespaced.id, 'team/ana', 'team/ana'],
     ]);
   });
+
+  it('restores under the encoded id a snapshot read before the re-file of a row whose scope id an older release wrote in its metadata alone', async () => {
+    const { memory, brain } = await facade();
+    // Such a release names the scope id in the metadata alone, and the column keeps its default.
+    await brain.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, strength, created_at, tags, emotions, metadata, deleted)
+       VALUES (?, 'older-1', 'episodic', 'user', 'Ana keeps bees.', 1, ?, '[]', '{}', ?, 0)`,
+      [brain.brainId, Date.now(), JSON.stringify({ scopeId: 'team/ana' })],
+    );
+    const readBefore = (await readTraceSnapshot(brain, brain.brainId, 'older-1'))!;
+    expect(readBefore).toMatchObject({ scopeId: '', scopeIdForm: 'plain' });
+    expect(await memory.ensureEncodedScopeIds()).toBe(1);
+    await brain.run(`UPDATE memory_traces SET content = 'changed' WHERE brain_id = ? AND id = 'older-1'`, [brain.brainId]);
+
+    await memory.restoreTrace('older-1', readBefore);
+
+    const row = await brain.get<{ scope_id: string; metadata: string }>(
+      `SELECT scope_id, metadata FROM memory_traces WHERE brain_id = ? AND id = 'older-1'`,
+      [brain.brainId],
+    );
+    expect([row?.scope_id, JSON.parse(row!.metadata).scopeId]).toEqual(['team%2Fana', 'team%2Fana']);
+    // User ana of namespace team owns none of it: a delete of her traces takes nothing.
+    expect(await memory.deleteScope('user', 'team/ana')).toEqual({ deleted: 0 });
+    expect(await contents(brain)).toEqual(['Ana keeps bees.']);
+  });
 });
 
 describe('Memory.restoreTrace on Postgres', () => {
