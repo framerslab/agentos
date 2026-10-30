@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 // The fallback hop's provider, stubbed as gmi-runtime.fallback.test.ts stubs it.
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
+import { z } from 'zod';
 import { gmi } from '../gmi';
 import { agent } from '../agent';
 import { SpendBudget, type SpendLimitInfo } from '../runtime/spendBudget';
@@ -38,6 +39,23 @@ describe('a spend budget on the GMI path', () => {
     // 2,950 counted: the next step's estimate (its prompt and its 100 output tokens) passes 3,000.
     await expect(session.send('Second.')).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringContaining('Token cap exceeded') });
     expect(s.seen).toHaveLength(1);
+  });
+
+  it('a structured send is estimated without the tool definitions its requests leave out', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('{"a":"x"}')] });
+    // About 40,000 characters of tool definitions (about 10,000 tokens), in a parameter's description.
+    const lookup = { description: 'Look up.', parameters: { type: 'object', properties: { q: { type: 'string', description: 'x'.repeat(40_000) } } }, execute: async () => 'found' };
+    // The prompt and the 4,096-token output default fit 12,000 tokens; with the tool definitions they would not.
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 12_000, unpriced: 'allow' });
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Extract.', budget, tools: { lookup } });
+
+    const result = await a.session('s1').send('Extract.', { responseSchema: z.object({ a: z.string() }) });
+    expect(result.object).toEqual({ a: 'x' });
+    // The request went without the tools, and its prompt is small.
+    expect(s.seen).toHaveLength(1);
+    expect(s.seen[0].options.tools).toBeUndefined();
+    expect(JSON.stringify(s.seen[0].messages).length).toBeLessThan(10_000);
   });
 
   it('a fallback hop is checked with the output cap it sends', async () => {
