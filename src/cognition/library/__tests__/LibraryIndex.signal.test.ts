@@ -111,4 +111,19 @@ describe('LibraryIndex.search with a signal', () => {
     expect(query).toHaveBeenCalledTimes(1);
     expect(lexicalSearch).not.toHaveBeenCalled();
   });
+
+  it('keeps the search\'s own signal on every narrowing, whatever a narrowing holds at run time', async () => {
+    const controller = new AbortController();
+    const query = vi.fn(async () => {
+      controller.abort(new Error('a newer question'));
+      return { documents: [] };
+    });
+    const lexicalSearch = vi.fn(async () => ({ documents: [] }));
+    const index = new LibraryIndex({ store: { query, lexicalSearch } as unknown as IVectorStore, collection: 'c', embed: recordingEmbed() });
+    // A narrowing built from another search's options carries that search's signal, which is never aborted here.
+    const narrowing = { kinds: ['session'], signal: new AbortController().signal };
+    await expect(index.search({ text: 'budget', scope: SCOPE, mode: 'hybrid', anyOf: [narrowing, { tags: ['q3'] }], signal: controller.signal })).rejects.toThrow('a newer question');
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(lexicalSearch).not.toHaveBeenCalled();
+  });
 });
