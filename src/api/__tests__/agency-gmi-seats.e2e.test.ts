@@ -169,7 +169,7 @@ describe('agency() seats served by GMIs', () => {
   it('a persistent member in a seat recalls nothing of its caller and files nothing under the caller', async () => {
     const k = key();
     const emb = key();
-    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('I cannot say.'), reply.text('I recall the locker.')] });
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('I cannot say.'), reply.text('I recall the locker.'), reply.text('The vault word.')] });
     script('openai', emb, { replies: [] });
     vi.stubEnv('OPENAI_API_KEY', emb);
     const member = gmi({
@@ -189,6 +189,12 @@ describe('agency() seats served by GMIs', () => {
     const recalled = JSON.stringify(s.seen[2].messages);
     expect(recalled).toContain('CANARY-ONE-7731');
     expect(recalled).not.toContain('CANARY-TWO-4410');
+    // The seat recalls its own words: its turn assembles memory under its own scope, and the recalled text leads its user
+    // message, apart from the history its session keeps.
+    await seat.generate('Which vault word did I give you?');
+    const seatRecall = lastUserText(s.seen[3]);
+    expect(seatRecall.startsWith('Context:')).toBe(true);
+    expect(seatRecall).toContain('CANARY-TWO-4410');
 
     // A memory tool never runs in a seat.
     expect(() => sessionSeat(member, { tools: ['memory_add'] })).toThrow(TypeError);
@@ -202,7 +208,8 @@ describe('agency() seats served by GMIs', () => {
     const withProvider = gmi({ provider: 'openai', model: 'stub-model', apiKey: k2, instructions: 'Help.', memoryProvider: { getContext, observe } });
     await buildSessionSeat(withProvider, { form: 'persistent', role: 'helper', userId: 'u1' }).generate('The word is CANARY-THREE-9020.');
     await withProvider.session('own', { userId: 'u1' }).send('Own words.');
-    // The provider is wired: the member's own turn reaches it.
+    // The provider is wired: the member's own turn reaches it, for its context and to observe it.
+    expect(getContext).toHaveBeenCalledWith('Own words.', expect.objectContaining({ tokenBudget: expect.any(Number) }));
     await vi.waitFor(() => expect(observe).toHaveBeenCalledWith('user', 'Own words.'));
     expect(getContext.mock.calls.some(([text]) => text.includes('CANARY-THREE'))).toBe(false);
     expect(observe.mock.calls.some(([, text]) => text.includes('CANARY-THREE'))).toBe(false);
