@@ -2202,6 +2202,66 @@ describe('AgentOS tool-result continuations', () => {
       expect(await rt.pending()).toBeNull();
     });
 
+    it.each([
+      ['on the stream', 'stream'],
+      ['resumed from the saved pause', 'resume'],
+    ] as const)(
+      'a continuation %s keeps the calls the GMI ran itself in the paused turn when a turn of another conversation ran on the session before it',
+      async (_label, path) => {
+        const lookup = vi.fn(async () => ({ success: true, output: { notes: ['Standup moved to 10:00.'] } }));
+        const rt = await sharedSessionRuntime(
+          {
+            tools: new Map([
+              [
+                'lookup_notes',
+                {
+                  description: 'Search the notes of the user.',
+                  inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+                  execute: lookup,
+                },
+              ],
+            ]),
+          },
+          [{ text: TRAVEL_REPLY }, { toolCalls: [LOOKUP_CALL] }, { text: 'I will read the notes file first.' }, { text: NOTES_REPLY }],
+        );
+        // the travel conversation's turn runs on the session's GMI first; then the notes turn runs lookup_notes itself
+        // and stops for READ_CALL
+        const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION);
+        expect((travel.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TRAVEL_REPLY);
+        const { request, saved } = await rt.pauseNotesTurn();
+        expect(lookup).toHaveBeenCalledTimes(1);
+
+        const continuation = await collect(
+          path === 'stream'
+            ? rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true)
+            : rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT]),
+        );
+
+        const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+        expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+        expect(last.finalResponseText).toBe(NOTES_REPLY);
+        // the model read the paused turn as the GMI ran it: lookup_notes's call and result, then READ_CALL's result once
+        const prompt = rt.promptCalls[3] ?? [];
+        expect(userMessagesOf(prompt)).toEqual([NOTES_QUESTION]);
+        expect(
+          prompt.some((m) => m.role === 'assistant' && m.tool_calls?.some((call) => call.id === LOOKUP_CALL.id)),
+        ).toBe(true);
+        expect(String(prompt.find((m) => m.role === 'tool' && m.tool_call_id === LOOKUP_CALL.id)?.content)).toContain(
+          'Standup moved to 10:00.',
+        );
+        expect(prompt.filter((m) => m.role === 'tool' && m.tool_call_id === READ_CALL.id).map((m) => m.content)).toEqual([
+          READ_RESULT.toolOutput,
+        ]);
+        // and nothing of the travel conversation's turn; every call has its result and every result its call
+        expect(contentsOf(prompt)).not.toContain(TRAVEL_REPLY);
+        expect(unansweredToolCallIds(prompt)).toEqual([]);
+        expect(unrequestedToolResultIds(prompt)).toEqual([]);
+        expect(last.ragSources).toEqual([NOTES_SOURCE]);
+        expect(lookup).toHaveBeenCalledTimes(1);
+        expect(await rt.pending()).toBeNull();
+      },
+    );
+
     it("a continuation on the stream that comes while the manager still retires the GMI it paused on completes on a live GMI for the pause's persona", async () => {
       const rt = await sharedSessionRuntime({}, [{ text: 'I will read the notes file first.' }, { text: NOTES_REPLY }]);
       const { request } = await rt.pauseNotesTurn();
