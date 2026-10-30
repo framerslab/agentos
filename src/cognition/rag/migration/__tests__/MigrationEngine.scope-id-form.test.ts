@@ -3,8 +3,10 @@
  * The scope-id form handshake of a migration between two SQLite Brain files: a plain source holding a reserved id
  * into a re-filed target of the same brain id is refused before any table is copied, naming the record; a plain
  * source with no reserved id is copied and the target keeps its record; and a source from before `scope_id`
- * existed is copied into a target table that has the column with the column filled from each row's metadata. Where
- * AGENTOS_TEST_POSTGRES_URL is set, the same refusal and the same fill into a Postgres Brain.
+ * existed is copied into a target table that has the column with the column filled from each row's metadata. A
+ * persona id is read part by part, so the `::` between its user id and its persona id is no reserved character, and a
+ * target that holds a knowledge-graph copy keeps its record. Where AGENTOS_TEST_POSTGRES_URL is set, the same refusal
+ * and the same fill into a Postgres Brain.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -14,6 +16,7 @@ import Database from 'better-sqlite3';
 import { MigrationEngine } from '../MigrationEngine.js';
 import { Brain } from '../../../memory/retrieval/store/Brain.js';
 import { refileBrainScopeIds } from '../../../memory/retrieval/store/scopeIdForm.js';
+import { SqlKnowledgeGraph } from '../../../memory/retrieval/store/SqlKnowledgeGraph.js';
 
 const dirs: string[] = [];
 const cleanups: Array<() => Promise<void>> = [];
@@ -102,6 +105,50 @@ describe('MigrationEngine scope-id form handshake', () => {
 
     expect(result.errors).toEqual([]);
     expect(rowsOf(to)).toEqual({ traces: [{ id: 't-a', scope_id: 'ana' }, { id: 't-t', scope_id: 'bo' }], record: 'encoded' });
+  });
+
+  it('copies a plain source whose persona ids hold no reserved character into a re-filed target', async () => {
+    const from = tempPath('source.sqlite');
+    const to = tempPath('target.sqlite');
+    // User `ana`'s persona `tutor`: the `::` between the two ids belongs to neither.
+    await brainFile(from, [['t-p', 'persona', 'ana::tutor']], false);
+    await brainFile(to, [['t-t', 'user', 'bo']], true);
+
+    const result = await MigrationEngine.migrate({ from: { type: 'sqlite', path: from }, to: { type: 'sqlite', path: to } });
+
+    expect(result.errors).toEqual([]);
+    expect(rowsOf(to)).toEqual({
+      traces: [{ id: 't-p', scope_id: 'ana::tutor' }, { id: 't-t', scope_id: 'bo' }],
+      record: 'encoded',
+    });
+  });
+
+  it('keeps the record of a re-filed target that holds no trace, only a knowledge-graph copy', async () => {
+    const from = tempPath('source.sqlite');
+    const to = tempPath('target.sqlite');
+    await brainFile(from, [['t-a', 'user', 'ana']], false);
+    await brainFile(to, [], true);
+    // The copy of a trace that is gone, filed under the encoded id of the plain user `team/ana`.
+    const target = await Brain.openSqlite(to, { brainId: 'b' });
+    try {
+      await new SqlKnowledgeGraph(target).recordMemory({
+        type: 'conversation',
+        summary: 'the copy of a trace that is gone',
+        participants: ['team%2Fana'],
+        importance: 0.5,
+        entityIds: [],
+        occurredAt: new Date(1).toISOString(),
+        outcome: 'unknown',
+        context: { memoryTraceId: 't-gone', scope: 'user', scopeId: 'team%2Fana', type: 'episodic' },
+      });
+    } finally {
+      await target.close();
+    }
+
+    const result = await MigrationEngine.migrate({ from: { type: 'sqlite', path: from }, to: { type: 'sqlite', path: to } });
+
+    expect(result.errors).toEqual([]);
+    expect(rowsOf(to)).toEqual({ traces: [{ id: 't-a', scope_id: 'ana' }], record: 'encoded' });
   });
 
   it("fills scope_id from the metadata of a source row that has none, where the target's table has the column", async () => {

@@ -8,13 +8,19 @@
  * the open and the knowledge graph's copies with it, and leaves no trace or document under the plain id that another
  * store, opener or process held: once the record is written, the plain id `team/ana` names user `ana` of namespace
  * `team`. An import takes its source's form from the source's own record (a JSON export's `meta`, a SQLite file's
- * `brain_meta`): a plain source is encoded as it is written into a re-filed Brain, and a source with the record goes
- * into a plain Brain only when that Brain holds no plain id the record would read as another.
+ * `brain_meta`, the mark an encoded Brain's Markdown export puts on each note): a plain source (a CSV or Markdown file
+ * included) is encoded as it is written into a re-filed Brain, a trace's knowledge-graph copy with it, and a source
+ * with the record goes into a plain Brain only when that Brain holds no plain id the record would read as another,
+ * in a trace or in a graph copy (a persona id read part by part, so the `::` between its two ids is not one). An import
+ * reads the target's form inside the transaction it writes in, so two imports into one Brain at once, and, on
+ * Postgres, an import and another process's re-file, follow one another. An export, and an import of a SQLite file,
+ * read a record and the rows it describes in one form, whenever a re-file commits.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { BetterSqliteAdapter, type StorageParameters } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
 import {
   encodePlainScopeId,
@@ -27,6 +33,11 @@ import { SqlKnowledgeGraph } from '../SqlKnowledgeGraph.js';
 import { JsonExporter } from '../../../io/JsonExporter.js';
 import { JsonImporter } from '../../../io/JsonImporter.js';
 import { SqliteImporter } from '../../../io/SqliteImporter.js';
+import { MarkdownExporter } from '../../../io/MarkdownExporter.js';
+import { MarkdownImporter } from '../../../io/MarkdownImporter.js';
+import { CsvImporter } from '../../../io/CsvImporter.js';
+import type { ImportResult } from '../../../io/facade/types.js';
+import { readFrontMatter } from '../../../../../core/utils/frontMatter.js';
 import { CognitiveMemoryManager } from '../../../CognitiveMemoryManager.js';
 import { KnowledgeGraph } from '../../graph/knowledge/KnowledgeGraph.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
@@ -539,17 +550,17 @@ describe("a manager's re-file", () => {
   });
 });
 
+const scopeIdsOf = async (brain: Brain) =>
+  (await brain.all<{ scope: string; scope_id: string }>('SELECT scope, scope_id FROM memory_traces WHERE deleted = 0 ORDER BY scope, scope_id'))
+    .map((row) => `${row.scope}:${row.scope_id}`);
+
+async function encodedBrain(filePath: string, brainId: string): Promise<Brain> {
+  const brain = await brainAt(filePath, brainId);
+  await refileBrainScopeIds(brain);
+  return brain;
+}
+
 describe('an import takes its source form from its record', () => {
-  const scopeIdsOf = async (brain: Brain) =>
-    (await brain.all<{ scope: string; scope_id: string }>('SELECT scope, scope_id FROM memory_traces WHERE deleted = 0 ORDER BY scope, scope_id'))
-      .map((row) => `${row.scope}:${row.scope_id}`);
-
-  async function encodedBrain(filePath: string, brainId: string): Promise<Brain> {
-    const brain = await brainAt(filePath, brainId);
-    await refileBrainScopeIds(brain);
-    return brain;
-  }
-
   it('JSON: an export of an encoded Brain is taken into a fresh Brain with its record', async () => {
     const source = await encodedBrain(tempFile(), 'src');
     await plainRow(source, 't-a', 'user', 'A/42');
@@ -619,5 +630,361 @@ describe('an import takes its source form from its record', () => {
     await plainRow(plainTarget, 't-b', 'user', 'team/bo');
     await expect(plainTarget.importFromSqlite(encodedPath)).rejects.toThrow(/scope_id_form/);
     expect(await scopeIdsOf(plainTarget)).toEqual(['user:team/bo']);
+  });
+});
+
+function tempDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scope-id-form-notes-'));
+  dirs.push(dir);
+  return dir;
+}
+
+/** The scope ids the brain's rows name in their metadata, sorted. */
+const metadataScopeIdsOf = async (brain: Brain) =>
+  (await brain.all<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ?', [brain.brainId]))
+    .map((row) => JSON.parse(row.metadata).scopeId as string)
+    .sort();
+
+/** Records a trace's episodic copy into the brain's knowledge graph, as a store with an SQL graph does. */
+async function recordCopy(brain: Brain, traceId: string, scopeId: string): Promise<void> {
+  const graph = new SqlKnowledgeGraph(brain);
+  await graph.initialize();
+  await graph.recordMemory({
+    type: 'conversation',
+    summary: `content of ${traceId}`,
+    participants: [scopeId],
+    importance: 0.5,
+    entityIds: [],
+    occurredAt: new Date(1).toISOString(),
+    outcome: 'unknown',
+    context: { memoryTraceId: traceId, scope: 'user', scopeId, type: 'episodic' },
+  });
+}
+
+describe("every import keeps a Brain's form", () => {
+  it('Markdown: a plain note is encoded as it is written into a re-filed Brain', async () => {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, 'ana.md'), '---\nid: n-ana\nscope: user\nscopeId: team/ana\n---\nAna keeps bees.\n');
+    fs.writeFileSync(path.join(dir, 'tutor.md'), '---\nid: n-tutor\nscope: persona\nscopeId: "team/ana::tutor"\n---\nThe tutor knows.\n');
+    const target = await encodedBrain(tempFile(), 'dst');
+
+    const result = await new MarkdownImporter(target).import(dir);
+
+    expect(result.errors).toEqual([]);
+    expect(await scopeIdsOf(target)).toEqual(['persona:team%2Fana::tutor', 'user:team%2Fana']);
+    expect(await metadataScopeIdsOf(target)).toEqual(['team%2Fana', 'team%2Fana::tutor']);
+  });
+
+  it('CSV: a plain row is encoded as it is written into a re-filed Brain', async () => {
+    const target = await encodedBrain(tempFile(), 'dst');
+    const csv = 'content,scope,scope_id,metadata\n"Ana keeps bees.",user,team/ana,\n"Bo hikes.",user,,"{""scopeId"":""team/bo""}"\n';
+
+    const result = await new CsvImporter(target).importFromString(csv);
+
+    expect(result.errors).toEqual([]);
+    expect(await scopeIdsOf(target)).toEqual(['user:team%2Fana', 'user:team%2Fbo']);
+    expect(await metadataScopeIdsOf(target)).toEqual(['team%2Fana', 'team%2Fbo']);
+  });
+
+  it("Markdown: an encoded Brain's export marks its notes, which come back in as they were written", async () => {
+    const source = await encodedBrain(tempFile(), 'src');
+    // A namespaced id, and a plain id in the encoded form.
+    await plainRow(source, 't-ns', 'user', 'A/42');
+    await plainRow(source, 't-plain', 'user', 'team%2Fana');
+    const dir = tempDir();
+    await new MarkdownExporter(source).export(dir);
+
+    // Into the Brain it came from it adds nothing.
+    expect((await new MarkdownImporter(source).import(dir)).imported).toBe(0);
+    // Into a re-filed Brain it comes in as it was written.
+    const encoded = await encodedBrain(tempFile(), 'enc');
+    expect((await new MarkdownImporter(encoded).import(dir)).errors).toEqual([]);
+    expect(await scopeIdsOf(encoded)).toEqual(['user:A/42', 'user:team%2Fana']);
+    // Into a fresh Brain it comes in as it was written, with the record.
+    const fresh = await brainAt(tempFile(), 'fresh');
+    expect((await new MarkdownImporter(fresh).import(dir)).errors).toEqual([]);
+    expect(await scopeIdsOf(fresh)).toEqual(['user:A/42', 'user:team%2Fana']);
+    expect(await fresh.getMeta(SCOPE_ID_FORM_KEY)).toBe('encoded');
+    // Into a plain Brain holding a reserved id it is refused, naming the record.
+    const plain = await brainAt(tempFile(), 'plain');
+    await plainRow(plain, 't-b', 'user', 'team/bo');
+    const refused = await new MarkdownImporter(plain).import(dir);
+    expect(refused.imported).toBe(0);
+    expect(refused.errors.join('\n')).toMatch(/scope_id_form/);
+    expect(await scopeIdsOf(plain)).toEqual(['user:team/bo']);
+    expect(await plain.getMeta(SCOPE_ID_FORM_KEY)).toBeUndefined();
+  });
+
+  it("JSON, a SQLite file and Brain.importFromSqlite encode a trace's knowledge-graph copy with the trace", async () => {
+    const sourcePath = tempFile();
+    const source = await brainAt(sourcePath, 'src');
+    await plainRow(source, 't-a', 'user', 'team/ana');
+    await recordCopy(source, 't-a', 'team/ana');
+    const exported = await new JsonExporter(source).exportToString();
+    await closers.pop()!();
+    const copiesOf = async (brain: Brain) =>
+      (await brain.all<{ properties: string }>(`SELECT properties FROM knowledge_nodes WHERE brain_id = ? AND type = 'memory'`, [brain.brainId]))
+        .map((row) => {
+          const stored = JSON.parse(row.properties);
+          return [stored._context.scopeId, stored._participants];
+        });
+    const imports: Array<[string, (target: Brain) => Promise<unknown>]> = [
+      ['JSON', (target) => new JsonImporter(target).importFromString(exported)],
+      ['SQLite file', (target) => new SqliteImporter(target).import(sourcePath)],
+      ['Brain.importFromSqlite', (target) => target.importFromSqlite(sourcePath)],
+    ];
+
+    for (const [name, importInto] of imports) {
+      const target = await encodedBrain(tempFile(), 'dst');
+      await importInto(target);
+
+      expect({ name, copies: await copiesOf(target) }).toEqual({ name, copies: [['team%2Fana', ['team%2Fana']]] });
+      const graph = new SqlKnowledgeGraph(target);
+      await graph.initialize();
+      // User `ana` of namespace `team` holds none of it; the plain user's encoded id holds it.
+      expect({ name, deleted: await graph.deleteMemories({ scopes: [{ scope: 'user', scopeId: 'team/ana' }] }) }).toEqual({ name, deleted: 0 });
+      expect({ name, deleted: await graph.deleteMemories({ scopes: [{ scope: 'user', scopeId: 'team%2Fana' }] }) }).toEqual({ name, deleted: 1 });
+    }
+  });
+
+  it('refuses an encoded export into a plain Brain whose reserved id only a graph copy holds', async () => {
+    const source = await encodedBrain(tempFile(), 'src');
+    await plainRow(source, 't-a', 'user', 'A/42');
+    const target = await brainAt(tempFile(), 'dst');
+    // The copy of a trace a release before keyed copies deleted: the brain holds no trace under `team/bo`.
+    await recordCopy(target, 't-gone', 'team/bo');
+
+    const result = await new JsonImporter(target).importFromString(await new JsonExporter(source).exportToString());
+
+    expect(result.imported).toBe(0);
+    expect(result.errors.join('\n')).toMatch(/scope_id_form/);
+    expect(await target.getMeta(SCOPE_ID_FORM_KEY)).toBeUndefined();
+  });
+
+  it('refuses an encoded export into a plain Brain whose reserved id a trace with the id "" holds', async () => {
+    const source = await encodedBrain(tempFile(), 'src');
+    await plainRow(source, 't-a', 'user', 'A/42');
+    const target = await brainAt(tempFile(), 'dst');
+    await plainRow(target, '', 'user', 'team/bo');
+
+    const result = await new JsonImporter(target).importFromString(await new JsonExporter(source).exportToString());
+
+    expect(result.imported).toBe(0);
+    expect(result.errors.join('\n')).toMatch(/scope_id_form/);
+    expect(await target.getMeta(SCOPE_ID_FORM_KEY)).toBeUndefined();
+  });
+
+  it('two imports into one Brain at once: the second reads the record the first wrote', async () => {
+    const encodedSource = await encodedBrain(tempFile(), 'src');
+    await plainRow(encodedSource, 't-a', 'user', 'A/42');
+    const plainSource = await brainAt(tempFile(), 'src2');
+    await plainRow(plainSource, 't-b', 'user', 'team/bo');
+    const encodedExport = await new JsonExporter(encodedSource).exportToString();
+    const plainExport = await new JsonExporter(plainSource).exportToString();
+    const target = await brainAt(tempFile(), 'dst');
+
+    const results = await Promise.all([
+      new JsonImporter(target).importFromString(encodedExport),
+      new JsonImporter(target).importFromString(plainExport),
+    ]);
+
+    expect(results.map((result) => result.errors)).toEqual([[], []]);
+    expect(await target.getMeta(SCOPE_ID_FORM_KEY)).toBe('encoded');
+    expect(await scopeIdsOf(target)).toEqual(['user:A/42', 'user:team%2Fbo']);
+  });
+});
+
+describe('an encoded export into a plain Brain', () => {
+  it('goes in, with its record, when the Brain holds persona ids whose parts hold no reserved character', async () => {
+    const source = await encodedBrain(tempFile(), 'src');
+    await plainRow(source, 't-a', 'user', 'A/42');
+    const target = await brainAt(tempFile(), 'dst');
+    // User `ana`'s persona `tutor`: the `::` between the two ids belongs to neither.
+    await plainRow(target, 't-p', 'persona', 'ana::tutor');
+
+    const result = await new JsonImporter(target).importFromString(await new JsonExporter(source).exportToString());
+
+    expect(result.errors).toEqual([]);
+    expect(await scopeIdsOf(target)).toEqual(['persona:ana::tutor', 'user:A/42']);
+    expect(await target.getMeta(SCOPE_ID_FORM_KEY)).toBe('encoded');
+  });
+});
+
+type ReadAll = Brain['all'];
+
+/**
+ * Re-files the Brain once, as another opener of it would, around the first read through `brain.all` whose statement
+ * `matches`: before that read runs, or once it has returned.
+ *
+ * @returns Whether the re-file ran, and a function that removes the hook.
+ */
+function refileAroundRead(
+  brain: Brain,
+  matches: (sql: string) => boolean,
+  when: 'before' | 'after',
+): { refiled: () => boolean; restore: () => void } {
+  const all = brain.all.bind(brain);
+  let refiled = false;
+  const spy = vi.spyOn(brain, 'all').mockImplementation((async (sql: string, params?: Parameters<ReadAll>[1]) => {
+    const now = !refiled && matches(sql);
+    if (now) refiled = true;
+    if (now && when === 'before') await refileBrainScopeIds(brain);
+    const rows = await all(sql, params);
+    if (now && when === 'after') await refileBrainScopeIds(brain);
+    return rows;
+  }) as ReadAll);
+  return { refiled: () => refiled, restore: () => spy.mockRestore() };
+}
+
+/** Runs `run`, then removes the hook, whether `run` settles or throws. */
+async function hooked<T>(hook: { restore: () => void }, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } finally {
+    hook.restore();
+  }
+}
+
+describe('an export or an import that a re-file overtakes reads one form', () => {
+  for (const when of ['before', 'after'] as const) {
+    it(`JSON export: the record and the traces agree, when the re-file commits ${when} the traces are read`, async () => {
+      const source = await brainAt(tempFile(), 'src');
+      await plainRow(source, 't-a', 'user', 'team/ana');
+      const hook = refileAroundRead(source, (sql) => sql.includes('FROM memory_traces'), when);
+      const payload = JSON.parse(await hooked(hook, () => new JsonExporter(source).exportToString())) as {
+        meta: Record<string, string>;
+        traces: Array<{ scope_id: string }>;
+      };
+
+      expect(hook.refiled()).toBe(true);
+      // Either the Brain before the re-file or the Brain after it, never its record of one with its ids of the other.
+      const read = [payload.meta[SCOPE_ID_FORM_KEY] ?? 'plain', payload.traces.map((trace) => trace.scope_id)];
+      expect([['plain', ['team/ana']], ['encoded', ['team%2Fana']]]).toContainEqual(read);
+    });
+
+    it(`Markdown export: a note's mark and its id agree, when the re-file commits ${when} the traces are read`, async () => {
+      const source = await brainAt(tempFile(), 'src');
+      await plainRow(source, 't-a', 'user', 'team/ana');
+      const dir = tempDir();
+      const hook = refileAroundRead(source, (sql) => sql.includes('FROM memory_traces'), when);
+      await hooked(hook, () => new MarkdownExporter(source).export(dir));
+
+      expect(hook.refiled()).toBe(true);
+      const note = readFrontMatter(fs.readFileSync(path.join(dir, 'user', 'episodic', 't-a.md'), 'utf8'));
+      // A note an encoded Brain wrote is marked, and the import takes its id as it is written; an unmarked note's id
+      // is plain.
+      const read = [note.data.scopeIdForm ?? 'plain', note.data.scopeId];
+      expect([['plain', 'team/ana'], ['encoded', 'team%2Fana']]).toContainEqual(read);
+    });
+  }
+
+  /**
+   * Re-files `opener`'s Brain once, as another opener of the file would, before the first read through any
+   * better-sqlite3 adapter's `all` whose statement is `sql`: the importer's own connection to the file reads it so.
+   */
+  function refileBeforeFileRead(opener: Brain, sql: string): { refiled: () => boolean; restore: () => void } {
+    const all = BetterSqliteAdapter.prototype.all;
+    let refiled = false;
+    const spy = vi.spyOn(BetterSqliteAdapter.prototype, 'all').mockImplementation(async function (
+      this: BetterSqliteAdapter,
+      statement: string,
+      params?: StorageParameters,
+    ) {
+      if (!refiled && statement === sql) {
+        refiled = true;
+        await refileBrainScopeIds(opener);
+      }
+      return all.call(this, statement, params);
+    } as BetterSqliteAdapter['all']);
+    return { refiled: () => refiled, restore: () => spy.mockRestore() };
+  }
+
+  it('SQLite file: a source re-filed between the read of its record and the read of its traces', async () => {
+    const sourcePath = tempFile();
+    const opener = await brainAt(sourcePath, 'src');
+    await plainRow(opener, 't-a', 'user', 'team/ana');
+    const target = await encodedBrain(tempFile(), 'dst');
+    const hook = refileBeforeFileRead(opener, 'SELECT * FROM memory_traces WHERE brain_id = ?');
+    const result: ImportResult = await hooked(hook, () => new SqliteImporter(target).import(sourcePath));
+
+    expect(hook.refiled()).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(await scopeIdsOf(target)).toEqual(['user:team%2Fana']);
+  });
+
+  it('Brain.importFromSqlite: a source re-filed between the read of its record and the read of its traces', async () => {
+    const sourcePath = tempFile();
+    const opener = await brainAt(sourcePath, 'src');
+    await plainRow(opener, 't-a', 'user', 'team/ana');
+    const target = await encodedBrain(tempFile(), 'dst');
+    const hook = refileBeforeFileRead(opener, 'SELECT * FROM memory_traces');
+    await hooked(hook, () => target.importFromSqlite(sourcePath));
+
+    expect(hook.refiled()).toBe(true);
+    expect(await scopeIdsOf(target)).toEqual(['user:team%2Fana']);
+    expect(await target.getMeta(SCOPE_ID_FORM_KEY)).toBe('encoded');
+  });
+});
+
+describeIfPostgres('imports on Postgres', () => {
+  it('wait for the lock a re-file holds, and read the record it wrote', async () => {
+    const sourcePath = tempFile();
+    const plainSource = await brainAt(sourcePath, 'src');
+    await plainRow(plainSource, 't-b', 'user', 'team/bo');
+    const plainExport = await new JsonExporter(plainSource).exportToString();
+    await closers.pop()!();
+    const notes = tempDir();
+    fs.writeFileSync(path.join(notes, 'bo.md'), '---\nid: n-bo\nscope: user\nscopeId: team/bo\n---\nBo hikes.\n');
+    const csv = 'content,scope,scope_id\n"Bo hikes.",user,team/bo\n';
+    const imports: Array<[string, (target: Brain) => Promise<unknown>]> = [
+      ['JSON', (target) => new JsonImporter(target).importFromString(plainExport)],
+      ['CSV', (target) => new CsvImporter(target).importFromString(csv)],
+      ['Markdown', (target) => new MarkdownImporter(target).import(notes)],
+      ['SQLite file', (target) => new SqliteImporter(target).import(sourcePath)],
+      ['Brain.importFromSqlite', (target) => target.importFromSqlite(sourcePath)],
+    ];
+
+    for (const [name, importInto] of imports) {
+      const brainId = `test-import-form-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const target = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+      const refiler = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+      closers.push(async () => {
+        for (const table of ['memory_traces', 'knowledge_nodes', 'brain_meta']) {
+          await target.run(`DELETE FROM ${table} WHERE brain_id = ?`, [brainId]);
+        }
+        await refiler.close();
+        await target.close();
+      });
+      // Another process re-files the Brain: it holds the brain's lock, and writes the record before it commits.
+      let lockHeld!: () => void;
+      const held = new Promise<void>((resolve) => (lockHeld = resolve));
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      const refile = refiler.transaction(async (trx) => {
+        await trx.run('SELECT pg_advisory_xact_lock(hashtext($1))', [`agentos_brain_scope_id_form:${brainId}`]);
+        lockHeld();
+        await released;
+        await trx.run(
+          refiler.features.dialect.insertOrReplace('brain_meta', ['brain_id', 'key', 'value'], ['?', '?', '?'], 'brain_id, key'),
+          [brainId, SCOPE_ID_FORM_KEY, 'encoded'],
+        );
+      });
+      await held;
+
+      const importing = importInto(target);
+      // An import that waits for the lock is still waiting a second later; one that does not has finished by then.
+      await Promise.race([importing, new Promise((resolve) => setTimeout(resolve, 1_000))]);
+      release();
+      await refile;
+      await importing;
+
+      const ids = (
+        await target.all<{ scope: string; scope_id: string }>(
+          'SELECT scope, scope_id FROM memory_traces WHERE brain_id = ? AND deleted = 0 ORDER BY scope, scope_id',
+          [brainId],
+        )
+      ).map((row) => `${row.scope}:${row.scope_id}`);
+      expect({ name, ids }).toEqual({ name, ids: ['user:team%2Fbo'] });
+    }
   });
 });
