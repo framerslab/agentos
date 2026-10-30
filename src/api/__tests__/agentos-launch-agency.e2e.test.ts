@@ -75,6 +75,7 @@ import { AgentOS } from '../AgentOS';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import type { IRetrievalAugmentor } from '../../cognition/rag/IRetrievalAugmentor';
 import type { ITool, ToolExecutionContext } from '../../core/tools/ITool';
+import type { ILogger } from '../../core/logging/ILogger';
 
 let callIds = 0;
 /** A model step that calls tools, each `[name, args]`. */
@@ -134,15 +135,18 @@ function recordingAugmentor() {
   return { augmentor: augmentor as unknown as IRetrievalAugmentor, queries: () => [...queries], filed: () => documents.join('\n') };
 }
 
-async function boot(extra: Record<string, unknown> = {}): Promise<AgentOS> {
-  return AgentOS.create({
-    modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'test' } }] },
-    turnPlanning: { enabled: false },
-    personas: PERSONAS,
-    tools: { search: search() },
-    agencies: { launch: true },
-    ...extra,
-  } as any);
+async function boot(extra: Record<string, unknown> = {}, logger?: ILogger): Promise<AgentOS> {
+  return AgentOS.create(
+    {
+      modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'test' } }] },
+      turnPlanning: { enabled: false },
+      personas: PERSONAS,
+      tools: { search: search() },
+      agencies: { launch: true },
+      ...extra,
+    } as any,
+    logger,
+  );
 }
 async function send(os: AgentOS, input: Record<string, unknown>): Promise<void> {
   for await (const _chunk of os.processRequest({ textInput: 'Go.', userId: 'ana', ...input } as any)) {
@@ -289,5 +293,45 @@ describe('launch_agency on the full runtime', () => {
     await send(booted, { selectedPersonaId: 'lead', sessionId: 's-2' });
     expect(toolMessages(provider.seen[2].messages)[0]).toContain('"status":"completed"');
     expect(provider.seen).toHaveLength(3);
+  });
+
+  it("a failed seat's message reaches neither the result nor the parent's next request; the runtime's logger gets it under the seat's name, and a logger that throws fails no launch", async () => {
+    const canary = 'sk-CANARY-7272';
+    // The logger AgentOS.create takes: it records every warning, and throws on the launch's own, as a host's may.
+    const warnings: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const logger: ILogger = {
+      info: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+      warn: (message: string, meta?: Record<string, unknown>) => {
+        warnings.push({ message, meta });
+        if (message.startsWith('[AgentOS] launch_agency')) throw new Error('the logger broke');
+      },
+    };
+    booted = await boot({}, logger);
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Check the claim.', seats: [{ role: 'checker', personaId: 'checker' }] }]),
+      // The checker's request fails with a message that holds a credential, and with it the sequential team.
+      Object.assign(new Error(`upstream refused key ${canary}`), { name: 'ProviderError', code: 'E_UPSTREAM' }),
+      textStep('The team failed.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // The lead, the checker's failed request, the lead: the seat ran as its persona (the precondition).
+    expect(provider.seen).toHaveLength(3);
+    expect(systemTextOf(provider.seen[1].messages)).toContain('You check facts.');
+    // The launch failed, by the seat's error's name and code, and its result reached the lead as the tool's result.
+    const [launched] = toolMessages(provider.seen[2].messages);
+    expect(launched).toContain('"status":"failed"');
+    expect(launched).toContain(`"reason":"seat 'checker' failed: GMIError (GMI_PROCESSING_ERROR)"`);
+    expect(launched).toContain('"error":{"name":"GMIError","code":"GMI_PROCESSING_ERROR"}');
+    // No model call, the lead's next one included, carries the message.
+    expect(JSON.stringify(provider.seen)).not.toContain(canary);
+    expect(provider.whole.join('\n')).not.toContain(canary);
+    // The logger received the seat's original error under the seat's name, then the run's, by name and code; it threw
+    // on both, and the launch went on.
+    const launchWarnings = warnings.filter(({ message }) => message.startsWith('[AgentOS] launch_agency'));
+    expect(launchWarnings.map(({ message }) => message)).toEqual(['[AgentOS] launch_agency seat checker failed', '[AgentOS] launch_agency run failed']);
+    expect(launchWarnings[0].meta).toEqual({ error: expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) }) });
+    expect(launchWarnings[1].meta).toEqual({ error: expect.objectContaining({ name: 'GMIError', message: 'GMIError (GMI_PROCESSING_ERROR)' }) });
   });
 });
