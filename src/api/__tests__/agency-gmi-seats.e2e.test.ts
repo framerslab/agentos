@@ -152,12 +152,15 @@ describe('agency() seats served by GMIs', () => {
     expect(systemText(s.seen[0])).toContain('- tutor: You are the tutor. Explain clearly.');
 
     await team.close();
+    // The seat session's tally went with it; the agent's tally holds its usage, read before the member's own session
+    // adds any.
+    expect((await member.usage(seat.seatId)).totalTokens).toBe(0);
+    const seatTokens = seat.record().usage.totalTokens;
+    expect(seatTokens).toBeGreaterThan(0);
+    expect((await member.usage()).totalTokens).toBe(seatTokens);
     await expect(seat.generate('Again.')).rejects.toThrow('seat closed');
     // agency().close() closed the seat's session and left the member serving its own users.
     await expect(member.session('own').send('Hello?')).resolves.toMatchObject({ text: 'Hello again.' });
-    // The seat session's tally went with it; the agent's tally holds its usage.
-    expect((await member.usage(seat.seatId)).totalTokens).toBe(0);
-    expect((await member.usage()).totalTokens).toBeGreaterThan(0);
   });
 
   it('a persistent member in a seat recalls nothing of its caller and files nothing under the caller', async () => {
