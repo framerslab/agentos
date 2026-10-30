@@ -18,7 +18,9 @@ type GmiProviderManagerCalls = Pick<AIModelProviderManager, 'getProvider' | 'get
  * builds each prompt. Metaprompt and utility calls have no fallback of their own
  * in this increment: on a fallback hop a call that names the primary's provider
  * or model finds nothing, which the caller reports. A turn's budget, when it
- * has one, bounds these calls too (the constructor's `budgetOf`).
+ * has one, bounds these calls too (the constructor's `budgetOf`), and the
+ * budget of the turn that queued a metaprompt bounds that metaprompt's calls
+ * whenever they run ({@link GatewayProviderManager.forQueuedWork}).
  */
 export class GatewayProviderManager implements GmiProviderManagerCalls {
   private resolution: CompletionResolution | undefined;
@@ -30,15 +32,33 @@ export class GatewayProviderManager implements GmiProviderManagerCalls {
    * @param budgetOf - The spend budget of the turn the GMI is running, read at each call. With one, each provider
    *   this manager hands out checks it before every completion request and charges every answer (`gmi.metaprompt`),
    *   so a metaprompt or self-reflection call spends inside the turn's budget; without one, the hop's own providers.
+   * @param hops - The manager whose hop this one answers from: for a view {@link GatewayProviderManager.forQueuedWork}
+   *   makes, the manager that made it; unset, this manager's own.
    */
-  constructor(private readonly budgetOf: () => SpendBudget | undefined = () => undefined) {}
+  constructor(
+    private readonly budgetOf: () => SpendBudget | undefined = () => undefined,
+    private readonly hops?: GatewayProviderManager,
+  ) {}
 
-  /** Makes `resolution` the hop that answers every later call. */
+  /** Makes `resolution` the hop that answers every later call (of the views this manager made too). */
   public setResolution(resolution: CompletionResolution): void {
-    this.resolution = resolution;
+    if (this.hops) this.hops.setResolution(resolution);
+    else this.resolution = resolution;
+  }
+
+  /**
+   * This manager with the budget of the turn in progress bound to it: the manager a metaprompt batch or a
+   * self-reflection cycle queued now makes its calls through, so they spend inside the budget of the turn that queued
+   * them, whenever they run (a later turn may be in progress by then). It answers from this manager's hop as it is
+   * when each call is made.
+   */
+  public forQueuedWork(): AIModelProviderManager {
+    const budget = this.budgetOf();
+    return new GatewayProviderManager(() => budget, this.hops ?? this).asProviderManager();
   }
 
   private current(): CompletionResolution {
+    if (this.hops) return this.hops.current();
     if (!this.resolution) {
       throw new Error('GatewayProviderManager: no resolution yet. The GMI resolves a hop before it builds a prompt; call setResolution first.');
     }

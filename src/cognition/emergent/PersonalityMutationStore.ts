@@ -1,6 +1,6 @@
 /**
- * @fileoverview SQLite persistence for personality mutations with
- * Ebbinghaus-style strength decay.
+ * @fileoverview Persistence for personality mutations with Ebbinghaus-style
+ * strength decay, on SQLite or PostgreSQL.
  *
  * Mutations persist across sessions and gradually fade toward baseline
  * unless reinforced by repeated adaptation. The ConsolidationLoop calls
@@ -9,7 +9,9 @@
  * pruned automatically.
  *
  * Uses the same {@link IStorageAdapter} interface as EmergentToolRegistry,
- * keeping storage concerns decoupled from specific SQLite drivers.
+ * keeping storage concerns decoupled from a database driver: every statement
+ * the store issues runs on SQLite (3.24.0 or later) and on PostgreSQL, so the
+ * runtime's storage adapter can be either.
  *
  * @module @framers/agentos/emergent/PersonalityMutationStore
  */
@@ -105,15 +107,17 @@ export interface DecayResult {
 // ============================================================================
 
 /**
- * SQLite-backed persistence layer for personality mutations with decay.
+ * Persistence layer for personality mutations with decay, on SQLite or
+ * PostgreSQL through the storage adapter.
  *
  * Follows the same `ensureSchema()` pattern as {@link EmergentToolRegistry}:
  * a cached promise guards against concurrent DDL execution, and all DML
- * methods await schema readiness before proceeding.
+ * methods await schema readiness before proceeding. A failed schema step is
+ * not cached: the next call runs it again.
  *
  * @example
  * ```ts
- * const store = new PersonalityMutationStore(sqliteAdapter);
+ * const store = new PersonalityMutationStore(storageAdapter);
  *
  * // Record a mutation
  * const id = await store.record({
@@ -134,14 +138,22 @@ export interface DecayResult {
  * ```
  */
 export class PersonalityMutationStore {
-  /** The underlying SQLite storage adapter. */
+  /** The underlying storage adapter, on SQLite or PostgreSQL. */
   private readonly db: IStorageAdapter;
 
   /**
    * Cached schema initialization promise.
-   * Ensures DDL runs exactly once, even under concurrent access.
+   * Ensures DDL runs exactly once, even under concurrent access; cleared
+   * when it fails, so the next call runs the DDL again.
    */
   private schemaReady: Promise<void> | null = null;
+
+  /**
+   * Cached promise of the guard table's `owner_token` step
+   * ({@link addOwnerTokenColumn}), which {@link decayForAgent} alone awaits;
+   * cleared when it fails, so the next decay runs the step again.
+   */
+  private guardSchemaReady: Promise<void> | null = null;
 
   /**
    * Create a new PersonalityMutationStore.
@@ -162,20 +174,19 @@ export class PersonalityMutationStore {
    *
    * Creates the `personality_mutations` table and its agent/trait index, and
    * the `personality_decay_cycles` guard table of {@link decayForAgent}, if
-   * they don't already exist. The guard table's `applied_at` column holds the
-   * owner token of the call that applied a cycle. It keeps the BIGINT
-   * declaration earlier releases made, so no migration runs: SQLite stores
-   * text that does not read as a number as TEXT in such a column
-   * (https://www.sqlite.org/datatype3.html#type_affinity), and the rows an
-   * earlier release wrote hold a number there. Uses the adapter's `exec()`
-   * method when available (for multi-statement DDL), falling back to
-   * individual `run()` calls for adapters that don't support it.
+   * they don't already exist. `owner_token` holds the token of the call that
+   * applied a cycle and `applied_at` the time it did, in milliseconds; a
+   * guard table an earlier release made without `owner_token` gains it in
+   * {@link ensureGuardSchema}. Every statement runs on SQLite and on
+   * PostgreSQL. Uses the adapter's `exec()` method when available (for
+   * multi-statement DDL), falling back to individual `run()` calls for
+   * adapters that don't support it.
    *
    * @returns A promise that resolves when the schema is ready.
    */
   private async ensureSchema(): Promise<void> {
     if (!this.schemaReady) {
-      this.schemaReady = (async () => {
+      const ready = (async () => {
         const ddl = `
           CREATE TABLE IF NOT EXISTS personality_mutations (
             id TEXT PRIMARY KEY,
@@ -194,6 +205,7 @@ export class PersonalityMutationStore {
             agent_id TEXT NOT NULL,
             cycle_id TEXT NOT NULL,
             applied_at BIGINT NOT NULL,
+            owner_token TEXT,
             PRIMARY KEY (agent_id, cycle_id)
           );
         `;
@@ -207,8 +219,62 @@ export class PersonalityMutationStore {
           }
         }
       })();
+      this.schemaReady = ready;
+      // A failed attempt is not kept: every call after it would fail with it.
+      ready.catch(() => {
+        if (this.schemaReady === ready) this.schemaReady = null;
+      });
     }
     return this.schemaReady;
+  }
+
+  /**
+   * The guard table's `owner_token` step, run once by {@link decayForAgent}
+   * before its transaction. Recording and loading mutations never wait on
+   * it, so a failed `ALTER` fails that decay alone (adapt_personality logs a
+   * failed decay and records the change), and the next decay runs the step
+   * again.
+   *
+   * @returns A promise that resolves when the guard table has `owner_token`.
+   */
+  private async ensureGuardSchema(): Promise<void> {
+    if (!this.guardSchemaReady) {
+      const ready = this.addOwnerTokenColumn();
+      this.guardSchemaReady = ready;
+      ready.catch(() => {
+        if (this.guardSchemaReady === ready) this.guardSchemaReady = null;
+      });
+    }
+    return this.guardSchemaReady;
+  }
+
+  /** True when the guard table has the `owner_token` column. */
+  private async hasOwnerTokenColumn(): Promise<boolean> {
+    try {
+      await this.db.get('SELECT owner_token FROM personality_decay_cycles LIMIT 0');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Adds `owner_token` to a guard table an earlier release made without it.
+   * The column is read first and the ALTER runs only when it is missing: on
+   * PostgreSQL an ALTER TABLE takes an ACCESS EXCLUSIVE lock
+   * (https://www.postgresql.org/docs/current/sql-altertable.html), which
+   * waits behind every open reader of the table, and SQLite has no ADD
+   * COLUMN IF NOT EXISTS (https://www.sqlite.org/lang_altertable.html). When
+   * the ALTER fails, the column is read again: another process that opened
+   * the same database may have added it.
+   */
+  private async addOwnerTokenColumn(): Promise<void> {
+    if (await this.hasOwnerTokenColumn()) return;
+    try {
+      await this.db.run('ALTER TABLE personality_decay_cycles ADD COLUMN owner_token TEXT');
+    } catch (error) {
+      if (!(await this.hasOwnerTokenColumn())) throw error;
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -372,14 +438,18 @@ export class PersonalityMutationStore {
    * decays the remaining rows, pruning any whose post-decay strength is at
    * or below the threshold. Requires a transaction-capable adapter — the
    * decay unit must be all-or-nothing so a mid-cycle failure cannot
-   * double-decay on retry.
+   * double-decay on retry. Runs on SQLite (3.24.0 or later, for the
+   * guard's `ON CONFLICT` clause) and on PostgreSQL.
    *
    * Each call writes a fresh `randomUUID()` token into the guard row's
-   * `applied_at`, reads the row back, and decays only when the row holds its
-   * own token; every other call for that cycle returns `skipped`. A token
-   * belongs to one call, so two calls in one millisecond never both own a
-   * cycle. A guard row an earlier release wrote holds a millisecond stamp
-   * there, a number, which never equals a token, so its cycle stays applied.
+   * `owner_token` and the time into its `applied_at`, reads the token back,
+   * and decays only when the row holds its own token; every other call for
+   * that cycle returns `skipped`. A token belongs to one call, so two calls
+   * in one millisecond never both own a cycle. A guard row an earlier release
+   * wrote has no `owner_token`, so its cycle stays applied. Before its
+   * transaction the first call adds `owner_token` to a guard table an earlier
+   * release made without it; when that `ALTER` fails, the call fails and the
+   * next one runs it again.
    *
    * @param agentId - The agent whose mutations decay (other agents' rows
    *   are untouched — the class defect in `decayAll`).
@@ -404,26 +474,30 @@ export class PersonalityMutationStore {
         'PersonalityMutationStore.decayForAgent requires a transaction-capable storage adapter',
       );
     }
+    await this.ensureGuardSchema();
     return this.db.transaction(async (tx) => {
       // Conflict-safe guard INSERT FIRST (no check-then-insert window): a
-      // concurrent same-cycle caller's insert is ignored, and ownership is
+      // concurrent same-cycle caller's insert does nothing, and ownership is
       // decided by reading back whose token the guard row holds. The loser
       // returns the promised `skipped` no-op instead of a uniqueness error.
       // The token is a UUID, not a time: near 1.8e12 adjacent doubles are
       // 2^-12 apart, so `Date.now() + Math.random()` gives two calls in one
-      // millisecond the same number about 1 time in 4096.
+      // millisecond the same number about 1 time in 4096. `ON CONFLICT ...
+      // DO NOTHING` is the one form SQLite and PostgreSQL both run: SQLite's
+      // `INSERT OR IGNORE` is a syntax error on PostgreSQL.
       const token = randomUUID();
       await tx.run(
-        'INSERT OR IGNORE INTO personality_decay_cycles (agent_id, cycle_id, applied_at) VALUES (?, ?, ?)',
-        [agentId, cycleId, token],
+        `INSERT INTO personality_decay_cycles (agent_id, cycle_id, applied_at, owner_token)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (agent_id, cycle_id) DO NOTHING`,
+        [agentId, cycleId, Date.now(), token],
       );
-      // A token (a string), or the stamp (a number) of a row an earlier
-      // release wrote.
+      // A guard row an earlier release wrote has no owner_token (NULL).
       const guard = (await tx.get(
-        'SELECT applied_at FROM personality_decay_cycles WHERE agent_id = ? AND cycle_id = ?',
+        'SELECT owner_token FROM personality_decay_cycles WHERE agent_id = ? AND cycle_id = ?',
         [agentId, cycleId],
-      )) as { applied_at?: string | number } | null | undefined;
-      if (guard?.applied_at !== token) return { decayed: 0, pruned: 0, skipped: true };
+      )) as { owner_token?: string | null } | null | undefined;
+      if (guard?.owner_token !== token) return { decayed: 0, pruned: 0, skipped: true };
 
       const stale = (await tx.all(
         'SELECT id FROM personality_mutations WHERE agent_id = ? AND strength <= 0.1',
