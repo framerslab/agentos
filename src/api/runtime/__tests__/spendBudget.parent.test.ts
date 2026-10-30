@@ -84,6 +84,25 @@ describe('SpendBudget with a parent', () => {
     expect(seen).toEqual([`child:${root.id}`, `first:${capped.id}`]);
   });
 
+  it('names each refusal afresh when limit functions throw one shared error object', () => {
+    const STOP = new Error('stop');
+    const seen: string[] = [];
+    const throwStop = () => {
+      throw STOP;
+    };
+    const note = (info: SpendLimitInfo) => {
+      seen.push(`${info.budgetId}:${info.what}`);
+    };
+    const rootA = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100, onLimitReached: throwStop });
+    const rootB = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100, onLimitReached: throwStop });
+    const childA = new SpendBudget({ maxCostUSD: 1, parent: rootA, onLimitReached: note });
+    const childB = new SpendBudget({ maxCostUSD: 1, parent: rootB, onLimitReached: note });
+    expect(() => childA.assertCanSpend(0, 500, 'first')).toThrow(STOP);
+    // The same object, thrown by another budget in a later check, names that budget's refusal.
+    expect(() => childB.assertCanSpend(0, 500, 'second')).toThrow(STOP);
+    expect(seen).toEqual([`${rootA.id}:first`, `${rootB.id}:second`]);
+  });
+
   it("lets the child's own check decide when a parent only warns", () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const parent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10, onLimitReached: 'warn' });
