@@ -148,8 +148,9 @@ describe("MiniMax image API integration", () => {
   });
 
   it("generates with image-01 on the global root when MINIMAX_BASE_URL holds only whitespace", async () => {
-    // The image provider trims the base URL and, with nothing left, sends to
-    // MiniMax's global root; a value of whitespace alone names no endpoint.
+    // A value of whitespace alone is unset (model.ts, resolveBaseUrl), so the
+    // call is sent with no base URL and the image provider sends to MiniMax's
+    // global root, where the chat model cannot make images.
     vi.stubEnv("MINIMAX_BASE_URL", " \n");
     setDefaultProvider({
       provider: "minimax",
@@ -163,19 +164,70 @@ describe("MiniMax image API integration", () => {
     expect(JSON.parse(String(init?.body)).model).toBe("image-01");
   });
 
-  const emptyBaseUrls: Array<[string, { baseUrl?: string }, { baseUrl?: string }]> = [
-    ["the default's baseUrl", { baseUrl: "" }, {}],
-    ["the call's baseUrl", {}, { baseUrl: "" }],
+  // An empty or whitespace-only base URL on the default or on the call is
+  // unset (model.ts, resolveBaseUrl: the rule the model pool states as "empty
+  // counts as missing"), so MINIMAX_BASE_URL applies as it does for a call
+  // with no baseUrl, and with no variable the call goes to MiniMax's global
+  // root. The three cases below pin where the default's key goes and which
+  // model is sent for each place the variable can point.
+  const blankBaseUrls: Array<[string, { baseUrl?: string }, { baseUrl?: string }]> = [
+    ["the default's baseUrl is empty", { baseUrl: "" }, {}],
+    ["the call's baseUrl is empty", {}, { baseUrl: "" }],
+    ["the default's baseUrl is whitespace", { baseUrl: " \n" }, {}],
+    ["the call's baseUrl is whitespace", {}, { baseUrl: " \t" }],
   ];
 
-  it.each(emptyBaseUrls)(
-    "generates with image-01 on the global root when %s is empty and MINIMAX_BASE_URL names a custom endpoint",
+  it.each(blankBaseUrls)(
+    "keeps the default's model on the custom endpoint MINIMAX_BASE_URL names when %s",
     async (_label, defaultBaseUrl, callBaseUrl) => {
-      // An empty base URL from the default or the call is the one the image
-      // provider is given, so MINIMAX_BASE_URL is not read; the provider then
-      // sends to MiniMax's global root, where the chat model cannot make
-      // images. The gateway in the environment is not where the call goes.
+      // The blank is passed over, so the gateway in the environment is where
+      // the default's key goes, as it is for a call with no baseUrl; a custom
+      // endpoint may serve any model under any name, so the default's model
+      // stays.
       vi.stubEnv("MINIMAX_BASE_URL", "http://gateway.test/v1");
+      setDefaultProvider({
+        provider: "minimax",
+        model: "MiniMax-M3.1-Flash",
+        apiKey: "default-key",
+        ...defaultBaseUrl,
+      });
+      const result = await generateImage({ prompt: "A lighthouse", ...callBaseUrl });
+      expect(result.model).toBe("MiniMax-M3.1-Flash");
+      const [url, init] = vi.mocked(fetch).mock.calls[0];
+      expect(url).toBe("http://gateway.test/v1/image_generation");
+      expect(init?.headers).toMatchObject({ Authorization: "Bearer default-key" });
+      expect(JSON.parse(String(init?.body)).model).toBe("MiniMax-M3.1-Flash");
+    },
+  );
+
+  it.each(blankBaseUrls)(
+    "generates with image-01 on the China root MINIMAX_BASE_URL names when %s",
+    async (_label, defaultBaseUrl, callBaseUrl) => {
+      // The blank is passed over, so the China root in the environment is
+      // where the call goes; a root of MiniMax's own serves its own names, so
+      // the chat model is dropped for image-01 there.
+      vi.stubEnv("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1");
+      setDefaultProvider({
+        provider: "minimax",
+        model: "MiniMax-M3.1-Flash",
+        apiKey: "default-key",
+        ...defaultBaseUrl,
+      });
+      const result = await generateImage({ prompt: "A lighthouse", ...callBaseUrl });
+      expect(result.model).toBe("image-01");
+      const [url, init] = vi.mocked(fetch).mock.calls[0];
+      expect(url).toBe("https://api.minimaxi.com/v1/image_generation");
+      expect(init?.headers).toMatchObject({ Authorization: "Bearer default-key" });
+      expect(JSON.parse(String(init?.body)).model).toBe("image-01");
+    },
+  );
+
+  it.each(blankBaseUrls)(
+    "generates with image-01 on the global root when %s and MINIMAX_BASE_URL is unset",
+    async (_label, defaultBaseUrl, callBaseUrl) => {
+      // With every source blank, the call is sent with no base URL and the
+      // image provider sends to MiniMax's global root, where the chat model
+      // cannot make images.
       setDefaultProvider({
         provider: "minimax",
         model: "MiniMax-M3.1-Flash",
@@ -186,6 +238,7 @@ describe("MiniMax image API integration", () => {
       expect(result.model).toBe("image-01");
       const [url, init] = vi.mocked(fetch).mock.calls[0];
       expect(url).toBe("https://api.minimax.io/v1/image_generation");
+      expect(init?.headers).toMatchObject({ Authorization: "Bearer default-key" });
       expect(JSON.parse(String(init?.body)).model).toBe("image-01");
     },
   );

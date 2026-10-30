@@ -592,6 +592,7 @@ export interface QueryRouterConfig {
    * only when `OPENROUTER_API_KEY` is being used implicitly for an OpenAI
    * classifier or generator. Any other provider takes the endpoint
    * `generateText` resolves for it (`MINIMAX_BASE_URL`, or MiniMax's default).
+   * An empty or whitespace-only value counts as omitted.
    */
   baseUrl?: string;
 
@@ -620,7 +621,8 @@ export interface QueryRouterConfig {
    * An embedding provider other than OpenAI otherwise gets no URL from the
    * router and uses its own endpoint. If neither override is set and QueryRouter falls back to
    * `OPENROUTER_API_KEY`, it automatically uses the OpenRouter compatibility
-   * URL for embeddings as well.
+   * URL for embeddings as well. An empty or whitespace-only value counts as
+   * omitted, here and in an inherited `baseUrl`.
    */
   embeddingBaseUrl?: string;
 

@@ -104,7 +104,8 @@ export interface PerformOCROptions {
 
   /**
    * Base URL for the cloud provider, such as a proxy. It needs a named
-   * provider, as `apiKey` does.
+   * provider, as `apiKey` does. An empty or whitespace-only value is unset
+   * and needs none: the call runs as one with no `baseUrl` does.
    */
   baseUrl?: string;
 }
