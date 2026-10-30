@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import { agent, buildSystemPrompt, type AgentOptions } from '../agent';
 import { gmi } from '../gmi';
+import { buildSessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 import { renderPersonalitySection } from '../../cognition/substrate/personas/personalityPrompt';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -98,6 +99,18 @@ describe('with the learning flag on', () => {
     expect(manifest.turns).toEqual({ prepared: 4, bound: 1, none: { no_user_id: 2, placeholder_user: 1 } });
     expect(manifest.loops.trait_changes).toEqual({ live: false, detail: 'asked for; this release changes no trait' });
     expect(manifest.loops.self_improvement_tools).toEqual({ live: false, detail: 'gmi() registers no self-improvement tool' });
+  });
+
+  it("has no learner for a seat's session, though its user binds outside the seat, and counts its turns as a seat's", async () => {
+    quietManifest();
+    const k = key();
+    script('openai', k, { replies: [reply.text('Seat.'), reply.text('Own.')] });
+    const tutor = gmi(options(k, { learning: true }));
+    // A seat that runs as the user, as a launch's seat runs as the parent turn's.
+    await buildSessionSeat(tutor, { form: 'persistent', role: 'helper', userId: 'ana' }).generate('Hello.');
+    // The same user binds in a session of the member's own.
+    await tutor.session('s1', { userId: 'ana' }).send('Hello.');
+    expect((await tutor.learning!.manifest()).turns).toEqual({ prepared: 2, bound: 1, none: { workflow_seat: 1 } });
   });
 
   it('has no learner for an agent with neither a name nor learning.agentKey, and binds one that has the key', async () => {
