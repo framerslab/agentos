@@ -241,6 +241,24 @@ describe('a spend budget on the GMI path', () => {
     expect(s.aborts).toBe(2);
   });
 
+  it("stream() takes a call's budget in place of the agent's, and without one the agent's applies", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Answer.'), reply.text('Unused.')] });
+    const agentBudget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 50, unpriced: 'allow' });
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, budget: agentBudget });
+
+    const callBudget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
+    const answered = a.stream('Hi.', { budget: callBudget });
+    for await (const _part of answered.fullStream) void _part;
+    await expect(answered.text).resolves.toBe('Answer.');
+    expect([callBudget.tokensUsed(), agentBudget.tokensUsed()]).toEqual([15, 0]);
+
+    const parts: Array<{ type: string; error?: unknown }> = [];
+    for await (const part of a.stream('Hi.').fullStream) parts.push(part);
+    expect(parts.at(-1)).toMatchObject({ type: 'error', error: expect.objectContaining({ message: expect.stringContaining('Token cap exceeded') }) });
+    expect(s.seen).toHaveLength(1);
+  });
+
   it("a budget bounds a GMI's metaprompt calls, and the turn's reply stands", async () => {
     const k = key();
     // `whole` answers a metaprompt's unstreamed request, should one be sent.
