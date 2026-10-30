@@ -63,7 +63,10 @@ import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistr
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { lazyLogger } from './runtime/lazyLogger.js';
 import { isCallMask } from './runtime/pool/redact.js';
-import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('stream_text');
 
 /**
  * The `fallback` component's lines, to the logger the host's factory makes when
@@ -617,6 +620,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         }
       }
 
+      // A blank baseUrl counts here and changes nothing: resolveProvider drops it, so the record is the provider's own.
       const ownCredentials =
         providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
       // An agency seat resolves strictly: no provider-less default, no reroute.
@@ -1695,6 +1699,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // never reaches it), can keep the record of the key it sends
           // (providerHealthKey), which the call below reads before it sends;
           // a failure of another key skips none of them.
+          // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
           const legProvider = fallbackEntrySentAs(fb).provider;
           const legOnSharedCredentials =
             fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;

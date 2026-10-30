@@ -36,7 +36,10 @@
  */
 
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
-import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('cache_leak_detector');
 
 export interface CacheUsageSample {
   /** Resolved model id the request ran on. */

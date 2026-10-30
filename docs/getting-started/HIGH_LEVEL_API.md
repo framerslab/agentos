@@ -77,7 +77,7 @@ for the requested task automatically:
 | `stable-diffusion-local` | Local | —                          | `v1-5-pruned-emaonly`            | —                        | `STABLE_DIFFUSION_LOCAL_BASE_URL` |
 
 When neither `provider` nor `model` is given, AgentOS checks configured runtimes in order
-(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `MINIMAX_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
+(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `MINIMAX_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). An empty or whitespace-only `OLLAMA_BASE_URL` or `STABLE_DIFFUSION_LOCAL_BASE_URL` is unset, as the call reads it, so detection goes on to the next runtime. Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
 
 MiniMax text requests default to `MiniMax-M3.1-Flash`; the current catalog also includes
 `MiniMax-M3`. Both accept image input and tools. Explicit model IDs, including saved
@@ -100,9 +100,10 @@ are forwarded through the Chat Completions API. See the
 MiniMax image generation uses `image-01`, also when `setDefaultProvider()` names a MiniMax text
 model such as `MiniMax-M3.1-Flash`: on the global root and on either China root, an image call drops
 the chat model the default names and takes the provider's image model. A root counts as one in any
-letter case of its scheme and host, as fetch lowercases them. An empty `baseUrl` on the
-call or the default is the URL the call is sent with, ahead of `MINIMAX_BASE_URL`, so the call goes
-to the global root and takes `image-01` there too. MiniMax publishes no
+letter case of its scheme and host, as fetch lowercases them. An empty or whitespace-only `baseUrl`
+on the call or the default is unset, so `MINIMAX_BASE_URL` applies as it does for a call with no
+`baseUrl`: a MiniMax root there takes `image-01`, a custom endpoint there keeps the default's model,
+and with no variable the call goes to the global root and takes `image-01` there too. MiniMax publishes no
 embedding model, so the `minimax` provider and `embedText()` refuse an embedding request before
 sending it; embed with another provider.
 
@@ -127,6 +128,8 @@ const bot = agent({
   instructions: 'You are a helpful assistant.',
 });
 ```
+
+A `baseUrl` that is an empty or whitespace-only string is unset: the call reads the global default's URL, then the provider's base-URL variable, as it does with no `baseUrl`, and with none it goes to the provider's own endpoint. The same reading applies to the default's `baseUrl` and to the variable (`OPENAI_BASE_URL=` leaves OpenAI's own endpoint), so no request is built on a blank base, whose relative URL (`/chat/completions`) Node's fetch rejects and a browser's would resolve against the page's own origin, with the key. A blank `baseUrl` names no endpoint, so it is not refused where a base URL meant for one provider would be: beside a `model` whose `provider:` prefix names another provider than `provider`, and on an image call that names no provider, the call runs as it does with no `baseUrl`. A key there is still refused.
 
 ### Local Providers
 

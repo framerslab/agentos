@@ -22,16 +22,16 @@ let currentFactory: LoggerFactory = (name, bindings) =>
 function guarded(raw?: ILogger): ILogger {
   const logger: ILogger = {
     info(...args: Parameters<ILogger['info']>) {
-      if (!emitContentSafeLog('info')) raw?.info(...args);
+      if (!emitContentSafeLog('info', 'logger_factory')) raw?.info(...args);
     },
     warn(...args: Parameters<ILogger['warn']>) {
-      if (!emitContentSafeLog('warn')) raw?.warn(...args);
+      if (!emitContentSafeLog('warn', 'logger_factory')) raw?.warn(...args);
     },
     error(...args: Parameters<ILogger['error']>) {
-      if (!emitContentSafeLog('error')) raw?.error(...args);
+      if (!emitContentSafeLog('error', 'logger_factory')) raw?.error(...args);
     },
     debug(...args: Parameters<NonNullable<ILogger['debug']>>) {
-      if (!emitContentSafeLog('debug')) raw?.debug?.(...args);
+      if (!emitContentSafeLog('debug', 'logger_factory')) raw?.debug?.(...args);
     },
     child(bindings) {
       if (isContentSafeTelemetryEnabled()) return logger;

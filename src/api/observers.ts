@@ -35,8 +35,11 @@
  * @module agentos/api/observers
  */
 import type { TokenUsage } from './generateText.js';
-import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 import { isContentSafeTelemetryEnabled } from '../core/logging/contentSafeTelemetry.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('observers');
 
 /**
  * Payload delivered to a registered usage observer once an LLM call

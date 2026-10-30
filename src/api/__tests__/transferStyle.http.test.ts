@@ -411,6 +411,19 @@ describe('transferStyle against the providers', () => {
       await expect(transferStyle({ ...style, baseUrl: origin })).rejects.toThrow('a baseUrl needs `provider`');
       expect(received).toEqual([]);
     });
+
+    it.each(['', ' \t\n '])('serves a baseUrl of %j as no baseUrl: unset, it names no endpoint and needs no provider', async (baseUrl) => {
+      vi.stubEnv('OPENAI_API_KEY', 'openai_api_key-from-env');
+      pointEveryProviderAtTheServer();
+      answerEveryProvider();
+
+      const result = await transferStyle({ ...style, baseUrl });
+
+      expect(result.provider).toBe('openai');
+      expect(received.map((request) => `${request.method} ${request.path}`)).toEqual(['POST /images/edits']);
+      // OPENAI_BASE_URL applies, as it does with no baseUrl, and the key is OpenAI's own.
+      expect(received[0].headers.authorization).toBe('Bearer openai_api_key-from-env');
+    });
   });
 
   describe('with a global default provider', () => {
