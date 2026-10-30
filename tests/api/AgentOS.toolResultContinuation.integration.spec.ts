@@ -2262,6 +2262,57 @@ describe('AgentOS tool-result continuations', () => {
       },
     );
 
+    it.each([
+      ['on the stream', 'stream'],
+      ['resumed from the saved pause', 'resume'],
+    ] as const)(
+      'a continuation %s that the orchestrator is given no tool-call gate for, after a turn of another conversation on the session, is judged with the gate its turn ran with',
+      async (_label, path) => {
+        const shell = vi.fn(async () => ({ success: true, output: { exitCode: 0 } }));
+        const rt = await sharedSessionRuntime(
+          {
+            guardrailService: shellGuard(false),
+            tools: new Map([
+              [
+                'shell_execute',
+                {
+                  description: 'Run a shell command on the host.',
+                  inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+                  execute: shell,
+                },
+              ],
+            ]),
+          },
+          [
+            { text: 'I will read the notes file first.' },
+            { text: TRAVEL_REPLY },
+            { toolCalls: [SHELL_CALL] },
+            { text: 'The command was refused.' },
+          ],
+        );
+        const { request, saved } = await rt.pauseNotesTurn();
+        // while the host runs READ_CALL, the session's GMI runs a turn of the travel conversation
+        const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION);
+        expect((travel.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TRAVEL_REPLY);
+
+        // a host that drives the orchestrator itself passes READ_CALL's result with no tool-call gate
+        const orchestrator = (rt.agentos as any).agentOSOrchestrator;
+        if (path === 'stream') {
+          await orchestrator.orchestrateToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true);
+        } else {
+          await orchestrator.orchestrateResumedToolResults(saved, [READ_RESULT]);
+        }
+        await vi.waitFor(() => expect(rt.promptCalls).toHaveLength(4));
+
+        // the notes turn's gate judged shell_execute, which the continuation's model asked for, and refused it
+        expect(shell).not.toHaveBeenCalled();
+        const refusal = rt.promptCalls[3]?.find((m) => m.role === 'tool' && m.tool_call_id === SHELL_CALL.id);
+        expect(String(refusal?.content)).toContain('AUTH_PERMISSION_DENIED');
+        expect(String(refusal?.content)).toContain('A destructive shell command');
+        await vi.waitFor(async () => expect(await rt.pending()).toBeNull());
+      },
+    );
+
     it("a continuation on the stream that comes while the manager still retires the GMI it paused on completes on a live GMI for the pause's persona", async () => {
       const rt = await sharedSessionRuntime({}, [{ text: 'I will read the notes file first.' }, { text: NOTES_REPLY }]);
       const { request } = await rt.pauseNotesTurn();
