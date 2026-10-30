@@ -857,12 +857,65 @@ describe('the importers file by scope id and deduplicate inside one', () => {
         brain.brainId,
         '',
       ]);
-      // The trace with no text writes its tag line alone, and the label's line break splits its link over two lines.
+      // The trace with no text writes its tag line alone, and the label's line break is written as a space: an
+      // Obsidian link holds none.
       expect(await bodyOf(blank!.id)).toBe('#alpha');
-      expect(await bodyOf('t-bare')).toBe('Bare words.\n\n#alpha\n\n**Related:**\n- [[Target\nnote]]');
+      expect(await bodyOf('t-bare')).toBe('Bare words.\n\n#alpha\n\n**Related:**\n- [[Target note]]');
 
       expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
       expect(await textsOf(brain)).toEqual(['', 'Bare words.']);
+    });
+
+    it('Obsidian: a note whose link runs over the line break its label holds, as earlier exports wrote it, is the duplicate of its trace', async () => {
+      const brain = await written('obsidian-spanning-link', 'A%2F42', 'Kept words.', 'Bare words.');
+      await brain.run('UPDATE memory_traces SET tags = ? WHERE brain_id = ? AND id = ?', [
+        JSON.stringify(['alpha']),
+        brain.brainId,
+        't-bare',
+      ]);
+      await brain.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, created_at)
+         VALUES (?, 't-bare', 'trace', 'trace:t-bare', 1), (?, 'kn-other', 'concept', 'Other note', 1),
+                (?, 'kn-target', 'concept', ?, 1), (?, 'kn-last', 'concept', 'Last note', 1)`,
+        [brain.brainId, brain.brainId, brain.brainId, 'Target\nnote', brain.brainId],
+      );
+      await brain.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, created_at)
+         VALUES (?, 'ke-other', 't-bare', 'kn-other', 'related_to', 1), (?, 'ke-target', 't-bare', 'kn-target', 'related_to', 1),
+                (?, 'ke-last', 't-bare', 'kn-last', 'related_to', 1)`,
+        [brain.brainId, brain.brainId, brain.brainId],
+      );
+      const dir = path.join(path.dirname(tempFile()), 'vault');
+      await fsp.mkdir(dir);
+      // An earlier export wrote a label as the brain holds it, so the link to the label with a line break spans two lines.
+      await fsp.writeFile(
+        path.join(dir, 't-bare.md'),
+        "---\nid: t-bare\nscope: user\nscopeId: 'A%2F42'\n---\nBare words.\n\n#alpha\n\n**Related:**\n- [[Other note]]\n- [[Target\nnote]]\n- [[Last note]]\n",
+        'utf8',
+      );
+      expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+      expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
+    });
+
+    it("Obsidian: a note that holds more than its trace's text, tags and links is imported", async () => {
+      const brain = await written('obsidian-edited', 'A%2F42', 'Kept words.', 'Bare words.');
+      const dir = path.join(path.dirname(tempFile()), 'vault');
+      await fsp.mkdir(dir);
+      // The trace's own note, with a paragraph added in Obsidian between its text and its tag line, and after its links.
+      const note = (body: string) => `---\nid: t-bare\nscope: user\nscopeId: 'A%2F42'\n---\n${body}\n`;
+      await fsp.writeFile(path.join(dir, 't-bare.md'), note('Bare words.\n\nA line added in Obsidian.\n\n#alpha'), 'utf8');
+      await fsp.writeFile(
+        path.join(dir, 't-bare-linked.md'),
+        note('Bare words.\n\n**Related:**\n- [[Target note]]\n\nSee also [[Other note]]'),
+        'utf8',
+      );
+      expect(await new ObsidianImporter(brain).import(dir)).toMatchObject({ imported: 2, skipped: 0, errors: [] });
+      expect(await textsOf(brain)).toEqual([
+        'Bare words.',
+        'Bare words.\n\n**Related:**\n- [[Target note]]\n\nSee also [[Other note]]',
+        'Bare words.\n\nA line added in Obsidian.\n\n#alpha',
+        'Kept words.',
+      ]);
     });
 
     it('a trace the brain forgot: an import of an export taken before the forget brings it back in no format', async () => {
