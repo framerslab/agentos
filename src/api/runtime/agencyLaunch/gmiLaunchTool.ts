@@ -5,8 +5,10 @@
  * (the provider and model its persona resolved, and its other route options), its generation hooks and request timeout,
  * the seat's instructions and the very tool instances its allowlist names, on the light profile with no memory and no
  * learner, and closed with the seat; a persistent seat runs a member of `agencies.members` as itself, through a session
- * of its own. Every seat's tool calls run the tool hooks of the turn that launched the team before the seat's own. The
- * engine, and agency() with it, is imported on the first launch, so building an agent loads neither.
+ * of its own. Every seat's tool calls run the tool hooks of the turn that launched the team before the seat's own. A
+ * seat whose call fails rejects with its error's name and code alone, and the error itself goes to the agent's
+ * `on.error`, else to the console. The engine, and agency() with it, is imported on the first launch, so building an
+ * agent loads neither.
  * @internal
  */
 import { randomUUID } from 'node:crypto';
@@ -185,8 +187,47 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
   const learning = opts.learning;
   const namespace = typeof learning === 'object' && learning !== null && typeof learning.namespace === 'string' ? learning.namespace : '';
 
+  /**
+   * Where a launch's failures go: a seat's failed call, whose original error the seat keeps from the team's models and
+   * from the result (it rejects with the error's name and code alone), and a route, a run or a close that failed. The
+   * agent's `on.error` receives each, under `launch_agency` and what failed (`launch_agency seat <role>`,
+   * `launch_agency run`), with the agent's `on` object as `this`, as agency() calls its callbacks; without it, the
+   * console does. A callback that throws or rejects fails no launch: its error and the one it was handed go to the
+   * console. Never throws: a seat reports its failed call through it.
+   */
   const logError = (error: unknown, where: string): void => {
-    console.warn(`[agentos] gmi(): ${where} failed:`, error);
+    const agent = where.startsWith(LAUNCH_AGENCY_TOOL_NAME) ? where : `${LAUNCH_AGENCY_TOOL_NAME} ${where}`;
+    const warn = (...args: unknown[]): void => {
+      try {
+        console.warn(...args);
+      } catch {
+        // A console that throws fails no launch.
+      }
+    };
+    const callbackFailed = (callbackError: unknown): void => {
+      warn('[agentos] gmi(): on.error threw:', callbackError);
+      warn(`[agentos] gmi(): ${agent} failed:`, error);
+    };
+    try {
+      // Read at each report, as agency() reads its callbacks, so one set or replaced after the agent was built runs.
+      const on = opts.on;
+      const onError = on?.error;
+      if (typeof onError !== 'function') {
+        warn(`[agentos] gmi(): ${agent} failed:`, error);
+        return;
+      }
+      const returned: unknown = onError.call(on, {
+        agent,
+        error: error instanceof Error ? error : new Error(String(error)),
+        timestamp: Date.now(),
+      });
+      // An async callback fails by rejecting.
+      if ((typeof returned === 'object' || typeof returned === 'function') && returned !== null && typeof (returned as PromiseLike<unknown>).then === 'function') {
+        Promise.resolve(returned).then(undefined, callbackFailed);
+      }
+    } catch (callbackError) {
+      callbackFailed(callbackError);
+    }
   };
 
   /** The member of a persistent seat, by its agentKey. */

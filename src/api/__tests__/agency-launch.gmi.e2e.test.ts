@@ -1062,7 +1062,8 @@ describe('launch_agency on gmi()', () => {
       // The manager runs on agent()'s path, which asks for whole responses; the GMIs stream.
       whole: true,
     });
-    const parent = gmi({ ...route(k), instructions: 'Coordinate.', on: { error: onError }, agencies: { launch: true } });
+    const on = { error: onError };
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', on, agencies: { launch: true } });
 
     const result = await parent.session('p1').send('Check it.');
     expect(result.text).toBe('Reported.');
@@ -1082,8 +1083,10 @@ describe('launch_agency on gmi()', () => {
     // The manager's calls are the coordinator's: charged to its sub-budget, which the launch's budget counts.
     expect(out.coordinatorUsage.totalTokens).toBeGreaterThan(0);
     expect(out.provenance.budget.tokensUsed).toBeGreaterThanOrEqual(out.coordinatorUsage.totalTokens);
-    // The host receives the original error, once, under the seat's name.
+    // The host receives the original error, once, under the seat's name, with its callbacks object as `this`, as
+    // agency() calls them.
     expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.contexts[0]).toBe(on);
     const [event] = onError.mock.calls[0];
     expect(event).toMatchObject({ agent: 'launch_agency seat checker', error: { name: 'GMIError', code: 'LLM_PROVIDER_ERROR' } });
     expect(event.error.message).toContain(canary);
