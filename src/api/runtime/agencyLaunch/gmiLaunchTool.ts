@@ -319,6 +319,9 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
       };
     },
 
+    // The agent's callbacks, for the child agency, which fires them as `launch:<agencyId>`: the agent's `on` sees every
+    // team it launches, a team one of its temporary seats launches through the agent's own tool included.
+    ...(opts.on ? { callbacks: opts.on } : {}),
     ...(ledger ? { usageLedger: ledger } : {}),
     // gmi() keeps no registry of running teams.
     recorder: { start: () => undefined, close: () => undefined },
