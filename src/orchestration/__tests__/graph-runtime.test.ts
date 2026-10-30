@@ -2655,34 +2655,43 @@ describe('GraphRuntime: a node of a parallel batch whose edges throw', () => {
 // still decide where the run goes, read from the state the run resumes with,
 // such as the decision a host writes into the checkpoint it forks.
 
+/**
+ * START -> approve, a node that waits for a person, whose two conditional
+ * edges lead to publish or revise as `route` picks, and both to END.
+ */
+function approvalRoutedBy(id: string, route: (state: GraphState) => string): CompiledExecutionGraph {
+  const graph = graphOf(id, [approveNode(), publishNode(), reviseNode()], [
+    [START, 'approve'],
+    ['publish', END],
+    ['revise', END],
+  ]);
+  graph.edges.push(
+    {
+      id: 'approve-publish',
+      source: 'approve',
+      target: 'publish',
+      type: 'conditional',
+      condition: { type: 'function', fn: route },
+    },
+    {
+      id: 'approve-revise',
+      source: 'approve',
+      target: 'revise',
+      type: 'conditional',
+      condition: { type: 'function', fn: route },
+    },
+  );
+  return graph;
+}
+
 describe('GraphRuntime: a node a resume marks complete from its recorded result', () => {
   it('follows the edge its condition picks, and only that edge', async () => {
     const store = new InMemoryCheckpointStore();
     const model = scriptedModel({ [PUBLISH]: 'Published.', [REVISE]: 'Revised.' });
     const runtime = runtimeOver(store, model.providerCall);
     // approve's edges route on the decision the host records in scratch.
-    const decision = (state: GraphState): string =>
-      (state.scratch as { decision?: string }).decision === 'publish' ? 'publish' : 'revise';
-    const graph = graphOf('g-replayed-edges', [approveNode(), publishNode(), reviseNode()], [
-      [START, 'approve'],
-      ['publish', END],
-      ['revise', END],
-    ]);
-    graph.edges.push(
-      {
-        id: 'approve-publish',
-        source: 'approve',
-        target: 'publish',
-        type: 'conditional',
-        condition: { type: 'function', fn: decision },
-      },
-      {
-        id: 'approve-revise',
-        source: 'approve',
-        target: 'revise',
-        type: 'conditional',
-        condition: { type: 'function', fn: decision },
-      },
+    const graph = approvalRoutedBy('g-replayed-edges', (state) =>
+      (state.scratch as { decision?: string }).decision === 'publish' ? 'publish' : 'revise',
     );
 
     const runId = runIdOf(await readAll(runtime.stream(graph, {})));
@@ -2699,6 +2708,22 @@ describe('GraphRuntime: a node a resume marks complete from its recorded result'
       'node_end:publish',
       'run_end',
     ]);
+    expect(model.calls).toEqual([PUBLISH]);
+  });
+
+  it('routes on a state that records its visit, as the state after a node runs does', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = scriptedModel({ [PUBLISH]: 'Published.', [REVISE]: 'Revised.' });
+    const runtime = runtimeOver(store, model.providerCall);
+    // After a node runs, the state its edges read names it as the current
+    // node and lists it among the visited ones.
+    const graph = approvalRoutedBy('g-replayed-visit', (state) =>
+      state.currentNodeId === 'approve' && state.visitedNodes.includes('approve') ? 'publish' : 'revise',
+    );
+
+    const runId = runIdOf(await readAll(runtime.stream(graph, {})));
+
+    expect(await runtime.resume(graph, runId)).toEqual({ publish: 'Published.' });
     expect(model.calls).toEqual([PUBLISH]);
   });
 });
