@@ -2323,6 +2323,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         }
       }
 
+      // A blank baseUrl counts here and changes nothing: resolveProvider drops it, so the record is the provider's own.
       const ownCredentials =
         providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
       // An agency seat resolves strictly: no provider-less default, no reroute.
@@ -3446,6 +3447,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // never reaches it), can keep the record of the key it sends
         // (providerHealthKey), which the call below reads before it sends;
         // a failure of another key skips none of them.
+        // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
         const legProvider = fallbackEntrySentAs(fb).provider;
         const legOnSharedCredentials =
           fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;
