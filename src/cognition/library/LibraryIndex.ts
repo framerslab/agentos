@@ -108,8 +108,10 @@ export interface LibrarySearch {
   match?: 'all' | 'any';
   prefix?: boolean;
   /**
-   * Cancels the search: checked before the query is embedded, and handed to the embedding function. A search whose
-   * signal has aborted rejects with the signal's reason before it asks the embedder or the store.
+   * Cancels the search: checked before the query is embedded and before and after each call to the store, and handed
+   * to the embedding function. Once it has aborted, the search starts no further call to the embedder or the store and
+   * rejects with the signal's reason, or with the embedding function's error when the signal cancelled its request; a
+   * store call that has started runs to its end, and its answer is dropped.
    */
   signal?: AbortSignal;
 }
@@ -288,9 +290,8 @@ export class LibraryIndex {
    * Searches what the scope may see. The store's filter selects the passages, and the index keeps only those whose
    * metadata meets the scope and the narrowing: a store whose filter drops or ignores a condition cannot widen the
    * answer, which can then hold fewer than `topK` passages. With `anyOf`, each narrowing is searched leg by leg under
-   * the same scope and the answers are ranked as one search's ({@link LibrarySearch.anyOf}). A search whose `signal`
-   * has aborted rejects with the signal's reason before it asks the embedder or the store
-   * ({@link LibrarySearch.signal}).
+   * the same scope and the answers are ranked as one search's ({@link LibrarySearch.anyOf}). Once its `signal` has
+   * aborted, a search starts no further call to the embedder or the store and rejects ({@link LibrarySearch.signal}).
    */
   async search(query: LibrarySearch): Promise<LibraryPassage[]> {
     query.signal?.throwIfAborted();
@@ -299,10 +300,11 @@ export class LibraryIndex {
     }
     const { anyOf, ...base } = query;
     if (anyOf === undefined) return this.searchWith(query, undefined);
-    // A branch narrows and nothing more: the text and the scope stay the search's own, whatever a branch holds at run
-    // time. A branch that finds nothing by its own narrowing is left out, so a choice of nothing embeds nothing.
+    // A branch narrows and nothing more: the text, the scope and the signal stay the search's own, whatever a branch
+    // holds at run time. A branch that finds nothing by its own narrowing is left out, so a choice of nothing embeds
+    // nothing.
     const branches = anyOf
-      .map((branch) => ({ ...base, ...branch, text: base.text, scope: base.scope }))
+      .map((branch) => ({ ...base, ...branch, text: base.text, scope: base.scope, signal: base.signal }))
       .filter((narrowed) => !findsNothing(narrowed));
     if (branches.length === 0) return [];
     const mode = base.mode ?? 'hybrid';
@@ -361,16 +363,22 @@ export class LibraryIndex {
     const options = { topK: query.topK ?? 10, filter, includeMetadata: true, includeTextContent: true };
     const mode = query.mode ?? 'hybrid';
     let result: QueryResult;
+    // No call to the store starts once the search's signal has aborted, whether it aborted while the query was embedded
+    // (an embedding function may ignore the signal) or during an earlier leg of a search with `anyOf`; a store call
+    // that has started runs to its end, and its answer is dropped when the signal aborted meanwhile.
     if (mode === 'lexical') {
       if (typeof this.store.lexicalSearch !== 'function') throw new Error('LibraryIndex: the store has no lexicalSearch.');
+      query.signal?.throwIfAborted();
       result = await this.store.lexicalSearch(this.collection, query.text, { topK: options.topK, match: query.match ?? 'any', prefix: query.prefix === true, includeMetadata: true, includeTextContent: true, filter });
     } else {
       const embedded = vector === undefined ? await this.embedQuery(query.text, query.signal) : vector;
+      query.signal?.throwIfAborted();
       result =
         mode === 'hybrid' && typeof this.store.hybridSearch === 'function'
           ? await this.store.hybridSearch(this.collection, embedded, query.text, { ...options, match: query.match ?? 'any', prefix: query.prefix === true })
           : await this.store.query(this.collection, embedded, options);
     }
+    query.signal?.throwIfAborted();
     // The store's filter selected these passages. A store whose filter drops or ignores a condition can still answer
     // one outside the scope or the narrowing, so each passage is checked against them again here.
     const allowed = result.documents.filter((doc) => meetsSearch((doc.metadata ?? {}) as Record<string, MetadataValue>, query));
