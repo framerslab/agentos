@@ -561,4 +561,19 @@ describe('agency() seats served by GMIs', () => {
     expect(turn?.toolHooks?.[0]).toBe(carried);
     expect(typeof turn?.dispatch).toBe('function');
   });
+
+  it('a send whose seat names only claim to be a set, by their string tag, runs no tool, with a warning', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.tools([{ id: 't1', name: 'search', args: {} }]), reply.text('Not run.')] });
+    const search = vi.fn(async () => 'found');
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], instructions: 'Look it up.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: {} }, execute: search } },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(member.session('s1').send('Go.', { __toolNames: { [Symbol.toStringTag]: 'Set' } } as never)).resolves.toMatchObject({ text: 'Not run.' });
+    expect(s.seen[0].options.tools ?? []).toEqual([]);
+    expect(search).not.toHaveBeenCalled();
+    expect(warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('__toolNames'))).toHaveLength(1);
+  });
 });
