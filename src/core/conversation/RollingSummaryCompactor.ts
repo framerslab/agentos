@@ -1,6 +1,7 @@
 import type { ChatMessage, ModelCompletionOptions } from '../llm/providers/IProvider';
 import type { ConversationMessage } from './ConversationMessage';
 // No runtime imports needed from ConversationMessage (type-only above).
+import { toolRoundBounds } from './toolRounds';
 
 export interface RollingSummaryCompactionConfig {
   enabled: boolean;
@@ -18,13 +19,20 @@ export interface RollingSummaryCompactionConfig {
   providerId?: string;
   /** Minimum time between compaction passes per conversation. */
   cooldownMs: number;
-  /** Preserve the first N messages verbatim (usually system + initial user). */
+  /**
+   * Preserve the first N messages verbatim (usually system + initial user). A tool round the first N messages reach
+   * into is kept whole with them.
+   */
   headMessagesToKeep: number;
   /** Preserve the last N messages verbatim (fresh context). */
   tailMessagesToKeep: number;
   /** Minimum number of messages to summarize in a pass. */
   minMessagesToSummarize: number;
-  /** Maximum number of messages summarized per pass (older-first). */
+  /**
+   * Maximum number of messages summarized per pass (older-first). A pass never ends inside a tool round: it takes fewer
+   * when the limit falls inside one, or, when taking fewer would leave less than `minMessagesToSummarize`, the rest of
+   * that round too.
+   */
   maxMessagesToSummarizePerPass: number;
   /** Maximum output tokens for the compactor model. */
   maxOutputTokens: number;
@@ -189,6 +197,22 @@ function resolveStateKey(stateKey?: string): string {
   return (stateKey && stateKey.trim()) ? stateKey.trim() : 'rollingSummaryState';
 }
 
+/**
+ * Runs one rolling-summary pass over a conversation when it is due: once the cooldown since the last pass has run out,
+ * it takes the messages the last summary does not cover, leaves the first `headMessagesToKeep` and the last
+ * `tailMessagesToKeep` of them, summarizes up to `maxMessagesToSummarizePerPass` of the rest, oldest first, and moves
+ * the summary's boundary (`summaryUptoTimestamp`) to the newest message it summarized. The next turn sends the
+ * conversation's first `headMessagesToKeep` messages and the messages newer than the boundary.
+ *
+ * A tool round (an assistant message that names tool calls, the tool messages that answer them and anything between)
+ * stays on one side of the boundary, since providers refuse a call without its result and a result without its call:
+ * the kept head takes the rest of a round it reaches into, and the summary ends where a round ends and where the next
+ * message is newer than the last one summarized, so no message shares the boundary's millisecond on the kept side.
+ *
+ * @param params - The conversation's messages, oldest first; its metadata, which holds the summary state under
+ *   `stateKey`; the compaction settings; and the call that runs the compaction model.
+ * @returns The summary state after the pass, with `updatedSessionMetadata` when the pass wrote a new summary.
+ */
 export async function maybeCompactConversationMessages(params: {
   messages: ConversationMessage[];
   sessionMetadata: Record<string, any>;
@@ -255,17 +279,51 @@ export async function maybeCompactConversationMessages(params: {
     ? eligible.filter((m) => m.timestamp > afterTimestamp)
     : eligible;
 
-  const effectiveHead = Math.min(headCount, unsummarized.length);
-  const remainingAfterHead = Math.max(0, unsummarized.length - effectiveHead);
-  const effectiveTail = Math.min(tailCount, remainingAfterHead);
+  // Every tool round stays on one side of the boundary.
+  const rounds = toolRoundBounds(messages);
+  const indexOf = new Map(messages.map((message, index) => [message, index] as const));
+  const at = unsummarized.map((message) => indexOf.get(message) as number);
+  /** Whether the tool round of `unsummarized[position]` goes on after it. */
+  const roundGoesOn = (position: number): boolean => rounds.end[at[position]] > at[position];
+  /**
+   * Whether a summary may end after the first `count` unsummarized messages: the last of them ends its tool round, and
+   * the conversation's next message is newer than it, since the next turn keeps a message by its timestamp alone and
+   * would hide one recorded in the boundary's millisecond.
+   */
+  const endsCleanly = (count: number): boolean => {
+    const last = at[count - 1];
+    const next = messages[last + 1];
+    return !roundGoesOn(count - 1) && (!next || next.timestamp > messages[last].timestamp);
+  };
 
-  const middleStart = effectiveHead;
-  const middleEnd = unsummarized.length - effectiveTail;
-  const candidates = middleEnd > middleStart ? unsummarized.slice(middleStart, middleEnd) : [];
+  // The kept head takes the rest of a tool round it reaches into.
+  let headEnd = Math.min(headCount, unsummarized.length);
+  while (headEnd > 0 && headEnd < unsummarized.length && roundGoesOn(headEnd - 1)) {
+    headEnd += 1;
+  }
+  const tailStart = Math.max(headEnd, unsummarized.length - tailCount);
+  const minimum = Math.max(1, config.minMessagesToSummarize);
+  const windowEnd = Math.min(tailStart, headEnd + Math.max(1, config.maxMessagesToSummarizePerPass));
 
-  const limitedCandidates = candidates.slice(0, Math.max(1, config.maxMessagesToSummarizePerPass));
+  // The summary ends at the latest clean cut that the kept tail and the limit for one pass allow.
+  let summaryEnd = windowEnd;
+  while (summaryEnd > headEnd && !endsCleanly(summaryEnd)) {
+    summaryEnd -= 1;
+  }
+  // The limit for one pass fell where no summary may end, and ending before that leaves too little: the summary goes
+  // on to the next clean cut before the kept tail, so a tool round longer than the limit does not hold every later
+  // pass at the same place.
+  if (summaryEnd < windowEnd && summaryEnd - headEnd < minimum) {
+    let past = windowEnd + 1;
+    while (past <= tailStart && !endsCleanly(past)) {
+      past += 1;
+    }
+    if (past <= tailStart) summaryEnd = past;
+  }
 
-  if (limitedCandidates.length < Math.max(1, config.minMessagesToSummarize)) {
+  const limitedCandidates = unsummarized.slice(headEnd, summaryEnd);
+
+  if (limitedCandidates.length < minimum) {
     return {
       enabled: true,
       didCompact: false,
