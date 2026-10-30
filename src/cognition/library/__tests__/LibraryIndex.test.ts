@@ -353,3 +353,38 @@ describe('LibraryIndex over a store whose filter falls short', () => {
     }
   });
 });
+
+describe('LibraryIndex and an embedding function that answers other than one vector for the query', () => {
+  const scope = { tenantId: 'org1', aclGroups: ['acct:ann'] };
+  const anyOf = [{ kinds: ['session'] }, { tags: ['q3'] }];
+  // Every search that embeds its text: one narrowing or several, dense or hybrid.
+  const shapes: Array<Pick<LibrarySearch, 'mode' | 'anyOf'>> = [{ mode: 'dense' }, { mode: 'hybrid' }, { mode: 'dense', anyOf }, { mode: 'hybrid', anyOf }];
+
+  it('fails the search after its one embedding and asks the store nothing, as indexing refuses the same answer', async () => {
+    const recording = {
+      query: vi.fn(async () => ({ documents: [] })),
+      lexicalSearch: vi.fn(async () => ({ documents: [] })),
+      hybridSearch: vi.fn(async () => ({ documents: [] })),
+      delete: vi.fn(async () => ({ deletedCount: 0 })),
+      upsert: vi.fn(async () => ({ upsertedCount: 0, upsertedIds: [], failedCount: 0 })),
+    };
+    // No vector, as embedText answers when an OpenAI-compatible endpoint answers an empty `data`, and two vectors for
+    // the one text.
+    for (const answer of [[], [[1, 0, 0, 0.1], [0, 1, 0, 0.1]]] as number[][][]) {
+      const answering = vi.fn(async () => answer);
+      const index = new LibraryIndex({ store: recording as unknown as IVectorStore, collection: 'library', embed: answering });
+      for (const shape of shapes) {
+        answering.mockClear();
+        await expect(index.search({ text: 'budget', scope, ...shape })).rejects.toThrow('the embedder answered a different number of vectors than texts');
+        expect(answering).toHaveBeenCalledTimes(1);
+      }
+      await expect(index.indexSource(source({ passages: [{ text: 'The budget grows.' }] }))).rejects.toThrow(
+        'the embedder answered a different number of vectors than texts',
+      );
+    }
+    expect(recording.query).not.toHaveBeenCalled();
+    expect(recording.lexicalSearch).not.toHaveBeenCalled();
+    expect(recording.hybridSearch).not.toHaveBeenCalled();
+    expect(recording.upsert).not.toHaveBeenCalled();
+  });
+});
