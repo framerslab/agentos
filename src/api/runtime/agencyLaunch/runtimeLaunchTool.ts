@@ -155,6 +155,8 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
         // The organization is the namespace on the full runtime.
         namespace: typeof organizationId === 'string' ? organizationId : '',
         ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
+        // The session's GMI keeps its turns' launch pool: the pool lasts as long as the GMI that runs the turn.
+        poolOwner: gmi,
         toolHooks: [],
         outputEstimateTokens: estimateOf(persona),
       };
