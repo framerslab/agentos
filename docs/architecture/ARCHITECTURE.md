@@ -458,7 +458,7 @@ The diagram shows a turn's first model call. On the turn's later calls, after a 
 
 The `PromptEngine` measures the prompt against the model's context window (`optimalContextTokens`, else `maxContextTokens`) and enforces two shares of it:
 
-- **Conversation history, 35%.** When the history is over its share, or the whole prompt over the window, the turn's own messages stay whole and the earlier history is reduced. The prompt engine's utility AI summarizes it when one is configured and the history is over `historyManagement.summarizationTriggerRatio` of its share; otherwise the oldest messages are dropped.
+- **Conversation history, 35%.** When the history is over its share, or the whole prompt over the window, the turn's own messages stay whole, with a tool round the first of them belongs to, and the earlier history is reduced. The prompt engine's utility AI summarizes it when one is configured and the history is over `historyManagement.summarizationTriggerRatio` of its share; otherwise the oldest messages are dropped, a tool round (a call and its results) at a time.
 - **Retrieved context, 20%.** When the retrieved context is over its share, or the whole prompt over the window, the utility AI summarizes it, or it is cut to its share when there is none.
 
 The GMI's `ConversationHistoryManager` keeps a window of messages (20 by default) and nothing else; the persona fields `overflowStrategy` and `summarizationTriggerTokens` are not read.

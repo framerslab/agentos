@@ -41,6 +41,7 @@ vi.mock('../../core/llm/providers/implementations/OpenRouterProvider', async (im
   return { ...real, OpenRouterProvider: ScriptedOpenRouterProvider };
 });
 import { agent, type AgentOptions } from '../agent';
+import { SpendBudget } from '../runtime/spendBudget';
 import { reply, script } from './helpers/stubProviders';
 import { setGlobalLlmObserver, type LlmUsageEvent } from '../observers';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -263,6 +264,38 @@ describe("agent({ runtime: 'gmi' }) usage", () => {
       await vi.waitFor(() => expect(bills()).toEqual([['error', 10, 2, 12], ['error', 2, 2, 4]]));
       expect(await session.usage()).toMatchObject({ promptTokens: 12, completionTokens: 4, totalTokens: 16 });
       expect(await a.usage()).toMatchObject({ promptTokens: 12, completionTokens: 4, totalTokens: 16 });
+    } finally {
+      usageLine.open();
+    }
+  });
+
+  it("a model call close() stopped is charged to the agent's budget as billed, and its late report adds what it reports beyond that", async () => {
+    // The script of the case above: 12 tokens on the finish line before close(), 16 in all on the usage line after it.
+    const finishSent = gate(); const usageLine = gate();
+    openRouter.bodies.push(() =>
+      sseBody([
+        orLine({ choices: [{ index: 0, delta: { role: 'assistant', content: 'Partial answer' }, finish_reason: null }] }),
+        orLine({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } }),
+        finishSent.open,
+        usageLine.opened,
+        orLine({ choices: [], usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } }),
+        'data: [DONE]',
+      ]),
+    );
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100_000, unpriced: 'allow' });
+    const a = agent({ runtime: 'gmi', provider: 'openrouter', model: OR_MODEL, apiKey: key(), fallbackProviders: [], budget } as unknown as AgentOptions);
+    const session = a.session('s');
+    try {
+      const outcome = session.send('hi').then(() => 'resolved', (error: unknown) => error);
+      await finishSent.opened;
+      await sleep(50);
+      await session.close();
+      expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR });
+      // The stopped call's bill after its content, charged in the turn.
+      expect(budget.tokensUsed()).toBe(12);
+      usageLine.open();
+      // The late report, charged once it arrives: 4 more, 16 in all.
+      await vi.waitFor(() => expect(budget.tokensUsed()).toBe(16));
     } finally {
       usageLine.open();
     }
