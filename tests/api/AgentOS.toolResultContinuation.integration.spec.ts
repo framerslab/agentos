@@ -25,6 +25,7 @@ import {
 } from '../../src/cognition/substrate/IGMI.js';
 import { InMemoryWorkingMemory } from '../../src/cognition/substrate/memory/InMemoryWorkingMemory.js';
 import { ConversationContext } from '../../src/core/conversation/ConversationContext';
+import type { RollingSummaryCompactionConfig } from '../../src/core/conversation/RollingSummaryCompactor';
 import { PromptEngine } from '../../src/core/llm/PromptEngine';
 import type { ChatMessage, ModelCompletionResponse } from '../../src/core/llm/providers/IProvider';
 import {
@@ -115,6 +116,20 @@ function unansweredToolCallIds(
       ? message.tool_calls
           .filter((call) => !messages.slice(index + 1).some((later) => later.role === 'tool' && later.tool_call_id === call.id))
           .map((call) => call.id)
+      : [],
+  );
+}
+
+/** The call ids of the tool messages of `messages` that answer a call no assistant message before them names. */
+function unrequestedToolResultIds(
+  messages: ReadonlyArray<{ role: string; tool_calls?: ReadonlyArray<{ id: string }> | null; tool_call_id?: string | null }>,
+): string[] {
+  return messages.flatMap((message, index) =>
+    message.role === 'tool' &&
+    !messages
+      .slice(0, index)
+      .some((earlier) => earlier.role === 'assistant' && (earlier.tool_calls ?? []).some((call) => call.id === message.tool_call_id))
+      ? [String(message.tool_call_id)]
       : [],
   );
 }
@@ -1856,5 +1871,272 @@ describe('AgentOS tool-result continuations', () => {
     await vi.waitFor(() => expect(orchestrator.getStreamIdentity(error!.streamId)).toBeNull());
     // neither text nor a request reached the host, so the turn is settled as one that failed before any output
     expect(settle).toHaveBeenCalledWith(expect.objectContaining({ operationId: 'op-unsaved-turn-pause', outcome: 'released' }));
+  });
+
+  describe('with the rolling summary on', () => {
+    /** The result the host passes back for WRITE_CALL. */
+    const WRITE_RESULT = {
+      toolCallId: WRITE_CALL.id,
+      toolName: WRITE_CALL.name,
+      toolOutput: 'Wrote the summary to notes.txt.',
+      isSuccess: true,
+    };
+
+    /** The user's messages and the GMI's replies, by the name the tests give each. */
+    const TEXTS = {
+      question1: 'Where do I keep my notes?',
+      reply1: 'In notes.txt.',
+      question2: 'What do they cover?',
+      reply2: 'The standup and the launch.',
+      question3: 'Read the file and write a summary of it back.',
+      done: 'The file is read and the summary written.',
+      question4: 'What did the file say about the standup?',
+      reply4: 'The standup moved to 10:00.',
+      question5: 'And about the launch?',
+      reply5: 'The launch is on Friday.',
+    } as const;
+
+    const NAMES = new Map<unknown, string>(Object.entries(TEXTS).map(([name, text]) => [text, name]));
+
+    /** The name of a message of the conversation: its text's name, `call` for the round's call, `read` and `write` for its results. */
+    function nameOf(message: { role: string; content?: unknown; tool_calls?: unknown; tool_call_id?: unknown }): string {
+      if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return 'call';
+      if (message.role === 'tool') return message.tool_call_id === READ_CALL.id ? 'read' : 'write';
+      return NAMES.get(message.content) ?? `an unexpected ${message.role} message`;
+    }
+
+    /**
+     * A GMI that answers each user turn with the next of `turns`: a reply, or a stop for the calls the host runs. It
+     * keeps the history the runtime hands each turn for its prompt; the host's results for a stop continue the turn to
+     * `continuation`.
+     */
+    function scriptedTurnsGmi(turns: Array<string | ToolCallRequest[]>, continuation: GMIOutput) {
+      const histories: Array<Array<{ id: string; role: string; tool_calls?: ToolCallRequest[] | null; tool_call_id?: string | null }>> = [];
+      return {
+        histories,
+        getCurrentPrimaryPersonaId: () => 'test-persona',
+        getGMIId: () => 'gmi-scripted-turns',
+        getPersona: () => PERSONA,
+        processTurnStream: async function* (turnInput?: {
+          metadata?: { conversationHistoryForPrompt?: any[] };
+        }): AsyncGenerator<any, GMIOutput, undefined> {
+          histories.push([...(turnInput?.metadata?.conversationHistoryForPrompt ?? [])]);
+          const turn = turns[histories.length - 1];
+          if (turn === undefined) {
+            throw new Error(`The GMI was given turn ${histories.length}; the test scripted ${turns.length}.`);
+          }
+          if (Array.isArray(turn)) {
+            yield {
+              type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+              content: turn,
+              interactionId: 'interaction-scripted-turns',
+              timestamp: new Date(),
+              metadata: { executionMode: 'external', requiresExternalToolResult: true },
+            };
+            return { isFinal: false, responseText: 'I need the file read and the summary written.', toolCalls: turn };
+          }
+          yield { type: GMIOutputChunkType.TEXT_DELTA, content: turn, interactionId: 'interaction-scripted-turns', timestamp: new Date() };
+          return { isFinal: true, responseText: turn };
+        },
+        hydrateConversationHistory: vi.fn(),
+        handleToolResults: vi.fn(async (): Promise<GMIOutput> => continuation),
+      };
+    }
+
+    /**
+     * A runtime over `conversationId` whose rolling summary runs on every turn that has a message to summarize, with
+     * `window` over its settings. The compaction's model answers each pass with a summary, and `summarizedTurns` keeps
+     * the turns each pass sent it. Each message the runtime records gets a time of its own, later than the one before.
+     */
+    async function summaryRuntime(
+      conversationId: string,
+      window: Pick<RollingSummaryCompactionConfig, 'headMessagesToKeep' | 'tailMessagesToKeep'> &
+        Partial<RollingSummaryCompactionConfig>,
+    ) {
+      const rt = await runtime(conversationId, {
+        orchestratorConfig: {
+          rollingSummaryCompactionConfig: {
+            enabled: true,
+            modelId: 'summary-model',
+            providerId: 'summary-provider',
+            cooldownMs: 0,
+            minMessagesToSummarize: 1,
+            maxMessagesToSummarizePerPass: 48,
+            maxOutputTokens: 300,
+            ...window,
+          },
+        },
+      });
+      const summarizedTurns: Array<Array<{ id: string }>> = [];
+      const summaryProvider = {
+        providerId: 'summary-provider',
+        generateCompletion: vi.fn(async (_modelId: string, messages: ChatMessage[]) => {
+          const prompt = String(messages[messages.length - 1]?.content ?? '');
+          summarizedTurns.push(JSON.parse(prompt.slice(prompt.indexOf('INPUT_JSON:') + 'INPUT_JSON:'.length)).new_turns);
+          const summary = { summary_markdown: '- The user keeps notes in notes.txt.', memory_json: { facts: [] } };
+          return { choices: [{ message: { role: 'assistant', content: JSON.stringify(summary) } }] };
+        }),
+      };
+      const providers = rt.agentos.getModelProviderManager();
+      const getProvider = providers.getProvider.bind(providers);
+      vi.spyOn(providers, 'getProvider').mockImplementation((providerId: string) =>
+        providerId === summaryProvider.providerId ? (summaryProvider as any) : getProvider(providerId),
+      );
+      let clock = Date.now();
+      vi.spyOn(Date, 'now').mockImplementation(() => (clock += 1));
+      return { rt, summarizedTurns };
+    }
+
+    /**
+     * Runs the conversation's first three turns on `rt`: two questions with their replies, then a turn the GMI stops
+     * for READ_CALL and WRITE_CALL, whose results (`results`) the host passes back and whose continuation replies.
+     */
+    async function runToolRoundTurns(rt: Awaited<ReturnType<typeof runtime>>, results = [READ_RESULT, WRITE_RESULT]) {
+      await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question1 }));
+      await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question2 }));
+      const stopped = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question3 }));
+      const request = stopped.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk;
+      expect(request.toolCalls).toEqual([READ_CALL, WRITE_CALL]);
+      await vi.waitFor(() => expect(rt.context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY)).toBeDefined());
+      const continued = await collect(rt.agentos.handleToolResults(request.streamId, results));
+      expect((continued.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.done);
+    }
+
+    // The conversation: two questions with their replies, then a turn the host's GMI stops for READ_CALL and
+    // WRITE_CALL, whose results the host passes back and whose continuation replies, then a fourth question, whose turn
+    // runs the first compaction. Each case sets how many messages the compaction keeps at the head and the tail.
+    it.each([
+      [
+        'a compaction that would end on the call',
+        'conv-summary-ends-on-call',
+        { headMessagesToKeep: 2, tailMessagesToKeep: 4 },
+        { summarized: ['question2', 'reply2', 'question3'], kept: ['question1', 'reply1', 'call', 'read', 'write', 'done'] },
+      ],
+      [
+        'a compaction that would end between the two results',
+        'conv-summary-ends-between-results',
+        { headMessagesToKeep: 2, tailMessagesToKeep: 3 },
+        { summarized: ['question2', 'reply2', 'question3'], kept: ['question1', 'reply1', 'call', 'read', 'write', 'done'] },
+      ],
+      [
+        'a compaction whose limit for one pass would end on the call',
+        'conv-summary-pass-limit-ends-on-call',
+        { headMessagesToKeep: 2, tailMessagesToKeep: 1, maxMessagesToSummarizePerPass: 4, minMessagesToSummarize: 3 },
+        { summarized: ['question2', 'reply2', 'question3'], kept: ['question1', 'reply1', 'call', 'read', 'write', 'done'] },
+      ],
+      [
+        'a compaction whose kept head would end on the call',
+        'conv-summary-head-ends-on-call',
+        { headMessagesToKeep: 6, tailMessagesToKeep: 1 },
+        { summarized: ['done'], kept: ['question1', 'reply1', 'question2', 'reply2', 'question3', 'call', 'read', 'write'] },
+      ],
+    ])('%s keeps the host tool round whole, out of the summary and in the history the next turn sends', async (_label, conversationId, window, expected) => {
+      const { rt, summarizedTurns } = await summaryRuntime(conversationId, window);
+      const gmi = scriptedTurnsGmi([TEXTS.reply1, TEXTS.reply2, [READ_CALL, WRITE_CALL], TEXTS.reply4], {
+        isFinal: true,
+        responseText: TEXTS.done,
+      });
+      rt.useGmi(gmi);
+
+      await runToolRoundTurns(rt);
+      // no turn so far had enough messages to compact
+      expect(summarizedTurns).toEqual([]);
+
+      const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question4 }));
+
+      expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.reply4);
+      const stored = rt.context.getAllMessages();
+      const names = new Map(stored.map((message) => [message.id, nameOf(message)]));
+      expect([...names.values()]).toEqual([
+        'question1', 'reply1', 'question2', 'reply2', 'question3', 'call', 'read', 'write', 'done', 'question4', 'reply4',
+      ]);
+      // a provider refuses a request that holds a call without its result, or a result without its call
+      const history = gmi.histories[3] ?? [];
+      expect(unrequestedToolResultIds(history)).toEqual([]);
+      expect(unansweredToolCallIds(history)).toEqual([]);
+      expect(history.map((message) => names.get(message.id))).toEqual(expected.kept);
+      // the one compaction summarized none of the round, and its boundary is the last message it summarized
+      expect(summarizedTurns.map((turns) => turns.map((turn) => names.get(turn.id)))).toEqual([expected.summarized]);
+      const boundary = stored.find((message) => names.get(message.id) === expected.summarized.at(-1))!.timestamp;
+      const metadata = next.find(
+        (r) => r.type === AgentOSResponseChunkType.METADATA_UPDATE && (r as any).updates?.rollingSummary,
+      ) as any;
+      expect(metadata?.updates.rollingSummary).toMatchObject({ didCompact: true, summaryUptoTimestamp: boundary });
+      expect(rt.context.getMetadata('rollingSummaryState')).toMatchObject({ summaryUptoTimestamp: boundary });
+    });
+
+    it('a later compaction that starts at the host tool round summarizes the round whole and keeps the head of the conversation', async () => {
+      // The fourth turn's compaction summarizes question2 to question3, so the fifth turn's starts at the round's
+      // call. The fifth turn sends the conversation's first two messages and the messages after the boundary, so a
+      // compaction that kept back the first two messages after the boundary as its head would leave the round out of
+      // the summary and out of the history.
+      const { rt, summarizedTurns } = await summaryRuntime('conv-summary-later-pass-starts-at-call', {
+        headMessagesToKeep: 2,
+        tailMessagesToKeep: 3,
+      });
+      const gmi = scriptedTurnsGmi([TEXTS.reply1, TEXTS.reply2, [READ_CALL, WRITE_CALL], TEXTS.reply4, TEXTS.reply5], {
+        isFinal: true,
+        responseText: TEXTS.done,
+      });
+      rt.useGmi(gmi);
+
+      await runToolRoundTurns(rt);
+      await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question4 }));
+      const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question5 }));
+
+      expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.reply5);
+      const stored = rt.context.getAllMessages();
+      const names = new Map(stored.map((message) => [message.id, nameOf(message)]));
+      expect([...names.values()]).toEqual([
+        'question1', 'reply1', 'question2', 'reply2', 'question3', 'call', 'read', 'write', 'done', 'question4', 'reply4',
+        'question5', 'reply5',
+      ]);
+      // each message before the fifth question is in one summary or in the history the fifth turn sends
+      expect(summarizedTurns.map((turns) => turns.map((turn) => names.get(turn.id)))).toEqual([
+        ['question2', 'reply2', 'question3'],
+        ['call', 'read', 'write', 'done'],
+      ]);
+      const history = gmi.histories[4] ?? [];
+      expect(history.map((message) => names.get(message.id))).toEqual(['question1', 'reply1', 'question4', 'reply4']);
+      const boundary = stored.find((message) => names.get(message.id) === 'done')!.timestamp;
+      const metadata = next.find(
+        (r) => r.type === AgentOSResponseChunkType.METADATA_UPDATE && (r as any).updates?.rollingSummary,
+      ) as any;
+      expect(metadata?.updates.rollingSummary).toMatchObject({ didCompact: true, summaryUptoTimestamp: boundary });
+      expect(rt.context.getMetadata('rollingSummaryState')).toMatchObject({ summaryUptoTimestamp: boundary });
+    });
+
+    it('a later compaction sends the compaction model a result the host returned empty, with the call it answers', async () => {
+      // The host's read returned nothing. The conversation records the empty result, and the compaction that
+      // summarizes the round sends it with the call, so the compaction model reads no call without its answer.
+      const { rt, summarizedTurns } = await summaryRuntime('conv-summary-later-pass-empty-result', {
+        headMessagesToKeep: 2,
+        tailMessagesToKeep: 3,
+      });
+      const gmi = scriptedTurnsGmi([TEXTS.reply1, TEXTS.reply2, [READ_CALL, WRITE_CALL], TEXTS.reply4, TEXTS.reply5], {
+        isFinal: true,
+        responseText: TEXTS.done,
+      });
+      rt.useGmi(gmi);
+
+      await runToolRoundTurns(rt, [{ ...READ_RESULT, toolOutput: '' }, WRITE_RESULT]);
+      await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question4 }));
+      const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question5 }));
+
+      expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.reply5);
+      const stored = rt.context.getAllMessages();
+      const names = new Map(stored.map((message) => [message.id, nameOf(message)]));
+      expect(stored.find((message) => names.get(message.id) === 'read')?.content).toBe('');
+      expect(summarizedTurns.map((turns) => turns.map((turn) => names.get(turn.id)))).toEqual([
+        ['question2', 'reply2', 'question3'],
+        ['call', 'read', 'write', 'done'],
+      ]);
+      expect(summarizedTurns[1]?.find((turn) => names.get(turn.id) === 'read')).toMatchObject({
+        role: 'tool',
+        content: '[empty result]',
+      });
+      const history = gmi.histories[4] ?? [];
+      expect(history.map((message) => names.get(message.id))).toEqual(['question1', 'reply1', 'question4', 'reply4']);
+    });
   });
 });

@@ -1511,8 +1511,9 @@ export class Memory {
 
     const format = await this._detectImportFormat(source, options);
     let result: ImportResult;
-    // The SQLite importer rebuilds the full-text index itself, once, after an
-    // import that inserted a trace or merged new tags into one.
+    // The SQLite and Obsidian importers rebuild the full-text index
+    // themselves, once, after an import that inserted a trace or added new
+    // tags to one.
     let importerRebuildsFullText = false;
 
     switch (format) {
@@ -1529,6 +1530,7 @@ export class Memory {
       case 'obsidian': {
         const { ObsidianImporter } = await import('../ObsidianImporter.js');
         result = await new ObsidianImporter(this._brain).import(source, options);
+        importerRebuildsFullText = true;
         break;
       }
       case 'sqlite': {
