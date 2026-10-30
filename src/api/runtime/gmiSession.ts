@@ -73,9 +73,9 @@ export interface GmiTurnOptions {
   /**
    * The caller's own signal among the turn's stops (`abortSignal` also carries a session's close()): a stream whose
    * caller's signal has already aborted starts no turn and ends at once with an error part that carries the signal's
-   * reason, a stream the signal stops ends with that reason in its error part (a failure that came before the stop
-   * keeps its own error), and a turn whose signal aborts after its last request (while a hook runs) ends with the
-   * reason too.
+   * reason, a send the signal stops rejects with that reason and a stream ends with it in its error part (on both, a
+   * failure that came before the stop keeps its own error), and a turn whose signal aborts after its last request
+   * (while a hook runs) ends with the reason too.
    */
   callerSignal?: AbortSignal;
   /**
@@ -586,17 +586,29 @@ function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: num
  * `send()`: the whole turn, folded into a `GenerateTextResult` (with `object`
  * when a schema was given). Rejects with the GMI's error, its code kept, when
  * the turn failed; an error thrown before the turn ran (no provider or model
- * resolves, the memory cannot be built) is rethrown as it was thrown. A
- * structured answer is parsed before the session keeps the turn, so one that
- * does not parse or validate rejects with `ObjectGenerationError` and leaves
- * nothing in the history.
+ * resolves, the memory cannot be built) is rethrown as it was thrown. A turn
+ * the caller's signal stopped (`turn.callerSignal` had aborted when the turn's
+ * failure was recorded) rejects with the signal's reason; a failure that came
+ * first keeps its own error, whatever the signal does after it. A structured
+ * answer is parsed before the session keeps the turn, so one that does not
+ * parse or validate rejects with `ObjectGenerationError` and leaves nothing in
+ * the history.
  */
 export async function sendGmiTurn(
   deps: GmiSessionDeps,
   input: MessageContent,
   turn: GmiTurnOptions,
 ): Promise<GenerateTextResult & { object?: unknown }> {
-  const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
+  // Whether the caller's signal had aborted when the turn's failure was recorded, as streamGmiTurn decides it: the turn
+  // ends after its failure (it awaits its ledger writes), so a signal read once it has ended can name a later stop.
+  const callerSignal = turn.callerSignal;
+  let stopped = false;
+  const folder = new GmiTurnFolder({
+    cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics),
+    onFailure: () => {
+      if (callerSignal?.aborted) stopped = true;
+    },
+  });
   const schema = turn.responseSchema;
   let object: unknown;
   const checked: GmiTurnOptions = schema
@@ -610,15 +622,20 @@ export async function sendGmiTurn(
     : turn;
   const run = runGmiTurn(deps, input, checked, folder);
   let recorded: SessionTranscriptMessage[] = [];
-  for (;;) {
-    const next = await run.next();
-    if (next.done) {
-      recorded = next.value;
-      break;
+  try {
+    for (;;) {
+      const next = await run.next();
+      if (next.done) {
+        recorded = next.value;
+        break;
+      }
     }
+  } catch (error) {
+    if (stopped && callerSignal) throw callerSignal.reason;
+    throw error;
   }
   const error = folder.toError();
-  if (error) throw error;
+  if (error) throw stopped && callerSignal ? callerSignal.reason : error;
   const result = folder.toGenerateTextResult(recorded);
   if (!schema) return result;
   return { ...result, object };

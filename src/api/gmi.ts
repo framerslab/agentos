@@ -772,14 +772,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const callerSignal = extra?.abortSignal;
       // A call whose signal has already aborted starts no turn, as a session's send does.
       callerSignal?.throwIfAborted();
-      let result: GenerateTextResult;
-      try {
-        result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options, ...callTurn(extra) });
-      } catch (error) {
-        // Once the caller's signal has aborted, the call rejects with its reason, as a session's send does.
-        if (callerSignal?.aborted) throw callerSignal.reason;
-        throw error;
-      }
+      // A turn the caller's signal stopped rejects with its reason, as a session's send does, and a failure that came
+      // before the stop keeps its own error: sendGmiTurn decides when the turn's failure is recorded.
+      const result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options, ...callTurn(extra) });
       // A signal that aborted once the turn had ended rejects the call too, and no source is retrieved for it.
       callerSignal?.throwIfAborted();
       // As agent().generate() does: the answer checked against the sources retrieved for the input.
@@ -936,24 +931,20 @@ export function gmi(opts: GmiOptions): GmiHandle {
               maxTokens: sendOpts?.maxTokens,
             }).filter(([, v]) => v !== undefined),
           );
-          try {
-            return await sendGmiTurn(deps('agent.session.send', sendOpts), input, {
-              options,
-              responseSchema: sendOpts?.responseSchema,
-              schemaName: sendOpts?.schemaName,
-              blockLabel: sendOpts?.blockLabel,
-              abortSignal: turnSignal(callerSignal),
-              ...(callerSignal ? { callerSignal } : {}),
-              budget: turnBudget(sendOpts?.budget),
-              ...seatTurnOf(sendOpts),
-            });
-          } catch (error) {
-            // Once the caller's signal has aborted, the send rejects with its
-            // reason, as agent()'s send does; a turn that close() alone ended
-            // keeps the GMI's error.
-            if (callerSignal?.aborted) throw callerSignal.reason;
-            throw error;
-          }
+          // A turn the caller's signal stopped rejects with its reason, as
+          // agent()'s send does, and a failure that came before the stop keeps
+          // its own error (sendGmiTurn decides when the turn's failure is
+          // recorded); a turn that close() alone ended keeps the GMI's error.
+          return sendGmiTurn(deps('agent.session.send', sendOpts), input, {
+            options,
+            responseSchema: sendOpts?.responseSchema,
+            schemaName: sendOpts?.schemaName,
+            blockLabel: sendOpts?.blockLabel,
+            abortSignal: turnSignal(callerSignal),
+            ...(callerSignal ? { callerSignal } : {}),
+            budget: turnBudget(sendOpts?.budget),
+            ...seatTurnOf(sendOpts),
+          });
         },
         // As in send(), the turn takes the caller's budget and the gate, tool names and hooks a seat puts on its calls.
         stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
