@@ -991,10 +991,17 @@ export class GMI implements IGMI {
     this.forgetTurnsOutside([]);
   }
 
+  /**
+   * Sets the turn a tool continuation goes on with: the ids its continuation runs under and the sources its tool
+   * calls and reply are judged with. A blank session or conversation id leaves the GMI's as it is; a blank
+   * organization means the turn has none, and clears the GMI's. `ragSources` replaces the sources the GMI keeps for
+   * the turn (an empty array clears them); without it they stay.
+   */
   public hydrateTurnContext(context: {
     sessionId?: string;
     conversationId?: string;
     organizationId?: string;
+    ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
   }): void {
     if (typeof context.sessionId === 'string' && context.sessionId.trim()) {
       this.reasoningTrace.sessionId = context.sessionId.trim();
@@ -1002,8 +1009,11 @@ export class GMI implements IGMI {
     if (typeof context.conversationId === 'string' && context.conversationId.trim()) {
       this.reasoningTrace.conversationId = context.conversationId.trim();
     }
-    if (typeof context.organizationId === 'string' && context.organizationId.trim()) {
-      this.reasoningTrace.organizationId = context.organizationId.trim();
+    if (typeof context.organizationId === 'string') {
+      this.reasoningTrace.organizationId = context.organizationId.trim() || undefined;
+    }
+    if (Array.isArray(context.ragSources)) {
+      this.turnRagSources = context.ragSources.length > 0 ? [...context.ragSources] : undefined;
     }
   }
 

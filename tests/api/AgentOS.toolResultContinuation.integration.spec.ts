@@ -1920,16 +1920,16 @@ describe('AgentOS tool-result continuations', () => {
     /**
      * A runtime whose sessions get their GMIs from a GMIManager, as AgentOS's sessions do: one GMI per session, which
      * serves every conversation of the session and is shut down and built again when a turn asks for another persona.
-     * Each GMI is the shipped one, on a provider that gives `REPLIES` and a retrieval that finds NOTES_SOURCE for the
+     * Each GMI is the shipped one, on a provider that gives `replies` and a retrieval that finds NOTES_SOURCE for the
      * notes question and TRAVEL_SOURCE for the travel question. The host's tool layer stops each user turn of the notes
      * conversation for READ_CALL once the GMI's turn ends, as a host that adds a tool of its own to the shipped GMI does.
      */
-    async function sharedSessionRuntime(overrides: Partial<AgentOSConfig> = {}) {
+    async function sharedSessionRuntime(overrides: Partial<AgentOSConfig> = {}, replies: ModelReply[] = REPLIES) {
       const agentos = new AgentOS();
       openAgents.push(agentos);
       await agentos.initialize(createConfig(overrides));
 
-      const { provider, promptCalls } = scriptedProvider(REPLIES);
+      const { provider, promptCalls } = scriptedProvider(replies);
       const retrieveContext = vi.fn(async (queryText: string) => {
         const sources = queryText.includes(NOTES_QUESTION)
           ? [NOTES_SOURCE]
@@ -2080,6 +2080,52 @@ describe('AgentOS tool-result continuations', () => {
       expect(unansweredToolCallIds(prompt)).toEqual([]);
       expect(last.ragSources).toEqual([NOTES_SOURCE]);
       expect(await rt.pending()).toBeNull();
+    });
+
+    it('a continuation on the stream reads nothing of a turn another conversation ran on the session before the paused turn', async () => {
+      const rt = await sharedSessionRuntime({}, [
+        { text: TRAVEL_REPLY },
+        { text: 'I will read the notes file first.' },
+        { text: NOTES_REPLY },
+      ]);
+      // the travel conversation's turn runs on the session's GMI first; then the notes turn stops for READ_CALL
+      const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION);
+      expect((travel.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TRAVEL_REPLY);
+      const { request } = await rt.pauseNotesTurn();
+
+      const continuation = await collect(
+        rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      );
+
+      const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+      expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+      expect(last.finalResponseText).toBe(NOTES_REPLY);
+      const prompt = rt.promptCalls[2] ?? [];
+      expect(userMessagesOf(prompt)).toEqual([NOTES_QUESTION]);
+      expect(contentsOf(prompt)).toContain(READ_RESULT.toolOutput);
+      expect(contentsOf(prompt)).not.toContain(TRAVEL_REPLY);
+      expect(unansweredToolCallIds(prompt)).toEqual([]);
+      expect(last.ragSources).toEqual([NOTES_SOURCE]);
+    });
+
+    it('with conversational persistence off, a result on the stream of a pause whose GMI a persona change shut down is refused before the model runs, and the pause stays', async () => {
+      const rt = await sharedSessionRuntime({ orchestratorConfig: { enableConversationalPersistence: false } });
+      const { request } = await rt.pauseNotesTurn();
+      const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION, TRAVEL_PERSONA.id);
+      const travelReply = travel.at(-1) as AgentOSFinalResponseChunk;
+      expect(travelReply.finalResponseText).toBe(TRAVEL_REPLY);
+
+      const continuation = await collect(
+        rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      );
+
+      // the conversation holds nothing of the paused turn, and the GMI that held it is gone
+      expect(continuation.map((r) => r.type)).toEqual([AgentOSResponseChunkType.ERROR]);
+      expect((continuation[0] as AgentOSErrorChunk).message).toContain('holds no history of the paused turn');
+      expect(rt.promptCalls).toHaveLength(2);
+      // the session keeps the travel persona's GMI, and the pause waits for a new turn to end it
+      expect(rt.manager.getGMIByInstanceId(travelReply.gmiInstanceId)?.getCurrentState()).not.toBe(GMIPrimeState.SHUTDOWN);
+      expect((await rt.pending())?.toolCalls).toEqual([READ_CALL]);
     });
   });
 });

@@ -761,6 +761,11 @@ export interface IGMI {
     options?: GMIToolResultOptions,
   ): Promise<GMIOutput>;
 
+  /**
+   * Makes `conversationHistory` the whole conversation history. The runtime calls it with the conversation's stored
+   * history before a resume continues a pause, and before results on the paused stream continue it on a GMI whose
+   * own history holds a turn of another conversation, or that replaced the GMI the turn paused on.
+   */
   hydrateConversationHistory?(
     conversationHistory: ConversationMessage[],
   ): void;
@@ -774,11 +779,19 @@ export interface IGMI {
   /** Empties the conversation history; `GMI` drops what it recorded about its turns, as for `replaceHistory`. */
   clearHistory?(): void;
 
+  /**
+   * Sets the turn a tool continuation goes on with: the session, conversation and organization the continuation runs
+   * under, and the sources the paused turn retrieved (`ragSources`), which its tool calls and reply are judged with.
+   * The runtime calls it when it calls `hydrateConversationHistory()`, and also when the conversation holds no history
+   * to set. A blank organization means the turn has none; an empty `ragSources` means it retrieved none; a field left
+   * out keeps what the GMI holds.
+   */
   hydrateTurnContext?(
     context: {
       sessionId?: string;
       conversationId?: string;
       organizationId?: string;
+      ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
     },
   ): void;
 
