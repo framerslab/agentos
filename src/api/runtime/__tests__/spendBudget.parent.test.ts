@@ -4,7 +4,7 @@
  * below zero. Pure logic: the launch builds its child budgets on it.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { CostCapExceededError } from '../../../safety/runtime/CostGuard.js';
+import { CostCapExceededError, CostGuard } from '../../../safety/runtime/CostGuard.js';
 import { DEFAULT_OUTPUT_ESTIMATE_TOKENS, SpendBudget, outputEstimateTokens, type SpendLimitInfo } from '../spendBudget.js';
 
 describe('SpendBudget with a parent', () => {
@@ -30,6 +30,20 @@ describe('SpendBudget with a parent', () => {
     const child = new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, parent: middle, onLimitReached: note('child') });
     expect(() => child.assertCanSpend(0, 500, 'step')).toThrow(CostCapExceededError);
     expect(seen).toEqual([`root:tokens:${root.id}`, `middle:tokens:${root.id}`, `child:tokens:${root.id}`]);
+  });
+
+  it('refuses a budget whose parent chain keeps its spending on the same guard and id, which would count each call twice', () => {
+    const guard = new CostGuard({ maxSessionCostUsd: 1, maxDailyCostUsd: 10, maxSingleOperationCostUsd: 1 });
+    const parent = new SpendBudget({ maxCostUSD: 1, guard, budgetId: 'run' });
+    const middle = new SpendBudget({ maxCostUSD: 1, guard, budgetId: 'launch', parent });
+    expect(() => new SpendBudget({ maxCostUSD: 0.5, guard, budgetId: 'run', parent })).toThrow(RangeError);
+    expect(() => new SpendBudget({ maxCostUSD: 0.5, guard, budgetId: 'run', parent: middle })).toThrow(RangeError);
+    // The refusal comes before the guard is touched: the parent's cap for the id holds.
+    expect(guard.getSnapshot('run').sessionLimit).toBe(1);
+    // A child on the same guard under an id of its own draws on the parent, each charged once.
+    const child = new SpendBudget({ maxCostUSD: 1, guard, budgetId: 'step', parent });
+    child.record(0.25, 300, 'step');
+    expect([child.spentUSD(), parent.spentUSD()]).toEqual([0.25, 0.25]);
   });
 
   it("lets the child's own check decide when a parent only warns", () => {
