@@ -1392,9 +1392,10 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     expect(agentStart.mock.calls.map(([e]) => [e.agent, e.input])).toEqual([[team, 'Look it up.']]);
     expect(approvalRequested).toHaveBeenCalledTimes(1);
     expect(approvalRequested).toHaveBeenCalledWith(expect.objectContaining({ agent: team, action: 'search' }));
-    expect(error).toHaveBeenCalledTimes(1);
-    expect(error.mock.calls[0][0]).toMatchObject({ agent: team });
-    expect(error.mock.calls[0][0].error).toBe(thrown);
+    // Read by the team's name: the agent's own failure reports may reach error under other names.
+    const teamErrors = error.mock.calls.map(([e]) => e).filter((e) => e.agent === team);
+    expect(teamErrors).toHaveLength(1);
+    expect(teamErrors[0].error).toBe(thrown);
     expect(approvalDecided).not.toHaveBeenCalled();
     expect(agentEnd).not.toHaveBeenCalled();
   });
