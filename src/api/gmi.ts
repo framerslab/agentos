@@ -343,12 +343,15 @@ interface SeatSendKeys {
 const skipEveryCall: ToolCallHook = async () => null;
 
 /**
- * A seat's tool names as its send carries them: a set (from any realm). Anything else present names no tool, so the turn
- * lists and runs none, and is warned about: a seat's names are its limit, and a turn must not run every tool for want
- * of them.
+ * A seat's tool names as its send carries them: a set (from any realm, so its string tag is read, and its `has` is
+ * checked, since a tag alone proves nothing). Anything else present names no tool, so the turn lists and runs none, and
+ * is warned about: a seat's names are its limit, and a turn must not run every tool for want of them.
  */
 function receivedToolNames(value: unknown): ReadonlySet<string> {
-  if (value instanceof Set || Object.prototype.toString.call(value) === '[object Set]') return value as ReadonlySet<string>;
+  const isSet =
+    value instanceof Set ||
+    (typeof (value as { has?: unknown } | null)?.has === 'function' && Object.prototype.toString.call(value) === '[object Set]');
+  if (isSet) return value as ReadonlySet<string>;
   console.warn("[agentos] gmi(): a send's __toolNames is not a Set; the turn lists and runs no tool.");
   return new Set<string>();
 }
