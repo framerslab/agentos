@@ -45,6 +45,13 @@ export interface SessionSeatOptions {
  * A roster member that runs one session of its own; built by {@link sessionSeat} and by launch_agency. Its first call
  * opens the session, and fails when the member already serves a session under the seat's id: `generate()` rejects and
  * `stream()` throws, with the `TypeError` that names the id (a launch's seat, with that error's name alone).
+ *
+ * Of the per-call options an agency passes to its members, a seat applies the call's `abortSignal`, `budget` and
+ * tool-approval gate, and on `generate()` the per-send generation overrides a session's send takes (`maxTokens`,
+ * `requestTimeout`, `toolChoice`, `cacheDiagnostics`, `cache`); its session's `stream()` takes none of those. Its
+ * member's own ledger records the seat's calls, so a call's `usageLedger` is not applied. The seat warns once about each
+ * other per-call option it is given (`temperature`, `model`, `provider` and the rest), which its member's own settings
+ * replace.
  */
 export interface SeatHandle extends Agent, SeatMetadata {
   /** The seat's session id on its member. */
@@ -96,6 +103,11 @@ type SeatSendOptions = SessionSendOptions & {
   __toolNames?: ReadonlySet<string>;
   __toolHooks?: readonly ToolCallHook[];
 };
+
+/** The per-send generation overrides a session's send takes, which a seat's `generate()` passes on. */
+const SEND_OVERRIDES = ['maxTokens', 'requestTimeout', 'toolChoice', 'cacheDiagnostics', 'cache'] as const;
+/** The per-call options a seat reads on every call, and the ledger option its member's own ledger stands in for. */
+const READ_ON_EVERY_CALL = new Set(['abortSignal', 'budget', 'usageLedger']);
 
 /** A gmi() handle's session opener, which takes the internal `__seat` setting. */
 type SeatSessionOpener = (id: string, options: { userId?: string; __seat: { memoryScope: 'session'; learner: 'none' } }) => AgentSession;
@@ -247,6 +259,8 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
   let closing: Promise<void> | undefined;
   /** The seat's calls in flight. */
   let running = 0;
+  /** The per-call options the seat has warned it does not apply: one line for each. */
+  const warned = new Set<string>();
 
   const open = (): AgentSession => {
     if (!session) {
@@ -265,12 +279,29 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
     return `${lead}\n\n${input}`;
   };
 
-  /** What the seat puts on a send: the call's stop and gate, the launch's budget (else the call's), the frame, names and hooks. */
-  const sendOptions = (opts: Record<string, unknown> | undefined): SeatSendOptions => {
+  /**
+   * What the seat puts on a send: the call's stop and gate, the launch's budget (else the call's), on `generate()` the
+   * call's per-send generation overrides, the frame, names and hooks. Warns once about each other per-call option, which
+   * the member's own settings replace.
+   */
+  const sendOptions = (opts: Record<string, unknown> | undefined, kind: 'generate' | 'stream'): SeatSendOptions => {
     const signal = opts?.abortSignal as AbortSignal | undefined;
     const gate = opts?.__approvalGate as ApprovalGateFn | undefined;
     const budget = options.budget ?? (opts?.budget as SpendBudget | SpendBudgetOptions | undefined);
+    const overrides: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(opts ?? {})) {
+      // The agency's own keys (`__approvalGate`, a panel's deadline flag) are not the caller's options.
+      if (value === undefined || key.startsWith('__') || READ_ON_EVERY_CALL.has(key)) continue;
+      if (kind === 'generate' && (SEND_OVERRIDES as readonly string[]).includes(key)) {
+        overrides[key] = value;
+        continue;
+      }
+      if (warned.has(key)) continue;
+      warned.add(key);
+      console.warn(`[agentos] sessionSeat(): seat '${record.role}' does not apply the per-call option '${key}' on ${kind}(); its member's own setting holds.`);
+    }
     return {
+      ...overrides,
       ...(signal ? { abortSignal: signal } : {}),
       ...(budget ? { budget } : {}),
       ...(gate ? { __approvalGate: gate } : {}),
@@ -308,7 +339,7 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
       if (closed) throw new Error('seat closed');
       record.calls += 1;
       running += 1;
-      const send = sendOptions(opts);
+      const send = sendOptions(opts, 'generate');
       try {
         const result = (await open().send(framed(prompt), send)) as GenerateTextResult;
         answered(result.text ?? '');
@@ -324,7 +355,7 @@ export function buildSessionSeat(member: Agent, options: InternalSeatOptions): S
     stream(prompt: string, opts?: Record<string, unknown>): StreamTextResult {
       if (closed) throw new Error('seat closed');
       record.calls += 1;
-      const send = sendOptions(opts);
+      const send = sendOptions(opts, 'stream');
       let result: StreamTextResult;
       try {
         result = open().stream(framed(prompt), send as { abortSignal?: AbortSignal });
