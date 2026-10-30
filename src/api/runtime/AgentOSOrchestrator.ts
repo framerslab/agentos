@@ -800,7 +800,11 @@ export class AgentOSOrchestrator {
       const { gmiInput, streamContext } = prepared;
       const longTermMemoryFeedbackPayload = prepared.longTermMemoryFeedbackPayload;
 
-      // The output guardrails' tool-call gate, which the GMI asks before each call it runs itself.
+      // The output guardrails' tool-call gate, which the GMI asks before each call it runs itself. The stream keeps it
+      // for a continuation given none of its own, whatever GMI that continuation runs on.
+      if (toolCallGate) {
+        streamContext.toolCallGate = toolCallGate;
+      }
       const gmiToolCallGate = gmiToolCallGateFor(toolCallGate, agentOSStreamId, gmiInstanceIdForChunks, streamContext);
       if (gmiToolCallGate) {
         gmiInput.metadata = { ...(gmiInput.metadata ?? {}), toolCallGate: gmiToolCallGate };

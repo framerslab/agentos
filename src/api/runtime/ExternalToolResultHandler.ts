@@ -84,6 +84,13 @@ export interface ActiveStreamContext {
    * ({@link ExternalToolResultHandler.setPausedTurnOn}).
    */
   pausedTurnHistory?: ConversationMessage[];
+  /**
+   * The output guardrails' tool-call gate of the stream: the one its turn ran with, or for a resumed stream the one
+   * the resume was given, else the paused stream's. A continuation of the stream given no gate of its own is judged
+   * with it, on whatever GMI it runs, since a GMI given the paused turn after another conversation's turn, or built
+   * again for it, keeps no gate of the paused turn.
+   */
+  toolCallGate?: GuardrailToolCallGate;
 }
 
 /**
@@ -583,7 +590,14 @@ export class ExternalToolResultHandler {
           gmi = await this.gmiForContinuation(streamContext);
           gmiInstanceIdForChunks = gmi.getGMIId();
           span?.setAttribute('agentos.gmi_id', gmiInstanceIdForChunks);
-          const continuationGate = gmiToolCallGateFor(toolCallGate, agentOSStreamId, gmiInstanceIdForChunks, streamContext);
+          // the gate the continuation was given, else the one the stream's turn ran with: the GMI may hold no gate of
+          // the paused turn, having dropped another conversation's turn's or been built again for the continuation
+          const continuationGate = gmiToolCallGateFor(
+            toolCallGate ?? streamContext.toolCallGate,
+            agentOSStreamId,
+            gmiInstanceIdForChunks,
+            streamContext,
+          );
           const continuationOptions: GMIToolResultOptions | undefined = continuationGate
             ? { toolCallGate: continuationGate }
             : undefined;
@@ -1206,7 +1220,14 @@ export class ExternalToolResultHandler {
     }
     // what can refuse the resume (an organization the runtime refuses) runs here, in the same step as the check and
     // before the take, so a refused resume leaves the pause as it was
-    const streamContext = this.openResumedStream(agentOSStreamId, pendingRequest, options, gmi, conversationContext);
+    const streamContext = this.openResumedStream(
+      agentOSStreamId,
+      pendingRequest,
+      options,
+      gmi,
+      conversationContext,
+      toolCallGate,
+    );
     // the resume takes the pause in the same step as the check, so a result on the pause's stream or a new turn that
     // comes while the resume waits below finds no pause to continue or end
     conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
@@ -1307,8 +1328,9 @@ export class ExternalToolResultHandler {
 
   /**
    * Opens the stream a resume continues a pause on: its context, with the organization the runtime resolves for the
-   * resume, and the sources the paused turn retrieved and the GMI's own history of the turn when this process still
-   * holds the paused stream; and the GMI's history and turn context set from them, from the conversation and from the
+   * resume and the tool-call gate the resume was given; while this process still holds the paused stream, also the
+   * sources the paused turn retrieved, the GMI's own history of the turn and, for a resume given no gate, the gate the
+   * paused turn ran with; and the GMI's history and turn context set from them, from the conversation and from the
    * new stream ({@link setPausedTurnOn}).
    *
    * @throws {GMIError} When the runtime refuses the resume's organization.
@@ -1319,6 +1341,7 @@ export class ExternalToolResultHandler {
     options: AgentOSResumeExternalToolRequestOptions,
     gmi: IGMI,
     conversationContext: ConversationContext,
+    toolCallGate?: GuardrailToolCallGate,
   ): ActiveStreamContext {
     const currentPersonaId = gmi.getCurrentPrimaryPersonaId();
     const storedOrganizationId = conversationContext.getMetadata(ORGANIZATION_ID_METADATA_KEY);
@@ -1343,6 +1366,7 @@ export class ExternalToolResultHandler {
       // stream that saved it keeps them
       ragSources: this.activeStreamContexts.get(pendingRequest.streamId)?.ragSources,
       pausedTurnHistory: this.activeStreamContexts.get(pendingRequest.streamId)?.pausedTurnHistory,
+      toolCallGate: toolCallGate ?? this.activeStreamContexts.get(pendingRequest.streamId)?.toolCallGate,
     };
     this.activeStreamContexts.set(agentOSStreamId, streamContext);
 
