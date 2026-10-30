@@ -4,8 +4,8 @@
  * below zero. Pure logic: the launch builds its child budgets on it.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { CostCapExceededError } from '../../../safety/runtime/CostGuard.js';
-import { DEFAULT_OUTPUT_ESTIMATE_TOKENS, SpendBudget, outputEstimateTokens, type SpendLimitInfo } from '../spendBudget.js';
+import { CostCapExceededError, CostGuard } from '../../../safety/runtime/CostGuard.js';
+import { DEFAULT_OUTPUT_ESTIMATE_TOKENS, SpendBudget, bothBudgets, outputEstimateTokens, type SpendLimitInfo } from '../spendBudget.js';
 
 describe('SpendBudget with a parent', () => {
   it('asks the parent first and records into both', () => {
@@ -30,6 +30,77 @@ describe('SpendBudget with a parent', () => {
     const child = new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, parent: middle, onLimitReached: note('child') });
     expect(() => child.assertCanSpend(0, 500, 'step')).toThrow(CostCapExceededError);
     expect(seen).toEqual([`root:tokens:${root.id}`, `middle:tokens:${root.id}`, `child:tokens:${root.id}`]);
+  });
+
+  it('refuses a budget whose parent chain keeps its spending on the same guard and id, which would count each call twice', () => {
+    const guard = new CostGuard({ maxSessionCostUsd: 1, maxDailyCostUsd: 10, maxSingleOperationCostUsd: 1 });
+    const parent = new SpendBudget({ maxCostUSD: 1, guard, budgetId: 'run' });
+    const middle = new SpendBudget({ maxCostUSD: 1, guard, budgetId: 'launch', parent });
+    expect(() => new SpendBudget({ maxCostUSD: 0.5, guard, budgetId: 'run', parent })).toThrow(RangeError);
+    expect(() => new SpendBudget({ maxCostUSD: 0.5, guard, budgetId: 'run', parent: middle })).toThrow(RangeError);
+    // The refusal comes before the guard is touched: the parent's cap for the id holds.
+    expect(guard.getSnapshot('run').sessionLimit).toBe(1);
+    // A child on the same guard under an id of its own draws on the parent, each charged once.
+    const child = new SpendBudget({ maxCostUSD: 1, guard, budgetId: 'step', parent });
+    child.record(0.25, 300, 'step');
+    expect([child.spentUSD(), parent.spentUSD()]).toEqual([0.25, 0.25]);
+  });
+
+  it("tells the budgets below an ancestor whose own function throws, and the call is refused with that function's error", () => {
+    const seen: string[] = [];
+    const root = new SpendBudget({
+      maxCostUSD: 1,
+      maxTotalTokens: 100,
+      onLimitReached: () => {
+        throw new Error('stop');
+      },
+    });
+    const middle = new SpendBudget({ maxCostUSD: 1, parent: root, onLimitReached: (info) => { seen.push(`middle:${info.budgetId}`); } });
+    const child = new SpendBudget({ maxCostUSD: 1, parent: middle, onLimitReached: (info) => { seen.push(`child:${info.budgetId}`); } });
+    expect(() => child.assertCanSpend(0, 500, 'step')).toThrow('stop');
+    expect(seen).toEqual([`middle:${root.id}`, `child:${root.id}`]);
+  });
+
+  it('tells the budgets below an ancestor whose own function throws a value that is not an object', () => {
+    const seen: string[] = [];
+    const stop = () => {
+      throw 'stop';
+    };
+    const thrownBy = (check: () => void): unknown => {
+      try {
+        check();
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    };
+    const root = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100, onLimitReached: stop });
+    const child = new SpendBudget({ maxCostUSD: 1, parent: root, onLimitReached: (info) => { seen.push(`child:${info.budgetId}`); } });
+    expect(thrownBy(() => child.assertCanSpend(0, 500, 'step'))).toBe('stop');
+    // Held to two budgets, the first hears of the second's refusal the same way.
+    const capped = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100, onLimitReached: stop });
+    const first = new SpendBudget({ maxCostUSD: 1, onLimitReached: (info) => { seen.push(`first:${info.budgetId}`); } });
+    expect(thrownBy(() => bothBudgets(first, capped).assertCanSpend(0, 500, 'step'))).toBe('stop');
+    expect(seen).toEqual([`child:${root.id}`, `first:${capped.id}`]);
+  });
+
+  it('names each refusal afresh when limit functions throw one shared error object', () => {
+    const STOP = new Error('stop');
+    const seen: string[] = [];
+    const throwStop = () => {
+      throw STOP;
+    };
+    const note = (info: SpendLimitInfo) => {
+      seen.push(`${info.budgetId}:${info.what}`);
+    };
+    const rootA = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100, onLimitReached: throwStop });
+    const rootB = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100, onLimitReached: throwStop });
+    const childA = new SpendBudget({ maxCostUSD: 1, parent: rootA, onLimitReached: note });
+    const childB = new SpendBudget({ maxCostUSD: 1, parent: rootB, onLimitReached: note });
+    expect(() => childA.assertCanSpend(0, 500, 'first')).toThrow(STOP);
+    // The same object, thrown by another budget in a later check, names that budget's refusal.
+    expect(() => childB.assertCanSpend(0, 500, 'second')).toThrow(STOP);
+    expect(seen).toEqual([`${rootA.id}:first`, `${rootB.id}:second`]);
   });
 
   it("lets the child's own check decide when a parent only warns", () => {
