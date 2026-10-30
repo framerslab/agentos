@@ -15,6 +15,13 @@
  * the host's archive, the typed facts extracted from it and its episodic copy in the knowledge graph (in-memory or
  * SQL), and report `{ deleted, graph }`. With no Brain, a manager started later over the same vector index deletes a
  * scope another store filed.
+ *
+ * One scope at a time. The manager's store (`getStore()`) loads a returning user's older traces that the brain's
+ * 1,000 most recent leave out (`hydrateScope`), and moves one scope id's traces to another in the Brain, the store,
+ * recall and the knowledge graph's copies (`refileScope`), over a durable vector index with no Brain too. A trace a
+ * second user files on another user's session carries that user's id (`turnUserId`), which `deleteScope` takes as a
+ * filter. The `Memory` facade deletes by scope and by trace, and restores a trace from a snapshot a host reads with
+ * `readTraceSnapshot` (the package's `cognition/memory/retrieval/store/tracePersistence` path).
  */
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -40,7 +47,9 @@ import {
   type MemoryDeletion,
   type MemoryTrace,
   type PADState,
+  type RememberOptions,
 } from '@framers/agentos';
+import { readTraceSnapshot, type TraceSnapshot } from '@framers/agentos/cognition/memory/retrieval/store/tracePersistence';
 import { reply, script } from './helpers/stubProviders';
 
 /** The embedding size of a common hosted model. Every text embeds as one direction, so a recall finds every trace of its scope. */
@@ -52,6 +61,7 @@ const FOUR_HOURS = 14_400_000;
 
 let serial = 0;
 const managers: CognitiveMemoryManager[] = [];
+const facades: Memory[] = [];
 const brains = new Set<Brain>();
 const dirs: string[] = [];
 
@@ -59,6 +69,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   for (const manager of managers.splice(0)) await manager.shutdown().catch(() => undefined);
+  for (const facade of facades.splice(0)) await facade.close().catch(() => undefined);
   for (const brain of brains) await brain.close().catch(() => undefined);
   brains.clear();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -1118,6 +1129,483 @@ describe.skipIf(!POSTGRES_URL)('deleting memory for good, with a Postgres Brain'
   });
 });
 
+/** Two traces under the scope id `42` and one under `7`, told to a manager. */
+async function tellThree(memory: CognitiveMemoryManager): Promise<{ bees: MemoryTrace; walnuts: MemoryTrace; cello: MemoryTrace }> {
+  const bees = await tellAbout(memory, '42', 'Ana keeps bees on the roof.');
+  const walnuts = await tellAbout(memory, '42', 'Ana is allergic to walnuts.');
+  const cello = await tellAbout(memory, '7', 'Bo plays the cello.');
+  return { bees, walnuts, cello };
+}
+
+/** A recall of one scope id's traces. Every text embeds as one direction, so it finds every trace of the scope. */
+const recallUnder = (memory: CognitiveMemoryManager, scopeId: string) =>
+  memory.retrieve('What do you know about them?', NEUTRAL, { scopes: [{ scope: 'user', scopeId }] });
+
+/** The ids of traces, sorted. */
+const idsOf = (traces: ReadonlyArray<{ id: string }>) => traces.map((trace) => trace.id).sort();
+
+/** A trace row's scope id, and whether it is soft-deleted. */
+async function filingOf(brain: Brain, id: string): Promise<{ scopeId: string; deleted: number } | undefined> {
+  const row = await brain.get<{ scope_id: string; deleted: number }>(
+    'SELECT scope_id, deleted FROM memory_traces WHERE brain_id = ? AND id = ?',
+    [brain.brainId, id],
+  );
+  return row ? { scopeId: row.scope_id, deleted: Number(row.deleted) } : undefined;
+}
+
+/** A host's vector index that runs `before`, with the ids the call names, ahead of each call of one of its methods. */
+function hookedIndex(
+  index: InMemoryVectorStore,
+  method: 'upsert' | 'delete',
+  before: (collection: string, ids: string[]) => Promise<void>,
+): InMemoryVectorStore {
+  return new Proxy(index, {
+    get(target, property) {
+      if (property === method) {
+        return async (collection: string, items: Array<string | { id: string }> | undefined, ...rest: unknown[]) => {
+          await before(collection, (items ?? []).map((item) => (typeof item === 'string' ? item : item.id)));
+          return (Reflect.get(target, property, target) as (...args: unknown[]) => unknown).call(target, collection, items, ...rest);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+describe('one scope at a time, with a Brain file', () => {
+  it("hydrateScope loads a returning user's older trace that the brain's 1,000 most recent leave out, and a call made again loads none", async () => {
+    const file = brainFile();
+    const firstBrain = await openBrain(file);
+    const first = await manager({ brain: firstBrain, dimension: 8 });
+    const told = await tellAbout(first, 'ana', "Ana's sister is Vera.");
+    await stop(first, firstBrain);
+
+    const brain = await openBrain(file);
+    // Other users' traces since: 1,200 rows newer than Ana's.
+    const blob = Buffer.from(Float32Array.from([1, 0, 0, 0, 0, 0, 0, 0]).buffer);
+    const since = Date.now() + 1_000;
+    await brain.transaction(async (trx) => {
+      for (let n = 0; n < 1_200; n += 1) {
+        await trx.run(
+          `INSERT INTO memory_traces (brain_id, id, type, scope, content, embedding, created_at, metadata, scope_id)
+           VALUES (?, ?, 'episodic', 'user', ?, ?, ?, ?, ?)`,
+          [brain.brainId, `other-${n}`, `Note ${n}.`, blob, since + n, JSON.stringify({ scopeId: `u-${n}` }), `u-${n}`],
+        );
+      }
+    });
+
+    const later = await manager({ brain, dimension: 8 });
+    expect(await later.getStore().getByScope('user', 'ana')).toEqual([]);
+    expect((await recall(later)).retrieved).toEqual([]);
+
+    expect(await later.getStore().hydrateScope('user', 'ana')).toBe(1);
+
+    expect(idsOf(await later.getStore().getByScope('user', 'ana'))).toEqual([told.id]);
+    expect((await recall(later)).retrieved.map((hit) => hit.content)).toEqual(["Ana's sister is Vera."]);
+    expect(await later.getStore().hydrateScope('user', 'ana')).toBe(0);
+  });
+
+  it('hydrateScope refuses a limit that is not a positive integer', async () => {
+    const brain = await openBrain(brainFile());
+    const memory = await manager({ brain });
+    await tell(memory);
+    for (const limit of [0, -1, 1.5, Number.NaN]) {
+      await expect(memory.getStore().hydrateScope('user', 'ana', limit)).rejects.toThrow(RangeError);
+    }
+  });
+
+  it("refileScope moves a scope id's traces to another in the Brain rows, the store, recall and the graph copies; another scope's stay, and a manager over the reopened file finds them under the new id", async () => {
+    const file = brainFile();
+    const brain = await openBrain(file);
+    const graph = new SqlKnowledgeGraph(brain);
+    const memory = await manager({ brain, knowledgeGraph: graph });
+    const { bees, walnuts, cello } = await tellThree(memory);
+
+    expect(await memory.getStore().refileScope('user', '42', 'A/42')).toBe(2);
+
+    const rows = await brain.all<{ id: string; scope_id: string; metadata: string }>(
+      'SELECT id, scope_id, metadata FROM memory_traces WHERE brain_id = ?',
+      [brain.brainId],
+    );
+    expect(Object.fromEntries(rows.map((row) => [row.id, [row.scope_id, JSON.parse(row.metadata).scopeId]]))).toEqual({
+      [bees.id]: ['A/42', 'A/42'],
+      [walnuts.id]: ['A/42', 'A/42'],
+      [cello.id]: ['7', '7'],
+    });
+    expect(idsOf(await memory.getStore().getByScope('user', 'A/42'))).toEqual(idsOf([bees, walnuts]));
+    expect(await memory.getStore().getByScope('user', '42')).toEqual([]);
+    expect(idsOf((await recallUnder(memory, 'A/42')).retrieved)).toEqual(idsOf([bees, walnuts]));
+    expect((await recallUnder(memory, '42')).retrieved).toEqual([]);
+    expect((await copiesIn(graph)).map((copy) => [copy.traceId, copy.scopeId])).toEqual([
+      [walnuts.id, 'A/42'],
+      [bees.id, 'A/42'],
+      [cello.id, '7'],
+    ]);
+    await stop(memory, brain);
+
+    const reopened = await openBrain(file);
+    const later = await manager({ brain: reopened, knowledgeGraph: new SqlKnowledgeGraph(reopened) });
+    expect(idsOf(await later.getStore().getByScope('user', 'A/42'))).toEqual(idsOf([bees, walnuts]));
+    expect(await later.getStore().getByScope('user', '42')).toEqual([]);
+    expect(idsOf((await recallUnder(later, 'A/42')).retrieved)).toEqual(idsOf([bees, walnuts]));
+    expect(idsOf((await recallUnder(later, '7')).retrieved)).toEqual([cello.id]);
+  });
+
+  it('refileScope moves a soft-deleted row too, so a delete of the new id takes its words', async () => {
+    const brain = await openBrain(brainFile());
+    const memory = await manager({ brain });
+    const kept = await tellAbout(memory, '42', 'Ana keeps bees on the roof.');
+    const superseded = await tellAbout(memory, '42', 'Ana lives in Lyon.');
+    await memory.getStore().softDelete(superseded.id);
+
+    expect(await memory.getStore().refileScope('user', '42', 'A/42')).toBe(2);
+
+    expect(await filingOf(brain, kept.id)).toEqual({ scopeId: 'A/42', deleted: 0 });
+    expect(await filingOf(brain, superseded.id)).toEqual({ scopeId: 'A/42', deleted: 1 });
+    expect(await memory.deleteScope('user', '42')).toEqual({ deleted: 0, graph: 'reached' });
+    expect(await memory.deleteScope('user', 'A/42')).toEqual({ deleted: 2, graph: 'reached' });
+    expect(await traceRowIds(brain)).toEqual([]);
+  });
+
+  it('refileScope refuses an empty scope id on either side, and moves nothing', async () => {
+    const brain = await openBrain(brainFile());
+    const memory = await manager({ brain });
+    const told = await tellAbout(memory, '42', 'Ana keeps bees on the roof.');
+
+    await expect(memory.getStore().refileScope('user', '', 'A/42')).rejects.toThrow(TypeError);
+    await expect(memory.getStore().refileScope('user', '42', '')).rejects.toThrow(TypeError);
+
+    expect(await filingOf(brain, told.id)).toEqual({ scopeId: '42', deleted: 0 });
+    expect(idsOf(await memory.getStore().getByScope('user', '42'))).toEqual([told.id]);
+  });
+
+  it('refileScope keeps a write another writer makes to a row while the move is under way', async () => {
+    const brain = await openBrain(brainFile());
+    let armed = false;
+    // Another writer (a Memory facade's recall, another process) changes the row while the move writes the vector.
+    const index = hookedIndex(await vectorIndex(), 'upsert', async (_collection, ids) => {
+      if (!armed) return;
+      armed = false;
+      await brain.run(
+        "UPDATE memory_traces SET metadata = json_set(metadata, '$.recalledBy', 'facade') WHERE brain_id = ? AND id = ?",
+        [brain.brainId, ids[0]],
+      );
+    });
+    const memory = await manager({ brain, index });
+    const told = await tellAbout(memory, '42', 'Ana keeps bees on the roof.');
+
+    armed = true;
+    expect(await memory.getStore().refileScope('user', '42', 'A/42')).toBe(1);
+
+    expect(armed).toBe(false);
+    expect(await metadataOf(brain, told.id)).toMatchObject({ scopeId: 'A/42', recalledBy: 'facade' });
+    expect(await filingOf(brain, told.id)).toEqual({ scopeId: 'A/42', deleted: 0 });
+  });
+
+  it('refileScope leaves a document the index fails to delete in the old collection, with a warning, and recall under the old id does not return its trace', async () => {
+    const brain = await openBrain(brainFile());
+    let failing = false;
+    const index = hookedIndex(await vectorIndex(), 'delete', async () => {
+      if (failing) throw new Error('the index is unavailable');
+    });
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const memory = await manager({ brain, index });
+    const told = await tellAbout(memory, '42', 'Ana keeps bees on the roof.');
+
+    failing = true;
+    expect(await memory.getStore().refileScope('user', '42', 'A/42')).toBe(1);
+    failing = false;
+
+    expect(warned.mock.calls.some(([line]) => String(line).includes('refileScope could not delete'))).toBe(true);
+    expect(await memory.getStore().getByScope('user', '42')).toEqual([]);
+    expect((await recallUnder(memory, '42')).retrieved).toEqual([]);
+    expect(idsOf((await recallUnder(memory, 'A/42')).retrieved)).toEqual([told.id]);
+  });
+});
+
+describe('one scope at a time, with no Brain', () => {
+  it('refileScope on a manager started later over the same index moves the traces another store filed before the restart', async () => {
+    const index = await vectorIndex(768);
+    const first = await manager({ index, dimension: 768 });
+    const { bees, walnuts, cello } = await tellThree(first);
+    await stop(first);
+
+    const later = await manager({ index, dimension: 768 });
+    expect(await later.getStore().refileScope('user', '42', 'A/42')).toBe(2);
+
+    expect(idsOf(await later.getStore().getByScope('user', 'A/42'))).toEqual(idsOf([bees, walnuts]));
+    expect(await later.getStore().getByScope('user', '42')).toEqual([]);
+    expect(idsOf((await recallUnder(later, 'A/42')).retrieved)).toEqual(idsOf([bees, walnuts]));
+
+    const restarted = await manager({ index, dimension: 768 });
+    expect(idsOf(await restarted.getStore().getByScope('user', 'A/42'))).toEqual(idsOf([bees, walnuts]));
+    expect(await restarted.getStore().getByScope('user', '42')).toEqual([]);
+    expect(idsOf(await restarted.getStore().getByScope('user', '7'))).toEqual([cello.id]);
+  });
+
+  it('refileScope moves the documents of traces a read loaded with no vector, so recall finds them under the new id alone', async () => {
+    const index = await vectorIndex(768);
+    const first = await manager({ index, dimension: 768 });
+    const { bees, walnuts } = await tellThree(first);
+    await stop(first);
+
+    const later = await manager({ index, dimension: 768 });
+    expect(idsOf(await later.getStore().getByScope('user', '42'))).toEqual(idsOf([bees, walnuts]));
+    expect(await later.getStore().refileScope('user', '42', 'A/42')).toBe(2);
+
+    expect(idsOf((await recallUnder(later, 'A/42')).retrieved)).toEqual(idsOf([bees, walnuts]));
+    expect((await recallUnder(later, '42')).retrieved).toEqual([]);
+    const restarted = await manager({ index, dimension: 768 });
+    expect(await restarted.getStore().getByScope('user', '42')).toEqual([]);
+    expect(idsOf(await restarted.getStore().getByScope('user', 'A/42'))).toEqual(idsOf([bees, walnuts]));
+  });
+});
+
+describe("a second user's traces on another user's session", () => {
+  /** What a second user, Bo, has the agent remember on the session `/s-1`. */
+  const visit = (memory: Pick<ICognitiveMemoryManager, 'encode'>, text: string) =>
+    memory.encode(text, NEUTRAL, 'neutral', { scope: 'user', scopeId: '/s-1', turnUserId: 'bo' });
+
+  it("carry the second user's id across a restart and on a recalled trace, and deleteScope with it takes only that user's traces and copies", async () => {
+    const file = brainFile();
+    const firstBrain = await openBrain(file);
+    const first = await manager({ brain: firstBrain, knowledgeGraph: new SqlKnowledgeGraph(firstBrain) });
+    const owner = await tellAbout(first, '/s-1', 'The owner keeps bees on the roof.');
+    const visitor = await visit(first, 'Bo keeps bees in the garden.');
+    expect(visitor.turnUserId).toBe('bo');
+    expect(owner.turnUserId).toBeUndefined();
+    await stop(first, firstBrain);
+
+    const brain = await openBrain(file);
+    const graph = new SqlKnowledgeGraph(brain);
+    const later = await manager({ brain, knowledgeGraph: graph });
+    const loaded = await later.getStore().getByScope('user', '/s-1');
+    expect(Object.fromEntries(loaded.map((trace) => [trace.id, trace.turnUserId ?? null]))).toEqual({
+      [owner.id]: null,
+      [visitor.id]: 'bo',
+    });
+    const recalled = (await recallUnder(later, '/s-1')).retrieved;
+    expect(recalled.find((hit) => hit.id === visitor.id)?.turnUserId).toBe('bo');
+
+    expect(await later.deleteScope('user', '/s-1', { turnUserId: 'bo' })).toEqual({ deleted: 1, graph: 'reached' });
+
+    expect(await traceRowIds(brain)).toEqual([owner.id]);
+    expect(idsOf(await later.getStore().getByScope('user', '/s-1'))).toEqual([owner.id]);
+    expect((await copiesIn(graph)).map((copy) => copy.traceId)).toEqual([owner.id]);
+  });
+
+  it("with no Brain, a manager started later over the same index deletes that user's traces of the scope and keeps the owner's", async () => {
+    const index = await vectorIndex(768);
+    const first = await manager({ index, dimension: 768 });
+    const owner = await tellAbout(first, '/s-1', 'The owner keeps bees on the roof.');
+    await visit(first, 'Bo keeps bees in the garden.');
+    await stop(first);
+
+    const later = await manager({ index, dimension: 768 });
+    expect(await later.deleteScope('user', '/s-1', { turnUserId: 'bo' })).toEqual({ deleted: 1, graph: 'reached' });
+
+    const restarted = await manager({ index, dimension: 768 });
+    expect(idsOf(await restarted.getStore().getByScope('user', '/s-1'))).toEqual([owner.id]);
+  });
+
+  it('deleteScope refuses an empty scope id and an empty turnUserId, and deletes nothing', async () => {
+    const brain = await openBrain(brainFile());
+    const memory = await manager({ brain });
+    const owner = await tellAbout(memory, '/s-1', 'The owner keeps bees on the roof.');
+    const visitor = await visit(memory, 'Bo keeps bees in the garden.');
+
+    await expect(memory.deleteScope('user', '')).rejects.toThrow(TypeError);
+    await expect(memory.deleteScope('user', '/s-1', { turnUserId: '' })).rejects.toThrow(TypeError);
+
+    expect(await traceRowIds(brain)).toEqual([owner.id, visitor.id].sort());
+  });
+});
+
+describe('the Memory facade deletes and restores by scope and by trace', () => {
+  /** The facade a host opens on a Brain file, with the brain id the file's other handles use. */
+  async function facadeOn(file: string, config: Parameters<typeof Memory.createSqlite>[1] = {}): Promise<Memory> {
+    const facade = await Memory.createSqlite(file, { brainId: 'qa', ...config });
+    facades.push(facade);
+    return facade;
+  }
+
+  it("deleteScope deletes a scope's traces for good: recall finds none of them, another scope's stays, and a call made again counts none", async () => {
+    const file = brainFile();
+    const memory = await facadeOn(file);
+    expect(memory.brainId).toBe('qa');
+    const bees = await memory.remember('Ana keeps bees on the roof.', { scope: 'user', scopeId: 'ana' });
+    const tea = await memory.remember('Ana likes green tea.', { scope: 'user', scopeId: 'ana' });
+    const cello = await memory.remember('Bo plays the cello.', { scope: 'user', scopeId: 'bo' });
+    expect((await memory.recall('bees')).map((hit) => hit.trace.id)).toEqual([bees.id]);
+    expect((await memory.recall('tea')).map((hit) => hit.trace.id)).toEqual([tea.id]);
+
+    expect(await memory.deleteScope('user', 'ana')).toEqual({ deleted: 2 });
+
+    expect(await memory.recall('bees')).toEqual([]);
+    expect(await memory.recall('tea')).toEqual([]);
+    expect((await memory.recall('cello')).map((hit) => hit.trace.id)).toEqual([cello.id]);
+    expect(await traceRowIds(await openBrain(file))).toEqual([cello.id]);
+    expect(await memory.deleteScope('user', 'ana')).toEqual({ deleted: 0 });
+  });
+
+  it("files a second user's words as a trace of their own, and deleteScope with turnUserId takes only that user's", async () => {
+    const memory = await facadeOn(brainFile());
+    const owner = await memory.remember('We meet at noon on Friday.', { scope: 'user', scopeId: '/s-1' });
+    const visitor = await memory.remember('We meet at noon on Friday.', {
+      scope: 'user',
+      scopeId: '/s-1',
+      metadata: { turnUserId: 'bo' },
+    });
+    expect(visitor.id).not.toBe(owner.id);
+    expect(visitor.turnUserId).toBe('bo');
+    expect(owner.turnUserId).toBeUndefined();
+    expect(idsOf((await memory.recall('noon')).map((hit) => hit.trace))).toEqual(idsOf([owner, visitor]));
+
+    expect(await memory.deleteScope('user', '/s-1', { turnUserId: 'bo' })).toEqual({ deleted: 1 });
+
+    expect((await memory.recall('noon')).map((hit) => hit.trace.id)).toEqual([owner.id]);
+  });
+
+  it("remember stores a host's extra metadata keys, and the facade's own keys win", async () => {
+    const file = brainFile();
+    const memory = await facadeOn(file);
+    const told = await memory.remember('Ana keeps bees on the roof.', {
+      scope: 'user',
+      scopeId: 'ana',
+      metadata: { source: 'crm', scopeId: 'someone-else' },
+    });
+
+    const brain = await openBrain(file);
+    expect(await metadataOf(brain, told.id)).toMatchObject({ source: 'crm', scopeId: 'ana' });
+    expect(await filingOf(brain, told.id)).toEqual({ scopeId: 'ana', deleted: 0 });
+  });
+
+  it('deleteTraces deletes the named traces, skips an id it holds no trace of, and a call made again counts none', async () => {
+    const memory = await facadeOn(brainFile());
+    const kept = await memory.remember('Ana keeps bees on the roof.', { scope: 'user', scopeId: 'ana' });
+    const gone = await memory.remember('Ana likes green tea.', { scope: 'user', scopeId: 'ana' });
+    expect((await memory.recall('tea')).map((hit) => hit.trace.id)).toEqual([gone.id]);
+
+    expect(await memory.deleteTraces([gone.id, 'no-such-id'])).toEqual({ deleted: 1 });
+    expect(await memory.deleteTraces([gone.id])).toEqual({ deleted: 0 });
+
+    expect(await memory.recall('tea')).toEqual([]);
+    expect((await memory.recall('bees')).map((hit) => hit.trace.id)).toEqual([kept.id]);
+  });
+
+  it('deletes a trace it gave feedback on and the traces it ingested from a document: the feedback goes, and each chunk keeps its text and lets go of its trace', async () => {
+    const file = brainFile();
+    const memory = await facadeOn(file, { selfImprove: true });
+    const walnuts = await memory.remember('Ana is allergic to walnuts.', { scope: 'user', scopeId: 'ana' });
+    await memory.feedback(walnuts.id, 'used', 'What is Ana allergic to?');
+    const notes = path.join(path.dirname(file), 'notes.txt');
+    fs.writeFileSync(notes, 'Ana takes the night train to Lyon every spring. '.repeat(30), 'utf8');
+    expect((await memory.ingest(notes)).tracesCreated).toBeGreaterThan(0);
+
+    const brain = await openBrain(file);
+    const chunks = await brain.all<{ id: string; trace_id: string | null; content: string }>(
+      'SELECT id, trace_id, content FROM document_chunks WHERE brain_id = ? ORDER BY chunk_index',
+      [brain.brainId],
+    );
+    const chunkTraceIds = chunks.map((chunk) => chunk.trace_id).filter((id): id is string => typeof id === 'string');
+    expect(chunkTraceIds.length).toBeGreaterThan(0);
+    expect(await brain.all('SELECT trace_id FROM retrieval_feedback WHERE brain_id = ?', [brain.brainId])).toEqual([
+      { trace_id: walnuts.id },
+    ]);
+
+    expect(await memory.deleteTraces([walnuts.id, ...chunkTraceIds])).toEqual({ deleted: 1 + chunkTraceIds.length });
+
+    expect(await brain.all('SELECT trace_id FROM retrieval_feedback WHERE brain_id = ?', [brain.brainId])).toEqual([]);
+    expect(
+      await brain.all('SELECT id, trace_id, content FROM document_chunks WHERE brain_id = ? ORDER BY chunk_index', [brain.brainId]),
+    ).toEqual(chunks.map((chunk) => ({ ...chunk, trace_id: null })));
+    expect(await traceRowIds(brain)).toEqual([]);
+  });
+
+  it('deleteScope deletes a row an older release wrote after the facade opened, with no scope_id and the scope id in its metadata', async () => {
+    const file = brainFile();
+    const memory = await facadeOn(file);
+    await memory.remember('Ana keeps bees on the roof.', { scope: 'user', scopeId: 'ana' });
+    const older = await memory.remember('Ana likes green tea.', { scope: 'user', scopeId: 'ana' });
+    const brain = await openBrain(file);
+    // A release older than the column, writing to the open brain, leaves scope_id empty.
+    await brain.run("UPDATE memory_traces SET scope_id = '' WHERE brain_id = ? AND id = ?", [brain.brainId, older.id]);
+
+    expect(await memory.deleteScope('user', 'ana')).toEqual({ deleted: 2 });
+
+    expect(await traceRowIds(brain)).toEqual([]);
+  });
+
+  it('deleteScope refuses an empty scope id and an empty turnUserId, and deletes nothing', async () => {
+    const file = brainFile();
+    const memory = await facadeOn(file);
+    await memory.remember('Ana keeps bees on the roof.', { scope: 'user', scopeId: 'ana' });
+    await memory.remember('A note filed under no scope id.', { scope: 'user' });
+
+    await expect(memory.deleteScope('user', '')).rejects.toThrow(TypeError);
+    await expect(memory.deleteScope('user', 'ana', { turnUserId: '' })).rejects.toThrow(TypeError);
+
+    expect(await traceRowIds(await openBrain(file))).toHaveLength(2);
+  });
+
+  it('restoreTrace brings back a trace a host changed and one it forgot from a snapshot read before, and refuses a snapshot of another trace', async () => {
+    const file = brainFile();
+    const memory = await facadeOn(file);
+    const kept = await memory.remember('Ana keeps bees on the roof.', { scope: 'user', scopeId: 'ana' });
+    const brain = await openBrain(file);
+    const before = await readTraceSnapshot(brain, memory.brainId, kept.id);
+    expect(before).toMatchObject({ id: kept.id, scope: 'user', scopeId: 'ana', content: 'Ana keeps bees on the roof.', deleted: 0 });
+
+    await brain.run("UPDATE memory_traces SET content = 'changed', scope_id = 'x' WHERE brain_id = ? AND id = ?", [
+      brain.brainId,
+      kept.id,
+    ]);
+    await memory.restoreTrace(kept.id, before!);
+    expect(await readTraceSnapshot(brain, memory.brainId, kept.id)).toEqual(before);
+    expect((await memory.recall('bees')).map((hit) => hit.trace.id)).toEqual([kept.id]);
+
+    await memory.forget(kept.id);
+    expect(await memory.recall('bees')).toEqual([]);
+    await memory.restoreTrace(kept.id, before!);
+    expect((await memory.recall('bees')).map((hit) => hit.trace.id)).toEqual([kept.id]);
+
+    await expect(memory.restoreTrace('other-id', before!)).rejects.toThrow(/snapshot of trace/);
+  });
+
+  it('a trace it forgot and then restored keeps its vector, so a memory manager over the file recalls it', async () => {
+    const file = brainFile();
+    const firstBrain = await openBrain(file);
+    const first = await manager({ brain: firstBrain });
+    const told = await tell(first);
+    await stop(first, firstBrain);
+
+    const memory = await facadeOn(file);
+    const brain = await openBrain(file);
+    const before = await readTraceSnapshot(brain, memory.brainId, told.id);
+    await memory.forget(told.id);
+    await memory.restoreTrace(told.id, before!);
+
+    const later = await manager({ brain });
+    expect((await recall(later)).retrieved.map((hit) => hit.id)).toEqual([told.id]);
+  });
+
+  it('names the second user, the scope calls and their results in the types a host imports from the package', () => {
+    type Store = ReturnType<CognitiveMemoryManager['getStore']>;
+    expectTypeOf<MemoryTrace['turnUserId']>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<NonNullable<Parameters<ICognitiveMemoryManager['encode']>[3]>['turnUserId']>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<Parameters<NonNullable<ICognitiveMemoryManager['deleteScope']>>[2]>().toEqualTypeOf<{ turnUserId?: string } | undefined>();
+    expectTypeOf<Awaited<ReturnType<Store['hydrateScope']>>>().toEqualTypeOf<number>();
+    expectTypeOf<Awaited<ReturnType<Store['refileScope']>>>().toEqualTypeOf<number>();
+    expectTypeOf<NonNullable<RememberOptions['metadata']>>().toEqualTypeOf<Record<string, unknown>>();
+    expectTypeOf<Memory['brainId']>().toEqualTypeOf<string>();
+    expectTypeOf<Parameters<Memory['deleteScope']>[2]>().toEqualTypeOf<{ turnUserId?: string } | undefined>();
+    expectTypeOf<Awaited<ReturnType<Memory['deleteScope']>>>().toEqualTypeOf<{ deleted: number }>();
+    expectTypeOf<Awaited<ReturnType<Memory['deleteTraces']>>>().toEqualTypeOf<{ deleted: number }>();
+    expectTypeOf<Parameters<Memory['restoreTrace']>[1]>().toEqualTypeOf<TraceSnapshot>();
+  });
+});
+
 describe("gmi(): memory.persistAccessState", () => {
   let keys = 0;
   const key = () => `k-qa-scopes-${++keys}`;
@@ -1181,5 +1669,29 @@ describe('the docs a host reads about it', () => {
     expect(doc('docs/memory/MEMORY_STORAGE.md')).toContain('metadata.decay');
     expect(doc('docs/GMI.md')).toContain('memory.persistAccessState');
     expect(doc('docs/getting-started/HIGH_LEVEL_API.md')).toMatch(/this path reads [^.]*`persistAccessState`/);
+  });
+
+  it("describe deleting traces for good and the key of a trace's episodic copy", () => {
+    const cognitive = doc('docs/memory/COGNITIVE_MEMORY.md');
+    expect(cognitive).toMatch(/^### Deleting traces$/m);
+    expect(cognitive).toContain('`CognitiveMemoryManager.deleteTraces(traceIds)` and `deleteScope(scope, scopeId)` delete for good.');
+    expect(cognitive).toContain("`graph` is `'not_supported'` when the knowledge graph has no `deleteMemories`");
+    expect(doc('docs/memory/MEMORY_STORAGE.md')).toContain('under the node id `trace:<traceId>`');
+  });
+
+  it("describe loading and moving one scope, a second user's traces, and the facade's deletes and restores", () => {
+    const cognitive = doc('docs/memory/COGNITIVE_MEMORY.md');
+    expect(cognitive).toMatch(/^### Loading and moving one scope$/m);
+    expect(cognitive).toContain('`MemoryStore.hydrateScope(scope, scopeId, limit?)`');
+    expect(cognitive).toContain('`MemoryStore.refileScope(scope, fromScopeId, toScopeId)`');
+    expect(cognitive).toContain('`MemoryTrace.turnUserId`');
+    expect(cognitive).toContain('`deleteScope(scope, scopeId, { turnUserId })`');
+    const storage = doc('docs/memory/MEMORY_STORAGE.md');
+    expect(storage).toMatch(/^## Deleting and restoring traces$/m);
+    expect(storage).toContain('`Memory.deleteScope(scope, scopeId, { turnUserId? })`');
+    expect(storage).toContain('`Memory.restoreTrace(traceId, snapshot)`');
+    expect(storage).toContain('`readTraceSnapshot(brain, brainId, traceId)`');
+    expect(storage).toContain('`Memory.brainId`');
+    expect(storage).toContain('`remember(content, { metadata })`');
   });
 });
