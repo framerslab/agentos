@@ -68,6 +68,12 @@ describe('validateLaunchArgs', () => {
       expect(refusal?.reason).toMatch(reason);
     }
   });
+
+  it('walks a dependsOn chain of any length without overflowing the stack, so the seat count is what refuses it', () => {
+    // Each seat waits for the next: the walk from the first goes the whole chain deep.
+    const seats = Array.from({ length: 50_000 }, (_, i) => seat(`s${i}`, i < 49_999 ? { dependsOn: [`s${i + 1}`] } : {}));
+    expect(validateLaunchArgs(args({ strategy: 'graph', seats }))).toBeUndefined();
+  });
 });
 
 describe('childBudgetCaps', () => {
