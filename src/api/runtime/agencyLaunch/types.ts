@@ -1,15 +1,17 @@
 /**
  * @file types.ts
  * The types and bounds of teams a GMI launches from a turn (`launch_agency`), and of the seats such a team and
- * `sessionSeat()` build. The package root and `src/api` export {@link LAUNCH_AGENCY_TOOL_NAME}, `sessionSeat()` and
- * the types of the `agencies` option, the tool's arguments and result and a seat; the launch registry, the engine
- * (`runLaunch`) and the tool factory (`createGmiLaunchTool`) stay internal.
+ * `sessionSeat()` build, with the tool's schema and description, which both surfaces offer. The package root and
+ * `src/api` export {@link LAUNCH_AGENCY_TOOL_NAME}, `sessionSeat()` and the types of the `agencies` option, the tool's
+ * arguments and result and a seat; the launch registry, the engine (`runLaunch`) and the tool factories
+ * (`createGmiLaunchTool`, `createRuntimeLaunchTool`) stay internal.
  */
 import type { AgentOptions } from '../../agent.js';
 import type { Agent, AgencyStrategy, HitlConfig } from '../../types.js';
 import { AgencyConfigError } from '../../types.js';
 import type { ApprovalGateFn } from '../approval-gate.js';
 import type { SpendBudget } from '../spendBudget.js';
+import type { JSONSchemaObject } from '../../../core/tools/ITool.js';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator.js';
 
 export type { SeatMetadata } from '../../types.js';
@@ -18,7 +20,12 @@ export type { SeatMetadata } from '../../types.js';
 export const LAUNCH_AGENCY_TOOL_NAME = 'launch_agency';
 /** The six strategies a launch offers: the tool's input schema lists them and the engine accepts them. */
 export const LAUNCH_STRATEGIES = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'] as const satisfies readonly AgencyStrategy[];
-/** The capability a full-runtime persona's grant would name for the tool. No code reads it: gmi() is the one surface that registers `launch_agency`. */
+/**
+ * The capability the full runtime's `launch_agency` requires (`requiredCapabilities`): only a persona whose
+ * `allowedCapabilities` names it lists and calls the tool, while the runtime checks capabilities strictly (its
+ * `toolPermissionManagerConfig.strictCapabilityChecking`, on by default). gmi() registers the tool for its agent alone
+ * and checks no capability.
+ */
 export const LAUNCH_CAPABILITY = 'agency:launch';
 /** The five self-modification tools, which a seat never gets. */
 export const SELF_MODIFICATION_TOOLS = ['forge_tool', 'create_workflow', 'manage_skills', 'self_evaluate', 'adapt_personality'] as const;
@@ -110,9 +117,21 @@ export interface AgencyLaunchOptions {
   hitl?: HitlConfig;
 }
 
-/** The bounds of a launch on the full runtime, with the route of its coordinator. AgentOSConfig takes no `agencies` option: gmi() is the one surface that registers `launch_agency`. */
+/**
+ * `AgentOSConfig.agencies`: whether the full runtime registers `launch_agency`, and every launch's bounds. `launch: true`
+ * registers the tool, which requires {@link LAUNCH_CAPABILITY}, so only a persona granted it lists and calls it. A
+ * seat is a GMI of the runtime's GMIManager: a registered persona a launch names by `personaId` (in place of
+ * `agentKey`), or a persona made for a temporary seat from the calling GMI's (its route, completion options,
+ * capabilities and hard limits, with the seat's instructions as its prompt). Every seat runs through a view of the
+ * runtime's tools that lists and runs its allowlist alone, as the parent turn's user and organization, with no
+ * cognitive memory, no retrieval and no learner.
+ */
 export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'members'> {
-  /** The route of a launched team's manager and synthesizers (they call generateText). Default: the parent persona's provider and model, with the key and base URL of the runtime's entry for that provider. */
+  /**
+   * The route of a launched team's manager and synthesizers (they call generateText). Default: the provider and model
+   * of the persona of the GMI that launched the team, else the GMIs' defaults
+   * (`gmiManagerConfig.defaultGMIBaseConfigDefaults`), with the key generateText resolves for that provider.
+   */
   coordinator?: { provider: string; model: string; apiKey?: string; baseUrl?: string };
 }
 
@@ -408,6 +427,99 @@ export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgency
     maxDeadlineMs,
     ...(options.hitl ? { hitl: options.hitl } : {}),
   };
+}
+
+/**
+ * The persistent members a surface's `launch_agency` seats as themselves: gmi()'s `agencies.members` by `agentKey`, or
+ * the full runtime's registered personas by `personaId`.
+ */
+export type LaunchMemberForm = { field: 'agentKey'; keys: readonly string[] } | { field: 'personaId' };
+
+/** The words the schema and the description give a member form. */
+function memberWords(members: LaunchMemberForm): { property: string; brief: string; tools: string; offer: string; rule: string } {
+  if (members.field === 'agentKey') {
+    const keys = members.keys.join(', ');
+    return {
+      property: `A persistent member to seat as itself, in place of instructions: one of ${keys}.`,
+      brief: "A member's brief for this team, at most 1,000 characters; only with agentKey.",
+      tools: '; for a member, only those it also has',
+      offer: `, or a member you seat as itself by agentKey (${keys})`,
+      rule: "A member's seat may name only tools the member also has.",
+    };
+  }
+  return {
+    property: 'A registered persona to seat as itself, in place of instructions: its own prompt, model and capabilities.',
+    brief: "A persona's brief for this team, at most 1,000 characters; only with personaId.",
+    tools: "; for a persona, only those its capabilities allow",
+    offer: ', or a registered persona you seat as itself by personaId',
+    rule: "A persona's seat may name only tools its capabilities allow.",
+  };
+}
+
+/**
+ * The input schema `launch_agency` offers the model. Counts, unknown keys and the forms' rules are the engine's
+ * (`validateLaunchArgs`), with its codes.
+ *
+ * @param limits - The tree's limits: the seat count and the deadlines the schema states.
+ * @param members - The members the surface seats as themselves; none, and the schema offers instructions alone.
+ */
+export function launchAgencyInputSchema(limits: LaunchLimits, members?: LaunchMemberForm): JSONSchemaObject {
+  const words = members ? memberWords(members) : undefined;
+  const names = { type: 'array', items: { type: 'string' } };
+  const seat: JSONSchemaObject = {
+    type: 'object',
+    properties: {
+      role: { type: 'string', description: "The seat's name in the team, unique: a letter, then letters, digits, '_' or '-', at most 52 characters." },
+      instructions: { type: 'string', description: 'Who the seat is and what it does: the system prompt of an agent made for this team.' },
+      ...(members && words
+        ? {
+            [members.field]: { type: 'string', description: words.property },
+            brief: { type: 'string', description: words.brief },
+          }
+        : {}),
+      tools: { ...names, description: `The names of your own tools this seat may use${words?.tools ?? ''}. A seat given none uses none.` },
+      dependsOn: { ...names, description: 'For the graph strategy: the roles this seat waits for; their outputs are its input.' },
+    },
+    required: ['role'],
+  };
+  return {
+    type: 'object',
+    properties: {
+      goal: { type: 'string', description: 'What the team must produce, in full: its members see nothing of this conversation. At most 8,000 characters.' },
+      strategy: {
+        type: 'string',
+        enum: [...LAUNCH_STRATEGIES],
+        description:
+          "How the seats work together. sequential (the default): each seat receives the task and the previous seat's output. parallel: every seat answers at once, and one answer is made from theirs. debate: the seats argue in rounds, and their arguments are summed up. review-loop: exactly two seats, the first writes and the second reviews until it approves. hierarchical: a manager delegates to the seats. graph: a seat runs once the seats its dependsOn names have answered.",
+      },
+      seats: { type: 'array', items: seat, description: `The team, at most ${limits.maxSeats} seats.` },
+      budgetUsd: { type: 'number', description: 'The most the team may spend, in US dollars; the launch takes the least of this and its own bounds.' },
+      maxTokens: { type: 'number', description: 'The most tokens the team may use; the launch takes the least of this and its own bounds.' },
+      deadlineMs: { type: 'number', description: `The team's deadline in milliseconds, at least 1,000; default ${limits.defaultDeadlineMs}, at most ${limits.maxDeadlineMs}.` },
+      maxRounds: { type: 'integer', description: 'The rounds of debate and review-loop: 1, 2 or 3 (the default).' },
+    },
+    required: ['goal', 'seats'],
+  };
+}
+
+/**
+ * What the model reads about `launch_agency`.
+ *
+ * @param limits - The tree's limits: the seat count the description states.
+ * @param members - The members the surface seats as themselves; none, and every seat is an agent made for the team.
+ */
+export function launchAgencyDescription(limits: LaunchLimits, members?: LaunchMemberForm): string {
+  const words = members ? memberWords(members) : undefined;
+  return [
+    "Launches a temporary team of agents on one goal and returns the team's answer as this call's result.",
+    `Each seat is an agent with the instructions you give it${words?.offer ?? ''}.`,
+    'One seat makes a subagent.',
+    "The team sees nothing of this conversation, so put everything it needs in the goal and each seat's instructions.",
+    'A seat uses only the tools its tools list names, from your own tools.',
+    ...(words ? [words.rule] : []),
+    `At most ${limits.maxSeats} seats; the team runs within a share of this turn's budget and a deadline.`,
+    'A launch that is refused returns an error that starts with its code, such as too_many_seats or invalid_arguments.',
+  ].join(' ');
 }
 
 /** A tool as the seat rules read it: its name and, for a composed tool, the tools its steps call. */
