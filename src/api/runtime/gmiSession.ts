@@ -73,7 +73,8 @@ export interface GmiTurnOptions {
   /**
    * The caller's own signal among the turn's stops (`abortSignal` also carries a session's close()): a stream whose
    * caller's signal has already aborted starts no turn and ends at once with an error part that carries the signal's
-   * reason, and a stream the signal stops ends with that reason in its error part.
+   * reason, a stream the signal stops ends with that reason in its error part, and a turn whose signal aborts after its
+   * last request (while a hook runs) ends with the reason too.
    */
   callerSignal?: AbortSignal;
   /**
@@ -480,6 +481,10 @@ export async function* runGmiTurn(
     }
     flush();
     ended = true;
+    // The caller's signal aborted after the turn's last request (while a hook ran): the turn ends with its reason, as
+    // generateText's check after each step's hook ends a call, and keeps its finished steps marked partial, as a turn
+    // stopped during a request does.
+    if (!folder.error()) turn.callerSignal?.throwIfAborted();
     if (folder.error()) {
       writer?.abort({ partial: true });
     } else {

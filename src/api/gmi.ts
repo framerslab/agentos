@@ -744,6 +744,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         if (callerSignal?.aborted) throw callerSignal.reason;
         throw error;
       }
+      // A signal that aborted once the turn had ended rejects the call too, and no source is retrieved for it.
+      callerSignal?.throwIfAborted();
       // As agent().generate() does: the answer checked against the sources retrieved for the input.
       if (opts.verifyCitations) {
         const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
