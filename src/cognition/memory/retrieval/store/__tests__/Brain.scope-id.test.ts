@@ -14,7 +14,8 @@
  * scope id; and a trace no import wrote, with the hash `remember()` stores or no hash at all, is the duplicate of a
  * record of its text in its scope id, and of its own Markdown or Obsidian note whatever whitespace surrounds its text
  * and whatever tags and links the note adds after it, an Obsidian note adding to its trace the tags and links it holds
- * that the trace lacks; a trace the brain forgot stays forgotten through an import of its text. Real SQLite files
+ * that the trace lacks; a trace the brain forgot stays forgotten through an import of its text, and a text a source
+ * forgot and stored again arrives live whichever of its two records the file holds first. Real SQLite files
  * through `@framers/sql-storage-adapter`, as the store opens them in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
@@ -1101,6 +1102,60 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       // remember() stores the text again.
       await memory.remember('Forgotten words.', { scope: 'user', scopeId: 'A%2F42' });
       expect(await textsOf(brain)).toEqual(['Forgotten words.']);
+    });
+
+    describe('a text the source forgot and stored again arrives live, whichever of its two records the file holds first', () => {
+      // forget() and then remember() leave a forgotten and a live trace of one text, as a merge of two equal traces
+      // does, and an export holds its rows in no set order: each order of the two records is read.
+      const orders = [
+        { name: 'the forgotten record first', deleted: [1, 0] },
+        { name: 'the live record first', deleted: [0, 1] },
+      ];
+
+      it.each(orders)('JSON, $name', async ({ deleted }) => {
+        const memory = await Memory.createSqlite(tempFile(), { brainId: 'stored-again', graph: false });
+        closers.push(() => memory.close());
+        const first = await memory.remember('Kept words.', { scope: 'user', scopeId: 'A%2F42' });
+        await memory.forget(first.id);
+        await memory.remember('Kept words.', { scope: 'user', scopeId: 'A%2F42' });
+        const exported = JSON.parse(
+          await new JsonExporter((memory as unknown as { _brain: Brain })._brain).exportToString(),
+        ) as { traces: Array<{ deleted: number }> };
+        expect(exported.traces.map((record) => record.deleted).sort()).toEqual([0, 1]);
+        const traces = deleted.map((flag) => exported.traces.find((record) => record.deleted === flag)!);
+        const file = JSON.stringify({ ...exported, traces });
+
+        const target = await open(tempFile(), 'json-target');
+        expect(await new JsonImporter(target).importFromString(file)).toMatchObject({ imported: 1, skipped: 1, errors: [] });
+        expect(await textsOf(target)).toEqual(['Kept words.']);
+        expect(await new JsonImporter(target).importFromString(file)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      });
+
+      it.each(orders)('SQLite, $name', async ({ deleted }) => {
+        // Inserted in this order, with their ids in this order and one creation time, the rows come back in it
+        // whichever index the importer's read of them takes.
+        const sourcePath = tempFile();
+        const source = await open(sourcePath, 'sqlite-source');
+        for (let index = 0; index < deleted.length; index++) {
+          await source.run(
+            `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, deleted, scope_id)
+             VALUES (?, ?, 'episodic', 'user', 'Kept words.', 1, ?, ?, 'A%2F42')`,
+            [source.brainId, `t-${index}`, JSON.stringify({ scopeId: 'A%2F42' }), deleted[index]],
+          );
+        }
+        const target = await open(tempFile(), 'sqlite-target');
+        expect(await new SqliteImporter(target).import(sourcePath)).toMatchObject({ imported: 1, skipped: 1, errors: [] });
+        expect(await textsOf(target)).toEqual(['Kept words.']);
+        expect(await new SqliteImporter(target).import(sourcePath)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      });
+
+      it.each(orders)('CSV, $name', async ({ deleted }) => {
+        const csv = `content,scope,scope_id,deleted\n${deleted.map((flag) => `"Kept words.",user,A%2F42,${flag}\n`).join('')}`;
+        const target = await open(tempFile(), 'csv-target');
+        expect(await new CsvImporter(target).importFromString(csv)).toMatchObject({ imported: 1, skipped: 1, errors: [] });
+        expect(await textsOf(target)).toEqual(['Kept words.']);
+        expect(await new CsvImporter(target).importFromString(csv)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      });
     });
   });
 });
