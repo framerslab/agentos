@@ -751,6 +751,40 @@ describe('launch_agency on gmi()', () => {
     expect(result.text).toBe('Done.');
   });
 
+  it('a member whose calls take their cap from controls.maxTotalTokens is floored on that cap', async () => {
+    const k = key();
+    const kl = key();
+    const ks = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([
+          { id: 'c1', name: 'launch_agency', args: { goal: 'Answer.', maxTokens: 7_000, seats: [{ role: 'answerer', agentKey: 'long' }] } },
+          { id: 'c2', name: 'launch_agency', args: { goal: 'Answer.', maxTokens: 5_000, seats: [{ role: 'answerer', agentKey: 'short' }] } },
+        ]),
+        reply.text('Done.'),
+      ],
+    });
+    const longCalls = script('openai', kl, { replies: [reply.text('A long answer.')] });
+    const shortCalls = script('openai', ks, { replies: [reply.text('Short answer.')] });
+    // Neither member sets maxTokens: each call a member makes is sent with its controls.maxTotalTokens as its cap.
+    const long = gmi({ ...route(kl), instructions: 'Answer at length.', controls: { maxTotalTokens: 8_000 } });
+    const short = gmi({ ...route(ks), instructions: 'Answer briefly.', controls: { maxTotalTokens: 1_000 } });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', maxTokens: 1_000, agencies: { launch: true, members: { long, short } } });
+
+    const result = await parent.session('p1').send('Go.');
+    // 7,000 cannot cover one call of the long member's: 2,000 for the prompt and the 8,000 its calls are sent with.
+    // Refused before a seat is built, so the member is never called.
+    expect(refusalOf(result, 0)).toBe('budget_unavailable');
+    expect(result.toolCalls[0].error).toBe("budget_unavailable: the launch's token cap, 7000, cannot cover one call (10000: 2000 for the prompt and 8000 for the output)");
+    expect(longCalls.seen).toHaveLength(0);
+    // 5,000 covers one call of the short member's (2,000 for the prompt and its 1,000): its seat runs, at that cap.
+    expect(launchOf(result, 1)).toMatchObject({ status: 'completed', text: 'Short answer.' });
+    expect(shortCalls.seen).toHaveLength(1);
+    expect(shortCalls.seen[0].options.maxTokens).toBe(1_000);
+    expect(s.seen).toHaveLength(2);
+    expect(result.text).toBe('Done.');
+  });
+
   it('the root launches of one turn share one pool, and the next turn launches from a fresh one', async () => {
     const k = key();
     const oneSeat = (role: string) => ({ goal: `Do the ${role} part.`, seats: [{ role, instructions: `Do the ${role} part.` }] });
