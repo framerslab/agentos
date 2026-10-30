@@ -348,7 +348,7 @@ export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgency
     throw new AgencyConfigError('agencies.hitl: HITL approvals configured but no handler provided');
   }
 
-  const members = (options as AgencyLaunchOptions).members;
+  const members = (options as AgencyLaunchOptions).members ?? undefined;
   if (members !== undefined) {
     if (typeof members !== 'object' || members === null) throw new RangeError('agencies.members must be a record of gmi() handles');
     for (const [key, member] of Object.entries(members)) {
