@@ -59,6 +59,71 @@ const RELATED_HEADING = '**Related:**';
 /** What opens each item of the **Related:** list: a line break and the opening of its link. */
 const RELATED_ITEM = '\n- [[';
 
+/** No labels with a line break: each link of a **Related:** list is read as one line. */
+const NO_LABELS: ReadonlySet<string> = new Set();
+
+// ---------------------------------------------------------------------------
+// What the export writes after a trace's text
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether `additions` is what `ObsidianExporter` writes after a trace's text:
+ * the tag line, the **Related:** list, or the tag line, a blank line and the
+ * list.
+ *
+ * @param additions - What a note holds after a trace's text, without the whitespace around it.
+ * @param labels    - Labels that hold a line break, whose links run over more than one line.
+ * @returns `true` when the note holds nothing else there.
+ */
+function isExportedAdditions(additions: string, labels: ReadonlySet<string>): boolean {
+  let at = 0;
+  const tagLine = TAG_LINE_RE.exec(additions);
+  if (tagLine) {
+    at = tagLine[0].length;
+    if (at === additions.length) return true;
+    if (!additions.startsWith('\n\n', at)) return false;
+    at += 2;
+  }
+  return additions.startsWith(RELATED_HEADING, at) && isRelatedList(additions, at + RELATED_HEADING.length, labels);
+}
+
+/**
+ * Whether `additions`, from `from` to its end, is one or more links of a
+ * **Related:** list: each a line break, `- [[`, a label and `]]`. A label is
+ * the rest of its line when that line ends in `]]`, or one of `labels`, which
+ * runs over the line breaks it holds. The places a link may start are kept in
+ * a list and read one by one, each once, so a list of any length is read
+ * without recursion.
+ *
+ * @param additions - What a note holds after a trace's text, without the whitespace around it.
+ * @param from      - Where the first link starts.
+ * @param labels    - Labels that hold a line break, whose links run over more than one line.
+ * @returns `true` when the links run to the end of `additions`.
+ */
+function isRelatedList(additions: string, from: number, labels: ReadonlySet<string>): boolean {
+  const toRead = [from];
+  const seen = new Set(toRead);
+  let at: number | undefined;
+  while ((at = toRead.pop()) !== undefined) {
+    if (!additions.startsWith(RELATED_ITEM, at)) continue;
+    const start = at + RELATED_ITEM.length;
+    const lineBreak = additions.indexOf('\n', start);
+    const lineEnd = lineBreak === -1 ? additions.length : lineBreak;
+    const ends = lineEnd - start >= 2 && additions.endsWith(']]', lineEnd) ? [lineEnd] : [];
+    for (const label of labels) {
+      if (additions.startsWith(`${label}]]`, start)) ends.push(start + label.length + 2);
+    }
+    for (const end of ends) {
+      if (end === additions.length) return true;
+      if (!seen.has(end)) {
+        seen.add(end);
+        toRead.push(end);
+      }
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -91,11 +156,12 @@ interface TraceFrontmatter {
  */
 export class ObsidianImporter extends MarkdownImporter {
   /**
-   * The labels of the brain's graph that hold a line break, read when an
-   * import starts. A note's link to such a label runs over the label's line
-   * breaks when a vault holds the label as the brain does.
+   * The labels of the brain's graph that hold a line break, read the first
+   * time an import meets a **Related:** list that does not read as one line a
+   * link. The export writes a label as the brain holds it, so a link to such
+   * a label runs over the label's line breaks.
    */
-  private _labelsWithLineBreaks: ReadonlySet<string> = new Set();
+  private _labelsWithLineBreaks: Promise<ReadonlySet<string>> | undefined;
 
   /**
    * @param brain - The target `Brain` to import into.
@@ -111,16 +177,16 @@ export class ObsidianImporter extends MarkdownImporter {
   /**
    * Recursively walk `sourceDir` and import every `.md` file as
    * `MarkdownImporter` does, reading each note's `#tags` and `[[wikilinks]]`
-   * as well. With deduplication on, the labels of the brain's graph that hold
-   * a line break are read first, so a trace's own note is found when its
-   * **Related:** list links to one of them (see {@link holdsTraceText}).
+   * as well. Each import reads the brain's graph afresh: the labels it holds
+   * that have a line break are read once, when a note first needs them (see
+   * {@link holdsTraceText}).
    *
    * @param sourceDir - Directory to recursively scan for `.md` files.
    * @param options   - `dedup` (default `true`) skips a note the brain holds.
    * @returns `ImportResult` with counts of imported, skipped, and errored items.
    */
   override async import(sourceDir: string, options?: Pick<ImportOptions, 'dedup'>): Promise<ImportResult> {
-    if (options?.dedup ?? true) this._labelsWithLineBreaks = await this._readLabelsWithLineBreaks();
+    this._labelsWithLineBreaks = undefined;
     return super.import(sourceDir, options);
   }
 
@@ -135,24 +201,31 @@ export class ObsidianImporter extends MarkdownImporter {
    * `ObsidianExporter` writes there: the tag line, the **Related:** list, or
    * the tag line, a blank line and the list. Each link of the list is a line
    * `- [[label]]`, or runs over the line breaks of a label the brain's graph
-   * holds. The text is read whole, so a trace whose own text ends in a line of
-   * hashtags, and a trace with no text, are the duplicates of their own notes
-   * too, and a vault exported from a brain and imported into it adds nothing.
-   * A note that holds anything else after the text, such as a paragraph added
-   * in Obsidian before or after its links, is not the trace's own note.
+   * holds, as the export writes a label that holds a line break; the graph is
+   * read for such labels once, when a list does not read as one line a link.
+   * The text is read whole, so a trace whose own text ends in a line of hashtags,
+   * and a trace with no text, are the duplicates of their own notes too, and
+   * a vault exported from a brain and imported into it adds nothing. A note
+   * that holds anything else after the text, such as a paragraph added in
+   * Obsidian before or after its links, is not the trace's own note.
    *
    * @param text - The text of the trace the note's `id` names.
    * @param body - The note's body, without its leading and trailing whitespace.
-   * @returns `true` when the note holds the trace's text.
+   * @returns A promise of `true` when the note holds the trace's text.
    */
-  protected override holdsTraceText(text: string, body: string): boolean {
-    if (super.holdsTraceText(text, body)) return true;
+  protected override async holdsTraceText(text: string, body: string): Promise<boolean> {
+    if (await super.holdsTraceText(text, body)) return true;
     const own = text.trim();
     if (!body.startsWith(own)) return false;
     const rest = body.slice(own.length);
     // The export writes a blank line between the text and what it adds; a trace with no text keeps none past the trim.
     if (own !== '' && !/^\s/.test(rest)) return false;
-    return this._isExportedAdditions(rest.trim());
+    const additions = rest.trim();
+    if (isExportedAdditions(additions, NO_LABELS)) return true;
+    if (!additions.includes(RELATED_HEADING)) return false;
+    // A link to a label that holds a line break runs over more than one line: read such labels once an import needs them.
+    this._labelsWithLineBreaks ??= this._readLabelsWithLineBreaks();
+    return isExportedAdditions(additions, await this._labelsWithLineBreaks);
   }
 
   /**
@@ -224,52 +297,6 @@ export class ObsidianImporter extends MarkdownImporter {
       [this.brain.brainId, '%\n%'],
     );
     return new Set(rows.map((row) => row.label));
-  }
-
-  /**
-   * Whether `additions` is what `ObsidianExporter` writes after a trace's
-   * text: the tag line, the **Related:** list, or the tag line, a blank line
-   * and the list.
-   *
-   * @param additions - What a note holds after a trace's text, without the whitespace around it.
-   * @returns `true` when the note holds nothing else there.
-   */
-  private _isExportedAdditions(additions: string): boolean {
-    let at = 0;
-    const tagLine = TAG_LINE_RE.exec(additions);
-    if (tagLine) {
-      at = tagLine[0].length;
-      if (at === additions.length) return true;
-      if (!additions.startsWith('\n\n', at)) return false;
-      at += 2;
-    }
-    if (!additions.startsWith(RELATED_HEADING, at)) return false;
-    return this._isRelatedListFrom(additions, at + RELATED_HEADING.length, new Set());
-  }
-
-  /**
-   * Whether `additions`, from `at` to its end, is one or more links of a
-   * **Related:** list: each a line break, `- [[`, a label and `]]`. A label is
-   * the rest of its line when that line ends in `]]`, or a label of the
-   * brain's graph that holds a line break.
-   *
-   * @param additions - What a note holds after a trace's text, without the whitespace around it.
-   * @param at        - Where the next link starts.
-   * @param failed    - The places already found to start no list that runs to the end.
-   * @returns `true` when the links run to the end of `additions`.
-   */
-  private _isRelatedListFrom(additions: string, at: number, failed: Set<number>): boolean {
-    if (failed.has(at) || !additions.startsWith(RELATED_ITEM, at)) return false;
-    const start = at + RELATED_ITEM.length;
-    const lineBreak = additions.indexOf('\n', start);
-    const lineEnd = lineBreak === -1 ? additions.length : lineBreak;
-    const ends = additions.slice(start, lineEnd).endsWith(']]') ? [lineEnd] : [];
-    for (const label of this._labelsWithLineBreaks) {
-      if (additions.startsWith(`${label}]]`, start)) ends.push(start + label.length + 2);
-    }
-    if (ends.some((end) => end === additions.length || this._isRelatedListFrom(additions, end, failed))) return true;
-    failed.add(at);
-    return false;
   }
 
   /**

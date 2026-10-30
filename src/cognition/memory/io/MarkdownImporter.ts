@@ -136,13 +136,14 @@ export class MarkdownImporter {
    * that it holds is that trace's own note, and so its duplicate, also when
    * the trace's text begins or ends with whitespace. `ObsidianImporter` also
    * reads past the tag line and the links `ObsidianExporter` writes after the
-   * text.
+   * text, and may read the brain's graph to do so, so an override may answer
+   * with a promise.
    *
    * @param text - The text of the trace the note's `id` names.
    * @param body - The note's body, without its leading and trailing whitespace.
-   * @returns `true` when the note holds the trace's text.
+   * @returns `true` when the note holds the trace's text, or a promise of the answer.
    */
-  protected holdsTraceText(text: string, body: string): boolean {
+  protected holdsTraceText(text: string, body: string): boolean | Promise<boolean> {
     return text.trim() === body;
   }
 
@@ -302,7 +303,7 @@ export class MarkdownImporter {
       'SELECT content FROM memory_traces WHERE brain_id = ? AND id = ? AND scope = ? AND scope_id = ? LIMIT 1',
       [this.brain.brainId, fm.id, scope, scopeId],
     );
-    return named ? this.holdsTraceText(named.content, body) : false;
+    return named ? await this.holdsTraceText(named.content, body) : false;
   }
 
   private async _resolveTraceId(preferredId: string): Promise<string> {

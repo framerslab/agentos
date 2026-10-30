@@ -9,9 +9,7 @@
  * 2. **`[[wikilinks]]`** — for each trace, the exporter queries the brain's
  *    `knowledge_edges` for related entities that share the same trace ID as
  *    a source.  Related knowledge-node labels are appended as `[[label]]`
- *    links so Obsidian's graph view can visualise the semantic network, one
- *    link a line: a line break in a label is written as a space, since an
- *    Obsidian link holds none.
+ *    links so Obsidian's graph view can visualise the semantic network.
  *
  * The folder layout mirrors `MarkdownExporter`:
  * ```
@@ -105,9 +103,7 @@ export class ObsidianExporter extends MarkdownExporter {
    * Additions over the base implementation:
    * - Tags are rendered as `#tagName` inline hashtags in the body.
    * - Related knowledge nodes (found via `knowledge_edges`) are rendered as
-   *   `[[Node Label]]` wikilinks appended at the bottom of the note, one a
-   *   line. A line break in a label, with the whitespace around it, is
-   *   written as one space, since an Obsidian link holds no line break.
+   *   `[[Node Label]]` wikilinks appended at the bottom of the note.
    *
    * @param trace - Parsed trace row.
    * @returns Full Markdown file content with front-matter.
@@ -132,7 +128,7 @@ export class ObsidianExporter extends MarkdownExporter {
     const wikiLinks =
       relatedNodes.length > 0
         ? '\n\n**Related:**\n' +
-          relatedNodes.map((label) => `- [[${label.replace(/\s*[\r\n]\s*/g, ' ')}]]`).join('\n')
+          relatedNodes.map((label) => `- [[${label}]]`).join('\n')
         : '';
 
     const body = trace.content + tagLine + wikiLinks;
