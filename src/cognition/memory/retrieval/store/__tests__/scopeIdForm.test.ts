@@ -945,6 +945,32 @@ describe('an export or an import that a re-file overtakes reads one form', () =>
     expect(await scopeIdsOf(target)).toEqual(['user:team%2Fana']);
     expect(await target.getMeta(SCOPE_ID_FORM_KEY)).toBe('encoded');
   });
+
+  it('SQLite export: the record and the traces agree, when the re-file commits between the copies of brain_meta and of the traces', async () => {
+    // A Brain on one connection (here in memory) reads no snapshot, so a re-file another flow makes can commit between
+    // two of the export's reads.
+    const source = await Brain.openSqlite(':memory:', { brainId: 'src' });
+    closers.push(() => source.close());
+    await plainRow(source, 't-a', 'user', 'team/ana');
+    const internals = source as unknown as { _bulkCopy: (...args: unknown[]) => Promise<void> };
+    const copy = internals._bulkCopy.bind(source);
+    let refiled = false;
+    internals._bulkCopy = async (...args: unknown[]) => {
+      await copy(...args);
+      if (args[1] === 'brain_meta' && !refiled) {
+        refiled = true;
+        await refileBrainScopeIds(source);
+      }
+    };
+    const exportPath = path.join(tempDir(), 'export.sqlite');
+    await source.exportToSqlite(exportPath);
+
+    expect(refiled).toBe(true);
+    const exported = await brainAt(exportPath, 'src');
+    // Either the Brain before the re-file or the Brain after it, never its record of one with its ids of the other.
+    const read = [(await exported.getMeta(SCOPE_ID_FORM_KEY)) ?? 'plain', await scopeIdsOf(exported)];
+    expect([['plain', ['user:team/ana']], ['encoded', ['user:team%2Fana']]]).toContainEqual(read);
+  });
 });
 
 describeIfPostgres('imports on Postgres', () => {
