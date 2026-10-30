@@ -401,4 +401,18 @@ describe('agency() seats served by GMIs', () => {
     await vi.waitFor(() => expect(seat.record()).toMatchObject({ status: 'failed', calls: 1 }));
     expect(seat.record().usage.totalTokens).toBe(14);
   });
+
+  it("a seat's close leaves the tally a member's own earlier session of that id kept", async () => {
+    const k = key();
+    script('openai', k, { replies: [reply.text('Hi.'), reply.text('Go.')] });
+    const member = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Help.' });
+    // The host names its own session as a seat's id would read.
+    await member.session('seat:lesson-1').send('Hi.');
+    await member.session('seat:lesson-1').close();
+    const seat = sessionSeat(member, { sessionId: 'lesson-1' });
+    await seat.generate('Go.');
+    await seat.close();
+    // The host's turn and the seat's, 15 tokens each, stay under the id.
+    expect((await member.usage('seat:lesson-1')).totalTokens).toBe(30);
+  });
 });
