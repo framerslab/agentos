@@ -19,8 +19,11 @@ import { GMI } from '../../src/cognition/substrate/GMI.js';
 import { GMIManager } from '../../src/cognition/substrate/GMIManager.js';
 import {
   GMIOutputChunkType,
+  GMIPrimeState,
   type AudioOutputConfig,
   type GMIOutput,
+  type GMIOutputChunk,
+  type GMITurnInput,
   type ToolCallRequest,
 } from '../../src/cognition/substrate/IGMI.js';
 import { InMemoryWorkingMemory } from '../../src/cognition/substrate/memory/InMemoryWorkingMemory.js';
@@ -558,6 +561,16 @@ function hostOverShippedGmi(inner: GMI): ReturnType<typeof hostToolGmi> {
   );
   return host;
 }
+
+/**
+ * GMIManager's own methods, kept before the tests replace them on the prototype: the tests of a session that serves
+ * several conversations acquire their GMIs from a real manager.
+ */
+const managerMethods = {
+  initialize: GMIManager.prototype.initialize,
+  getOrCreateGMIForSession: GMIManager.prototype.getOrCreateGMIForSession,
+  shutdown: GMIManager.prototype.shutdown,
+};
 
 describe('AgentOS tool-result continuations', () => {
   const openAgents: AgentOS[] = [];
@@ -1856,5 +1869,217 @@ describe('AgentOS tool-result continuations', () => {
     await vi.waitFor(() => expect(orchestrator.getStreamIdentity(error!.streamId)).toBeNull());
     // neither text nor a request reached the host, so the turn is settled as one that failed before any output
     expect(settle).toHaveBeenCalledWith(expect.objectContaining({ operationId: 'op-unsaved-turn-pause', outcome: 'released' }));
+  });
+
+  describe('on a session that serves several conversations', () => {
+    /** The conversation whose turn stops for READ_CALL, and the one a turn runs on while the host runs it. */
+    const NOTES_CONVERSATION = 'conv-shared-notes';
+    const TRAVEL_CONVERSATION = 'conv-shared-travel';
+    const NOTES_QUESTION = 'What do my notes say about the standup?';
+    const TRAVEL_QUESTION = 'Which hotel did I book in Lisbon?';
+    const NOTES_REPLY = 'Standup moved to 10:00.';
+    const TRAVEL_REPLY = 'You booked the Hotel Avenida in Lisbon.';
+    const NOTES_SOURCE: RagRetrievedChunk = {
+      id: 'chunk-team-standup',
+      content: 'Team notes: the standup moves to 10:00 from Monday.',
+      originalDocumentId: 'doc-team-notes',
+    };
+    const TRAVEL_SOURCE: RagRetrievedChunk = {
+      id: 'chunk-lisbon-hotel',
+      content: 'Hotel Avenida, Lisbon: check-in from 15:00.',
+      originalDocumentId: 'doc-travel-bookings',
+    };
+    /** A persona that retrieves on the user's question, and a second persona a turn of the session can ask for. */
+    const NOTES_PERSONA = {
+      ...PERSONA,
+      memoryConfig: { enabled: false, ragConfig: { enabled: true, retrievalTriggers: { onUserQuery: true } } },
+    };
+    const TRAVEL_PERSONA = {
+      ...NOTES_PERSONA,
+      id: 'travel-persona',
+      name: 'Travel Persona',
+      baseSystemPrompt: 'You plan trips for the user.',
+    };
+    /** The model's replies, in order: the notes turn, the travel turn, and the notes turn's continuation. */
+    const REPLIES: ModelReply[] = [{ text: 'I will read the notes file first.' }, { text: TRAVEL_REPLY }, { text: NOTES_REPLY }];
+
+    const managers: GMIManager[] = [];
+
+    afterEach(async () => {
+      for (const manager of managers.splice(0)) {
+        await managerMethods.shutdown.call(manager).catch(() => undefined);
+      }
+    });
+
+    /** The user messages of a model request. */
+    const userMessagesOf = (prompt: ChatMessage[]) =>
+      prompt.filter((message) => message.role === 'user').map((message) => message.content);
+    /** The content of every message of a model request. */
+    const contentsOf = (prompt: ChatMessage[]) => prompt.map((message) => message.content);
+
+    /**
+     * A runtime whose sessions get their GMIs from a GMIManager, as AgentOS's sessions do: one GMI per session, which
+     * serves every conversation of the session and is shut down and built again when a turn asks for another persona.
+     * Each GMI is the shipped one, on a provider that gives `REPLIES` and a retrieval that finds NOTES_SOURCE for the
+     * notes question and TRAVEL_SOURCE for the travel question. The host's tool layer stops each user turn of the notes
+     * conversation for READ_CALL once the GMI's turn ends, as a host that adds a tool of its own to the shipped GMI does.
+     */
+    async function sharedSessionRuntime(overrides: Partial<AgentOSConfig> = {}) {
+      const agentos = new AgentOS();
+      openAgents.push(agentos);
+      await agentos.initialize(createConfig(overrides));
+
+      const { provider, promptCalls } = scriptedProvider(REPLIES);
+      const retrieveContext = vi.fn(async (queryText: string) => {
+        const sources = queryText.includes(NOTES_QUESTION)
+          ? [NOTES_SOURCE]
+          : queryText.includes(TRAVEL_QUESTION)
+            ? [TRAVEL_SOURCE]
+            : [];
+        return { queryText, retrievedChunks: sources, augmentedContext: sources.map((source) => source.content).join('\n') };
+      });
+      const personas = [NOTES_PERSONA, TRAVEL_PERSONA];
+      const manager = new GMIManager(
+        { personaLoaderConfig: { personaSource: 'in-memory' } },
+        undefined,
+        undefined,
+        agentos.getConversationManager(),
+        { ...historyPromptEngine(), estimateTokenCount: async () => 10 },
+        {
+          getModelInfo: vi.fn().mockResolvedValue({
+            modelId: 'mock-model',
+            providerId: 'mock-provider',
+            contextWindowSize: 8192,
+            capabilities: ['chat', 'tool_use'],
+            supportsStreaming: true,
+          }),
+          getProvider: vi.fn().mockReturnValue(provider),
+          getProviderForModel: vi.fn().mockReturnValue({ providerId: 'mock-provider' }),
+        } as any,
+        { summarize: vi.fn(), parseJsonSafe: vi.fn() } as any,
+        agentos.getToolOrchestrator(),
+        { augmenterId: 'stub-retrieval', retrieveContext } as any,
+        {
+          initialize: async () => undefined,
+          loadPersonaById: async (id: string) => personas.find((persona) => persona.id === id),
+          loadAllPersonaDefinitions: async () => personas,
+        } as any,
+      );
+      await managerMethods.initialize.call(manager);
+      managers.push(manager);
+      // the runtime's turns, continuations and resumes acquire their GMIs from this manager
+      vi.spyOn(GMIManager.prototype, 'getOrCreateGMIForSession').mockImplementation((...args) =>
+        managerMethods.getOrCreateGMIForSession.apply(manager, args),
+      );
+      const runTurn = GMI.prototype.processTurnStream;
+      vi.spyOn(GMI.prototype, 'processTurnStream').mockImplementation(async function* (this: GMI, turnInput: GMITurnInput) {
+        const output: GMIOutput = yield* runTurn.call(this, turnInput);
+        if (turnInput.metadata?.isToolContinuation === true || turnInput.metadata?.conversationId !== NOTES_CONVERSATION) {
+          return output;
+        }
+        const hostRequest: GMIOutputChunk = {
+          type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+          content: [READ_CALL],
+          interactionId: turnInput.interactionId,
+          timestamp: new Date(),
+          metadata: { executionMode: 'external', requiresExternalToolResult: true },
+        };
+        yield hostRequest;
+        return { ...output, isFinal: false, toolCalls: [READ_CALL] };
+      });
+
+      const ask = (conversationId: string, textInput: string, selectedPersonaId: string = NOTES_PERSONA.id) =>
+        collect(
+          agentos.processRequest({ userId: 'user-1', sessionId: 'session-shared', conversationId, textInput, selectedPersonaId }),
+        );
+      const pending = () => agentos.getPendingExternalToolRequest(NOTES_CONVERSATION, 'user-1');
+
+      /** Runs the notes turn, which stops for READ_CALL, and returns the request the host reads and the saved pause. */
+      async function pauseNotesTurn() {
+        const responses = await ask(NOTES_CONVERSATION, NOTES_QUESTION);
+        const request = responses.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk | undefined;
+        expect(request?.toolCalls).toEqual([READ_CALL]);
+        await vi.waitFor(async () => expect(await pending()).not.toBeNull());
+        const saved = (await pending())!;
+        expect(saved.toolCalls).toEqual([READ_CALL]);
+        return { request: request!, saved };
+      }
+
+      return { agentos, manager, promptCalls, retrieveContext, ask, pending, pauseNotesTurn };
+    }
+
+    it.each([
+      ['on the stream', 'stream'],
+      ['resumed from the saved pause', 'resume'],
+    ] as const)(
+      'a continuation %s reads its own conversation and the sources its turn retrieved, not the turn another conversation ran on the session meanwhile',
+      async (_label, path) => {
+        const recorder = sourcesRecorder();
+        const rt = await sharedSessionRuntime({ guardrailService: recorder.guard });
+        const { request, saved } = await rt.pauseNotesTurn();
+        // while the host runs READ_CALL, the session's GMI runs a turn of the travel conversation
+        const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION);
+        const travelReply = travel.at(-1) as AgentOSFinalResponseChunk;
+        expect(travelReply.finalResponseText).toBe(TRAVEL_REPLY);
+        expect(travelReply.ragSources).toEqual([TRAVEL_SOURCE]);
+        expect(travelReply.gmiInstanceId).toBe(request.gmiInstanceId);
+        recorder.seen.length = 0;
+
+        const continuation = await collect(
+          path === 'stream'
+            ? rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true)
+            : rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT]),
+        );
+
+        const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+        expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+        expect(last.finalResponseText).toBe(NOTES_REPLY);
+        // the model read the notes conversation, its question and READ_CALL's result, and nothing of the travel one
+        const prompt = rt.promptCalls[2] ?? [];
+        expect(userMessagesOf(prompt)).toEqual([NOTES_QUESTION]);
+        expect(contentsOf(prompt)).toContain(READ_RESULT.toolOutput);
+        expect(contentsOf(prompt)).not.toContain(TRAVEL_REPLY);
+        expect(unansweredToolCallIds(prompt)).toEqual([]);
+        // the reply, and every output guard evaluation of it, carries the sources the notes turn retrieved
+        expect(last.ragSources).toEqual([NOTES_SOURCE]);
+        expect(recorder.seen).toEqual([
+          [AgentOSResponseChunkType.TEXT_DELTA, [NOTES_SOURCE]],
+          [AgentOSResponseChunkType.FINAL_RESPONSE, [NOTES_SOURCE]],
+        ]);
+        expect(await rt.pending()).toBeNull();
+      },
+    );
+
+    it("a continuation on the stream whose GMI a persona change on the session shut down completes on a GMI for the pause's persona, from its own conversation", async () => {
+      const rt = await sharedSessionRuntime();
+      const { request } = await rt.pauseNotesTurn();
+      const pausedGmi = rt.manager.getGMIByInstanceId(request.gmiInstanceId)!;
+      expect(pausedGmi).toBeDefined();
+      // the travel turn asks for another persona: the manager shuts the session's GMI down and builds one for it
+      const travel = await rt.ask(TRAVEL_CONVERSATION, TRAVEL_QUESTION, TRAVEL_PERSONA.id);
+      expect((travel.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TRAVEL_REPLY);
+      expect(pausedGmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+
+      const continuation = await collect(
+        rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+      );
+
+      expect(continuation.filter((r) => r.type === AgentOSResponseChunkType.ERROR)).toEqual([]);
+      const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+      expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+      expect(last.finalResponseText).toBe(NOTES_REPLY);
+      // the pause's persona answered, on the GMI the session now holds for it
+      expect(last.personaId).toBe(NOTES_PERSONA.id);
+      expect(last.gmiInstanceId).not.toBe(request.gmiInstanceId);
+      expect(rt.manager.getGMIByInstanceId(last.gmiInstanceId)?.getPersona().id).toBe(NOTES_PERSONA.id);
+      // from the notes conversation, with the sources the notes turn retrieved
+      const prompt = rt.promptCalls[2] ?? [];
+      expect(userMessagesOf(prompt)).toEqual([NOTES_QUESTION]);
+      expect(contentsOf(prompt)).toContain(READ_RESULT.toolOutput);
+      expect(contentsOf(prompt)).not.toContain(TRAVEL_REPLY);
+      expect(unansweredToolCallIds(prompt)).toEqual([]);
+      expect(last.ragSources).toEqual([NOTES_SOURCE]);
+      expect(await rt.pending()).toBeNull();
+    });
   });
 });
