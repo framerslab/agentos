@@ -46,6 +46,22 @@ describe('resolveLaunchLimits', () => {
     }
   });
 
+  it('reads null as unset in every field, as a JSON or YAML config writes "unset"', () => {
+    const nulls = {
+      maxDepth: null,
+      maxSeats: null,
+      maxConcurrent: null,
+      budgetShare: null,
+      maxLaunchTokens: null,
+      maxLaunchCostUSD: null,
+      maxDeadlineMs: null,
+      defaultDeadlineMs: null,
+    } as unknown as AgencyLaunchOptions;
+    expect(resolveLaunchLimits(nulls)).toEqual(resolveLaunchLimits({}));
+    // null members and hitl are unset too.
+    expect(resolveLaunchLimits({ members: null, hitl: null } as unknown as AgencyLaunchOptions)).toEqual(resolveLaunchLimits({}));
+  });
+
   it('refuses approvals with no handler, as agency() does', () => {
     expect(() => resolveLaunchLimits({ hitl: { approvals: { beforeTool: ['send_email'] } } })).toThrow(AgencyConfigError);
     expect(resolveLaunchLimits({ hitl: { approvals: { beforeTool: ['send_email'] }, handler: async () => ({ approved: true }) } }).hitl).toBeDefined();
