@@ -163,15 +163,22 @@ async function streamErrorOf(result: StreamTextResult): Promise<unknown> {
  * @param member - A gmi() handle (gmi() or agent({ runtime: 'gmi' })).
  * @param options - The seat's session id, description, dependencies, tool names and brief.
  * @returns A roster member for `agency({ agents })`.
- * @throws {TypeError} For a member that is not a gmi() handle, a brief over 1,000 characters, or a `tools` entry the
- *   member does not have, that never runs in a seat (a self-modification or memory tool), that is launch_agency (only a
- *   launch gives a seat that tool), or that is a composed tool whose steps are not all among `tools`.
+ * @throws {TypeError} For a member that is not a gmi() handle, a brief that is not text or is over 1,000 characters, a
+ *   `dependsOn` that is not a list of seat names, or a `tools` entry the member does not have, that never runs in a seat
+ *   (a self-modification or memory tool), that is launch_agency (only a launch gives a seat that tool), or that is a
+ *   composed tool whose steps are not all among `tools`. Only these five options are read: an options object's other
+ *   keys change nothing.
  */
 export function sessionSeat(member: Agent, options: SessionSeatOptions = {}): SeatHandle {
   if (!isGmiHandle(member)) {
     throw new TypeError("sessionSeat(): the member must be a gmi() agent (gmi() or agent({ runtime: 'gmi' })); a legacy agent's session takes no approval gate or frame per send, and its sessions are not GMIs");
   }
+  if (options.brief !== undefined && typeof options.brief !== 'string') throw new TypeError('sessionSeat(): brief is text');
   if (options.brief !== undefined && options.brief.length > 1_000) throw new TypeError('sessionSeat(): brief is at most 1,000 characters');
+  const dependsOn: unknown = options.dependsOn;
+  if (dependsOn !== undefined && !(Array.isArray(dependsOn) && dependsOn.every((name) => typeof name === 'string'))) {
+    throw new TypeError('sessionSeat(): dependsOn is a list of seat names');
+  }
   const config: Partial<AgentOptions> = gmiOptionsOf(member) ?? {};
   const own: SeatToolLike[] = adaptTools(config.tools);
   const byName = new Map<string, SeatToolLike>(own.map((tool) => [tool.name, tool]));
@@ -205,12 +212,15 @@ export function sessionSeat(member: Agent, options: SessionSeatOptions = {}): Se
   }
 
   const description = options.description ?? descriptionOf(config);
+  // The five options of SessionSeatOptions alone: an options object that carries an internal key (a user to run as,
+  // hooks, a budget, the member's ownership) seats the member as any other does.
   return buildSessionSeat(member, {
-    ...options,
     sessionId: `seat:${options.sessionId ?? randomUUID()}`,
     form: 'persistent',
     tools: names,
     ...(description ? { description } : {}),
+    ...(options.dependsOn ? { dependsOn: options.dependsOn } : {}),
+    ...(options.brief !== undefined ? { brief: options.brief } : {}),
   });
 }
 
