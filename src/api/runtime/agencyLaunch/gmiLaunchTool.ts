@@ -2,10 +2,11 @@
  * @file gmiLaunchTool.ts
  * `launch_agency` on gmi(): the tool a gmi() agent with `agencies.launch` registers, and the host the launch engine
  * runs through on that surface. A temporary seat is a gmi() agent built for the launch from the launching agent's route
- * (the provider and model its persona resolved, and its other route options), the seat's instructions and the very tool
- * instances its allowlist names, on the light profile with no memory and no learner, and closed with the seat; a
- * persistent seat runs a member of `agencies.members` as itself, through a session of its own. The engine, and agency()
- * with it, is imported on the first launch, so building an agent loads neither.
+ * (the provider and model its persona resolved, and its other route options), its generation hooks and request timeout,
+ * the seat's instructions and the very tool instances its allowlist names, on the light profile with no memory and no
+ * learner, and closed with the seat; a persistent seat runs a member of `agencies.members` as itself, through a session
+ * of its own. Every seat's tool calls run the tool hooks of the turn that launched the team before the seat's own. The
+ * engine, and agency() with it, is imported on the first launch, so building an agent loads neither.
  * @internal
  */
 import { randomUUID } from 'node:crypto';
@@ -54,7 +55,7 @@ export interface GmiLaunchToolOptions {
   route: () => Promise<{ provider?: string; model?: string }>;
 }
 
-/** The launching agent's options a temporary seat's agent takes: its route and its completion settings. */
+/** The launching agent's options a temporary seat's agent takes: its route, completion settings and generation hooks. */
 const SEAT_OPTION_KEYS = [
   'provider',
   'model',
@@ -73,9 +74,16 @@ const SEAT_OPTION_KEYS = [
   'cache',
   'maxSteps',
   'chainOfThought',
+  // Its generation hooks, so a host's rewrite of a request or of a step's text covers the seat's calls. Its tool hook is
+  // not among them: every seat's tool calls run the hooks of the turn that launched the team, the agent's own among them.
+  'onBeforeGeneration',
+  'onAfterGeneration',
 ] as const satisfies ReadonlyArray<keyof AgentOptions>;
 
-/** The options of a temporary seat's agent: the launching agent's route, the seat's role, instructions and tools. */
+/**
+ * The options of a temporary seat's agent: the launching agent's route, generation hooks and request timeout, and the
+ * seat's role, instructions and tools.
+ */
 function temporarySeatOptions(parent: AgentOptions, role: string, instructions: string, tools: ITool[], ledger: AgentOSUsageLedgerOptions | undefined): AgentOptions {
   const inherited: Record<string, unknown> = {};
   for (const key of SEAT_OPTION_KEYS) if (parent[key] !== undefined) inherited[key] = parent[key];
@@ -88,6 +96,9 @@ function temporarySeatOptions(parent: AgentOptions, role: string, instructions: 
     // The light profile with no memory: a seat runs one goal, and nothing it is told outlives the launch.
     cognition: 'light',
     ...(ledger ? { usageLedger: { ...ledger, source: LAUNCH_AGENCY_TOOL_NAME } } : {}),
+    // The launching agent's request timeout bounds each of the seat's calls too. Its other controls stay the agent's:
+    // the launch's budget bounds what the seat spends.
+    ...(parent.controls?.maxDurationMs !== undefined ? { controls: { maxDurationMs: parent.controls.maxDurationMs } } : {}),
   };
 }
 
@@ -248,6 +259,8 @@ export function createGmiLaunchTool(o: GmiLaunchToolOptions): ITool<LaunchAgency
         ...(caller?.providerUserId !== undefined ? { providerUserId: caller.providerUserId } : {}),
         namespace,
         ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
+        // The hooks the launching turn's calls ran under, outermost first: any it carried, then the agent's own. Every
+        // seat's tool calls run them before the seat's own hook, a member's included.
         toolHooks: caller?.toolHooks ?? [],
         outputEstimateTokens: outputEstimate,
         scopeId: `${agentScope}:${sessionId}`,

@@ -60,7 +60,10 @@ export interface AgencyLaunchOptions {
    * Registers `launch_agency` on the agent's tool table. Default false. On gmi(), a launched team's manager, synthesizers
    * and temporary seats run on the provider and model the agent's first call resolved: those its options name, else the
    * environment's pair at that call, whatever the environment names later. A call that names its own provider or model
-   * runs on that pair alone; a team it launches runs on the agent's.
+   * runs on that pair alone; a team it launches runs on the agent's. A temporary seat also takes the agent's other route
+   * and completion settings, its `onBeforeGeneration` and `onAfterGeneration` hooks and its `controls.maxDurationMs`;
+   * every seat's tool calls run the `onBeforeToolExecution` hooks of the turn that launched the team, a member's before
+   * its own.
    */
   launch?: boolean;
   /** The deepest team level a launch tree reaches: an integer from 1 to 4, default 2. */
