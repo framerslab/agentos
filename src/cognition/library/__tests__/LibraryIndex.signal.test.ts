@@ -112,6 +112,20 @@ describe('LibraryIndex.search with a signal', () => {
     expect(lexicalSearch).not.toHaveBeenCalled();
   });
 
+  it('drops the store\'s answer and rejects with the reason when the signal aborts while the store answers', async () => {
+    const store = await makeStore();
+    const controller = new AbortController();
+    const answer = store.query.bind(store);
+    // The search is cancelled while its one store call runs; the store answers the passage all the same.
+    const query = vi.spyOn(store, 'query').mockImplementation(async (...args: Parameters<typeof answer>) => {
+      controller.abort(new Error('closed'));
+      return answer(...args);
+    });
+    const index = new LibraryIndex({ store, collection: 'c', embed: recordingEmbed() });
+    await expect(index.search({ text: 'budget', scope: SCOPE, mode: 'dense', signal: controller.signal })).rejects.toThrow('closed');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the search\'s own signal on every narrowing, whatever a narrowing holds at run time', async () => {
     const controller = new AbortController();
     const query = vi.fn(async () => {
