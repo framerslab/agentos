@@ -13,7 +13,7 @@
  */
 import { agent as createAgent } from '../agent.js';
 import { mergeAdaptableTools } from '../toolAdapter.js';
-import { knownProviderPrefixOf, routedProviderOf } from '../../model.js';
+import { baseUrlIfSet, knownProviderPrefixOf, routedProviderOf } from '../../model.js';
 import type {
   AgencyOptions,
   AgencyQuorumConfig,
@@ -401,6 +401,12 @@ export function mergeDefaults(
   const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
   // The agency's runtime is the default engine of a config seat; the seat's own wins.
   const runtime = (agentConfig as AgencySeatConfig).runtime ?? agencyConfig.runtime;
+  const agencyBaseUrl = otherVendor ? undefined : agencyConfig.baseUrl;
+  // A seat's empty or whitespace-only baseUrl is unset, as every call reads
+  // one (baseUrlIfSet in model.ts): the seat takes the agency's URL as a seat
+  // with none does, so the agency's key never goes, for want of that URL, to
+  // the provider's own endpoint.
+  const blankSeatBaseUrl = typeof agentConfig.baseUrl === 'string' && baseUrlIfSet(agentConfig.baseUrl) === undefined;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
@@ -408,8 +414,9 @@ export function mergeDefaults(
     model,
     provider,
     apiKey: agentConfig.apiKey ?? (otherVendor ? undefined : agencyConfig.apiKey),
-    baseUrl: agentConfig.baseUrl ?? (otherVendor ? undefined : agencyConfig.baseUrl),
+    baseUrl: agentConfig.baseUrl ?? agencyBaseUrl,
     ...agentConfig,
+    ...(blankSeatBaseUrl ? { baseUrl: agencyBaseUrl } : {}),
     // Tools are merged separately because we want additive merging
     // (agency tools + agent tools) rather than wholesale replacement.
     tools: mergeAdaptableTools(agencyConfig.tools, agentConfig.tools),

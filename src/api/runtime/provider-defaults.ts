@@ -180,6 +180,23 @@ const AUTO_DETECT_ORDER: AutoDetectProbe[] = [
   { envKey: 'MINIMAX_API_KEY', provider: 'minimax' },
 ];
 
+/**
+ * Whether the variable a probe reads configures its provider: a key variable
+ * that is set, or a base-URL variable (`OLLAMA_BASE_URL`,
+ * `STABLE_DIFFUSION_LOCAL_BASE_URL`) that holds more than whitespace. An empty
+ * or whitespace-only base URL is unset, as resolveProvider and
+ * resolveMediaProvider read it (`baseUrlIfSet` in `model.ts`), so detection
+ * goes on to the next provider instead of choosing one whose call is then
+ * refused for want of a base URL.
+ *
+ * @param envKey - The variable's name.
+ * @returns True when the variable configures its provider.
+ */
+function probeVariableIsSet(envKey: string): boolean {
+  const value = process.env[envKey];
+  return envKey.endsWith('_BASE_URL') ? value !== undefined && value.trim() !== '' : Boolean(value);
+}
+
 function isBinaryOnPath(binaryName: string): boolean {
   const lookupCommand = process.platform === 'win32' ? 'where' : 'which';
   const result = spawnSync(lookupCommand, [binaryName], { stdio: 'ignore' });
@@ -215,8 +232,10 @@ const PROBE_BY_PROVIDER: Record<string, AutoDetectProbe> = Object.fromEntries(
  * Auto-detects the active provider by scanning well-known environment variables
  * and CLI binaries in priority order.
  *
- * Returns the identifier of the first provider whose key/URL env var is non-empty
- * or whose CLI binary is on PATH, or `undefined` when no recognisable runtime is present.
+ * Returns the identifier of the first provider whose key env var is non-empty,
+ * whose base-URL env var holds more than whitespace (an empty or whitespace-only
+ * one is unset, as the call that follows reads it), or whose CLI binary is on
+ * PATH, or `undefined` when no recognisable runtime is present.
  *
  * Default priority: openrouter → openai → anthropic → gemini → groq → together → mistral → xai → requesty →
  * minimax (text only) → claude-code-cli → gemini-cli → ollama → the image providers, minimax last among them.
@@ -238,7 +257,7 @@ export function autoDetectProvider(task?: ProviderDefaultTask): string | undefin
     const scopedTasks = 'envKey' in probe ? probe.tasks : undefined;
     if (task && scopedTasks && !scopedTasks.includes(task)) continue;
     const available = 'envKey' in probe
-      ? Boolean(process.env[probe.envKey])
+      ? probeVariableIsSet(probe.envKey)
       : isBinaryOnPath(probe.binaryName);
 
     if (!available) continue;
