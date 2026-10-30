@@ -407,7 +407,7 @@ describe('agency() seats served by GMIs', () => {
     const seat = sessionSeat(member);
     const result = seat.stream('Teach.');
     let failure: unknown;
-    for await (const part of result.fullStream) if (part.type === 'error') failure = part.error;
+    for await (const part of result.fullStream as AsyncIterable<{ type: string; error?: unknown }>) if (part.type === 'error') failure = part.error;
     expect(failure).toBeDefined();
     const offered = ((s.seen[0].options.tools as Array<{ function: { name: string } }> | undefined) ?? []).map((t) => t.function.name);
     expect(offered).toEqual(['search']);
