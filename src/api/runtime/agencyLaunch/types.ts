@@ -63,7 +63,10 @@ export interface AgencyLaunchOptions {
    * runs on that pair alone; a team it launches runs on the agent's. A temporary seat also takes the agent's other route
    * and completion settings, its `onBeforeGeneration` and `onAfterGeneration` hooks and its `controls.maxDurationMs`;
    * every seat's tool calls run the `onBeforeToolExecution` hooks of the turn that launched the team, a member's before
-   * its own.
+   * its own. A seat whose call fails rejects with its error's name and code alone, so a provider's or a handler's
+   * message reaches no model of the team and not the result; the error itself goes to the agent's `on.error`, under
+   * `launch_agency seat <role>` (the console without one), as do the launch's other failures. A callback that throws
+   * or rejects fails no launch.
    */
   launch?: boolean;
   /** The deepest team level a launch tree reaches: an integer from 1 to 4, default 2. */
