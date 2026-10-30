@@ -13,6 +13,7 @@ import { AgencyConfigError } from '../types';
 import type { ApprovalDecision, ApprovalRequest } from '../types';
 import { SpendBudget } from '../runtime/spendBudget';
 import { buildSessionSeat, sessionSeat } from '../runtime/agencyLaunch/sessionSeat';
+import { seatMetadataOf } from '../runtime/strategies/shared';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
@@ -284,5 +285,33 @@ describe('agency() seats served by GMIs', () => {
     const team = agency({ ...base, runtime: 'gmi', strategy: 'sequential', agents: { a: { runtime: null as unknown as 'gmi', instructions: 'x' } } });
     await team.generate('Go.');
     expect(s.seen.map((call) => call.streamed)).toEqual([true]);
+  });
+
+  it("refuses a dependsOn that is not a list of seat names, takes an empty one as none, and streams a pre-built seat its dependencies' output", async () => {
+    const k = key();
+    const base = { provider: 'openai', model: 'stub-model', apiKey: k } as const;
+    const seat = (instructions: string) => agent({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k, instructions });
+    // A config's dependsOn written as one name, and a pre-built seat's with a number among its names: each refused, naming the seat.
+    const asName = () => agency({ ...base, strategy: 'graph', agents: { researcher: { instructions: 'r' }, writer: { instructions: 'w', dependsOn: 'researcher' as unknown as string[] } } });
+    expect(asName).toThrow(AgencyConfigError);
+    expect(asName).toThrow("seat 'writer'");
+    const withNumber = () => agency({ ...base, agents: { a: seat('A.'), b: Object.assign(seat('B.'), { dependsOn: ['a', 1] }) } });
+    expect(withNumber).toThrow(AgencyConfigError);
+    expect(withNumber).toThrow("seat 'b'");
+    // An empty dependsOn lists no seat, on either form.
+    expect(seatMetadataOf({ instructions: 'x', dependsOn: [] })).toEqual({ description: 'x' });
+    expect(seatMetadataOf(Object.assign(seat('y'), { dependsOn: [] }))).toEqual({});
+
+    // The graph strategy's stream reads a pre-built seat's dependsOn: `b` waits for `a` and streams with its output.
+    const s = script('openai', k, { replies: [reply.text('Fact A.'), reply.text('Report B.')] });
+    const b = Object.assign(seat('Report.'), { dependsOn: ['a'] });
+    const graphTeam = agency({ ...base, agents: { b, a: seat('Find a fact.') } });
+    const parts: Array<{ type: string; agent?: string; input?: string }> = [];
+    for await (const part of graphTeam.stream('Write the report.').fullStream) parts.push(part as { type: string; agent?: string; input?: string });
+    const starts = parts.filter((part) => part.type === 'agent-start' && part.agent !== '__agency__');
+    expect(starts.map((part) => part.agent)).toEqual(['a', 'b']);
+    expect(starts[1].input).toContain('Outputs from dependencies:');
+    expect(starts[1].input).toContain('[a]:\nFact A.');
+    expect(lastUserText(s.seen[1])).toContain('[a]:\nFact A.');
   });
 });
