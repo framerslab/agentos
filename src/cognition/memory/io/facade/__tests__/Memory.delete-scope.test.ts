@@ -4,7 +4,8 @@
  * `deleteScope` (all of a scope, or a second user's traces in it), `deleteTraces`, `restoreTrace` (a trace brought
  * back to the state a snapshot holds, its vector kept where its content is) and `brainId`. A delete takes the rows that
  * name a trace (its feedback, the chunk it was filed from) and its memory-graph node and edges, whichever facade on
- * the Brain wrote them; a second user's words stay a trace of their own beside the same words of the session's owner.
+ * the Brain wrote them, a relation a host made to the node included; a second user's words stay a trace of their own
+ * beside the same words of the session's owner.
  * `deleteScope` finds the rows a release older than the `scope_id` column wrote under the scope after the facade
  * opened, and refuses an empty scope id. A real SQLite facade, and on Postgres (when `AGENTOS_TEST_POSTGRES_URL` is
  * set, as CI's Test & Lint job sets it) a restore re-indexes the restored row alone.
@@ -156,6 +157,29 @@ describe('Memory.deleteTraces with rows that name a trace', () => {
 
     expect(await brain.all('SELECT id FROM knowledge_nodes WHERE id IN (?, ?)', [bees.id, tea.id])).toEqual([]);
     expect(await brain.all('SELECT id FROM knowledge_edges')).toEqual([]);
+  });
+
+  it("deletes a trace's memory-graph node with a relation the host made to it, and keeps the entity it named", async () => {
+    const { memory, brain } = await facade();
+    const bees = await memory.remember('Ana keeps bees.', { scope: 'user', scopeId: 'ana' });
+    const tea = await memory.remember('Ana likes tea.', { scope: 'user', scopeId: 'ana' });
+    await (memory as unknown as { _memoryGraph: { recordCoActivation(ids: string[]): Promise<void> } })._memoryGraph.recordCoActivation([bees.id, tea.id]);
+    const hive = await memory.addEntity({ type: 'concept', label: 'hive' });
+    await memory.addRelation({ sourceId: bees.id, targetId: hive.id, type: 'related_to' });
+
+    expect(await memory.deleteTraces([bees.id])).toEqual({ deleted: 1 });
+
+    expect(await brain.all('SELECT id FROM knowledge_nodes WHERE brain_id = ? AND id = ?', [brain.brainId, bees.id])).toEqual([]);
+    expect(
+      await brain.all('SELECT id FROM knowledge_edges WHERE brain_id = ? AND (source_id = ? OR target_id = ?)', [
+        brain.brainId,
+        bees.id,
+        bees.id,
+      ]),
+    ).toEqual([]);
+    expect(await brain.all('SELECT id FROM knowledge_nodes WHERE brain_id = ? AND id = ?', [brain.brainId, hive.id])).toEqual([
+      { id: hive.id },
+    ]);
   });
 });
 

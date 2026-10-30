@@ -7,7 +7,7 @@
  * that re-file one brain at once. A re-file keeps a write made meanwhile, takes the rows an older release filed since
  * the open and the knowledge graph's copies with it, and leaves no trace or document under the plain id that another
  * store, opener or process held: once the record is written, the plain id `team/ana` names user `ana` of namespace
- * `team`.
+ * `team`, and a delete of her scope through a store that has not followed the re-file leaves the plain user's traces.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -445,6 +445,26 @@ describe("a manager's re-file", () => {
     expect(await manager.ensureEncodedScopeIds()).toBe(0);
     expect(await recallUnder(manager, 'team%2Fana')).toEqual([BEES]);
     expect(await recallUnder(manager, 'team/ana')).toEqual([]);
+  });
+
+  it("deletes none of the plain user's traces it holds under the old id when the namespaced user's scope is deleted", async () => {
+    const filePath = tempFile();
+    const { manager, brain } = await openManager(filePath);
+    const plainUser = await manager.encode(BEES, MOOD, 'neutral', { scope: 'user', scopeId: 'team/ana' });
+    // Another process re-files the Brain, and its learner, user `ana` of namespace `team`, files under `team/ana`.
+    const otherProcess = await Brain.openSqlite(filePath, { brainId: 'agent', coordinationToken: {} });
+    closers.push(() => otherProcess.close());
+    await refileBrainScopeIds(otherProcess);
+    await plainRow(otherProcess, 't-learner', 'user', 'team/ana');
+
+    // Her account is deleted through this process's manager before it follows the re-file.
+    expect((await manager.deleteScope('user', 'team/ana')).deleted).toBe(1);
+
+    expect(await brain.all('SELECT id, scope_id FROM memory_traces WHERE brain_id = ?', [brain.brainId])).toEqual([
+      { id: plainUser.id, scope_id: 'team%2Fana' },
+    ]);
+    expect(await manager.ensureEncodedScopeIds()).toBe(0);
+    expect(await recallUnder(manager, 'team%2Fana')).toEqual([BEES]);
   });
 
   it('loads under the encoded id the rows a hydration read before the re-file', async () => {
