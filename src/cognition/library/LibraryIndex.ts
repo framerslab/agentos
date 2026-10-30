@@ -121,9 +121,10 @@ export interface LibraryIndexOptions {
   store: IVectorStore;
   collection: string;
   /**
-   * One vector per text, in order. The caller wires its model, its budget and its deadline. A search hands it the
-   * search's `signal` as `options.signal`, so a request in flight is cancelled with the search; indexing, and a search
-   * with no signal, pass no options.
+   * One vector per text, in order: an answer of any other count fails the call, a search before it asks the store
+   * anything and `indexSource` before it writes the batch. The caller wires its model, its budget and its deadline. A
+   * search hands it the search's `signal` as `options.signal`, so a request in flight is cancelled with the search;
+   * indexing, and a search with no signal, pass no options.
    */
   embed: (texts: string[], options?: { signal?: AbortSignal }) => Promise<number[][]>;
   /** How many passages one `embed` call and one upsert carry. @default 64 */
@@ -141,6 +142,9 @@ function withoutSourceFields(metadata: Record<string, MetadataValue> | undefined
   delete rest.title;
   return rest;
 }
+
+/** What `indexSource` and `search` throw when the embedding function answers other than one vector per text. */
+const VECTOR_COUNT_MISMATCH = 'LibraryIndex: the embedder answered a different number of vectors than texts.';
 
 /**
  * A store may report a failed write or delete in its result instead of throwing (InMemoryVectorStore does for a
@@ -235,7 +239,7 @@ export class LibraryIndex {
     for (let from = 0; from < source.passages.length; from += this.batchSize) {
       const batch = source.passages.slice(from, from + this.batchSize);
       const vectors = await this.embed(batch.map((passage) => passage.text));
-      if (vectors.length !== batch.length) throw new Error('LibraryIndex: the embedder answered a different number of vectors than texts.');
+      if (vectors.length !== batch.length) throw new Error(VECTOR_COUNT_MISMATCH);
       const documents: VectorDocument[] = batch.map((passage, offset) => ({
         id: `${source.sourceId}#${from + offset}`,
         embedding: vectors[offset],
@@ -336,12 +340,17 @@ export class LibraryIndex {
 
   /**
    * The query's embedding. None is asked for once the search's signal has aborted: the search rejects with the
-   * signal's reason. The embedding function receives the signal, when the search gives one, to cancel its request.
+   * signal's reason. The embedding function receives the signal, when the search gives one, to cancel its request. An
+   * answer of other than one vector throws, as it does in `indexSource`, so no store call receives a query without its
+   * vector and a search of several narrowings never embeds its text again; a signal that aborted while the text was
+   * embedded rejects with its reason first, whatever the answer.
    */
   private async embedQuery(text: string, signal: AbortSignal | undefined): Promise<number[]> {
     signal?.throwIfAborted();
-    const [vector] = signal === undefined ? await this.embed([text]) : await this.embed([text], { signal });
-    return vector;
+    const vectors = signal === undefined ? await this.embed([text]) : await this.embed([text], { signal });
+    signal?.throwIfAborted();
+    if (vectors.length !== 1) throw new Error(VECTOR_COUNT_MISMATCH);
+    return vectors[0];
   }
 
   /**

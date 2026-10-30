@@ -51,7 +51,7 @@ The module is `@framers/agentos/cognition/library`; its names are also exported 
 
 A source is an id unique in the collection (`session:<id>`, `document:<id>`), a kind, a tenant, the access groups that may see it, an optional folder, tags and title, metadata copied onto every passage, and its passages.
 
-`indexSource(source)` deletes whatever the collection holds under the source's id, then embeds the passages and writes them `batchSize` at a time (64 unless given). A failed batch leaves the passages written before it; indexing the source again replaces them. A delete or a write the store reports as failed in its result (`failedCount` or `errors`), instead of throwing, fails the call as well. A source with no tenant or no access group is refused. The index makes no collection: create it on the store first.
+`indexSource(source)` deletes whatever the collection holds under the source's id, then embeds the passages and writes them `batchSize` at a time (64 unless given). A failed batch leaves the passages written before it; indexing the source again replaces them. A delete or a write the store reports as failed in its result (`failedCount` or `errors`), instead of throwing, fails the call as well, and so does an embedding function that answers a different number of vectors than the batch has passages, before that batch is written. A source with no tenant or no access group is refused. The index makes no collection: create it on the store first.
 
 Every passage carries these metadata keys:
 
@@ -82,6 +82,8 @@ The keys in this table come from the source's own fields: they win over the same
 | `dense` | One embedding of the query; the nearest passages. | `query` |
 
 A search with `anyOf` calls the store's legs apart and ranks them itself: see [Several narrowings at once](#several-narrowings-at-once).
+
+A `dense` or `hybrid` search asks the embedding function for one vector, the query's, and needs exactly one back: an answer of any other count, an empty list included, fails the search after that one call and before the store is asked anything, with the error `indexSource` throws for a miscounted batch (`LibraryIndex: the embedder answered a different number of vectors than texts.`).
 
 `match` asks for any word of the query (`'any'`, the default) or every word (`'all'`), and `prefix` (false by default) lets a stored word match when it begins with a query word; both go to the lexical leg of a `lexical` or `hybrid` search.
 
