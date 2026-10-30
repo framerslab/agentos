@@ -254,9 +254,12 @@ export class SqlMemoryGraph implements IMemoryGraph {
    *
    * Edges referencing the removed node are deleted from both SQLite and the
    * in-memory cache to keep the graph consistent. The SQL delete takes every
-   * memory-graph edge that names the node, those another graph instance on the
-   * same Brain wrote after this one loaded included, so the node's own delete
-   * meets no edge that still references it.
+   * edge that names the node, those another graph instance on the same Brain
+   * wrote after this one loaded included, and a relation a host made to the
+   * node through the knowledge graph (`upsertRelation`), so the node's own
+   * delete meets no edge that still references it. For an id that names no
+   * node of this graph (a knowledge-graph entity of the same id), only
+   * memory-graph edges go, and the entity keeps its relations.
    *
    * @param memoryId - ID of the node to remove.
    */
@@ -265,8 +268,10 @@ export class SqlMemoryGraph implements IMemoryGraph {
     // the node would refuse its delete.
     await this.brain.run(
       `DELETE FROM knowledge_edges
-        WHERE brain_id = ? AND (source_id = ? OR target_id = ?) AND type IN (${MEMORY_EDGE_TYPES_SQL})`,
-      [this.brain.brainId, memoryId, memoryId],
+        WHERE brain_id = ? AND (source_id = ? OR target_id = ?)
+          AND (type IN (${MEMORY_EDGE_TYPES_SQL})
+               OR EXISTS (SELECT 1 FROM knowledge_nodes WHERE brain_id = ? AND id = ? AND type = ?))`,
+      [this.brain.brainId, memoryId, memoryId, this.brain.brainId, memoryId, NODE_TYPE],
     );
     for (const [key, edge] of this._edges) {
       if (edge.sourceId === memoryId || edge.targetId === memoryId) {

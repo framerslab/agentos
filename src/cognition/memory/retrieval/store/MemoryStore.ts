@@ -2450,7 +2450,9 @@ export class MemoryStore {
    *   scope id or files a scope's traces under none.
    * @throws When a live trace's vector cannot be embedded or written into the new collection, or a Brain row cannot
    *   be read or written or kept changing through three reads; the traces moved before it stay moved, and a call made
-   *   again moves the rest.
+   *   again moves the rest. A row moves before its trace's vector, so a store that reads the new id meanwhile finds no
+   *   document there yet rather than one its row does not name: a trace whose vector could not be written has its row
+   *   under the new id, this store reads it under neither id, and the call made again moves the vector.
    */
   async refileScope(scope: MemoryScope, fromScopeId: string, toScopeId: string): Promise<number> {
     for (const [name, value] of [['fromScopeId', fromScopeId], ['toScopeId', toScopeId]] as const) {
@@ -2471,7 +2473,7 @@ export class MemoryStore {
         });
       }
     };
-    await move(await this.scopeTraceIds(scope, fromScopeId));
+    await move(await this.scopeTraceIds(scope, fromScopeId, { heldWhereverFiled: true }));
     // A stale copy at the old collection's front, of a trace this store holds under another scope, goes, so the walk
     // reaches the scope's traces after it on an index that lists a collection from its start.
     if (!brain) await this.walkScopeCollection(scope, fromScopeId, move, { withEmbeddings: true, dropStale: () => true });
@@ -2696,15 +2698,19 @@ export class MemoryStore {
     const trace: MemoryTrace = { ...(held ?? this.rowToTrace(row!)), scope, scopeId: toScopeId };
     const fromCollection = collectionName(this.config.collectionPrefix, scope, fromScopeId);
 
-    // A live trace this store holds has its document in the new collection before its row moves, so a failure here
-    // leaves the trace where it was.
-    let embedding: number[] | undefined;
-    if (live && held) embedding = await this.writeMovedDocument(trace, row?.embedding, 'refileScope');
-
+    // The row moves first, as a Brain's re-file moves its rows. A document in the new collection whose row still named
+    // the old id would be stale to a store on the same Brain or index that reads the new id meanwhile, and such a store
+    // deletes a stale document it reads ({@link query}, {@link getByScope}); with the row moved, it finds no document
+    // there yet, and the old collection's document is stale.
     if (row && brain && (await this.refileRow(brain, row.metadata, traceId, scope, fromScopeId, toScopeId))) {
       // A hydration that read this row before the move reads it again before it loads it.
       getNamespaceCoordinator(this.coordinationNamespace).refileEpoch += 1;
     }
+
+    // A live trace this store holds takes its document into the new collection. When that fails, its row is filed
+    // under the new id already, this store reads the trace under neither id, and a call made again moves the document.
+    let embedding: number[] | undefined;
+    if (live && held) embedding = await this.writeMovedDocument(trace, row?.embedding, 'refileScope');
 
     if (live) await this.deleteMovedDocument(fromCollection, traceId);
     if (held) {
@@ -3052,6 +3058,9 @@ export class MemoryStore {
    * next opens. Last, every store on the backing resource in this process, this one included, keeps of each trace
    * only where it was filed, none of its words ({@link withoutWords}).
    *
+   * A trace this store holds under another scope than its Brain row names (a move another process made, which this
+   * store has not followed) also leaves the collection its row names, where that process filed its document.
+   *
    * With no Brain, the traces this store holds are the ones it reaches: an id the vector index holds of a trace this
    * store never loaded names no collection, and `deleteScope` is what finds such a trace.
    *
@@ -3075,15 +3084,19 @@ export class MemoryStore {
     const counted = new Set(ids.filter((id) => this.traceCache.get(id)?.isActive === true));
     const known = new Set(ids.filter((id) => this.traceCache.has(id)));
     const rowIds: string[] = [];
+    const rows = new Map<string, Pick<MemoryTraceRow, 'scope' | 'scope_id' | 'metadata'>>();
     if (brain) {
       try {
         for (let offset = 0; offset < ids.length; offset += 400) {
           const chunk = ids.slice(offset, offset + 400);
-          const rows = await brain.all<{ id: string }>(
-            `SELECT id FROM memory_traces WHERE brain_id = ? AND id IN (${chunk.map(() => '?').join(', ')})`,
+          const found = await brain.all<Pick<MemoryTraceRow, 'id' | 'scope' | 'scope_id' | 'metadata'>>(
+            `SELECT id, scope, scope_id, metadata FROM memory_traces WHERE brain_id = ? AND id IN (${chunk.map(() => '?').join(', ')})`,
             [brain.brainId, ...chunk],
           );
-          for (const row of rows) rowIds.push(row.id);
+          for (const row of found) {
+            rowIds.push(row.id);
+            rows.set(row.id, row);
+          }
         }
       } catch {
         throw new Error('MemoryStore.deleteTraces: the Brain could not be read');
@@ -3101,6 +3114,14 @@ export class MemoryStore {
       } catch {
         // The row delete below removes what the tombstone could not mark.
       }
+    }
+    // A trace this store holds under another scope than its row's (a move another process made, which this store has
+    // not followed) has a document in the collection its row names too, which the eviction above did not reach.
+    for (const [id, row] of rows) {
+      const held = this.traceCache.get(id);
+      const filed = rowScopeId(row);
+      if (!held || filed === '' || (held.scope === row.scope && held.scopeId === filed)) continue;
+      await this.deleteRowDocument(collectionName(this.config.collectionPrefix, row.scope as MemoryScope, filed), id);
     }
     if (brain && rowIds.length > 0) {
       await deleteTraceRows(brain, brain.brainId, rowIds);
@@ -3126,7 +3147,10 @@ export class MemoryStore {
   /**
    * Deletes every trace of one scope for good ({@link deleteTraces}). The traces this store holds and every Brain row
    * filed under the scope (`memory_traces.scope_id`), soft-deleted rows and another process's included, go in one
-   * batch; the brain's rows a release older than the column wrote are filed first ({@link scopeTraceIds}). With no
+   * batch; the brain's rows a release older than the column wrote are filed first ({@link scopeTraceIds}). A trace this
+   * store holds under the scope whose row a move filed under another scope id (`refileScope` in another store or
+   * process, a Brain's re-file this store has not followed) stays: it is that scope id's, and after a Brain's re-file
+   * the old id names another user. With no
    * Brain the vector index is the scope's durable record, holding what another store filed before a restart, so the
    * scope's collection is then walked from its start a page at a time ({@link readScopeCollection}), following the
    * cursor the index returns, and each page is deleted. The walk runs again while it finds a document this call has
@@ -3163,7 +3187,7 @@ export class MemoryStore {
       traceIds.length === 0 ? 0 : this.deleteTraces(traceIds, { beforeDelete: options.beforeDelete });
     const filedByThem = (traceId: string): boolean =>
       only === undefined || this.traceCache.get(traceId)?.turnUserId === only;
-    let deleted = await deleteBatch(await this.scopeTraceIds(scope, scopeId, only));
+    let deleted = await deleteBatch(await this.scopeTraceIds(scope, scopeId, { turnUserId: only }));
     if (!this.brain) {
       await this.walkScopeCollection(
         scope,
@@ -3192,8 +3216,21 @@ export class MemoryStore {
    * that user filed as a second user. The rows of the brain that hold `scope_id` `''` while their metadata names a
    * scope id are filed first (`fillScopeIds`): a release older than the column writes them to a brain this process
    * holds open, and the read by `scope_id` would miss them.
+   *
+   * With a Brain, a trace this store holds under the scope whose row a move filed under another scope id
+   * (`refileScope` in another store or process, a Brain's re-file this store has not followed) belongs to that scope id
+   * and is left out, as every read of the scope leaves it out: after a Brain's re-file the old id names another user.
+   *
+   * @param options.heldWhereverFiled - List every trace this store holds under the scope, whatever its row says: a move
+   *   of the scope ({@link refileScope}) takes the trace this store holds after a row that moved first.
+   * @throws When the rows of the traces this store holds cannot be read.
    */
-  private async scopeTraceIds(scope: MemoryScope, scopeId: string, turnUserId?: string): Promise<string[]> {
+  private async scopeTraceIds(
+    scope: MemoryScope,
+    scopeId: string,
+    options: { turnUserId?: string; heldWhereverFiled?: boolean } = {},
+  ): Promise<string[]> {
+    const { turnUserId } = options;
     const ids = new Set<string>();
     for (const trace of this.traceCache.values()) {
       if (trace.scope === scope && trace.scopeId === scopeId && (turnUserId === undefined || trace.turnUserId === turnUserId)) {
@@ -3207,6 +3244,18 @@ export class MemoryStore {
         `SELECT id${turnUserId === undefined ? '' : ', metadata'} FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?`,
         [brain.brainId, scope, scopeId],
       );
+      if (!options.heldWhereverFiled) {
+        const filedHere = new Set(rows.map((row) => row.id));
+        const heldOnly = [...ids].filter((traceId) => !filedHere.has(traceId));
+        if (heldOnly.length > 0) {
+          const durable = await this.getDurableTraceRows(heldOnly, brain);
+          if (!durable.ok) throw new Error('MemoryStore.deleteScope: the Brain could not be read');
+          for (const traceId of heldOnly) {
+            const row = durable.rows.get(traceId);
+            if (row && rowFiledElsewhere(row, scope, scopeId)) ids.delete(traceId);
+          }
+        }
+      }
       for (const row of rows) {
         if (turnUserId === undefined || parseTraceMetadata(row.metadata).turnUserId === turnUserId) ids.add(row.id);
       }
@@ -3368,6 +3417,26 @@ export class MemoryStore {
     console.warn(
       `[MemoryStore] could not delete ${traceIds.length} stale documents of traces filed under another scope from a ` +
         `scope's collection; a later read that reaches them, or the next delete or refile of the scope, tries again`,
+    );
+  }
+
+  /**
+   * Deletes a trace's document from the collection its Brain row names, for a trace being deleted for good that this
+   * store holds under another scope ({@link deleteTraces}). A delete the index fails is reported, not thrown, as a soft
+   * delete's eviction is.
+   */
+  private async deleteRowDocument(collection: string, traceId: string): Promise<void> {
+    const vectorStore = this.config.vectorStore;
+    try {
+      if (vectorStore.collectionExists && !(await vectorStore.collectionExists(collection))) return;
+      const result = await vectorStore.delete(collection, [traceId]);
+      if ((result?.failedCount ?? 0) === 0) return;
+    } catch {
+      // Reported below.
+    }
+    console.warn(
+      `[MemoryStore] deleteTraces could not delete trace ${traceId}'s document from the collection its Brain row names, ` +
+        'which another store moved it into; the document may persist in a shared index',
     );
   }
 

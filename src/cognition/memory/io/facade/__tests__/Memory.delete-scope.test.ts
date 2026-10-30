@@ -7,8 +7,10 @@
  * the Brain wrote them, a relation a host made to the node included; a second user's words stay a trace of their own
  * beside the same words of the session's owner.
  * `deleteScope` finds the rows a release older than the `scope_id` column wrote under the scope after the facade
- * opened, and refuses an empty scope id. A real SQLite facade, and on Postgres (when `AGENTOS_TEST_POSTGRES_URL` is
- * set, as CI's Test & Lint job sets it) a restore re-indexes the restored row alone.
+ * opened, and refuses an empty scope id. A snapshot read before the Brain was re-filed in the encoded scope-id form
+ * restores under the encoded id, so a plain user's trace never comes back under a namespaced user's id. A real SQLite
+ * facade, and on Postgres (when `AGENTOS_TEST_POSTGRES_URL` is set, as CI's Test & Lint job sets it) a restore
+ * re-indexes the restored row alone, and a trace deleted for good comes back under the encoded id.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -225,6 +227,29 @@ describe('Memory.deleteTraces and restoreTrace', () => {
     expect(await embeddingOf()).toBeNull();
     expect(await contents(brain)).toEqual(['Ana keeps bees.']);
   });
+
+  it('restores a snapshot read before the Brain was re-filed under the encoded id, and one read after it as it is', async () => {
+    const { memory, brain } = await facade();
+    const plainUser = await memory.remember('Ana keeps bees.', { scope: 'user', scopeId: 'team/ana' });
+    const readBefore = (await readTraceSnapshot(brain, brain.brainId, plainUser.id))!;
+    expect(await memory.ensureEncodedScopeIds()).toBe(1);
+    // Once the Brain is re-filed, `team/ana` names user `ana` of namespace `team`.
+    const namespaced = await memory.remember('Ana of the team plays cello.', { scope: 'user', scopeId: 'team/ana' });
+    const readAfter = (await readTraceSnapshot(brain, brain.brainId, namespaced.id))!;
+    await brain.run(`UPDATE memory_traces SET content = 'changed' WHERE brain_id = ?`, [brain.brainId]);
+
+    await memory.restoreTrace(plainUser.id, readBefore);
+    await memory.restoreTrace(namespaced.id, readAfter);
+
+    const rows = await brain.all<{ id: string; scope_id: string; metadata: string }>(
+      'SELECT id, scope_id, metadata FROM memory_traces WHERE brain_id = ? ORDER BY content',
+      [brain.brainId],
+    );
+    expect(rows.map((row) => [row.id, row.scope_id, JSON.parse(row.metadata).scopeId])).toEqual([
+      [plainUser.id, 'team%2Fana', 'team%2Fana'],
+      [namespaced.id, 'team/ana', 'team/ana'],
+    ]);
+  });
 });
 
 describe('Memory.restoreTrace on Postgres', () => {
@@ -262,5 +287,28 @@ describe('Memory.restoreTrace on Postgres', () => {
       [brain.brainId, other.id],
     );
     expect(Number(marked?.n)).toBe(1);
+  });
+
+  it.skipIf(!POSTGRES_URL)('brings a trace deleted for good back under the encoded id when the Brain was re-filed after its snapshot', async () => {
+    const memory = await Memory.createPostgres(POSTGRES_URL!, {
+      brainId: `restore-form-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      poolSize: 2,
+      graph: false,
+      selfImprove: false,
+    });
+    memories.push(memory);
+    const brain = (memory as unknown as { _brain: Brain })._brain;
+    const plainUser = await memory.remember('Ana keeps bees.', { scope: 'user', scopeId: 'team/ana' });
+    const readBefore = (await readTraceSnapshot(brain, brain.brainId, plainUser.id))!;
+    expect(await memory.ensureEncodedScopeIds()).toBe(1);
+    expect(await memory.deleteTraces([plainUser.id])).toEqual({ deleted: 1 });
+
+    await memory.restoreTrace(plainUser.id, readBefore);
+
+    const row = await brain.get<{ scope_id: string; metadata: string }>(
+      'SELECT scope_id, metadata FROM memory_traces WHERE brain_id = ? AND id = ?',
+      [brain.brainId, plainUser.id],
+    );
+    expect([row?.scope_id, JSON.parse(row!.metadata).scopeId]).toEqual(['team%2Fana', 'team%2Fana']);
   });
 });

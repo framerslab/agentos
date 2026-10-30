@@ -7,10 +7,11 @@
  * the old collection; recall under the old id finds none of them though the index failed to delete an old document,
  * a write another writer makes to a moving trace's row is kept, a trace a hydration read before the move is loaded
  * under the new id, and the document a trace moves into stays when another store reads the new id during the move.
- * A store that still holds a moved trace under the old id deletes nothing of it with that id, and its delete for good
- * takes the document the trace moved into in another process. A trace's `turnUserId` survives a restart, and
- * `deleteScope` with `turnUserId` deletes only that user's traces of the scope. An empty scope id is refused by
- * `refileScope` and `deleteScope`, and a limit that is not a positive integer by `hydrateScope`. Real SQLite Brains.
+ * A store that still holds a moved trace under the old id deletes nothing of it with that id, moves nothing of it to a
+ * third id, and its delete for good takes the document the trace moved into in another process. A trace's
+ * `turnUserId` survives a restart, and `deleteScope` with `turnUserId` deletes only that user's traces of the scope.
+ * An empty scope id is refused by `refileScope` and `deleteScope`, and a limit that is not a positive integer by
+ * `hydrateScope`. Real SQLite Brains.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
@@ -385,6 +386,42 @@ describe('refileScope', () => {
     expect(await here.deleteScope('user', 'A/42')).toBe(1);
 
     expect(await brain.all('SELECT id FROM memory_traces')).toEqual([]);
+    expect(await idsIn(vectorStore, 'cogmem_user_A/42')).toEqual([]);
+  });
+
+  it('moves nothing of a trace it holds under the old id whose row another store moved to a third id', async () => {
+    const brain = await openBrain(tempFile());
+    const vectorStore = await vectorStoreOf4();
+    const holder = await storeOver(brain, new KnowledgeGraph(), vectorStore);
+    await holder.store(trace('t-1', '42', 1_000));
+    // Another store on the Brain moves the scope to a third id, and the holder has not followed it.
+    expect(await (await storeOver(brain)).refileScope('user', '42', 'B/42')).toBe(1);
+
+    expect(await holder.refileScope('user', '42', 'A/42')).toBe(0);
+
+    expect(await brain.all('SELECT id, scope_id FROM memory_traces')).toEqual([{ id: 't-1', scope_id: 'B/42' }]);
+    expect(await idsIn(vectorStore, 'cogmem_user_A/42')).toEqual([]);
+  });
+
+  it('moves nothing of a trace whose row another writer moves to a third id while this store moves it', async () => {
+    const brain = await openBrain(tempFile());
+    const vectorStore = await vectorStoreOf4();
+    const store = await storeOver(brain, new KnowledgeGraph(), vectorStore);
+    await store.store(trace('t-1', '42', 1_000));
+    // Another process's move of the scope to a third id commits right before this move writes the row.
+    let movedElsewhere = false;
+    beforeRowMove(brain, async () => {
+      if (movedElsewhere) return;
+      movedElsewhere = true;
+      await brain.run(
+        `UPDATE memory_traces SET scope_id = 'B/42', metadata = json_set(metadata, '$.scopeId', 'B/42') WHERE id = 't-1'`,
+      );
+    });
+
+    expect(await store.refileScope('user', '42', 'A/42')).toBe(0);
+
+    expect(movedElsewhere).toBe(true);
+    expect(await brain.all('SELECT id, scope_id FROM memory_traces')).toEqual([{ id: 't-1', scope_id: 'B/42' }]);
     expect(await idsIn(vectorStore, 'cogmem_user_A/42')).toEqual([]);
   });
 });

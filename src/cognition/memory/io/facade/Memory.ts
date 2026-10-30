@@ -895,7 +895,8 @@ export class Memory {
    * Deletes the given traces for good, as {@link deleteScope} does for a scope. The rows that name a trace go first,
    * as the Brain's foreign keys require: its `retrieval_feedback` rows are deleted, and a `document_chunks` row it was
    * filed from lets go of it and keeps its text. Each trace's memory-graph node goes with its edges, whichever facade
-   * on the Brain wrote them. Unknown ids are skipped.
+   * on the Brain wrote them, a relation a host made to the node ({@link addRelation}) included. Unknown ids are
+   * skipped.
    *
    * @returns How many trace rows it deleted, so a call made again counts none.
    */
@@ -908,7 +909,7 @@ export class Memory {
       try {
         await this._memoryGraph.removeNode(id);
       } catch {
-        // A node another edge still names stays; its trace is gone.
+        // A node whose delete fails stays, holding no words of the trace; its trace is gone.
       }
       this._hnswSidecar?.remove(id);
     }
