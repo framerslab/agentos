@@ -2585,7 +2585,8 @@ export class MemoryStore {
    * live trace's vector document moves into the new collection, with the vector the store holds, its row's, or a new
    * embedding; then the store's copy takes the new id, and the trace's knowledge-graph copy is recorded again under it
    * where the graph holds one under another ({@link followGraphCopy}). A trace the store no longer holds under the old
-   * id is left as it is.
+   * id is left as it is, and so is one whose Brain row is gone, deleted for good by another store or process once the
+   * re-file committed: its words go into no collection.
    *
    * @returns Whether it moved the trace.
    */
@@ -2593,14 +2594,18 @@ export class MemoryStore {
     const scope = moved.scope as MemoryScope;
     const held = this.traceCache.get(moved.id);
     if (!held || held.scope !== scope || held.scopeId !== moved.from) return false;
+    let rowEmbedding: unknown;
+    if (this.brain) {
+      const durable = await this.getDurableTraceRows([moved.id]);
+      // A trace whose row is gone was deleted for good once the re-file committed, by another store or process: none
+      // of its words go into the new collection or the graph.
+      if (durable.ok && !durable.rows.has(moved.id)) return false;
+      rowEmbedding = durable.rows.get(moved.id)?.embedding;
+    }
     const live = held.isActive && !this.tombstonedTraceIds.has(moved.id);
     const trace: MemoryTrace = { ...held, scope, scopeId: moved.to };
     let embedding: number[] | undefined;
     if (live) {
-      const rowEmbedding =
-        this.embeddingCache.has(moved.id) || !this.brain
-          ? undefined
-          : (await this.getDurableTraceRows([moved.id])).rows.get(moved.id)?.embedding;
       embedding = await this.writeMovedDocument(trace, rowEmbedding, 'ensureEncodedScopeIds');
       await this.deleteMovedDocument(
         collectionName(this.config.collectionPrefix, scope, moved.from),
