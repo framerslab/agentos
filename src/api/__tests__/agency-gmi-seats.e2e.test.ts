@@ -369,4 +369,33 @@ describe('agency() seats served by GMIs', () => {
     expect(record.usage.totalTokens).toBe(14);
     await expect(seat.usage()).resolves.toMatchObject({ totalTokens: 14 });
   });
+
+  it('sessionSeat refuses a long brief, a self-modification tool and launch_agency, seats the rest by default, and records a stream that failed', async () => {
+    const k = key();
+    // A tool step (14 tokens), then a reply whose connection drops after its first delta.
+    const s = script('openai', k, { replies: [reply.tools([{ id: 't1', name: 'search', args: {} }]), reply.breakAfterFirstDelta('Half')] });
+    const tool = (description: string) => ({ description, parameters: { type: 'object', properties: {} }, execute: async () => 'ok' });
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], instructions: 'Tutor.',
+      tools: { search: tool('Search.'), forge_tool: tool('Forge a tool.') },
+      agencies: { launch: true },
+    });
+    expect(() => sessionSeat(member, { brief: 'x'.repeat(1_001) })).toThrow(TypeError);
+    expect(() => sessionSeat(member, { brief: 'x'.repeat(1_000) })).not.toThrow();
+    expect(() => sessionSeat(member, { tools: ['forge_tool'] })).toThrow("'forge_tool' is a self-modification tool");
+    expect(() => sessionSeat(member, { tools: ['launch_agency'] })).toThrow("'launch_agency' runs in a seat only when a launch gives it");
+
+    // By default the seat offers the member's own tools but those two.
+    const seat = sessionSeat(member);
+    const result = seat.stream('Teach.');
+    let failure: unknown;
+    for await (const part of result.fullStream) if (part.type === 'error') failure = part.error;
+    expect(failure).toBeDefined();
+    const offered = ((s.seen[0].options.tools as Array<{ function: { name: string } }> | undefined) ?? []).map((t) => t.function.name);
+    expect(offered).toEqual(['search']);
+    // The stream ended with an error part: the record says the call failed and keeps the billed step's usage.
+    await result.usage;
+    await vi.waitFor(() => expect(seat.record()).toMatchObject({ status: 'failed', calls: 1 }));
+    expect(seat.record().usage.totalTokens).toBe(14);
+  });
 });
