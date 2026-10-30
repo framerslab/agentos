@@ -294,10 +294,11 @@ export interface ICognitiveMemoryManager {
 
   /**
    * Re-files the Brain's plain `user` and `persona` scope ids that hold a `/`, a `%` or a `:` in the encoded form a
-   * learning layer reads, once per Brain (`MemoryStore.ensureEncodedScopeIds`). The layer calls it when it first
-   * opens the manager. Optional, so a host's own implementation keeps compiling.
+   * learning layer reads, once per Brain, and moves what the manager's store holds of the traces it moved; on a Brain
+   * another handle or process re-filed, the store follows the Brain's rows (`MemoryStore.ensureEncodedScopeIds`). The
+   * layer calls it when it first opens the manager. Optional, so a host's own implementation keeps compiling.
    *
-   * @returns How many traces it moved.
+   * @returns How many traces its re-file moved: none when the Brain held the record already.
    */
   ensureEncodedScopeIds?(): Promise<number>;
 

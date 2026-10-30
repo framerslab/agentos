@@ -954,9 +954,10 @@ export class Memory {
 
   /**
    * Re-files this facade's Brain in the encoded form a learning layer reads, once per Brain
-   * (`refileBrainScopeIds`). The layer calls it when it is first handed the facade.
+   * (`refileBrainScopeIds`); every live `MemoryStore` on the Brain in this process then moves what it holds of the
+   * traces the re-file moved. The layer calls it when it is first handed the facade.
    *
-   * @returns How many traces it moved.
+   * @returns How many traces it moved: none when the Brain held the record already.
    */
   async ensureEncodedScopeIds(): Promise<number> {
     await this._initPromise;

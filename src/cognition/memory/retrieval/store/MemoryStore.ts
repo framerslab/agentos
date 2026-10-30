@@ -55,7 +55,8 @@ import {
   type PersistedDecayState,
 } from './tracePersistence.js';
 import { fillScopeIds } from './migrations/v2-to-v3.js';
-import { refileBrainScopeIds } from './scopeIdForm.js';
+import { encodePlainScopeId, onBrainRefiled, refileBrainScopeIds, type RefiledTrace } from './scopeIdForm.js';
+import { copyKey } from '../graph/knowledge/memoryCopies.js';
 
 // ---------------------------------------------------------------------------
 // Embedding guard (CR4)
@@ -141,6 +142,9 @@ const DEFAULT_REINFORCEMENT_INTERVAL_MS = 3_600_000;
 /** How many documents of a scope's collection a store with no Brain reads at once while it deletes the scope. */
 const SCOPE_DELETE_PAGE_SIZE = 500;
 
+/** How many documents of moved traces one delete takes from the collection a Brain's re-file moved them out of. */
+const MOVED_DOCUMENT_DELETE_PAGE_SIZE = 500;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -160,6 +164,32 @@ function scopeKey(scope: MemoryScope, scopeId: string): string {
  */
 function filedElsewhere(trace: MemoryTrace, scope: MemoryScope, scopeId: string): boolean {
   return typeof trace.scope === 'string' && typeof trace.scopeId === 'string' && (trace.scope !== scope || trace.scopeId !== scopeId);
+}
+
+/**
+ * The scope id a trace's Brain row is filed under: its `scope_id`, or, for a row that holds `''` there (a release
+ * older than the column wrote it), its metadata's `scopeId`; `''` for a row that names none.
+ */
+function rowScopeId(row: Pick<MemoryTraceRow, 'scope_id' | 'metadata'>): string {
+  if (row.scope_id) return row.scope_id;
+  const { scopeId } = parseTraceMetadata(row.metadata);
+  return typeof scopeId === 'string' ? scopeId : '';
+}
+
+/**
+ * Whether a trace's Brain row is filed under another scope than the one a read reaches the trace under: a row a move
+ * filed under another scope id (a Brain's re-file or `refileScope`, in this process or another) while this store holds
+ * the trace, or its vector document sits, under the old one, or a trace stored again under another scope. The read
+ * does not return the trace there. A row that names no scope id is read as filed where the read reaches it.
+ */
+function rowFiledElsewhere(
+  row: Pick<MemoryTraceRow, 'scope' | 'scope_id' | 'metadata'>,
+  scope: MemoryScope,
+  scopeId: string,
+): boolean {
+  if (row.scope !== scope) return true;
+  const filed = rowScopeId(row);
+  return filed !== '' && filed !== scopeId;
 }
 
 /**
@@ -405,6 +435,16 @@ interface MemoryTraceRow {
   metadata: string | null;
   /** Present only when a query selects it (softDelete's cleanup lookup). */
   deleted?: number;
+  /** Present only when a query selects it (the check of traces against their Brain rows). */
+  scope_id?: string | null;
+}
+
+/** What a check of traces against their Brain rows found (`reconcileDurableTraceStates`). */
+interface DurableTraceStates {
+  /** Whether the rows could be read: a read that fails recalls none of the traces. */
+  ok: boolean;
+  /** Each checked trace's row by trace id, as the check first read it: none for a trace with no row, or with no Brain. */
+  rows: Map<string, MemoryTraceRow>;
 }
 
 /**
@@ -477,6 +517,8 @@ interface StoreCoordinationTarget {
   revive: (trace: MemoryTrace, embedding: number[], source: boolean) => Promise<boolean>;
   /** Drops the words of a trace deleted for good from the store's cache ({@link withoutWords}). */
   forgetDeleted: (traceId: string) => void;
+  /** Moves what the store holds of the traces a Brain's re-file moved ({@link followBrainRefile}). */
+  followRefile: (traces: readonly RefiledTrace[]) => Promise<void>;
 }
 
 interface ReferenceLike<T extends object> {
@@ -495,7 +537,10 @@ interface StoreRegistration {
 
 interface NamespaceCoordinator {
   deleteEpoch: number;
-  /** Counts the Brain rows `refileScope` moves, so a hydration reads a row again that a move changed since its read. */
+  /**
+   * Counts the moves of Brain rows (`refileScope`, a Brain's re-file), so a hydration reads a row again that a move
+   * changed since its read.
+   */
   refileEpoch: number;
   pendingOperations: number;
   operations: Map<string, TraceOperationState>;
@@ -709,6 +754,36 @@ function hydrationEpochs(namespace: object): HydrationEpochs {
   const coordinator = getNamespaceCoordinator(namespace);
   return { deletes: coordinator.deleteEpoch, refiles: coordinator.refileEpoch };
 }
+
+/**
+ * Tells every live store on a re-filed Brain in this process which traces the re-file moved, once it has committed
+ * ({@link refileBrainScopeIds}): a hydration that read a row before the re-file reads it again before it loads it, and
+ * each store moves what it holds of those traces. A store whose move fails is reported; a read of an old id does not
+ * return a moved trace meanwhile, since its row is filed under the new id, and the store follows the Brain's rows
+ * again when `ensureEncodedScopeIds` is called on it.
+ */
+async function followBrainRefile(coordinationToken: object, traces: readonly RefiledTrace[]): Promise<void> {
+  const coordinator = namespaceCoordinators.get(coordinationToken);
+  if (!coordinator) return;
+  coordinator.refileEpoch += 1;
+  const targets: StoreCoordinationTarget[] = [];
+  for (const reference of coordinator.stores) {
+    const target = reference.deref();
+    if (target) targets.push(target);
+    else coordinator.stores.delete(reference);
+  }
+  const outcomes = await Promise.allSettled(targets.map((target) => target.followRefile(traces)));
+  const failed = outcomes.filter((outcome) => outcome.status === 'rejected').length;
+  if (failed > 0) {
+    console.warn(
+      `[MemoryStore] ${failed} of ${targets.length} stores on a re-filed Brain could not move what they hold of the ` +
+        `${traces.length} traces it moved; a read of an old scope id does not return them, and ensureEncodedScopeIds ` +
+        'on such a store follows the Brain again',
+    );
+  }
+}
+
+onBrainRefiled(followBrainRefile);
 
 function isTraceDeletePending(namespace: object, traceId: string): boolean {
   const coordinator = namespaceCoordinators.get(namespace);
@@ -966,6 +1041,8 @@ export class MemoryStore {
    * reader awaits. See {@link MemoryStore.ensureHydratedFromBrain}.
    */
   private brainHydration: Promise<void> | null = null;
+  /** The per-scope hydrations under way ({@link hydrateScope}), which a Brain's re-file waits for before it follows. */
+  private readonly scopeHydrations = new Set<Promise<number>>();
   /** Namespace shared by stores that address the same backing resource. */
   private coordinationNamespace: object;
   /** Lifecycle-registered callbacks used to invalidate sibling store caches. */
@@ -993,6 +1070,7 @@ export class MemoryStore {
       evictDeleted: (traceId, fallback) => this.evictDeletedLocally(traceId, fallback),
       revive: (trace, embedding, source) => this.reviveLocally(trace, embedding, source),
       forgetDeleted: (traceId) => this.forgetDeletedLocally(traceId),
+      followRefile: (traces) => this.followRefileLocally(traces),
     };
     this.coordinationNamespace = vectorStoreNamespace(
       config.vectorStore,
@@ -1191,7 +1269,7 @@ export class MemoryStore {
         const placeholders = chunk.map(() => '?').join(', ');
         const rows = await brain.all<MemoryTraceRow>(
           `SELECT id, type, scope, content, embedding, strength, created_at,
-                  last_accessed, retrieval_count, tags, emotions, metadata, deleted
+                  last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id
              FROM memory_traces
             WHERE brain_id = ? AND id IN (${placeholders})`,
           [brain.brainId, ...chunk],
@@ -1204,15 +1282,21 @@ export class MemoryStore {
     }
   }
 
+  /**
+   * Checks traces against their Brain rows: a trace whose row is gone or deleted is fenced in every store on the
+   * backing resource, and one whose row shows it revived is revived.
+   *
+   * @returns Whether the rows could be read, and the rows read, by trace id.
+   */
   private async reconcileDurableTraceStates(
     traceIds: string[],
     namespace: object,
     brain: import('./Brain.js').Brain | null,
-  ): Promise<boolean> {
-    if (!brain || traceIds.length === 0) return true;
+  ): Promise<DurableTraceStates> {
+    if (!brain || traceIds.length === 0) return { ok: true, rows: new Map() };
 
     const initial = await this.getDurableTraceRows(traceIds, brain);
-    if (!initial.ok) return false;
+    if (!initial.ok) return { ok: false, rows: new Map() };
 
     let validationAvailable = true;
     const stateChanges = new Set<string>();
@@ -1276,13 +1360,15 @@ export class MemoryStore {
         ),
       ),
     );
-    return validationAvailable;
+    return { ok: validationAvailable, rows: initial.rows };
   }
 
   /**
    * Return the subset of cached trace IDs that remain recallable after a
    * fail-closed durable-state check. Used by non-vector recall paths such as
    * graph association injection so a tombstone cannot bypass vector filters.
+   * A trace whose Brain row a move filed under another scope id than the one
+   * this store holds it under is not recallable until the store follows it.
    *
    * @param traceIds - The candidate trace IDs.
    * @param scopes - When given and non-empty, only traces filed under one of
@@ -1295,22 +1381,24 @@ export class MemoryStore {
   ): Promise<Set<string>> {
     this.beginOperation();
     const uniqueIds = [...new Set(traceIds)];
-    const validated = await this.reconcileDurableTraceStates(
+    const durable = await this.reconcileDurableTraceStates(
       uniqueIds,
       this.coordinationNamespace,
       this.brain,
     );
-    if (!validated) return new Set();
+    if (!durable.ok) return new Set();
     const readable = scopes?.length
       ? new Set(scopes.map(({ scope, scopeId }) => scopeKey(scope, scopeId)))
       : null;
     return new Set(
       uniqueIds.filter((traceId) => {
         const trace = this.traceCache.get(traceId);
+        const row = durable.rows.get(traceId);
         return Boolean(
           trace?.isActive &&
           !this.tombstonedTraceIds.has(traceId) &&
           !isTraceDeletePending(this.coordinationNamespace, traceId) &&
+          !(row && rowFiledElsewhere(row, trace.scope, trace.scopeId)) &&
           (!readable || readable.has(scopeKey(trace.scope, trace.scopeId))),
         );
       }),
@@ -1832,11 +1920,11 @@ export class MemoryStore {
     const vectorSearchStart = Date.now();
 
     if (this.tombstonedTraceIds.size > 0) {
-      const localStateAvailable = await this.reconcileDurableTraceStates(
+      const localStateAvailable = (await this.reconcileDurableTraceStates(
         [...this.tombstonedTraceIds],
         namespace,
         brain,
-      );
+      )).ok;
       if (!localStateAvailable) {
         return {
           scored: [],
@@ -1859,13 +1947,14 @@ export class MemoryStore {
           includeMetadata: true,
         });
 
-        const durableStateAvailable = await this.reconcileDurableTraceStates(
+        const durable = await this.reconcileDurableTraceStates(
           results.documents.map((document) => document.id),
           namespace,
           brain,
         );
-        if (!durableStateAvailable) continue;
+        if (!durable.ok) continue;
 
+        const staleDocuments: string[] = [];
         for (const result of results.documents) {
           if (
             this.tombstonedTraceIds.has(result.id) ||
@@ -1878,6 +1967,13 @@ export class MemoryStore {
           // A document left in a collection its trace has moved out of (`refileScope`, whose delete of the old
           // document failed) is not the trace's: this store holds the trace under another scope.
           if (cached && filedElsewhere(cached, scope, scopeId)) {
+            continue;
+          }
+          // Nor is one whose Brain row a move filed under another scope id, in this process or another: a store that
+          // holds the trace has not followed the move yet, and the document of a trace it does not hold is stale.
+          const row = durable.rows.get(result.id);
+          if (row && rowFiledElsewhere(row, scope, scopeId)) {
+            if (!cached) staleDocuments.push(result.id);
             continue;
           }
 
@@ -1931,6 +2027,7 @@ export class MemoryStore {
             graphActivation,
           });
         }
+        if (staleDocuments.length > 0) await this.deleteStaleDocuments(collection, staleDocuments);
       } catch {
         // Collection may not exist yet; skip
       }
@@ -2194,7 +2291,7 @@ export class MemoryStore {
     let results = collectCachedResults();
 
     const collection = collectionName(this.config.collectionPrefix, scope, scopeId);
-    const cachedStateAvailable = await this.reconcileDurableTraceStates(
+    const cachedState = await this.reconcileDurableTraceStates(
       [
         ...results.map((trace) => trace.id),
         ...this.tombstonedTraceIds,
@@ -2202,10 +2299,15 @@ export class MemoryStore {
       namespace,
       brain,
     );
-    if (!cachedStateAvailable) return [];
+    if (!cachedState.ok) return [];
     // Reconciliation can revive a trace while waiting behind an in-flight
     // store. Refresh the snapshot so that revival is visible in this call.
-    results = collectCachedResults();
+    // A trace whose Brain row a move filed under another scope id is not
+    // listed under this one until the store follows the move.
+    results = collectCachedResults().filter((trace) => {
+      const row = cachedState.rows.get(trace.id);
+      return !(row && rowFiledElsewhere(row, scope, scopeId));
+    });
 
     // Fallback: if cache is empty for this scope, query the vector store.
     if (results.length === 0) {
@@ -2221,12 +2323,13 @@ export class MemoryStore {
           includeMetadata: true,
           includeTextContent: true,
         });
-        const providerStateAvailable = await this.reconcileDurableTraceStates(
+        const providerState = await this.reconcileDurableTraceStates(
           queryResult.documents.map((document) => document.id),
           namespace,
           brain,
         );
-        if (!providerStateAvailable) return [];
+        if (!providerState.ok) return [];
+        const staleDocuments: string[] = [];
         for (const doc of queryResult.documents) {
           if (
             this.tombstonedTraceIds.has(doc.id) ||
@@ -2236,6 +2339,13 @@ export class MemoryStore {
           }
           if (!doc.metadata) continue;
           const cached = this.traceCache.get(doc.id);
+          // A document whose Brain row a move filed under another scope id is not the scope's; one of a trace this
+          // store does not hold is stale.
+          const row = providerState.rows.get(doc.id);
+          if (row && rowFiledElsewhere(row, scope, scopeId)) {
+            if (!cached) staleDocuments.push(doc.id);
+            continue;
+          }
           if (cached) {
             // A document left behind in a collection its trace moved out of lists the trace under its own scope only.
             if (cached.isActive && !filedElsewhere(cached, scope, scopeId)) {
@@ -2250,6 +2360,7 @@ export class MemoryStore {
             results.push(trace);
           }
         }
+        if (staleDocuments.length > 0) await this.deleteStaleDocuments(collection, staleDocuments);
       } catch {
         // Vector store query may fail (collection not found, etc.); return empty.
       }
@@ -2281,6 +2392,22 @@ export class MemoryStore {
     this.beginOperation();
     const brain = this.brain;
     if (!brain) return 0;
+    const hydration = this.hydrateScopeRows(brain, scope, scopeId, limit);
+    this.scopeHydrations.add(hydration);
+    try {
+      return await hydration;
+    } finally {
+      this.scopeHydrations.delete(hydration);
+    }
+  }
+
+  /** The read and the load of {@link hydrateScope}. */
+  private async hydrateScopeRows(
+    brain: import('./Brain.js').Brain,
+    scope: MemoryScope,
+    scopeId: string,
+    limit: number,
+  ): Promise<number> {
     const namespace = this.coordinationNamespace;
     const epochs = hydrationEpochs(namespace);
     const rows = await brain.all<MemoryTraceRow>(
@@ -2357,23 +2484,183 @@ export class MemoryStore {
 
   /**
    * Puts this store's Brain in the encoded form a learning layer reads the first time a layer opens it
-   * ({@link refileBrainScopeIds}), then moves the traces this store has cached under a moved id
-   * ({@link refileScope}, whose Brain update finds the rows moved already). A Brain that holds the record is left
-   * as it is; a store with no Brain has nothing to re-file.
+   * ({@link refileBrainScopeIds}). Once the re-file has committed, every live store on the Brain in this process, this
+   * one included, moves what it holds of the traces the re-file moved, and of those alone: a row filed under an old id
+   * after the re-file is a namespaced learner's, and stays where it is. Then, whoever re-filed the Brain (this call,
+   * another handle or another process), this store follows the Brain's rows: each trace it holds under a `user` or
+   * `persona` id that the encoded form would change moves to the scope id its row holds, and one whose row holds the
+   * id as it is stays, since a namespaced id holds a `/` too. A hydration under way loads its rows as the Brain holds
+   * them after the re-file. Until a store follows, a read of an old id does not return a trace whose row moved. A store
+   * with no Brain has nothing to re-file.
    *
-   * @returns How many Brain rows the re-file moved.
+   * @returns How many Brain rows this call's re-file moved: none when the Brain held the record already.
+   * @throws When the re-file fails (its transaction rolls back, and a later call re-files the Brain), or when this
+   *   store cannot read the rows of the traces it holds or move one into its new collection.
    */
   async ensureEncodedScopeIds(): Promise<number> {
     this.beginOperation();
     const brain = this.brain;
     if (!brain) return 0;
-    const { moved } = await refileBrainScopeIds(brain);
-    let traces = 0;
-    for (const pair of moved) {
-      await this.refileScope(pair.scope as MemoryScope, pair.from, pair.to);
-      traces += pair.traces;
+    const result = await refileBrainScopeIds(brain);
+    // The re-file's own move of this store's traces is reported, not thrown; this pass makes a move that failed there,
+    // or one another handle or process made, and throws when it cannot.
+    await this.followBrainRows(brain);
+    return result.alreadyEncoded ? 0 : result.moved.reduce((sum, pair) => sum + pair.traces, 0);
+  }
+
+  /**
+   * Follows the Brain's rows after a re-file, whoever made it ({@link ensureEncodedScopeIds}): once the hydrations
+   * under way have loaded what they read, each trace this store holds under a `user` or `persona` id that the encoded
+   * form would change is read against its Brain row, and one whose row is filed under another scope id moves there
+   * ({@link followRefiledTraceWithTraceLock}). One whose row holds the id as it is stays: a namespaced id holds a `/`
+   * too, and an id this store holds is never encoded again.
+   *
+   * @throws When the rows cannot be read, or a trace cannot move into its new collection.
+   */
+  private async followBrainRows(brain: import('./Brain.js').Brain): Promise<void> {
+    const namespace = this.coordinationNamespace;
+    // A hydration that read a row before the re-file reads it again before it loads it.
+    getNamespaceCoordinator(namespace).refileEpoch += 1;
+    await this.settleHydrations();
+    const candidates = [...this.traceCache.values()].filter(
+      (trace) =>
+        (trace.scope === 'user' || trace.scope === 'persona') &&
+        typeof trace.scopeId === 'string' &&
+        trace.scopeId !== '' &&
+        encodePlainScopeId(trace.scope, trace.scopeId) !== trace.scopeId,
+    );
+    if (candidates.length === 0) return;
+    const { ok, rows } = await this.getDurableTraceRows(candidates.map((trace) => trace.id), brain);
+    if (!ok) {
+      throw new Error('MemoryStore.ensureEncodedScopeIds: could not read the Brain rows of the traces this store holds');
     }
-    return traces;
+    for (const trace of candidates) {
+      const row = rows.get(trace.id);
+      if (!row || row.scope !== trace.scope) continue;
+      const to = rowScopeId(row);
+      if (to === '' || to === trace.scopeId) continue;
+      const moved: RefiledTrace = { id: trace.id, scope: trace.scope, from: trace.scopeId, to };
+      await withTraceOperation(namespace, trace.id, 'normal', async ({ blockedByDelete }) => {
+        if (blockedByDelete) return;
+        await this.followRefiledTraceWithTraceLock(moved);
+      });
+    }
+  }
+
+  /**
+   * Moves what this store holds of the traces a Brain's re-file moved ({@link followBrainRefile}): once the hydrations
+   * under way have loaded what they read, each trace it holds under the old id moves with its vector document and its
+   * knowledge-graph copy ({@link followRefiledTraceWithTraceLock}), and the old collection's documents of the other
+   * moved traces go, since their rows are filed under the new id.
+   *
+   * @throws When a trace it holds cannot move into its new collection; the traces before it stay moved.
+   */
+  private async followRefileLocally(traces: readonly RefiledTrace[]): Promise<void> {
+    await this.settleHydrations();
+    const namespace = this.coordinationNamespace;
+    const unheld = new Map<string, string[]>();
+    for (const moved of traces) {
+      const cached = this.traceCache.get(moved.id);
+      if (cached && cached.scope === moved.scope && cached.scopeId === moved.from) {
+        await withTraceOperation(namespace, moved.id, 'normal', async ({ blockedByDelete }) => {
+          if (blockedByDelete) return;
+          await this.followRefiledTraceWithTraceLock(moved);
+        });
+        continue;
+      }
+      const collection = collectionName(this.config.collectionPrefix, moved.scope as MemoryScope, moved.from);
+      const ids = unheld.get(collection) ?? [];
+      ids.push(moved.id);
+      unheld.set(collection, ids);
+    }
+    for (const [collection, ids] of unheld) await this.deleteMovedDocuments(collection, ids);
+  }
+
+  /**
+   * Moves one trace a Brain's re-file moved that this store holds under the old id, inside the trace's operation: a
+   * live trace's vector document moves into the new collection, with the vector the store holds, its row's, or a new
+   * embedding; then the store's copy takes the new id, and the trace's knowledge-graph copy is recorded again under it
+   * where the graph holds one under another ({@link followGraphCopy}). A trace the store no longer holds under the old
+   * id is left as it is.
+   *
+   * @returns Whether it moved the trace.
+   */
+  private async followRefiledTraceWithTraceLock(moved: RefiledTrace): Promise<boolean> {
+    const scope = moved.scope as MemoryScope;
+    const held = this.traceCache.get(moved.id);
+    if (!held || held.scope !== scope || held.scopeId !== moved.from) return false;
+    const live = held.isActive && !this.tombstonedTraceIds.has(moved.id);
+    const trace: MemoryTrace = { ...held, scope, scopeId: moved.to };
+    let embedding: number[] | undefined;
+    if (live) {
+      const rowEmbedding =
+        this.embeddingCache.has(moved.id) || !this.brain
+          ? undefined
+          : (await this.getDurableTraceRows([moved.id])).rows.get(moved.id)?.embedding;
+      embedding = await this.writeMovedDocument(trace, rowEmbedding, 'ensureEncodedScopeIds');
+      await this.deleteMovedDocument(
+        collectionName(this.config.collectionPrefix, scope, moved.from),
+        moved.id,
+        'ensureEncodedScopeIds',
+      );
+    }
+    held.scopeId = moved.to;
+    held.updatedAt = Date.now();
+    if (embedding) this.embeddingCache.set(moved.id, embedding);
+    if (held.isActive) this.registerScope(scope, moved.to);
+    if (live) await this.followGraphCopy(trace, embedding);
+    return true;
+  }
+
+  /**
+   * Records a moved trace's knowledge-graph copy again under the scope id it moved to, where the graph holds a copy
+   * filed under another: the Brain's own SQL graph had its copies moved with the rows by the re-file, and keeps them,
+   * with the relations that name them, as they are. A trace with no copy gets none.
+   */
+  private async followGraphCopy(trace: MemoryTrace, embedding: number[] | undefined): Promise<void> {
+    const graph = this.config.knowledgeGraph;
+    if (typeof graph.deleteMemories !== 'function') return;
+    try {
+      const copy = await graph.getMemory(copyKey(trace.id));
+      if ((copy?.context as { scopeId?: unknown } | undefined)?.scopeId === trace.scopeId) return;
+      if ((await graph.deleteMemories({ traceIds: [trace.id] })) > 0) await this.recordGraphCopy(trace, embedding);
+    } catch {
+      // The copy stays under the old id, where a delete by the trace's id still finds it.
+    }
+  }
+
+  /** Waits for the hydrations under way to load what they read: the whole-brain one and each per-scope one. */
+  private async settleHydrations(): Promise<void> {
+    await Promise.allSettled([...(this.brainHydration ? [this.brainHydration] : []), ...this.scopeHydrations]);
+  }
+
+  /**
+   * Deletes from the collection a Brain's re-file moved them out of the documents of moved traces this store does not
+   * hold there, a page at a time. A delete the index fails is reported, not thrown: a read of the old id skips and
+   * deletes such a document, since its row is filed under the new id.
+   */
+  private async deleteMovedDocuments(collection: string, traceIds: readonly string[]): Promise<void> {
+    const vectorStore = this.config.vectorStore;
+    try {
+      if (vectorStore.collectionExists && !(await vectorStore.collectionExists(collection))) return;
+    } catch {
+      // An index that cannot say whether it holds the collection: the delete finds out.
+    }
+    let failed = 0;
+    for (let offset = 0; offset < traceIds.length; offset += MOVED_DOCUMENT_DELETE_PAGE_SIZE) {
+      const page = traceIds.slice(offset, offset + MOVED_DOCUMENT_DELETE_PAGE_SIZE);
+      try {
+        failed += (await vectorStore.delete(collection, page))?.failedCount ?? 0;
+      } catch {
+        failed += page.length;
+      }
+    }
+    if (failed > 0) {
+      console.warn(
+        `[MemoryStore] could not delete ${failed} documents of traces a Brain's re-file moved from the collection they ` +
+          'moved out of; a read of the old scope id skips and deletes them, since their rows are filed under the new one',
+      );
+    }
   }
 
   /**
@@ -2412,36 +2699,7 @@ export class MemoryStore {
     // A live trace this store holds has its document in the new collection before its row moves, so a failure here
     // leaves the trace where it was.
     let embedding: number[] | undefined;
-    if (live && held) {
-      embedding =
-        this.embeddingCache.get(traceId) ??
-        blobToEmbedding(row?.embedding) ??
-        (await this.embedText(trace.content));
-      if (!embedding) {
-        throw new Error(`MemoryStore.refileScope: the embedding manager returned no vector for trace ${traceId}`);
-      }
-      const toCollection = collectionName(this.config.collectionPrefix, scope, toScopeId);
-      try {
-        const exists = this.config.vectorStore.collectionExists
-          ? await this.config.vectorStore.collectionExists(toCollection)
-          : true;
-        if (!exists) {
-          await this.config.vectorStore.createCollection?.(
-            toCollection,
-            this.config.embeddingDimension ?? embedding.length,
-            { overwriteIfExists: false },
-          );
-        }
-      } catch {
-        // Some providers auto-create collections.
-      }
-      const result = await this.config.vectorStore.upsert(toCollection, [
-        { id: traceId, textContent: trace.content, embedding, metadata: traceToMetadata(trace, this.persistsAccessState) },
-      ]);
-      if ((result?.failedCount ?? 0) > 0) {
-        throw new Error(`MemoryStore.refileScope: the vector index refused trace ${traceId} in its new collection`);
-      }
-    }
+    if (live && held) embedding = await this.writeMovedDocument(trace, row?.embedding, 'refileScope');
 
     if (row && brain && (await this.refileRow(brain, row.metadata, traceId, scope, fromScopeId, toScopeId))) {
       // A hydration that read this row before the move reads it again before it loads it.
@@ -2505,8 +2763,50 @@ export class MemoryStore {
     throw new Error(`MemoryStore.refileScope: trace ${traceId}'s row changed under each of three reads while it moved`);
   }
 
-  /** Deletes a moved trace's document from the collection it left; a delete the index fails is reported, not thrown. */
-  private async deleteMovedDocument(collection: string, traceId: string): Promise<void> {
+  /**
+   * Writes a moved trace's vector document into the collection of the scope id it moved to (`trace.scopeId`), with the
+   * vector the store holds, the one its Brain row holds, or a new embedding of its text.
+   *
+   * @param operation - The public call the move serves, named in an error.
+   * @returns The vector it wrote.
+   * @throws When no vector can be had, or the vector index refuses the document.
+   */
+  private async writeMovedDocument(trace: MemoryTrace, rowEmbedding: unknown, operation: string): Promise<number[]> {
+    const embedding =
+      this.embeddingCache.get(trace.id) ?? blobToEmbedding(rowEmbedding) ?? (await this.embedText(trace.content));
+    if (!embedding) {
+      throw new Error(`MemoryStore.${operation}: the embedding manager returned no vector for trace ${trace.id}`);
+    }
+    const toCollection = collectionName(this.config.collectionPrefix, trace.scope, trace.scopeId);
+    try {
+      const exists = this.config.vectorStore.collectionExists
+        ? await this.config.vectorStore.collectionExists(toCollection)
+        : true;
+      if (!exists) {
+        await this.config.vectorStore.createCollection?.(
+          toCollection,
+          this.config.embeddingDimension ?? embedding.length,
+          { overwriteIfExists: false },
+        );
+      }
+    } catch {
+      // Some providers auto-create collections.
+    }
+    const result = await this.config.vectorStore.upsert(toCollection, [
+      { id: trace.id, textContent: trace.content, embedding, metadata: traceToMetadata(trace, this.persistsAccessState) },
+    ]);
+    if ((result?.failedCount ?? 0) > 0) {
+      throw new Error(`MemoryStore.${operation}: the vector index refused trace ${trace.id} in its new collection`);
+    }
+    return embedding;
+  }
+
+  /**
+   * Deletes a moved trace's document from the collection it left; a delete the index fails is reported, not thrown.
+   *
+   * @param operation - The public call the move serves, named in the report.
+   */
+  private async deleteMovedDocument(collection: string, traceId: string, operation = 'refileScope'): Promise<void> {
     const vectorStore = this.config.vectorStore;
     try {
       if (vectorStore.collectionExists && !(await vectorStore.collectionExists(collection))) return;
@@ -2516,7 +2816,7 @@ export class MemoryStore {
       // Reported below.
     }
     console.warn(
-      `[MemoryStore] refileScope could not delete trace ${traceId}'s document from the collection it moved out of; ` +
+      `[MemoryStore] ${operation} could not delete trace ${traceId}'s document from the collection it moved out of; ` +
         'recall under the old scope id skips it, since the store holds the trace under the new one',
     );
   }
@@ -3053,9 +3353,10 @@ export class MemoryStore {
   }
 
   /**
-   * Deletes from a scope's collection the stale documents of traces this store holds under another scope
-   * ({@link walkScopeCollection}); a delete the index fails is reported, with no scope id, and the next delete or
-   * refile of the scope tries again.
+   * Deletes from a scope's collection the stale documents of traces filed under another scope: traces this store
+   * holds under another scope ({@link walkScopeCollection}), and traces whose Brain rows a move filed under another
+   * scope id ({@link query}, {@link getByScope}). A delete the index fails is reported, with no scope id, and a later
+   * read that reaches such a document, or the next delete or refile of the scope, tries again.
    */
   private async deleteStaleDocuments(collection: string, traceIds: string[]): Promise<void> {
     try {
@@ -3066,7 +3367,7 @@ export class MemoryStore {
     }
     console.warn(
       `[MemoryStore] could not delete ${traceIds.length} stale documents of traces filed under another scope from a ` +
-        `scope's collection; the next delete or refile of the scope tries again`,
+        `scope's collection; a later read that reaches them, or the next delete or refile of the scope, tries again`,
     );
   }
 
