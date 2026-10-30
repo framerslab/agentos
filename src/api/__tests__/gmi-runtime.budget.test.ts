@@ -340,6 +340,20 @@ describe('a spend budget on the GMI path', () => {
     await session.close();
   });
 
+  it('a metaprompt its budget refuses is warned about, by its id and the refusal', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [costly('I hear you.', 2_950), reply.text('{"mood":"calm"}')], whole: true });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // The default 'throw': no function hears of the refusal.
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 3_000, unpriced: 'allow' });
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Help.', maxTokens: 100, cognition: { sentiment: true, metaprompts: ['confusion_clarification'] }, memory: false, budget });
+
+    await a.session('s1').send('I am confused and this is unclear. Please explain it again.');
+    const lines = () => warn.mock.calls.map((call) => call.map(String).join(' '));
+    await vi.waitFor(() => expect(lines()).toEqual(expect.arrayContaining([expect.stringMatching(/metaprompt 'gmi_confusion_clarification'.*Token cap exceeded/)])));
+    expect(s.seen.filter((call) => !call.streamed)).toEqual([]);
+  });
+
   it('a session send takes a per-send budget, on the GMI engine and on the legacy one', async () => {
     const k = key();
     const s = script('openai', k, { replies: [reply.text('Unused.')], whole: true });
