@@ -1597,7 +1597,8 @@ export interface BaseAgentConfig {
   /**
    * Names of other agents in the agency that must complete before this agent runs.
    * Used with `strategy: 'graph'` to build an explicit dependency DAG.
-   * Agents with no `dependsOn` are roots and run first.
+   * Agents with no `dependsOn`, or an empty one, are roots and run first. `agency()` throws
+   * `AgencyConfigError`, naming the agent, for a value that is not an array of names.
    * @example `dependsOn: ['researcher']` — this agent waits for `researcher` to finish.
    */
   dependsOn?: string[];
@@ -1763,7 +1764,9 @@ export interface AgencySeatConfig extends BaseAgentConfig {
   /**
    * Which engine serves the seat. `'legacy'` (the default) calls the model through
    * generateText and streamText; `'gmi'` serves each of the seat's calls with a
-   * Generalized Mind Instance (docs/GMI.md, "GMIs from agent()").
+   * Generalized Mind Instance (docs/GMI.md, "GMIs from agent()"). `agency()` throws
+   * `AgencyConfigError`, naming the seat, for any other value; `null` is unset, so the
+   * agency's `runtime` applies.
    */
   runtime?: 'legacy' | 'gmi';
   /**
@@ -1792,7 +1795,8 @@ export interface SeatMetadata {
   description?: string;
   /**
    * Seats this one waits for under the graph strategy. An agency that names no strategy and is not adaptive
-   * runs `graph` when any seat's `dependsOn` lists a seat.
+   * runs `graph` when any seat's `dependsOn` lists a seat; an empty list lists none. `agency()` throws
+   * `AgencyConfigError`, naming the seat, for a `dependsOn` that is set and is not an array of seat names.
    */
   dependsOn?: string[];
 }
@@ -1884,6 +1888,7 @@ export interface AgencyOptions extends BaseAgentConfig {
    * generateText and streamText, `'gmi'` serves each of the seat's calls with a Generalized Mind Instance
    * (docs/GMI.md, "GMIs from agent()"). A seat's own `runtime` wins. Pre-built seats keep the engine they were
    * built with, and the hierarchical manager and the parallel and debate synthesizers stay on the legacy engine.
+   * Any other value throws `AgencyConfigError`, here and on a seat; `null` is unset at both levels.
    * The agency itself takes no `cognition`: a strategy runs a config seat through its `generate()` or `stream()`,
    * which run the `'light'` profile; seat a persistent GMI with `sessionSeat()` to run its own profile.
    */

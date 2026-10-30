@@ -77,7 +77,10 @@ export type NoLearnerReason =
   | 'placeholder_user'
   /** The agent has no stable id: a `gmi()` agent without a name and without `learning.agentKey`. */
   | 'no_agent_key'
-  /** A GMI built for a workflow role, or a turn that carries `metadata.workflowId`. */
+  /**
+   * A GMI built for a workflow role, a turn that carries `metadata.workflowId`, or a seat's session in an agency
+   * (`sessionSeat()`, `launch_agency`), whatever user that session runs as.
+   */
   | 'workflow_seat'
   /** The turn's user is not the session's first user; every later turn of the session has no learner either. */
   | 'other_user'
