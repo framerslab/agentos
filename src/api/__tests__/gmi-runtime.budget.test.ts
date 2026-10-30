@@ -248,9 +248,8 @@ describe('a spend budget on the GMI path', () => {
     const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, budget: agentBudget });
 
     const callBudget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
-    const answered = a.stream('Hi.', { budget: callBudget });
-    for await (const _part of answered.fullStream) void _part;
-    await expect(answered.text).resolves.toBe('Answer.');
+    // The turn runs whether or not its parts are read.
+    await expect(a.stream('Hi.', { budget: callBudget }).text).resolves.toBe('Answer.');
     expect([callBudget.tokensUsed(), agentBudget.tokensUsed()]).toEqual([15, 0]);
 
     const parts: Array<{ type: string; error?: unknown }> = [];
