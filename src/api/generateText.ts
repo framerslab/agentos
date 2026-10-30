@@ -30,7 +30,7 @@ import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { lazyLogger } from './runtime/lazyLogger.js';
 import { isCallMask } from './runtime/pool/redact.js';
-import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
@@ -115,6 +115,9 @@ import type {
   CacheDiagnostics,
   AttemptOutcome,
 } from '../core/llm/providers/IProvider.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('generate_text');
 
 // Re-export multimodal types for downstream consumers
 export type { MessageContent, MessageContentPart };
