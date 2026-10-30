@@ -353,4 +353,20 @@ describe('agency() seats served by GMIs', () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('sessionSeat()');
   });
+
+  it("a seat's call that fails after a billed step adds that step's usage to the seat's record", async () => {
+    const k = key();
+    // One tool step (14 tokens), then the provider fails before any output: the turn fails with a billed step behind it.
+    script('openai', k, { replies: [reply.tools([{ id: 't1', name: 'search', args: {} }]), new Error('upstream down')] });
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], instructions: 'Look it up.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: {} }, execute: async () => 'found' } },
+    });
+    const seat = sessionSeat(member);
+    await expect(seat.generate('Find it.')).rejects.toThrow();
+    const record = seat.record();
+    expect(record).toMatchObject({ status: 'failed', calls: 1 });
+    expect(record.usage.totalTokens).toBe(14);
+    await expect(seat.usage()).resolves.toMatchObject({ totalTokens: 14 });
+  });
 });
