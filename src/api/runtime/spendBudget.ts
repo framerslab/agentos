@@ -57,7 +57,8 @@ export interface SpendBudgetOptions {
    * A budget this one draws on. Every check asks the parent first, with the same estimate, and every record and
    * outside cost is added to the parent after this budget. A refusal by the parent, or by any budget above it, runs
    * this budget's own `onLimitReached` function (when it is one) with the refusing budget's {@link SpendLimitInfo},
-   * after the refusing budget's own, before the error goes on.
+   * after the refusing budget's own, before the error goes on. A parent chain that holds a budget on the same `guard`
+   * and `budgetId` as this one is refused: the two would keep one total and charge every call to it twice.
    */
   parent?: SpendBudget;
 }
@@ -156,7 +157,8 @@ export class SpendBudget {
   /**
    * @param options - The budget's settings.
    * @throws {RangeError} When `maxCostUSD`, or a `maxTotalTokens` that is set, is not a number zero or more.
-   *   `maxCostUSD` may be `Number.POSITIVE_INFINITY` (a budget with no dollar cap).
+   *   `maxCostUSD` may be `Number.POSITIVE_INFINITY` (a budget with no dollar cap). Also when a budget in the
+   *   `parent` chain keeps its spending on the given `guard` under the same id; the guard is left as it was.
    */
   constructor(options: SpendBudgetOptions) {
     if (!(options.maxCostUSD >= 0)) throw new RangeError('maxCostUSD must be zero or more');
@@ -167,6 +169,15 @@ export class SpendBudget {
     }
     this.options = options;
     this.id = options.budgetId ?? `budget-${Date.now()}-${++budgets}`;
+    if (options.guard) {
+      // One guard and one id keep one total: a budget above this one that keeps it too would be charged every call twice
+      // (once by each budget), and this budget would replace the cap that budget holds for the id.
+      for (let above = options.parent; above; above = above.options.parent) {
+        if (above.guard === options.guard && above.id === this.id) {
+          throw new RangeError(`A spend budget cannot draw on a budget that keeps its spending on the same guard under the same id ('${this.id}')`);
+        }
+      }
+    }
     this.guard =
       options.guard ??
       new CostGuard({
