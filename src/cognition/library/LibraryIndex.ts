@@ -107,14 +107,25 @@ export interface LibrarySearch {
   /** For the lexical leg, alone or in a hybrid search: every word or any word (default), and whether a stored word may only begin with a query word. */
   match?: 'all' | 'any';
   prefix?: boolean;
+  /**
+   * Cancels the search: checked before the query is embedded and before and after each call to the store, and handed
+   * to the embedding function. Once it has aborted, the search starts no further call to the embedder or the store and
+   * rejects with the signal's reason, or with the embedding function's error when the signal cancelled its request; a
+   * store call that has started runs to its end, and its answer is dropped.
+   */
+  signal?: AbortSignal;
 }
 
 /** What the index is made of. */
 export interface LibraryIndexOptions {
   store: IVectorStore;
   collection: string;
-  /** One vector per text, in order. The caller wires its model, its budget and its deadline. */
-  embed: (texts: string[]) => Promise<number[][]>;
+  /**
+   * One vector per text, in order. The caller wires its model, its budget and its deadline. A search hands it the
+   * search's `signal` as `options.signal`, so a request in flight is cancelled with the search; indexing, and a search
+   * with no signal, pass no options.
+   */
+  embed: (texts: string[], options?: { signal?: AbortSignal }) => Promise<number[][]>;
   /** How many passages one `embed` call and one upsert carry. @default 64 */
   batchSize?: number;
 }
@@ -188,7 +199,7 @@ function findsNothing(query: Pick<LibrarySearch, 'folderId' | 'folderIds' | 'sou
 export class LibraryIndex {
   private readonly store: IVectorStore;
   private readonly collection: string;
-  private readonly embed: (texts: string[]) => Promise<number[][]>;
+  private readonly embed: (texts: string[], options?: { signal?: AbortSignal }) => Promise<number[][]>;
   private readonly batchSize: number;
 
   /** An index over a collection the store already holds; the index makes no collection. */
@@ -279,18 +290,21 @@ export class LibraryIndex {
    * Searches what the scope may see. The store's filter selects the passages, and the index keeps only those whose
    * metadata meets the scope and the narrowing: a store whose filter drops or ignores a condition cannot widen the
    * answer, which can then hold fewer than `topK` passages. With `anyOf`, each narrowing is searched leg by leg under
-   * the same scope and the answers are ranked as one search's ({@link LibrarySearch.anyOf}).
+   * the same scope and the answers are ranked as one search's ({@link LibrarySearch.anyOf}). Once its `signal` has
+   * aborted, a search starts no further call to the embedder or the store and rejects ({@link LibrarySearch.signal}).
    */
   async search(query: LibrarySearch): Promise<LibraryPassage[]> {
+    query.signal?.throwIfAborted();
     if (!query.scope.tenantId || query.scope.aclGroups.length === 0) {
       throw new Error('LibraryIndex.search needs a tenant and at least one access group.');
     }
     const { anyOf, ...base } = query;
     if (anyOf === undefined) return this.searchWith(query, undefined);
-    // A branch narrows and nothing more: the text and the scope stay the search's own, whatever a branch holds at run
-    // time. A branch that finds nothing by its own narrowing is left out, so a choice of nothing embeds nothing.
+    // A branch narrows and nothing more: the text, the scope and the signal stay the search's own, whatever a branch
+    // holds at run time. A branch that finds nothing by its own narrowing is left out, so a choice of nothing embeds
+    // nothing.
     const branches = anyOf
-      .map((branch) => ({ ...base, ...branch, text: base.text, scope: base.scope }))
+      .map((branch) => ({ ...base, ...branch, text: base.text, scope: base.scope, signal: base.signal }))
       .filter((narrowed) => !findsNothing(narrowed));
     if (branches.length === 0) return [];
     const mode = base.mode ?? 'hybrid';
@@ -300,7 +314,7 @@ export class LibraryIndex {
     // A hybrid answer's score is a rank among one branch's own candidates, so a choice of several branches is searched
     // leg by leg, each leg's score the passage's own, and the two legs are fused once over every branch.
     const pool = dense && lexical ? topK * 3 : topK;
-    const vector = dense ? (await this.embed([base.text]))[0] : undefined;
+    const vector = dense ? await this.embedQuery(base.text, base.signal) : undefined;
     const byDense = new Map<string, LibraryPassage>();
     const byLexical = new Map<string, LibraryPassage>();
     for (const narrowed of branches) {
@@ -318,6 +332,16 @@ export class LibraryIndex {
         const passage = byDense.get(id) ?? byLexical.get(id);
         return passage === undefined ? [] : [{ ...passage, score }];
       });
+  }
+
+  /**
+   * The query's embedding. None is asked for once the search's signal has aborted: the search rejects with the
+   * signal's reason. The embedding function receives the signal, when the search gives one, to cancel its request.
+   */
+  private async embedQuery(text: string, signal: AbortSignal | undefined): Promise<number[]> {
+    signal?.throwIfAborted();
+    const [vector] = signal === undefined ? await this.embed([text]) : await this.embed([text], { signal });
+    return vector;
   }
 
   /**
@@ -339,16 +363,22 @@ export class LibraryIndex {
     const options = { topK: query.topK ?? 10, filter, includeMetadata: true, includeTextContent: true };
     const mode = query.mode ?? 'hybrid';
     let result: QueryResult;
+    // No call to the store starts once the search's signal has aborted, whether it aborted while the query was embedded
+    // (an embedding function may ignore the signal) or during an earlier leg of a search with `anyOf`; a store call
+    // that has started runs to its end, and its answer is dropped when the signal aborted meanwhile.
     if (mode === 'lexical') {
       if (typeof this.store.lexicalSearch !== 'function') throw new Error('LibraryIndex: the store has no lexicalSearch.');
+      query.signal?.throwIfAborted();
       result = await this.store.lexicalSearch(this.collection, query.text, { topK: options.topK, match: query.match ?? 'any', prefix: query.prefix === true, includeMetadata: true, includeTextContent: true, filter });
     } else {
-      const [embedded] = vector === undefined ? await this.embed([query.text]) : [vector];
+      const embedded = vector === undefined ? await this.embedQuery(query.text, query.signal) : vector;
+      query.signal?.throwIfAborted();
       result =
         mode === 'hybrid' && typeof this.store.hybridSearch === 'function'
           ? await this.store.hybridSearch(this.collection, embedded, query.text, { ...options, match: query.match ?? 'any', prefix: query.prefix === true })
           : await this.store.query(this.collection, embedded, options);
     }
+    query.signal?.throwIfAborted();
     // The store's filter selected these passages. A store whose filter drops or ignores a condition can still answer
     // one outside the scope or the narrowing, so each passage is checked against them again here.
     const allowed = result.documents.filter((doc) => meetsSearch((doc.metadata ?? {}) as Record<string, MetadataValue>, query));
