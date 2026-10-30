@@ -91,11 +91,14 @@ export function encodePlainScopeId(scope: string, scopeId: string): string {
 /**
  * A snapshot read from a Brain in the plain form (`TraceSnapshot.scopeIdForm`), as a Brain re-filed since holds its
  * row: the scope id in the encoded form, in the snapshot's column and in its metadata's `scopeId`, as the re-file
- * writes a row. A scope id the rule keeps stays as it is.
+ * writes a row. A snapshot whose column holds `''` while its metadata names a scope id (a row a release older than
+ * the column wrote, which the re-file files first) takes the metadata's id, encoded, in both, since the next fill
+ * would file that id as it is. A scope id the rule keeps stays as it is.
  */
 export function snapshotInEncodedForm(snapshot: TraceSnapshot): TraceSnapshot {
-  const to = encodePlainScopeId(snapshot.scope, snapshot.scopeId);
-  if (to === snapshot.scopeId) return { ...snapshot, scopeIdForm: ENCODED_SCOPE_ID_FORM };
+  const filed = snapshot.scopeId !== '' ? snapshot.scopeId : scopeIdOfMetadata(snapshot.metadata);
+  const to = encodePlainScopeId(snapshot.scope, filed);
+  if (to === filed) return { ...snapshot, scopeIdForm: ENCODED_SCOPE_ID_FORM };
   const metadata = parseTraceMetadata(snapshot.metadata);
   metadata.scopeId = to;
   return { ...snapshot, scopeId: to, metadata: JSON.stringify(metadata), scopeIdForm: ENCODED_SCOPE_ID_FORM };
