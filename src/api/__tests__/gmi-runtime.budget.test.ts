@@ -390,4 +390,17 @@ describe('a spend budget on the GMI path', () => {
     }
     expect(s.seen).toHaveLength(0);
   });
+  it("a legacy agent's generate() holds the budget its settings make across the validation retries of the call", async () => {
+    const k = key();
+    // Three answers that do not parse, 900 tokens each: the second attempt's estimate passes what the first left.
+    const s = script('openai', k, { replies: [costly('not json', 900), costly('still not json', 900), costly('nope', 900)], whole: true });
+    const a = agent({
+      provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer in JSON.', maxTokens: 100,
+      responseSchema: z.object({ a: z.string() }),
+      controls: { maxValidationRetries: 2 },
+    });
+
+    await expect(a.generate('x', { budget: { maxCostUSD: 1, maxTotalTokens: 1_000, unpriced: 'allow' } })).rejects.toThrow(/Token cap exceeded/);
+    expect(s.seen).toHaveLength(1);
+  });
 });
