@@ -778,6 +778,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           ? resolveProvider(parsed.providerId, parsed.modelId, { apiKey: route.apiKey, baseUrl: route.baseUrl })
           : resolveProvider(parsed.providerId, parsed.modelId);
         servingProviderId = resolved.providerId;
+        // A blank baseUrl counts here and changes nothing: resolveProvider dropped it, so the record is the provider's own.
         const ownCredentials = routeCredentials && (route.apiKey !== undefined || route.baseUrl !== undefined);
         // The provider's shared credentials are read quietly: that lookup sends nothing.
         const hopHealthId = providerHealthKey(

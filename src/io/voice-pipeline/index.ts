@@ -174,7 +174,7 @@ export { WebRTCStreamTransport, createWebRTCTransport } from './WebRTCStreamTran
 export { VoicePipelineOrchestrator } from './VoicePipelineOrchestrator.js';
 
 // A listen-only session and a transcriber that reconnects (TranscriptTurn and ITranscriptInputSink come from types.ts, above)
-export { startListenSession, type ListenSession, type ListenSessionOverrides, type ListenSessionStats, type ListenSessionState, type ListenEndReason } from './ListenSession.js';
+export { startListenSession, type ListenSession, type ListenSessionOverrides, type ListenSessionStats, type ListenSessionState, type ListenEndReason, type ListenWarningKind } from './ListenSession.js';
 export { ReconnectingSTT, type ReconnectingSTTOptions, type SttReconnectedEvent, type SttGapEvent } from './ReconnectingSTT.js';
 
 // Typed error for barge-in interruptions

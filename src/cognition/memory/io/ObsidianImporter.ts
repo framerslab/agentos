@@ -47,6 +47,13 @@ const EMBED_RE = /!\[\[[^\]]+\]\]/g;
  */
 const HASHTAG_RE = /(?<![[#])#([\w-]+)/g;
 
+/**
+ * What `ObsidianExporter` writes after a trace's text, at the end of a note's
+ * body: the line of the trace's `#tags`, then the **Related:** list of its
+ * `[[links]]`, each after a blank line and each only when the trace has some.
+ */
+const EXPORTED_ADDITIONS_RE = /(?:\n\n#\S*(?: #\S*)*)?(?:\n\n\*\*Related:\*\*(?:\n- \[\[[^\n]*\]\])+)?$/;
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -86,8 +93,23 @@ export class ObsidianImporter extends MarkdownImporter {
   }
 
   // -------------------------------------------------------------------------
-  // Overridden hook
+  // Overridden hooks
   // -------------------------------------------------------------------------
+
+  /**
+   * Whether a note's body holds a trace's text: the body, without the tag line
+   * and the **Related:** list `ObsidianExporter` writes after the text, holds
+   * it as a Markdown note does. A trace with tags or graph links is then the
+   * duplicate of its own note, and a vault exported from a brain and imported
+   * into it adds nothing.
+   *
+   * @param text - The text of the trace the note's `id` names.
+   * @param body - The note's body, without its leading and trailing whitespace.
+   * @returns `true` when the note holds the trace's text.
+   */
+  protected override holdsTraceText(text: string, body: string): boolean {
+    return super.holdsTraceText(text, body.replace(EXPORTED_ADDITIONS_RE, '').trim());
+  }
 
   /**
    * Post-process a successfully imported Markdown file:

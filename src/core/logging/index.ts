@@ -7,6 +7,7 @@ export * from './ILogger.js';
 export * from './loggerFactory.js';
 export { PinoLogger } from './PinoLogger.js';
 export {
-  enableContentSafeTelemetry, isContentSafeTelemetryEnabled,
+  enableContentSafeTelemetry, isContentSafeTelemetryEnabled, CONTENT_SAFE_COMPONENTS,
   type ContentSafeLogLevel, type ContentSafeLogEvent, type ContentSafeLogSink,
+  type ContentSafeLogComponent, type ContentSafeTelemetryOptions,
 } from './contentSafeTelemetry.js';

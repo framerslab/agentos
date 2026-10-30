@@ -40,6 +40,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { duplicateTraceCondition, duplicateTraceParams } from './importScope.js';
 
 // ---------------------------------------------------------------------------
 // ChatGPT export format types
@@ -278,11 +279,13 @@ export class ChatGptImporter {
   /**
    * Insert a single episodic memory trace derived from a message pair.
    *
-   * Deduplication is based on SHA-256 of the combined `content` string, inside
-   * the `user` scope and the scope id `''` these traces file under. `import`
-   * first files the traces an older release wrote with `scope_id` `''` under
-   * the scope id their metadata names (`fillScopeIds`), so another scope id's
-   * trace is not taken for a duplicate.
+   * Deduplication works inside the `user` scope and the scope id `''` these
+   * traces file under: a trace there that holds the combined `content` string,
+   * or names its SHA-256 as `import_hash` or `content_hash`, makes the pair a
+   * duplicate, whichever writer stored it. `import` first files the traces an
+   * older release wrote with `scope_id` `''` under the scope id their metadata
+   * names (`fillScopeIds`), so another scope id's trace is not taken for a
+   * duplicate.
    *
    * @param content        - The `[user]:...\n[assistant]:...` content string.
    * @param createdAt      - Unix timestamp (ms) of the user message.
@@ -300,13 +303,12 @@ export class ChatGptImporter {
 
     // Dedup check.
     if (options?.dedup ?? true) {
-      const { dialect } = this.brain.features;
       const existing = await this.brain.get<{ id: string }>(
         `SELECT id FROM memory_traces
           WHERE brain_id = ? AND scope = 'user' AND scope_id = ''
-            AND ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
+            AND ${duplicateTraceCondition(this.brain)}
           LIMIT 1`,
-        [this.brain.brainId, hash],
+        [this.brain.brainId, ...duplicateTraceParams(hash, content)],
       );
 
       if (existing) {

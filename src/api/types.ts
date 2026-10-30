@@ -1429,7 +1429,11 @@ export interface BaseAgentConfig {
   name?: string;
   /** Override the provider API key instead of reading from environment variables. */
   apiKey?: string;
-  /** Override the provider base URL (useful for local proxies or Ollama). */
+  /**
+   * Override the provider base URL (useful for local proxies or Ollama). An empty or whitespace-only value is
+   * unset: a same-provider `setDefaultProvider()` URL, then the provider's URL variable, apply as with none. A seat
+   * of an agency with a blank value takes the agency-level `baseUrl` as a seat with none does.
+   */
   baseUrl?: string;
   /**
    * HEXACO-inspired personality trait overrides (0–1 scale).
@@ -2007,7 +2011,7 @@ export interface ModelPoolEntry {
   model: string;
   /** Key for this entry. Falls back to a same-provider `setDefaultProvider()` key, then the provider's environment variable; never to the agency-level `apiKey`. */
   apiKey?: string;
-  /** Base URL for this entry. Falls back as `apiKey` does, to a same-provider `setDefaultProvider()` URL, then the provider's URL variable. */
+  /** Base URL for this entry. Falls back as `apiKey` does, to a same-provider `setDefaultProvider()` URL, then the provider's URL variable; an empty or whitespace-only value at any step counts as missing. */
   baseUrl?: string;
   /** Defaults for a seat that sits here and sets none of its own. */
   effort?: BaseAgentConfig['effort'];

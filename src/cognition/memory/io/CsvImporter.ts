@@ -15,10 +15,16 @@
  * - `retrieval_count`
  * - `deleted`
  * - `tags` (JSON array, comma-separated, or pipe-separated)
- * - `metadata` (JSON object; its `scopeId` names the trace's scope id)
+ * - `metadata` (JSON object; its `scopeId` names the trace's scope id). A cell
+ *   that is not valid JSON, or whose JSON is not an object, makes its row an
+ *   error.
+ * - `scope_id` (the trace's scope id when the metadata names none; the
+ *   metadata is given it too)
  *
- * Deduplication uses SHA-256 of the `content` field, inside the row's scope
- * and scope id, and stores the hash in `metadata.import_hash`. A trace a
+ * Deduplication works inside the row's scope and scope id: a trace there that
+ * holds the row's `content`, or names its SHA-256 as `metadata.import_hash` or
+ * `metadata.content_hash`, makes the row a duplicate, whichever writer stored
+ * it. An imported row stores the hash in `metadata.import_hash`. A trace a
  * release older than `memory_traces.scope_id` wrote holds `''` in that column
  * whatever scope id its metadata names; the import files such traces under
  * that scope id before its first duplicate check (`fillScopeIds`).
@@ -30,7 +36,7 @@ import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
-import { importedScopeId } from './importScope.js';
+import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 
 /**
@@ -112,14 +118,13 @@ export class CsvImporter {
     const deletedIndex = indexOf('deleted');
     const tagsIndex = indexOf('tags');
     const metadataIndex = indexOf('metadata');
+    const scopeIdIndex = indexOf('scope_id');
 
-    const { dialect } = this.brain.features;
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id
        FROM memory_traces
        WHERE brain_id = ? AND scope = ? AND scope_id = ?
-         AND (${dialect.jsonExtract('metadata', '$.import_hash')} = ?
-              OR ${dialect.jsonExtract('metadata', '$.content_hash')} = ?)
+         AND ${duplicateTraceCondition(this.brain)}
        LIMIT 1`;
 
     const insertSql = `INSERT INTO memory_traces
@@ -145,17 +150,27 @@ export class CsvImporter {
           let metadata: Record<string, unknown> = {};
           const rawMetadata = metadataIndex >= 0 ? row[metadataIndex] ?? '' : '';
           if (rawMetadata.trim()) {
+            let parsed: unknown;
             try {
-              metadata = JSON.parse(rawMetadata) as Record<string, unknown>;
+              parsed = JSON.parse(rawMetadata);
             } catch {
               result.errors.push(`CSV metadata parse error for content "${content.slice(0, 40)}..."`);
               continue;
             }
+            // An array, null or a lone value cannot hold the row's scope id and import hash.
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              result.errors.push(`CSV metadata is not a JSON object for content "${content.slice(0, 40)}..."`);
+              continue;
+            }
+            metadata = parsed as Record<string, unknown>;
           }
-          const scopeId = importedScopeId(metadata);
+          // The metadata's scopeId comes first, then the scope_id cell, as for a JSON or SQLite record.
+          const scopeId = importedScopeId(metadata, this._readCell(row, scopeIdIndex));
 
           if (options?.dedup ?? true) {
-            const existing = await trx.get<{ id: string }>(checkSql, [brainId, scope, scopeId, hash, hash]);
+            const existing = await trx.get<{ id: string }>(checkSql, [
+              brainId, scope, scopeId, ...duplicateTraceParams(hash, content),
+            ]);
             if (existing) {
               result.skipped++;
               continue;

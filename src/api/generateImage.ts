@@ -23,7 +23,7 @@ import type {
   ImageModality,
   ImageOutputFormat,
 } from '../io/media/images/IImageProvider.js';
-import { resolveModelOption, resolveMediaProvider, type ModelOption } from './model.js';
+import { baseUrlIfSet, resolveModelOption, resolveMediaProvider, type ModelOption } from './model.js';
 import { getDefaultProvider } from './runtime/global-default.js';
 import {
   resolveProviderChain,
@@ -58,8 +58,26 @@ const IMAGE_PROVIDER_ENV_MAP: Array<{ envKey: string; providerId: string }> = [
 const imageFallbackEmitter = new EventEmitter();
 
 /**
+ * Whether the variable an {@link IMAGE_PROVIDER_ENV_MAP} entry reads
+ * configures its provider: a key that is set, or a base URL that is set as
+ * resolveMediaProvider reads it ({@link baseUrlIfSet}). An empty or
+ * whitespace-only STABLE_DIFFUSION_LOCAL_BASE_URL leaves stable-diffusion-local
+ * out, so detection goes on to the next provider (MiniMax after it) instead of
+ * choosing one whose call is then refused for want of a base URL.
+ *
+ * @param envKey - The variable's name.
+ * @returns True when the variable configures its provider.
+ */
+function configuresImageProvider(envKey: string): boolean {
+  const value = process.env[envKey];
+  return envKey.endsWith('_BASE_URL') ? baseUrlIfSet(value) !== undefined : Boolean(value);
+}
+
+/**
  * Detects all image providers with valid credentials in the environment
  * and returns their provider IDs in priority order, excluding the primary.
+ * A base-URL variable that is empty or whitespace-only configures none (see
+ * {@link configuresImageProvider}).
  *
  * @param primaryProviderId - The provider that was explicitly selected; it
  *   is excluded from the fallback list since it is already the first in line.
@@ -69,7 +87,7 @@ function detectFallbackImageProviders(primaryProviderId: string): string[] {
   const fallbacks: string[] = [];
   for (const { envKey, providerId } of IMAGE_PROVIDER_ENV_MAP) {
     if (providerId === primaryProviderId) continue;
-    if (!process.env[envKey]) continue;
+    if (!configuresImageProvider(envKey)) continue;
     if (!hasImageProviderFactory(providerId)) continue;
     fallbacks.push(providerId);
   }
@@ -77,14 +95,16 @@ function detectFallbackImageProviders(primaryProviderId: string): string[] {
 }
 
 /**
- * Detects all image providers with valid credentials in the environment.
+ * Detects all image providers with valid credentials in the environment. A
+ * base-URL variable that is empty or whitespace-only configures none (see
+ * {@link configuresImageProvider}).
  *
  * @returns Provider IDs in priority order.
  */
 function detectAvailableImageProviders(): string[] {
   const available: string[] = [];
   for (const { envKey, providerId } of IMAGE_PROVIDER_ENV_MAP) {
-    if (!process.env[envKey]) continue;
+    if (!configuresImageProvider(envKey)) continue;
     if (!hasImageProviderFactory(providerId)) continue;
     available.push(providerId);
   }
@@ -108,8 +128,10 @@ interface DefaultImageModel {
  * @param inline - The call's own key and base URL. Pass them only for the
  *   primary: a custom endpoint keeps the default's model whatever its name,
  *   and a fallback runs on its own endpoint with its own key. The model is
- *   chosen for the base URL resolveMediaProvider sends with, so an empty
- *   `baseUrl` goes to both: it names the provider's own endpoint.
+ *   chosen for the base URL resolveMediaProvider sends with (resolveBaseUrl
+ *   in model.ts), so the call's `baseUrl` goes to both as given: an empty or
+ *   whitespace-only one is unset for both, and the default's URL, then the
+ *   provider's base-URL variable, apply as they do for a call with none.
  */
 function globalDefaultImageModel(inline: { apiKey?: string; baseUrl?: string }): DefaultImageModel | undefined {
   const providerId = getDefaultProvider()?.provider;
@@ -233,9 +255,17 @@ export interface GenerateImageOptions {
   outputCompression?: number;
   /** Whether the provider should return a URL or base64-encoded data. */
   responseFormat?: ImageResponseFormat;
-  /** Override the provider API key instead of reading from environment variables. */
+  /**
+   * Override the provider API key instead of reading from environment variables. With neither `provider` nor
+   * `model`, it is refused unless the global default names the provider the call goes to first: it is never sent
+   * to a provider detected from the environment.
+   */
   apiKey?: string;
-  /** Override the provider base URL. */
+  /**
+   * Override the provider base URL, refused as `apiKey` is with neither `provider` nor `model`. An empty or
+   * whitespace-only value is unset: it is not refused, the global default's URL and then the provider's base-URL
+   * variable apply as they do with no `baseUrl`, and with none the call goes to the provider's own endpoint.
+   */
   baseUrl?: string;
   /** Optional user identifier forwarded to the provider for moderation tracking. */
   userId?: string;
@@ -348,8 +378,10 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
         }
         // The call's own key or base URL goes only to a provider it names, or
         // the global default names: here the first provider was detected
-        // from the environment, and the key would go to it.
-        if ((opts.apiKey !== undefined || opts.baseUrl !== undefined) && providerChain[0] !== defaultImage?.providerId) {
+        // from the environment, and the key would go to it. An empty or
+        // whitespace-only baseUrl is unset (baseUrlIfSet in model.ts): it
+        // names no endpoint, so the call runs as one with no baseUrl does.
+        if ((opts.apiKey !== undefined || baseUrlIfSet(opts.baseUrl) !== undefined) && providerChain[0] !== defaultImage?.providerId) {
           throw new Error(
             "generateImage: an apiKey or baseUrl needs provider (or a model such as 'openai:gpt-image-2.5-flare'): " +
               `without one, the provider is detected from the environment (${providerChain[0]}) and the key would go to it.`,
