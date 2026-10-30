@@ -20,8 +20,9 @@ export interface RollingSummaryCompactionConfig {
   /** Minimum time between compaction passes per conversation. */
   cooldownMs: number;
   /**
-   * Preserve the first N messages verbatim (usually system + initial user). A tool round the first N messages reach
-   * into is kept whole with them.
+   * Preserve the first N messages verbatim (usually system + initial user): the conversation's first N messages,
+   * thoughts and errors not counted, which the next turn sends after every pass and no pass summarizes. A tool round the
+   * first N messages reach into is kept whole with them.
    */
   headMessagesToKeep: number;
   /** Preserve the last N messages verbatim (fresh context). */
@@ -29,9 +30,11 @@ export interface RollingSummaryCompactionConfig {
   /** Minimum number of messages to summarize in a pass. */
   minMessagesToSummarize: number;
   /**
-   * Maximum number of messages summarized per pass (older-first). A pass never ends inside a tool round: it takes fewer
-   * when the limit falls inside one, or, when taking fewer would leave less than `minMessagesToSummarize`, the rest of
-   * that round too.
+   * Maximum number of messages summarized per pass (older-first). A pass never ends inside a tool round, nor right
+   * before a message the next turn sends that was recorded in the millisecond of the last message it takes, since the
+   * next turn keeps messages by timestamp: it takes fewer when the limit falls at such a place, or, when taking fewer
+   * would leave less than `minMessagesToSummarize`, goes on past the limit to the next place a pass may end before the
+   * kept tail. The limit counts messages, not tokens.
    */
   maxMessagesToSummarizePerPass: number;
   /** Maximum output tokens for the compactor model. */
@@ -178,6 +181,34 @@ function isEligibleForRollingSummary(message: ConversationMessage): boolean {
   return content.length > 0;
 }
 
+/**
+ * Whether the history the next turn sends leaves `message` out: `assembleConversationHistory` sends no thoughts and no
+ * errors.
+ */
+function isLeftOutOfHistory(message: ConversationMessage): boolean {
+  return message.role === 'thought' || message.role === 'error';
+}
+
+/**
+ * The index just past the head the next turn sends after every pass: the conversation's first `headCount` messages
+ * that are not thoughts or errors, and the rest of a tool round they reach into.
+ *
+ * @param messages - The conversation's messages, oldest first.
+ * @param headCount - How many messages the head holds.
+ * @param roundEnd - For each message, the index of the last message of its tool round (`toolRoundBounds(messages).end`).
+ * @returns The index of the first message after the head.
+ */
+function keptHeadEnd(messages: ConversationMessage[], headCount: number, roundEnd: number[]): number {
+  if (headCount <= 0) return 0;
+  let counted = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (isLeftOutOfHistory(messages[index])) continue;
+    counted += 1;
+    if (counted === headCount) return roundEnd[index] + 1;
+  }
+  return messages.length;
+}
+
 function buildTurnsForCompactor(messages: ConversationMessage[]): Array<{ id: string; role: string; name?: string; content: string }> {
   return messages
     .map((m) => ({
@@ -199,15 +230,17 @@ function resolveStateKey(stateKey?: string): string {
 
 /**
  * Runs one rolling-summary pass over a conversation when it is due: once the cooldown since the last pass has run out,
- * it takes the messages the last summary does not cover, leaves the first `headMessagesToKeep` and the last
- * `tailMessagesToKeep` of them, summarizes up to `maxMessagesToSummarizePerPass` of the rest, oldest first, and moves
- * the summary's boundary (`summaryUptoTimestamp`) to the newest message it summarized. The next turn sends the
- * conversation's first `headMessagesToKeep` messages and the messages newer than the boundary.
+ * it leaves the conversation's first `headMessagesToKeep` messages, takes the messages after them that the last
+ * summary does not cover, leaves the last `tailMessagesToKeep` of those, summarizes up to
+ * `maxMessagesToSummarizePerPass` of the rest, oldest first, and moves the summary's boundary (`summaryUptoTimestamp`)
+ * to the newest message it summarized. The next turn sends the conversation's first `headMessagesToKeep` messages and
+ * the messages newer than the boundary, so the next pass starts where this one ended.
  *
  * A tool round (an assistant message that names tool calls, the tool messages that answer them and anything between)
  * stays on one side of the boundary, since providers refuse a call without its result and a result without its call:
  * the kept head takes the rest of a round it reaches into, and the summary ends where a round ends and where the next
- * message is newer than the last one summarized, so no message shares the boundary's millisecond on the kept side.
+ * message the next turn sends is newer than the last one summarized, so no message it sends shares the boundary's
+ * millisecond on the kept side.
  *
  * @param params - The conversation's messages, oldest first; its metadata, which holds the summary state under
  *   `stateKey`; the compaction settings; and the call that runs the compaction model.
@@ -274,46 +307,49 @@ export async function maybeCompactConversationMessages(params: {
   const headCount = Math.max(0, config.headMessagesToKeep);
   const tailCount = Math.max(0, config.tailMessagesToKeep);
   const afterTimestamp = typeof summaryUptoTimestamp === 'number' ? summaryUptoTimestamp : undefined;
-  const eligible = messages.filter(isEligibleForRollingSummary);
-  const unsummarized = afterTimestamp
-    ? eligible.filter((m) => m.timestamp > afterTimestamp)
-    : eligible;
 
   // Every tool round stays on one side of the boundary.
   const rounds = toolRoundBounds(messages);
-  const indexOf = new Map(messages.map((message, index) => [message, index] as const));
-  const at = unsummarized.map((message) => indexOf.get(message) as number);
+  // The next turn sends the conversation's head after every pass, so no pass summarizes it: a pass takes the messages
+  // after the head that the summary does not cover yet. `at[position]` is the index in `messages` of
+  // `unsummarized[position]`.
+  const headEnd = keptHeadEnd(messages, headCount, rounds.end);
+  const at: number[] = [];
+  messages.forEach((message, index) => {
+    if (index < headEnd || !isEligibleForRollingSummary(message)) return;
+    if (afterTimestamp && !(message.timestamp > afterTimestamp)) return;
+    at.push(index);
+  });
+  const unsummarized = at.map((index) => messages[index]);
   /** Whether the tool round of `unsummarized[position]` goes on after it. */
   const roundGoesOn = (position: number): boolean => rounds.end[at[position]] > at[position];
   /**
    * Whether a summary may end after the first `count` unsummarized messages: the last of them ends its tool round, and
-   * the conversation's next message is newer than it, since the next turn keeps a message by its timestamp alone and
-   * would hide one recorded in the boundary's millisecond.
+   * the next message the next turn sends is newer than it, since the next turn keeps a message by its timestamp alone
+   * and would hide one recorded in the boundary's millisecond. A thought or an error in that millisecond hides
+   * nothing, since the next turn sends neither.
    */
   const endsCleanly = (count: number): boolean => {
     const last = at[count - 1];
-    const next = messages[last + 1];
-    return !roundGoesOn(count - 1) && (!next || next.timestamp > messages[last].timestamp);
+    if (roundGoesOn(count - 1)) return false;
+    let next = last + 1;
+    while (next < messages.length && isLeftOutOfHistory(messages[next])) next += 1;
+    return next === messages.length || messages[next].timestamp > messages[last].timestamp;
   };
 
-  // The kept head takes the rest of a tool round it reaches into.
-  let headEnd = Math.min(headCount, unsummarized.length);
-  while (headEnd > 0 && headEnd < unsummarized.length && roundGoesOn(headEnd - 1)) {
-    headEnd += 1;
-  }
-  const tailStart = Math.max(headEnd, unsummarized.length - tailCount);
+  const tailStart = Math.max(0, unsummarized.length - tailCount);
   const minimum = Math.max(1, config.minMessagesToSummarize);
-  const windowEnd = Math.min(tailStart, headEnd + Math.max(1, config.maxMessagesToSummarizePerPass));
+  const windowEnd = Math.min(tailStart, Math.max(1, config.maxMessagesToSummarizePerPass));
 
   // The summary ends at the latest clean cut that the kept tail and the limit for one pass allow.
   let summaryEnd = windowEnd;
-  while (summaryEnd > headEnd && !endsCleanly(summaryEnd)) {
+  while (summaryEnd > 0 && !endsCleanly(summaryEnd)) {
     summaryEnd -= 1;
   }
   // The limit for one pass fell where no summary may end, and ending before that leaves too little: the summary goes
   // on to the next clean cut before the kept tail, so a tool round longer than the limit does not hold every later
   // pass at the same place.
-  if (summaryEnd < windowEnd && summaryEnd - headEnd < minimum) {
+  if (summaryEnd < windowEnd && summaryEnd < minimum) {
     let past = windowEnd + 1;
     while (past <= tailStart && !endsCleanly(past)) {
       past += 1;
@@ -321,7 +357,7 @@ export async function maybeCompactConversationMessages(params: {
     if (past <= tailStart) summaryEnd = past;
   }
 
-  const limitedCandidates = unsummarized.slice(headEnd, summaryEnd);
+  const limitedCandidates = unsummarized.slice(0, summaryEnd);
 
   if (limitedCandidates.length < minimum) {
     return {
