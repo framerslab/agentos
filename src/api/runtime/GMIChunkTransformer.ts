@@ -58,6 +58,8 @@ export interface TransformerStreamContext {
   userApiKeys?: Record<string, string>;
   processingOptions?: { preferredModelId?: string; preferredProviderId?: string };
   languageNegotiation?: any;
+  /** The sources the stream announced last, which the transformer records as it streams them. */
+  ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
 }
 
 /**
@@ -173,8 +175,10 @@ export class GMIChunkTransformer {
     const { gmi, personaId, conversationContext } = streamContext;
     const gmiInstanceIdForChunks = gmi.getGMIId();
 
-    // The sources reach the stream before the text, so an output guardrail that judges the text reads them.
+    // The sources reach the stream before the text, so an output guardrail that judges the text reads them; the stream
+    // keeps them for a continuation of its turn.
     if (Array.isArray(gmiOutput.ragSources) && gmiOutput.ragSources.length > 0) {
+      streamContext.ragSources = gmiOutput.ragSources;
       await this.chunks.pushChunk(
         agentOSStreamId,
         AgentOSResponseChunkType.METADATA_UPDATE,
@@ -379,7 +383,9 @@ export class GMIChunkTransformer {
           // Surface as METADATA_UPDATE so consumers (output guardrails, UI source
           // panels, telemetry) can pick up retrieved chunks before the model
           // emits text deltas. Grounding guardrails subscribe to this update to
-          // verify subsequent claims against the same sources the LLM saw.
+          // verify subsequent claims against the same sources the LLM saw. The stream keeps them: a continuation of
+          // the turn gives them to a GMI that does not hold them (ExternalToolResultHandler).
+          streamContext.ragSources = ragSources;
           await this.chunks.pushChunk(
             agentOSStreamId,
             AgentOSResponseChunkType.METADATA_UPDATE,
