@@ -15,6 +15,9 @@
  *     - Merge `tags` arrays (union, dedup).
  *   - A trace of another scope id is not a duplicate: its tags and time are
  *     left as they are.
+ *   - The source's live rows are read before its forgotten ones
+ *     (`liveRecordsFirst`), so a text the source holds both forgotten and live
+ *     arrives live, and the forgotten row merges into that trace.
  *   - A trace a release older than `memory_traces.scope_id` wrote to the
  *     target holds `''` in that column whatever scope id its metadata names;
  *     the import files such traces under that scope id before it merges
@@ -48,7 +51,13 @@ import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
-import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from './importScope.js';
+import {
+  duplicateTraceCondition,
+  duplicateTraceParams,
+  importedScopeId,
+  isForgottenRecord,
+  liveRecordsFirst,
+} from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 
@@ -218,7 +227,8 @@ export class SqliteImporter {
 
   /**
    * Insert the source's traces, or merge a duplicate's tags and time into
-   * the trace the brain holds.
+   * the trace the brain holds. The source's live rows are read before its
+   * forgotten ones (see `liveRecordsFirst`).
    *
    * @returns How many traces it inserted, and how many held traces a merge
    *   gave new tags.
@@ -253,7 +263,7 @@ export class SqliteImporter {
 
     const updateTimestampSql = `UPDATE memory_traces SET created_at = ?, tags = ? WHERE brain_id = ? AND id = ?`;
 
-    for (const row of sourceRows) {
+    for (const row of liveRecordsFirst(sourceRows, isForgottenRecord)) {
       try {
         const hash = await this._sha256(row.content);
         const scope = row.scope ?? 'user';

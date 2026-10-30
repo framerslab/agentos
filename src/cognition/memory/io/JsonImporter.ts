@@ -12,7 +12,9 @@
  * `{ dedup: false }` on the importer or `Memory.importFrom`. A trace a release
  * older than `memory_traces.scope_id` wrote holds `''` in that column whatever
  * scope id its metadata names; the import files such traces under that scope
- * id before its first duplicate check (`fillScopeIds`).
+ * id before its first duplicate check (`fillScopeIds`). The import reads the
+ * file's live trace records before its forgotten ones (`liveRecordsFirst`), so
+ * a text the file holds both forgotten and live arrives live.
  *
  * @module memory/io/JsonImporter
  */
@@ -22,7 +24,13 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { base64ToBytes } from './base64.js';
-import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from './importScope.js';
+import {
+  duplicateTraceCondition,
+  duplicateTraceParams,
+  importedScopeId,
+  isForgottenRecord,
+  liveRecordsFirst,
+} from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 
@@ -322,7 +330,10 @@ export class JsonImporter {
    * Each trace is filed under its scope and scope id (see `importedScopeId`)
    * and deduplicated inside them (see `duplicateTraceCondition`): if a trace of
    * the same scope and scope id holds the record's text, or names its hash, the
-   * record is skipped and its id maps to that trace's.
+   * record is skipped and its id maps to that trace's. The live records are
+   * read before the forgotten ones (see `liveRecordsFirst`), so of two records
+   * of one text, the forgotten one is the duplicate of the live one, never the
+   * reverse.
    *
    * @param trx    - Transactional storage adapter.
    * @param traces - Array of serialised trace objects from the export.
@@ -345,7 +356,7 @@ export class JsonImporter {
           retrieval_count, tags, emotions, metadata, deleted, scope_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-    for (const t of traces) {
+    for (const t of liveRecordsFirst(traces, isForgottenRecord)) {
       try {
         const hash = await this._sha256(t.content);
         const sourceId = t.id;
