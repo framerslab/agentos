@@ -240,7 +240,8 @@ function resolveStateKey(stateKey?: string): string {
  * stays on one side of the boundary, since providers refuse a call without its result and a result without its call:
  * the kept head takes the rest of a round it reaches into, and the summary ends where a round ends and where the next
  * message the next turn sends is newer than the last one summarized, so no message it sends shares the boundary's
- * millisecond on the kept side.
+ * millisecond on the kept side. A boundary an earlier release stored inside a round leaves the rest of the round to
+ * the next pass, which reads the round from its call.
  *
  * @param params - The conversation's messages, oldest first; its metadata, which holds the summary state under
  *   `stateKey`; the compaction settings; and the call that runs the compaction model.
@@ -320,6 +321,15 @@ export async function maybeCompactConversationMessages(params: {
     if (afterTimestamp && !(message.timestamp > afterTimestamp)) return;
     at.push(index);
   });
+  // A boundary an earlier release stored inside a tool round summarized the round's first messages and not the rest:
+  // the pass reads the round from its start, so the compaction model reads its results with the call they answer.
+  if (at.length > 0 && rounds.start[at[0]] < at[0]) {
+    const earlierMembers: number[] = [];
+    for (let index = Math.max(rounds.start[at[0]], headEnd); index < at[0]; index += 1) {
+      if (isEligibleForRollingSummary(messages[index])) earlierMembers.push(index);
+    }
+    at.unshift(...earlierMembers);
+  }
   const unsummarized = at.map((index) => messages[index]);
   /** Whether the tool round of `unsummarized[position]` goes on after it. */
   const roundGoesOn = (position: number): boolean => rounds.end[at[position]] > at[position];

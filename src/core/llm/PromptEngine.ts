@@ -827,15 +827,19 @@ export class PromptEngine implements IPromptEngine {
       if (historyTokens > budgets.history || currentTokens > budget) {
         // The turn being answered stays whole: summarizing or truncating it
         // would drop the request itself (a structured user message has no
-        // userInput copy) or split a tool call from its result. Only the
-        // messages before it are reduced, to what the budget leaves them.
+        // userInput copy) or split a tool call from its result. A tool round
+        // the turn's first message belongs to stays with it, so a call before
+        // the turn whose result the turn holds is kept with that result. Only
+        // the messages before them are reduced, to what the budget leaves them.
         const history = optimized.conversationHistory;
         const turnCount = Math.min(
           Math.max(0, Math.floor(optimized.currentTurnMessageCount ?? 0)),
           history.length,
         );
-        const turnMessages = history.slice(history.length - turnCount);
-        const earlier = history.slice(0, history.length - turnCount);
+        let turnStart = history.length - turnCount;
+        if (turnStart < history.length) turnStart = toolRoundBounds(history).start[turnStart];
+        const turnMessages = history.slice(turnStart);
+        const earlier = history.slice(0, turnStart);
         const turnTokens = await this.calculateTokensForMessages(turnMessages, modelInfo.modelId, sendsThinking);
         const earlierTokens = historyTokens - turnTokens;
         // The earlier history keeps its share of the history budget, and no
