@@ -4,9 +4,12 @@
  * `/`, a `%` or a `:` is percent-encoded (a lone surrogate as `%u` and four hexadecimal digits), every other id keeps
  * its form; and the one-time re-file of a Brain's plain ids, with its `brain_meta` record. Real SQLite Brains, and the
  * real manager over one, as a layer opens them; and, where AGENTOS_TEST_POSTGRES_URL is set, two Postgres handles
- * that re-file one brain at once.
+ * that re-file one brain at once. A re-file keeps a write made meanwhile, takes the rows an older release filed since
+ * the open and the knowledge graph's copies with it, and leaves no trace or document under the plain id that another
+ * store, opener or process held: once the record is written, the plain id `team/ana` names user `ana` of namespace
+ * `team`.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,6 +21,7 @@ import {
   refileBrainScopeIds,
   SCOPE_ID_FORM_KEY,
 } from '../scopeIdForm.js';
+import { SqlKnowledgeGraph } from '../SqlKnowledgeGraph.js';
 import { CognitiveMemoryManager } from '../../../CognitiveMemoryManager.js';
 import { KnowledgeGraph } from '../../graph/knowledge/KnowledgeGraph.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
@@ -54,6 +58,76 @@ async function plainRow(brain: Brain, id: string, scope: string, scopeId: string
 const filed = async (brain: Brain) =>
   (await brain.all<{ id: string; scope_id: string; metadata: string }>('SELECT id, scope_id, metadata FROM memory_traces ORDER BY id'))
     .map((row) => [row.id, row.scope_id, JSON.parse(row.metadata).scopeId]);
+
+const MOOD = { valence: 0, arousal: 0, dominance: 0 };
+const BEES = 'Ana keeps bees on the roof.';
+
+async function newIndex(): Promise<InMemoryVectorStore> {
+  const index = new InMemoryVectorStore();
+  await index.initialize({ id: `refile-${Math.random()}`, type: 'in_memory' });
+  return index;
+}
+
+/**
+ * A manager over the brain `agent` of a file, as a layer opens one, with an in-memory knowledge graph, and an index of
+ * its own unless one is given: an index handed to several managers stands for one a host keeps across restarts.
+ */
+async function openManager(
+  filePath: string,
+  index?: InMemoryVectorStore,
+): Promise<{ manager: CognitiveMemoryManager; brain: Brain }> {
+  const brain = await Brain.openSqlite(filePath, { brainId: 'agent' });
+  const vectorStore = index ?? (await newIndex());
+  const manager = new CognitiveMemoryManager();
+  await manager.initialize({
+    agentId: 'agent',
+    traits: { openness: 0.5, conscientiousness: 0.5, extraversion: 0.5, agreeableness: 0.5, emotionality: 0.5, honesty: 0.5 },
+    moodProvider: () => MOOD,
+    featureDetectionStrategy: 'keyword',
+    workingMemory: new InMemoryWorkingMemory(),
+    knowledgeGraph: new KnowledgeGraph(),
+    vectorStore,
+    embeddingManager: {
+      generateEmbeddings: async ({ texts }: { texts: string | string[] }) => ({
+        embeddings: (Array.isArray(texts) ? texts : [texts]).map(() => [1, 0, 0, 0]),
+      }),
+    },
+    encoding: { baseStrength: 0.5, flashbulbThreshold: 0.8, flashbulbStrengthMultiplier: 2, flashbulbStabilityMultiplier: 5, baseStabilityMs: 3_600_000 },
+    brain,
+  } as never);
+  closers.push(async () => {
+    await manager.shutdown();
+    await brain.close();
+  });
+  return { manager, brain };
+}
+
+/** What a reader of one `user` scope id recalls. */
+const recallUnder = async (manager: CognitiveMemoryManager, scopeId: string): Promise<string[]> =>
+  (await manager.retrieve('bees on the roof', MOOD, { scopes: [{ scope: 'user', scopeId }] } as never)).retrieved.map(
+    (trace) => trace.content,
+  );
+
+/** The texts an index holds in one collection: none when it holds no such collection. */
+async function textsIn(index: InMemoryVectorStore, collection: string): Promise<string[]> {
+  if (!(await index.collectionExists(collection))) return [];
+  const scanned = await index.scanByMetadata(collection, { includeTextContent: true });
+  return scanned.documents.map((document) => document.textContent ?? '');
+}
+
+/**
+ * A trace an earlier process filed under the plain id `team/ana`, into the Brain and into an index this process keeps:
+ * its row holds no vector (a release before rows kept their vectors wrote it), so no hydration loads it, and this
+ * process holds it only as the index's document.
+ */
+async function fileUnheldTrace(filePath: string, index: InMemoryVectorStore): Promise<void> {
+  const earlier = await openManager(filePath, index);
+  await earlier.manager.encode(BEES, MOOD, 'neutral', { scope: 'user', scopeId: 'team/ana' });
+  await closers.pop()!();
+  const handle = await Brain.openSqlite(filePath, { brainId: 'agent' });
+  await handle.run('UPDATE memory_traces SET embedding = NULL WHERE brain_id = ?', [handle.brainId]);
+  await handle.close();
+}
 
 describe('the written form of a plain id', () => {
   it('percent-encodes an id that holds a slash, a percent sign or a colon, and keeps every other id', () => {
@@ -118,6 +192,88 @@ describe('refileBrainScopeIds', () => {
     expect(await other.getMeta(SCOPE_ID_FORM_KEY)).toBeUndefined();
     expect(await filed(other)).toEqual([['t-o', 'team/bo', 'team/bo']]);
   });
+
+  it('re-files a row a release older than the column filed since the open, which holds no scope_id yet', async () => {
+    const brain = await brainAt(tempFile());
+    await brain.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata)
+       VALUES (?, 't-old', 'episodic', 'user', 'content of t-old', 1, ?)`,
+      [brain.brainId, JSON.stringify({ scopeId: 'team/ana' })],
+    );
+
+    expect(await refileBrainScopeIds(brain)).toEqual({
+      alreadyEncoded: false,
+      moved: [{ scope: 'user', from: 'team/ana', to: 'team%2Fana', traces: 1 }],
+    });
+    expect(await filed(brain)).toEqual([['t-old', 'team%2Fana', 'team%2Fana']]);
+  });
+
+  it('re-files a trace whose id is the empty string, as the JSON importer keeps one', async () => {
+    const brain = await brainAt(tempFile());
+    await plainRow(brain, '', 'user', 'team/ana');
+    await plainRow(brain, 't-1', 'user', 'team/bo');
+
+    await refileBrainScopeIds(brain);
+
+    expect(await filed(brain)).toEqual([
+      ['', 'team%2Fana', 'team%2Fana'],
+      ['t-1', 'team%2Fbo', 'team%2Fbo'],
+    ]);
+  });
+
+  it('re-files once, and fails neither, when two handles on one file in this process re-file it together', async () => {
+    const filePath = tempFile();
+    const one = await brainAt(filePath);
+    const two = await brainAt(filePath);
+    for (const i of [1, 2, 3]) await plainRow(one, `t-${i}`, 'user', `team/u${i}`);
+
+    const results = await Promise.all([refileBrainScopeIds(one), refileBrainScopeIds(two)]);
+
+    expect(results.map((result) => result.alreadyEncoded).sort()).toEqual([false, true]);
+    expect((await filed(one)).map(([, scopeId]) => scopeId)).toEqual(['team%2Fu1', 'team%2Fu2', 'team%2Fu3']);
+  });
+
+  it("re-files the brain's knowledge-graph copies with its traces, a copy whose trace is gone included", async () => {
+    const brain = await brainAt(tempFile());
+    const graph = new SqlKnowledgeGraph(brain);
+    await graph.initialize();
+    const copy = (traceId: string, scopeId: string) =>
+      graph.recordMemory({
+        type: 'conversation',
+        summary: `content of ${traceId}`,
+        participants: [scopeId],
+        importance: 0.5,
+        entityIds: [],
+        occurredAt: new Date(1).toISOString(),
+        outcome: 'unknown',
+        context: { memoryTraceId: traceId, scope: 'user', scopeId, type: 'episodic' },
+      });
+    await plainRow(brain, 't-1', 'user', 'team/ana');
+    await copy('t-1', 'team/ana');
+    // The copy of a trace a release before keyed copies deleted, which a delete of its scope takes.
+    await copy('t-gone', 'team/ana');
+    await copy('t-bo', 'bo');
+
+    await refileBrainScopeIds(brain);
+
+    const copies = await brain.all<{ id: string; properties: string }>(
+      `SELECT id, properties FROM knowledge_nodes WHERE brain_id = ? AND type = 'memory' ORDER BY id`,
+      [brain.brainId],
+    );
+    expect(
+      copies.map(({ id, properties }) => {
+        const stored = JSON.parse(properties);
+        return [id, stored._context.scopeId, stored._participants];
+      }),
+    ).toEqual([
+      ['trace:t-1', 'team%2Fana', ['team%2Fana']],
+      ['trace:t-bo', 'bo', ['bo']],
+      ['trace:t-gone', 'team%2Fana', ['team%2Fana']],
+    ]);
+    // A delete of user `ana` of namespace `team` takes none of them; a delete of the encoded id takes both.
+    expect(await graph.deleteMemories({ scopes: [{ scope: 'user', scopeId: 'team/ana' }] })).toBe(0);
+    expect(await graph.deleteMemories({ scopes: [{ scope: 'user', scopeId: 'team%2Fana' }] })).toBe(2);
+  });
 });
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -143,6 +299,60 @@ describeIfPostgres('refileBrainScopeIds on Postgres', () => {
     const ids = (await one.all<{ scope_id: string }>('SELECT scope_id FROM memory_traces WHERE brain_id = ?', [brainId])).map((row) => row.scope_id);
     expect(ids).toHaveLength(1_200);
     expect(ids.filter((id) => !/^team%2Fu\d+$/.test(id))).toEqual([]);
+  });
+
+  it('keeps a metadata write another process commits while the re-file waits on its row', async () => {
+    const brainId = `test-refile-cas-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const one = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    const two = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    closers.push(async () => {
+      await one.run('DELETE FROM memory_traces WHERE brain_id = ?', [brainId]);
+      await one.run('DELETE FROM brain_meta WHERE brain_id = ?', [brainId]);
+      await two.close();
+      await one.close();
+    });
+    await plainRow(one, 't-1', 'user', 'team/ana');
+
+    // Process two writes the row's metadata in a transaction it holds open until the re-file waits on the row.
+    let commit!: () => void;
+    const committing = new Promise<void>((resolve) => (commit = resolve));
+    let writerStarted!: (pid: number) => void;
+    const writerPid = new Promise<number>((resolve) => (writerStarted = resolve));
+    const writer = two.transaction(async (trx) => {
+      await trx.run('UPDATE memory_traces SET metadata = ? WHERE brain_id = ? AND id = ?', [
+        JSON.stringify({ scopeId: 'team/ana', note: 'kept' }),
+        brainId,
+        't-1',
+      ]);
+      writerStarted((await trx.get<{ pid: number }>('SELECT pg_backend_pid() AS pid'))!.pid);
+      await committing;
+    });
+    const pid = await writerPid;
+    const refiling = refileBrainScopeIds(one);
+    try {
+      // The re-file read the row before the write committed, and its update waits on the writer's lock.
+      await vi.waitFor(
+        async () => {
+          const blocked = await one.get<{ count: number }>(
+            'SELECT count(*)::int AS count FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))',
+            [pid],
+          );
+          expect(blocked?.count).toBe(1);
+        },
+        { timeout: 10_000, interval: 20 },
+      );
+    } finally {
+      commit();
+    }
+    await writer;
+    await refiling;
+
+    const row = await one.get<{ scope_id: string; metadata: string }>(
+      'SELECT scope_id, metadata FROM memory_traces WHERE brain_id = ? AND id = ?',
+      [brainId, 't-1'],
+    );
+    expect(row?.scope_id).toBe('team%2Fana');
+    expect(JSON.parse(row!.metadata)).toEqual({ scopeId: 'team%2Fana', note: 'kept' });
   });
 });
 
@@ -190,5 +400,136 @@ describe("a manager's re-file", () => {
     const restarted = await open();
     expect(await restarted.ensureEncodedScopeIds()).toBe(0);
     expect(await recall(restarted, 'team%2Fana')).toEqual(['Ana keeps bees on the roof.']);
+  });
+
+  it('moves only the traces the re-file moved, never a row filed under the old id after it', async () => {
+    const { manager, brain } = await openManager(tempFile());
+    await manager.encode(BEES, MOOD, 'neutral', { scope: 'user', scopeId: 'team/ana' });
+    // Another process's learner, user `ana` of namespace `team`, files under `team/ana` right after the re-file
+    // commits, before this store moves what it holds.
+    const runTransaction = brain.transaction.bind(brain);
+    let learnerFiled = false;
+    Object.assign(brain, {
+      transaction: async (fn: Parameters<Brain['transaction']>[0]) => {
+        const result = await runTransaction(fn);
+        if (!learnerFiled) {
+          learnerFiled = true;
+          await plainRow(brain, 't-learner', 'user', 'team/ana');
+        }
+        return result;
+      },
+    });
+
+    expect(await manager.ensureEncodedScopeIds()).toBe(1);
+
+    expect((await filed(brain)).find(([id]) => id === 't-learner')).toEqual(['t-learner', 'team/ana', 'team/ana']);
+    expect(await recallUnder(manager, 'team%2Fana')).toEqual([BEES]);
+  });
+
+  it('follows the Brain when another process re-filed it first, and reads nothing under the old id meanwhile', async () => {
+    const filePath = tempFile();
+    const { manager } = await openManager(filePath);
+    const trace = await manager.encode(BEES, MOOD, 'neutral', { scope: 'user', scopeId: 'team/ana' });
+    const otherProcess = await Brain.openSqlite(filePath, { brainId: 'agent', coordinationToken: {} });
+    closers.push(() => otherProcess.close());
+    expect((await refileBrainScopeIds(otherProcess)).moved).toEqual([
+      { scope: 'user', from: 'team/ana', to: 'team%2Fana', traces: 1 },
+    ]);
+
+    // Before this process follows, what it holds under the old id is not read there: its row is filed elsewhere.
+    expect(await recallUnder(manager, 'team/ana')).toEqual([]);
+    expect(await manager.getStore().filterRecallableTraceIds([trace.id], [{ scope: 'user', scopeId: 'team/ana' }])).toEqual(
+      new Set(),
+    );
+
+    expect(await manager.ensureEncodedScopeIds()).toBe(0);
+    expect(await recallUnder(manager, 'team%2Fana')).toEqual([BEES]);
+    expect(await recallUnder(manager, 'team/ana')).toEqual([]);
+  });
+
+  it('loads under the encoded id the rows a hydration read before the re-file', async () => {
+    const filePath = tempFile();
+    // Filed by an earlier process: this one holds none of it until it hydrates.
+    const earlier = await openManager(filePath);
+    await earlier.manager.encode(BEES, MOOD, 'neutral', { scope: 'user', scopeId: 'team/ana' });
+    await closers.pop()!();
+    const { manager, brain } = await openManager(filePath);
+    // The first recall's hydration reads the Brain's rows, then waits for the re-file to commit before it loads them.
+    let hydrationRead!: () => void;
+    const read = new Promise<void>((resolve) => (hydrationRead = resolve));
+    let releaseHydration!: () => void;
+    const released = new Promise<void>((resolve) => (releaseHydration = resolve));
+    const readAll = brain.all.bind(brain);
+    Object.assign(brain, {
+      all: async (sql: string, params?: Parameters<Brain['all']>[1]) => {
+        const rows = await readAll(sql, params);
+        if (/deleted = 0\s+ORDER BY created_at DESC/.test(sql) && !/scope_id = \?/.test(sql)) {
+          hydrationRead();
+          await released;
+        }
+        return rows;
+      },
+    });
+    const firstRecall = recallUnder(manager, 'team%2Fana');
+    await read;
+
+    const refiled = manager.ensureEncodedScopeIds();
+    try {
+      await vi.waitFor(async () => expect(await brain.getMeta(SCOPE_ID_FORM_KEY)).toBe('encoded'), {
+        timeout: 10_000,
+        interval: 10,
+      });
+    } finally {
+      releaseHydration();
+    }
+    expect(await refiled).toBe(1);
+    await firstRecall;
+
+    expect(await recallUnder(manager, 'team%2Fana')).toEqual([BEES]);
+    expect(await recallUnder(manager, 'team/ana')).toEqual([]);
+  });
+
+  it('drops from the old collection the document of a trace it does not hold when another opener re-files the Brain', async () => {
+    const filePath = tempFile();
+    const index = await newIndex();
+    await fileUnheldTrace(filePath, index);
+    expect(await textsIn(index, 'cogmem_user_team/ana')).toEqual([BEES]);
+    const facadeHandle = await brainAt(filePath, 'agent');
+    const { manager } = await openManager(filePath, index);
+
+    // The layer re-files the facade's handle on the Brain first; the manager's store follows what that moved.
+    await refileBrainScopeIds(facadeHandle);
+
+    expect(await textsIn(index, 'cogmem_user_team/ana')).toEqual([]);
+    expect(await manager.ensureEncodedScopeIds()).toBe(0);
+  });
+
+  it('never recalls a document under a scope id its Brain row is no longer filed under', async () => {
+    const filePath = tempFile();
+    const index = await newIndex();
+    await fileUnheldTrace(filePath, index);
+    const { manager } = await openManager(filePath, index);
+    const otherProcess = await Brain.openSqlite(filePath, { brainId: 'agent', coordinationToken: {} });
+    closers.push(() => otherProcess.close());
+    await refileBrainScopeIds(otherProcess);
+    expect(await manager.ensureEncodedScopeIds()).toBe(0);
+
+    // User `ana` of namespace `team` reads `team/ana`: the plain user's words are not hers.
+    expect(await recallUnder(manager, 'team/ana')).toEqual([]);
+    // The read deletes the stale document from the collection.
+    expect(await textsIn(index, 'cogmem_user_team/ana')).toEqual([]);
+  });
+
+  it("lists none of a collection's documents whose Brain rows are filed under another scope id", async () => {
+    const filePath = tempFile();
+    const index = await newIndex();
+    await fileUnheldTrace(filePath, index);
+    const { manager } = await openManager(filePath, index);
+    const otherProcess = await Brain.openSqlite(filePath, { brainId: 'agent', coordinationToken: {} });
+    closers.push(() => otherProcess.close());
+    await refileBrainScopeIds(otherProcess);
+
+    expect(await manager.getStore().getByScope('user', 'team/ana')).toEqual([]);
+    expect(await textsIn(index, 'cogmem_user_team/ana')).toEqual([]);
   });
 });
