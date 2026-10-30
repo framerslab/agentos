@@ -180,8 +180,8 @@ describe('an access after another writer changed the row the store holds the tra
       const store = await storeOver(brain);
       await store.store(trace(Date.now()));
       await facadeFeedback(filePath, 'used');
-      expect(await store.recordAccess('t-vera')).not.toBeNull();
       // The feedback took the interval from one hour to two; the store's access doubles that.
+      expect(await store.recordAccess('t-vera')).toMatchObject({ accessCount: 2, reinforcementInterval: 14_400_000, retrievalCount: 2 });
       expect(store.getTrace('t-vera')).toMatchObject({ accessCount: 2, reinforcementInterval: 14_400_000, retrievalCount: 2 });
     } finally {
       await brain.close();

@@ -2077,7 +2077,17 @@ export class MemoryStore {
       }
     }
 
-    return trace.isActive ? update : null;
+    if (!trace.isActive) return null;
+    // An access counted on top of another writer's row state (persistAccess) leaves the trace's values, not the update's.
+    return {
+      encodingStrength: trace.encodingStrength,
+      stability: trace.stability,
+      retrievalCount: trace.retrievalCount,
+      lastAccessedAt: trace.lastAccessedAt,
+      accessCount: trace.accessCount,
+      reinforcementInterval: trace.reinforcementInterval,
+      nextReinforcementAt: trace.nextReinforcementAt ?? update.nextReinforcementAt,
+    };
   }
 
   /**
