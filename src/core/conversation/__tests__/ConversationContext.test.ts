@@ -437,6 +437,34 @@ describe('ConversationContext history cuts', () => {
       expect(summary?.content).toBe('The user asked about the weather.');
     });
 
+    it('makes the summary again when a message of its chunk is rewritten while it is made', async () => {
+      // A limit of six that keeps no first and no newest messages, summarized seven at a time. The reply that passes
+      // the limit starts a summary of all seven, and an output guardrail rewrites the reply while it is made. A summary
+      // of the reply as it was would keep what the guardrail removed, so it is dropped and made again from the reply as
+      // the guardrail left it.
+      let finish: (summary: string) => void = () => {};
+      const summarize = vi
+        .fn(async (_text: string) => 'The user asked about the card.')
+        .mockImplementationOnce(() => new Promise<string>((resolve) => { finish = resolve; }));
+      const context = summarizingContext(['q1', 'r1', 'q2', 'r2', 'q3', 'r3'], summarize, {
+        maxHistoryLengthMessages: 6,
+        messagesToKeepVerbatimHead: 0,
+        messagesToKeepVerbatimTail: 0,
+        summarizationChunkSize: 7,
+      });
+
+      const reply = context.addMessage({ role: MessageRole.ASSISTANT, content: 'The card is 4111 1111 1111 1111.' });
+      expect(summarize).toHaveBeenCalledTimes(1);
+      context.replaceMessageContent(reply.id, 'The card is [removed].');
+      finish('The user asked about the card 4111 1111 1111 1111.');
+
+      await vi.waitFor(() => expect(summarize).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(names(context.getAllMessages())).toEqual(['summary']));
+      expect(summarize.mock.calls[1][0]).toContain('The card is [removed].');
+      expect(summarize.mock.calls[1][0]).not.toContain('4111');
+      expect(context.getAllMessages()[0].content).toBe('The user asked about the card.');
+    });
+
     it('keeps a new summary and the last summary of a loaded conversation at the trims after it', async () => {
       // A conversation loaded from storage holds a summary that sorts by its own time, after messages it does not all
       // stand for. A pass summarizes the eight oldest messages after the head into a summary of its own, right after
