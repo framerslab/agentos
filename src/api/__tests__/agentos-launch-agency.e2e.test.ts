@@ -81,6 +81,7 @@ import { checkChainable } from '../../cognition/emergent/StepGate';
 import { callTool, makeForgeHost } from '../../cognition/emergent/__tests__/helpers/forge-host';
 import { createSqliteAdapter } from '../../cognition/emergent/__tests__/helpers/sqlite-adapter';
 import { seedToolRow } from '../../cognition/emergent/__tests__/helpers/seed-rows';
+import { launchRegistry } from '../runtime/agencyLaunch/launchRegistry';
 
 let callIds = 0;
 /** A model step that calls tools, each `[name, args]`. */
@@ -495,6 +496,79 @@ describe('launch_agency on the full runtime', () => {
     // The lead, the editor's first step, the drafter, the editor's second step, the lead.
     expect(provider.seen).toHaveLength(5);
   });
+
+  it("a runtime seat stops at its launch's token cap, a metaprompt of its persona included", async () => {
+    const moody = persona('moody', {
+      defaultModelCompletionOptions: { maxTokens: 500 },
+      metaPrompts: [{ id: 'reflect', promptTemplate: 'REFLECT-ON-THE-TURN', maxOutputTokens: 400, trigger: { type: 'turn_interval', intervalTurns: 1 } }],
+    });
+    // Each seat's route counts 500 output tokens a call (the floor counts a personaId member on its own persona's route,
+    // so the checker names it too), so a 3,000-token launch covers one call.
+    const lead = persona('lead', { allowedCapabilities: ['agency:launch'], defaultModelCompletionOptions: { maxTokens: 500 } });
+    booted = await boot({ personas: [lead, persona('checker', { defaultModelCompletionOptions: { maxTokens: 500 } }), moody] });
+    const reflections = () => provider.whole.filter((prompt) => prompt.includes('REFLECT-ON-THE-TURN')).length;
+
+    // Under the default cap the seat's metaprompt reaches the provider (the precondition).
+    provider.replies.push(toolStep(['launch_agency', { goal: 'Feel it.', seats: [{ role: 'moody', personaId: 'moody' }] }]), textStep('Felt.'), textStep('Done.'));
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-1' });
+    await vi.waitFor(() => expect(reflections()).toBe(1));
+
+    // Under a 3,000-token cap the seat's step spends 2,700: its metaprompt and the next seat's step are refused unsent.
+    provider.seen.length = 0;
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Feel it again.', maxTokens: 3_000, seats: [{ role: 'moody', personaId: 'moody' }, { role: 'checker', personaId: 'checker' }] }]),
+      textStep('Felt again.', 2_700),
+      textStep('Done.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-2' });
+    expect(toolMessages(provider.seen[2].messages)[0]).toContain('"status":"budget_exhausted"');
+    // The lead, the moody seat, the lead: no request after the refusal.
+    expect(provider.seen).toHaveLength(3);
+    expect(reflections()).toBe(1);
+  });
+
+  it("a runtime seat's billed failure is charged to its launch", async () => {
+    booted = await boot();
+    // The seat's request fails before any output and is billed, as OpenAI's Responses path reports a failed response.
+    const billed = Object.assign(new Error('The response failed.'), { name: 'OpenAIProviderError', details: { usage: { promptTokens: 900, completionTokens: 100, totalTokens: 1_000 } } });
+    provider.replies.push(toolStep(['launch_agency', { goal: 'Try.', seats: [{ role: 'checker', personaId: 'checker' }] }]), billed, textStep('Done.'));
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-billed' });
+    const result = toolMessages(provider.seen[2].messages)[0];
+    // The seat's one call failed (the precondition), and its bill is in the launch's count.
+    expect(result).toContain('"status":"failed"');
+    expect(Number(/"tokensUsed":(\d+)/.exec(result)?.[1])).toBeGreaterThanOrEqual(1_000);
+  });
+
+  it('a runtime seat whose tool returns after the deadline sends no further request', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow = hostTool('slow', async () => {
+      await held;
+      return 'late';
+    });
+    booted = await boot({ tools: { search: search(), slow } });
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Wait.', deadlineMs: 1_000, seats: [{ role: 'waiter', instructions: 'Call slow.', tools: ['slow'] }] }]),
+      toolStep(['slow', {}]),
+      textStep('Done.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-late' });
+    const result = toolMessages(provider.seen[2].messages)[0];
+    expect(result).toContain('"status":"timed_out"');
+    // The waiter's turn still waits on its tool as the launch returns: its record reads cut, with no error, as a gmi()
+    // seat's does.
+    expect(result).toContain('"role":"waiter","form":"temporary","status":"cut","calls":1');
+    expect(result).not.toContain('"error"');
+    const agencyId = /"agencyId":"([^"]+)"/.exec(result)?.[1];
+    expect(agencyId).toBeDefined();
+    // The seat's tool returns after the deadline and the grace, its turn stopped; then the seat closes.
+    release();
+    await vi.waitFor(() => expect(launchRegistry.get(agencyId!)).toBeUndefined(), { timeout: 10_000 });
+    // The lead, the waiter, the lead: the waiter's next step was refused before its request (the stub ignores signals).
+    expect(provider.seen).toHaveLength(3);
+  }, 30_000);
 });
 
 describe('launch_agency is never a step', () => {
