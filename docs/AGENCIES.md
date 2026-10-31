@@ -93,6 +93,6 @@ A launch that started returns, whatever its status, `{ status, agencyId, text, t
 
 On both, a seat's GMI whose turn fails also writes its own diagnostic of the failed turn to the console, the error's message included, as any GMI's failed turn does; the content-safe mode leaves that line as it is ([Logging](./observability/LOGGING.md#content-safe-server-telemetry)).
 
-A launched team shares only what its strategy passes between its seats. Nothing of it outlives the call but the result the parent receives, the usage its calls recorded and, for a persistent member on `gmi()`, the seat session's memory traces, which no later turn reads.
+A launched team shares only what its strategy passes between its seats. Once every seat is released (by the launch's return, or later for a seat still running then), nothing of the team remains but the result the parent received, the usage its calls recorded and, for a persistent member on `gmi()`, the seat session's memory traces, which no later turn reads.
 
 The package root and `@framers/agentos/api` export `sessionSeat()`, `SessionSeatOptions`, `SeatHandle`, `SeatMetadata`, `LAUNCH_AGENCY_TOOL_NAME` and the launch's types: `AgencyLaunchOptions` (`agencies` on an agent), `RuntimeAgencyLaunchOptions` (`AgentOSConfig.agencies`), `LaunchLimits`, `LaunchAgencyArgs`, `LaunchSeatSpec`, `LaunchAgencyResult`, `LaunchSeatRecord`, `LaunchUsage`, `LaunchStatus`, `LaunchRefusal`, `LaunchRefusalCode`, `AgencyLaunchFrame`, `CallerTurnContext`, `ToolCallHook` and `LaunchRecordMetadata` (a launched team's registry entry).
