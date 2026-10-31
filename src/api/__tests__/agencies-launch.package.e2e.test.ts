@@ -2076,6 +2076,51 @@ describe('agencies and launch_agency, as a host uses the package', () => {
       expect(total(memberRows)).toBe(15);
     });
   });
+
+  it("the bounds hold as the docs' table writes them with nothing set: a null takes its default, the default deadline never passes maxDeadlineMs, a count must be an integer, and gmi() warns when it is built about a launch pool that cannot cover one call of its route", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('A.'), reply.text('B.'), reply.text('C.')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    /** What the agent's table says of `agencies`: the launch_agency definition its first model call offered. */
+    const tableOf = async (agencies: AgencyLaunchOptions): Promise<OfferedTool['function']> => {
+      const asked = s.seen.length;
+      await gmi({ ...route(k), instructions: 'Answer.', agencies }).session('p-bounds').send('Hi.');
+      return launchTool(s.seen[asked]);
+    };
+    const warnings = (): string => warn.mock.calls.map(([message]) => String(message)).join('\n');
+
+    // With nothing set the table states the defaults.
+    const defaults = await tableOf({ launch: true });
+    expect(JSON.stringify(defaults.parameters)).toContain('default 120000, at most 600000');
+    expect(defaults.description).toContain('At most 5 seats');
+    // A field set to null takes its default.
+    const unset = await tableOf({ launch: true, maxSeats: null, maxDeadlineMs: null, defaultDeadlineMs: null } as unknown as AgencyLaunchOptions);
+    expect(JSON.stringify(unset.parameters)).toContain('default 120000, at most 600000');
+    expect(unset.description).toContain('At most 5 seats');
+    // A maxDeadlineMs below the default deadline is the default too.
+    const short = await tableOf({ launch: true, maxDeadlineMs: 5_000 });
+    expect(JSON.stringify(short.parameters)).toContain('default 5000, at most 5000');
+
+    // A count must be an integer, launch on or off.
+    const fractions: Array<[AgencyLaunchOptions, string]> = [
+      [{ maxDepth: 1.5 }, 'agencies.maxDepth must be an integer from 1 to 4, not 1.5'],
+      [{ maxSeats: 2.5 }, 'agencies.maxSeats must be an integer from 1 to 12, not 2.5'],
+      [{ maxConcurrent: 1.5 }, 'agencies.maxConcurrent must be an integer from 1 to 4, not 1.5'],
+    ];
+    for (const [agencies, words] of fractions) {
+      expect(() => gmi({ ...route(k), agencies })).toThrow(RangeError);
+      expect(() => gmi({ ...route(k), agencies })).toThrow(words);
+    }
+
+    // A pool that cannot cover one call of the agent's route (2,000 for the prompt and its 1,000 output tokens) is
+    // warned about when the agent is built, and one that can is not.
+    warn.mockClear();
+    gmi({ ...route(k), maxTokens: 1_000, agencies: { launch: true, maxLaunchTokens: 2_500 } });
+    expect(warnings()).toContain("agencies.maxLaunchTokens (2500) cannot cover one call of this agent's route (3000:");
+    warn.mockClear();
+    gmi({ ...route(k), maxTokens: 1_000, agencies: { launch: true, maxLaunchTokens: 3_000 } });
+    expect(warnings()).not.toContain('agencies.maxLaunchTokens');
+  });
 });
 
 describe('launch_agency on the full runtime, as a host uses the package', () => {
