@@ -56,6 +56,7 @@ import {
   brainHoldsScopeIdFormRecord,
   encodedCopyProperties,
   encodePlainScopeId,
+  holdsScopeIdsTheFormChanges,
   importScopeIdFormDecision,
   readScopeIdFormRecord,
   SCOPE_ID_FORM_KEY,
@@ -1623,7 +1624,11 @@ export class Brain {
    *
    * A Brain a learning layer serves holds its plain `user` and `persona` scope
    * ids in the encoded form and records it in `brain_meta` (`scope_id_form`;
-   * see `scopeIdForm.ts`). A plain source goes into a Brain that holds the
+   * see `scopeIdForm.ts`). A source with the record whose `user` and
+   * `persona` scope ids, in its traces and its knowledge-graph copies, hold
+   * none of `/`, `%` and `:` reads the same in both forms and is taken as a
+   * plain one: its record is not copied, so a Brain without the record stays
+   * without it. A plain source goes into a Brain that holds the
    * record with its ids encoded as they are written, each trace's
    * knowledge-graph copy with it, merged or replaced. A source with the record
    * goes into a Brain without it, which gets the record, unless the Brain
@@ -1735,7 +1740,9 @@ export class Brain {
    * brain, so only its form counts there, and a Brain that holds the encoded form keeps it (the source's plain ids are
    * encoded as they are written, each trace's knowledge-graph copy with them), whatever rows it held before. A source
    * with the record goes into a Brain without it, which gets the record, unless the Brain holds a plain id the record
-   * would read as another. Every row of each portable table of the file is then copied under this brain's id.
+   * would read as another; one whose `user` and `persona` scope ids read the same in both forms is taken as a plain
+   * one. Every row of each portable table of the file is then copied under this brain's id, the record but: the
+   * handshake writes it where this brain holds the encoded form once the copy is in.
    *
    * @returns The rows copied per table.
    * @throws When the handshake refuses the source, naming the record; or {@link ScopeIdFormChangedWhileCopied} when
@@ -1746,7 +1753,12 @@ export class Brain {
     source: Brain,
     strategy: 'merge' | 'replace',
   ): Promise<Record<string, number>> {
-    const sourceEncoded = await brainHoldsScopeIdFormRecord(source);
+    const sourceRecord = await brainHoldsScopeIdFormRecord(source);
+    // The traces and the knowledge-graph nodes are read first: a source whose user and persona scope ids read the same
+    // in both forms is taken as a plain one, so a Brain without the record keeps its plain form.
+    const traceRows = await source.all<Record<string, unknown>>('SELECT * FROM memory_traces');
+    const nodeRows = await source.all<Record<string, unknown>>('SELECT * FROM knowledge_nodes');
+    const sourceEncoded = sourceRecord && holdsScopeIdsTheFormChanges(traceRows, nodeRows);
     const decision = await importScopeIdFormDecision(
       trx,
       this,
@@ -1769,21 +1781,32 @@ export class Brain {
     for (const table of PORTABLE_TABLES) {
       // Read every row in the source file regardless of its stored brainId
       // so we capture the full snapshot for re-insertion under our brainId.
-      const rows = await source.all<Record<string, unknown>>(`SELECT * FROM ${table}`);
+      const rows =
+        table === 'memory_traces'
+          ? traceRows
+          : table === 'knowledge_nodes'
+            ? nodeRows
+            : await source.all<Record<string, unknown>>(`SELECT * FROM ${table}`);
       tablesImported[table] = rows.length;
       if (rows.length === 0) continue;
 
       // Always use upsert to gracefully handle the brain_meta rows seeded
       // by `_seedMeta` during the receiving Brain's initialization (which
       // would otherwise collide with the source's schema_version/created_at).
-      const copied = decision.action === 'encode' ? encodedSourceRows(table, rows) : rows;
+      // The record is the handshake's to write, below.
+      const kept = table === 'brain_meta' ? rows.filter((row) => row.key !== SCOPE_ID_FORM_KEY) : rows;
+      const copied = decision.action === 'encode' ? encodedSourceRows(table, kept) : kept;
       await this._bulkCopy(this, table, copied, this.#brainId, { upsert: true, db: trx });
     }
-    // A replace deletes the record with this brain's other brain_meta rows, and a plain source brings none.
-    if (decision.action === 'encode' || decision.action === 'record') await writeScopeIdFormRecord(trx, this);
+    // This brain holds the encoded form once the copy is in when the handshake encoded the source, gave this brain the
+    // source's record, or took an encoded source into an encoded brain; a replace deleted the record with this brain's
+    // other brain_meta rows.
+    if (decision.action === 'encode' || decision.action === 'record' || (decision.action === 'take' && sourceEncoded)) {
+      await writeScopeIdFormRecord(trx, this);
+    }
     // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
     if ((tablesImported['knowledge_nodes'] ?? 0) > 0) await keyTraceCopies(trx, this.#brainId);
-    if ((await brainHoldsScopeIdFormRecord(source)) !== sourceEncoded) {
+    if ((await brainHoldsScopeIdFormRecord(source)) !== sourceRecord) {
       throw new ScopeIdFormChangedWhileCopied(
         `Brain.importFromSqlite: the source's scope-id form record changed while it was copied, on each of ` +
           `${SCOPE_ID_FORM_PASSES} passes`,

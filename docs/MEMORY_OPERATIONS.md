@@ -769,6 +769,8 @@ A Brain a learning layer serves holds its plain `user` and `persona` scope ids i
 | Markdown or Obsidian note | encoded when its front matter says `scopeIdForm: encoded` |
 | CSV file, ChatGPT export | plain |
 
+A source with the record whose `user` and `persona` scope ids, in its traces and its knowledge-graph copies, hold none of `/`, `%` and `:` reads the same in both forms, and an import takes it as a plain one: a Brain without the record stays without it, and the learning layer that opens that Brain later re-files the plain ids a host with no layer filed there meanwhile.
+
 - A plain source goes into a Brain that holds the record with each `user` and `persona` scope id encoded as it is written, in the trace's `scope_id` column and its metadata, and in each trace's knowledge-graph copy.
 - A source with the record goes into a Brain that holds the record as it is written.
 - A source with the record goes into a Brain without it when that Brain holds no plain id the encoded form changes, in a trace or in a knowledge-graph memory node, and the Brain then gets the record. A persona id is read part by part, so the `::` between its user id and its persona id counts for neither. Otherwise nothing of the source is imported and `errors` names the record (`scope_id_form`); a Markdown or Obsidian folder is weighed note by note, and `Brain.importFromSqlite` throws.
@@ -776,6 +778,8 @@ A Brain a learning layer serves holds its plain `user` and `persona` scope ids i
 - An export reads its Brain's record and its rows in one form: when a re-file commits while the export reads, it reads again. The SQLite importer reads its source file the same way, and `Brain.importFromSqlite` copies again when its source's record changed while it copied.
 
 A source and a Brain that both lack the record take each other as they are, so where no learning layer has opened any Brain involved, every import files its ids as they are written.
+
+A Brain that takes the record from an import holds the encoded form from then on, whoever serves it: a host with no learning layer files its plain ids as they are, and the record reads one that holds a `/`, a `%` or a `:` as encoded or namespaced (`team/ana` then names user `ana` of namespace `team`), and no re-file moves it. Serve such a Brain with a learning layer.
 
 
 ### ImportResult

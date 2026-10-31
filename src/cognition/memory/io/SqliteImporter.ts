@@ -54,7 +54,11 @@
  * ids in the encoded form, and says so in `brain_meta` (`scope_id_form`; see
  * `scopeIdForm.ts`). The source's form is the record of the brain it holds:
  * its rows are read with the record read before and after them, and read
- * again when a re-file of the file committed in between. A plain source goes
+ * again when a re-file of the file committed in between. A source with the
+ * record whose `user` and `persona` scope ids, in its traces and its
+ * knowledge-graph copies, hold none of `/`, `%` and `:` reads the same in both
+ * forms and is taken as a plain one, so a Brain without the record stays
+ * without it. A plain source goes
  * into a Brain that holds the record with its ids encoded as they are written,
  * each trace's knowledge-graph copy with it. A source with the record goes
  * into a Brain without it, which then gets the record, unless that Brain holds
@@ -79,6 +83,7 @@ import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 import {
   encodedCopyProperties,
   encodePlainScopeId,
+  holdsScopeIdsTheFormChanges,
   importScopeIdFormDecision,
   readInOneScopeIdForm,
   readScopeIdFormRecord,
@@ -208,7 +213,7 @@ export class SqliteImporter {
       // The source's form is its brain's record. Its rows are read with the record read before and after them, and
       // read again when a re-file of the file committed in between, so they are in the form the record names.
       const sourceBrainId = brainIds.length === 1 ? brainIds[0]! : undefined;
-      const { value: rows, encoded: sourceEncoded } = await readInOneScopeIdForm(
+      const { value: rows, encoded: sourceRecord } = await readInOneScopeIdForm(
         async () => sourceBrainId !== undefined && (await readScopeIdFormRecord(sourceAdapter, sourceBrainId)),
         async (): Promise<SourceRows> => ({
           traces: await this._readSource<TraceRow>(sourceAdapter, read, 'memory_traces'),
@@ -216,6 +221,9 @@ export class SqliteImporter {
           edges: await this._readSource<EdgeRow>(sourceAdapter, read, 'knowledge_edges'),
         }),
       );
+      // A source whose user and persona scope ids read the same in both forms is taken as a plain one, so a Brain
+      // without the record keeps its plain form.
+      const sourceEncoded = sourceRecord && holdsScopeIdsTheFormChanges(rows.traces ?? [], rows.nodes ?? []);
 
       let traces = { inserted: 0, retagged: 0 };
       await this.brain.transaction(async (trx) => {

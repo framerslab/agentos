@@ -40,7 +40,9 @@ export class MigrationEngine {
    *    each brain the source holds (`brain_meta.scope_id_form`, which a learning
    *    layer writes): where the two sides disagree in a way a copy of the rows
    *    as they are cannot keep, it refuses the whole migration, naming the
-   *    record, before it copies any table.
+   *    record, before it copies any table. A source brain with the record
+   *    whose `user` and `persona` scope ids read the same in both forms is
+   *    copied as a plain one, and a target without the record gets none.
    * 2. Lists the source's tables and, for each one, reads rows in streaming batches.
    * 3. Creates the table in the target (if it doesn't exist).
    * 4. Writes each batch to the target.
@@ -142,7 +144,12 @@ export class MigrationEngine {
     };
   }
 
-  /** Runs the scope-id form handshake for every brain the source holds; backends without Brain tables skip it. */
+  /**
+   * Runs the scope-id form handshake for every brain the source holds; backends without Brain tables skip it. A source
+   * brain with the record whose `user` and `persona` scope ids read the same in both forms (none holds a `/`, a `%` or
+   * a `:`) is copied as a plain one: the copy of `brain_meta` brings its record, which is removed from a target that
+   * did not hold one, so a target a host with no learning layer serves keeps its plain form.
+   */
   private static async _scopeIdFormHandshake(
     source: IMigrationSource,
     target: IMigrationTarget,
@@ -153,9 +160,11 @@ export class MigrationEngine {
     const refused: string[] = [];
     const clear: string[] = [];
     for (const [brainId, form] of from) {
-      const decision = scopeIdFormHandshake(brainId, form, to.get(brainId) ?? ABSENT_BRAIN, { encodeOnWrite: false });
+      const held = to.get(brainId) ?? ABSENT_BRAIN;
+      const copied = form.encoded && !form.reserved ? { ...form, encoded: false } : form;
+      const decision = scopeIdFormHandshake(brainId, copied, held, { encodeOnWrite: false });
       if (decision.action === 'refuse') refused.push(`scope_id_form: ${decision.reason}`);
-      else if (decision.action === 'clear') clear.push(brainId);
+      else if (decision.action === 'clear' || (form.encoded && !copied.encoded && !held.encoded)) clear.push(brainId);
     }
     return { refused, clear };
   }

@@ -32,8 +32,10 @@
  * A Brain a learning layer serves holds its plain `user` and `persona` scope
  * ids in the encoded form (`scopeIdForm.ts`). A note that front matter marks
  * `scopeIdForm: encoded` was written by such a Brain's export, and its scope
- * id is taken as it is written; every other note's scope id is plain. Into a
- * Brain that holds the record, a plain note's id is encoded as it is written;
+ * id is taken as it is written; every other note's scope id is plain, and so
+ * is a marked note's `user` or `persona` scope id that holds none of `/`, `%`
+ * and `:`, which reads the same in both forms. Into a Brain that holds the
+ * record, a plain note's id is encoded as it is written;
  * a marked note goes into a Brain without the record, which then gets it,
  * unless that Brain holds a plain id the record would read as another, in a
  * trace or a knowledge-graph copy: then the note is not imported and `errors`
@@ -53,6 +55,7 @@ import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import {
   ENCODED_SCOPE_ID_FORM,
   encodePlainScopeId,
+  holdsScopeIdsTheFormChanges,
   importScopeIdFormDecision,
   SCOPE_ID_FORM_KEY,
   writeScopeIdFormRecord,
@@ -314,12 +317,10 @@ export class MarkdownImporter {
     let written: { traceId: string } | { held: HeldTrace } | 'skipped' | 'refused';
     try {
       written = await this.brain.transaction(async (trx) => {
-        const decision = await importScopeIdFormDecision(
-          trx,
-          this.brain,
-          { encoded: fm.scopeIdForm === ENCODED_SCOPE_ID_FORM },
-          { reserved },
-        );
+        // A marked note whose scope id reads the same in both forms is taken as a plain one.
+        const encoded =
+          fm.scopeIdForm === ENCODED_SCOPE_ID_FORM && holdsScopeIdsTheFormChanges([{ scope, scope_id: namedScopeId }]);
+        const decision = await importScopeIdFormDecision(trx, this.brain, { encoded }, { reserved });
         if (decision.action === 'refuse') {
           result.errors.push(`${filePath}: ${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
           return 'refused' as const;

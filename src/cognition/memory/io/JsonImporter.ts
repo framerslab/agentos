@@ -26,13 +26,16 @@
  *
  * A Brain a learning layer serves holds its plain `user` and `persona` scope
  * ids in the encoded form (`scopeIdForm.ts`), and its export's `meta` names
- * the record (`scope_id_form`). An export without it is in the plain form:
- * into a Brain that holds the record, its ids are encoded as they are written,
- * each trace's knowledge-graph copy with it. An export with the record goes
- * into a Brain without it, which then gets the record, unless that Brain holds
- * a plain id the record would read as another, in a trace or a copy: then
- * nothing is imported and `errors` names the record. The Brain's form is read
- * in the transaction the import writes in.
+ * the record (`scope_id_form`). An export without it is in the plain form, and
+ * so is one with it whose `user` and `persona` scope ids, in its traces and
+ * its knowledge-graph copies, hold none of `/`, `%` and `:`, since they read
+ * the same in both forms: a Brain without the record then stays without it.
+ * Into a Brain that holds the record, a plain export's ids are encoded as they
+ * are written, each trace's knowledge-graph copy with it. An export with the
+ * record goes into a Brain without it, which then gets the record, unless that
+ * Brain holds a plain id the record would read as another, in a trace or a
+ * copy: then nothing is imported and `errors` names the record. The Brain's
+ * form is read in the transaction the import writes in.
  *
  * @module memory/io/JsonImporter
  */
@@ -50,6 +53,7 @@ import {
   ENCODED_SCOPE_ID_FORM,
   encodedCopyProperties,
   encodePlainScopeId,
+  holdsScopeIdsTheFormChanges,
   importScopeIdFormDecision,
   SCOPE_ID_FORM_KEY,
   writeScopeIdFormRecord,
@@ -290,9 +294,11 @@ export class JsonImporter {
       return result;
     }
 
-    // The source's form comes from its own record; an import encodes a plain source as it writes it, so the source's
-    // ids are not read.
-    const sourceEncoded = payload.meta?.[SCOPE_ID_FORM_KEY] === ENCODED_SCOPE_ID_FORM;
+    // The source's form comes from its own record. A source whose user and persona scope ids read the same in both forms
+    // is taken as a plain one, so a Brain without the record keeps its plain form.
+    const sourceEncoded =
+      payload.meta?.[SCOPE_ID_FORM_KEY] === ENCODED_SCOPE_ID_FORM &&
+      holdsScopeIdsTheFormChanges(payload.traces, Array.isArray(payload.nodes) ? payload.nodes : []);
 
     // ---- Import in a single transaction for atomicity ----
     const context: ImportContext = {

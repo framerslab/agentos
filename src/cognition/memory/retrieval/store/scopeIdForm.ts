@@ -18,9 +18,12 @@
  *
  * An import takes its source's form from the source's own record (a JSON export's `meta`, a SQLite file's
  * `brain_meta`, the mark on a note an encoded Brain's Markdown export wrote); a CSV file, and a source without the
- * record, is plain. Into a Brain that holds the record a plain source's ids are encoded as they are written, each
- * trace's knowledge-graph copy with them; a source with the record goes into a Brain without it only when that Brain
- * holds no plain id the record would read as another, and the record is written with it
+ * record, is plain. A source with the record whose `user` and `persona` scope ids all read the same in both forms
+ * (none holds a `/`, a `%` or a `:`; {@link holdsScopeIdsTheFormChanges}) is taken as a plain one too, so a Brain
+ * without the record keeps the plain form a host with no learning layer writes, and the layer that opens it later
+ * re-files the ids written there since. Into a Brain that holds the record a plain source's ids are encoded as they are
+ * written, each trace's knowledge-graph copy with them; a source with the record goes into a Brain without it only
+ * when that Brain holds no plain id the record would read as another, and the record is written with it
  * ({@link importScopeIdFormDecision}, which reads the Brain's form in the transaction the import writes in). An export
  * reads its record and its rows in one form ({@link readInOneScopeIdForm}). The RAG migration copies rows as they are,
  * so it refuses where an import would encode ({@link scopeIdFormHandshake}).
@@ -568,6 +571,35 @@ async function copiesHoldReservedScopeIds(db: ScopeIdFormReader, brainId: string
   }
 }
 
+/**
+ * Whether the records of an import's source hold a `user` or `persona` scope id that the two forms read apart: one the
+ * encoded form changes ({@link encodePlainScopeId}: it holds a `/`, a `%` or a `:`, a persona id read part by part), in
+ * a trace or in a knowledge-graph memory node's stored context. In a plain source such an id is a plain one the encoded
+ * form writes otherwise; in a source with the record it is an encoded id or a layer's namespaced or session id, which
+ * the plain form would read as another. A source whose ids hold none reads the same in both forms, so an import takes
+ * it as a plain one whatever its record says: a Brain without the record keeps its plain form.
+ *
+ * @param traces - The source's traces. Each one's scope is its `scope` (`user` when it names none), and both its
+ *   `scope_id` and its metadata's `scopeId` are read. A record that is not an object is skipped.
+ * @param nodes - The source's knowledge-graph nodes; a memory node's `properties` text names its scope id.
+ */
+export function holdsScopeIdsTheFormChanges(traces: Iterable<unknown>, nodes: Iterable<unknown> = []): boolean {
+  for (const trace of traces) {
+    if (!trace || typeof trace !== 'object') continue;
+    const { scope, scope_id: column, metadata } = trace as { scope?: unknown; scope_id?: unknown; metadata?: unknown };
+    const scopeName = typeof scope === 'string' ? scope : 'user';
+    for (const scopeId of [typeof column === 'string' ? column : '', scopeIdOfMetadata(metadata)]) {
+      if (scopeId !== '' && encodePlainScopeId(scopeName, scopeId) !== scopeId) return true;
+    }
+  }
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object') continue;
+    const { type, properties } = node as { type?: unknown; properties?: unknown };
+    if (type === 'memory' && typeof properties === 'string' && refiledCopyProperties(properties) !== undefined) return true;
+  }
+  return false;
+}
+
 /** Whether a statement that reads one row of a brain finds one. A store without the table holds none. */
 async function holdsRow(db: ScopeIdFormReader, sql: string, brainId: string): Promise<boolean> {
   try {
@@ -632,9 +664,11 @@ export async function readScopeIdForms(
  * the brain's form lock, which a re-file takes too, then it reads the record, so an import follows a re-file or
  * another import of the brain that commits first, and none writes beside a re-file. A source holds the encoded form
  * when its own record says so (a JSON export's `meta`, a SQLite file's `brain_meta`, the mark on a note an encoded
- * Brain's Markdown export wrote). A plain source is encoded as it is written into a Brain that holds the record
- * (`encode`), so its ids are not read. A source with the record goes into a Brain without it, which gets the record
- * (`record`, the caller's to write), unless the Brain holds a plain id the record would read as another (`refuse`).
+ * Brain's Markdown export wrote) and it holds a `user` or `persona` scope id the forms read apart
+ * ({@link holdsScopeIdsTheFormChanges}): the caller reads both, and passes a source whose ids read the same in both
+ * forms as a plain one. A plain source is encoded as it is written into a Brain that holds the record (`encode`). A
+ * source with the record goes into a Brain without it, which gets the record (`record`, the caller's to write), unless
+ * the Brain holds a plain id the record would read as another (`refuse`).
  *
  * @param options.replacing - The import empties the brain first, so the ids the brain holds do not count.
  * @param options.reserved - Shared by the parts of one import (a Markdown folder's notes): once a scan has found such
