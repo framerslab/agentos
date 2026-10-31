@@ -59,7 +59,7 @@ function cutsKeepingToolRounds(
 /**
  * Configuration for the ConversationContext, defining its behavior and limits.
  * @interface ConversationContextConfig
- * @property {number} [maxHistoryLengthMessages=100] - The number of messages the history keeps: past it, the oldest messages after the first `messagesToKeepVerbatimHead` are dropped, or summarized with `enableAutomaticSummarization`. A tool round the kept messages reach into is kept whole, past this number when it has to be.
+ * @property {number} [maxHistoryLengthMessages=100] - The number of messages the history keeps: past it, the oldest messages after the first `messagesToKeepVerbatimHead` are dropped, or summarized with `enableAutomaticSummarization`, and a summary right after those first messages is kept with them. A tool round the kept messages reach into is kept whole, past this number when it has to be.
  * @property {boolean} [enableAutomaticSummarization=false] - If true, attempts to summarize older parts of the conversation when history exceeds limits. Requires `utilityAI`.
  * @property {number} [messagesToKeepVerbatimTail=10] - Number of most recent messages to always keep verbatim (not summarized), more when the oldest of them is part of a tool round.
  * @property {number} [messagesToKeepVerbatimHead=2] - Number of earliest messages (e.g., system prompts, initial user query) to always keep verbatim, more when the last of them is part of a tool round.
@@ -238,11 +238,11 @@ export class ConversationContext {
    * Returns readonly copies of the messages to prevent external modification.
    *
    * With `limit`, the newest `limit` messages. Without it, the messages a trim to `maxHistoryLengthMessages` keeps:
-   * the first `messagesToKeepVerbatimHead` and the newest after them, `maxHistoryLengthMessages` in all. Providers
-   * refuse a tool call without its result and a tool result without its call, so neither cut falls inside a tool round
-   * (an assistant message that names tool calls, the tool messages that answer them and anything between): a round the
-   * returned messages reach into is returned whole, past the limit when it has to be, as the prompt engine's token
-   * trim keeps a round it cannot drop.
+   * the first `messagesToKeepVerbatimHead`, a summary right after them, and the newest after that,
+   * `maxHistoryLengthMessages` in all. Providers refuse a tool call without its result and a tool result without its
+   * call, so neither cut falls inside a tool round (an assistant message that names tool calls, the tool messages that
+   * answer them and anything between): a round the returned messages reach into is returned whole, past the limit when
+   * it has to be, as the prompt engine's token trim keeps a round it cannot drop.
    *
    * @public
    * @param {number} [limit] - Optional. The number of recent messages to return, more when the oldest of them is part of a tool round. Without it, the messages a trim to `config.maxHistoryLengthMessages` keeps.
@@ -432,8 +432,10 @@ export class ConversationContext {
    * A summary replaces a chunk of the messages between the first `messagesToKeepVerbatimHead` and the newest
    * `messagesToKeepVerbatimTail`. None of the three ends inside a tool round: a round the head or the tail reaches into
    * stays whole there, and a round the chunk reaches into is summarized whole, past `summarizationChunkSize`. The
-   * summary takes the chunk's place, so a message recorded while the summary is made stays after it, and the summary of
-   * a history cleared meanwhile is dropped.
+   * summary takes the chunk's place, so a message recorded while the summary is made stays after it. A history still
+   * past its limit with too few messages left for another chunk is trimmed, and the trim keeps the summary, which comes
+   * right after the head. The summary of a history cleared meanwhile is dropped, and the messages recorded since the
+   * clear, whose own passes found this one holding the lock, get a pass once it ends.
    *
    * @private
    * @async
@@ -446,6 +448,8 @@ export class ConversationContext {
 
     if (this.config.enableAutomaticSummarization && this.utilityAI) {
       this.isSummarizing = true;
+      // set when a clear replaces the history while the summary is made
+      let historyReplaced = false;
       try {
         const headCount = Math.max(0, this.config.messagesToKeepVerbatimHead);
         const tailCount = Math.max(0, this.config.messagesToKeepVerbatimTail);
@@ -482,6 +486,7 @@ export class ConversationContext {
 
           // A history cleared while the summary was made no longer holds the messages it summarizes.
           if (this.messages !== messages) {
+            historyReplaced = true;
             return;
           }
 
@@ -511,6 +516,7 @@ export class ConversationContext {
             if(remainingMiddleLength >= MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT && remainingMiddleLength >= this.config.summarizationChunkSize) {
                  await this.manageHistoryLength(); // Recursive call with safeguard
             } else {
+                 // the trim keeps the summary, which comes right after the head
                  this.truncateHistorySimple(this.config.maxHistoryLengthMessages);
             }
           }
@@ -522,6 +528,10 @@ export class ConversationContext {
         this.truncateHistorySimple(this.config.maxHistoryLengthMessages);
       } finally {
         this.isSummarizing = false;
+        // The messages recorded since the clear found this pass holding the lock, so their history gets a pass now.
+        if (historyReplaced) {
+          await this.manageHistoryLength();
+        }
       }
     } else {
       this.truncateHistorySimple(this.config.maxHistoryLengthMessages);
@@ -530,18 +540,31 @@ export class ConversationContext {
 
   /**
    * Where a trim to `targetMessageCount` messages cuts `messages`: it keeps the first `messagesToKeepVerbatimHead` (at
-   * most `targetMessageCount`) and the newest that fill the rest, and neither cut falls inside a tool round.
+   * most `targetMessageCount`), a summary right after them, and the newest that fill the rest, and neither cut falls
+   * inside a tool round. The summary stands for the messages it replaced, so it takes the place of the oldest of the
+   * newest messages, as long as one of those is still kept.
    *
    * @private
    */
   private trimCuts(messages: ReadonlyArray<ConversationMessage>, targetMessageCount: number): { headEnd: number; tailStart: number } {
     const headCount = Math.max(0, Math.min(this.config.messagesToKeepVerbatimHead, targetMessageCount));
-    return cutsKeepingToolRounds(messages, headCount, Math.max(0, targetMessageCount - headCount));
+    const tailCount = Math.max(0, targetMessageCount - headCount);
+    if (headCount + tailCount >= messages.length) {
+      return { headEnd: messages.length, tailStart: messages.length };
+    }
+    const rounds = toolRoundBounds(messages);
+    const headEnd = headCount > 0 ? rounds.end[headCount - 1] + 1 : 0;
+    if (tailCount > 1 && messages[headEnd]?.role === MessageRole.SUMMARY) {
+      return cutsKeepingToolRounds(messages, headEnd + 1, tailCount - 1, rounds);
+    }
+    return cutsKeepingToolRounds(messages, headCount, tailCount, rounds);
   }
 
   /**
    * Performs simple truncation of message history from the middle: it keeps the first `messagesToKeepVerbatimHead`
-   * messages (at most `targetMessageCount`) and the newest that fill the rest of `targetMessageCount`.
+   * messages (at most `targetMessageCount`), a summary right after them, and the newest that fill the rest of
+   * `targetMessageCount`. The summary stands for the messages it replaced, so it takes the place of the oldest of those
+   * newest messages, as long as one of them is still kept.
    *
    * Providers refuse a tool call without its result and a tool result without its call, so neither cut falls inside a
    * tool round (an assistant message that names tool calls, the tool messages that answer them and anything between):
