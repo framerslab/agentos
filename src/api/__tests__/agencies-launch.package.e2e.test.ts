@@ -3058,4 +3058,132 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
       { type: 'output', agent: `launch:${gmiRoot.agencyId}`, action: 'return' },
     ]);
   });
+
+  it("a composition the runtime's engine holds runs in a seat only whole, each step through the seat's names and agencies.hitl's gate, while a composed call in no team runs its steps unasked, and a composition a host builds over createStepGate meets a seat's names and gate by its own call alone", async () => {
+    const k = key();
+    const ran: Ran = [];
+    const asked: Asked[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(askedOf(request));
+      return request.action === 'send_email' ? { approved: false, reason: 'mail is paused' } : { approved: true };
+    };
+    const search = recording('search', ran);
+    const note = recording('note', ran);
+    // A composition the host builds over its own step gate, of two tools the runtime holds too.
+    const hostSteps: Record<string, ITool> = { search, note };
+    const hostNotify = new ComposableToolBuilder(createStepGate({ resolve: (name) => hostSteps[name] })).build(
+      'host_notify',
+      'Looks it up, then notes it.',
+      { type: 'object', properties: { q: { type: 'string' } } },
+      {
+        mode: 'compose',
+        steps: [
+          { name: 'find', tool: 'search', inputMapping: { q: '$input.q' } },
+          { name: 'jot', tool: 'note', inputMapping: { q: '$input.q' } },
+        ],
+      },
+    );
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          // The lead forges a composition of search and send_email, as a model does.
+          reply.tools([
+            {
+              id: 'f1',
+              name: 'forge_tool',
+              args: {
+                name: 'notify',
+                description: 'Looks it up, then emails the team.',
+                inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+                outputSchema: {},
+                implementation: {
+                  mode: 'compose',
+                  steps: [
+                    { name: 'find', tool: 'search', inputMapping: { q: '$input.q' } },
+                    { name: 'send', tool: 'send_email', inputMapping: { q: '$input.q' } },
+                  ],
+                },
+                testCases: [{ input: { q: 'x' }, expectedOutput: 'sent', stepOutputs: { send: 'sent' } }],
+              },
+            },
+          ]),
+          reply.text('Forged.'),
+        ],
+      }),
+      // The engine's judge approves what it is asked about.
+      JSON.stringify({ safety: { passed: true, score: 1 }, correctness: { passed: true, score: 1 }, determinism: { likely: true }, confidence: 0.9, reasoning: 'Safe and correct.' }),
+    );
+    const os = await startRuntime(k, {
+      emergent: true,
+      // send_email has side effects, so a composition chains it only once the host lists it.
+      emergentConfig: { compose: { sideEffectingTools: ['send_email'] } },
+      tools: { search, send_email: recording('send_email', ran, { hasSideEffects: true }), note, host_notify: hostNotify },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['notify', 'send_email', 'host_notify', 'note'] }, handler } },
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-forge' });
+    // The forge took (the precondition); its dry run may run the search step.
+    expect(s.seen).toHaveLength(2);
+    expect(toolText(s.seen[1], 'f1')).not.toContain('Error from tool');
+    const afterForge = ran.length;
+
+    s.replies.push(
+      reply.tools([
+        // Without send_email in the allowlist the composition could not run whole.
+        { id: 'l1', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Notify.', seats: [{ role: 'mailer', instructions: 'Notify the team.', tools: ['notify', 'search'] }] } },
+        { id: 'l2', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Notify.', seats: [{ role: 'mailer', instructions: 'Notify the team.', tools: ['notify', 'search', 'send_email'] }] } },
+      ]),
+      reply.tools([{ id: 'c1', name: 'notify', args: { q: 'x' } }]),
+      reply.text('Mail held.'),
+      reply.text('Done.'),
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-compose' });
+    // The lead, the mailer's two steps, the lead: the narrow launch ran no seat.
+    expect(s.seen).toHaveLength(6);
+    const narrow = toolText(s.seen[5], 'l1');
+    expect(narrow).toContain('tool_not_allowed');
+    expect(narrow).toContain("'notify' is a composed tool whose step 'send_email' the seat's allowlist leaves out");
+    // With the whole allowlist the mailer was offered the three tools and called the composition (the precondition).
+    expect(offered(s.seen[3]).sort()).toEqual(['notify', 'search', 'send_email']);
+    const wide = launchedIn(s.seen[5], 'l2');
+    expect(wide).toMatchObject({ status: 'completed', text: 'Mail held.' });
+    const team = `launch:${wide.agencyId}`;
+    // The team's gate asked about the composed call by its name, then about its send_email step by the step tool's
+    // name, before the step ran; the search step, which the policy does not cover, ran unasked, and send_email never ran.
+    expect(asked.map(({ agent, action }) => `${agent} ${action}`)).toEqual([`${team} notify`, `${team} send_email`]);
+    expect(asked[0]).toMatchObject({ args: { q: 'x' }, callId: 'c1' });
+    expect(asked[1]).toMatchObject({ args: { q: 'x' } });
+    expect(ran.slice(afterForge)).toEqual([{ name: 'search', args: { q: 'x' } }]);
+    expect(toolText(s.seen[4], 'c1')).toContain('mail is paused');
+
+    // A composed call in no team, the lead's own, runs its steps as before: no one is asked, and both steps run.
+    s.replies.push(reply.tools([{ id: 'c2', name: 'notify', args: { q: 'y' } }]), reply.text('Notified.'));
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-direct' });
+    expect(s.seen).toHaveLength(8);
+    expect(toolText(s.seen[7], 'c2')).not.toContain('Error from tool');
+    expect(asked).toHaveLength(2);
+    expect(ran.slice(afterForge + 1)).toEqual([
+      { name: 'search', args: { q: 'y' } },
+      { name: 'send_email', args: { q: 'y' } },
+    ]);
+
+    // A composition the host built over createStepGate runs its steps through its own gate: the seat's call to it is
+    // asked by its name, and its steps run outside the seat's view, its names and its gate: note, which the seat's
+    // allowlist leaves out and the policy covers, runs unasked.
+    s.replies.push(
+      launchStep({ goal: 'Run it.', seats: [{ role: 'runner', instructions: 'Run it.', tools: ['host_notify'] }] }, 'l3'),
+      reply.tools([{ id: 'h1', name: 'host_notify', args: { q: 'z' } }]),
+      reply.text('Ran.'),
+      reply.text('Done.'),
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-host' });
+    expect(s.seen).toHaveLength(12);
+    expect(offered(s.seen[9])).toEqual(['host_notify']);
+    const hostTeam = launchedIn(s.seen[11], 'l3');
+    expect(hostTeam).toMatchObject({ status: 'completed', text: 'Ran.' });
+    expect(asked.slice(2)).toEqual([{ type: 'tool', agent: `launch:${hostTeam.agencyId}`, action: 'host_notify', args: { q: 'z' }, callId: 'h1' }]);
+    expect(ran.slice(afterForge + 3)).toEqual([
+      { name: 'search', args: { q: 'z' } },
+      { name: 'note', args: { q: 'z' } },
+    ]);
+  });
 });
