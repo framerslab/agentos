@@ -128,6 +128,28 @@ function brainIdOf(memory: ICognitiveMemoryManager | undefined): string | undefi
   }
 }
 
+/** What a write touched: the brain it went to and the traces it names, for the line about a write not taken back. */
+interface Touched {
+  brainId?: string;
+  traceIds?: readonly string[];
+  /** A recorded write, whose `pending` ledger row stays when it is not taken back. */
+  recorded?: boolean;
+}
+
+/** The trace ids a recorded write names: those it creates, changes and deletes. */
+function traceIdsOf(after: SessionSelfChange['after'] | undefined): string[] {
+  const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  const changed = list(after?.changed).map((change) => (change && typeof change === 'object' ? (change as { id?: unknown }).id : undefined));
+  const ids = [...list(after?.created), ...changed, ...list(after?.deleted)];
+  return [...new Set(ids.filter((id): id is string => typeof id === 'string'))];
+}
+
+/** Where what a write wrote lies: its brain and its traces, as far as the session knows them. */
+function placeOf(touched: Touched): string {
+  const traces = touched.traceIds?.length ? ` (traces ${touched.traceIds.join(', ')})` : '';
+  return touched.brainId ? `brain ${touched.brainId}${traces}` : `the memory store it was written to${traces}`;
+}
+
 export class LearnerSession implements ILearnerSession {
   private readonly key: LearnerKey | undefined;
   /** The registry persona's authored traits. */
@@ -266,8 +288,8 @@ export class LearnerSession implements ILearnerSession {
       const result = await input.apply();
       const after = await this.tombstoneAfter(storage.store, write);
       if (after !== 'clear') {
-        await this.takeBack(input.undo, result, write, after === 'forgotten');
-        return { status: 'rejected', reason: after === 'forgotten' ? 'forgotten' : 'store_unavailable' };
+        const gone = await this.takeBack(storage.store, input.undo, result, write, after === 'forgotten', { brainId: this.brainId });
+        return { status: 'rejected', reason: gone ? 'forgotten' : 'store_unavailable' };
       }
       return { status: 'written', result };
     });
@@ -510,27 +532,55 @@ export class LearnerSession implements ILearnerSession {
 
   /**
    * Takes back a write that finished after its user was forgotten, whose tombstone could not be read again or whose
-   * verdict could not be written, and, for a forgotten user, deletes the user's learning rows once more.
-   * The writer's `undo` is told which (`forgotten` deletes for good; `unrecorded` restores the
-   * before-state). A line about a forgotten user names the tombstone's hash, never the user.
+   * verdict did not land, and, for a forgotten user, deletes the user's learning rows once more. The writer's `undo` is
+   * told which (`forgotten` deletes for good; `unrecorded` restores the before-state). The tombstone is read before an
+   * `unrecorded` undo and again once it has run: a `forgetUser` of another process, which this process's write chain
+   * does not order, may have deleted the user's traces meanwhile, and a restore would bring back the words it removed,
+   * so a write whose user is forgotten by then is taken back for good. A line about a forgotten user names the
+   * tombstone's hash and where the write lies, never the user.
+   *
+   * @returns Whether the write was taken back for good, its user forgotten.
    */
   private async takeBack<T>(
+    store: LearningStore,
     undo: (result: T, reason: 'forgotten' | 'unrecorded') => Promise<void>,
     result: T,
     write: WriteTarget,
     forgotten: boolean,
+    touched: Touched,
+  ): Promise<boolean> {
+    if (!forgotten && (await this.tombstoneAfter(store, write)) !== 'forgotten') {
+      await this.undoWrite(undo, result, 'unrecorded', write, touched);
+      if ((await this.tombstoneAfter(store, write)) !== 'forgotten') return false;
+    }
+    await this.undoWrite(undo, result, 'forgotten', write, touched);
+    if (write.user) await this.host.purgeUserRows(write.user.namespace, write.user.userId);
+    return true;
+  }
+
+  /** Runs a writer's `undo`; one that fails is traced with where the write lies, and never fails the call. */
+  private async undoWrite<T>(
+    undo: (result: T, reason: 'forgotten' | 'unrecorded') => Promise<void>,
+    result: T,
+    reason: 'forgotten' | 'unrecorded',
+    write: WriteTarget,
+    touched: Touched,
   ): Promise<void> {
     try {
-      await undo(result, forgotten ? 'forgotten' : 'unrecorded');
+      await undo(result, reason);
     } catch (error) {
-      if (forgotten && write.user) {
+      if (reason === 'forgotten' && write.user) {
         const hash = (await tombstoneHash(write.user.namespace, write.user.userId)).slice(0, 16);
-        console.warn(`[agentos] learning: a memory write that finished after its user was forgotten (tombstone ${hash}) was not taken back (${messageOf(error)}); a second forgetUser call for the user deletes it.`);
+        console.warn(
+          `[agentos] learning: a memory write that finished after its user was forgotten (tombstone ${hash}) was not taken back (${messageOf(error)}); what it wrote stays in ${placeOf(touched)} until it is deleted there.`,
+        );
       } else {
-        console.warn(`[agentos] learning: a memory write whose record could not be completed was not taken back (${messageOf(error)}); its pending ledger row stays, and the learner's next load decides it by whether the write holds.`);
+        const row = touched.recorded ? '; its pending ledger row stays to be decided by whether the write holds' : '';
+        console.warn(
+          `[agentos] learning: a memory write whose record could not be completed was not taken back (${messageOf(error)}); it stays in ${placeOf(touched)}${row}.`,
+        );
       }
     }
-    if (forgotten && write.user) await this.host.purgeUserRows(write.user.namespace, write.user.userId);
   }
 
   private async recordInChain<T>(input: SessionSelfChange<T>, write: WriteTarget): Promise<ProposalResult<T>> {
@@ -562,6 +612,7 @@ export class LearnerSession implements ILearnerSession {
     }
     if (!('candidate' in proposed)) return { status: 'rejected', reason: proposed.status };
     const ledgerId = proposed.candidate.id;
+    const touched: Touched = { brainId: input.brainId, traceIds: traceIdsOf(input.after), recorded: true };
     this.host.inFlight.add(ledgerId);
     try {
       let result: T;
@@ -575,20 +626,23 @@ export class LearnerSession implements ILearnerSession {
       }
       const after = await this.tombstoneAfter(store, write);
       if (after !== 'clear') {
-        await this.takeBack(input.undo, result, write, after === 'forgotten');
-        return after === 'forgotten' ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'store_unavailable', ledgerId };
+        const gone = await this.takeBack(store, input.undo, result, write, after === 'forgotten', touched);
+        return gone ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'store_unavailable', ledgerId };
       }
       let decided: DecideResult;
       try {
         decided = await ledger.decide(ledgerId, 'kept', 'written');
       } catch (error) {
         // A change with no record does not happen: the write is taken back and its pending row stays to be decided.
-        await this.takeBack(input.undo, result, write, false);
-        return { status: 'rejected', reason: 'store_unavailable', ledgerId, error };
+        const gone = await this.takeBack(store, input.undo, result, write, false, touched);
+        return gone ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'store_unavailable', ledgerId, error };
       }
       if (decided.status === 'kept') return { status: 'kept', ledgerId, result };
-      await this.takeBack(input.undo, result, write, decided.status === 'forgotten');
-      return decided.status === 'forgotten' ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'conflict', ledgerId };
+      // The verdict did not land: the user forgotten meanwhile (the chain's head marked, or the candidate deleted with
+      // the user's rows by another process), another verdict first, or a head that kept moving. The tombstone decides
+      // how the write is taken back.
+      const gone = await this.takeBack(store, input.undo, result, write, decided.status === 'forgotten', touched);
+      return gone ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'conflict', ledgerId };
     } finally {
       this.host.inFlight.delete(ledgerId);
     }
@@ -604,8 +658,9 @@ export class LearnerSession implements ILearnerSession {
     }
     const after = await this.tombstoneAfter(store, write);
     if (after !== 'clear') {
-      await this.takeBack(input.undo, result, write, after === 'forgotten');
-      return { status: 'rejected', reason: after === 'forgotten' ? 'forgotten' : 'store_unavailable' };
+      const touched: Touched = { brainId: input.brainId, traceIds: traceIdsOf(input.after) };
+      const gone = await this.takeBack(store, input.undo, result, write, after === 'forgotten', touched);
+      return { status: 'rejected', reason: gone ? 'forgotten' : 'store_unavailable' };
     }
     return { status: 'written', result };
   }
