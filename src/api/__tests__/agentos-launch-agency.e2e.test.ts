@@ -634,6 +634,43 @@ describe('launch_agency on the full runtime', () => {
     expect(ran).toEqual(['slow_write']);
     expect(asked).toEqual(['slow_write']);
   }, 30_000);
+
+  it("a level-2 runtime seat's tool call is asked once, by the gate of the team the root launch built", async () => {
+    const asked: string[] = [];
+    const askedBy: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      askedBy.push(request.agent);
+      return { approved: true };
+    };
+    const searches: unknown[] = [];
+    const finder = hostTool('search', async (args) => {
+      searches.push(args);
+      return 'found';
+    });
+    booted = await boot({ tools: { search: finder }, agencies: { launch: true, hitl: { approvals: { beforeTool: ['search'] }, handler } } });
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Plan the search.', seats: [{ role: 'planner', instructions: 'Plan the search.', tools: ['search', 'launch_agency'] }] }]),
+      toolStep(['launch_agency', { goal: 'Search.', seats: [{ role: 'finder', instructions: 'FINDER: find it.', tools: ['search'] }] }]),
+      toolStep(['search', { q: 'x' }]),
+      textStep('Found.'),
+      textStep('Planned.'),
+      textStep('All done.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // The lead, the planner, the finder's two steps, the planner, the lead: the finder was offered search and called it
+    // (the precondition).
+    expect(provider.seen).toHaveLength(6);
+    expect(systemTextOf(provider.seen[2].messages)).toContain('FINDER: find it.');
+    expect(provider.seen[2].tools).toEqual(['search']);
+    const root = toolMessages(provider.seen[5].messages)[0];
+    expect(root).toContain('"status":"completed"');
+    // Its search ran once and was asked once, by the gate of the team the lead launched: the level-2 team, with no hitl
+    // of its own, ran under the gate its launching seat's call carried.
+    expect(searches).toEqual([{ q: 'x' }]);
+    expect(asked).toEqual(['search']);
+    expect(askedBy).toEqual([`launch:${/"agencyId":"([^"]+)"/.exec(root)?.[1]}`]);
+  });
 });
 
 describe('launch_agency is never a step', () => {
