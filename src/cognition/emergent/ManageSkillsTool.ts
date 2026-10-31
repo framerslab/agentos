@@ -186,13 +186,6 @@ export class ManageSkillsTool implements ITool<ManageSkillsInput> {
   // --------------------------------------------------------------------------
 
   /**
-   * Execute the requested skill management action.
-   *
-   * @param args - Action type and associated parameters.
-   * @param context - Tool execution context.
-   * @returns A {@link ToolExecutionResult} wrapping the action outcome.
-   */
-  /**
    * The learning layer's refusal of an `enable` or a `disable`, before the approval gate: turning a skill on or off is
    * a self-change, and searching and listing are not.
    *
@@ -205,6 +198,13 @@ export class ManageSkillsTool implements ITool<ManageSkillsInput> {
     return refusal ? refusedSelfChange(this.name, refusal) : undefined;
   }
 
+  /**
+   * Execute the requested skill management action.
+   *
+   * @param args - Action type and associated parameters.
+   * @param context - Tool execution context.
+   * @returns A {@link ToolExecutionResult} wrapping the action outcome.
+   */
   async execute(
     args: ManageSkillsInput,
     context: ToolExecutionContext,

@@ -269,17 +269,6 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
   // --------------------------------------------------------------------------
 
   /**
-   * Execute the forge pipeline via the engine.
-   *
-   * Extracts the agent ID and session/correlation ID from the execution context
-   * and delegates to {@link EmergentCapabilityEngine.forge}.
-   *
-   * @param args - The forge tool input arguments (name, description, schemas,
-   *   implementation, test cases).
-   * @param context - The tool execution context providing agent and session IDs.
-   * @returns A {@link ToolExecutionResult} wrapping the {@link ForgeResult}.
-   */
-  /**
    * The learning layer's refusal of a forge, before the approval gate: forging is a self-change on every call.
    *
    * @param _args - The forge arguments; the refusal does not depend on them.
@@ -290,6 +279,17 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
     return refusal ? refusedSelfChange(this.name, refusal) : undefined;
   }
 
+  /**
+   * Execute the forge pipeline via the engine.
+   *
+   * Extracts the agent ID and session/correlation ID from the execution context
+   * and delegates to {@link EmergentCapabilityEngine.forge}.
+   *
+   * @param args - The forge tool input arguments (name, description, schemas,
+   *   implementation, test cases).
+   * @param context - The tool execution context providing agent and session IDs.
+   * @returns A {@link ToolExecutionResult} wrapping the {@link ForgeResult}.
+   */
   async execute(
     args: ForgeToolInput,
     context: ToolExecutionContext

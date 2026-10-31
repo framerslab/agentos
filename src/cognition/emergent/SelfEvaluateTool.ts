@@ -267,13 +267,6 @@ export class SelfEvaluateTool implements ITool<SelfEvaluateInput> {
   // --------------------------------------------------------------------------
 
   /**
-   * Execute the requested self-evaluation action.
-   *
-   * @param args - Action type and associated parameters.
-   * @param context - Tool execution context.
-   * @returns A {@link ToolExecutionResult} wrapping the action outcome.
-   */
-  /**
    * The learning layer's refusal of an `adjust`, before the approval gate: adjusting a setting or a trait is a
    * self-change. An `evaluate` on such a turn still runs (it scores and stores nothing), and a `report` reads.
    *
@@ -286,6 +279,13 @@ export class SelfEvaluateTool implements ITool<SelfEvaluateInput> {
     return refusal ? refusedSelfChange(this.name, refusal) : undefined;
   }
 
+  /**
+   * Execute the requested self-evaluation action.
+   *
+   * @param args - Action type and associated parameters.
+   * @param context - Tool execution context.
+   * @returns A {@link ToolExecutionResult} wrapping the action outcome.
+   */
   async execute(
     args: SelfEvaluateInput,
     context: ToolExecutionContext,
