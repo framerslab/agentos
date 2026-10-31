@@ -4,7 +4,8 @@
  * and calls only with the `agency:launch` capability, and its host for the launch engine. A seat is a
  * GMI of the runtime's GMIManager (`createAgencySeat`): a registered persona by `personaId`, or a persona made for a
  * temporary seat from the calling GMI's; it runs through a view of the shared tool orchestrator that lists and runs
- * its allowlist alone. The engine is imported on the first call.
+ * its allowlist alone, and makes its completion calls through a view of the runtime's provider manager that checks
+ * each against the launch's budget before it is sent. The engine is imported on the first call.
  * @internal
  */
 import type { AgencyRegistry } from '../../../agents/agency/AgencyRegistry.js';
@@ -17,6 +18,7 @@ import { GMIErrorCode } from '../../../core/utils/errors.js';
 import { resolveGMIForToolContext } from '../SelfImprovementSessionManager.js';
 import { outputEstimateTokens } from '../spendBudget.js';
 import type { LaunchEntry } from './launchRegistry.js';
+import { meteredProviderManager } from './meteredProviderManager.js';
 import type { LaunchHost, LaunchParent, ResolvedSeat } from './runLaunch.js';
 import { runtimeSeat, type RuntimeSeatHandle } from './runtimeSeat.js';
 import { seatToolView } from './seatToolView.js';
@@ -211,6 +213,8 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
           userId,
           persona: seat.form === 'persistent' ? { personaId: seat.ref } : { definition: temporaryPersona(personaOf(parent), seat, launch.launchId) },
           toolView: (base) => seatToolView(base, seat.toolNames),
+          // Every completion call the seat's GMI makes is checked against the launch's budget before it is sent.
+          providerManager: (base) => meteredProviderManager(base, launch.budget),
         });
         const description = (seat.form === 'persistent' ? seat.brief : undefined) ?? built.gmi.getPersona().description;
         return runtimeSeat({

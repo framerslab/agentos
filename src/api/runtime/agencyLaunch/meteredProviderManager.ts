@@ -4,6 +4,7 @@
  * metaprompts and self-reflection reach through `gmi()`'s provider manager, and the provider manager of a
  * runtime seat of a launched team, through which every one of that seat's completion calls goes.
  */
+import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager.js';
 import type { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse, ModelUsage } from '../../../core/llm/providers/IProvider.js';
 import { assertCallWithinBudget, costOfUsageUSD, promptCharsOf, type SpendBudget } from '../spendBudget.js';
 import { withMembers } from '../withMembers.js';
@@ -87,5 +88,25 @@ export function meteredProvider(provider: IProvider, budget: SpendBudget, what: 
       return response;
     },
     generateCompletionStream: stream,
+  });
+}
+
+/**
+ * A view of a provider manager whose providers check `budget` before each completion request and charge each answer
+ * ({@link meteredProvider}, the calls recorded as `launch.seat`); every other member runs on `base`. A runtime seat's
+ * GMI makes every completion call through it, its steps, metaprompts and self-reflection alike, so each is refused
+ * before its request once the launch's budget is spent, and a call whose turn has already stopped is not sent.
+ * Embeddings are not counted.
+ *
+ * @param base - The runtime's provider manager.
+ * @param budget - The launch's budget.
+ * @returns The view, typed as the manager it wraps.
+ */
+export function meteredProviderManager(base: AIModelProviderManager, budget: SpendBudget): AIModelProviderManager {
+  const metered = (provider: IProvider | undefined): IProvider | undefined => (provider ? meteredProvider(provider, budget, 'launch.seat') : undefined);
+  return withMembers(base, {
+    getProvider: (providerId: string) => metered(base.getProvider(providerId)),
+    getDefaultProvider: () => metered(base.getDefaultProvider()),
+    getProviderForModel: (modelId: string) => metered(base.getProviderForModel(modelId)),
   });
 }
