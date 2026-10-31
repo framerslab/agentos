@@ -332,6 +332,13 @@ export interface RememberOptions {
   importance?: number;
 
   /**
+   * The new trace's id, when the caller names it before the write: a write the learning ledger records names its new
+   * traces in its `pending` row first. A text the scope already holds is not stored again, and the trace that holds
+   * it is returned under its own id.
+   */
+  id?: string;
+
+  /**
    * Extra keys for the trace's stored metadata, merged under the keys the facade sets itself (`scopeId`,
    * `content_hash`, `entities`, `decay`), which win. The rolling-summary sink records `contributorIds` here, and a
    * memory write on a turn with no learner records `turnUserId` (`MemoryTrace.turnUserId`).

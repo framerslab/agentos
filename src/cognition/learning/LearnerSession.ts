@@ -81,6 +81,8 @@ export interface LearnerSessionHost {
   purgeUserRows(namespace: string, userId: string): Promise<void>;
   /** Re-files a memory manager's Brain once and keeps the manager for `forgetUser`. */
   adoptMemory(memory: ICognitiveMemoryManager): Promise<void>;
+  /** Decides a crash's pending memory writes of a learner, and starts deciding its agent's without waiting on them. Never throws. */
+  recoverPending(key: LearnerKey): Promise<void>;
 }
 
 /**
@@ -177,9 +179,10 @@ export class LearnerSession implements ILearnerSession {
 
   /**
    * What the layer does when it opens the session: re-files the memory manager's Brain once and, for a learner,
-   * hydrates the learner's two scopes and writes the learner's session row, in every mode, and loads the trait row
-   * where the mode reads learned state (`on` and `frozen`). Never throws: what fails is traced and tried again at the
-   * next turn.
+   * hydrates the learner's two scopes and writes the learner's session row, in every mode, loads the trait row where
+   * the mode reads learned state (`on` and `frozen`), and decides the learner's pending memory writes a crash left, in
+   * every mode, since a crash's row was written in a mode that recorded it. Never throws: what fails is traced and tried
+   * again at the next turn.
    */
   async open(): Promise<void> {
     if (this.context.memory) await this.host.adoptMemory(this.context.memory);
@@ -190,6 +193,7 @@ export class LearnerSession implements ILearnerSession {
       await this.loadTraits();
       if (this.traits?.status === 'ok') this.lastTraits = this.learnerRender(this.traits).traits;
     }
+    await this.host.recoverPending(this.key);
   }
 
   async prepareTurn(input: TurnInputForLearning): Promise<TurnPreparation> {

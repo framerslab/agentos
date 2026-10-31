@@ -73,6 +73,7 @@ import {
   writeTraceSnapshot,
   deleteTraceRows,
   holdsEncodedScopeIdForm,
+  readTraceSnapshot,
   type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
@@ -490,7 +491,7 @@ export class Memory {
       return this._buildTrace(existing);
     }
 
-    const id = nextTraceId();
+    const id = typeof options?.id === 'string' && options.id !== '' ? options.id : nextTraceId();
     const now = Date.now();
     const tags = options?.tags ?? [];
     const entities = options?.entities ?? [];
@@ -977,6 +978,22 @@ export class Memory {
     await this._initPromise;
     const { moved } = await refileBrainScopeIds(this._brain);
     return moved.reduce((sum, pair) => sum + pair.traces, 0);
+  }
+
+  /** One row of this facade's Brain as a snapshot, live or deleted; `undefined` when there is none. */
+  async readTrace(traceId: string): Promise<TraceSnapshot | undefined> {
+    await this._initPromise;
+    return readTraceSnapshot(this._brain, this._brain.brainId, traceId);
+  }
+
+  /** How many live traces one scope holds in this facade's Brain. */
+  async countScope(scope: string, scopeId: string): Promise<number> {
+    await this._initPromise;
+    const row = await this._brain.get<{ n: number | string }>(
+      'SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0',
+      [this._brain.brainId, scope, scopeId],
+    );
+    return Number(row?.n ?? 0);
   }
 
   /**

@@ -21,7 +21,7 @@ export {
   type ProposeOptions,
   type ProposeResult,
 } from './ledger/index.js';
-export { freezeScopeKey } from './hostCalls.js';
+export { assertLearnerKey, forgetTargets, freezeScopeKey, type ForgetTarget } from './hostCalls.js';
 export { LEARNABLE_TRAITS, LIFETIME_BAND, type OperatorTraits, type TraitState } from './traitState.js';
 export { processIsFrozen, resolveLearning, resolveLearningConfig, resolveTurnMode } from './config.js';
 export {

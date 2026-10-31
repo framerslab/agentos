@@ -164,6 +164,8 @@ export interface LearningMemoryTools {
   restoreTrace?(traceId: string, before: TraceSnapshot): Promise<void>;
   /** One row as a snapshot (`readTraceSnapshot`); the layer decides a crash's `pending` memory write by it. */
   readTrace?(traceId: string): Promise<TraceSnapshot | undefined>;
+  /** How many live traces one scope holds: `forgetUser` counts a user's plain-form traces it leaves. */
+  countScope?(scope: string, scopeId: string): Promise<number>;
   ensureEncodedScopeIds?(): Promise<number>;
 }
 
