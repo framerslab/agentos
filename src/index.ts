@@ -355,6 +355,9 @@ export type {
   TurnInputForLearning,
   TurnPreparation,
 } from './cognition/learning/index.js';
+// The trait map a learner context carries (`LearnerContext.authoredTraits`) and a learner session answers
+// (`currentTraits()`).
+export type { HexacoTraitValues } from './cognition/substrate/personas/hexaco.js';
 export { createAgentCognitiveMemory } from './api/runtime/agentCognitiveMemory.js';
 export type { AgentCognitiveMemory, AgentCognitiveMemoryOptions } from './api/runtime/agentCognitiveMemory.js';
 export type { MemoryProviderHookOptions } from './api/runtime/memoryProviderHooks.js';
