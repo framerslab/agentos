@@ -6,12 +6,15 @@
  * temporary seat from the calling GMI's; it runs through a view of the shared tool orchestrator that lists and runs
  * its allowlist alone and asks the approval gate of the team's call (the one `agencies.hitl` makes at a root launch)
  * about each of its tool calls, and makes its completion calls through a view of the runtime's provider manager that
- * checks each against the launch's budget before it is sent. The engine is imported on the first call.
+ * checks each against the launch's budget before it is sent. The team's manager and synthesizers call generateText on
+ * the host's `coordinator`, else with the key and base URL of the runtime's entry for their provider. The engine is
+ * imported on the first call.
  * @internal
  */
 import type { AgencyRegistry } from '../../../agents/agency/AgencyRegistry.js';
 import type { GMIManager } from '../../../cognition/substrate/GMIManager.js';
 import type { IPersonaDefinition } from '../../../cognition/substrate/personas/IPersonaDefinition.js';
+import type { ProviderConfigEntry } from '../../../core/llm/providers/AIModelProviderManager.js';
 import type { ILogger } from '../../../core/logging/ILogger.js';
 import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator.js';
@@ -55,6 +58,11 @@ export interface RuntimeLaunchToolDeps {
   limits: LaunchLimits;
   /** The GMIs' default provider and model, for a persona that names none (`gmiManagerConfig.defaultGMIBaseConfigDefaults`). */
   gmiDefaults?: { defaultLlmProviderId?: string; defaultLlmModelId?: string };
+  /**
+   * The runtime's provider entries (`modelProviderManagerConfig.providers`): a launched team's coordinator takes the
+   * key and base URL of its provider's entry.
+   */
+  providers: readonly ProviderConfigEntry[];
   /** Where a launch's failures go: a seat's failed call's original error among them. */
   logger: ILogger;
 }
@@ -91,6 +99,42 @@ function temporaryPersona(parent: IPersonaDefinition | undefined, seat: Extract<
     metaPrompts: [],
     sentimentTracking: { enabled: false },
   } as IPersonaDefinition;
+}
+
+/** The route of a launched team's manager and synthesizers. */
+export interface CoordinatorRoute {
+  provider?: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+}
+
+/**
+ * The route of a launched team's manager and synthesizers, which call generateText: the host's `coordinator`, else
+ * the provider and model of the persona of the GMI that launched the team, with the key and base URL of the runtime's
+ * enabled entry for that provider, where the runtime's own providers take theirs; the environment's key only when that
+ * entry has none.
+ *
+ * @param coordinator - `agencies.coordinator`, when the host sets it.
+ * @param persona - The provider and model of the launching GMI's persona, else the GMIs' defaults.
+ * @param providers - The runtime's provider entries.
+ * @returns The route, with only the fields that are set.
+ */
+export function coordinatorRoute(
+  coordinator: RuntimeAgencyLaunchOptions['coordinator'],
+  persona: { provider?: string; model?: string },
+  providers: readonly ProviderConfigEntry[],
+): CoordinatorRoute {
+  if (coordinator) return { ...coordinator };
+  const { provider, model } = persona;
+  const entry = provider ? providers.find((candidate) => candidate.providerId === provider && candidate.enabled) : undefined;
+  const config = (entry?.config ?? {}) as { apiKey?: unknown; baseURL?: unknown };
+  return {
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(typeof config.apiKey === 'string' && config.apiKey ? { apiKey: config.apiKey } : {}),
+    ...(typeof config.baseURL === 'string' && config.baseURL ? { baseUrl: config.baseURL } : {}),
+  };
 }
 
 /**
@@ -265,12 +309,13 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
     },
 
     async agencyRoute(parent: LaunchParent) {
-      // The manager and synthesizers call generateText.
-      if (deps.options.coordinator) return { ...deps.options.coordinator };
+      // The manager and synthesizers call generateText: on the host's coordinator, else on the launching persona's
+      // provider and model with the key and base URL of the runtime's entry for that provider.
+      if (deps.options.coordinator) return coordinatorRoute(deps.options.coordinator, {}, deps.providers);
       const persona = personaOf(parent);
       const provider = persona?.defaultProviderId || deps.gmiDefaults?.defaultLlmProviderId;
       const model = persona?.defaultModelId || deps.gmiDefaults?.defaultLlmModelId;
-      return { ...(provider ? { provider } : {}), ...(model ? { model } : {}) };
+      return coordinatorRoute(undefined, { provider, model }, deps.providers);
     },
 
     // The team's entry in the runtime's AgencyRegistry while it runs: made under the launch's agencyId with a seat per

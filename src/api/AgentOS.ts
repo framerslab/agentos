@@ -1244,6 +1244,7 @@ export class AgentOS implements IAgentOS {
             options: agencies,
             limits: launchLimits,
             gmiDefaults: this.config.gmiManagerConfig.defaultGMIBaseConfigDefaults,
+            providers: this.config.modelProviderManagerConfig.providers,
             logger: this.logger,
           }),
         );
