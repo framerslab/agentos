@@ -90,7 +90,10 @@ export interface GmiTurnOptions {
   toolNames?: ReadonlySet<string>;
   /** The launching turn's onBeforeToolExecution hooks, run before the agent's own. */
   toolHooks?: readonly ToolCallHook[];
-  /** A launched team's seat: the launch its team comes from, which a launch from the turn's tool calls nests under. */
+  /**
+   * A launched team's seat: the launch its team comes from, put in the turn's `metadata.agencyLaunch`. The GMI hands
+   * each tool call of the turn a frozen copy, and a launch from that call nests under it.
+   */
   launchFrame?: AgencyLaunchFrame;
   /**
    * Checks the reply of a turn that ended without error, before the session
@@ -129,8 +132,6 @@ export interface GmiTurnContext {
   providerUserId?: string;
   /** The turn's stop ({@link GmiTurnOptions.abortSignal}): every tool call of the turn carries it. */
   abortSignal?: AbortSignal;
-  /** A seat's frame ({@link GmiTurnOptions.launchFrame}): every tool call of the turn carries it in `sessionData.agencyLaunch`. */
-  launchFrame?: AgencyLaunchFrame;
 }
 
 /** The GMI that serves one turn. */
@@ -385,7 +386,6 @@ export async function* runGmiTurn(
       toolHooks: turn.toolHooks,
       providerUserId: deps.providerUserId,
       abortSignal: turn.abortSignal,
-      launchFrame: turn.launchFrame,
       // The bill a provider reports for a call this turn stopped (close() during
       // the call) arrives after the turn has ended: it is metered, counted and
       // charged to the turn's budget as a failed attempt's, as a billed failure
@@ -417,6 +417,7 @@ export async function* runGmiTurn(
         providerUserId: deps.providerUserId ?? null,
         ...(deps.providerUserId === undefined ? { noTurnUser: true } : {}),
         ...(deps.memoryScope ? { memoryScope: deps.memoryScope } : {}),
+        ...(turn.launchFrame ? { agencyLaunch: turn.launchFrame } : {}),
         options: {
           ...(turn.options ?? {}),
           ...(turn.responseSchema ? { responseSchema: turn.responseSchema, schemaName: turn.schemaName ?? 'response' } : {}),
