@@ -5712,9 +5712,10 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
         endSession: async () => undefined,
         currentTraits: () => ({}),
       });
-      const own = namedAtFirstTurn(1, hostSession);
+      const own = namedAtFirstTurn(2, hostSession);
       await expect(own.session.prepareTurn(anaTurn('A'))).rejects.toThrow('store offline');
-      expect(await own.session.prepareTurn(anaTurn('A', 'bo'))).toEqual({
+      await expect(own.session.prepareTurn(anaTurn('A', 'bo'))).rejects.toThrow('store offline');
+      expect(await own.session.prepareTurn(anaTurn('A'))).toEqual({
         systemPrompts: [{ content: renderPersonalitySection(TUTOR_PERSONA), priority: 2, source: 'learning:personality' }],
         learner: 'none',
         noLearnerReason: 'other_user',
