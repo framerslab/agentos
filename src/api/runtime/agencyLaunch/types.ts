@@ -2,9 +2,10 @@
  * @file types.ts
  * The types and bounds of teams a GMI launches from a turn (`launch_agency`), and of the seats such a team and
  * `sessionSeat()` build, with the tool's schema and description, which both surfaces offer. The package root and
- * `src/api` export {@link LAUNCH_AGENCY_TOOL_NAME}, `sessionSeat()` and the types of the `agencies` option, the tool's
- * arguments and result and a seat; the launch registry, the engine (`runLaunch`) and the tool factories
- * (`createGmiLaunchTool`, `createRuntimeLaunchTool`) stay internal.
+ * `src/api` export {@link LAUNCH_AGENCY_TOOL_NAME}, `sessionSeat()` and the types of the `agencies` options, a launch
+ * tree's limits, the tool's arguments and result, a seat, the frame a seat's turns carry, the turn a tool call came
+ * from, a tool hook and a launched team's registry record (`./index.ts` gathers them); neither exports the launch
+ * registry, the engine (`runLaunch`) or the tool factories (`createGmiLaunchTool`, `createRuntimeLaunchTool`).
  */
 import type { AgentOptions } from '../../agent.js';
 import type { Agent, AgencyStrategy, HitlConfig } from '../../types.js';
