@@ -1,12 +1,28 @@
 /**
  * The learning layer: a host's `learning` option, the learner a session is bound to, the personality section a GMI
  * sends each turn, the written form of every scope id a turn files and reads its memory under, what a tool reads about
- * its turn, and the loop manifest (docs/GMI.md, "Learning").
+ * its turn, the learning store and its ledger, a learner's trait state, and the loop manifest (docs/GMI.md,
+ * "Learning").
  * @module agentos/learning
  */
 export { createLearningLayer, type LearningLayerOptions } from './LearningLayer.js';
 export { deferLearnerSession } from './LearnerSession.js';
 export { buildManifest } from './manifest.js';
+export * from './store/index.js';
+export {
+  chainKeyOf,
+  GENESIS_HASH,
+  Ledger,
+  tombstoneHash,
+  type CandidateInput,
+  type ChainCheck,
+  type DecideResult,
+  type LedgerOptions,
+  type ProposeOptions,
+  type ProposeResult,
+} from './ledger/index.js';
+export { freezeScopeKey } from './hostCalls.js';
+export { LEARNABLE_TRAITS, LIFETIME_BAND, type OperatorTraits, type TraitState } from './traitState.js';
 export { processIsFrozen, resolveLearning, resolveLearningConfig, resolveTurnMode } from './config.js';
 export {
   couldBeSessionForm,
