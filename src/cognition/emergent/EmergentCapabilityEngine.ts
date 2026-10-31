@@ -65,7 +65,7 @@ import type { ITool, ToolEffectRecord, ToolExecutionContext, ToolExecutionResult
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
 import type { AdaptPersonalityTool } from './AdaptPersonalityTool.js';
 import { ComposableToolBuilder } from './ComposableToolBuilder.js';
-import type { StepGate } from './StepGate.js';
+import { UNCHAINABLE_TOOLS, type StepGate } from './StepGate.js';
 import { SandboxedToolForge } from './SandboxedToolForge.js';
 import { EmergentJudge } from './EmergentJudge.js';
 import { EmergentToolRegistry } from './EmergentToolRegistry.js';
@@ -1994,6 +1994,13 @@ export class EmergentCapabilityEngine {
         return 'effects_need_ceiling';
       }
       return null;
+    }
+    // A tool that is never a step keeps a reason of its own, whichever step
+    // names it: it names no configuration key in the start-up line
+    // (REASON_CONFIG_KEYS has none for it), and a registration never checks
+    // it again (it is not in STEP_SUSPENSION_REASONS).
+    if (implementation.steps.some((step) => UNCHAINABLE_TOOLS.has(step.tool))) {
+      return 'step_never_chainable';
     }
     for (const step of implementation.steps) {
       const verdict = this.composableBuilder.check(step.tool);

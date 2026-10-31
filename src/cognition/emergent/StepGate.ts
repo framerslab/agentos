@@ -36,9 +36,9 @@ export interface StepGate {
 /**
  * Why a step may not be chained: no gate to resolve it (`compose_needs_gate`),
  * no tool under its name (`step_missing`), a tool with side effects the host
- * has not listed (`step_not_chainable`), a tool that does not declare
- * `hasSideEffects` (`side_effects_undeclared`), or a chain that reaches itself
- * (`step_cycle`).
+ * has not listed, or one that is never a step (`step_not_chainable`), a tool
+ * that does not declare `hasSideEffects` (`side_effects_undeclared`), or a
+ * chain that reaches itself (`step_cycle`).
  */
 export type ChainRefusalCode =
   | 'compose_needs_gate'
@@ -69,8 +69,18 @@ export const COMPOSE_NEEDS_GATE_MESSAGE =
 export const MAX_COMPOSITION_DEPTH = 8;
 
 /**
+ * Tools that are never a step, whatever the host lists. A team is launched
+ * from a turn: a workflow's step runs under the workflow's own timer, which
+ * would cut a team outside its launch's deadline and close path, and a
+ * composed tool would launch a team on every call of what the model sees as
+ * one tool.
+ */
+export const UNCHAINABLE_TOOLS: ReadonlySet<string> = new Set(['launch_agency']);
+
+/**
  * The one rule for chaining a tool as a step.
  *
+ * - a tool in {@link UNCHAINABLE_TOOLS}: by no one, listed or not.
  * - `hasSideEffects: false`: chained freely.
  * - `hasSideEffects: true`: only when the host lists the tool's name.
  * - flag unset: by no one, listed or not; the host declares it first.
@@ -81,6 +91,13 @@ export function checkChainable(
   tool: ITool | undefined,
   sideEffectingTools: readonly string[],
 ): Chainability {
+  if (UNCHAINABLE_TOOLS.has(stepTool)) {
+    return {
+      ok: false,
+      code: 'step_not_chainable',
+      message: `step tool "${stepTool}" can never be a step: a team is launched from a turn`,
+    };
+  }
   if (!tool) {
     return { ok: false, code: 'step_missing', message: `step tool "${stepTool}" is not registered` };
   }
