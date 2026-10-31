@@ -30,6 +30,7 @@ import type {
 } from '../../orchestration/workflows/storage/IWorkflowStore';
 import type { ConversationManager } from '../../core/conversation/ConversationManager';
 import type { GMIManager } from '../../cognition/substrate/GMIManager';
+import type { ILearningLayer } from '../../cognition/learning/types';
 import type { ExtensionManager } from '../../extensions';
 import type { IToolOrchestrator, ToolDefinitionForLLM } from '../../core/tools/IToolOrchestrator';
 import type { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
@@ -260,6 +261,11 @@ export interface IAgentOS {
    */
   getConversationManager(): ConversationManager;
   getGMIManager(): GMIManager;
+  /**
+   * The runtime's learning layer, or `undefined` when learning is off: no `learning` option and no layer passed in
+   * `gmiManagerConfig.learningLayer`. Optional, so an implementation written without the layer still compiles.
+   */
+  getLearningLayer?(): ILearningLayer | undefined;
   getExtensionManager(): ExtensionManager;
   getToolOrchestrator(): IToolOrchestrator;
   getExternalToolRegistry(): ExternalToolRegistry | undefined;

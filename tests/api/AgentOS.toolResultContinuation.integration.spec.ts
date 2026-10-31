@@ -621,11 +621,16 @@ describe('AgentOS tool-result continuations', () => {
   });
 
   /**
-   * A runtime with lookup_notes and shell_execute registered, over the conversation `conversationId`. The session's
-   * GMI is the one the test sets with `useGmi()`, as the GMI manager hands a session the GMI it holds or builds for it.
+   * A runtime with lookup_notes and shell_execute registered, over the conversation `conversationId`, which takes
+   * `contextConfig` as its settings. The session's GMI is the one the test sets with `useGmi()`, as the GMI manager
+   * hands a session the GMI it holds or builds for it.
    */
-  async function runtime(conversationId: string, overrides: Partial<AgentOSConfig> = {}) {
-    const context = new ConversationContext(conversationId);
+  async function runtime(
+    conversationId: string,
+    overrides: Partial<AgentOSConfig> = {},
+    contextConfig: ConstructorParameters<typeof ConversationContext>[1] = {},
+  ) {
+    const context = new ConversationContext(conversationId, contextConfig);
     context.setMetadata('userId', 'user-1');
     let sessionGmi: unknown;
     vi.spyOn(GMIManager.prototype, 'getOrCreateGMIForSession').mockImplementation(
@@ -755,6 +760,93 @@ describe('AgentOS tool-result continuations', () => {
     toolOutput: 'Standup: see the team notes.',
     isSuccess: true,
   };
+
+  // The conversation that the rolling-summary and history-limit tests at the end of this file run, and the GMI that
+  // runs it.
+
+  /** The result the host passes back for WRITE_CALL. */
+  const WRITE_RESULT = {
+    toolCallId: WRITE_CALL.id,
+    toolName: WRITE_CALL.name,
+    toolOutput: 'Wrote the summary to notes.txt.',
+    isSuccess: true,
+  };
+
+  /** The user's messages and the GMI's replies, by the name the tests give each. */
+  const TEXTS = {
+    question1: 'Where do I keep my notes?',
+    reply1: 'In notes.txt.',
+    question2: 'What do they cover?',
+    reply2: 'The standup and the launch.',
+    question3: 'Read the file and write a summary of it back.',
+    done: 'The file is read and the summary written.',
+    question4: 'What did the file say about the standup?',
+    reply4: 'The standup moved to 10:00.',
+    question5: 'And about the launch?',
+    reply5: 'The launch is on Friday.',
+  } as const;
+
+  const NAMES = new Map<unknown, string>(Object.entries(TEXTS).map(([name, text]) => [text, name]));
+
+  /** The name of a message of the conversation: its text's name, `call` for the round's call, `read` and `write` for its results. */
+  function nameOf(message: { role: string; content?: unknown; tool_calls?: unknown; tool_call_id?: unknown }): string {
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return 'call';
+    if (message.role === 'tool') return message.tool_call_id === READ_CALL.id ? 'read' : 'write';
+    return NAMES.get(message.content) ?? `an unexpected ${message.role} message`;
+  }
+
+  /**
+   * A GMI that answers each user turn with the next of `turns`: a reply, or a stop for the calls the host runs. It
+   * keeps the history the runtime hands each turn for its prompt; the host's results for a stop continue the turn to
+   * `continuation`.
+   */
+  function scriptedTurnsGmi(turns: Array<string | ToolCallRequest[]>, continuation: GMIOutput) {
+    const histories: Array<Array<{ id: string; role: string; tool_calls?: ToolCallRequest[] | null; tool_call_id?: string | null }>> = [];
+    return {
+      histories,
+      getCurrentPrimaryPersonaId: () => 'test-persona',
+      getGMIId: () => 'gmi-scripted-turns',
+      getPersona: () => PERSONA,
+      processTurnStream: async function* (turnInput?: {
+        metadata?: { conversationHistoryForPrompt?: any[] };
+      }): AsyncGenerator<any, GMIOutput, undefined> {
+        histories.push([...(turnInput?.metadata?.conversationHistoryForPrompt ?? [])]);
+        const turn = turns[histories.length - 1];
+        if (turn === undefined) {
+          throw new Error(`The GMI was given turn ${histories.length}; the test scripted ${turns.length}.`);
+        }
+        if (Array.isArray(turn)) {
+          yield {
+            type: GMIOutputChunkType.TOOL_CALL_REQUEST,
+            content: turn,
+            interactionId: 'interaction-scripted-turns',
+            timestamp: new Date(),
+            metadata: { executionMode: 'external', requiresExternalToolResult: true },
+          };
+          return { isFinal: false, responseText: 'I need the file read and the summary written.', toolCalls: turn };
+        }
+        yield { type: GMIOutputChunkType.TEXT_DELTA, content: turn, interactionId: 'interaction-scripted-turns', timestamp: new Date() };
+        return { isFinal: true, responseText: turn };
+      },
+      hydrateConversationHistory: vi.fn(),
+      handleToolResults: vi.fn(async (): Promise<GMIOutput> => continuation),
+    };
+  }
+
+  /**
+   * Runs the conversation's first three turns on `rt`: two questions with their replies, then a turn the GMI stops
+   * for READ_CALL and WRITE_CALL, whose results (`results`) the host passes back and whose continuation replies.
+   */
+  async function runToolRoundTurns(rt: Awaited<ReturnType<typeof runtime>>, results = [READ_RESULT, WRITE_RESULT]) {
+    await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question1 }));
+    await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question2 }));
+    const stopped = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question3 }));
+    const request = stopped.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk;
+    expect(request.toolCalls).toEqual([READ_CALL, WRITE_CALL]);
+    await vi.waitFor(() => expect(rt.context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY)).toBeDefined());
+    const continued = await collect(rt.agentos.handleToolResults(request.streamId, results));
+    expect((continued.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.done);
+  }
 
   it('a resumed turn whose model uses a tool the GMI runs itself ends with FINAL_RESPONSE and leaves no pause', async () => {
     const rt = await runtime('conv-internal-tool');
@@ -2402,75 +2494,6 @@ describe('AgentOS tool-result continuations', () => {
   });
 
   describe('with the rolling summary on', () => {
-    /** The result the host passes back for WRITE_CALL. */
-    const WRITE_RESULT = {
-      toolCallId: WRITE_CALL.id,
-      toolName: WRITE_CALL.name,
-      toolOutput: 'Wrote the summary to notes.txt.',
-      isSuccess: true,
-    };
-
-    /** The user's messages and the GMI's replies, by the name the tests give each. */
-    const TEXTS = {
-      question1: 'Where do I keep my notes?',
-      reply1: 'In notes.txt.',
-      question2: 'What do they cover?',
-      reply2: 'The standup and the launch.',
-      question3: 'Read the file and write a summary of it back.',
-      done: 'The file is read and the summary written.',
-      question4: 'What did the file say about the standup?',
-      reply4: 'The standup moved to 10:00.',
-      question5: 'And about the launch?',
-      reply5: 'The launch is on Friday.',
-    } as const;
-
-    const NAMES = new Map<unknown, string>(Object.entries(TEXTS).map(([name, text]) => [text, name]));
-
-    /** The name of a message of the conversation: its text's name, `call` for the round's call, `read` and `write` for its results. */
-    function nameOf(message: { role: string; content?: unknown; tool_calls?: unknown; tool_call_id?: unknown }): string {
-      if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return 'call';
-      if (message.role === 'tool') return message.tool_call_id === READ_CALL.id ? 'read' : 'write';
-      return NAMES.get(message.content) ?? `an unexpected ${message.role} message`;
-    }
-
-    /**
-     * A GMI that answers each user turn with the next of `turns`: a reply, or a stop for the calls the host runs. It
-     * keeps the history the runtime hands each turn for its prompt; the host's results for a stop continue the turn to
-     * `continuation`.
-     */
-    function scriptedTurnsGmi(turns: Array<string | ToolCallRequest[]>, continuation: GMIOutput) {
-      const histories: Array<Array<{ id: string; role: string; tool_calls?: ToolCallRequest[] | null; tool_call_id?: string | null }>> = [];
-      return {
-        histories,
-        getCurrentPrimaryPersonaId: () => 'test-persona',
-        getGMIId: () => 'gmi-scripted-turns',
-        getPersona: () => PERSONA,
-        processTurnStream: async function* (turnInput?: {
-          metadata?: { conversationHistoryForPrompt?: any[] };
-        }): AsyncGenerator<any, GMIOutput, undefined> {
-          histories.push([...(turnInput?.metadata?.conversationHistoryForPrompt ?? [])]);
-          const turn = turns[histories.length - 1];
-          if (turn === undefined) {
-            throw new Error(`The GMI was given turn ${histories.length}; the test scripted ${turns.length}.`);
-          }
-          if (Array.isArray(turn)) {
-            yield {
-              type: GMIOutputChunkType.TOOL_CALL_REQUEST,
-              content: turn,
-              interactionId: 'interaction-scripted-turns',
-              timestamp: new Date(),
-              metadata: { executionMode: 'external', requiresExternalToolResult: true },
-            };
-            return { isFinal: false, responseText: 'I need the file read and the summary written.', toolCalls: turn };
-          }
-          yield { type: GMIOutputChunkType.TEXT_DELTA, content: turn, interactionId: 'interaction-scripted-turns', timestamp: new Date() };
-          return { isFinal: true, responseText: turn };
-        },
-        hydrateConversationHistory: vi.fn(),
-        handleToolResults: vi.fn(async (): Promise<GMIOutput> => continuation),
-      };
-    }
-
     /** How many messages a compaction keeps at the head and the tail, and any other setting a test sets. */
     type SummaryWindow = Pick<RollingSummaryCompactionConfig, 'headMessagesToKeep' | 'tailMessagesToKeep'> &
       Partial<RollingSummaryCompactionConfig>;
@@ -2524,21 +2547,6 @@ describe('AgentOS tool-result continuations', () => {
       let clock = Date.now();
       vi.spyOn(Date, 'now').mockImplementation(() => (clock += 1));
       return { rt, summarizedTurns };
-    }
-
-    /**
-     * Runs the conversation's first three turns on `rt`: two questions with their replies, then a turn the GMI stops
-     * for READ_CALL and WRITE_CALL, whose results (`results`) the host passes back and whose continuation replies.
-     */
-    async function runToolRoundTurns(rt: Awaited<ReturnType<typeof runtime>>, results = [READ_RESULT, WRITE_RESULT]) {
-      await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question1 }));
-      await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question2 }));
-      const stopped = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question3 }));
-      const request = stopped.find((r) => isActionableToolCallRequestChunk(r)) as AgentOSToolCallRequestChunk;
-      expect(request.toolCalls).toEqual([READ_CALL, WRITE_CALL]);
-      await vi.waitFor(() => expect(rt.context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY)).toBeDefined());
-      const continued = await collect(rt.agentos.handleToolResults(request.streamId, results));
-      expect((continued.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.done);
     }
 
     // The conversation: two questions with their replies, then a turn the host's GMI stops for READ_CALL and
@@ -2753,5 +2761,42 @@ describe('AgentOS tool-result continuations', () => {
         });
       },
     );
+  });
+
+  describe('with the rolling summary off and a history limit', () => {
+    it('a trim whose cut falls between the call and its results keeps the round whole, in the conversation and in the history the next turn sends', async () => {
+      // A limit of six keeps the conversation's first two messages and its newest four. The conversation holds six
+      // when the fourth question is recorded, and its newest four then start at the round's first result: a cut
+      // there drops the call and keeps both results.
+      const rt = await runtime('conv-history-limit-cuts-into-round', {}, { maxHistoryLengthMessages: 6 });
+      const gmi = scriptedTurnsGmi([TEXTS.reply1, TEXTS.reply2, [READ_CALL, WRITE_CALL], TEXTS.reply4, TEXTS.reply5], {
+        isFinal: true,
+        responseText: TEXTS.done,
+      });
+      rt.useGmi(gmi);
+
+      await runToolRoundTurns(rt);
+      const next = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question4 }));
+
+      expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.reply4);
+      // a provider refuses a request that holds a call without its result, or a result without its call
+      const history = gmi.histories[3] ?? [];
+      expect(unrequestedToolResultIds(history)).toEqual([]);
+      expect(unansweredToolCallIds(history)).toEqual([]);
+      expect(history.map(nameOf)).toEqual(['question1', 'reply1', 'call', 'read', 'write', 'done']);
+      // the conversation keeps the round whole, past the limit
+      expect(rt.context.getAllMessages().map(nameOf)).toEqual([
+        'question1', 'reply1', 'call', 'read', 'write', 'done', 'question4', 'reply4',
+      ]);
+
+      // once the newest four start after the round, the next trim leaves the round out whole
+      const after = await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question5 }));
+
+      expect((after.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.reply5);
+      expect((gmi.histories[4] ?? []).map(nameOf)).toEqual(['question1', 'reply1', 'done', 'question4', 'reply4']);
+      expect(rt.context.getAllMessages().map(nameOf)).toEqual([
+        'question1', 'reply1', 'question4', 'reply4', 'question5', 'reply5',
+      ]);
+    });
   });
 });

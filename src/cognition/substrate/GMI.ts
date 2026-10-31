@@ -1507,8 +1507,9 @@ export class GMI implements IGMI {
                     ? [{ content: this.activePersona.baseSystemPrompt, priority: 1}]
                     : [];
 
-        // The personality section sorts right after the base prompt (priority 2 after priority 1). With no
-        // learner session and no persona traits passed there is none, and the prompt is the one sent before.
+        // The personality section sorts after a string or template base prompt (priority 2 after priority 1); the
+        // entries of a list keep their own priorities. With no learner session and no persona traits passed there is
+        // none, and the prompt is the one sent before.
         const systemPrompts = [...baseSystemPrompts, ...turnLearning.systemPrompts];
         const rollingSummaryText = typeof turnInput.metadata?.rollingSummary?.text === 'string'
           ? turnInput.metadata.rollingSummary.text.trim()
