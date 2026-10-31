@@ -165,7 +165,8 @@ describe('a runtime with a learning layer', () => {
     const layer = recordingLayer(() => new Promise<ILearnerSession>((resolve) => {
       answer = resolve;
     }));
-    const manager = await managerWith(layer, { shutdownTimeoutMs: 200 });
+    // Long enough that the open is still the session's when it answers, past the acquisition's budget.
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 5_000 });
     const startedAt = Date.now();
     const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_900);
