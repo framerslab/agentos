@@ -5,7 +5,8 @@
  * learner session asked for the turn's scope ids and its recorder before the GMI prepares the turn). A learner's
  * summary goes under the learner's scope ids as one recorded upsert, and the retriever reads it back for that learner
  * and for no other tenant's user of the same id; a text that did not change is kept with no row, and one that changed
- * is replaced, the kept verdict naming what the upsert wrote and forgot; a turn with no learner files under its
+ * is replaced, the kept verdict naming what the upsert wrote and forgot; a text it kept whose trace was deleted since is
+ * filed again; a turn with no learner files under its
  * session's form; a second user's summary goes with forgetUser for that user; an upsert whose second write fails
  * takes back the first; a forget that fails is kept and made at the next upsert; a compaction that finishes after
  * forgetUser writes nothing back, with the facade on a file of its own and on the learning store's adapter; a freeze
@@ -230,6 +231,39 @@ describe("a learner's summary", () => {
       'Fact: Ana likes green tea.',
       'Rolling summary for conversation c-a (persona tutor).\n\n- likes green tea',
     ]);
+  });
+});
+
+describe('a text the sink kept', () => {
+  it('is filed again when its trace was deleted since, as an upsert with no learning layer files it', async () => {
+    quiet();
+    const { store, brain, memory, layer, sink } = await setUp();
+    const session = await layer.forLearner(LEARNER_A, contextOf('s-a'));
+    const upsert = (summaryText: string, fact: string) =>
+      sink.upsertRollingSummaryMemory(
+        updateOf(turnOf(session, { userId: '42', namespace: 'A', conversationId: 'c-a' }), {
+          userId: '42',
+          organizationId: 'A',
+          conversationId: 'c-a',
+          summaryText,
+          summaryJson: { facts: [{ text: fact }] },
+          policy: USER_ONLY,
+        }),
+      );
+    await upsert('- likes tea', 'Ana likes tea.');
+    const fact = await brain.get<{ id: string }>("SELECT id FROM memory_traces WHERE content = 'Fact: Ana likes tea.'");
+    // The host forgets the fact the sink filed; the next compaction still holds it.
+    await memory.forget(fact!.id);
+
+    await upsert('- likes tea, hot', 'Ana likes tea.');
+
+    expect((await filed(brain)).map((trace) => trace.content)).toEqual([
+      'Fact: Ana likes tea.',
+      'Rolling summary for conversation c-a (persona tutor).\n\n- likes tea, hot',
+    ]);
+    const kept = (await sinkRows(store, chainKeyOf(LEARNER_A)))[3]!.after!;
+    expect(kept.created).toHaveLength(2);
+    expect(kept.deleted).toHaveLength(1);
   });
 });
 
