@@ -84,6 +84,15 @@ describe('ConversationContext history cuts', () => {
       context.addMessage(fields('r3'));
       expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'q3', 'r3']);
     });
+
+    it.each([0, -3])('with a limit of %s keeps every message, as getHistory() returns them', (limit) => {
+      const context = contextWith(['q1', 'r1', 'q2', 'r2'], { maxHistoryLengthMessages: limit });
+
+      context.addMessage(fields('q3'));
+
+      expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'q2', 'r2', 'q3']);
+      expect(names(context.getHistory())).toEqual(['q1', 'r1', 'q2', 'r2', 'q3']);
+    });
   });
 
   describe('getHistory', () => {
@@ -398,6 +407,36 @@ describe('ConversationContext history cuts', () => {
       expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'r5', 'q6', 'r6', 'q7', 'r7']);
       const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
       expect(summary?.content).toBe('The user asked about the weather.');
+    });
+
+    it('keeps a new summary and the last summary of a loaded conversation at the trims after it', async () => {
+      // A conversation loaded from storage holds a summary that sorts by its own time, after messages it does not all
+      // stand for. A pass summarizes the eight oldest messages after the head into a summary of its own, right after
+      // the head, and leaves seven between it and the newest two, too few for another chunk, so it trims the history.
+      // The two summaries stand for different messages the trim drops, so it keeps both, and so does the next trim.
+      const summarize = vi.fn(async () => 'The user asked about the weather.');
+      const context = summarizingContext(
+        ['q1', 'r1', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4', 'q5', 'r5', 'q6', 'summary', 'q7', 'r7', 'q8', 'r8', 'q9', 'r9'],
+        summarize,
+        { summarizationChunkSize: 8 },
+      );
+      const summaries = () =>
+        context.getAllMessages().filter((message) => message.role === MessageRole.SUMMARY).map((message) => message.content);
+
+      context.addMessage(fields('q10'));
+
+      await vi.waitFor(() =>
+        expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'summary', 'r7', 'q8', 'r8', 'q9', 'r9', 'q10']),
+      );
+      expect(summaries()).toEqual(['The user asked about the weather.', 'The user asked about the notes.']);
+
+      context.addMessage(fields('r10'));
+
+      await vi.waitFor(() =>
+        expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'summary', 'q8', 'r8', 'q9', 'r9', 'q10', 'r10']),
+      );
+      expect(summaries()).toEqual(['The user asked about the weather.', 'The user asked about the notes.']);
+      expect(summarize).toHaveBeenCalledTimes(1);
     });
   });
 });
