@@ -6,15 +6,24 @@
  * learner and in mode off where a layer exists, and acts as before on a learner's turn), so a tool added to the
  * category fails this test until it is classed. For each recorded path: exactly one candidate row, or the call's own
  * row for an operator's call; under AGENTOS_LEARNING_FREEZE=1 an operator's call still writes its row and changes
- * state; every kind revert covers is reverted and its before-state comes back. The memory tools' paths are read from
- * their source as the emergent tools' are; the rolling-summary sink's path is added with its routing.
+ * state; every kind revert covers is reverted and its before-state comes back. The memory tools' paths and the memory
+ * derivations that record are read from their source as the emergent tools' are.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ToolExecutionContext } from '../../../core/tools/ITool';
-import { createLearningLayer, InMemoryLearningStore, toolLearningContextFor, type LearnerContext, type LearnerKey } from '../index';
+import { DEFAULT_LONG_TERM_MEMORY_POLICY } from '../../../core/conversation/LongTermMemoryPolicy';
+import { createStandaloneMemoryRollingSummarySink } from '../../memory/io/integration/StandaloneMemoryBridge';
+import {
+  createLearningLayer,
+  InMemoryLearningStore,
+  toolLearningContextFor,
+  turnLearningBeforePreparation,
+  type LearnerContext,
+  type LearnerKey,
+} from '../index';
 import { chainKeyOf } from '../ledger/Ledger';
 import { closeMemory, facadeAt, liveContents, tempFile } from './helpers/memoryFixtures';
 
@@ -80,6 +89,29 @@ const MEMORY_TOOLS_THAT_WRITE: Record<string, string> = {
   memory_update: 'recorded',
   memory_reflect: 'withdrawn: refused wherever a learning layer exists, so it writes no row',
   rehydrate_memory: 'not a self-change: it reads the archive and logs the access',
+};
+
+/** Every actor under `src/cognition/memory/` that records a memory derivation through a learner session. */
+function memoryActorsThatRecord(): string[] {
+  const actors = new Set<string>();
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== '__tests__') walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.ts') || entry.name.endsWith('.d.ts')) continue;
+      for (const match of fs.readFileSync(full, 'utf8').matchAll(/actor: '(memory:[a-z_]+)'/g)) actors.add(match[1]!);
+    }
+  };
+  walk(path.join(SRC, 'cognition/memory'));
+  return [...actors].sort();
+}
+
+/** The memory derivations that record through the ledger in this release, and what each records. */
+const MEMORY_DERIVATIONS_RECORDED: Record<string, string> = {
+  'memory:rolling_summary': 'the rolling-summary sink: one candidate per upsert that inserts or forgets a trace',
 };
 
 describe('the paths that change learned state', () => {
@@ -176,5 +208,51 @@ describe("the memory tools' writes", () => {
       await layer.revert(String(write.details?.ledgerId), 'ops');
       expect(await liveContents(brain), `after revert ${step + 1}`).toEqual(afterEachRevert[step]);
     }
+  });
+});
+
+describe("the rolling-summary sink's upserts", () => {
+  it('reads every memory derivation that records from the source, and each is classed', () => {
+    expect(memoryActorsThatRecord()).toEqual(Object.keys(MEMORY_DERIVATIONS_RECORDED).sort());
+  });
+
+  it('leave one candidate and its kept verdict per upsert; under AGENTOS_LEARNING_FREEZE=1 an upsert leaves none, while revert brings the before-state back', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const store = new InMemoryLearningStore();
+    const { memory, brain } = await facadeAt(tempFile(), 'sink-brain');
+    const layer = createLearningLayer({ store, memoryTools: memory });
+    const session = await layer.forLearner(KEY, context());
+    const sink = createStandaloneMemoryRollingSummarySink(memory);
+    const upsert = async (summaryText: string): Promise<void> => {
+      const learning = turnLearningBeforePreparation(session, { userId: '42', namespace: 'A', workflowSeat: false, conversationId: 's-1' })!;
+      await sink.upsertRollingSummaryMemory({
+        userId: '42',
+        organizationId: 'A',
+        sessionId: 's-1',
+        conversationId: 's-1',
+        personaId: 'tutor',
+        memoryPolicy: { ...DEFAULT_LONG_TERM_MEMORY_POLICY, scopes: { conversation: false, user: true, persona: false, organization: false } },
+        summaryText,
+        summaryJson: null,
+        turnScopes: learning.scopes,
+        recordSelfChange: learning.recordSelfChange,
+        contributorIds: ['42'],
+      });
+    };
+    const sinkRows = async () =>
+      (await store.chainRows(CHAIN)).filter((row) => row.kind === 'memory_write' && JSON.parse(row.body).actor === 'memory:rolling_summary');
+
+    await upsert('- first');
+    await upsert('- second');
+    const rows = await sinkRows();
+    expect(rows.filter((row) => row.rowType === 'candidate')).toHaveLength(2);
+    expect(rows.filter((row) => row.rowType === 'verdict').map((row) => row.verdict)).toEqual(['kept', 'kept']);
+
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    await upsert('- third');
+    expect(await sinkRows()).toHaveLength(4);
+
+    await layer.revert(rows.filter((row) => row.rowType === 'candidate')[1]!.id, 'ops');
+    expect((await liveContents(brain)).map((text) => text.split('\n\n')[1])).toEqual(['- first']);
   });
 });

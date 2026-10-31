@@ -6629,7 +6629,7 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
     await layer.freeze({ learner: LEARNER_42 }, 'ops');
     const report = await layer.forgetUser('42', { namespace: 'A' });
     const unreached = (await layer.manifest()).forgetUnreached ?? [];
-    expect(unreached).toHaveLength(4);
+    expect(unreached).toHaveLength(5);
     expect(report).toEqual({
       userId: '42',
       namespace: 'A',
@@ -6646,6 +6646,7 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
     });
     expect(unreached.map((line) => line.split(': ')[0])).toEqual([
       'the memory archive',
+      "a conversation's own history",
       "memory's observer and reflector buffers and prospective reminders",
       "a session's forged tools",
       "an organization scope a host's policy shares",
@@ -6947,16 +6948,17 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
     const withoutFacade = (await createLearningLayer().manifest()).forgetUnreached;
     expect(withoutFacade).toEqual([
       'the memory archive: an archived original carries no scope id to find it by',
+      "a conversation's own history: the full runtime's conversation store and a gmi() session's history keep a conversation's messages until the host deletes them, and a later compaction summarizes them again",
       "memory's observer and reflector buffers and prospective reminders: they carry no user id",
       "a session's forged tools: they carry no user id",
       "an organization scope a host's policy shares: it is the organization's, which the host's shareWithOrganization policy files into",
       'a memory tools facade the layer was not handed: a host that registers the memory tools itself passes their facade as learning.memoryTools',
     ]);
     const { memory } = await toolsFacade();
-    expect((await createLearningLayer({ memoryTools: memory }).manifest()).forgetUnreached).toEqual(withoutFacade!.slice(0, 4));
+    expect((await createLearningLayer({ memoryTools: memory }).manifest()).forgetUnreached).toEqual(withoutFacade!.slice(0, 5));
     const noDeleteScope = { brainId: 'old-tools', deleteTraces: async () => ({ deleted: 0 }) };
     expect((await createLearningLayer({ memoryTools: noDeleteScope }).manifest()).forgetUnreached).toEqual([
-      ...withoutFacade!.slice(0, 4),
+      ...withoutFacade!.slice(0, 5),
       'memory tools facade of brain old-tools: it has no deleteScope',
     ]);
   });
