@@ -1991,9 +1991,12 @@ describe('agencies and launch_agency, as a host uses the package', () => {
           ...untyped.map(([id, args]) => launch(id, args)),
           // No strategy: the seats run in the order listed, though the first names the second in its dependsOn.
           launch('ok', { goal: 'Answer in order.', seats: [{ role: 'first', instructions: 'You go first.', dependsOn: ['second'] }, { role: 'second', instructions: 'You go second.' }] }),
+          // A seat whose answer passes what a result holds.
+          launch('long', { goal: 'Say it all.', seats: [{ role: 'talker', instructions: 'You talk.' }] }),
         ]),
         reply.text('First answer.'),
         reply.text('Second answer.'),
+        reply.text('y'.repeat(16_001)),
         reply.text('Done.'),
       ],
     });
@@ -2014,8 +2017,8 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     untyped.forEach(([id], i) => {
       expect(refusalOf(result, invalid.length + i), id).toContain("Invalid arguments for tool 'launch_agency'");
     });
-    // The parent's two steps and the two seats of the one launch that started: no refused call ran a seat.
-    expect(s.seen).toHaveLength(4);
+    // The parent's two steps and the seats of the two launches that started: no refused call ran a seat.
+    expect(s.seen).toHaveLength(5);
     const ran = launchOf(result, invalid.length + untyped.length);
     expect(ran).toMatchObject({ status: 'completed', text: 'Second answer.', provenance: { strategy: 'sequential' } });
     expect(ran.seats.map((seat) => [seat.role, seat.status, seat.summary])).toEqual([
@@ -2027,6 +2030,11 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     expect(lastUserText(s.seen[1])).toContain('Answer in order.');
     expect(systemText(s.seen[2])).toContain('You go second.');
     expect(lastUserText(s.seen[2])).toContain('First answer.');
+    // A result holds 16,000 characters of the team's text and says it was cut, and 1,000 of a seat's summary.
+    const long = launchOf(result, invalid.length + untyped.length + 1);
+    expect(long).toMatchObject({ status: 'completed', truncated: true });
+    expect(long.text).toBe('y'.repeat(16_000));
+    expect(long.seats[0].summary).toHaveLength(1_000);
   });
 
   it("the agent's usage ledger records a temporary seat's calls and the team's manager's under the source launch_agency, beside the agent's own, and a member's seat records its calls to the member's own ledger; the manager is offered no spawn_specialist", async () => {
