@@ -748,6 +748,41 @@ describe('launch_agency on the full runtime', () => {
     expect(sends).toEqual([]);
     expect(toolMessages(provider.seen[2].messages)[0]).toContain('mail is paused');
   });
+
+  it("a runtime seat's approval runs only the registration it was asked about, never a tool registered under the name while it waited", async () => {
+    const first: unknown[] = [];
+    const second: unknown[] = [];
+    const asked: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      // Another registration takes the name while this approval is pending.
+      const replacement = hostTool('send_email', async (args) => {
+        second.push(args);
+        return 'sent by the replacement';
+      }, true);
+      await booted!.getToolOrchestrator().registerTool({ ...replacement, id: 'send_email-v2' });
+      return { approved: true };
+    };
+    const sendEmail = hostTool('send_email', async (args) => {
+      first.push(args);
+      return 'sent';
+    }, true);
+    booted = await boot({ tools: { search: search(), send_email: sendEmail }, agencies: { launch: true, hitl: { approvals: { beforeTool: ['send_email'] }, handler } } });
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Email the team.', seats: [{ role: 'mailer', instructions: 'Send the mail.', tools: ['send_email'] }] }]),
+      toolStep(['send_email', { to: 'team' }]),
+      textStep('Mail held.'),
+      textStep('Done.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // The seat called send_email and the approver approved it (the precondition). The name then held another tool, which
+    // the approval was not asked about: neither tool ran, and the seat's model read why.
+    expect(asked).toEqual(['send_email']);
+    expect(second).toEqual([]);
+    expect(first).toEqual([]);
+    expect(toolMessages(provider.seen[2].messages)[0]).toContain('step_replaced');
+    expect(toolMessages(provider.seen[3].messages)[0]).toContain('"status":"completed"');
+  });
 });
 
 describe('launch_agency is never a step', () => {
