@@ -21,7 +21,7 @@ import {
 
 /**
  * Whether a value is a turn's scopes as a learner session gives them: the GMI checks a preparation's before it files
- * by them, and a tool before it reads them.
+ * by them, and a tool before it reads them. A blank scope id is no turn's: `''` is the Brain's unscoped traces.
  */
 export function isTurnScopes(value: unknown): value is TurnScopes {
   if (!value || typeof value !== 'object') return false;
@@ -30,7 +30,9 @@ export function isTurnScopes(value: unknown): value is TurnScopes {
     (v.learner === 'bound' || v.learner === 'none') &&
     LEARNING_MODES.includes(v.mode as LearningMode) &&
     typeof v.userScopeId === 'string' &&
+    v.userScopeId !== '' &&
     typeof v.personaScopeId === 'string' &&
+    v.personaScopeId !== '' &&
     typeof v.namespace === 'string'
   );
 }
