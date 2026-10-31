@@ -4,8 +4,7 @@
  * (`createAgencySeat`). Each call runs one turn of that GMI under the call's stop, in the seat session, as the parent
  * turn's user and organization, with the launch frame in its metadata; the seat's calls run one at a time. A failed
  * turn rejects with its error's name and code alone, as a gmi() seat's does, the error itself going to the launch's
- * `logError` (spec D16). Each call that ran a turn is reported to `onCall` when it ends (the agency registry's seat
- * history).
+ * `logError`. Each call that ran a turn is reported to `onCall` when it ends (the agency registry's seat history).
  * @internal
  */
 import { randomUUID } from 'node:crypto';

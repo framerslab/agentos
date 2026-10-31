@@ -1,7 +1,7 @@
 /**
  * @file runtimeLaunchTool.ts
- * `launch_agency` on the full runtime (spec 4.10): the config tool AgentOS registers with `agencies.launch`, which a
- * persona lists and calls only with the `agency:launch` capability, and its host for the launch engine. A seat is a
+ * `launch_agency` on the full runtime: the config tool AgentOS registers with `agencies.launch`, which a persona lists
+ * and calls only with the `agency:launch` capability, and its host for the launch engine. A seat is a
  * GMI of the runtime's GMIManager (`createAgencySeat`): a registered persona by `personaId`, or a persona made for a
  * temporary seat from the calling GMI's; it runs through a view of the shared tool orchestrator that lists and runs
  * its allowlist alone. The engine is imported on the first call.
@@ -51,7 +51,7 @@ export interface RuntimeLaunchToolDeps {
   limits: LaunchLimits;
   /** The GMIs' default provider and model, for a persona that names none (`gmiManagerConfig.defaultGMIBaseConfigDefaults`). */
   gmiDefaults?: { defaultLlmProviderId?: string; defaultLlmModelId?: string };
-  /** Where a launch's failures go: a seat's failed call's original error among them (spec D16). */
+  /** Where a launch's failures go: a seat's failed call's original error among them. */
   logger: ILogger;
 }
 
@@ -68,9 +68,9 @@ function firstLineOf(text: string, fallback: string): string {
 }
 
 /**
- * A temporary seat's persona, made field by field from the persona of the GMI that launched it (spec D4): its route,
- * completion options, capabilities and hard limits, with the seat's instructions as its prompt and no traits,
- * metaprompts, sentiment tracking or memory config.
+ * A temporary seat's persona, made field by field from the persona of the GMI that launched it: its route, completion
+ * options, capabilities and hard limits, with the seat's instructions as its prompt and no traits, metaprompts,
+ * sentiment tracking or memory config.
  */
 function temporaryPersona(parent: IPersonaDefinition | undefined, seat: Extract<ResolvedSeat, { form: 'temporary' }>, launchId: string): IPersonaDefinition {
   return {
@@ -114,8 +114,8 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
    * The output tokens one call of a GMI built from the persona is counted with, as its own check counts it: the
    * persona's maxTokens held to the output ceiling of its model, the runtime's default model when it names none
    * (4,096 when maxTokens is unset, which is what a GMI sends then: no cap). The one-call floor counts a temporary seat
-   * with the persona of the GMI that launched it, whose route the seat takes (spec D4), and a personaId member with its
-   * own persona's (spec 4.8 step 4, 4.10).
+   * with the persona of the GMI that launched it, whose route the seat takes, and a personaId member with its own
+   * persona's.
    */
   const estimateOf = (persona: IPersonaDefinition | undefined): number =>
     outputEstimateTokens(persona?.defaultModelId || deps.gmiDefaults?.defaultLlmModelId || '', persona?.defaultModelCompletionOptions?.maxTokens);
@@ -140,7 +140,7 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
     surface: 'runtime',
 
     async rootParent(ctx: ToolExecutionContext): Promise<LaunchParent> {
-      // A full-runtime turn carries no gate, no hooks and no budget (spec 4.10); its root launches draw on its pool.
+      // A full-runtime turn carries no gate, no hooks and no budget; its root launches draw on its pool.
       const gmi = resolveGMIForToolContext(manager(), ctx);
       if (!gmi) throw new Error('launch_agency: the GMI that made the call is not active');
       const persona = gmi.getPersona();
@@ -168,12 +168,12 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
       };
     },
 
-    /** A nested launch's temporary seats run on the calling GMI's persona's route (spec D4): the floor counts them with its estimate. */
+    /** A nested launch's temporary seats run on the calling GMI's persona's route: the floor counts them with its estimate. */
     async outputEstimateTokens(ctx: ToolExecutionContext): Promise<number> {
       return estimateOf(resolveGMIForToolContext(manager(), ctx)?.getPersona() ?? manager().getPersonaDefinition(ctx.personaId));
     },
 
-    /** A personaId member's calls run on its own persona's route: the floor counts its seat with that persona's estimate (spec 4.8 step 4). */
+    /** A personaId member's calls run on its own persona's route: the floor counts its seat with that persona's estimate. */
     async memberOutputEstimateTokens(ref: string): Promise<number | undefined> {
       const persona = manager().getPersonaDefinition(ref);
       return persona ? estimateOf(persona) : undefined;
@@ -242,8 +242,8 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
           return { code: 'unknown_member', reason: `seat '${seat.role}': no persona '${seat.ref}'` };
         }
         logError(error, `seat ${seat.role}`);
-        // Spec D19: a seat that cannot be seated (a persona the user's tier or strict validation refuses, a GMI that does
-        // not initialize) refuses the launch before any seat runs.
+        // A seat that cannot be seated (a persona the user's tier or strict validation refuses, a GMI that does not
+        // initialize) refuses the launch before any seat runs.
         return seat.form === 'persistent'
           ? { code: 'member_unavailable', reason: `seat '${seat.role}': the persona '${seat.ref}' could not be seated (${nameAndCode(error)})` }
           : { code: 'member_unavailable', reason: `seat '${seat.role}' could not be seated (${nameAndCode(error)})` };
@@ -251,7 +251,7 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
     },
 
     async agencyRoute(parent: LaunchParent) {
-      // The manager and synthesizers call generateText (spec D17).
+      // The manager and synthesizers call generateText.
       if (deps.options.coordinator) return { ...deps.options.coordinator };
       const persona = personaOf(parent);
       const provider = persona?.defaultProviderId || deps.gmiDefaults?.defaultLlmProviderId;
@@ -259,10 +259,10 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
       return { ...(provider ? { provider } : {}), ...(model ? { model } : {}) };
     },
 
-    // The team's entry in the runtime's AgencyRegistry while it runs (spec D14): made under the launch's agencyId with a
-    // seat per role once the team is built, a history entry per seat call (each seat's onCall), marked closing when the
-    // launch returns while a seat still holds its GMI, and, when the launch's entry goes, the launch's status, closing
-    // time and usage merged, then the entry removed. A runtime with no registry records nothing.
+    // The team's entry in the runtime's AgencyRegistry while it runs: made under the launch's agencyId with a seat per
+    // role once the team is built, a history entry per seat call (each seat's onCall), marked closing when the launch
+    // returns while a seat still holds its GMI, and, when the launch's entry goes, the launch's status, closing time
+    // and usage merged, then the entry removed. A runtime with no registry records nothing.
     recorder: {
       start({ agencyId, conversationId, meta, seats }) {
         const registry = deps.getAgencyRegistry?.();
