@@ -11,6 +11,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdaptPersonalityTool, type AdaptPersonalityDeps } from '../AdaptPersonalityTool';
 import { SelfEvaluateTool, type SelfEvaluateDeps, type SelfEvaluateInput } from '../SelfEvaluateTool';
+import type { ForgeToolMetaTool } from '../ForgeToolMetaTool';
+import { wrapForgeTool } from '../wrapForgeTool';
 import type { ToolExecutionContext } from '../../../core/tools/ITool';
 import type { ToolCallResult, UserContext } from '../../substrate/IGMI';
 import { approvingHitl, echoTool, makeForgeHost, type ForgeHost } from './helpers/forge-host';
@@ -247,6 +249,16 @@ describe('the self-modification tools behind the approval gate', () => {
     // A call the layer lets act is asked about, as before.
     expect((await call(host, 'create_workflow', { action: 'list' }, { learner: 'bound', mode: 'off' })).isError).toBe(false);
     expect(requestApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('keep the refusal through wrapForgeTool, which a host wraps forge_tool with', async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    const raw = (await host.orchestrator.getTool('forge_tool')) as unknown as ForgeToolMetaTool;
+    const wrapped = wrapForgeTool({ raw, agentId: 'agent-1', sessionId: 'session-test', capture: () => undefined });
+    const contextOf = (learning: TurnLearning): ToolExecutionContext =>
+      ({ gmiId: 'g', personaId: 'p', userContext: { userId: 'u' }, sessionData: { sessionId: 'session-test', learning } }) as ToolExecutionContext;
+    expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf({ learner: 'bound', mode: 'off' }))?.details).toEqual({ status: 'rejected', reason: 'off' });
+    expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf(bound))).toBeUndefined();
   });
 
   it('name the learning refusal, not a missing approval manager, with the gate on and no manager', async () => {
