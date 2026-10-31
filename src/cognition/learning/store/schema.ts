@@ -2,9 +2,10 @@
  * @module learning/store/schema
  *
  * The learning store's ten tables, portable between SQLite and Postgres: TEXT and INTEGER columns, JSON in TEXT, times
- * as ISO strings, and no literal question mark in any statement (the Postgres adapter numbers each one). Every row
- * carries its learner's `namespace`; each row the layer updates in place carries a `version`, and a chain head's `seq`
- * is its version, moved only by compare-and-swap. A product that runs its own migrations runs
+ * as ISO strings, and no literal question mark in any statement (the Postgres adapter numbers each one). Every
+ * learner-keyed row carries its learner's `namespace`; a tombstone holds the hash of its namespace and user id alone,
+ * with `''` in its `namespace` column. Each row the layer updates in place carries a `version`, and a chain head's
+ * `seq` is its version, moved only by compare-and-swap. A product that runs its own migrations runs
  * {@link LEARNING_SCHEMA_DDL}, adds each column of {@link LEARNING_COLUMN_ADDITIONS} its tables lack, and passes
  * `ensureSchema: false` to the store.
  *
