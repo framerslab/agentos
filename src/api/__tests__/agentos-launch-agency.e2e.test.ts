@@ -77,6 +77,10 @@ import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPer
 import type { IRetrievalAugmentor } from '../../cognition/rag/IRetrievalAugmentor';
 import type { ITool, ToolExecutionContext } from '../../core/tools/ITool';
 import type { ILogger } from '../../core/logging/ILogger';
+import { checkChainable } from '../../cognition/emergent/StepGate';
+import { callTool, makeForgeHost } from '../../cognition/emergent/__tests__/helpers/forge-host';
+import { createSqliteAdapter } from '../../cognition/emergent/__tests__/helpers/sqlite-adapter';
+import { seedToolRow } from '../../cognition/emergent/__tests__/helpers/seed-rows';
 
 let callIds = 0;
 /** A model step that calls tools, each `[name, args]`. */
@@ -490,5 +494,68 @@ describe('launch_agency on the full runtime', () => {
     expect(toolMessages(provider.seen[3].messages)[0]).toContain('"status":"completed"');
     // The lead, the editor's first step, the drafter, the editor's second step, the lead.
     expect(provider.seen).toHaveLength(5);
+  });
+});
+
+describe('launch_agency is never a step', () => {
+  /** A stand-in for the runtime's launch_agency, with side effects: the rule goes by name. */
+  const launchTool = () => hostTool('launch_agency', async () => 'launched', true);
+  const listed = { compose: { sideEffectingTools: ['launch_agency'] } };
+
+  it('create_workflow refuses it though the host lists it, and a stored composition naming it loads with step_never_chainable', async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [launchTool()], config: listed });
+    const workflow = { action: 'create', name: 'team_up', description: 'Launches a team.', steps: [{ tool: 'launch_agency', args: { goal: '$input' } }] };
+    const refused = await callTool(host.orchestrator, 'create_workflow', workflow, { correlationId: 'wf-team' });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.errorDetails?.message)).toContain('step_not_chainable');
+    expect(String(refused.errorDetails?.message)).toContain('can never be a step');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const db = createSqliteAdapter();
+    const loader = await makeForgeHost({ db, tools: [launchTool()], config: listed });
+    seedToolRow(db, {
+      id: 'compose-team',
+      name: 'team_up',
+      mode: 'compose',
+      source: JSON.stringify({ mode: 'compose', steps: [{ name: 'launch', tool: 'launch_agency', inputMapping: { goal: '$input.text' } }] }),
+      inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+    });
+    const summary = await loader.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(summary.outcomes).toEqual([{ toolId: 'compose-team', name: 'team_up', state: 'suspended', reason: 'step_never_chainable' }]);
+    // Its start-up line names no configuration key: no key a host sets unlocks it.
+    const line = warn.mock.calls.map(([message]) => String(message)).find((message) => message.includes('"team_up"'));
+    expect(line).toContain('step_never_chainable');
+    expect(line).not.toContain('(see ');
+    // The rule's verdict keeps a public code: ChainRefusalCode gains no member.
+    expect(checkChainable('launch_agency', launchTool(), ['launch_agency'])).toMatchObject({ ok: false, code: 'step_not_chainable' });
+  });
+
+  it('a stored composition that names it after a step refused for another reason still loads with step_never_chainable', async () => {
+    // send_note has side effects and is not listed: on its own it suspends a composition with step_not_chainable, whose
+    // start-up line names emergent.compose.sideEffectingTools, a list that cannot unlock launch_agency.
+    const sendNote = () => hostTool('send_note', async () => 'sent', true);
+    expect(checkChainable('send_note', sendNote(), listed.compose.sideEffectingTools)).toMatchObject({ ok: false, code: 'step_not_chainable' });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const db = createSqliteAdapter();
+    const loader = await makeForgeHost({ db, tools: [sendNote(), launchTool()], config: listed });
+    seedToolRow(db, {
+      id: 'compose-note-team',
+      name: 'note_then_team',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [
+          { name: 'note', tool: 'send_note', inputMapping: { text: '$input.text' } },
+          { name: 'launch', tool: 'launch_agency', inputMapping: { goal: '$input.text' } },
+        ],
+      }),
+      inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+    });
+    const summary = await loader.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(summary.outcomes).toEqual([{ toolId: 'compose-note-team', name: 'note_then_team', state: 'suspended', reason: 'step_never_chainable' }]);
+    const line = warn.mock.calls.map(([message]) => String(message)).find((message) => message.includes('"note_then_team"'));
+    expect(line).toContain('step_never_chainable');
+    expect(line).not.toContain('(see ');
   });
 });
