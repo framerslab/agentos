@@ -179,11 +179,15 @@ describe('the other four self-modification tools through the tool orchestrator',
     expect((await call(host, 'manage_skills', { action: 'list' })).isError).toBe(false);
   });
 
-  it("are not refused on a learner's turn in mode on, nor without a layer", async () => {
+  it("act on a learner's turn in mode on, and without a layer", async () => {
     const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
-    expect(reasonOf(await call(host, 'create_workflow', CREATE, bound))).toBeUndefined();
-    expect(reasonOf(await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 }))).toBeUndefined();
+    // Each call succeeds: a failure for any other reason has no refusal reason either, so the reason alone proves nothing.
+    expect((await call(host, 'create_workflow', CREATE, bound)).isError).toBe(false);
+    expect((await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 })).isError).toBe(false);
     expect((await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 }, bound)).isError).toBe(false);
+    expect((await call(host, 'manage_skills', { action: 'enable', skillId: 'web-search' }, bound)).isError).toBe(false);
+    expect((await call(host, 'forge_tool', FORGE, bound)).isError).toBe(false);
+    expect(host.judge).toHaveBeenCalledTimes(1);
   });
 });
 
