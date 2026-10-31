@@ -5478,6 +5478,60 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
     }
   });
 
+  it("takes a write back as unrecorded when the tombstone cannot be read again, leaving its candidate pending, and names a forgotten user's tombstone, never the user, when a write cannot be taken back", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    /** A store whose tombstones cannot be read while `unreadable` is set, as a store whose connection dropped. */
+    class FlakyTombstones extends InMemoryLearningStore {
+      unreadable = false;
+      async isForgotten(hash: string): Promise<boolean> {
+        if (this.unreadable) throw new Error('tombstones unreadable');
+        return super.isForgotten(hash);
+      }
+    }
+    const store = new FlakyTombstones();
+    const layer = createLearningLayer({ store });
+    try {
+      const session = await layer.forLearner(LEARNER_42, productContext('s-1'));
+      await session.prepareTurn(productTurn());
+      const unread = watchedWrite('mt-u', async () => {
+        store.unreadable = true;
+        return 'mt-u';
+      });
+      const result = await session.recordSelfChange!(unread.input);
+      store.unreadable = false;
+      expect(result).toMatchObject({ status: 'rejected', reason: 'store_unavailable' });
+      expect(unread.undone).toEqual([['mt-u', 'unrecorded']]);
+      const pending = (await store.chainRows(chainKeyOf(LEARNER_42))).filter((row) => row.subject === 'mt-u');
+      expect(pending.map((row) => [row.rowType, row.verdict])).toEqual([['candidate', 'pending']]);
+      expect(result.status === 'rejected' ? result.ledgerId : undefined).toBe(pending[0].id);
+
+      // A forgotten user's write whose undo fails: the warning names the tombstone's first 16 hex digits, never the user.
+      const zed: LearnerKey = { namespace: 'A', agentKey: 'tutor', userId: 'zed-private' };
+      const zedSession = await layer.forLearner(zed, productContext('s-2'));
+      await zedSession.prepareTurn(productTurn({ userId: 'zed-private' }));
+      const hash = await tombstoneHash('A', 'zed-private');
+      const stuck: SessionSelfChange<string> = {
+        ...watchedWrite('mt-z').input,
+        apply: async () => {
+          await store.insertForgotten(hash, LEARNED_AT);
+          return 'mt-z';
+        },
+        undo: async () => {
+          throw new Error('the trace is locked');
+        },
+      };
+      expect(await zedSession.recordSelfChange!(stuck)).toEqual({ status: 'rejected', reason: 'forgotten' });
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines.some((line) => line.includes(`(tombstone ${hash.slice(0, 16)}) was not taken back (the trace is locked)`))).toBe(true);
+      expect(lines.some((line) => line.includes('zed-private'))).toBe(false);
+      expect(await store.traitRow('A', 'tutor', 'zed-private')).toBeUndefined();
+      expect(await store.chainRows(chainKeyOf(zed))).toEqual([]);
+    } finally {
+      await layer.close();
+    }
+  });
+
   it("files a session with no learner under the session's own form, records its writes under the agent, and a named user's turn on it under that user", async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const { adapter } = await processOver(learningFile());
