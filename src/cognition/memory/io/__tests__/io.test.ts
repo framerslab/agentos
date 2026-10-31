@@ -1004,6 +1004,44 @@ describe('ChatGptImporter', () => {
     ]);
   });
 
+  it("finds a conversation's row by the export's id for it, through a rename and without a creation time", async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    const brain = await openBrain();
+    const importer = new ChatGptImporter(brain);
+    const rowsOf = () =>
+      brain.all<{ id: string; title: string; updated_at: number }>(
+        'SELECT id, title, updated_at FROM conversations WHERE brain_id = ? ORDER BY title',
+        [brain.brainId],
+      );
+
+    // The export names the conversation by its id; a later export carries the title it was renamed to.
+    const named = buildMockConversations() as Array<Record<string, unknown>>;
+    named[0]!.conversation_id = 'conv-generics';
+    named[0]!.id = 'conv-generics';
+    fs.writeFileSync(jsonPath, JSON.stringify(named), 'utf8');
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    named[0]!.title = 'Generics, renamed';
+    named[0]!.update_time = 1711240000;
+    fs.writeFileSync(jsonPath, JSON.stringify(named), 'utf8');
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+    const renamed = await rowsOf();
+    expect(renamed.map((row) => [row.title, Number(row.updated_at)])).toEqual([['Generics, renamed', 1711240000000]]);
+
+    // A conversation the export gives no creation time is found again by its id alone.
+    const undated = buildMockConversations() as Array<Record<string, unknown>>;
+    undated[0]!.conversation_id = 'conv-undated';
+    undated[0]!.title = 'Undated';
+    delete undated[0]!.create_time;
+    delete undated[0]!.update_time;
+    const mapping = undated[0]!.mapping as Record<string, { message?: { content?: { parts?: string[] } } | null }>;
+    mapping['user-msg-1']!.message!.content!.parts = ['What is a mapped type?'];
+    fs.writeFileSync(jsonPath, JSON.stringify(undated), 'utf8');
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+    expect((await rowsOf()).map((row) => row.title)).toEqual(['Generics, renamed', 'Undated']);
+  });
+
   it('handles empty conversations.json gracefully', async () => {
     const dir = tempDir();
     const jsonPath = path.join(dir, 'conversations.json');
