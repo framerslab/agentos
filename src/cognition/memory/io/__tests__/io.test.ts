@@ -954,7 +954,7 @@ describe('ChatGptImporter', () => {
     expect(first.imported).toBeGreaterThan(0);
 
     const second = await importer.import(jsonPath);
-    // New conversation rows are created (OR IGNORE), but trace content is duped.
+    // The conversation's row is found again, and its pair is a duplicate.
     expect(second.skipped).toBeGreaterThan(0);
   });
 

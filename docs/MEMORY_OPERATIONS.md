@@ -717,6 +717,7 @@ const result = await mem.importFrom('./conversations.json', { format: 'chatgpt' 
 ```
 
 - Each message pair becomes one `episodic` trace in `user` scope whose content is `[user]: ...` followed by `[assistant]: ...`, with no tags; its metadata names the conversation row.
+- A conversation's row is found again, so a later import of the conversation, from the same export or a later one, adds no row and files the pairs it adds under that row. A conversation the export names by an id (`conversation_id`, else `id`) is found by that id, which its row's metadata records as `chatgpt_id`, so it keeps its row through a rename and when the export gives it no `create_time`. A conversation the export names by no id is found by its title and creation time, as is a row an earlier release wrote, which records the export's id once an import of a conversation the export names by one finds it. When the export's update time is later than the row's, the row takes that update time and the conversation's title. A conversation the export names by no id gets a row of its own when it is renamed between two exports or the export gives it no `create_time`, since the file then holds nothing that names it.
 - System and tool messages are skipped.
 - The user message's timestamp from the export becomes the trace's `created_at`.
 - Long conversations produce many traces, which can then be consolidated via `mem.consolidate()`.
