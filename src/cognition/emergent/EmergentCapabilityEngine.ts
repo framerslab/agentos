@@ -70,6 +70,7 @@ import { SandboxedToolForge } from './SandboxedToolForge.js';
 import { EmergentJudge } from './EmergentJudge.js';
 import { EmergentToolRegistry } from './EmergentToolRegistry.js';
 import { InvalidToolNameError, forgedToolNameProblem } from './ToolName.js';
+import { selfChangeRefusal } from '../learning/toolContext.js';
 
 // ============================================================================
 // SELF-IMPROVEMENT TOOL DEPENDENCIES
@@ -2462,8 +2463,11 @@ export class EmergentCapabilityEngine {
 
           // Only check promotion when execution succeeded AND output passed
           // validation. Promoting after validation failure would reward tools
-          // that produce structurally invalid output.
-          if (success && validationPassed) {
+          // that produce structurally invalid output. A promotion is a
+          // self-change: a use on a turn the learning layer refuses one (the
+          // freeze, mode `off` or `frozen`, a turn with no learner) is
+          // recorded and checks none.
+          if (success && validationPassed && !selfChangeRefusal(context.sessionData)) {
             await this.checkPromotion(tool.id);
           }
         }
