@@ -256,3 +256,27 @@ describe('the self-modification tools behind the approval gate', () => {
     expect(reasonOf(await call(host, 'manage_skills', { action: 'enable', skillId: 'web-search' }))).toBe('frozen');
   });
 });
+
+describe("a forged tool's use on a turn the learning layer refuses", () => {
+  it('runs and checks no promotion, as a use on a learner turn in mode on, or on a host with no layer, does', async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    expect((await call(host, 'forge_tool', FORGE, bound)).isError).toBe(false);
+    const promotion = vi.spyOn(host.engine, 'checkPromotion');
+    const refused: TurnLearning[] = [
+      { learner: 'bound', mode: 'frozen' },
+      { learner: 'bound', mode: 'off' },
+      { learner: 'none', mode: 'on' },
+    ];
+    for (const learning of refused) {
+      expect((await call(host, 'echo_twice', { text: 'a' }, learning)).output, JSON.stringify(learning)).toEqual({ text: 'a' });
+    }
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    expect((await call(host, 'echo_twice', { text: 'a' })).output).toEqual({ text: 'a' });
+    vi.unstubAllEnvs();
+    expect(promotion).not.toHaveBeenCalled();
+
+    await call(host, 'echo_twice', { text: 'a' }, bound);
+    await call(host, 'echo_twice', { text: 'a' });
+    expect(promotion).toHaveBeenCalledTimes(2);
+  });
+});
