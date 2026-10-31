@@ -197,14 +197,16 @@ export class MarkdownImporter {
    * that it holds is that trace's own note, and so its duplicate, also when
    * the trace's text begins or ends with whitespace. `ObsidianImporter` also
    * reads past the tag line and the links `ObsidianExporter` writes after the
-   * text, and may read the brain's graph to do so, so an override may answer
-   * with a promise.
+   * text, and may read the brain's graph to do so, through `db`, so an
+   * override may answer with a promise.
    *
    * @param text - The text of the trace the note's `id` names.
    * @param body - The note's body, without its leading and trailing whitespace.
+   * @param _db  - What a read of the brain goes through: the note's transaction, which holds a connection of the
+   *   brain's own, so a read through the brain would wait for another (a Postgres pool of one waits for good).
    * @returns `true` when the note holds the trace's text, or a promise of the answer.
    */
-  protected holdsTraceText(text: string, body: string): boolean | Promise<boolean> {
+  protected holdsTraceText(text: string, body: string, _db?: Pick<Brain, 'all'>): boolean | Promise<boolean> {
     return withLfLineBreaks(text).trim() === withLfLineBreaks(body);
   }
 
@@ -397,7 +399,8 @@ export class MarkdownImporter {
    * id, so its import into the brain it came from adds nothing, whatever
    * whitespace surrounds a trace's text.
    *
-   * @param trx     - The note's transaction.
+   * @param trx     - The note's transaction: the trace is read through it, and so is the brain's graph where
+   *   {@link holdsTraceText} reads it.
    * @param fm      - The note's front matter.
    * @param scope   - The scope the note files under.
    * @param scopeId - The scope id the note files under.
@@ -405,7 +408,7 @@ export class MarkdownImporter {
    * @returns The trace, or `undefined` when the note is not the note of a trace the brain holds.
    */
   private async _heldTraceOfNote(
-    trx: { get: Brain['get'] },
+    trx: { get: Brain['get']; all: Brain['all'] },
     fm: TraceFrontmatter,
     scope: string,
     scopeId: string,
@@ -416,7 +419,7 @@ export class MarkdownImporter {
       'SELECT content, tags FROM memory_traces WHERE brain_id = ? AND id = ? AND scope = ? AND scope_id = ? LIMIT 1',
       [this.brain.brainId, fm.id, scope, scopeId],
     );
-    if (!named || !(await this.holdsTraceText(named.content, body))) return undefined;
+    if (!named || !(await this.holdsTraceText(named.content, body, trx))) return undefined;
     return { id: fm.id, content: named.content, tags: named.tags };
   }
 
