@@ -528,6 +528,16 @@ export class Ledger {
   }
 
   /**
+   * The candidates still pending on one agent's chains with no learner in one namespace (the agent's own chain and
+   * each second user's), created at or before `createdBefore` (an ISO time): what a crash left there, read without
+   * reading the chains. A row whose text is not a ledger entry's is left out.
+   */
+  async agentPending(namespace: string, agentKey: string, createdBefore: string): Promise<LedgerEntry[]> {
+    const rows = await this.store.agentPendingRows(namespace, agentKey, createdBefore);
+    return rows.map((row) => readEntry(row.body)).filter((entry): entry is LedgerEntry => entry !== undefined);
+  }
+
+  /**
    * The newest row of a chain that carries a state digest for one of the given kinds.
    * @throws {Error} When that row's text is not a ledger entry's.
    */

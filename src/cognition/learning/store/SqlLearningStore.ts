@@ -272,6 +272,23 @@ class SqlTx implements LearningStoreTx {
       .sort(byChainAndSeq);
   }
 
+  async agentPendingRows(namespace: string, agentKey: string, createdBefore: string): Promise<StoredLedgerRow[]> {
+    if (holdsLoneSurrogate(namespace, agentKey, createdBefore)) return this.none([]);
+    // The time is compared once read, by code unit, as every text the store orders: a database compares TEXT by its
+    // collation.
+    return (
+      await this.db.all<Row>(
+        `SELECT ${LEDGER_COLUMNS.split(', ').map((column) => `c.${column}`).join(', ')} FROM agentos_learning_ledger c
+          WHERE c.namespace = ? AND c.agent_key = ? AND c.user_id IS NULL AND c.row_type = 'candidate'
+            AND NOT EXISTS (SELECT 1 FROM agentos_learning_ledger v WHERE v.candidate_id = c.id AND v.row_type = 'verdict')`,
+        [namespace, agentKey],
+      )
+    )
+      .map(toLedger)
+      .filter((row) => row.createdAt <= createdBefore)
+      .sort(byChainAndSeq);
+  }
+
   async head(chainKey: string): Promise<ChainHead | undefined> {
     if (holdsLoneSurrogate(chainKey)) return this.none(undefined);
     const row = await this.db.get<Row>('SELECT * FROM agentos_learning_heads WHERE chain_key = ?', [chainKey]);

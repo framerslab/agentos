@@ -2,16 +2,16 @@
  * @file learning-store.contract.ts
  * The contract every LearningStore keeps; each store's test file runs it (learning-store.test.ts for the in-process
  * store, learning-store.sql.test.ts for the SQL store on SQLite and Postgres). Ledger rows read back in sequence order,
- * by candidate and by learner, and a chain's rows with its head in one read; a chain head is advanced by
- * compare-and-swap, moved only in its last row, hash and seq,
- * and refused once marked forgotten; trait rows are updated by version; freezes, sessions and tombstones are kept,
- * freezes listed in one order, a session row's start kept when it is written again and a session row written at the
- * version its writer read; text is ordered by UTF-16 code
- * unit, whatever order the database sorts text in; a user's rows are deleted in one namespace only, and the tombstone
- * stays; a transaction that throws takes back every write it made, a deletion included, and no read sees one of them;
- * a transaction's handle refuses every call once its transaction has ended; every row a store is given or hands out is
- * a copy; and a store writes no text that holds a lone surrogate, which a SQL text column cannot hold, and reads,
- * marks and deletes no other user's rows by such a key.
+ * by candidate and by learner, and a chain's rows with its head in one read; an agent's candidates with no verdict on
+ * its chains with no learner read back up to a time; a chain head is advanced by compare-and-swap, moved only in its
+ * last row, hash and seq, and refused once marked forgotten; trait rows are updated by version; freezes, sessions and
+ * tombstones are kept, freezes listed in one order, a session row's start kept when it is written again and a session
+ * row written at the version its writer read; text is ordered by UTF-16 code unit, whatever order the database sorts
+ * text in; a user's rows are deleted in one namespace only, and the tombstone stays; a transaction that throws takes
+ * back every write it made, a deletion included, and no read sees one of them; a transaction's handle refuses every
+ * call once its transaction has ended; every row a store is given or hands out is a copy; and a store writes no text
+ * that holds a lone surrogate, which a SQL text column cannot hold, and reads, marks and deletes no other user's rows
+ * by such a key.
  */
 import { describe, expect, it } from 'vitest';
 import type {
@@ -166,6 +166,25 @@ export function runLearningStoreContract(name: string, open: () => Promise<Learn
         expect((await store.learnerLedgerRows('A', 'tutor', '42')).map((r) => r.id)).toEqual(['u-1', 'u-2', 'x-1']);
         expect((await store.learnerLedgerRows('A', 'coach', '42')).map((r) => r.id)).toEqual(['coach-1']);
         expect(await store.learnerLedgerRows('A', 'tutor', '7')).toEqual([]);
+      }));
+
+    it("reads the pending candidates of an agent's chains with no learner up to a time, and none decided, a learner's, another agent's or namespace's", () =>
+      withStore(async (store) => {
+        const agent = { namespace: 'A', agentKey: 'tutor', userId: null };
+        await store.insertLedgerRow(ledgerRow({ ...agent, id: 'a-1', chainKey: 'a|A|tutor', seq: 1 }));
+        await store.insertLedgerRow(ledgerRow({ ...agent, id: 'a-2', chainKey: 'a|A|tutor', seq: 2 }));
+        await store.insertLedgerRow(ledgerRow({ ...agent, id: 'a-3', chainKey: 'a|A|tutor', seq: 3, rowType: 'verdict', candidateId: 'a-2', verdict: 'kept' }));
+        await store.insertLedgerRow(ledgerRow({ ...agent, id: 'a-4', chainKey: 'a|A|tutor', seq: 4, createdAt: LATER }));
+        await store.insertLedgerRow(ledgerRow({ ...agent, id: 't-1', chainKey: 't|A|tutor|bo', turnUserId: 'bo' }));
+        await store.insertLedgerRow(ledgerRow({ id: 'u-1' }));
+        await store.insertLedgerRow(ledgerRow({ ...agent, id: 'coach-1', chainKey: 'a|A|coach', agentKey: 'coach' }));
+        await store.insertLedgerRow(ledgerRow({ ...agent, id: 'b-1', chainKey: 'a|B|tutor', namespace: 'B' }));
+        expect((await store.agentPendingRows('A', 'tutor', NOW)).map((r) => r.id)).toEqual(['a-1', 't-1']);
+        expect((await store.agentPendingRows('A', 'tutor', LATER)).map((r) => r.id)).toEqual(['a-1', 'a-4', 't-1']);
+        expect(await store.transaction((tx) => tx.agentPendingRows('A', 'nobody', LATER))).toEqual([]);
+        // A key that holds a lone surrogate reads no row of the key a driver would write in its place.
+        await store.insertLedgerRow(ledgerRow({ ...agent, id: 'r-1', chainKey: 'a|A|tutor\uFFFD', agentKey: 'tutor\uFFFD' }));
+        expect(await store.agentPendingRows('A', 'tutor\uD800', LATER)).toEqual([]);
       }));
 
     it('advances a chain head by compare-and-swap, and refuses a forgotten head', () =>

@@ -8,9 +8,9 @@
  * Calls run one at a time, in the order they are made, and a call outside a transaction runs as a transaction of its
  * own. A transaction writes the rows in place and keeps an undo log, which it replays newest first when its function
  * throws, so no call copies the store's state and no call sees a write that a transaction takes back. A chain's,
- * a candidate's and a learner's ledger rows are found through maps keyed by each; a user's deletion is the one call
- * that reads every ledger row. Like the SQL store, it writes no text that holds a lone surrogate, so a learner's state
- * moves between the two stores unchanged.
+ * a candidate's and a learner's ledger rows are found through maps keyed by each; a user's deletion reads every ledger
+ * row, and the read of an agent's pending rows every candidate. Like the SQL store, it writes no text that holds a lone
+ * surrogate, so a learner's state moves between the two stores unchanged.
  */
 import {
   TransactionalLearningStore,
@@ -159,6 +159,18 @@ class MemoryTx implements LearningStoreTx {
 
   async learnerLedgerRows(namespace: string, agentKey: string, userId: string): Promise<StoredLedgerRow[]> {
     return sortedCopies(this.open().learners.get(keyOf(namespace, agentKey, userId))?.values());
+  }
+
+  async agentPendingRows(namespace: string, agentKey: string, createdBefore: string): Promise<StoredLedgerRow[]> {
+    const pending: StoredLedgerRow[] = [];
+    for (const [candidateId, rows] of this.open().candidates) {
+      const candidate = rows.get(candidateId);
+      if (!candidate || candidate.rowType !== 'candidate') continue;
+      if (candidate.namespace !== namespace || candidate.agentKey !== agentKey || candidate.userId !== null) continue;
+      if (candidate.createdAt > createdBefore || [...rows.values()].some((row) => row.rowType === 'verdict')) continue;
+      pending.push(candidate);
+    }
+    return sortedCopies(pending);
   }
 
   async head(chainKey: string): Promise<ChainHead | undefined> {

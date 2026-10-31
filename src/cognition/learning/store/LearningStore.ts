@@ -133,6 +133,12 @@ export interface LearningStoreTx {
   candidateRows(candidateId: string): Promise<StoredLedgerRow[]>;
   /** The rows keyed to one learner (by namespace, agent and `userId`), ordered by chain key and sequence. */
   learnerLedgerRows(namespace: string, agentKey: string, userId: string): Promise<StoredLedgerRow[]>;
+  /**
+   * The candidates that have no verdict row on one agent's chains with no learner in one namespace (the agent's own
+   * chain and each second user's), created at or before `createdBefore` (an ISO time), ordered by chain key and
+   * sequence: what a crash left pending there.
+   */
+  agentPendingRows(namespace: string, agentKey: string, createdBefore: string): Promise<StoredLedgerRow[]>;
 
   head(chainKey: string): Promise<ChainHead | undefined>;
   /** Starts a chain's head; `false` when the chain has one. */
@@ -213,6 +219,7 @@ export abstract class TransactionalLearningStore implements LearningStore {
   chainWithHead(chainKey: string) { return this.transaction((tx) => tx.chainWithHead(chainKey)); }
   candidateRows(candidateId: string) { return this.transaction((tx) => tx.candidateRows(candidateId)); }
   learnerLedgerRows(namespace: string, agentKey: string, userId: string) { return this.transaction((tx) => tx.learnerLedgerRows(namespace, agentKey, userId)); }
+  agentPendingRows(namespace: string, agentKey: string, createdBefore: string) { return this.transaction((tx) => tx.agentPendingRows(namespace, agentKey, createdBefore)); }
   head(chainKey: string) { return this.transaction((tx) => tx.head(chainKey)); }
   insertHead(head: ChainHead) { return this.transaction((tx) => tx.insertHead(head)); }
   advanceHead(chainKey: string, expectedSeq: number, next: { lastId: string; lastHash: string; seq: number }) { return this.transaction((tx) => tx.advanceHead(chainKey, expectedSeq, next)); }
