@@ -46,12 +46,13 @@ export interface ToolExecutionRequestDetails {
   correlationId?: string;
   sessionData?: Record<string, any>;
   /**
-   * The tool instance the caller already resolved and checked (a composed
-   * step). `ToolOrchestrator.processToolCall` runs its checks against it and
-   * refuses the call (`STEP_REPLACED`) when the name resolves to another
-   * instance by the time the call is delegated. A call without it is bound
-   * the same way to the instance resolved when the call began
-   * (`TOOL_REPLACED`).
+   * The tool instance the caller already resolved and checked: a composed
+   * step's, or the one a launched seat's approval gate approved, which the
+   * seat's tool view hands on. `ToolOrchestrator.processToolCall` runs its
+   * checks against it and refuses the call (`STEP_REPLACED`) when the name
+   * resolves to another instance by the time the call is delegated. A call
+   * without it is bound the same way to the instance resolved when the call
+   * began (`TOOL_REPLACED`).
    */
   tool?: ITool;
   /**

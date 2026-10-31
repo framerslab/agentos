@@ -4,15 +4,18 @@
  * A call to any other name is answered `{ skipped: true, reason: 'not available in this seat' }` (code
  * `TOOL_NOT_IN_SEAT`), as a gmi() seat's is, and its tool never runs. A call to one of the seat's names asks the
  * approval gate of the call the seat serves (the gate the child agency passes with it, which `agencies.hitl` makes at a
- * root launch) about a tool the orchestrator has, as gmi()'s view asks: anything but the exact approval skips the
- * tool, and the model is told why; a call whose stop has come asks no one, and the orchestrator refuses it
- * (`STEP_ABORTED`). Every call the view passes on carries `callerTurn` with the seat's names, that gate and the view's
- * own `processToolCall` as `dispatch`, through which the shared orchestrator's step gate runs each step of a
+ * root launch) about a tool the orchestrator has, as gmi()'s view asks: anything but the exact approval skips the tool,
+ * and the model is told why; a call whose stop has come asks no one, and the orchestrator refuses it (`STEP_ABORTED`).
+ * An approval is for the registration the gate was asked about: the view hands that instance on as the call's `tool`,
+ * so a tool registered under the name while the approval was pending never runs under it (the orchestrator refuses the
+ * call, `STEP_REPLACED`). Every call the view passes on carries `callerTurn` with the seat's names, that gate and the
+ * view's own `processToolCall` as `dispatch`, through which the shared orchestrator's step gate runs each step of a
  * composition the seat calls: a step meets the seat's names and that gate as the seat's direct calls do, and a step
- * whose tool is outside the names never runs. Every other member runs on the shared orchestrator, whose own checks
- * (the persona's capabilities, the approval of a tool with side effects) still apply to each call.
+ * whose tool is outside the names never runs. Every other member runs on the shared orchestrator, whose own checks (the
+ * persona's capabilities, the approval of a tool with side effects) still apply to each call.
  * @internal
  */
+import type { ITool } from '../../../core/tools/ITool.js';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator.js';
 import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from '../approval-gate.js';
 import { withMembers } from '../withMembers.js';
@@ -50,7 +53,9 @@ export function seatToolView(
     // without asking anyone, and so is a call whose stop has come: the orchestrator refuses it (STEP_ABORTED). The view
     // does not see the step of the GMI's tool loop, so the request names step 0.
     const gate = gateOf();
-    if (gate && (await base.getTool(req.name)) && !details.signal?.aborted) {
+    const current = gate ? await base.getTool(req.name) : undefined;
+    let bound: ITool | undefined;
+    if (gate && current && !details.signal?.aborted) {
       const verdict = await askApprovalGate(gate, { name: req.name, args: req.arguments ?? {}, id: req.id, step: 0 });
       if (verdict !== APPROVAL_GRANTED) {
         return {
@@ -61,6 +66,9 @@ export function seatToolView(
           errorDetails: { message: `Skipped: ${verdict.reason}` },
         };
       }
+      // The approval is for the registration the gate was asked about. A composed step arrives with the instance its
+      // pipeline checked already.
+      if (!details.tool) bound = current;
     }
     const callerTurn: CallerTurnContext = {
       ...(details.callerTurn ?? {}),
@@ -68,7 +76,9 @@ export function seatToolView(
       ...(gate ? { approvalGate: gate } : {}),
       dispatch: processToolCall,
     };
-    return base.processToolCall({ ...details, callerTurn });
+    // The orchestrator checks and runs the bound instance alone, and refuses the call (STEP_REPLACED) when another
+    // registration took the name while the approval was pending.
+    return base.processToolCall({ ...details, ...(bound ? { tool: bound } : {}), callerTurn });
   };
   return withMembers(base, {
     processToolCall,
