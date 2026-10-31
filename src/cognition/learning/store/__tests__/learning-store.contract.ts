@@ -1,18 +1,21 @@
 /**
  * @file learning-store.contract.ts
  * The contract every LearningStore keeps; each store's test file runs it (learning-store.test.ts for the in-process
- * store). Ledger rows read back in sequence order, by candidate and by learner; a chain head is advanced by
- * compare-and-swap, moved only in its last row, hash and seq, and refused once marked forgotten; trait rows are updated
- * by version; freezes, sessions and tombstones are kept, freezes listed in one order and a session row's start kept
- * when it is written again; a user's rows are deleted in one namespace only, and the tombstone stays; a transaction
- * that throws takes back every write it made, a deletion included, and no read sees one of them; and every row a store
- * is given or hands out is a copy.
+ * store, learning-store.sql.test.ts for the SQL store on SQLite and Postgres). Ledger rows read back in sequence order,
+ * by candidate and by learner; a chain head is advanced by compare-and-swap, moved only in its last row, hash and seq,
+ * and refused once marked forgotten; trait rows are updated by version; freezes, sessions and tombstones are kept,
+ * freezes listed in one order and a session row's start kept when it is written again; text is ordered by UTF-16 code
+ * unit, whatever order the database sorts text in; a user's rows are deleted in one namespace only, and the tombstone
+ * stays; a transaction that throws takes back every write it made, a deletion included, and no read sees one of them;
+ * a transaction's handle refuses every call once its transaction has ended; and every row a store is given or hands
+ * out is a copy.
  */
 import { describe, expect, it } from 'vitest';
 import type {
   ChainHead,
   FreezeRow,
   LearningStore,
+  LearningStoreTx,
   SessionRow,
   StoredLedgerRow,
   StoredTraitRow,
@@ -243,6 +246,23 @@ export function runLearningStoreContract(name: string, open: () => Promise<Learn
         ]);
       }));
 
+    it('orders text by UTF-16 code unit, whatever order the database sorts text in', () =>
+      withStore(async (store) => {
+        // A locale's collation (en_US.utf8, say) sorts 'a' and 'b' before 'C'; by code unit 'C' comes first.
+        for (const scopeKey of ['agent|b', 'agent|C', 'agent|a']) await store.insertFreeze(freezeRow({ scopeKey }));
+        expect((await store.freezeRows()).map((row) => row.scopeKey)).toEqual(['agent|C', 'agent|a', 'agent|b']);
+
+        for (const sessionId of ['s-b', 's-C', 's-a']) await store.putSessionRow(sessionRow({ sessionId }));
+        expect((await store.sessionRowsOf('A', '42')).map((row) => row.sessionId)).toEqual(['s-C', 's-a', 's-b']);
+
+        for (const chainKey of ['u|A|tutor|b', 'u|A|tutor|C', 'u|A|tutor|a']) {
+          await store.insertLedgerRow(ledgerRow({ id: `r-${chainKey}`, chainKey, candidateId: 'c-1' }));
+        }
+        const chains = ['u|A|tutor|C', 'u|A|tutor|a', 'u|A|tutor|b'];
+        expect((await store.learnerLedgerRows('A', 'tutor', '42')).map((row) => row.chainKey)).toEqual(chains);
+        expect((await store.candidateRows('c-1')).map((row) => row.chainKey)).toEqual(chains);
+      }));
+
     it("keeps a session row's first start when the row is written again", () =>
       withStore(async (store) => {
         await store.putSessionRow(sessionRow());
@@ -390,6 +410,29 @@ export function runLearningStoreContract(name: string, open: () => Promise<Learn
           expect(transaction).rejects.toThrow('the change failed'),
           expect(reads).resolves.toEqual([undefined, [], undefined]),
         ]);
+      }));
+
+    it("refuses every call on a transaction's handle once its transaction has ended", () =>
+      withStore(async (store) => {
+        const handles: LearningStoreTx[] = [];
+        await store.transaction(async (tx) => {
+          handles.push(tx);
+        });
+        await expect(
+          store.transaction(async (tx) => {
+            handles.push(tx);
+            throw new Error('the change failed');
+          }),
+        ).rejects.toThrow('the change failed');
+
+        expect(handles).toHaveLength(2);
+        for (const tx of handles) {
+          await expect(tx.insertLedgerRow(ledgerRow({ id: 'late' }))).rejects.toThrow(/ended/);
+          await expect(tx.insertTraitRow(traitRow())).rejects.toThrow(/ended/);
+          await expect(tx.ledgerRow('late')).rejects.toThrow(/ended/);
+        }
+        expect(await store.ledgerRow('late')).toBeUndefined();
+        expect(await store.traitRow('A', 'tutor', '42')).toBeUndefined();
       }));
 
     it('hands out copies, and keeps copies of the rows it is given', () =>
