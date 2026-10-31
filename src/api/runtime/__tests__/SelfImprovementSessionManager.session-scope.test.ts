@@ -219,6 +219,19 @@ describe('self-improvement hooks act on the calling session', () => {
       { type: 'semantic', scope: 'thread', scopeId: 'session-B', tags: ['eval'] },
     ]);
   });
+
+  it("with a learning layer, files the evaluation in the turn's thread in the session's form, so a conversation named after the persona files apart from the persona's own thread", async () => {
+    const { deps, memoryA, memoryB } = await twoSessions();
+    const scopes = { learner: 'bound', mode: 'on', userScopeId: 'A/user-b', personaScopeId: 'A/user-b::scoped-persona', namespace: 'A' };
+
+    await deps.storeMemory?.(
+      { type: 'self_evaluation', content: 'User B asked about their invoice.', scope: 'session', tags: ['eval'] },
+      sessionBContext({ sessionData: { sessionId: 'session-B', conversationId: 'scoped-persona', learning: { learner: 'bound', mode: 'on', scopes } } }),
+    );
+
+    expect(memoryA.encode).not.toHaveBeenCalled();
+    expect((memoryB.encode.mock.calls[0] as unknown[] | undefined)?.[3]).toEqual({ type: 'semantic', scope: 'thread', scopeId: 'A//scoped-persona', tags: ['eval'] });
+  });
 });
 
 describe('cognitive memory recall stays within the turn\'s scopes', () => {
