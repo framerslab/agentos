@@ -5,6 +5,8 @@
  * turn's user and organization, with the launch frame in its metadata; the seat's calls run one at a time. A failed
  * turn rejects with its error's name and code alone, as a gmi() seat's does, the error itself going to the launch's
  * `logError`. Each call that ran a turn is reported to `onCall` when it ends (the agency registry's seat history).
+ * Each call hands the seat's tool view the approval gate the child agency passes with it, which the view asks on each
+ * of the call's tool calls.
  * @internal
  */
 import { randomUUID } from 'node:crypto';
@@ -20,6 +22,7 @@ import {
   type ToolResultChunkPayload,
 } from '../../../cognition/substrate/IGMI.js';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
+import { composeReceivedGate, type ApprovalGateFn } from '../approval-gate.js';
 import { TurnLock } from '../gmiSession.js';
 import type { SeatHandle } from './sessionSeat.js';
 import { SEAT_SUMMARY_CHARS, type AgencyLaunchFrame, type LaunchSeatRecord } from './types.js';
@@ -50,6 +53,11 @@ export interface RuntimeSeatOptions {
    * asks it before each call of its own tool round, so a call the guardrails block never runs.
    */
   toolCallGate?: GMIToolCallGate;
+  /**
+   * Hands the seat's tool view the approval gate of the call the seat serves, for that call's tool calls, and
+   * undefined once the call ends: the gate the child agency passes with each call.
+   */
+  setGate?: (gate: ApprovalGateFn | undefined) => void;
   /** Shuts the seat's GMI down and takes it out of the manager. */
   release(): Promise<void>;
   /**
@@ -271,8 +279,13 @@ export function runtimeSeat(options: RuntimeSeatOptions): RuntimeSeatHandle {
             throw new Error('seat closed');
           }
           ranTurn = true;
+          // The child agency passes its gate with each call (a value that is not a function refuses every tool): the
+          // view asks it on each of this call's tool calls. It is set once the call holds the seat's lock, so a call
+          // waiting for an earlier turn neither replaces nor clears that turn's gate.
+          options.setGate?.(composeReceivedGate(opts?.__approvalGate));
           return await runTurn(prompt, opts?.abortSignal as AbortSignal | undefined);
         } finally {
+          options.setGate?.(undefined);
           // The registry's seat history hears of every call that ran a turn, answered or not.
           if (ranTurn) reportCall();
           release();

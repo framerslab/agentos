@@ -65,6 +65,8 @@ const guarded = agency({
 | `beforeReturn: boolean` | The final answer leaves the agency | Customer-facing channels where the last response gets a human or judge review. |
 | `beforeStrategyOverride: boolean` | Nothing: no strategy makes a `strategy-override` request. Like every trigger, setting it makes `agency()` require a `handler` | Reserved; set it and nothing pauses. |
 
+A team a GMI launches with `launch_agency` runs under `agencies.hitl` (a `gmi()` agent's, or `AgentOSConfig.agencies` on the full runtime) at a root launch, after the gate the launching turn carries: its `beforeTool` list covers every tool call of every seat, a nested team's seats included, each call asked once, and a call whose turn has already stopped is refused without asking anyone. Its `beforeAgent` and `beforeReturn` are asked in the root team alone.
+
 Source: [`HitlConfig.approvals` in `src/api/types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts).
 
 ## Six handler factories

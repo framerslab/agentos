@@ -4,8 +4,9 @@
  * and calls only with the `agency:launch` capability, and its host for the launch engine. A seat is a
  * GMI of the runtime's GMIManager (`createAgencySeat`): a registered persona by `personaId`, or a persona made for a
  * temporary seat from the calling GMI's; it runs through a view of the shared tool orchestrator that lists and runs
- * its allowlist alone, and makes its completion calls through a view of the runtime's provider manager that checks
- * each against the launch's budget before it is sent. The engine is imported on the first call.
+ * its allowlist alone and asks the approval gate of the team's call (the one `agencies.hitl` makes at a root launch)
+ * about each of its tool calls, and makes its completion calls through a view of the runtime's provider manager that
+ * checks each against the launch's budget before it is sent. The engine is imported on the first call.
  * @internal
  */
 import type { AgencyRegistry } from '../../../agents/agency/AgencyRegistry.js';
@@ -15,6 +16,7 @@ import type { ILogger } from '../../../core/logging/ILogger.js';
 import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator.js';
 import { GMIErrorCode } from '../../../core/utils/errors.js';
+import type { ApprovalGateFn } from '../approval-gate.js';
 import { resolveGMIForToolContext } from '../SelfImprovementSessionManager.js';
 import { outputEstimateTokens } from '../spendBudget.js';
 import type { LaunchEntry } from './launchRegistry.js';
@@ -198,6 +200,8 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
     async buildSeat(seat: ResolvedSeat, launch: LaunchEntry, parent: LaunchParent, frame: AgencyLaunchFrame, cutWhen: () => boolean): Promise<SeatHandle | LaunchRefusal> {
       const seatSessionId = `seat:${launch.launchId}:${seat.role}`;
       const userId = parent.providerUserId ?? 'system';
+      // The approval gate of the call the seat serves: set by the seat for each call, asked by its view.
+      const gate: { current?: ApprovalGateFn } = {};
       try {
         if (seat.form === 'persistent') {
           // A member's seat names only tools its persona may use: those its capabilities allow.
@@ -212,7 +216,7 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
           seatSessionId,
           userId,
           persona: seat.form === 'persistent' ? { personaId: seat.ref } : { definition: temporaryPersona(personaOf(parent), seat, launch.launchId) },
-          toolView: (base) => seatToolView(base, seat.toolNames),
+          toolView: (base) => seatToolView(base, seat.toolNames, () => gate.current),
           // Every completion call the seat's GMI makes is checked against the launch's budget before it is sent.
           providerManager: (base) => meteredProviderManager(base, launch.budget),
         });
@@ -231,6 +235,9 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
           personaId: built.personaId,
           release: built.release,
           ...(parent.toolCallGate ? { toolCallGate: parent.toolCallGate } : {}),
+          setGate: (fn) => {
+            gate.current = fn;
+          },
           cutWhen,
           logError,
           // Each call the seat ran, in the team's registry entry: its outcome, and the start of its answer when it answered.
