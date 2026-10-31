@@ -79,6 +79,13 @@ describe('the tag grammar (U1)', () => {
     expect(tagKeysOf({ tags: ['budget_', '-Budget', 'budget.'] })).toEqual(['budget']);
   });
 
+  it('reads a stored label with a long run of separators inside it in one pass, not one pass for each separator', () => {
+    const label = `a${'-'.repeat(100_000)}b`;
+    const started = performance.now();
+    expect(classifyLegacyTag(label)).toEqual({ state: 'alias', key: 'ab' });
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it('orders by code point, not by UTF-16 unit', () => {
     expect(compareCodePoints('\u{1F600}', '｡')).toBeGreaterThan(0);
     expect(compareCodePoints('ab', 'abc')).toBeLessThan(0);
