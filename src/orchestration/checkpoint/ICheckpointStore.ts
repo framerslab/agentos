@@ -122,7 +122,14 @@ export interface ICheckpointStore {
    *
    * If a checkpoint with the same `id` already exists it is overwritten.
    *
+   * The runtime awaits each save and does not retry one that rejects: the run that
+   * asked for the checkpoint ends with the store's error, which `GraphRuntime.stream()`
+   * throws, and a resume by the run id continues from the last checkpoint the store
+   * saved. When a save inside a parallel batch rejects, the run ends with the error
+   * once the batch's other nodes have finished.
+   *
    * @param checkpoint - The snapshot to persist.
+   * @throws The store's error when it cannot persist the checkpoint.
    */
   save(checkpoint: Checkpoint): Promise<void>;
 
