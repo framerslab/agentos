@@ -3,9 +3,13 @@
  *
  * ULIDs for ledger rows: 48 bits of milliseconds and 80 random bits in Crockford's base 32, 26 characters, so ids
  * sort by time (https://github.com/ulid/spec). Ids made in one process stay in order: within one millisecond, or
- * when the clock steps back, the random part of the last id is incremented.
+ * when the clock steps back, the random part of the last id is incremented. A time a ULID cannot hold (not a finite
+ * number, or past 2^48 - 1 milliseconds) is refused, and leaves the order of the next ids as it was.
  */
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+/** The latest time a ULID holds: 48 bits of milliseconds since the epoch. */
+const MAX_TIME = 2 ** 48 - 1;
 
 let lastTime = -1;
 let lastRandom: number[] = [];
@@ -29,8 +33,14 @@ function increment(digits: number[]): boolean {
   return false;
 }
 
-/** A ULID for the time `now` (milliseconds since the epoch). */
+/**
+ * A ULID for the time `now` (milliseconds since the epoch; a time before the epoch is written as the epoch).
+ * @throws {RangeError} When `now` is not a finite number or is past 2^48 - 1, before any state changes.
+ */
 export function ulid(now: number = Date.now()): string {
+  if (!Number.isFinite(now) || now > MAX_TIME) {
+    throw new RangeError(`A ULID holds a time of at most ${MAX_TIME} milliseconds since the epoch; got ${String(now)}.`);
+  }
   let time = Math.max(0, Math.floor(now));
   if (time <= lastTime) {
     time = lastTime;

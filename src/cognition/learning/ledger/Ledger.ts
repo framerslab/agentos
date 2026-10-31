@@ -70,7 +70,8 @@ export interface ProposeOptions {
   verdict?: LedgerVerdict;
   /**
    * The reason the candidate records, and its verdict with it; an `operator_set` candidate whose reason is `reanchor`
-   * starts its chain's verified part. Default `pending`, or the verdict's name.
+   * starts its chain's verified part, and is written after the chain's newest row though its head was deleted or
+   * moved back outside the layer. Default `pending`, or the verdict's name.
    */
   reason?: string;
   /** On a row that changes its subject's stored state: that state's digest after the change. */
@@ -201,7 +202,7 @@ function entryOf(row: StoredLedgerRow): LedgerEntry {
 }
 
 /** Whether a row starts a chain's verified part: an `operator_set` candidate whose reason is `reanchor`. */
-function isReanchor(entry: LedgerEntry): boolean {
+function isReanchor(entry: Pick<LedgerEntry, 'rowType' | 'kind' | 'reason'>): boolean {
   return entry.rowType === 'candidate' && entry.kind === 'operator_set' && entry.reason === 'reanchor';
 }
 
@@ -245,6 +246,7 @@ export class Ledger {
    * @throws {Error} When the store fails or `change` throws, with nothing written; when a row with a learner names a
    *   `turnUserId`; when an `alsoDecide` entry names a candidate twice, one outside this chain, or one whose current
    *   verdict it cannot follow.
+   * @throws {RangeError} When the clock gives a time a ULID cannot hold, with nothing written.
    */
   async propose(input: CandidateInput, options: ProposeOptions = {}): Promise<ProposeResult> {
     const turnUserId = input.turnUserId || null;
@@ -319,6 +321,7 @@ export class Ledger {
    *
    * @throws {Error} When the store fails or `change` throws, with nothing written; when the candidate's text is not a
    *   ledger entry's.
+   * @throws {RangeError} When the clock gives a time a ULID cannot hold, with nothing written.
    */
   async decide(
     candidateId: string,
@@ -410,12 +413,14 @@ export class Ledger {
           if (!head && tomb !== undefined && (await tx.isForgotten(tomb))) return { status: 'forgotten' };
           const refusal = check ? await check(tx, chainKey) : undefined;
           if (refusal) return refusal;
-          // A chain with rows and no head row (its head deleted outside the layer) goes on after its newest row, so
-          // an operator's reanchor can still append to it.
-          const stored = head ? [] : await tx.chainRows(chainKey);
+          // A chain with rows and no head row (its head deleted outside the layer), and, for an operator's reanchor,
+          // a chain with rows past its head (its head moved back outside the layer), goes on after its newest row, so
+          // the reanchor can still append to it.
+          const stored = !head || isReanchor(drafts[0]!) ? await tx.chainRows(chainKey) : [];
           const newest = stored[stored.length - 1];
-          let prevHash = head?.lastHash ?? newest?.hash ?? GENESIS_HASH;
-          let seq = head?.seq ?? newest?.seq ?? 0;
+          const after = newest !== undefined && (head === undefined || newest.seq > head.seq) ? newest : undefined;
+          let prevHash = after?.hash ?? head?.lastHash ?? GENESIS_HASH;
+          let seq = after?.seq ?? head?.seq ?? 0;
           const createdAt = new Date(this.clock()).toISOString();
           const written: Array<{ entry: LedgerEntry; body: string; hash: string }> = [];
           for (const draft of drafts) {
