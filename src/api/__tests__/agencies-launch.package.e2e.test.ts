@@ -2412,6 +2412,9 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
       const out = launchedIn(s.seen[2], 'l1');
       expect(out.status).toBe('timed_out');
       expect(hangs).toBe(1);
+      // The waiter's call still ran when the launch stopped: its record reads cut, with no error.
+      expect(out.seats).toEqual([expect.objectContaining({ role: 'waiter', form: 'temporary', status: 'cut', calls: 1 })]);
+      expect(out.seats[0].error).toBeUndefined();
       // The team stays listed, closing, its seat's GMI still active.
       const listed = os.listAgencies();
       expect(listed.map((entry) => entry.agencyId)).toEqual([out.agencyId]);
@@ -2426,15 +2429,14 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
       await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-other' });
       expect(launchedIn(s.seen[7], 'l3')).toMatchObject({ status: 'completed', text: 'Other done.' });
       // Once the tool returns and the seat is released, the team leaves the list and its GMI goes. Nothing more runs for
-      // the waiter: its tool ran once, and a model call its stopped turn still makes is aborted before it starts (the
-      // provider reads the stop and answers with its abort chunk; the queued reply is there for it to skip).
+      // the waiter: its tool ran once, and its stopped turn sends no further request, not even one the provider would
+      // answer with its abort chunk (the queued reply is there for a request that would reach it).
       s.replies.push(reply.text('SENTINEL: never read.'));
       release();
       await vi.waitFor(() => expect(os.listAgencies()).toEqual([]), { timeout: 10_000 });
       expect(await activeGmis(os)).not.toContain(waiterGmi);
-      const after = s.seen.length - 8;
-      expect(after).toBeLessThanOrEqual(1);
-      expect(s.aborts).toBe(after);
+      expect(s.seen).toHaveLength(8);
+      expect(s.aborts).toBe(0);
       expect(hangs).toBe(1);
       s.replies.length = 0;
       // The session's scope admits again.
@@ -2447,6 +2449,65 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
       release();
     }
   }, 40_000);
+
+  it("a runtime seat's calls are metered against its launch's budget: a step that spends the cap leaves the launch budget_exhausted with nothing more sent, a reflection of the seat's persona included, and a billed failure is charged", async () => {
+    const k = key();
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          // Under the default cap the moody seat's reflection reaches the provider (the precondition).
+          launchStep({ goal: 'Feel it.', seats: [{ role: 'moody', personaId: 'moody' }] }, 'm1'),
+          reply.text('Felt.'),
+          reply.text('Done.'),
+        ],
+      }),
+      'ok',
+    );
+    const reflect = { id: 'reflect', promptTemplate: 'REFLECT-ON-THE-TURN', maxOutputTokens: 400, trigger: { type: 'turn_interval', intervalTurns: 1 } };
+    // Each seat's route counts 500 output tokens a call, so a 3,000-token launch covers one call of each.
+    const os = await startRuntime(k, {
+      personas: [
+        persona('lead', { allowedCapabilities: ['agency:launch'], defaultModelCompletionOptions: { maxTokens: 500 } }),
+        persona('checker', { defaultModelCompletionOptions: { maxTokens: 500 } }),
+        persona('moody', { defaultModelCompletionOptions: { maxTokens: 500 }, metaPrompts: [reflect] }),
+      ],
+    });
+    const reflections = (): number => (s.wholeSeen ?? []).filter((prompt) => prompt.includes('REFLECT-ON-THE-TURN')).length;
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-meter-1' });
+    await vi.waitFor(() => expect(reflections()).toBe(1));
+    expect(launchedIn(s.seen[2], 'm1')).toMatchObject({ status: 'completed', text: 'Felt.' });
+
+    // Under a 3,000-token cap the moody seat's step reports 2,700: the checker's step and the reflection are refused
+    // before their requests.
+    s.replies.push(
+      launchStep({ goal: 'Feel it again.', maxTokens: 3_000, seats: [{ role: 'moody', personaId: 'moody' }, { role: 'checker', personaId: 'checker' }] }, 'm2'),
+      textCosting('Felt again.', 2_700),
+      reply.text('Done.'),
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-meter-2' });
+    await sleep(200);
+    // The lead, the moody seat, the lead: no request after the refusal, and no second reflection.
+    expect(s.seen).toHaveLength(6);
+    expect(reflections()).toBe(1);
+    const capped = launchedIn(s.seen[5], 'm2');
+    expect(capped).toMatchObject({ status: 'budget_exhausted', provenance: expect.objectContaining({ budget: expect.objectContaining({ maxTotalTokens: 3_000 }) }) });
+    expect(capped.provenance.budget.tokensUsed).toBeGreaterThanOrEqual(2_700);
+    expect(capped.seats[0]).toMatchObject({ role: 'moody', status: 'completed', calls: 1, usage: expect.objectContaining({ totalTokens: 2_700 }) });
+    expect(capped.seats[1]).toMatchObject({ role: 'checker' });
+    expect(capped.seats[1].status).not.toBe('completed');
+
+    // A seat's request that fails and is billed, as OpenAI's Responses path reports a failed response, is charged.
+    const billed = Object.assign(new Error('The response failed.'), {
+      name: 'OpenAIProviderError',
+      details: { usage: { promptTokens: 900, completionTokens: 100, totalTokens: 1_000 } },
+    });
+    s.replies.push(launchStep({ goal: 'Try.', seats: [{ role: 'checker', personaId: 'checker' }] }, 'b1'), billed, reply.text('Done.'));
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-meter-3' });
+    expect(s.seen).toHaveLength(9);
+    const failed = launchedIn(s.seen[8], 'b1');
+    expect(failed).toMatchObject({ status: 'failed' });
+    expect(failed.provenance.budget.tokensUsed).toBeGreaterThanOrEqual(1_000);
+  });
 
   it("a team's nested launches share one launch in flight: of three seats that launch at once, one is admitted and two are refused, and a later launch from a team is admitted once the earlier one has settled", async () => {
     const k = key();
