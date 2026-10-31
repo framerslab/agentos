@@ -191,7 +191,11 @@ export function deferLearnerSession(args: {
         }
       }
       const prepared = await inner.prepareTurn(input);
-      if (lost && !adopted && prepared && prepared.learner === 'bound') {
+      // A session that could not take the loss answers by its own reading of the session's rule; the loss is the first
+      // and stands over it. A reason the session has whatever the turn (no user id, a placeholder user, no agent key, a
+      // workflow seat) stays.
+      const ruled = prepared?.learner === 'bound' || prepared?.noLearnerReason === 'other_user' || prepared?.noLearnerReason === 'other_namespace';
+      if (lost && !adopted && prepared && ruled) {
         return { ...prepared, learner: 'none', noLearnerReason: lost };
       }
       return prepared;
