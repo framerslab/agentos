@@ -205,7 +205,7 @@ const again = await restarted.getConversation('conv-1');
 - `appendOnlyPersistence: true` inserts each row once and never updates or deletes one: a message rewritten in memory keeps its first text on disk, `deleteConversation()` throws, and the last-active time is the newest message's. A host that runs a sealed provenance profile turns it on.
 - Without it, a save rewrites each message, and `deleteConversation()` deletes the conversation's messages with it, on SQLite connections that leave foreign keys off too.
 
-The table is the conversation's record: a message that leaves the history in memory, cut by `maxHistoryLengthMessages` or folded into a summary, keeps its row and comes back on load. `getHistory()` then returns the messages a trim to `maxHistoryLengthMessages` keeps (the first `messagesToKeepVerbatimHead`, a summary right after them, and the newest after that, with a tool round they reach into whole), and a summary sorts by its own time, which is later than the messages it was placed before.
+The table is the conversation's record: a message that leaves the history in memory, cut by `maxHistoryLengthMessages` or folded into a summary, keeps its row and comes back on load. `getHistory()` then returns the messages a trim to `maxHistoryLengthMessages` keeps: the first `messagesToKeepVerbatimHead`, the last summary after them, and the newest, with a tool round they reach into whole. A summary sorts by its own time, which is later than the messages it replaced and the messages it was placed before, so on load it follows them.
 
 [One suite](https://github.com/framerslab/agentos/blob/master/src/core/conversation/__tests__/ConversationManager.persistence.test.ts) runs this on sql.js, better-sqlite3 and PostgreSQL.
 
