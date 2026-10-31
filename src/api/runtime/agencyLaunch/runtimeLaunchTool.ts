@@ -6,9 +6,9 @@
  * temporary seat from the calling GMI's; it runs through a view of the shared tool orchestrator that lists and runs
  * its allowlist alone and asks the approval gate of the team's call (the one `agencies.hitl` makes at a root launch)
  * about each of its tool calls, and makes its completion calls through a view of the runtime's provider manager that
- * checks each against the launch's budget before it is sent. The team's manager and synthesizers call generateText on
- * the host's `coordinator`, else with the key and base URL of the runtime's entry for their provider. The engine is
- * imported on the first call.
+ * checks each against the launch's budget before it is sent. The team's manager and synthesizers call generateText with
+ * the key and base URL of the runtime's entry for their provider, unless the host's `coordinator` names its own. The
+ * engine is imported on the first call.
  * @internal
  */
 import type { AgencyRegistry } from '../../../agents/agency/AgencyRegistry.js';
@@ -19,6 +19,7 @@ import type { ILogger } from '../../../core/logging/ILogger.js';
 import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator.js';
 import { GMIErrorCode } from '../../../core/utils/errors.js';
+import { baseUrlIfSet } from '../../model.js';
 import type { ApprovalGateFn } from '../approval-gate.js';
 import { resolveGMIForToolContext } from '../SelfImprovementSessionManager.js';
 import { outputEstimateTokens } from '../spendBudget.js';
@@ -110,10 +111,31 @@ export interface CoordinatorRoute {
 }
 
 /**
+ * The key and base URL of the runtime's entry for a provider, read as the runtime reads them: its provider manager
+ * matches an entry's `providerId` in any case and serves the provider from the last enabled entry it initializes for
+ * it, and the provider reads `apiKey` and `baseURL` from that entry's config (Ollama's reads `baseUrl` too). A key that
+ * is not a non-empty string and a blank base URL are left out.
+ */
+function entryCredentials(providers: readonly ProviderConfigEntry[], providerId: string): { apiKey?: string; baseUrl?: string } {
+  const wanted = providerId.toLowerCase();
+  let entry: ProviderConfigEntry | undefined;
+  for (const candidate of providers) {
+    if (candidate.enabled && typeof candidate.providerId === 'string' && candidate.providerId.toLowerCase() === wanted) entry = candidate;
+  }
+  const config = (entry?.config ?? {}) as { apiKey?: unknown; baseURL?: unknown; baseUrl?: unknown };
+  const urlOf = (value: unknown): string | undefined => (typeof value === 'string' ? baseUrlIfSet(value) : undefined);
+  const apiKey = typeof config.apiKey === 'string' && config.apiKey ? config.apiKey : undefined;
+  const baseUrl = urlOf(config.baseURL) ?? (wanted === 'ollama' ? urlOf(config.baseUrl) : undefined);
+  return { ...(apiKey ? { apiKey } : {}), ...(baseUrl ? { baseUrl } : {}) };
+}
+
+/**
  * The route of a launched team's manager and synthesizers, which call generateText: the host's `coordinator`, else
- * the provider and model of the persona of the GMI that launched the team, with the key and base URL of the runtime's
- * enabled entry for that provider, where the runtime's own providers take theirs; the environment's key only when that
- * entry has none.
+ * the provider and model of the persona of the GMI that launched the team. A route that names neither a key nor a
+ * base URL takes those of the runtime's entry for its provider, where the runtime's own providers take theirs; what the
+ * entry leaves unset is what generateText resolves for the provider, as for any call that names none. A coordinator
+ * that names a key or a base URL keeps what it names and takes nothing of the entry, so a key never goes to a base URL
+ * that was not named with it.
  *
  * @param coordinator - `agencies.coordinator`, when the host sets it.
  * @param persona - The provider and model of the launching GMI's persona, else the GMIs' defaults.
@@ -125,16 +147,17 @@ export function coordinatorRoute(
   persona: { provider?: string; model?: string },
   providers: readonly ProviderConfigEntry[],
 ): CoordinatorRoute {
-  if (coordinator) return { ...coordinator };
-  const { provider, model } = persona;
-  const entry = provider ? providers.find((candidate) => candidate.providerId === provider && candidate.enabled) : undefined;
-  const config = (entry?.config ?? {}) as { apiKey?: unknown; baseURL?: unknown };
-  return {
-    ...(provider ? { provider } : {}),
-    ...(model ? { model } : {}),
-    ...(typeof config.apiKey === 'string' && config.apiKey ? { apiKey: config.apiKey } : {}),
-    ...(typeof config.baseURL === 'string' && config.baseURL ? { baseUrl: config.baseURL } : {}),
-  };
+  const provider = coordinator ? coordinator.provider : persona.provider;
+  const model = coordinator ? coordinator.model : persona.model;
+  const apiKey = typeof coordinator?.apiKey === 'string' && coordinator.apiKey !== '' ? coordinator.apiKey : undefined;
+  const baseUrl = typeof coordinator?.baseUrl === 'string' ? baseUrlIfSet(coordinator.baseUrl) : undefined;
+  const credentials =
+    apiKey !== undefined || baseUrl !== undefined
+      ? { ...(apiKey !== undefined ? { apiKey } : {}), ...(baseUrl !== undefined ? { baseUrl } : {}) }
+      : provider
+        ? entryCredentials(providers, provider)
+        : {};
+  return { ...(provider ? { provider } : {}), ...(model ? { model } : {}), ...credentials };
 }
 
 /**
@@ -310,7 +333,8 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
 
     async agencyRoute(parent: LaunchParent) {
       // The manager and synthesizers call generateText: on the host's coordinator, else on the launching persona's
-      // provider and model with the key and base URL of the runtime's entry for that provider.
+      // provider and model. A route that names no key and no base URL takes those of the runtime's entry for its
+      // provider.
       if (deps.options.coordinator) return coordinatorRoute(deps.options.coordinator, {}, deps.providers);
       const persona = personaOf(parent);
       const provider = persona?.defaultProviderId || deps.gmiDefaults?.defaultLlmProviderId;
