@@ -8,9 +8,9 @@
  * an operator act; a verdict follows only a candidate it can decide, and a revert's verdict only a kept candidate of
  * its own chain; rows with no learner chain per agent and per visitor, and a row with a learner names no visitor. The
  * canonical text orders every key by UTF-16 code unit and refuses a value that contains itself. On SQLite, edits made
- * outside the layer: a row's text, an indexed column, a row moved to another chain, the newest row deleted, a row
- * whose text is no ledger entry, and a chain recomputed without the key; and an operator's reanchor, from which a
- * broken chain verifies again.
+ * outside the layer: a row's text, an indexed column, a row moved to another chain or to a later place, the first, a
+ * middle or the newest row deleted, a row whose text is no ledger entry, and a chain recomputed without the key; and
+ * an operator's reanchor, from which a broken chain verifies again.
  * (The cases of two adapters appending to one chain on Postgres run in learning-store.sql.test.ts.)
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -336,6 +336,29 @@ describe.each([
     expect(staleHeads).toBeLessThan(0);
     expect(await ledger.latestVerdict(id)).toBe('rejected');
     expect((await store.chainRows(chainKeyOf(LEARNER))).map((r) => r.verdict)).toEqual(['pending', 'rejected']);
+
+    // The candidate's rows are gone by the time the verdict's transaction reads them.
+    const pending = idOf(await ledger.propose(candidate('two')));
+    const vanished = Object.assign(Object.create(store) as LearningStore, {
+      transaction: <T>(fn: (tx: LearningStoreTx) => Promise<T>) =>
+        store.transaction((tx) => fn(Object.assign(Object.create(tx) as LearningStoreTx, { candidateRows: async () => [] }))),
+    });
+    expect(await new Ledger({ store: vanished }).decide(pending, 'kept', 'written')).toEqual({ status: 'unknown_candidate' });
+    expect(await ledger.latestVerdict(pending)).toBe('pending');
+  });
+
+  it("writes a visitor's verdict on that visitor's chain, with its session, evidence and state digest", async () => {
+    const store = await open();
+    const ledger = new Ledger({ store });
+    const id = idOf(await ledger.propose({ ...candidate(), learner: { ...LEARNER, userId: null }, turnUserId: 'bo' }));
+    expect((await ledger.decide(id, 'kept', 'written', { stateDigest: 'digest-9', evidence: { note: 'checked' } })).status).toBe('kept');
+    expect((await store.chainRows('t|A|tutor|bo')).map((r) => [r.rowType, r.turnUserId, r.sessionId, r.stateDigest])).toEqual([
+      ['candidate', 'bo', 's-1', null],
+      ['verdict', 'bo', 's-1', 'digest-9'],
+    ]);
+    expect(await ledger.latestStateRow('t|A|tutor|bo', ['operator_set'])).toMatchObject({ rowType: 'verdict', evidence: { note: 'checked' } });
+    expect(await ledger.verifyChain('t|A|tutor|bo')).toEqual({ ok: true, keyed: false });
+    expect(await store.chainRows('a|A|tutor')).toEqual([]);
   });
 
   it("writes a revert's verdict on a candidate it names only while that candidate is kept and in its chain", async () => {
@@ -453,6 +476,36 @@ describe('an edit made outside the layer, on SQLite', () => {
     const rows = await three.store.chainRows(chainKeyOf(LEARNER));
     await three.adapter.run('DELETE FROM agentos_learning_ledger WHERE id = ?', [rows[rows.length - 1]!.id]);
     expect(await c.verifyChain(chainKeyOf(LEARNER))).toMatchObject({ ok: false, reason: expect.stringMatching(/head/) });
+  });
+
+  it('verifies an empty chain, and breaks on a deleted first row, a deleted middle row and a row moved to a later place', async () => {
+    const key = chainKeyOf(LEARNER);
+    const one = await openSql();
+    const a = new Ledger({ store: one.store });
+    expect(await a.verifyChain(key)).toEqual({ ok: true, keyed: false });
+    await a.propose(candidate('one'), { verdict: 'kept' });
+    const [first, second] = await one.store.chainRows(key);
+    await one.adapter.run('DELETE FROM agentos_learning_ledger WHERE id = ?', [first!.id]);
+    expect(await a.verifyChain(key)).toEqual({ ok: false, keyed: false, reason: `row ${second!.id}: first row` });
+
+    const two = await openSql();
+    const b = new Ledger({ store: two.store });
+    await b.propose(candidate('one'), { verdict: 'kept' });
+    await b.propose(candidate('two'), { verdict: 'kept' });
+    const rows = await two.store.chainRows(key);
+    await two.adapter.run('DELETE FROM agentos_learning_ledger WHERE id = ?', [rows[1]!.id]);
+    expect(await b.verifyChain(key)).toEqual({ ok: false, keyed: false, reason: `row ${rows[2]!.id}: link` });
+
+    // A writer without the key gives the newest row a later place, recomputes its hash and moves the head to match.
+    const three = await openSql();
+    const c = new Ledger({ store: three.store });
+    await c.propose(candidate('one'), { verdict: 'kept' });
+    const [, newest] = await three.store.chainRows(key);
+    const body = canonicalJson({ ...JSON.parse(newest!.body), seq: 3 });
+    const hash = await sha256Hex(body);
+    await three.adapter.run('UPDATE agentos_learning_ledger SET body = ?, seq = ?, hash = ? WHERE id = ?', [body, 3, hash, newest!.id]);
+    await three.adapter.run('UPDATE agentos_learning_heads SET last_hash = ?, seq = ?', [hash, 3]);
+    expect(await c.verifyChain(key)).toEqual({ ok: false, keyed: false, reason: `row ${newest!.id}: sequence` });
   });
 
   it('breaks on rows moved to another chain, even with a head made for them there', async () => {
