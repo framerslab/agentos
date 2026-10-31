@@ -173,8 +173,8 @@ export class GMIManager {
   private isInitialized: boolean = false;
   public readonly managerId: string;
   /**
-   * One promise per getOrCreateGMIForSession() call in flight, resolved when
-   * the call returns or throws. shutdown() waits for them.
+   * One promise per getOrCreateGMIForSession() or createAgencySeat() call in
+   * flight, resolved when the call returns or throws. shutdown() waits for them.
    */
   private readonly creationsInFlight = new Set<Promise<void>>();
   /**
@@ -883,7 +883,8 @@ export class GMIManager {
    * make no model call, the tool view and provider manager the launch gives it, and, with the runtime's learning layer,
    * no learner (a workflow seat's source): it still renders its persona's traits, and with the layer off it sends no
    * personality section. It is registered under the seat session id, so its own tool calls resolve it; `release()`
-   * shuts it down and takes it out of the manager.
+   * shuts it down and takes it out of the manager. `shutdown()` waits for a seat being built, as it waits for a
+   * session's GMI, and the build then fails with its GMI shut down.
    *
    * @throws {GMIManagerError} `PERSONA_NOT_FOUND` for an unknown persona; `PERMISSION_DENIED` for one the user's tier or
    *   strict validation refuses; `INVALID_STATE` for a session that already has a GMI; `CONFIGURATION_ERROR` without
@@ -892,6 +893,23 @@ export class GMIManager {
    */
   public async createAgencySeat(spec: AgencySeatSpec): Promise<{ gmi: IGMI; personaId: string; release(): Promise<void> }> {
     this.ensureInitialized();
+    // shutdown() waits for this build to settle, as it waits for a session's; a GMI the build makes once shutdown has
+    // begun is shut down instead of registered.
+    let settle!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.creationsInFlight.add(inFlight);
+    try {
+      return await this.buildAgencySeat(spec);
+    } finally {
+      this.creationsInFlight.delete(inFlight);
+      settle();
+    }
+  }
+
+  /** The work of {@link GMIManager.createAgencySeat}. */
+  private async buildAgencySeat(spec: AgencySeatSpec): Promise<{ gmi: IGMI; personaId: string; release(): Promise<void> }> {
     const taken = (): GMIManagerError =>
       new GMIManagerError(`Session '${spec.seatSessionId}' already has a GMI; a seat runs in a session of its own.`, GMIErrorCode.INVALID_STATE, { sessionId: spec.seatSessionId });
     if (this.gmiSessionMap.has(spec.seatSessionId)) throw taken();
@@ -1035,9 +1053,9 @@ export class GMIManager {
   }
 
   /**
-   * Waits, at most `shutdownTimeoutMs`, for the getOrCreateGMIForSession()
-   * calls in flight to settle. A call still running after that shuts down the
-   * GMI it builds once it gets that far.
+   * Waits, at most `shutdownTimeoutMs`, for the getOrCreateGMIForSession() and
+   * createAgencySeat() calls in flight to settle. A call still running after
+   * that shuts down the GMI it builds once it gets that far.
    */
   private async creationsSettled(): Promise<void> {
     if (this.creationsInFlight.size === 0) return;
@@ -1108,9 +1126,9 @@ export class GMIManager {
 
     // Every GMI shuts down at the same time, each within shutdownTimeoutMs, so
     // the manager takes about one bound however many GMIs are active. In the
-    // same bound it waits for the getOrCreateGMIForSession() calls in flight:
-    // one that began before the flag was cleared and has not registered its
-    // GMI shuts that GMI down itself.
+    // same bound it waits for the getOrCreateGMIForSession() and
+    // createAgencySeat() calls in flight: one that began before the flag was
+    // cleared and has not registered its GMI shuts that GMI down itself.
     const sessionIdsToDeactivate = Array.from(this.gmiSessionMap.keys());
     // A GMI in the active map that no session maps to is shut down in the same
     // pass. Two creations for one new session that race both build a GMI, and
