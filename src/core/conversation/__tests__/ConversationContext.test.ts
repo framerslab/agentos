@@ -72,17 +72,17 @@ describe('ConversationContext history cuts', () => {
       expect(names(context.getAllMessages())).toEqual(['q1', 'call', 'read', 'write', 'q2', 'r2']);
     });
 
-    it('with a head setting given as undefined keeps the newest messages, and getHistory() returns them', () => {
-      // A setting given as undefined takes the place of its default, so the trim keeps no first messages: a limit of
-      // four keeps the newest four.
+    it.each([undefined, Number.NaN])('with a head setting of %s keeps the first two messages, as the default does', (head) => {
+      // A head setting that is not a number keeps the default head of two: a limit of four keeps the first two
+      // messages and the newest two, and getHistory() returns them.
       const context = contextWith(['q1', 'r1', 'q2', 'r2', 'q3'], {
         maxHistoryLengthMessages: 4,
-        messagesToKeepVerbatimHead: undefined,
+        messagesToKeepVerbatimHead: head,
       });
 
-      expect(names(context.getHistory())).toEqual(['r1', 'q2', 'r2', 'q3']);
+      expect(names(context.getHistory())).toEqual(['q1', 'r1', 'r2', 'q3']);
       context.addMessage(fields('r3'));
-      expect(names(context.getAllMessages())).toEqual(['q2', 'r2', 'q3', 'r3']);
+      expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'q3', 'r3']);
     });
   });
 
