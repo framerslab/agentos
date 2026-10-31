@@ -366,3 +366,41 @@ describe('GMIManager.shutdown', () => {
     expect(manager.gmiSessionMap.size).toBe(0);
   });
 });
+
+describe('GMIManager session deactivation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('gives a session whose GMI it is deactivating a new GMI once that one has shut down, never the one shutting down', async () => {
+    // The GMI's cognitive memory stays open until the case lets it close, so the GMI is SHUTTING_DOWN and still bound
+    // to its session, as during an idle cleanup or a persona refresh.
+    let releaseMemory!: () => void;
+    const memoryHeld = new Promise<void>((resolve) => {
+      releaseMemory = resolve;
+    });
+    const { manager, gmis } = await createHarness({ closeMemory: () => memoryHeld });
+    const [retired] = gmis;
+
+    const deactivation = manager.deactivateGMIForSession('session-1');
+    expect(retired.getCurrentState()).toBe(GMIPrimeState.SHUTTING_DOWN);
+    let settled = false;
+    const acquisition = manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id).finally(() => {
+      settled = true;
+    });
+    // the acquisition waits while the deactivated GMI shuts down
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+
+    releaseMemory();
+    await expect(deactivation).resolves.toBe(true);
+    const { gmi: acquired } = await acquisition;
+
+    expect(acquired).not.toBe(retired);
+    expect(acquired.getCurrentState()).toBe(GMIPrimeState.READY);
+    expect(retired.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+    expect(manager.gmiSessionMap.get('session-1')).toBe(acquired.gmiId);
+    expect(manager.activeGMIs.has(retired.gmiId)).toBe(false);
+    await manager.shutdown();
+  });
+});

@@ -57,25 +57,27 @@ import {
   encodedCopyProperties,
   encodePlainScopeId,
   importScopeIdFormDecision,
+  readScopeIdFormRecord,
   SCOPE_ID_FORM_KEY,
   writeScopeIdFormRecord,
 } from './scopeIdForm.js';
 import { parseTraceMetadata, scopeIdOfMetadata } from './tracePersistence.js';
 
-/** How many times `importFromSqlite` copies a source whose scope-id form record changes while it reads it. */
-const SOURCE_FORM_PASSES = 3;
+/**
+ * How many times `exportToSqlite` and `importFromSqlite` copy a brain whose scope-id form record changes while they
+ * read it.
+ */
+const SCOPE_ID_FORM_PASSES = 3;
 
 /**
- * Thrown inside `importFromSqlite`'s transaction when the source's scope-id form record changed while the copy read
- * the source: the transaction rolls back and the copy is made again, and after the last pass the call throws it.
+ * Thrown inside a copy (`exportToSqlite`'s read of this brain, `importFromSqlite`'s transaction) when the scope-id
+ * form record of the brain it reads changed while it read the rows: the copy is made again, and after the last pass
+ * the call throws it.
  */
-class SourceScopeIdFormChanged extends Error {
-  constructor() {
-    super(
-      `Brain.importFromSqlite: the source's scope-id form record changed while it was copied, on each of ` +
-        `${SOURCE_FORM_PASSES} passes`,
-    );
-    this.name = 'SourceScopeIdFormChanged';
+class ScopeIdFormChangedWhileCopied extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ScopeIdFormChangedWhileCopied';
   }
 }
 
@@ -1464,18 +1466,27 @@ export class Brain {
    * Refuses to overwrite an existing file at `targetPath` so callers do
    * not silently lose data.
    *
-   * The rows come from one consistent view of the database (see
+   * The rows come from one consistent view of the database where it gives
+   * one, Postgres or a SQLite file in WAL mode as `openSqlite` opens it (see
    * `_readSnapshot`), so a write that lands while the export runs is wholly
-   * in the file or wholly out of it. The file is written under a temporary
-   * name beside `targetPath` and moved there once whole: a failed export
-   * leaves nothing at `targetPath`, and a retry can run. A file that appears
-   * at `targetPath` while the export runs is kept, and the export fails.
+   * in the file or wholly out of it. The brain's scope-id form record
+   * (`scope_id_form` in `brain_meta`; see `scopeIdForm.ts`) is read before
+   * the rows and again after them: on a brain with one connection, which
+   * reads no snapshot, a re-file that commits while the export reads makes
+   * the export copy again, so the file's record names the form its rows are
+   * in. The file is written under a temporary name beside `targetPath` and
+   * moved there once whole: a failed export leaves nothing at `targetPath`,
+   * and a retry can run. A file that appears at `targetPath` while the
+   * export runs is kept, and the export fails.
    *
    * Forking semantics: rows are emitted with the source brainId. Importing
    * the resulting file under a different brainId produces a fork.
    *
    * @param targetPath - Destination file path. File must not exist.
    * @returns Bytes written to the destination file.
+   * @throws When anything exists at `targetPath`, before the export or once
+   *   it is written; or when the scope-id form record changed while the
+   *   export read the rows, on each of three passes.
    */
   async exportToSqlite(targetPath: string): Promise<{ bytesWritten: number }> {
     // Refuse to overwrite anything at the target, a dangling link included.
@@ -1483,43 +1494,58 @@ export class Brain {
       throw new Error(`Brain.exportToSqlite: target already exists: ${targetPath}`);
     }
 
-    const partialPath = `${targetPath}.partial-${uuidv4()}`;
-    try {
-      // Open a fresh SQLite Brain at the partial path. We import under the
-      // source brainId so the export file is identifiable as belonging to
-      // this brain even if the receiving Brain has a different id.
-      const target = await Brain.openSqlite(partialPath, { brainId: this.#brainId });
+    for (let pass = 1; ; pass += 1) {
+      const partialPath = `${targetPath}.partial-${uuidv4()}`;
       try {
-        await this._readSnapshot(async (source) => {
-          for (const table of PORTABLE_TABLES) {
-            const rows = await source.all<Record<string, unknown>>(
-              `SELECT * FROM ${table} WHERE brain_id = ?`,
-              [this.#brainId],
-            );
-            if (rows.length === 0) continue;
+        // Open a fresh SQLite Brain at the partial path. We import under the
+        // source brainId so the export file is identifiable as belonging to
+        // this brain even if the receiving Brain has a different id.
+        const target = await Brain.openSqlite(partialPath, { brainId: this.#brainId });
+        try {
+          await this._readSnapshot(async (source) => {
+            // The scope-id form record, read before the rows and again after
+            // them. A brain on one connection reads no snapshot, so a re-file
+            // another flow commits between two reads moves rows this pass has
+            // not read yet; the pass is then made again, and the file's record
+            // names the form its rows are in.
+            const encoded = await readScopeIdFormRecord(source, this.#brainId);
+            for (const table of PORTABLE_TABLES) {
+              const rows = await source.all<Record<string, unknown>>(
+                `SELECT * FROM ${table} WHERE brain_id = ?`,
+                [this.#brainId],
+              );
+              if (rows.length === 0) continue;
 
-            // Upsert so source rows override the brain_meta defaults
-            // (schema_version, created_at) seeded during target initialisation.
-            await this._bulkCopy(target, table, rows, this.#brainId, { upsert: true });
+              // Upsert so source rows override the brain_meta defaults
+              // (schema_version, created_at) seeded during target initialisation.
+              await this._bulkCopy(target, table, rows, this.#brainId, { upsert: true });
+            }
+            if ((await readScopeIdFormRecord(source, this.#brainId)) !== encoded) {
+              throw new ScopeIdFormChangedWhileCopied(
+                `Brain.exportToSqlite: this brain's scope-id form record changed while it was exported, on each of ` +
+                  `${SCOPE_ID_FORM_PASSES} passes`,
+              );
+            }
+          });
+          // Fold the write-ahead log into the file, so the one file moved into
+          // place holds every row.
+          const rollbackJournal = target._features.dialect.pragma('journal_mode', 'DELETE');
+          if (rollbackJournal) {
+            await target.exec(rollbackJournal);
           }
-        });
-        // Fold the write-ahead log into the file, so the one file moved into
-        // place holds every row.
-        const rollbackJournal = target._features.dialect.pragma('journal_mode', 'DELETE');
-        if (rollbackJournal) {
-          await target.exec(rollbackJournal);
+        } finally {
+          await target.close();
         }
-      } finally {
-        await target.close();
+        await publishWithoutReplacing(partialPath, targetPath);
+        break;
+      } catch (error) {
+        await Promise.all(
+          ['', '-wal', '-shm', '-journal'].map((suffix) =>
+            fs.rm(`${partialPath}${suffix}`, { force: true }).catch(() => undefined),
+          ),
+        );
+        if (!(error instanceof ScopeIdFormChangedWhileCopied) || pass >= SCOPE_ID_FORM_PASSES) throw error;
       }
-      await publishWithoutReplacing(partialPath, targetPath);
-    } catch (error) {
-      await Promise.all(
-        ['', '-wal', '-shm', '-journal'].map((suffix) =>
-          fs.rm(`${partialPath}${suffix}`, { force: true }).catch(() => undefined),
-        ),
-      );
-      throw error;
     }
 
     const stat = await fs.stat(targetPath);
@@ -1683,7 +1709,7 @@ export class Brain {
           tablesImported = await this._adapter.transaction((trx) => this._importSource(trx, source, strategy));
           break;
         } catch (error) {
-          if (!(error instanceof SourceScopeIdFormChanged) || pass >= SOURCE_FORM_PASSES) throw error;
+          if (!(error instanceof ScopeIdFormChangedWhileCopied) || pass >= SCOPE_ID_FORM_PASSES) throw error;
         }
       }
     } finally {
@@ -1712,8 +1738,8 @@ export class Brain {
    * would read as another. Every row of each portable table of the file is then copied under this brain's id.
    *
    * @returns The rows copied per table.
-   * @throws When the handshake refuses the source, naming the record; or {@link SourceScopeIdFormChanged} when the
-   *   source's record changed while the copy read it.
+   * @throws When the handshake refuses the source, naming the record; or {@link ScopeIdFormChangedWhileCopied} when
+   *   the source's record changed while the copy read it.
    */
   private async _importSource(
     trx: StorageAdapter,
@@ -1757,7 +1783,12 @@ export class Brain {
     if (decision.action === 'encode' || decision.action === 'record') await writeScopeIdFormRecord(trx, this);
     // A trace's copy is found by its trace's key: one the file holds under another node id gets the key here.
     if ((tablesImported['knowledge_nodes'] ?? 0) > 0) await keyTraceCopies(trx, this.#brainId);
-    if ((await brainHoldsScopeIdFormRecord(source)) !== sourceEncoded) throw new SourceScopeIdFormChanged();
+    if ((await brainHoldsScopeIdFormRecord(source)) !== sourceEncoded) {
+      throw new ScopeIdFormChangedWhileCopied(
+        `Brain.importFromSqlite: the source's scope-id form record changed while it was copied, on each of ` +
+          `${SCOPE_ID_FORM_PASSES} passes`,
+      );
+    }
     return tablesImported;
   }
 

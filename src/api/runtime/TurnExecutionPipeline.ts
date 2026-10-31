@@ -35,6 +35,7 @@ import type {
 import { GMIInteractionType } from '../../cognition/substrate/IGMI';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { withAgentOSSpan } from '../../safety/evaluation/observability/otel';
+import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import type { TurnPlan } from '../../orchestration/turn-planner/TurnPlanner';
 import {
   executeRollingSummaryPhase,
@@ -77,6 +78,11 @@ export interface PipelineStreamContext {
   userApiKeys?: Record<string, string>;
   processingOptions?: { preferredModelId?: string; preferredProviderId?: string };
   languageNegotiation?: any;
+  /**
+   * The output guardrails' tool-call gate the stream's turn runs with, when a guardrail evaluates tool calls; a
+   * continuation of the stream given no gate of its own is judged with it.
+   */
+  toolCallGate?: GuardrailToolCallGate;
 }
 
 /**
