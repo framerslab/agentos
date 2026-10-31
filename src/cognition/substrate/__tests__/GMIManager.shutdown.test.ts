@@ -131,6 +131,8 @@ async function createHarness(options: HarnessOptions = {}) {
   };
   const conversationManager = {
     getOrCreateConversationContext: async () => new ConversationContext('conv-1'),
+    // No stored contexts, so the idle cleanup reads each GMI's creation time.
+    listContextsForSession: async () => [],
   } as unknown as ConversationManager;
   const promptEngine = {
     estimateTokenCount: async () => 10,
@@ -465,6 +467,114 @@ describe('GMIManager session deactivation', () => {
     expect(retired.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
     expect(manager.gmiSessionMap.get('session-1')).toBe(acquired.gmiId);
     expect(manager.activeGMIs.has(retired.gmiId)).toBe(false);
+    await manager.shutdown();
+  });
+});
+
+describe('GMIManager agency seats', () => {
+  const seatSessionId = 'seat:launch-1:writer';
+  const seatSpec = { seatSessionId, userId: 'user-1', persona: { personaId: persona.id }, toolView: (base: IToolOrchestrator) => base };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("refuses a request that names a seat's session whatever persona it names, an unknown one included", async () => {
+    const { manager } = await createHarness({ agencySeatPromptEngineConfig: SEAT_PROMPT_ENGINE_CONFIG });
+    const seat = await manager.createAgencySeat(seatSpec);
+    // The precondition: a persona the manager does not hold is refused as unknown on any other session.
+    await expect(manager.getOrCreateGMIForSession('user-3', 'session-3', 'no-such-persona')).rejects.toMatchObject({
+      code: GMIErrorCode.PERSONA_NOT_FOUND,
+    });
+
+    await expect(manager.getOrCreateGMIForSession('user-3', seatSessionId, 'no-such-persona')).rejects.toMatchObject({
+      code: GMIErrorCode.PERMISSION_DENIED,
+    });
+    expect(manager.gmiSessionMap.get(seatSessionId)).toBe(seat.gmi.gmiId);
+    await seat.release();
+    await manager.shutdown();
+  });
+
+  it('leaves a running seat to its launch when the idle cleanup runs', async () => {
+    const { manager, gmis } = await createHarness({ agencySeatPromptEngineConfig: SEAT_PROMPT_ENGINE_CONFIG });
+    const seat = await manager.createAgencySeat(seatSpec);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const cleaned = await manager.cleanupInactiveGMIs(0);
+
+    // The cleanup ran: both sessions' GMIs were idle past the threshold and are gone.
+    for (const gmi of gmis) expect(gmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+    expect(cleaned).toBe(2);
+    expect(seat.gmi.getCurrentState()).toBe(GMIPrimeState.READY);
+    expect(manager.gmiSessionMap.get(seatSessionId)).toBe(seat.gmi.gmiId);
+    expect(manager.activeGMIs.get(seat.gmi.gmiId)).toBe(seat.gmi);
+
+    await seat.release();
+    expect(seat.gmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+    expect(manager.gmiSessionMap.has(seatSessionId)).toBe(false);
+    await manager.shutdown();
+  });
+
+  it('refuses a request whose GMI was being built when a seat took its session, and keeps the seat', async () => {
+    let memoryRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      memoryRequested = resolve;
+    });
+    let releaseMemory!: () => void;
+    const memoryHeld = new Promise<void>((resolve) => {
+      releaseMemory = resolve;
+    });
+    const { manager, memoryShutdown } = await createHarness({
+      agencySeatPromptEngineConfig: SEAT_PROMPT_ENGINE_CONFIG,
+      holdMemoryFor: (sessionId) => {
+        if (sessionId !== seatSessionId) return undefined;
+        memoryRequested();
+        return memoryHeld;
+      },
+    });
+    // The request has passed every check on the session and waits while its GMI is built.
+    const outcome = manager.getOrCreateGMIForSession('user-3', seatSessionId, persona.id).then(
+      () => 'registered',
+      (error: { code?: string }) => error.code,
+    );
+    await requested;
+    const seat = await manager.createAgencySeat(seatSpec);
+    expect(manager.gmiSessionMap.get(seatSessionId)).toBe(seat.gmi.gmiId);
+
+    releaseMemory();
+
+    expect(await outcome).toBe(GMIErrorCode.PERMISSION_DENIED);
+    // The GMI built for the request closed its memory (a seat's GMI has none) and was never registered.
+    expect(memoryShutdown).toHaveBeenCalledTimes(1);
+    expect(manager.gmiSessionMap.get(seatSessionId)).toBe(seat.gmi.gmiId);
+    expect(manager.activeGMIs.size).toBe(3);
+    expect(seat.gmi.getCurrentState()).toBe(GMIPrimeState.READY);
+
+    await seat.release();
+    expect(seat.gmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+    expect(manager.activeGMIs.has(seat.gmi.gmiId)).toBe(false);
+    await manager.shutdown();
+  });
+
+  it('releases only its own GMI: a seat handle released after the manager restarted leaves the new seat of its session alone', async () => {
+    const { manager } = await createHarness({ agencySeatPromptEngineConfig: SEAT_PROMPT_ENGINE_CONFIG });
+    const stale = await manager.createAgencySeat(seatSpec);
+    await manager.shutdown();
+    expect(stale.gmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+    await manager.initialize();
+    const current = await manager.createAgencySeat(seatSpec);
+
+    await stale.release();
+
+    expect(current.gmi.getCurrentState()).toBe(GMIPrimeState.READY);
+    expect(manager.gmiSessionMap.get(seatSessionId)).toBe(current.gmi.gmiId);
+    await expect(manager.getOrCreateGMIForSession('user-3', seatSessionId, persona.id)).rejects.toMatchObject({
+      code: GMIErrorCode.PERMISSION_DENIED,
+    });
+
+    await current.release();
+    expect(current.gmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+    expect(manager.gmiSessionMap.has(seatSessionId)).toBe(false);
     await manager.shutdown();
   });
 });
