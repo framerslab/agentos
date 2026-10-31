@@ -318,9 +318,11 @@ export class ChatGptImporter {
    * an id. The row is written with an insert that does nothing when the brain
    * holds a row of that name, so two imports that write one conversation's row
    * at the same time, in one process or in two, write one row and both file
-   * under it. A row of any other name is never taken. A conversation the export
-   * names by neither has nothing to find it by: each import writes it a row of
-   * its own. The row then takes the conversation's title and the export's
+   * under it. A row of any other name is never taken, since nothing in it says
+   * which conversation it is: the conversation gets the row it names beside it,
+   * and the pairs filed under the other keep naming that one. A conversation the
+   * export names by neither has nothing to find it by: each import writes it a
+   * row of its own. The row then takes the conversation's title and the export's
    * update time when that update time is later than the row's. The row's
    * metadata records the export's id as `chatgpt_id`.
    *
