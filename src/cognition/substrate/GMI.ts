@@ -737,7 +737,8 @@ export class GMI implements IGMI {
     // whose host passed one): the session is asked again and reads it as a turn of that organization.
     if (continuation && this.turnLearning && this.turnLearning.namespace === namespace) return this.turnLearning;
 
-    const userId = typeof turnInput.userId === 'string' && turnInput.userId ? turnInput.userId : null;
+    const namesUser = turnInput.metadata?.noTurnUser !== true && typeof turnInput.userId === 'string' && turnInput.userId !== '';
+    const userId = namesUser ? (turnInput.userId as string) : null;
     const workflowSeat = Boolean(turnInput.metadata?.workflowId);
     const conversationId = this.getConversationIdForTurn(turnInput);
     const preferredModelId = turnInput.metadata?.options?.preferredModelId;

@@ -342,6 +342,11 @@ export interface GMITurnInput {
      */
     memoryScope?: { userId?: string; sessionId?: string } | null;
     /**
+     * True on a turn that names no user: a `gmi()` session opened with no user id, `generate()` and `stream()` run as
+     * their own session id, which is no user's. A learning layer reads such a turn's user as `null`.
+     */
+    noTurnUser?: boolean;
+    /**
      * Asked before each call of this turn's tool round runs (see {@link GMIToolCallGate}). A tool continuation that names
      * none asks the gate of the turn it continues.
      */
