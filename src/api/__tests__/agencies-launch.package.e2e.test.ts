@@ -3058,4 +3058,248 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
       { type: 'output', agent: `launch:${gmiRoot.agencyId}`, action: 'return' },
     ]);
   });
+
+  it("a composition the runtime's engine holds runs in a seat only whole, each step through the seat's names and agencies.hitl's gate, while a composed call in no team runs its steps unasked, and a composition a host builds over createStepGate meets a seat's names and gate by its own call alone", async () => {
+    const k = key();
+    const ran: Ran = [];
+    const asked: Asked[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(askedOf(request));
+      return request.action === 'send_email' ? { approved: false, reason: 'mail is paused' } : { approved: true };
+    };
+    const search = recording('search', ran);
+    const note = recording('note', ran);
+    // A composition the host builds over its own step gate, of two tools the runtime holds too.
+    const hostSteps: Record<string, ITool> = { search, note };
+    const hostNotify = new ComposableToolBuilder(createStepGate({ resolve: (name) => hostSteps[name] })).build(
+      'host_notify',
+      'Looks it up, then notes it.',
+      { type: 'object', properties: { q: { type: 'string' } } },
+      {
+        mode: 'compose',
+        steps: [
+          { name: 'find', tool: 'search', inputMapping: { q: '$input.q' } },
+          { name: 'jot', tool: 'note', inputMapping: { q: '$input.q' } },
+        ],
+      },
+    );
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          // The lead forges a composition of search and send_email, as a model does.
+          reply.tools([
+            {
+              id: 'f1',
+              name: 'forge_tool',
+              args: {
+                name: 'notify',
+                description: 'Looks it up, then emails the team.',
+                inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+                outputSchema: {},
+                implementation: {
+                  mode: 'compose',
+                  steps: [
+                    { name: 'find', tool: 'search', inputMapping: { q: '$input.q' } },
+                    { name: 'send', tool: 'send_email', inputMapping: { q: '$input.q' } },
+                  ],
+                },
+                testCases: [{ input: { q: 'x' }, expectedOutput: 'sent', stepOutputs: { send: 'sent' } }],
+              },
+            },
+          ]),
+          reply.text('Forged.'),
+        ],
+      }),
+      // The engine's judge approves what it is asked about.
+      JSON.stringify({ safety: { passed: true, score: 1 }, correctness: { passed: true, score: 1 }, determinism: { likely: true }, confidence: 0.9, reasoning: 'Safe and correct.' }),
+    );
+    const os = await startRuntime(k, {
+      emergent: true,
+      // send_email has side effects, so a composition chains it only once the host lists it.
+      emergentConfig: { compose: { sideEffectingTools: ['send_email'] } },
+      tools: { search, send_email: recording('send_email', ran, { hasSideEffects: true }), note, host_notify: hostNotify },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['notify', 'send_email', 'host_notify', 'note'] }, handler } },
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-forge' });
+    // The forge took (the precondition); its dry run may run the search step.
+    expect(s.seen).toHaveLength(2);
+    expect(toolText(s.seen[1], 'f1')).not.toContain('Error from tool');
+    const afterForge = ran.length;
+
+    s.replies.push(
+      reply.tools([
+        // Without send_email in the allowlist the composition could not run whole.
+        { id: 'l1', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Notify.', seats: [{ role: 'mailer', instructions: 'Notify the team.', tools: ['notify', 'search'] }] } },
+        { id: 'l2', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Notify.', seats: [{ role: 'mailer', instructions: 'Notify the team.', tools: ['notify', 'search', 'send_email'] }] } },
+      ]),
+      reply.tools([{ id: 'c1', name: 'notify', args: { q: 'x' } }]),
+      reply.text('Mail held.'),
+      reply.text('Done.'),
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-compose' });
+    // The lead, the mailer's two steps, the lead: the narrow launch ran no seat.
+    expect(s.seen).toHaveLength(6);
+    const narrow = toolText(s.seen[5], 'l1');
+    expect(narrow).toContain('tool_not_allowed');
+    expect(narrow).toContain("'notify' is a composed tool whose step 'send_email' the seat's allowlist leaves out");
+    // With the whole allowlist the mailer was offered the three tools and called the composition (the precondition).
+    expect(offered(s.seen[3]).sort()).toEqual(['notify', 'search', 'send_email']);
+    const wide = launchedIn(s.seen[5], 'l2');
+    expect(wide).toMatchObject({ status: 'completed', text: 'Mail held.' });
+    const team = `launch:${wide.agencyId}`;
+    // The team's gate asked about the composed call by its name, then about its send_email step by the step tool's
+    // name, before the step ran; the search step, which the policy does not cover, ran unasked, and send_email never ran.
+    expect(asked.map(({ agent, action }) => `${agent} ${action}`)).toEqual([`${team} notify`, `${team} send_email`]);
+    expect(asked[0]).toMatchObject({ args: { q: 'x' }, callId: 'c1' });
+    expect(asked[1]).toMatchObject({ args: { q: 'x' } });
+    expect(ran.slice(afterForge)).toEqual([{ name: 'search', args: { q: 'x' } }]);
+    expect(toolText(s.seen[4], 'c1')).toContain('mail is paused');
+
+    // A composed call in no team, the lead's own, runs its steps as before: no one is asked, and both steps run.
+    s.replies.push(reply.tools([{ id: 'c2', name: 'notify', args: { q: 'y' } }]), reply.text('Notified.'));
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-direct' });
+    expect(s.seen).toHaveLength(8);
+    expect(toolText(s.seen[7], 'c2')).not.toContain('Error from tool');
+    expect(asked).toHaveLength(2);
+    expect(ran.slice(afterForge + 1)).toEqual([
+      { name: 'search', args: { q: 'y' } },
+      { name: 'send_email', args: { q: 'y' } },
+    ]);
+
+    // A composition the host built over createStepGate runs its steps through its own gate: the seat's call to it is
+    // asked by its name, and its steps run outside the seat's view, its names and its gate: note, which the seat's
+    // allowlist leaves out and the policy covers, runs unasked.
+    s.replies.push(
+      launchStep({ goal: 'Run it.', seats: [{ role: 'runner', instructions: 'Run it.', tools: ['host_notify'] }] }, 'l3'),
+      reply.tools([{ id: 'h1', name: 'host_notify', args: { q: 'z' } }]),
+      reply.text('Ran.'),
+      reply.text('Done.'),
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-host' });
+    expect(s.seen).toHaveLength(12);
+    expect(offered(s.seen[9])).toEqual(['host_notify']);
+    const hostTeam = launchedIn(s.seen[11], 'l3');
+    expect(hostTeam).toMatchObject({ status: 'completed', text: 'Ran.' });
+    expect(asked.slice(2)).toEqual([{ type: 'tool', agent: `launch:${hostTeam.agencyId}`, action: 'host_notify', args: { q: 'z' }, callId: 'h1' }]);
+    expect(ran.slice(afterForge + 3)).toEqual([
+      { name: 'search', args: { q: 'z' } },
+      { name: 'note', args: { q: 'z' } },
+    ]);
+  });
+
+  it("an agencies.hitl approval on the full runtime is for the tool it was asked about: a tool the host registers under the name while the approval waits never runs under it, nor does the one it replaced", async () => {
+    const k = key();
+    const ran: Ran = [];
+    const asked: Asked[] = [];
+    let os!: AgentOS;
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(askedOf(request));
+      // While the approval is pending, the host registers another send_email through the runtime's tool orchestrator.
+      await os.getToolOrchestrator().registerTool({
+        ...hostTool('send_email', async (args) => {
+          ran.push({ name: 'send_email (replacement)', args });
+          return { success: true, output: 'sent by the replacement' };
+        }),
+        id: 'host-send_email-replacement',
+        inputSchema: { type: 'object', properties: { to: { type: 'string' } } },
+        hasSideEffects: true,
+      });
+      return { approved: true };
+    };
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          launchStep({ goal: 'Email the team.', seats: [{ role: 'mailer', instructions: 'Send the mail.', tools: ['send_email'] }] }, 'l1'),
+          reply.tools([{ id: 'e1', name: 'send_email', args: { to: 'team' } }]),
+          reply.text('Mail held.'),
+          reply.text('Done.'),
+        ],
+      }),
+      'ok',
+    );
+    os = await startRuntime(k, {
+      tools: { search: recording('search', ran), send_email: recording('send_email', ran, { hasSideEffects: true }) },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['send_email'] }, handler } },
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-replaced' });
+    // The lead, the mailer's two steps, the lead: the mailer called send_email and the handler approved it (the
+    // precondition).
+    expect(s.seen).toHaveLength(4);
+    const out = launchedIn(s.seen[3], 'l1');
+    expect(out).toMatchObject({ status: 'completed', text: 'Mail held.' });
+    expect(asked).toEqual([{ type: 'tool', agent: `launch:${out.agencyId}`, action: 'send_email', args: { to: 'team' }, callId: 'e1' }]);
+    // The name then held another tool, which the approval was not asked about: neither tool ran, and the mailer read why.
+    expect(ran).toEqual([]);
+    expect(toolText(s.seen[2], 'e1')).toContain('step_replaced');
+  });
+
+  it("an agencies.hitl handler that fails on a level-2 seat's call fails the root team's call, whose gate it is: the level-2 team reports how it ran, every later call under that gate is refused unasked, and the root launch fails, named by the error's name and code alone", async () => {
+    const k = key();
+    const canary = 'sk-CANARY-4141';
+    const thrown = Object.assign(new Error(`the approver at https://ops:${canary}@hooks.example refused`), { name: 'WebhookError', code: 'E_HOOK' });
+    const ran: Ran = [];
+    let asks = 0;
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          launchStep({ goal: 'Plan the search.', seats: [{ role: 'planner', instructions: 'Plan the search.', tools: ['search', LAUNCH_AGENCY_TOOL_NAME] }] }, 'l1'),
+          launchStep({ goal: 'Search.', seats: [{ role: 'finder', instructions: 'FINDER: find it.', tools: ['search'] }] }, 'n1'),
+          // The finder's search: the handler fails.
+          reply.tools([{ id: 's1', name: 'search', args: { q: 'x' } }]),
+          reply.text('No search.'),
+          // The planner's own search, a later call under the same gate.
+          reply.tools([{ id: 's2', name: 'search', args: { q: 'y' } }]),
+          reply.text('Planned.'),
+          reply.text('Handled.'),
+        ],
+      }),
+      'ok',
+    );
+    const warnings: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const logger: ILogger = {
+      info: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+      warn: (message: string, meta?: Record<string, unknown>) => {
+        warnings.push({ message, meta });
+      },
+    };
+    const os = await startRuntime(
+      k,
+      {
+        tools: { search: recording('search', ran) },
+        agencies: {
+          launch: true,
+          hitl: {
+            approvals: { beforeTool: ['search'] },
+            handler: async (): Promise<ApprovalDecision> => {
+              asks += 1;
+              throw thrown;
+            },
+          },
+        },
+      },
+      logger,
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-nested-fails' });
+    // The lead, the planner, the finder's two steps, the planner's two steps, the lead: the finder and then the planner
+    // called search (the precondition).
+    expect(s.seen).toHaveLength(7);
+    expect(systemText(s.seen[2])).toContain('FINDER: find it.');
+    // The handler was asked once, for the finder's call, and failed: the finder was told only that it failed.
+    expect(asks).toBe(1);
+    expect(ran).toEqual([]);
+    expect(toolText(s.seen[3], 's1')).toContain('the approval handler failed');
+    // The level-2 team reported how its own team ran.
+    expect(launchedIn(s.seen[4], 'n1')).toMatchObject({ status: 'completed', text: 'No search.' });
+    // The planner's later call under the root team's gate was refused, the handler not asked again.
+    expect(toolText(s.seen[5], 's2')).toContain('an earlier tool approval failed');
+    // The root team's call rejected with the handler's error: the root launch failed, named by its name and code alone.
+    const root = launchedIn(s.seen[6], 'l1');
+    expect(root).toMatchObject({ status: 'failed', reason: 'the team failed: WebhookError (E_HOOK)' });
+    expectNoWordOf(canary, [JSON.stringify(s.seen), JSON.stringify(root)]);
+    const launchWarnings = warnings.filter(({ message }) => message.startsWith('[AgentOS] launch_agency'));
+    expect(launchWarnings.map(({ message }) => message)).toEqual(['[AgentOS] launch_agency run failed']);
+    expect(launchWarnings[0].meta).toEqual({ error: expect.objectContaining({ name: 'WebhookError', message: expect.stringContaining(canary) }) });
+  });
 });
