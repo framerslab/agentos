@@ -110,6 +110,16 @@ describe('the full runtime with the learning flag on', () => {
     expect(await send(booted, { userId: 'u', sessionId: 's-2', selectedPersonaId: 'calm' })).not.toContain(HEADING);
   });
 
+  it('renders a trait a persona writes under its canonical key and an alias by the canonical key, with no overlay', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const both = { ...tutor, id: 'both', personalityTraits: { honesty: 0.9, openness: 0.4, opennessToExperience: 0.9 } } as unknown as IPersonaDefinition;
+    booted = await boot({ learning: true, personas: [both] });
+    const system = await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'both' });
+    // The canonical key wins, as the normalizer reads it: openness 0.4 renders no directive.
+    expect(system).toContain(renderPersonalitySection({ honesty: 0.9, openness: 0.4 })!);
+    expect(system).not.toContain('Explore creative angles');
+  });
+
   it("returns its layer, whose manifest counts a learner's turn and a placeholder user's turn, and renders the authored traits in mode off", async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     booted = await boot({ learning: { mode: 'off' } });

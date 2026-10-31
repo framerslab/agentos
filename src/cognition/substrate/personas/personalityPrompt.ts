@@ -180,7 +180,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> => !!value &
  * the patch is read back as the difference.) A trait the overlay writes under an alias (`honestyHumility`,
  * `honesty_humility`, `opennessToExperience`) beside the persona's canonical key is read as a patch of that key.
  *
- * @param authored - The registry persona's `personalityTraits`.
+ * @param authored - The registry persona's `personalityTraits` as written, not normalized: an alias the persona writes
+ *   itself beside its canonical key is then no patch.
  * @param resolved - The overlay-resolved persona's `personalityTraits`.
  * @returns The patched traits under canonical keys, or `undefined` when the overlay changes none.
  */
