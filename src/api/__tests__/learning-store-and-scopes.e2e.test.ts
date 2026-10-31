@@ -30,6 +30,13 @@
  * on the Brain follows the move: in this process when it commits, and after another process's re-file (a child Node
  * process that loads the built package, as a host's second process does) when the layer opens it; until then no read
  * returns a moved trace under the plain id, which from then on names a namespaced learner.
+ *
+ * Every import, export and migration keeps a Brain's form. An import (the `Memory` facade's JSON, SQLite file,
+ * Markdown and CSV imports, and `Brain.importFromSqlite`) takes its source's form from the source's own record and
+ * encodes a plain source's ids as it writes them into a re-filed Brain, refuses an encoded source where the Brain holds
+ * a plain id the record would read as another, naming the record, and on Postgres waits for a re-file under way. The
+ * RAG `MigrationEngine` (the package's `cognition/rag` path) runs the same handshake per brain before it copies any
+ * table, and fills `scope_id` from each row's metadata for a source from before the column.
  */
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -72,6 +79,10 @@ import {
   type BrainRefileResult,
   type ScopeIdRefile,
 } from '@framers/agentos/cognition/memory/retrieval/store/scopeIdForm';
+import { JsonExporter, MarkdownExporter, ObsidianImporter } from '@framers/agentos/cognition/memory';
+import { MigrationEngine } from '@framers/agentos/cognition/rag';
+import { createPostgresAdapter } from '@framers/sql-storage-adapter';
+import Database from 'better-sqlite3';
 import { reply, script } from './helpers/stubProviders';
 
 /** The embedding size of a common hosted model. Every text embeds as one direction, so a recall finds every trace of its scope. */
@@ -2232,6 +2243,619 @@ describe.skipIf(!POSTGRES_URL)("a Brain's re-file on Postgres", () => {
   });
 });
 
+/** What the user tells the agent, in the cases on imports and migrations. */
+const HIKES = 'Bo hikes on Sundays.';
+const TUTOR = 'The tutor knows Ana learns by drawing.';
+const STANDUP = 'The stand-up moved to ten.';
+
+/** One handle per Brain file, through which a case reads what a file holds. */
+const readers = new Map<string, Brain>();
+
+async function readerOf(file: string): Promise<Brain> {
+  const held = readers.get(file);
+  if (held && brains.has(held)) return held;
+  const brain = await openBrain(file);
+  readers.set(file, brain);
+  return brain;
+}
+
+/** What the brain `qa` of a file holds: each live trace as `<scope>:<scope_id>`, sorted, and its scope-id form record. */
+async function formOf(file: string): Promise<{ ids: string[]; record: string | undefined }> {
+  const brain = await readerOf(file);
+  const rows = await brain.all<{ scope: string; scope_id: string }>(
+    'SELECT scope, scope_id FROM memory_traces WHERE brain_id = ? AND deleted = 0 ORDER BY scope, scope_id',
+    [brain.brainId],
+  );
+  return { ids: rows.map((row) => `${row.scope}:${row.scope_id}`), record: await brain.getMeta(SCOPE_ID_FORM_KEY) };
+}
+
+/** Closes a facade, as a process that is done with its file does. */
+async function closeFacade(facade: Memory): Promise<void> {
+  const at = facades.indexOf(facade);
+  if (at >= 0) facades.splice(at, 1);
+  await facade.close();
+}
+
+/** A Brain file a learning layer has opened: what `fill` files first, re-filed once to the encoded form, with the record. */
+async function refiledFacade(fill: (memory: Memory) => Promise<unknown> = async () => undefined): Promise<{ file: string; memory: Memory }> {
+  const file = brainFile();
+  const memory = await openFacade(file);
+  await fill(memory);
+  await memory.ensureEncodedScopeIds();
+  return { file, memory };
+}
+
+/** A Brain file no learning layer has opened, holding what `fill` files. */
+async function plainFacade(fill: (memory: Memory) => Promise<unknown> = async () => undefined): Promise<{ file: string; memory: Memory }> {
+  const file = brainFile();
+  const memory = await openFacade(file);
+  await fill(memory);
+  return { file, memory };
+}
+
+/** A directory of its own, removed after the test. */
+function scratchDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-files-'));
+  dirs.push(dir);
+  return dir;
+}
+
+/** The Markdown notes under a folder, by path. */
+function notesUnder(dir: string): string[] {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const at = path.join(dir, entry.name);
+    if (entry.isDirectory()) return notesUnder(at);
+    return entry.name.endsWith('.md') ? [at] : [];
+  });
+}
+
+/** A front-matter field of a note as written: its value with any quotes taken off, or undefined. */
+function frontMatterField(note: string, field: string): string | undefined {
+  const line = new RegExp(`^${field}: (.*)$`, 'm').exec(note.split(/^---$/m)[1] ?? '');
+  return line ? line[1]!.trim().replace(/^["']|["']$/g, '') : undefined;
+}
+
+/**
+ * The Brain as an exporter reads it, while another opener of the same file re-files it once (`refile`), right before
+ * the exporter's first read of the trace rows: a re-file that commits while the export reads.
+ */
+function overtakenByRefile(brain: Brain, refile: () => Promise<unknown>): { brain: Brain; refiled: () => boolean } {
+  let refiled = false;
+  const overtaken = new Proxy(brain, {
+    get(target, property) {
+      if (property === 'all') {
+        return async (sql: string, params?: Parameters<Brain['all']>[1]) => {
+          if (!refiled && sql.includes('FROM memory_traces')) {
+            refiled = true;
+            await refile();
+          }
+          return target.all(sql, params);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { brain: overtaken, refiled: () => refiled };
+}
+
+/** A Brain file a release older than the `scope_id` column wrote: one `user` trace of the brain, its scope id in its metadata alone. */
+function olderReleaseFile(brainId: string, traceId: string, scopeId: string): string {
+  const file = brainFile();
+  const db = new Database(file);
+  try {
+    db.exec(`
+      CREATE TABLE brain_meta (brain_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (brain_id, key));
+      CREATE TABLE memory_traces (
+        brain_id TEXT NOT NULL, id TEXT NOT NULL, type TEXT NOT NULL, scope TEXT NOT NULL, content TEXT NOT NULL,
+        embedding BLOB, strength REAL NOT NULL DEFAULT 1.0, created_at INTEGER NOT NULL, last_accessed INTEGER,
+        retrieval_count INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]', emotions TEXT NOT NULL DEFAULT '{}',
+        metadata TEXT NOT NULL DEFAULT '{}', deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (brain_id, id));
+    `);
+    db.prepare(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata) VALUES (?, ?, 'episodic', 'user', ?, 1, ?)`,
+    ).run(brainId, traceId, `What ${scopeId} said.`, JSON.stringify({ scopeId }));
+  } finally {
+    db.close();
+  }
+  return file;
+}
+
+/** A refusal in an import's `errors`, by the record it names; any other message as it is. */
+const refusals = (errors: readonly string[]) => errors.map((error) => (/scope_id_form/.test(error) ? 'scope_id_form' : error));
+
+describe("an import or a migration keeps a Brain's scope-id form", () => {
+  it("takes a re-filed Brain's JSON export into a fresh Brain as it is written, with the record, and recall there finds it under the encoded id", async () => {
+    const source = await refiledFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const exported = await source.memory.exportToString();
+    expect((JSON.parse(exported) as { meta: Record<string, string> }).meta[SCOPE_ID_FORM_KEY]).toBe(ENCODED_SCOPE_ID_FORM);
+
+    const target = await plainFacade();
+    const result = await target.memory.importFromString(exported, 'json');
+
+    expect(result.errors).toEqual([]);
+    expect(result.imported).toBeGreaterThan(0);
+    expect(await formOf(target.file)).toEqual({ ids: ['user:team%2Fana'], record: ENCODED_SCOPE_ID_FORM });
+    expect((await target.memory.recall('bees', { scope: 'user', scopeId: 'team%2Fana' })).map((hit) => hit.trace.content)).toEqual([BEES]);
+  });
+
+  it("files a plain JSON export's user and persona ids encoded into a re-filed Brain, the trace's knowledge-graph copy with them, and a thread id as it is", async () => {
+    const source = await plainFacade();
+    const bees = await source.memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' });
+    await source.memory.remember(TUTOR, { scope: 'persona', scopeId: 'team/ana::tutor' });
+    await source.memory.remember(STANDUP, { scope: 'thread', scopeId: 'conv/7' });
+    // The trace's episodic copy in the Brain's knowledge graph, as a memory manager over the Brain records it.
+    await source.memory.graph.recordMemory(leftoverCopy(bees.id, 'team/ana', BEES));
+    const exported = await source.memory.exportToString();
+    expect((JSON.parse(exported) as { meta: Record<string, string> }).meta[SCOPE_ID_FORM_KEY]).toBeUndefined();
+
+    const target = await refiledFacade();
+    const result = await target.memory.importFromString(exported, 'json');
+
+    expect(result.errors).toEqual([]);
+    expect(await formOf(target.file)).toEqual({
+      ids: ['persona:team%2Fana::tutor', 'thread:conv/7', 'user:team%2Fana'],
+      record: ENCODED_SCOPE_ID_FORM,
+    });
+    // The column and the metadata name one id.
+    const filed = Object.values(await filedAs(await readerOf(target.file))).map(([column, metadata]) => `${column} | ${String(metadata)}`);
+    expect(filed.sort()).toEqual(['conv/7 | conv/7', 'team%2Fana | team%2Fana', 'team%2Fana::tutor | team%2Fana::tutor']);
+    // The copy is filed under the plain user's encoded id: a delete of user `ana` of namespace `team` takes none of it.
+    expect((await copiesIn(target.memory.graph)).map((copy) => [copy.traceId, copy.scopeId])).toEqual([[bees.id, 'team%2Fana']]);
+    expect(await target.memory.graph.deleteMemories!({ scopes: [{ scope: 'user', scopeId: 'team/ana' }] })).toBe(0);
+    expect(await target.memory.graph.deleteMemories!({ scopes: [{ scope: 'user', scopeId: 'team%2Fana' }] })).toBe(1);
+  });
+
+  it("refuses a re-filed Brain's export into a plain Brain holding a plain id with a slash, names the record, and changes nothing", async () => {
+    const source = await refiledFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const target = await plainFacade((memory) => memory.remember(HIKES, { scope: 'user', scopeId: 'team/bo' }));
+
+    const result = await target.memory.importFromString(await source.memory.exportToString(), 'json');
+
+    expect(result.imported).toBe(0);
+    expect(refusals(result.errors)).toEqual(['scope_id_form']);
+    expect(await formOf(target.file)).toEqual({ ids: ['user:team/bo'], record: undefined });
+  });
+
+  it("takes a re-filed Brain's export into a plain Brain whose persona ids hold none of the characters in their parts, which gets the record", async () => {
+    const source = await refiledFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    // User `ana`'s persona `tutor`: the `::` between the two ids belongs to neither.
+    const target = await plainFacade((memory) => memory.remember(TUTOR, { scope: 'persona', scopeId: 'ana::tutor' }));
+
+    const result = await target.memory.importFromString(await source.memory.exportToString(), 'json');
+
+    expect(result.errors).toEqual([]);
+    expect(await formOf(target.file)).toEqual({ ids: ['persona:ana::tutor', 'user:team%2Fana'], record: ENCODED_SCOPE_ID_FORM });
+  });
+
+  it('takes a source with the record whose ids read the same in both forms as a plain one: no record comes with it, and a later re-file still files the plain ids written after it', async () => {
+    const source = await refiledFacade(async (memory) => {
+      await memory.remember(HIKES, { scope: 'user', scopeId: 'bo' });
+      await memory.remember(TUTOR, { scope: 'persona', scopeId: 'bo::tutor' });
+    });
+    const exported = await source.memory.exportToString();
+    expect((JSON.parse(exported) as { meta: Record<string, string> }).meta[SCOPE_ID_FORM_KEY]).toBe(ENCODED_SCOPE_ID_FORM);
+    const sqliteExport = path.join(scratchDir(), 'bo.sqlite');
+    await source.memory.export(sqliteExport);
+
+    // Into a Brain without the record: a host with no learning layer goes on filing its plain ids, and the layer that
+    // opens the Brain later re-files them.
+    const fresh = await plainFacade();
+    expect((await fresh.memory.importFromString(exported, 'json')).errors).toEqual([]);
+    expect(await formOf(fresh.file)).toEqual({ ids: ['persona:bo::tutor', 'user:bo'], record: undefined });
+    await fresh.memory.remember(STANDUP, { scope: 'user', scopeId: 'org:42' });
+    expect(await fresh.memory.ensureEncodedScopeIds()).toBe(1);
+    expect(await formOf(fresh.file)).toEqual({ ids: ['persona:bo::tutor', 'user:bo', 'user:org%3A42'], record: ENCODED_SCOPE_ID_FORM });
+
+    // Into a plain Brain that holds a plain id with a slash, from JSON and from a SQLite file: no refusal, and it stays plain.
+    for (const [name, importInto] of [
+      ['JSON', (memory: Memory) => memory.importFromString(exported, 'json')],
+      ['SQLite file', (memory: Memory) => memory.importFrom(sqliteExport)],
+    ] as const) {
+      const plain = await plainFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/bo' }));
+      const result = await importInto(plain.memory);
+      expect({ name, errors: result.errors, form: await formOf(plain.file) }).toEqual({
+        name,
+        errors: [],
+        form: { ids: ['persona:bo::tutor', 'user:bo', 'user:team/bo'], record: undefined },
+      });
+    }
+  });
+
+  it('a SQLite file: encodes a plain source into a re-filed Brain, and refuses a re-filed one into a plain Brain holding a plain id with a slash', async () => {
+    const plainSource = await plainFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const plainFile = path.join(scratchDir(), 'plain.sqlite');
+    await plainSource.memory.export(plainFile);
+    const encodedSource = await refiledFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const encodedFile = path.join(scratchDir(), 'encoded.sqlite');
+    await encodedSource.memory.export(encodedFile);
+
+    const refiled = await refiledFacade();
+    expect((await refiled.memory.importFrom(plainFile)).errors).toEqual([]);
+    expect(await formOf(refiled.file)).toEqual({ ids: ['user:team%2Fana'], record: ENCODED_SCOPE_ID_FORM });
+
+    const plain = await plainFacade((memory) => memory.remember(HIKES, { scope: 'user', scopeId: 'team/bo' }));
+    const refused = await plain.memory.importFrom(encodedFile);
+    expect(refused.imported).toBe(0);
+    expect(refusals(refused.errors)).toEqual(['scope_id_form']);
+    expect(await formOf(plain.file)).toEqual({ ids: ['user:team/bo'], record: undefined });
+  });
+
+  it('Brain.importFromSqlite encodes a plain source merged into a re-filed Brain, keeps the record through a replace, and throws for a re-filed source into a plain Brain holding a plain id with a slash', async () => {
+    const plainSource = await plainFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const plainFile = path.join(scratchDir(), 'plain.sqlite');
+    await plainSource.memory.export(plainFile);
+    const encodedSource = await refiledFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const encodedFile = path.join(scratchDir(), 'encoded.sqlite');
+    await encodedSource.memory.export(encodedFile);
+
+    const merged = await refiledFacade();
+    await closeFacade(merged.memory);
+    await (await readerOf(merged.file)).importFromSqlite(plainFile);
+    expect(await formOf(merged.file)).toEqual({ ids: ['user:team%2Fana'], record: ENCODED_SCOPE_ID_FORM });
+
+    // A replace empties the brain, its record among its brain_meta rows, and keeps the form a layer reads.
+    const replaced = await refiledFacade((memory) => memory.remember(HIKES, { scope: 'user', scopeId: 'bo' }));
+    await closeFacade(replaced.memory);
+    await (await readerOf(replaced.file)).importFromSqlite(plainFile, { strategy: 'replace' });
+    expect(await formOf(replaced.file)).toEqual({ ids: ['user:team%2Fana'], record: ENCODED_SCOPE_ID_FORM });
+
+    const plain = await plainFacade((memory) => memory.remember(HIKES, { scope: 'user', scopeId: 'team/bo' }));
+    await closeFacade(plain.memory);
+    await expect((await readerOf(plain.file)).importFromSqlite(encodedFile)).rejects.toThrow(/scope_id_form/);
+    expect(await formOf(plain.file)).toEqual({ ids: ['user:team/bo'], record: undefined });
+  });
+
+  it("Markdown: a re-filed Brain's export marks its notes, which come back as they were written, and a plain note goes into a re-filed Brain encoded", async () => {
+    const source = await refiledFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const notes = scratchDir();
+    expect((await source.memory.export(notes, { format: 'markdown' })).refused).toEqual([]);
+    const written = notesUnder(notes).map((file) => fs.readFileSync(file, 'utf8'));
+    expect(written.map((note) => [frontMatterField(note, 'scopeId'), frontMatterField(note, 'scopeIdForm')])).toEqual([
+      ['team%2Fana', ENCODED_SCOPE_ID_FORM],
+    ]);
+
+    const refiled = await refiledFacade();
+    expect((await refiled.memory.importFrom(notes, { format: 'markdown' })).errors).toEqual([]);
+    expect(await formOf(refiled.file)).toEqual({ ids: ['user:team%2Fana'], record: ENCODED_SCOPE_ID_FORM });
+
+    const fresh = await plainFacade();
+    expect((await fresh.memory.importFrom(notes, { format: 'markdown' })).errors).toEqual([]);
+    expect(await formOf(fresh.file)).toEqual({ ids: ['user:team%2Fana'], record: ENCODED_SCOPE_ID_FORM });
+
+    // A note a host writes by hand names a plain id.
+    const handWritten = scratchDir();
+    fs.writeFileSync(path.join(handWritten, 'bo.md'), `---\nid: n-bo\nscope: user\nscopeId: team/bo\n---\n${HIKES}\n`);
+    const target = await refiledFacade();
+    expect((await target.memory.importFrom(handWritten, { format: 'markdown' })).errors).toEqual([]);
+    expect(await formOf(target.file)).toEqual({ ids: ['user:team%2Fbo'], record: ENCODED_SCOPE_ID_FORM });
+  });
+
+  it("CSV: files a plain row's scope id encoded into a re-filed Brain", async () => {
+    const target = await refiledFacade();
+
+    const result = await target.memory.importFromString(`content,scope,scope_id\n"${HIKES}",user,team/bo\n`, 'csv');
+
+    expect(result.errors).toEqual([]);
+    expect(await formOf(target.file)).toEqual({ ids: ['user:team%2Fbo'], record: ENCODED_SCOPE_ID_FORM });
+    expect(Object.values(await filedAs(await readerOf(target.file)))).toEqual([['team%2Fbo', 'team%2Fbo']]);
+  });
+
+  it('refuses a re-filed Brain\'s export into a plain Brain whose plain id with a slash only a knowledge-graph copy, or a trace with the id "", holds', async () => {
+    const source = await refiledFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const exported = await source.memory.exportToString();
+
+    // The copy of a trace a release before keyed copies deleted: the Brain holds no trace under `team/bo`.
+    const withCopy = await plainFacade((memory) => memory.graph.recordMemory(leftoverCopy('gone-1', 'team/bo', HIKES)));
+    const refusedForCopy = await withCopy.memory.importFromString(exported, 'json');
+    expect(refusedForCopy.imported).toBe(0);
+    expect(refusals(refusedForCopy.errors)).toEqual(['scope_id_form']);
+    expect(await formOf(withCopy.file)).toEqual({ ids: [], record: undefined });
+
+    // An import kept a record's id "".
+    const withEmptyId = await plainFacade();
+    await fileRow(await readerOf(withEmptyId.file), '', 'team/bo', HIKES);
+    const refusedForEmptyId = await withEmptyId.memory.importFromString(exported, 'json');
+    expect(refusedForEmptyId.imported).toBe(0);
+    expect(refusals(refusedForEmptyId.errors)).toEqual(['scope_id_form']);
+    expect(await formOf(withEmptyId.file)).toEqual({ ids: ['user:team/bo'], record: undefined });
+  });
+
+  it('two imports into one Brain at once never leave the record beside a plain id with a slash', async () => {
+    const encoded = await refiledFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const plain = await plainFacade((memory) => memory.remember(HIKES, { scope: 'user', scopeId: 'team/bo' }));
+    const encodedExport = await encoded.memory.exportToString();
+    const plainExport = await plain.memory.exportToString();
+    const target = await plainFacade();
+
+    const results = await Promise.all([
+      target.memory.importFromString(encodedExport, 'json'),
+      target.memory.importFromString(plainExport, 'json'),
+    ]);
+
+    // The one that commits second reads what the first wrote: either the record, and the plain id comes in encoded, or
+    // the plain id, and the encoded export is refused.
+    const outcome = { errors: results.map((result) => refusals(result.errors)), form: await formOf(target.file) };
+    expect([
+      { errors: [[], []], form: { ids: ['user:team%2Fana', 'user:team%2Fbo'], record: ENCODED_SCOPE_ID_FORM } },
+      { errors: [['scope_id_form'], []], form: { ids: ['user:team/bo'], record: undefined } },
+    ]).toContainEqual(outcome);
+  });
+
+  it('a JSON and a Markdown export that a re-file overtakes while they read hold the record, or the mark, and the ids in one form', async () => {
+    const jsonSource = await plainFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const json = overtakenByRefile(await readerOf(jsonSource.file), () => jsonSource.memory.ensureEncodedScopeIds());
+    const payload = JSON.parse(await new JsonExporter(json.brain).exportToString()) as {
+      meta: Record<string, string>;
+      traces: Array<{ scope_id: string }>;
+    };
+    expect(json.refiled()).toBe(true);
+    // The Brain before the re-file or the Brain after it, never the record of one with the ids of the other.
+    expect([['plain', ['team/ana']], ['encoded', ['team%2Fana']]]).toContainEqual([
+      payload.meta[SCOPE_ID_FORM_KEY] ?? 'plain',
+      payload.traces.map((trace) => trace.scope_id),
+    ]);
+
+    const markdownSource = await plainFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    const markdown = overtakenByRefile(await readerOf(markdownSource.file), () => markdownSource.memory.ensureEncodedScopeIds());
+    const notes = scratchDir();
+    await new MarkdownExporter(markdown.brain).export(notes);
+    expect(markdown.refiled()).toBe(true);
+    const [note] = notesUnder(notes).map((file) => fs.readFileSync(file, 'utf8'));
+    expect([['plain', 'team/ana'], ['encoded', 'team%2Fana']]).toContainEqual([
+      frontMatterField(note!, 'scopeIdForm') ?? 'plain',
+      frontMatterField(note!, 'scopeId'),
+    ]);
+  });
+
+  it("MigrationEngine refuses a plain source holding a plain id with a slash into a re-filed target of the same brain before it copies any table, and copies one with none, which keeps the target's record", async () => {
+    const reserved = await plainFacade((memory) => memory.remember(BEES, { scope: 'user', scopeId: 'team/ana' }));
+    await closeFacade(reserved.memory);
+    // User `ana` and her persona `tutor`: the `::` between the two ids belongs to neither.
+    const clean = await plainFacade(async (memory) => {
+      await memory.remember(WALNUTS, { scope: 'user', scopeId: 'ana' });
+      await memory.remember(TUTOR, { scope: 'persona', scopeId: 'ana::tutor' });
+    });
+    await closeFacade(clean.memory);
+    const target = await refiledFacade((memory) => memory.remember(HIKES, { scope: 'user', scopeId: 'bo' }));
+    await closeFacade(target.memory);
+
+    const refused = await MigrationEngine.migrate({ from: { type: 'sqlite', path: reserved.file }, to: { type: 'sqlite', path: target.file } });
+
+    expect(refused.verified).toBe(false);
+    expect(refused.tablesProcessed).toEqual([]);
+    expect(refusals(refused.errors)).toEqual(['scope_id_form']);
+    expect(await formOf(target.file)).toEqual({ ids: ['user:bo'], record: ENCODED_SCOPE_ID_FORM });
+
+    const copied = await MigrationEngine.migrate({ from: { type: 'sqlite', path: clean.file }, to: { type: 'sqlite', path: target.file } });
+
+    expect(copied.errors).toEqual([]);
+    expect(copied.tablesProcessed).toContain('memory_traces');
+    expect(await formOf(target.file)).toEqual({ ids: ['persona:ana::tutor', 'user:ana', 'user:bo'], record: ENCODED_SCOPE_ID_FORM });
+  });
+
+  it('MigrationEngine keeps the record of a target that holds only a knowledge-graph copy, copies a source with the record whose ids read the same in both forms as a plain one, and fills scope_id from the metadata of a source from before the column', async () => {
+    const plainSource = await plainFacade((memory) => memory.remember(HIKES, { scope: 'user', scopeId: 'bo' }));
+    await closeFacade(plainSource.memory);
+    // A re-filed brain whose only memory is a copy filed under an encoded id, its trace gone.
+    const copyOnly = await refiledFacade((memory) => memory.graph.recordMemory(leftoverCopy('gone-1', 'team/ana', BEES)));
+    expect((await copiesIn(copyOnly.memory.graph)).map((copy) => copy.scopeId)).toEqual(['team%2Fana']);
+    await closeFacade(copyOnly.memory);
+
+    const intoCopyOnly = await MigrationEngine.migrate({ from: { type: 'sqlite', path: plainSource.file }, to: { type: 'sqlite', path: copyOnly.file } });
+
+    expect(intoCopyOnly.errors).toEqual([]);
+    expect(await formOf(copyOnly.file)).toEqual({ ids: ['user:bo'], record: ENCODED_SCOPE_ID_FORM });
+
+    const sameInBoth = await refiledFacade((memory) => memory.remember(HIKES, { scope: 'user', scopeId: 'bo' }));
+    await closeFacade(sameInBoth.memory);
+    const plainTarget = await plainFacade((memory) => memory.remember(WALNUTS, { scope: 'user', scopeId: 'ana' }));
+    await closeFacade(plainTarget.memory);
+
+    const intoPlain = await MigrationEngine.migrate({ from: { type: 'sqlite', path: sameInBoth.file }, to: { type: 'sqlite', path: plainTarget.file } });
+
+    expect(intoPlain.errors).toEqual([]);
+    expect(await formOf(plainTarget.file)).toEqual({ ids: ['user:ana', 'user:bo'], record: undefined });
+
+    const older = olderReleaseFile('qa', 't-old', 'ana');
+    const filledTarget = await plainFacade();
+    await closeFacade(filledTarget.memory);
+
+    const filled = await MigrationEngine.migrate({ from: { type: 'sqlite', path: older }, to: { type: 'sqlite', path: filledTarget.file } });
+
+    expect(filled.errors).toEqual([]);
+    expect(await filedAs(await readerOf(filledTarget.file))).toEqual({ 't-old': ['ana', 'ana'] });
+  });
+});
+
+describe.skipIf(!POSTGRES_URL)("an import or a migration keeps a Postgres Brain's scope-id form", () => {
+  /** Removes a test's rows of one brain id from the shared database. */
+  async function cleanUp(...brainIds: string[]): Promise<void> {
+    for (const brainId of brainIds) {
+      const cleaner = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+      for (const table of ['knowledge_edges', 'knowledge_nodes', 'retrieval_feedback', 'document_chunks', 'documents', 'memory_traces', 'brain_meta']) {
+        await cleaner.run(`DELETE FROM ${table} WHERE brain_id = ?`, [brainId]);
+      }
+      await cleaner.close();
+    }
+  }
+
+  /** A handle on one brain of the database, as one process opens it: a connection pool of its own. */
+  async function openPostgres(brainId: string): Promise<Brain> {
+    const brain = await Brain.openPostgres(POSTGRES_URL!, { brainId });
+    brains.add(brain);
+    return brain;
+  }
+
+  const newBrainId = (name: string) => `qa-${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  /** A brain's live trace rows, `<scope>:<scope_id>`, sorted. */
+  async function idsOn(brain: Brain): Promise<string[]> {
+    const rows = await brain.all<{ scope: string; scope_id: string }>(
+      'SELECT scope, scope_id FROM memory_traces WHERE brain_id = ? AND deleted = 0 ORDER BY scope, scope_id',
+      [brain.brainId],
+    );
+    return rows.map((row) => `${row.scope}:${row.scope_id}`);
+  }
+
+  it('MigrationEngine into Postgres refuses a plain source holding a plain id with a slash into a re-filed brain, and fills scope_id from the metadata of a source from before the column', async () => {
+    const refiledId = newBrainId('migrate-refuse');
+    const filledId = newBrainId('migrate-fill');
+    try {
+      // A brain of the database a learning layer has opened.
+      const target = await Memory.createPostgres(POSTGRES_URL!, { brainId: refiledId });
+      facades.push(target);
+      await target.remember(HIKES, { scope: 'user', scopeId: 'ana' });
+      await target.ensureEncodedScopeIds();
+      // A file of the same brain no layer opened, holding a plain id with a slash.
+      const sourceFile = brainFile();
+      const source = await Memory.createSqlite(sourceFile, { brainId: refiledId });
+      facades.push(source);
+      await source.remember(BEES, { scope: 'user', scopeId: 'team/ana' });
+      await closeFacade(source);
+
+      const refused = await MigrationEngine.migrate({
+        from: { type: 'sqlite', path: sourceFile },
+        to: { type: 'postgres', connectionString: POSTGRES_URL! },
+      });
+
+      expect(refused.verified).toBe(false);
+      expect(refused.tablesProcessed).toEqual([]);
+      expect(refusals(refused.errors)).toEqual(['scope_id_form']);
+      const refiled = await openPostgres(refiledId);
+      expect(await idsOn(refiled)).toEqual(['user:ana']);
+      expect(await refiled.getMeta(SCOPE_ID_FORM_KEY)).toBe(ENCODED_SCOPE_ID_FORM);
+
+      const filled = await MigrationEngine.migrate({
+        from: { type: 'sqlite', path: olderReleaseFile(filledId, 't-old', 'ana') },
+        to: { type: 'postgres', connectionString: POSTGRES_URL! },
+      });
+
+      expect(filled.errors).toEqual([]);
+      const filledBrain = await openPostgres(filledId);
+      expect(await filledBrain.all('SELECT id, scope_id FROM memory_traces WHERE brain_id = ?', [filledId])).toEqual([
+        { id: 't-old', scope_id: 'ana' },
+      ]);
+    } finally {
+      await cleanUp(refiledId, filledId);
+    }
+  });
+
+  it('an import into a brain another process is re-filing waits for the re-file, and files the plain id it brings encoded', async () => {
+    const brainId = newBrainId('import-lock');
+    // A plain export, from a Brain no layer serves.
+    const plain = await plainFacade((memory) => memory.remember(HIKES, { scope: 'user', scopeId: 'team/bo' }));
+    const plainExport = await plain.memory.exportToString();
+    try {
+      const layer = await openPostgres(brainId);
+      const writer = await openPostgres(brainId);
+      const watcher = await openPostgres(brainId);
+      const memory = await manager({ brain: layer });
+      const bees = await tellAbout(memory, 'team/ana', BEES);
+      const importer = await Memory.createPostgres(POSTGRES_URL!, { brainId });
+      facades.push(importer);
+      /** The backends that wait for a lock one backend holds. */
+      const waitingOn = async (blocker: number) =>
+        (await watcher.all<{ pid: number }>('SELECT pid FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))', [blocker])).map(
+          (row) => Number(row.pid),
+        );
+
+      // Another process holds the trace's row in a transaction it keeps open, so the layer's re-file, which holds the
+      // brain, waits on the row.
+      let commit!: () => void;
+      const committing = new Promise<void>((resolve) => (commit = resolve));
+      let writing!: (pid: number) => void;
+      const writerPid = new Promise<number>((resolve) => (writing = resolve));
+      const holding = writer.transaction(async (trx) => {
+        await trx.run('UPDATE memory_traces SET strength = strength WHERE brain_id = ? AND id = ?', [brainId, bees.id]);
+        writing((await trx.get<{ pid: number }>('SELECT pg_backend_pid() AS pid'))!.pid);
+        await committing;
+      });
+      let refiling: Promise<number> | undefined;
+      let importing: Promise<Awaited<ReturnType<Memory['importFromString']>>> | undefined;
+      try {
+        const holder = await writerPid;
+        refiling = memory.ensureEncodedScopeIds();
+        let refiler = 0;
+        await vi.waitFor(
+          async () => {
+            const [waiting] = await waitingOn(holder);
+            expect(waiting).toBeTypeOf('number');
+            refiler = waiting!;
+          },
+          { timeout: 10_000, interval: 20 },
+        );
+        importing = importer.importFromString(plainExport, 'json');
+        let settled = false;
+        void importing.then(
+          () => (settled = true),
+          () => (settled = true),
+        );
+        // The import waits for the brain the re-file holds; one that does not wait ends first.
+        await vi.waitFor(
+          async () => {
+            expect(settled || (await waitingOn(refiler)).length > 0).toBe(true);
+          },
+          { timeout: 10_000, interval: 20 },
+        );
+      } finally {
+        commit();
+      }
+      await holding;
+
+      expect(await refiling).toBe(1);
+      expect((await importing!).errors).toEqual([]);
+      expect(await idsOn(watcher)).toEqual(['user:team%2Fana', 'user:team%2Fbo']);
+      expect(await watcher.getMeta(SCOPE_ID_FORM_KEY)).toBe(ENCODED_SCOPE_ID_FORM);
+    } finally {
+      await cleanUp(brainId);
+    }
+  });
+
+  it("an Obsidian import into a brain on a pool of one connection ends: a note reads the brain's graph in its own transaction", async () => {
+    const brainId = newBrainId('import-pool');
+    // One connection, which a note's transaction holds: a read outside it would wait for it, and fail after 5 seconds.
+    const adapter = createPostgresAdapter({
+      connectionString: POSTGRES_URL!,
+      max: 1,
+      connectionTimeoutMillis: 5_000,
+      typeParsers: { int8: 'number' },
+    });
+    await adapter.open();
+    const brain = await Brain.openWithAdapter(adapter, { brainId });
+    brains.add(brain);
+    try {
+      // A trace an earlier Obsidian import filed, its knowledge-graph node linked to a label that holds a line break.
+      const label = 'the hive\nby the roof';
+      await brain.run(
+        `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, scope_id)
+         VALUES (?, 'mt-held', 'episodic', 'user', ?, 1, '{}', '')`,
+        [brainId, BEES],
+      );
+      await brain.run(
+        `INSERT INTO knowledge_nodes (brain_id, id, type, label, properties, created_at) VALUES (?, 'kn-trace', 'trace', 'trace:mt-held', ?, 1)`,
+        [brainId, JSON.stringify({ trace_id: 'mt-held' })],
+      );
+      await brain.run(`INSERT INTO knowledge_nodes (brain_id, id, type, label, properties, created_at) VALUES (?, 'kn-label', 'concept', ?, '{}', 1)`, [
+        brainId,
+        label,
+      ]);
+      await brain.run(
+        `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, weight, bidirectional, metadata, created_at)
+         VALUES (?, 'ke-held', 'kn-trace', 'kn-label', 'related_to', 1.0, 0, '{}', 1)`,
+        [brainId],
+      );
+      // The trace's own note, as the export writes it: its link runs over the label's line break.
+      const vault = scratchDir();
+      fs.writeFileSync(path.join(vault, 'mt-held.md'), `---\nid: mt-held\nscope: user\n---\n${BEES}\n\n**Related:**\n- [[${label}]]\n`);
+
+      expect(await new ObsidianImporter(brain).import(vault)).toEqual({ imported: 0, skipped: 1, errors: [] });
+    } finally {
+      await cleanUp(brainId);
+    }
+  });
+});
+
 describe("gmi(): memory.persistAccessState", () => {
   let keys = 0;
   const key = () => `k-qa-scopes-${++keys}`;
@@ -2330,5 +2954,22 @@ describe('the docs a host reads about it', () => {
     expect(cognitive).toContain("a scope id that holds a `/` is a layer's namespaced id");
     expect(cognitive).toMatch(/Until a store follows a move, its reads skip/);
     expect(cognitive).toContain('Two limits hold.');
+  });
+
+  it("describe how an import, an export and a migration keep a Brain's scope-id form", () => {
+    const operations = doc('docs/MEMORY_OPERATIONS.md');
+    expect(operations).toMatch(/^### A Brain's scope-id form$/m);
+    expect(operations).toContain('| JSON export | encoded when its `meta` holds the record |');
+    expect(operations).toContain('| SQLite file | encoded when the brain it holds has the record in `brain_meta` |');
+    expect(operations).toContain('| Markdown or Obsidian note | encoded when its front matter says `scopeIdForm: encoded` |');
+    expect(operations).toContain('| CSV file, ChatGPT export | plain |');
+    expect(operations).toContain('reads the same in both forms, and an import takes it as a plain one');
+    expect(operations).toContain("On Postgres the import first takes the brain's advisory lock, as a re-file does.");
+    expect(operations).toContain('An export reads its Brain\'s record and its rows in one form');
+    expect(operations).toContain("that the Brain's scope-id form refuses");
+    expect(doc('docs/getting-started/SQL_STORAGE_QUICKSTART.md')).toContain(
+      'Before it copies any table, the engine compares each brain the source holds with the same brain id in the target',
+    );
+    expect(doc('docs/memory/MEMORY_STORAGE.md')).toContain("Its `brain_meta` rows carry the brain's scope-id form record where the brain has one");
   });
 });
