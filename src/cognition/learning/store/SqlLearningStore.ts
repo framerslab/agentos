@@ -2,8 +2,10 @@
  * @module learning/store/SqlLearningStore
  *
  * The learning store over a `@framers/sql-storage-adapter` store: Postgres for a deployment that several processes
- * share, SQLite for one process and the tests. Each chain's head row orders appends across processes by
- * compare-and-swap (`advanceHead`), and every state change runs in one adapter transaction with its ledger row.
+ * share, SQLite for one adapter in one process and the tests (of two adapters on one SQLite file, an append that
+ * runs while the other's does can fail with SQLite's busy error, as the ledger's limits say). Each chain's head row
+ * orders appends across processes by compare-and-swap (`advanceHead`), and every state change runs in one adapter
+ * transaction with its ledger row.
  *
  * Give it the runtime's raw storage adapter, never AgentOS's provenance-wrapped one, whose write hooks can turn a
  * `run()` into a no-op: a ledger write that silently does nothing would leave a change with no record. The store

@@ -15,9 +15,11 @@
  * verdict inside the transaction that would write it, so of two processes that decide one candidate at once, one
  * writes its verdict.
  *
- * Limits: a SQLite store serves one process. Its transactions run one at a time on one connection, and the ledger
- * retries a moved head, not a file another process holds locked, so processes that share learners share a Postgres
- * store. The load check reads every row of a chain, the rows before its newest reanchor included.
+ * Limits: a SQLite store serves one adapter. Its transactions run one at a time on the adapter's one connection, and
+ * the ledger retries a moved head, not a file another connection holds locked: of two adapters on one SQLite file, in
+ * one process or two, an append that runs while the other's does can fail with SQLite's busy error, so processes that
+ * share learners share a Postgres store. The load check reads every row of a chain, the rows before its newest
+ * reanchor included.
  */
 import { encodeScopeIdPart } from '../../memory/retrieval/store/scopeIdForm.js';
 import { processIsFrozen } from '../config.js';
