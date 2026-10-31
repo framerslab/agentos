@@ -1,17 +1,18 @@
 /**
  * @file Memory.delete-scope.test.ts
  * The facade's deletes and restores, which account deletion and a ledger revert call on the memory tools' Brain:
- * `deleteScope` (all of a scope, or a second user's traces in it), `deleteTraces`, `restoreTrace` (a trace brought
- * back to the state a snapshot holds, its vector kept where its content is) and `brainId`. A delete takes the rows that
- * name a trace (its feedback, the chunk it was filed from) and its memory-graph node and edges, whichever facade on
- * the Brain wrote them, a relation a host made to the node included; a second user's words stay a trace of their own
- * beside the same words of the session's owner, through `remember` and through an import in each format (a Markdown or
- * Obsidian note names its user in its front matter), so a delete of either user's traces leaves the other's.
- * `deleteScope` finds the rows a release older than the `scope_id` column wrote under the scope after the facade
- * opened, and refuses an empty scope id. A snapshot read before the Brain was re-filed in the encoded scope-id form
- * restores under the encoded id, so a plain user's trace never comes back under a namespaced user's id. A real SQLite
- * facade, and on Postgres (when `AGENTOS_TEST_POSTGRES_URL` is set, as CI's Test & Lint job sets it) a restore
- * re-indexes the restored row alone, and a trace deleted for good comes back under the encoded id.
+ * `deleteScope` (all of a scope, or a second user's traces in it), `deleteTraces`, `restoreTrace` (a trace brought back
+ * to the state a snapshot holds, its vector kept where its content is), `readTrace` (one row as a snapshot, as the
+ * package root's `readTraceSnapshot` reads it), `countScope`, `remember` under an id its writer names, and `brainId`. A
+ * delete takes the rows that name a trace (its feedback, the chunk it was filed from) and its memory-graph node and
+ * edges, whichever facade on the Brain wrote them, a relation a host made to the node included; a second user's words
+ * stay a trace of their own beside the same words of the session's owner, through `remember` and through an import in
+ * each format (a Markdown or Obsidian note names its user in its front matter), so a delete of either user's traces
+ * leaves the other's. `deleteScope` finds the rows a release older than the `scope_id` column wrote under the scope
+ * after the facade opened, and refuses an empty scope id. A snapshot read before the Brain was re-filed in the encoded
+ * scope-id form restores under the encoded id, so a plain user's trace never comes back under a namespaced user's id. A
+ * real SQLite facade, and on Postgres (when `AGENTOS_TEST_POSTGRES_URL` is set, as CI's Test & Lint job sets it) a
+ * restore re-indexes the restored row alone, and a trace deleted for good comes back under the encoded id.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -21,6 +22,8 @@ import { Memory } from '../Memory.js';
 import type { Brain } from '../../../retrieval/store/Brain.js';
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
 import { readTraceSnapshot } from '../../../retrieval/store/tracePersistence.js';
+import * as root from '../../../../../index.js';
+import type { TraceSnapshot } from '../../../../../index.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 
@@ -187,6 +190,24 @@ describe('Memory.deleteTraces with rows that name a trace', () => {
 });
 
 describe('Memory.deleteTraces and restoreTrace', () => {
+  it("reads one row as a snapshot, counts a scope's live traces, and keeps the id a writer names for a new trace", async () => {
+    const { memory, brain } = await facade();
+    expect((await memory.remember('Ana keeps bees.', { id: 'mt-named', scope: 'user', scopeId: 'ana' })).id).toBe('mt-named');
+    // A text the scope holds already is not stored again: the trace that holds it answers under its own id.
+    expect((await memory.remember('Ana keeps bees.', { id: 'mt-again', scope: 'user', scopeId: 'ana' })).id).toBe('mt-named');
+    await memory.remember('Ana likes tea.', { scope: 'user', scopeId: 'ana' });
+    await memory.remember('Bo keeps goats.', { scope: 'user', scopeId: 'bo' });
+    expect(await memory.countScope('user', 'ana')).toBe(2);
+
+    await memory.forget('mt-named');
+
+    expect(await memory.countScope('user', 'ana')).toBe(1);
+    const snapshot: TraceSnapshot | undefined = await memory.readTrace('mt-named');
+    expect(snapshot).toMatchObject({ id: 'mt-named', scope: 'user', scopeId: 'ana', content: 'Ana keeps bees.', deleted: 1 });
+    expect(snapshot).toEqual(await root.readTraceSnapshot(brain, brain.brainId, 'mt-named'));
+    expect(await memory.readTrace('mt-again')).toBeUndefined();
+  });
+
   it('deletes named traces, and restores a changed or forgotten trace from its snapshot', async () => {
     const { memory, brain } = await facade();
     const kept = await memory.remember('Ana keeps bees.', { scope: 'user', scopeId: 'ana' });
