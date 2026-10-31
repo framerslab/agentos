@@ -2093,6 +2093,8 @@ export class GMI implements IGMI {
                 // runs (STEP_ABORTED), and the tool receives it as its context's signal; a composed tool hands it to
                 // each step, so it stops between steps. A call already running is never cut.
                 signal: stop.signal,
+                // The gate the turn asks before each call: a team the call launches has its seats' calls asked it too.
+                ...(toolCallGate ? { callerTurn: { toolCallGate } } : {}),
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;

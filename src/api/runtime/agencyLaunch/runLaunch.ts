@@ -11,6 +11,7 @@ import { agency } from '../../agency.js';
 import type { Agent, AgencyCallbacks, AgencyOptions, AgencyStrategy } from '../../types.js';
 import { AgencyConfigError } from '../../types.js';
 import { IDENTIFIER_PATTERN } from '../../../cognition/emergent/ToolName.js';
+import type { GMIToolCallGate } from '../../../cognition/substrate/IGMI.js';
 import type { ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import type { ApprovalGateFn } from '../approval-gate.js';
 import { SpendBudget, type SpendLimitInfo } from '../spendBudget.js';
@@ -73,6 +74,11 @@ export interface LaunchParent {
   turnId?: string;
   /** The hooks the parent turn's calls ran under, outermost first. */
   toolHooks: readonly ToolCallHook[];
+  /**
+   * The full runtime: the output guardrails' tool-call gate the parent turn asks before each of its calls (the call's
+   * `callerTurn.toolCallGate`). Every seat's turn asks it before each of its own calls.
+   */
+  toolCallGate?: GMIToolCallGate;
   /**
    * The output tokens one call of a temporary seat the launch builds is counted with, on the route its host builds it
    * on. The one-call floor counts it for each temporary seat; a persistent member's call is counted on its own route.
@@ -246,6 +252,8 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
       namespace: entry.namespace,
       ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
       toolHooks: ctx.callerTurn?.toolHooks ?? entry.toolHooks,
+      // The guardrails' gate the seat's turn asks: the nested team's seats are asked it too.
+      ...(ctx.callerTurn?.toolCallGate ? { toolCallGate: ctx.callerTurn.toolCallGate } : {}),
       outputEstimateTokens,
       // A nested launch's scope is the launch its team comes from.
       scopeId: frame.launchId,

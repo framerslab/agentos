@@ -51,6 +51,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
 import { AgentOS } from '../AgentOS';
 import { AgentOSResponseChunkType, type AgentOSToolCallRequestChunk } from '../types/AgentOSResponse';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
+import type { IRetrievalAugmentor, RagRetrievedChunk } from '../../cognition/rag/IRetrievalAugmentor';
 import type { ITool } from '../../core/tools/ITool';
 import { GuardrailAction, type GuardrailOutputPayload, type IGuardrailService } from '../../safety/guardrails/IGuardrailService';
 
@@ -107,14 +108,38 @@ function dangerGuard(judged: string[]): IGuardrailService {
   };
 }
 
-async function boot(runs: string[], judged: string[]): Promise<AgentOS> {
+/** A source the lead's turn retrieves, marked confidential. */
+const CONFIDENTIAL: RagRetrievedChunk = { id: 'chunk-payroll', content: 'October payroll.', originalDocumentId: 'doc-payroll', metadata: { classification: 'confidential' } };
+
+/**
+ * An output guardrail that judges tool calls: it blocks `danger` in a turn whose retrieved sources hold a confidential
+ * one, and records each call it judges, marked when it saw such a source beside it.
+ */
+function confidentialGuard(judged: string[]): IGuardrailService {
+  return {
+    id: 'confidential-danger',
+    config: { evaluateToolCalls: true },
+    async evaluateOutput({ chunk, ragSources }: GuardrailOutputPayload) {
+      if (chunk.type !== AgentOSResponseChunkType.TOOL_CALL_REQUEST) return null;
+      const confidential = (ragSources ?? []).some((source) => source.metadata?.classification === 'confidential');
+      const names = (chunk as AgentOSToolCallRequestChunk).toolCalls.map((call) => call.name);
+      judged.push(...names.map((name) => (confidential ? `${name} (confidential)` : name)));
+      return confidential && names.includes('danger')
+        ? { action: GuardrailAction.BLOCK, reason: 'Not after confidential sources.', reasonCode: 'CONFIDENTIAL' }
+        : null;
+    },
+  };
+}
+
+async function boot(runs: string[], guard: IGuardrailService, extra: Record<string, unknown> = {}): Promise<AgentOS> {
   return AgentOS.create({
     modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'test' } }] },
     turnPlanning: { enabled: false },
     personas: [lead],
     tools: { danger: recordingTool('danger', runs) },
-    guardrailService: dangerGuard(judged),
+    guardrailService: guard,
     agencies: { launch: true },
+    ...extra,
   } as any);
 }
 
@@ -137,7 +162,7 @@ describe('launch_agency on the full runtime, under output guardrails that judge 
   it("a seat's tool call is judged by the guardrails that judge the launching turn's own calls, and refused before it runs", async () => {
     const runs: string[] = [];
     const judged: string[] = [];
-    booted = await boot(runs, judged);
+    booted = await boot(runs, dangerGuard(judged));
     provider.replies.push(
       toolStep(['launch_agency', { goal: 'Run danger.', seats: [{ role: 'doer', instructions: 'Call danger.', tools: ['danger'] }] }]),
       toolStep(['danger', {}]),
@@ -158,7 +183,7 @@ describe('launch_agency on the full runtime, under output guardrails that judge 
   it("a nested team's seat's tool call is judged by the same guardrails, and refused before it runs", async () => {
     const runs: string[] = [];
     const judged: string[] = [];
-    booted = await boot(runs, judged);
+    booted = await boot(runs, dangerGuard(judged));
     provider.replies.push(
       toolStep(['launch_agency', { goal: 'Plan the work.', seats: [{ role: 'planner', instructions: 'Hand the work on.', tools: ['launch_agency', 'danger'] }] }]),
       toolStep(['launch_agency', { goal: 'Run danger.', seats: [{ role: 'doer', instructions: 'Call danger.', tools: ['danger'] }] }]),
@@ -175,5 +200,34 @@ describe('launch_agency on the full runtime, under output guardrails that judge 
     expect(runs).toEqual([]);
     expect(toolMessages(provider.seen[3].messages)[0]).toContain('No danger.');
     expect(provider.seen).toHaveLength(6);
+  });
+
+  it("a seat's tool call is judged beside the sources the launching turn retrieved", async () => {
+    const runs: string[] = [];
+    const judged: string[] = [];
+    // The lead retrieves on its user's input; the store answers with the confidential source.
+    const reader = { ...lead, memoryConfig: { enabled: true, ragConfig: { enabled: true, retrievalTriggers: { onUserQuery: true } } } } as unknown as IPersonaDefinition;
+    const augmentor = {
+      retrieveContext: async (queryText: string) => ({ queryText, augmentedContext: CONFIDENTIAL.content, retrievedChunks: [CONFIDENTIAL] }),
+      ingestDocuments: async () => ({ ingestedIds: [], failedCount: 0, errors: [] }),
+      checkHealth: async () => ({ isHealthy: true }),
+      shutdown: async () => undefined,
+    } as unknown as IRetrievalAugmentor;
+    booted = await boot(runs, confidentialGuard(judged), { personas: [reader], retrievalAugmentor: augmentor });
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Run danger.', seats: [{ role: 'doer', instructions: 'Call danger.', tools: ['danger'] }] }]),
+      toolStep(['danger', {}]),
+      textStep('Could not.'),
+      textStep('Done.'),
+    );
+    await send(booted, 's-3');
+    // The guardrail judged the lead's own call beside the confidential source its turn read (the precondition), and the
+    // seat was offered danger and asked for it.
+    expect(judged).toContain('launch_agency (confidential)');
+    expect(provider.seen[1].tools).toEqual(['danger']);
+    // The seat's turn retrieved nothing of its own: its call was judged beside the launching turn's sources, and refused.
+    expect(judged).toContain('danger (confidential)');
+    expect(runs).toEqual([]);
+    expect(toolMessages(provider.seen[2].messages)[0]).toContain('Not after confidential sources.');
   });
 });
