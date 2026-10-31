@@ -1,10 +1,14 @@
 /**
  * @module learning/ledger/canonical
  *
- * The text a ledger row's hash is taken over, and the hashes. Canonical JSON sorts every object's keys by UTF-16 code
- * unit, drops `undefined`, keeps array order, writes a value with a `toJSON` method as what that method returns (a date
- * as its ISO string), and writes numbers as `JSON.stringify` does, so one entry has one text in every process.
- * SHA-256 and HMAC-SHA-256 run on Node's `crypto`, or on Web Crypto where there is no `process`.
+ * The text a ledger row's hash is taken over, and the hashes. Canonical JSON writes every object's members in the order
+ * of their keys by UTF-16 code unit at every depth, keys that are array indexes among them (the order RFC 8785 sorts
+ * keys in, https://www.rfc-editor.org/rfc/rfc8785#section-3.2.3), where `JSON.stringify` writes an array-index key
+ * before every other key. It leaves out what `JSON.stringify` leaves out of an object (`undefined`, a function, a
+ * symbol) and writes `null` for it in an array, keeps array order, writes a value with a `toJSON` method as what that
+ * method returns (a date as its ISO string), and writes strings, numbers, booleans and `null` as `JSON.stringify`
+ * does, so one entry has one text in every process. SHA-256 and HMAC-SHA-256 run on Node's `crypto`, or on Web Crypto
+ * where there is no `process`.
  */
 import { sha256 } from '../../memory/core/util/crossPlatformCrypto.js';
 
@@ -14,27 +18,39 @@ export const GENESIS_HASH = '0'.repeat(64);
 /** Whether `JSON.stringify` leaves a value out of an object, and writes `null` for it in an array. */
 const omitted = (value: unknown): boolean => value === undefined || typeof value === 'function' || typeof value === 'symbol';
 
-/** What `JSON.stringify` writes for a value, every object's keys sorted: `toJSON` is applied once, as it applies it. */
-function sortValue(value: unknown): unknown {
+/**
+ * A value's canonical text; `undefined` for a value JSON leaves out. `toJSON` is applied once, as `JSON.stringify`
+ * applies it, and each member is read once. `ancestors` holds the objects being written around this one.
+ */
+function write(value: unknown, ancestors: Set<object>): string | undefined {
   const json =
     value !== null && typeof value === 'object' && typeof (value as { toJSON?: unknown }).toJSON === 'function'
       ? (value as { toJSON: () => unknown }).toJSON()
       : value;
-  if (Array.isArray(json)) return json.map((item) => (omitted(item) ? null : sortValue(item)));
-  if (json !== null && typeof json === 'object') {
-    const out: Record<string, unknown> = {};
+  if (omitted(json)) return undefined;
+  if (json === null || typeof json !== 'object') return JSON.stringify(json);
+  if (ancestors.has(json)) throw new TypeError('canonicalJson: a value that contains itself has no JSON form');
+  ancestors.add(json);
+  try {
+    // Array.from visits a hole as `undefined`, which is written `null`, as JSON.stringify writes it.
+    if (Array.isArray(json)) return `[${Array.from(json, (item) => write(item, ancestors) ?? 'null').join(',')}]`;
+    const members: string[] = [];
     for (const key of Object.keys(json).sort()) {
-      const item = (json as Record<string, unknown>)[key];
-      if (!omitted(item)) out[key] = sortValue(item);
+      const text = write((json as Record<string, unknown>)[key], ancestors);
+      if (text !== undefined) members.push(`${JSON.stringify(key)}:${text}`);
     }
-    return out;
+    return `{${members.join(',')}}`;
+  } finally {
+    ancestors.delete(json);
   }
-  return json;
 }
 
-/** The canonical JSON of a value. */
+/**
+ * The canonical JSON of a value; `null` for a value JSON leaves out.
+ * @throws {TypeError} Where `JSON.stringify` throws: a value that contains itself, a bigint.
+ */
 export function canonicalJson(value: unknown): string {
-  return JSON.stringify(sortValue(value));
+  return write(value, new Set<object>()) ?? 'null';
 }
 
 /** SHA-256 of a text, as lowercase hexadecimal. */

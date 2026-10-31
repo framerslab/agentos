@@ -57,7 +57,10 @@ export interface CandidateInput {
   after: unknown;
   evidence?: LedgerEvidence;
   sessionId?: string;
-  /** On a `userId: null` row, the explicit id of a second user whose turn it records. A blank id names no one. */
+  /**
+   * On a `userId: null` row, the explicit id of a second user whose turn it records. A blank id names no one. A row
+   * with a learner takes none: it would sit in the learner's chain, and that user's deletion would cut it out.
+   */
   turnUserId?: string;
   versions?: Partial<LedgerVersions>;
 }
@@ -65,7 +68,10 @@ export interface CandidateInput {
 export interface ProposeOptions {
   /** `pending` (default) writes the candidate alone; `kept`, `rejected` or `reverted` writes its verdict with it. */
   verdict?: LedgerVerdict;
-  /** The verdict's reason. Default `pending`, or the verdict's name. */
+  /**
+   * The reason the candidate records, and its verdict with it; an `operator_set` candidate whose reason is `reanchor`
+   * starts its chain's verified part. Default `pending`, or the verdict's name.
+   */
   reason?: string;
   /** On a row that changes its subject's stored state: that state's digest after the change. */
   stateDigest?: string;
@@ -236,14 +242,18 @@ export class Ledger {
    * is an operator's. A forgotten user's chain takes nothing (`forgotten`). With `verdict`, the candidate's verdict,
    * any `alsoDecide` verdicts and `change` run in the same transaction as the candidate.
    *
-   * @throws {Error} When the store fails or `change` throws, with nothing written; when an `alsoDecide` entry names a
-   *   candidate twice, one outside this chain, or one whose current verdict it cannot follow.
+   * @throws {Error} When the store fails or `change` throws, with nothing written; when a row with a learner names a
+   *   `turnUserId`; when an `alsoDecide` entry names a candidate twice, one outside this chain, or one whose current
+   *   verdict it cannot follow.
    */
   async propose(input: CandidateInput, options: ProposeOptions = {}): Promise<ProposeResult> {
+    const turnUserId = input.turnUserId || null;
+    if (turnUserId !== null && input.learner.userId !== null) {
+      throw new Error('The learning ledger takes a turnUserId only on a row with no learner (userId null): a row with a learner is the learner\'s alone.');
+    }
     if (!options.operator && (processIsFrozen() || this.options.isFrozen?.(input.learner))) return { status: 'frozen' };
     const versions = await this.versionsOf(input.versions);
     const verdict = options.verdict ?? 'pending';
-    const turnUserId = input.turnUserId || null;
     const candidateId = ulid(this.clock());
     const base = {
       learner: input.learner,
