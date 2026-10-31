@@ -8,6 +8,12 @@
  * Give it the runtime's raw storage adapter, never AgentOS's provenance-wrapped one, whose write hooks can turn a
  * `run()` into a no-op: a ledger write that silently does nothing would leave a change with no record. The store
  * leaves the adapter open when it closes.
+ *
+ * The store orders what it reads by UTF-16 code unit, as the in-process store does, whatever order the database sorts
+ * text in: a database orders TEXT by its collation, and Postgres by the database's locale, under which `agent|a` sorts
+ * before `agent|C`. So the rows are sorted once read, and only a chain's rows, by their integer `seq`, are ordered by
+ * the database. A transaction's handle refuses every call once its transaction has ended, where the adapter's own
+ * handle would run the call outside any transaction (on Postgres, on the pool).
  */
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import {
@@ -124,6 +130,11 @@ const toDoc = (r: Row): LearnerDocRow => ({
   updatedAt: str(r.updated_at),
 });
 
+/** Text by UTF-16 code unit, as the in-process store orders it. */
+const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+const byChainAndSeq = (a: StoredLedgerRow, b: StoredLedgerRow): number => compareText(a.chainKey, b.chainKey) || a.seq - b.seq;
+
 const LEDGER_COLUMNS =
   'id, chain_key, seq, row_type, candidate_id, namespace, agent_key, user_id, turn_user_id, session_id, kind, subject, verdict, body, prev_hash, hash, state_digest, created_at';
 
@@ -144,9 +155,25 @@ const USER_TABLES: ReadonlyArray<[name: string, table: string]> = [
   ['freezes', 'agentos_learning_freezes'],
 ];
 
-/** One transaction's handle, over the adapter's handle for that transaction. */
+/**
+ * One transaction's handle, over the adapter's handle for that transaction. Once the transaction has ended, every call
+ * throws.
+ */
 class SqlTx implements LearningStoreTx {
-  constructor(private readonly db: StorageAdapter) {}
+  private ended = false;
+
+  constructor(private readonly trx: StorageAdapter) {}
+
+  /** Ends the transaction: every later call on this handle throws. */
+  end(): void {
+    this.ended = true;
+  }
+
+  /** The adapter's handle, while the transaction is open. */
+  private get db(): StorageAdapter {
+    if (this.ended) throw new Error('A learning store transaction was used after it ended: make every call inside its function.');
+    return this.trx;
+  }
 
   async insertLedgerRow(row: StoredLedgerRow): Promise<void> {
     await this.db.run(
@@ -170,17 +197,21 @@ class SqlTx implements LearningStoreTx {
 
   async candidateRows(candidateId: string): Promise<StoredLedgerRow[]> {
     return (
-      await this.db.all<Row>(`SELECT ${LEDGER_COLUMNS} FROM agentos_learning_ledger WHERE candidate_id = ? ORDER BY chain_key, seq`, [candidateId])
-    ).map(toLedger);
+      await this.db.all<Row>(`SELECT ${LEDGER_COLUMNS} FROM agentos_learning_ledger WHERE candidate_id = ?`, [candidateId])
+    )
+      .map(toLedger)
+      .sort(byChainAndSeq);
   }
 
   async learnerLedgerRows(namespace: string, agentKey: string, userId: string): Promise<StoredLedgerRow[]> {
     return (
       await this.db.all<Row>(
-        `SELECT ${LEDGER_COLUMNS} FROM agentos_learning_ledger WHERE namespace = ? AND agent_key = ? AND user_id = ? ORDER BY chain_key, seq`,
+        `SELECT ${LEDGER_COLUMNS} FROM agentos_learning_ledger WHERE namespace = ? AND agent_key = ? AND user_id = ?`,
         [namespace, agentKey, userId],
       )
-    ).map(toLedger);
+    )
+      .map(toLedger)
+      .sort(byChainAndSeq);
   }
 
   async head(chainKey: string): Promise<ChainHead | undefined> {
@@ -238,7 +269,9 @@ class SqlTx implements LearningStoreTx {
   }
 
   async freezeRows(): Promise<FreezeRow[]> {
-    return (await this.db.all<Row>('SELECT * FROM agentos_learning_freezes ORDER BY scope_key, mode')).map(toFreeze);
+    return (await this.db.all<Row>('SELECT * FROM agentos_learning_freezes'))
+      .map(toFreeze)
+      .sort((a, b) => compareText(a.scopeKey, b.scopeKey) || compareText(a.mode, b.mode));
   }
 
   async insertFreeze(row: FreezeRow): Promise<void> {
@@ -280,8 +313,10 @@ class SqlTx implements LearningStoreTx {
 
   async sessionRowsOf(namespace: string, userId: string): Promise<SessionRow[]> {
     return (
-      await this.db.all<Row>('SELECT * FROM agentos_learning_sessions WHERE namespace = ? AND user_id = ? ORDER BY session_id, kind', [namespace, userId])
-    ).map(toSession);
+      await this.db.all<Row>('SELECT * FROM agentos_learning_sessions WHERE namespace = ? AND user_id = ?', [namespace, userId])
+    )
+      .map(toSession)
+      .sort((a, b) => compareText(a.sessionId, b.sessionId) || compareText(a.kind, b.kind));
   }
 
   async isForgotten(hash: string): Promise<boolean> {
@@ -295,10 +330,12 @@ class SqlTx implements LearningStoreTx {
   async learnerDocs(table: LearnerDocTable, namespace: string, agentKey: string, userId: string): Promise<LearnerDocRow[]> {
     return (
       await this.db.all<Row>(
-        `SELECT * FROM ${DOC_TABLES[table]} WHERE namespace = ? AND agent_key = ? AND user_id = ? ORDER BY created_at, id`,
+        `SELECT * FROM ${DOC_TABLES[table]} WHERE namespace = ? AND agent_key = ? AND user_id = ?`,
         [namespace, agentKey, userId],
       )
-    ).map(toDoc);
+    )
+      .map(toDoc)
+      .sort((a, b) => compareText(a.createdAt, b.createdAt) || compareText(a.id, b.id));
   }
 
   async deleteUserRows(namespace: string, userId: string): Promise<Record<string, number>> {
@@ -333,6 +370,7 @@ export class SqlLearningStore extends TransactionalLearningStore {
     this.ensureSchema = options.ensureSchema !== false;
   }
 
+  /** Settles once the store's tables exist; a store that makes its own schema makes them at its first call. */
   private whenReady(): Promise<void> {
     if (!this.ensureSchema) return Promise.resolve();
     this.ready ??= ensureLearningSchema(this.adapter).catch((error: unknown) => {
@@ -344,7 +382,14 @@ export class SqlLearningStore extends TransactionalLearningStore {
 
   async transaction<T>(fn: (tx: LearningStoreTx) => Promise<T>): Promise<T> {
     await this.whenReady();
-    return this.adapter.transaction((trx) => fn(new SqlTx(trx)));
+    return this.adapter.transaction(async (trx) => {
+      const tx = new SqlTx(trx);
+      try {
+        return await fn(tx);
+      } finally {
+        tx.end();
+      }
+    });
   }
 
   /** Leaves the adapter open: it is the host's. */
