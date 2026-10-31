@@ -389,13 +389,15 @@ function seatTurnOf(sendOpts: unknown): Pick<GmiTurnOptions, 'approvalGate' | 't
 function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName, LoopState>> {
   const off = (detail: string): LoopState => ({ live: false, detail });
   const memory = cognition.memory !== false;
+  // An empty preset list expands to no metaprompt, so none runs.
+  const metaprompts = cognition.metaprompts === 'all' || (Array.isArray(cognition.metaprompts) && cognition.metaprompts.length > 0);
   return {
     memory: memory ? { live: true } : off('memory is off'),
     memory_mechanisms: cognition.mechanisms ? { live: true } : off(memory ? 'the mechanisms are off' : 'memory is off'),
     memory_observer_reflector: off('gmi() builds memory without an observer or a reflector'),
     memory_store: off(memory ? 'memory lives in process memory' : 'memory is off'),
     sentiment: cognition.sentiment ? { live: true } : off('sentiment tracking is off'),
-    metaprompts: cognition.metaprompts !== false ? { live: true } : off('no metaprompt preset'),
+    metaprompts: metaprompts ? { live: true } : off('no metaprompt preset'),
     emergent_tools: off('gmi() builds no emergent engine'),
     self_improvement_tools: off('gmi() registers no self-improvement tool'),
     forged_code_executor: off('gmi() builds no emergent engine'),
