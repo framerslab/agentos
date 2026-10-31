@@ -72,6 +72,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
 });
 
 import { AgentOS } from '../AgentOS';
+import type { ApprovalDecision, ApprovalRequest } from '../types';
 import type { AgencySession } from '../../agents/agency/AgencyTypes';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import type { IRetrievalAugmentor } from '../../cognition/rag/IRetrievalAugmentor';
@@ -568,6 +569,70 @@ describe('launch_agency on the full runtime', () => {
     await vi.waitFor(() => expect(launchRegistry.get(agencyId!)).toBeUndefined(), { timeout: 10_000 });
     // The lead, the waiter, the lead: the waiter's next step was refused before its request (the stub ignores signals).
     expect(provider.seen).toHaveLength(3);
+  }, 30_000);
+
+  it("agencies.hitl gates a runtime seat's tool call", async () => {
+    const sends: unknown[] = [];
+    const asked: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      return { approved: false, reason: 'mail is paused' };
+    };
+    const sendEmail = hostTool('send_email', async (args) => {
+      sends.push(args);
+      return 'sent';
+    }, true);
+    booted = await boot({ tools: { search: search(), send_email: sendEmail }, agencies: { launch: true, hitl: { approvals: { beforeTool: ['send_email'] }, handler } } });
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Email the team.', seats: [{ role: 'mailer', instructions: 'Send the mail.', tools: ['send_email'] }] }]),
+      toolStep(['send_email', { to: 'team' }]),
+      textStep('Mail held.'),
+      textStep('Done.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // The seat was offered send_email and called it (the precondition): the handler was asked once and the tool did
+    // not run, and the seat's model read why.
+    expect(provider.seen[1].tools).toEqual(['send_email']);
+    expect(asked).toEqual(['send_email']);
+    expect(sends).toEqual([]);
+    expect(toolMessages(provider.seen[2].messages)[0]).toContain('mail is paused');
+    expect(toolMessages(provider.seen[3].messages)[0]).toContain('"status":"completed"');
+  });
+
+  it("a runtime seat's tool call reached after its launch's deadline asks no approver", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const asked: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      return { approved: true };
+    };
+    const ran: string[] = [];
+    const slowWrite = hostTool('slow_write', async () => {
+      ran.push('slow_write');
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      return 'written';
+    });
+    const note = hostTool('note', async () => {
+      ran.push('note');
+      return 'noted';
+    });
+    booted = await boot({
+      tools: { search: search(), slow_write: slowWrite, note },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['slow_write', 'note'] }, handler } },
+    });
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Write, then note.', deadlineMs: 1_000, seats: [{ role: 'writer', instructions: 'Write, then note.', tools: ['slow_write', 'note'] }] }]),
+      // The writer's step: slow_write runs past the 1,000 ms deadline; note comes after it in the same step.
+      toolStep(['slow_write', {}], ['note', {}]),
+      textStep('Done.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    expect(toolMessages(provider.seen[2].messages)[0]).toContain('"status":"timed_out"');
+    // Before the deadline the approver was asked and the tool ran; the call the seat reached after it was refused for
+    // the stop (the precondition), with no one asked, and never ran.
+    expect(warn.mock.calls.some(([line]) => String(line).includes("step_aborted: the call to 'note' was stopped before it ran"))).toBe(true);
+    expect(ran).toEqual(['slow_write']);
+    expect(asked).toEqual(['slow_write']);
   }, 30_000);
 });
 
