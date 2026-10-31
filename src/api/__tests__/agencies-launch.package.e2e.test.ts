@@ -6,19 +6,66 @@
  * orchestrator run, with no network and no key. Each case reads only what a host can observe: the tools a model call is
  * offered, the requests the provider receives, a send's tool calls and their results, the context a host's own tool is
  * handed, a session's kept messages, the events an agent's callbacks receive, budgets, warnings and construction errors.
+ * On the full runtime (`AgentOS.create()` with `agencies`) the cases read the same, and what the runtime itself shows a
+ * host: the agencies it lists, the GMIs its snapshot names, the logger it was given and the errors it starts with.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-// The provider class alone is replaced: the package root reads the module's other exports (its default base URL).
-vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../core/llm/providers/implementations/OpenAIProvider')>()),
-  OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai'),
-}));
-import { AgencyConfigError, LAUNCH_AGENCY_TOOL_NAME, SpendBudget, agency, agent, gmi } from '../../index';
-import type { AgencyCallbacks, AgencyLaunchOptions, AgentSession, ApprovalDecision, ApprovalRequest, GenerateTextResult, ITool, LaunchAgencyResult } from '../../index';
+// The provider class alone is replaced: the package root reads the module's other exports (its default base URL). It is
+// the repository's stub, and a script that sets `answerWhole` answers each unstreamed call with that text and spends no
+// reply: what the full runtime's own unstreamed calls (an emergent judge's, a parallel team's synthesizer's) receive.
+vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => {
+  const { stubProviderClass } = await import('./helpers/stubProviders');
+  const Stub = stubProviderClass('openai');
+  class OpenAIProvider extends Stub {
+    override async generateCompletion(...args: Parameters<InstanceType<typeof Stub>['generateCompletion']>) {
+      const s = this.script as WholeAnswering | undefined;
+      const answer = s?.answerWhole;
+      if (s === undefined || answer === undefined) return super.generateCompletion(...args);
+      (s.wholeSeen ??= []).push(JSON.stringify(args[1]));
+      return {
+        id: 'stub',
+        object: 'chat.completion',
+        created: 0,
+        modelId: args[0],
+        choices: [{ index: 0, message: { role: 'assistant', content: answer }, finishReason: 'stop' }],
+        usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+      };
+    }
+  }
+  return {
+    ...(await importOriginal<typeof import('../../core/llm/providers/implementations/OpenAIProvider')>()),
+    OpenAIProvider,
+  };
+});
+import { AgencyConfigError, AgentOS, AgentOSResponseChunkType, AgentOSServiceError, GuardrailAction, LAUNCH_AGENCY_TOOL_NAME, SpendBudget, agency, agent, gmi } from '../../index';
+import type {
+  AgencyCallbacks,
+  AgencyLaunchOptions,
+  AgencySession,
+  AgentOSInput,
+  AgentOSResponse,
+  AgentOSToolCallRequestChunk,
+  AgentSession,
+  ApprovalDecision,
+  ApprovalRequest,
+  GenerateTextResult,
+  GuardrailOutputPayload,
+  IGuardrailService,
+  ILogger,
+  IPersonaDefinition,
+  IRetrievalAugmentor,
+  ITool,
+  LaunchAgencyResult,
+  RagRetrievedChunk,
+  ToolExecutionContext,
+} from '../../index';
 // The module the package's './emergent' entry serves: the parts a host builds a composition or a workflow from.
-import { ComposableToolBuilder, CreateWorkflowTool, createStepGate } from '../../cognition/emergent/index';
+import { ComposableToolBuilder, CreateWorkflowTool, checkChainable, createStepGate } from '../../cognition/emergent/index';
 import type { StepGate } from '../../cognition/emergent/index';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
+
+/** A script whose provider answers unstreamed calls itself (see the provider mock above), and those calls' messages. */
+type WholeAnswering = ProviderScript & { answerWhole?: string; wholeSeen?: string[] };
 
 let n = 0;
 const key = () => `k-agencies-package-${++n}`;
@@ -1849,5 +1896,696 @@ describe('agencies and launch_agency, as a host uses the package', () => {
       warn.mock.calls.filter(([line]) => typeof line === 'string' && line.includes(what)).map(([, error]) => error);
     expect(handed('launch_agency seat checker')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
     expect(handed('launch_agency seat verifier')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
+  });
+});
+
+describe('launch_agency on the full runtime, as a host uses the package', () => {
+  /** A persona a host registers on the runtime, on the stub's provider and model. */
+  const persona = (id: string, extra: Record<string, unknown> = {}): IPersonaDefinition =>
+    ({
+      id,
+      name: id,
+      description: `The ${id}.`,
+      version: '1.0.0',
+      baseSystemPrompt: `You are the ${id}.`,
+      defaultProviderId: 'openai',
+      defaultModelId: 'stub-model',
+      ...extra,
+    }) as unknown as IPersonaDefinition;
+  /** A config tool of the host's: its output is what `execute` returns, handed the call's context. */
+  const configTool = (name: string, execute: (context: ToolExecutionContext) => Promise<unknown>, hasSideEffects = false): ITool => ({
+    ...hostTool(name, async (_args, context) => ({ success: true, output: await execute(context) })),
+    hasSideEffects,
+  });
+  /** The script's provider answers unstreamed calls with `text`, spending no reply. */
+  const answerWhole = (s: ProviderScript, text: string): WholeAnswering => Object.assign(s, { answerWhole: text });
+  const runtimes: AgentOS[] = [];
+  afterEach(async () => {
+    for (const os of runtimes.splice(0)) await os.shutdown();
+  });
+  /**
+   * A full runtime as a host starts one: its provider under key `k`, the personas `lead` (granted agency:launch),
+   * `helper` and `checker`, the tool `search`, and launch_agency on. `overrides` replaces any of them.
+   */
+  const startRuntime = async (k: string, overrides: Record<string, unknown> = {}, logger?: ILogger): Promise<AgentOS> => {
+    const os = await AgentOS.create(
+      {
+        modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: k } }] },
+        turnPlanning: { enabled: false },
+        personas: [persona('lead', { allowedCapabilities: ['agency:launch'] }), persona('helper'), persona('checker', { baseSystemPrompt: 'You check facts.' })],
+        tools: { search: configTool('search', async () => 'found') },
+        agencies: { launch: true },
+        ...overrides,
+      } as unknown as Parameters<typeof AgentOS.create>[0],
+      logger,
+    );
+    runtimes.push(os);
+    return os;
+  };
+  /** The error a runtime's start refused with, or undefined when it started. */
+  const startRefusal = async (overrides: Record<string, unknown>): Promise<unknown> => {
+    const k = key();
+    script('openai', k);
+    return startRuntime(k, overrides).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  };
+  /** One turn as a host runs it, for the user `ana`: every chunk the runtime streams, drained. */
+  const runTurn = async (
+    os: AgentOS,
+    input: { selectedPersonaId: string; sessionId: string; textInput?: string; organizationId?: string },
+  ): Promise<AgentOSResponse[]> => {
+    const chunks: AgentOSResponse[] = [];
+    for await (const chunk of os.processRequest({ userId: 'ana', textInput: 'Go.', ...input } as AgentOSInput)) chunks.push(chunk);
+    return chunks;
+  };
+  /** The launch a model call read as the result of tool call `id`: one that started. */
+  const launchedIn = (call: SeenCall, id: string): LaunchAgencyResult => {
+    const text = toolText(call, id);
+    expect(text, `tool call ${id} started a launch`).not.toContain('Error from tool');
+    return JSON.parse(text) as LaunchAgencyResult;
+  };
+  /** The ids of the GMIs the runtime's snapshot names. */
+  const activeGmis = async (os: AgentOS): Promise<string[]> => (await os.getRuntimeSnapshot()).gmis.items.map((item) => item.gmiId);
+
+  it("agencies registers launch_agency only with launch: true, its bounds and a host's tool of that name are checked when the runtime starts, and only a persona granted agency:launch lists and calls the tool, whose seats run on the caller's route or as a registered persona", async () => {
+    // Without agencies, and with agencies that leave launch unset, the lead, granted agency:launch, is offered its
+    // tools and no launch_agency.
+    for (const agencies of [undefined, { maxDepth: 3 }]) {
+      const k = key();
+      const s = script('openai', k, { replies: [reply.text('Hello.')] });
+      answerWhole(s, 'ok');
+      const os = await startRuntime(k, { agencies });
+      await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-off' });
+      expect(offered(s.seen[0])).toContain('search');
+      expect(offered(s.seen[0])).not.toContain(LAUNCH_AGENCY_TOOL_NAME);
+    }
+
+    // Every bound is checked when the runtime starts, launch on or off: a configuration error that names the field.
+    for (const [agencies, words] of [
+      [{ maxDepth: 9 }, 'agencies.maxDepth must be an integer from 1 to 4, not 9'],
+      [{ launch: true, maxSeats: 0 }, 'agencies.maxSeats must be an integer from 1 to 12, not 0'],
+      [{ budgetShare: 2 }, 'agencies.budgetShare must be above 0 and at most 1, not 2'],
+    ] as const) {
+      const error = await startRefusal({ agencies });
+      expect(error).toBeInstanceOf(AgentOSServiceError);
+      expect(error).toMatchObject({ code: 'SYS_CONFIGURATION_ERROR' });
+      expect((error as Error).message).toContain(words);
+    }
+
+    // With launch on, a host's own tool named launch_agency fails the start, where the runtime would replace it without
+    // a word; with launch off the runtime keeps the host's tool, and a persona granted nothing runs it.
+    const own = configTool(LAUNCH_AGENCY_TOOL_NAME, async () => 'the host ran its own');
+    const clash = await startRefusal({ tools: { search: configTool('search', async () => 'found'), [LAUNCH_AGENCY_TOOL_NAME]: own } });
+    expect(clash).toBeInstanceOf(AgentOSServiceError);
+    expect(clash).toMatchObject({ code: 'SYS_CONFIGURATION_ERROR', details: { toolName: LAUNCH_AGENCY_TOOL_NAME } });
+    expect((clash as Error).message).toContain("agencies.launch registers 'launch_agency', and the runtime's tools already hold a tool of that name.");
+    const kOwn = key();
+    const sOwn = script('openai', kOwn, { replies: [reply.tools([{ id: 'o1', name: LAUNCH_AGENCY_TOOL_NAME, args: {} }]), reply.text('Done.')] });
+    answerWhole(sOwn, 'ok');
+    const withOwn = await startRuntime(kOwn, { tools: { [LAUNCH_AGENCY_TOOL_NAME]: own }, agencies: { maxDepth: 3 } });
+    await runTurn(withOwn, { selectedPersonaId: 'helper', sessionId: 'r-own' });
+    expect(offered(sOwn.seen[0])).toContain(LAUNCH_AGENCY_TOOL_NAME);
+    expect(toolText(sOwn.seen[1], 'o1')).toContain('the host ran its own');
+
+    // With launch on, a persona not granted agency:launch is not offered the tool, and its call is refused before it runs.
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        launchStep(oneSeat('writer'), 'h1'),
+        reply.text('I cannot.'),
+        launchStep({ goal: 'Write the note.', seats: [{ role: 'writer', instructions: 'You write notes.' }] }, 'l1'),
+        reply.text('Note written.'),
+        reply.text('Done.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, {
+      personas: [persona('lead', { allowedCapabilities: ['agency:launch'], defaultModelCompletionOptions: { maxTokens: 600 } }), persona('helper')],
+    });
+    await runTurn(os, { selectedPersonaId: 'helper', sessionId: 'r-helper' });
+    expect(offered(s.seen[0])).toContain('search');
+    expect(offered(s.seen[0])).not.toContain(LAUNCH_AGENCY_TOOL_NAME);
+    const refused = toolText(s.seen[1], 'h1');
+    expect(refused).toContain("Error from tool 'launch_agency'");
+    expect(refused).toContain('agency:launch');
+    // The helper's two calls alone: no seat ran.
+    expect(s.seen).toHaveLength(2);
+
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-lead' });
+    // The lead is offered the tool, whose seat names instructions or a registered persona by personaId, never an agentKey.
+    const definition = launchTool(s.seen[2]);
+    const seatFields = Object.keys((definition.parameters as { properties: { seats: { items: { properties: Record<string, unknown> } } } }).properties.seats.items.properties);
+    expect(seatFields).toEqual(expect.arrayContaining(['role', 'instructions', 'personaId', 'brief', 'tools']));
+    expect(seatFields).not.toContain('agentKey');
+    expect(definition.description).toContain('personaId');
+    // A temporary seat runs on the lead's route: its instructions as its prompt, the lead's model, output cap and user.
+    expect(s.seen[2].options).toMatchObject({ maxTokens: 600, userId: 'ana' });
+    expect(systemText(s.seen[3])).toContain('You write notes.');
+    expect(systemText(s.seen[3])).not.toContain('You are the lead.');
+    expect(s.seen[3].modelId).toBe('stub-model');
+    expect(s.seen[3].options).toMatchObject({ maxTokens: 600, userId: 'ana' });
+    const out = launchedIn(s.seen[4], 'l1');
+    expect(out).toMatchObject({ status: 'completed', text: 'Note written.' });
+    expect(out.seats).toEqual([expect.objectContaining({ role: 'writer', form: 'temporary', status: 'completed', calls: 1, summary: 'Note written.' })]);
+    expect(s.seen).toHaveLength(5);
+  });
+
+  it("a personaId seat runs as its registered persona over a view of the runtime's tools that lists and runs only its allowlist; an unknown persona, an agentKey seat and a self-modification tool are refused; the seat retrieves nothing; its tool calls see the parent's user and organization, its seat session and a frozen frame", async () => {
+    const k = key();
+    const queries: string[] = [];
+    const filed: string[] = [];
+    const augmentor = {
+      retrieveContext: async (queryText: string) => {
+        queries.push(queryText);
+        return { queryText, augmentedContext: '', retrievedChunks: [] };
+      },
+      ingestDocuments: async (documents: unknown) => {
+        filed.push(JSON.stringify(documents));
+        return { ingestedIds: ['doc'], failedCount: 0, errors: [] };
+      },
+      checkHealth: async () => ({ isHealthy: true }),
+      shutdown: async () => undefined,
+    } as unknown as IRetrievalAugmentor;
+    let searches = 0;
+    let os!: AgentOS;
+    const calls: Array<{ context: ToolExecutionContext; listed: AgencySession[]; gmis: string[] }> = [];
+    const whoami = configTool('whoami', async (context) => {
+      calls.push({ context, listed: os.listAgencies(), gmis: await activeGmis(os) });
+      return 'ana';
+    });
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          // The reader's own turn.
+          reply.text('We know a little.'),
+          // The lead: an agentKey seat, a persona no one registered, a self-modification tool, then two registered personas.
+          reply.tools([
+            { id: 'a1', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'x', seats: [{ role: 'tutor', agentKey: 'tutor' }] } },
+            { id: 'g1', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'x', seats: [{ role: 'ghost', personaId: 'ghost' }] } },
+            { id: 'f1', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Forge.', seats: [{ role: 'smith', instructions: 'Forge a tool.', tools: ['forge_tool'] }] } },
+            {
+              id: 'l1',
+              name: LAUNCH_AGENCY_TOOL_NAME,
+              args: { goal: 'CANARY-SEAT-2: read this.', seats: [{ role: 'reader', personaId: 'reader' }, { role: 'checker', personaId: 'checker', tools: ['whoami'] }] },
+            },
+          ]),
+          reply.text('Read.'),
+          // The checker calls its own tool, and one outside its allowlist.
+          reply.tools([
+            { id: 'w1', name: 'whoami', args: {} },
+            { id: 'x1', name: 'search', args: {} },
+          ]),
+          reply.text('Checked.'),
+          reply.text('Done.'),
+        ],
+      }),
+      'ok',
+    );
+    os = await startRuntime(k, {
+      emergent: true,
+      retrievalAugmentor: augmentor,
+      personas: [
+        persona('lead', { allowedCapabilities: ['agency:launch'] }),
+        persona('checker', { baseSystemPrompt: 'You check facts.' }),
+        persona('reader', { memoryConfig: { enabled: true, ragConfig: { enabled: true, retrievalTriggers: { onUserQuery: true }, ingestionTriggers: { onTurnSummary: true } } } }),
+      ],
+      tools: {
+        search: configTool('search', async () => {
+          searches += 1;
+          return 'found';
+        }),
+        whoami,
+      },
+    });
+    // The reader's own turn retrieves with its input and files a turn summary (the precondition).
+    await runTurn(os, { selectedPersonaId: 'reader', sessionId: 'r-reader', textInput: 'CANARY-OWN-1 what do we know?' });
+    expect(queries).toContain('CANARY-OWN-1 what do we know?');
+    expect(filed.join('\n')).toContain('CANARY-OWN-1');
+
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-lead', organizationId: 'org-7' });
+    // The lead's own table is wider than any seat's (the precondition).
+    expect(offered(s.seen[1])).toEqual(expect.arrayContaining(['search', 'whoami', 'forge_tool', LAUNCH_AGENCY_TOOL_NAME]));
+    const lead = s.seen[5];
+    expect(toolText(lead, 'a1')).toContain("seat_form_unsupported: seat 'tutor': agentKey seats run on gmi(); name a registered persona by personaId");
+    expect(toolText(lead, 'g1')).toContain("unknown_member: seat 'ghost': no member 'ghost'");
+    expect(toolText(lead, 'f1')).toContain("tool_not_allowed: seat 'smith': 'forge_tool' is a self-modification tool");
+    const out = launchedIn(lead, 'l1');
+    expect(out).toMatchObject({ status: 'completed', text: 'Checked.', provenance: expect.objectContaining({ depth: 1 }) });
+    expect(out.seats).toEqual([
+      expect.objectContaining({ role: 'reader', form: 'persistent', member: 'reader', status: 'completed', calls: 1, summary: 'Read.' }),
+      expect.objectContaining({ role: 'checker', form: 'persistent', member: 'checker', status: 'completed', calls: 1, summary: 'Checked.' }),
+    ]);
+    // Each seat is its registered persona, handed its role before the goal, and offered its allowlist alone.
+    expect(systemText(s.seen[2])).toContain('You are the reader.');
+    expect(lastUserText(s.seen[2])).toContain('Your role in this team: reader.');
+    expect(lastUserText(s.seen[2])).toContain('CANARY-SEAT-2: read this.');
+    expect(offered(s.seen[2])).toEqual([]);
+    expect(systemText(s.seen[3])).toContain('You check facts.');
+    expect(offered(s.seen[3])).toEqual(['whoami']);
+    // A call outside the seat's allowlist is answered "not available in this seat", and its tool never runs.
+    expect(toolText(s.seen[4], 'x1')).toContain('not available in this seat');
+    expect(searches).toBe(0);
+    expect(toolText(s.seen[4], 'w1')).toContain('ana');
+    // The seat's tool call saw the parent's user and organization, the seat's own session, and the frame, frozen.
+    expect(calls).toHaveLength(1);
+    const [{ context, listed, gmis }] = calls;
+    expect(context.userContext.userId).toBe('ana');
+    expect(context.sessionData?.organizationId).toBe('org-7');
+    expect(context.sessionData?.sessionId).toBe(`seat:${out.agencyId}:checker`);
+    expect(context.sessionData?.agencyLaunch).toEqual({ launchId: out.agencyId, role: 'checker', depth: 1 });
+    expect(Object.isFrozen(context.sessionData?.agencyLaunch)).toBe(true);
+    // While the team ran it was listed with its two seats, whose GMIs were active; afterwards neither stays.
+    expect(listed.map((entry) => entry.agencyId)).toEqual([out.agencyId]);
+    const seatGmis = Object.values(listed[0].seats).map((seat) => seat.gmiInstanceId);
+    expect(seatGmis).toHaveLength(2);
+    expect(gmis).toEqual(expect.arrayContaining(seatGmis));
+    expect(os.listAgencies()).toEqual([]);
+    expect((await activeGmis(os)).filter((id) => seatGmis.includes(id))).toEqual([]);
+    // The reader's seat retrieved nothing and filed nothing: the team's goal reached neither the queries nor the store.
+    expect(queries.some((query) => query.includes('CANARY-SEAT-2'))).toBe(false);
+    expect(filed.join('\n')).not.toContain('CANARY-SEAT-2');
+  });
+
+  it("a personaId seat is bounded by its own persona: it names only tools its persona's capabilities allow, and the one-call floor counts its persona's route, whose output cap its calls are sent with", async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([
+          // The helper's persona is not granted agency:launch, though the lead is.
+          { id: 'u1', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Launch a team of your own.', seats: [{ role: 'helper', personaId: 'helper', tools: [LAUNCH_AGENCY_TOOL_NAME] }] } },
+          // 3,000 covers one call of the lead's route (2,000 for the prompt, 500 for the output) and not one of big's.
+          { id: 'b1', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Think big.', maxTokens: 3_000, seats: [{ role: 'big', personaId: 'big' }] } },
+          // 2,200 covers one call of small's route (2,000 and 100) and not one of the lead's.
+          { id: 's1', name: LAUNCH_AGENCY_TOOL_NAME, args: { goal: 'Think small.', maxTokens: 2_200, seats: [{ role: 'small', personaId: 'small' }] } },
+        ]),
+        reply.text('Small.'),
+        reply.text('Done.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, {
+      personas: [
+        persona('lead', { allowedCapabilities: ['agency:launch'], defaultModelCompletionOptions: { maxTokens: 500 } }),
+        persona('helper'),
+        persona('big', { defaultModelCompletionOptions: { maxTokens: 2_000 } }),
+        persona('small', { baseSystemPrompt: 'You think small.', defaultModelCompletionOptions: { maxTokens: 100 } }),
+      ],
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-own-route' });
+    // The lead's call is sent with its own cap (the precondition).
+    expect(s.seen[0].options.maxTokens).toBe(500);
+    const lead = s.seen[2];
+    expect(toolText(lead, 'u1')).toContain("unknown_tool: seat 'helper': the persona 'helper' has no tool 'launch_agency'");
+    expect(toolText(lead, 'b1')).toContain('budget_unavailable');
+    expect(toolText(lead, 'b1')).toContain('(4000: 2000 for the prompt and 2000 for the output)');
+    expect(launchedIn(lead, 's1')).toMatchObject({ status: 'completed', text: 'Small.' });
+    // Small's seat ran as its persona, its call sent with its own cap; no other seat ran.
+    expect(systemText(s.seen[1])).toContain('You think small.');
+    expect(s.seen[1].options.maxTokens).toBe(100);
+    expect(s.seen).toHaveLength(3);
+  });
+
+  it("a running team is listed by its name, its parent and its seats, each seat call with its outcome, and listAgencies hands out copies; a seat that fails is named to its team and the result by its error's name and code alone, while the logger the host gave the runtime gets the original, and a logger that throws fails no launch", async () => {
+    const k = key();
+    const kc = key();
+    const canary = 'sk-CANARY-7373';
+    // The manager, on agent()'s path, which asks for whole responses, delegates to each seat in turn.
+    const manager = script('openai', kc, {
+      whole: true,
+      replies: [
+        reply.tools([{ id: 'd1', name: 'delegate_to_flaky', args: { task: 'Try it.' } }]),
+        reply.tools([{ id: 'd2', name: 'delegate_to_writer', args: { task: 'Write it.' } }]),
+        reply.tools([{ id: 'd3', name: 'delegate_to_peeker', args: { task: 'Look around.' } }]),
+        reply.text('The team looked around.'),
+      ],
+    });
+    const s = script('openai', k, {
+      replies: [
+        launchStep(
+          {
+            goal: 'Look around.',
+            strategy: 'hierarchical',
+            seats: [
+              { role: 'flaky', instructions: 'You try things.' },
+              { role: 'writer', instructions: 'You write.' },
+              { role: 'peeker', personaId: 'checker', tools: ['peek'] },
+            ],
+          },
+          'l1',
+        ),
+        // The flaky seat's request fails with a message that holds a credential.
+        providerFailure(canary),
+        reply.text('Written.'),
+        reply.tools([{ id: 'p1', name: 'peek', args: {} }]),
+        reply.text('Peeked.'),
+        reply.text('Done.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const warnings: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const logger: ILogger = {
+      info: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+      warn: (message: string, meta?: Record<string, unknown>) => {
+        warnings.push({ message, meta });
+        // A host's logger may throw.
+        if (message.startsWith('[AgentOS] launch_agency')) throw new Error('the logger broke');
+      },
+    };
+    let os!: AgentOS;
+    const peeks: Array<{ first: AgencySession[]; second: AgencySession[]; gmis: string[] }> = [];
+    const peek = configTool('peek', async () => {
+      const first = os.listAgencies();
+      // What a caller does to the copies it was handed reaches the runtime not at all.
+      for (const entry of first) {
+        (entry.metadata as Record<string, unknown>).status = 'tampered';
+        entry.seats.flaky?.history?.push({ timestamp: 'now', status: 'completed', outputPreview: 'tampered' });
+        delete entry.seats.writer;
+      }
+      peeks.push({ first, second: os.listAgencies(), gmis: await activeGmis(os) });
+      return 'looked';
+    });
+    os = await startRuntime(
+      k,
+      { tools: { search: configTool('search', async () => 'found'), peek }, agencies: { launch: true, coordinator: { provider: 'openai', model: 'stub-model', apiKey: kc } } },
+      logger,
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-list' });
+    // The lead, the flaky seat's failed request, the writer, the peeker's two steps, the lead; the manager's four calls
+    // (the precondition).
+    expect(s.seen).toHaveLength(6);
+    expect(manager.seen).toHaveLength(4);
+    const out = launchedIn(s.seen[5], 'l1');
+    expect(out).toMatchObject({ status: 'completed', text: 'The team looked around.' });
+    expect(out.seats).toEqual([
+      expect.objectContaining({ role: 'flaky', form: 'temporary', status: 'failed', calls: 1, error: { name: 'GMIError', code: 'GMI_PROCESSING_ERROR' } }),
+      expect.objectContaining({ role: 'writer', form: 'temporary', status: 'completed', calls: 1, summary: 'Written.' }),
+      expect.objectContaining({ role: 'peeker', form: 'persistent', member: 'checker', status: 'completed', calls: 1, summary: 'Peeked.' }),
+    ]);
+    // The manager's next request read the delegation's error by its name and code; no request and not the result
+    // carries the message.
+    expect(toolText(manager.seen[1], 'd1')).toContain('GMIError (GMI_PROCESSING_ERROR)');
+    expectNoWordOf(canary, [JSON.stringify(manager.seen), JSON.stringify(s.seen), JSON.stringify(out)]);
+    // The logger the host gave the runtime got the seat's original error once, under the seat's name; it threw, and the
+    // launch went on.
+    const launchWarnings = warnings.filter(({ message }) => message.startsWith('[AgentOS] launch_agency'));
+    expect(launchWarnings.map(({ message }) => message)).toEqual(['[AgentOS] launch_agency seat flaky failed']);
+    expect(launchWarnings[0].meta).toEqual({ error: expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) }) });
+
+    // Read from the peeker's tool while the team ran: one launched team, by its name, its parent and its three seats.
+    expect(peeks).toHaveLength(1);
+    const [{ first, second, gmis }] = peeks;
+    // The copy the tool changed (the precondition), and the listing after it, which the change did not reach.
+    expect(first).toHaveLength(1);
+    expect(first[0].metadata).toMatchObject({ status: 'tampered' });
+    expect(Object.keys(first[0].seats).sort()).toEqual(['flaky', 'peeker']);
+    expect(second).toHaveLength(1);
+    const entry = second[0];
+    expect(entry).toMatchObject({
+      agencyId: out.agencyId,
+      workflowId: `launch:${out.agencyId}`,
+      conversationId: expect.any(String),
+      metadata: expect.objectContaining({
+        kind: 'launched',
+        parentGmiId: expect.any(String),
+        parentPersonaId: 'lead',
+        launchingSessionId: 'r-list',
+        depth: 1,
+        strategy: 'hierarchical',
+        status: 'running',
+        goalPreview: 'Look around.',
+        startedAt: expect.any(String),
+      }),
+    });
+    expect(Object.keys(entry.seats).sort()).toEqual(['flaky', 'peeker', 'writer']);
+    expect(entry.seats.peeker).toMatchObject({ roleId: 'peeker', personaId: 'checker', metadata: { form: 'persistent', member: 'checker' }, history: [] });
+    expect(entry.seats.writer).toMatchObject({ roleId: 'writer', personaId: `${out.agencyId}-writer`, metadata: { form: 'temporary' } });
+    // Each call a seat ran: the failed one by its outcome and its error's name and code, the answered one with its start.
+    expect(entry.seats.flaky.history).toEqual([
+      { timestamp: expect.any(String), status: 'failed', metadata: { outcome: 'failed', error: { name: 'GMIError', code: 'GMI_PROCESSING_ERROR' } } },
+    ]);
+    expect(entry.seats.writer.history).toEqual([{ timestamp: expect.any(String), status: 'completed', outputPreview: 'Written.', metadata: { outcome: 'completed' } }]);
+    // The seats' GMIs were active while the team ran; afterwards the list is empty and none of them is.
+    const seatGmis = Object.values(entry.seats).map((seat) => seat.gmiInstanceId);
+    expect(gmis).toEqual(expect.arrayContaining(seatGmis));
+    expect(os.listAgencies()).toEqual([]);
+    expect((await activeGmis(os)).filter((id) => seatGmis.includes(id))).toEqual([]);
+  });
+
+  it("a launch that returns while a seat's tool still runs stays listed, closing, and holds its session's scope until the seat is released, while another session launches; then the scope admits again", async () => {
+    const k = key();
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let hangs = 0;
+    const hang = configTool('hang', async () => {
+      hangs += 1;
+      await hanging;
+      return 'done';
+    });
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Wait.', deadlineMs: 1_000, seats: [{ role: 'waiter', instructions: 'Call hang.', tools: ['hang'] }] }, 'l1'),
+        // The waiter's tool runs past the deadline and the grace.
+        reply.tools([{ id: 'h1', name: 'hang', args: {} }]),
+        reply.text('Timed out.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, { tools: { search: configTool('search', async () => 'found'), hang } });
+    try {
+      await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-close' });
+      // The launch returned timed_out while the waiter's tool still runs (the precondition).
+      const out = launchedIn(s.seen[2], 'l1');
+      expect(out.status).toBe('timed_out');
+      expect(hangs).toBe(1);
+      // The team stays listed, closing, its seat's GMI still active.
+      const listed = os.listAgencies();
+      expect(listed.map((entry) => entry.agencyId)).toEqual([out.agencyId]);
+      expect(listed[0].metadata).toMatchObject({ kind: 'launched', status: 'closing' });
+      const waiterGmi = listed[0].seats.waiter.gmiInstanceId;
+      expect(await activeGmis(os)).toContain(waiterGmi);
+      // The same session's next launch is refused while its team closes; another session's is admitted.
+      s.replies.push(launchStep(oneSeat('again'), 'l2'), reply.text('Not now.'));
+      await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-close' });
+      expect(toolText(s.seen[4], 'l2')).toContain('concurrency_exceeded');
+      s.replies.push(launchStep(oneSeat('other'), 'l3'), reply.text('Other done.'), reply.text('Done.'));
+      await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-other' });
+      expect(launchedIn(s.seen[7], 'l3')).toMatchObject({ status: 'completed', text: 'Other done.' });
+      // Once the tool returns and the seat is released, the team leaves the list and its GMI goes. Nothing more runs for
+      // the waiter: its tool ran once, and a model call its stopped turn still makes is aborted before it starts (the
+      // provider reads the stop and answers with its abort chunk; the queued reply is there for it to skip).
+      s.replies.push(reply.text('SENTINEL: never read.'));
+      release();
+      await vi.waitFor(() => expect(os.listAgencies()).toEqual([]), { timeout: 10_000 });
+      expect(await activeGmis(os)).not.toContain(waiterGmi);
+      const after = s.seen.length - 8;
+      expect(after).toBeLessThanOrEqual(1);
+      expect(s.aborts).toBe(after);
+      expect(hangs).toBe(1);
+      s.replies.length = 0;
+      // The session's scope admits again.
+      s.replies.push(launchStep(oneSeat('later'), 'l4'), reply.text('Later done.'), reply.text('Done.'));
+      const base = s.seen.length;
+      await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-close' });
+      expect(s.seen).toHaveLength(base + 3);
+      expect(launchedIn(s.seen[base + 2], 'l4')).toMatchObject({ status: 'completed', text: 'Later done.' });
+    } finally {
+      release();
+    }
+  }, 40_000);
+
+  it("a team's nested launches share one launch in flight: of three seats that launch at once, one is admitted and two are refused, and a later launch from a team is admitted once the earlier one has settled", async () => {
+    const k = key();
+    const kc = key();
+    // A parallel team's answers are made one by the synthesizer on the coordinator's route.
+    const coordinator = answerWhole(script('openai', kc), 'Three answers in one.');
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const nested = (role: string) => launchStep({ goal: `Answer ${role}.`, seats: [{ role, instructions: 'NESTED-SEAT: answer.' }] }, `n-${role}`);
+    const isNestedSeat = (call: SeenCall): boolean => systemText(call).includes('NESTED-SEAT');
+    const refusedSteps = (calls: SeenCall[]): SeenCall[] =>
+      calls.filter((call) => call.messages.some((m) => m.role === 'tool' && textOf(m.content).includes('concurrency_exceeded')));
+    const launchers = (roles: string[]) => roles.map((role) => ({ role, instructions: `Seat ${role}: launch one helper.`, tools: [LAUNCH_AGENCY_TOOL_NAME] }));
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Three at once.', strategy: 'parallel', seats: launchers(['a', 'b', 'c']) }, 'trio'),
+        // Each seat's first step launches one helper.
+        nested('n1'),
+        nested('n2'),
+        nested('n3'),
+        // The admitted helper's answer and the refused seats' next steps wait until both refusals are in.
+        reply.hold([], gate, reply.text('Done here.')),
+        reply.hold([], gate, reply.text('Done here.')),
+        reply.hold([], gate, reply.text('Done here.')),
+        // The seat whose helper ran, then the lead.
+        reply.text('Helped.'),
+        reply.text('All three answered.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, { agencies: { launch: true, coordinator: { provider: 'openai', model: 'stub-model', apiKey: kc } } });
+    const turn = runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-trio' });
+    try {
+      await vi.waitFor(() => expect(refusedSteps(s.seen)).toHaveLength(2), { timeout: 20_000 });
+    } finally {
+      open();
+    }
+    await turn;
+    // One nested launch was admitted and its helper ran once; the other two were refused concurrency_exceeded.
+    expect(refusedSteps(s.seen)).toHaveLength(2);
+    expect(s.seen.filter(isNestedSeat)).toHaveLength(1);
+    expect(s.replies).toHaveLength(0);
+    const trio = launchedIn(s.seen[s.seen.length - 1], 'trio');
+    expect(trio).toMatchObject({ status: 'completed', text: 'Three answers in one.' });
+    expect(trio.seats.map((seat) => seat.status)).toEqual(['completed', 'completed', 'completed']);
+    expect(coordinator.wholeSeen?.length).toBeGreaterThan(0);
+
+    // A team's launches one after the other: each is admitted once the one before it has settled.
+    s.replies.push(
+      launchStep({ goal: 'One after the other.', seats: launchers(['first', 'second']) }, 'duo'),
+      nested('m1'),
+      reply.text('m1 done.'),
+      reply.text('first done.'),
+      nested('m2'),
+      reply.text('m2 done.'),
+      reply.text('second done.'),
+      reply.text('Both answered.'),
+    );
+    const before = s.seen.length;
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-duo' });
+    const later = s.seen.slice(before);
+    expect(later.filter(isNestedSeat)).toHaveLength(2);
+    expect(refusedSteps(later)).toEqual([]);
+    expect(launchedIn(later[later.length - 1], 'duo')).toMatchObject({ status: 'completed', text: 'second done.' });
+  }, 40_000);
+
+  it("launch_agency is never a step on the full runtime: create_workflow and forge_tool refuse a step that names it, though the host lists it among the side-effecting tools a step may chain, before the judge, and the package's step check says why", async () => {
+    const k = key();
+    /** A forge request for a composition of one step that calls `stepTool`. */
+    const forgeRequest = (name: string, stepTool: string) => ({
+      name,
+      description: `The ${name} tool.`,
+      inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+      outputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+      implementation: { mode: 'compose', steps: [{ name: 'step', tool: stepTool, inputMapping: { goal: '$input.text' } }] },
+      testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'done' }, stepOutputs: { step: { text: 'done' } } }],
+    });
+    const sendNote = configTool('send_note', async () => 'sent', true);
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          reply.tools([
+            // A side-effecting tool the host lists chains (the precondition), and launch_agency, listed too, never does.
+            { id: 'w1', name: 'create_workflow', args: { action: 'create', name: 'note_flow', description: 'Sends a note.', steps: [{ tool: 'send_note', args: { text: '$input' } }] } },
+            { id: 'w2', name: 'create_workflow', args: { action: 'create', name: 'team_up', description: 'Launches a team.', steps: [{ tool: LAUNCH_AGENCY_TOOL_NAME, args: { goal: '$input' } }] } },
+            // A composition of a chainable tool reaches the judge (the precondition); one naming launch_agency does not.
+            { id: 'f0', name: 'forge_tool', args: forgeRequest('look_up', 'search') },
+            { id: 'f1', name: 'forge_tool', args: forgeRequest('team_up', LAUNCH_AGENCY_TOOL_NAME) },
+          ]),
+          reply.text('Done.'),
+        ],
+      }),
+      'not a verdict',
+    );
+    const os = await startRuntime(k, {
+      emergent: true,
+      emergentConfig: { selfImprovement: { enabled: true }, compose: { sideEffectingTools: [LAUNCH_AGENCY_TOOL_NAME, 'send_note'] } },
+      tools: { search: configTool('search', async () => 'found'), send_note: sendNote },
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-steps' });
+    expect(offered(s.seen[0])).toEqual(expect.arrayContaining(['create_workflow', 'forge_tool', 'send_note', LAUNCH_AGENCY_TOOL_NAME]));
+    const next = s.seen[1];
+    expect(toolText(next, 'w1')).not.toContain('Error from tool');
+    expect(toolText(next, 'w1')).toContain('"name":"note_flow"');
+    for (const id of ['w2', 'f1']) {
+      expect(toolText(next, id)).toContain('step_not_chainable');
+      expect(toolText(next, id)).toContain('can never be a step');
+    }
+    const judged = (name: string): string[] => (s.wholeSeen ?? []).filter((prompt) => prompt.includes('security auditor') && prompt.includes(`Tool name: ${name}`));
+    expect(judged('look_up').length).toBeGreaterThan(0);
+    expect(judged('team_up')).toEqual([]);
+    // The package's step check, as a host reads it: a listed side-effecting tool chains, launch_agency never does.
+    expect(checkChainable('send_note', sendNote, ['send_note'])).toMatchObject({ ok: true });
+    expect(checkChainable(LAUNCH_AGENCY_TOOL_NAME, configTool(LAUNCH_AGENCY_TOOL_NAME, async () => 'launched', true), [LAUNCH_AGENCY_TOOL_NAME])).toMatchObject({
+      ok: false,
+      code: 'step_not_chainable',
+      message: expect.stringContaining('can never be a step'),
+    });
+  });
+
+  it("the output guardrails that judge the launching turn's tool calls judge each call of every seat before it runs, beside the sources the launching turn retrieved, a nested team's seat included", async () => {
+    const k = key();
+    const judged: string[] = [];
+    let dangers = 0;
+    const guard = {
+      id: 'no-danger',
+      config: { evaluateToolCalls: true },
+      async evaluateOutput({ chunk, ragSources }: GuardrailOutputPayload) {
+        if (chunk.type !== AgentOSResponseChunkType.TOOL_CALL_REQUEST) return null;
+        const confidential = (ragSources ?? []).some((source) => source.metadata?.classification === 'confidential');
+        const names = (chunk as AgentOSToolCallRequestChunk).toolCalls.map((call) => call.name);
+        judged.push(...names.map((name) => (confidential ? `${name} (confidential)` : name)));
+        return names.includes('danger') ? { action: GuardrailAction.BLOCK, reason: 'No danger.', reasonCode: 'NO_DANGER' } : null;
+      },
+    } as unknown as IGuardrailService;
+    // The lead's turn retrieves a confidential source.
+    const payroll = { id: 'chunk-payroll', content: 'October payroll.', originalDocumentId: 'doc-payroll', metadata: { classification: 'confidential' } } as unknown as RagRetrievedChunk;
+    const augmentor = {
+      retrieveContext: async (queryText: string) => ({ queryText, augmentedContext: 'October payroll.', retrievedChunks: [payroll] }),
+      ingestDocuments: async () => ({ ingestedIds: [], failedCount: 0, errors: [] }),
+      checkHealth: async () => ({ isHealthy: true }),
+      shutdown: async () => undefined,
+    } as unknown as IRetrievalAugmentor;
+    const s = script('openai', k, {
+      replies: [
+        // A seat of the lead's team asks for danger.
+        launchStep({ goal: 'Run danger.', seats: [{ role: 'doer', instructions: 'Call danger.', tools: ['danger'] }] }, 'l1'),
+        reply.tools([{ id: 'x1', name: 'danger', args: {} }]),
+        reply.text('Could not.'),
+        reply.text('Done.'),
+        // A seat of a team the lead's seat launches asks for danger.
+        launchStep({ goal: 'Plan the work.', seats: [{ role: 'planner', instructions: 'Hand the work on.', tools: [LAUNCH_AGENCY_TOOL_NAME, 'danger'] }] }, 'l2'),
+        launchStep({ goal: 'Run danger.', seats: [{ role: 'doer', instructions: 'Call danger.', tools: ['danger'] }] }, 'l3'),
+        reply.tools([{ id: 'x2', name: 'danger', args: {} }]),
+        reply.text('Could not.'),
+        reply.text('Handed on.'),
+        reply.text('Done.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, {
+      guardrailService: guard,
+      retrievalAugmentor: augmentor,
+      personas: [persona('lead', { allowedCapabilities: ['agency:launch'], memoryConfig: { enabled: true, ragConfig: { enabled: true, retrievalTriggers: { onUserQuery: true } } } })],
+      tools: {
+        danger: configTool('danger', async () => {
+          dangers += 1;
+          return 'done';
+        }),
+      },
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-guard-1' });
+    // The guardrail judged the lead's own call beside the confidential source its turn read, and the seat was offered
+    // danger and asked for it (the precondition).
+    expect(judged).toContain('launch_agency (confidential)');
+    expect(offered(s.seen[1])).toEqual(['danger']);
+    // The seat's call was judged beside the launching turn's sources and refused before it ran.
+    expect(judged).toContain('danger (confidential)');
+    expect(dangers).toBe(0);
+    expect(toolText(s.seen[2], 'x1')).toContain('No danger.');
+
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-guard-2' });
+    // The planner launched the doer's team from its seat (the precondition), and that doer's call was judged and refused.
+    expect(offered(s.seen[6])).toEqual(['danger']);
+    expect(judged.filter((name) => name.startsWith('danger'))).toHaveLength(2);
+    expect(dangers).toBe(0);
+    expect(toolText(s.seen[7], 'x2')).toContain('No danger.');
   });
 });
