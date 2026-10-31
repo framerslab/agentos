@@ -2001,7 +2001,7 @@ describe('agencies and launch_agency, as a host uses the package', () => {
       ],
     });
     const parent = gmi({ ...route(k), instructions: 'Coordinate.', agencies: { launch: true } });
-    const result = await parent.session('p-args').send('Launch.');
+    const result = await parent.session('p-args').send('Launch the team for the sunny report.');
     expect(result.text).toBe('Done.');
 
     // The table offers the six strategies but panel.
@@ -2028,6 +2028,9 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     // The first seat ran first, on the goal; the second took its output.
     expect(systemText(s.seen[1])).toContain('You go first.');
     expect(lastUserText(s.seen[1])).toContain('Answer in order.');
+    // The team sees nothing of the launching conversation.
+    expect(JSON.stringify(s.seen[0].messages)).toContain('sunny');
+    expect(JSON.stringify(s.seen.slice(1, 3).map((call) => call.messages))).not.toContain('sunny');
     expect(systemText(s.seen[2])).toContain('You go second.');
     expect(lastUserText(s.seen[2])).toContain('First answer.');
     // A result holds 16,000 characters of the team's text and says it was cut, and 1,000 of a seat's summary.
@@ -3784,11 +3787,12 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
 
       // A request naming the idle seat's session under the seat's own persona, and one naming the running seat's
       // session under another persona: each turn ends with the manager's refusal, and no model call receives either.
-      const [own, other] = await Promise.all([
+      const [own, other, unknown] = await Promise.all([
         outside({ sessionId: firstSession, selectedPersonaId: 'checker', textInput: 'First outside request.' }),
         outside({ sessionId: secondSession, selectedPersonaId: 'helper', textInput: 'Second outside request.' }),
+        outside({ sessionId: firstSession, selectedPersonaId: 'no-such-persona', textInput: 'Third outside request.' }),
       ]);
-      for (const chunks of [own, other]) {
+      for (const chunks of [own, other, unknown]) {
         const error = chunks.find((chunk) => chunk.type === AgentOSResponseChunkType.ERROR) as { message?: string } | undefined;
         expect(error?.message).toContain('is a seat of a team a GMI launched; no request runs in it.');
         expect(chunks.some((chunk) => chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE)).toBe(false);
@@ -3830,6 +3834,54 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
       expect(s.seen).toHaveLength(6);
       expect(lastUserText(s.seen[5])).toContain('A later request.');
       expect(systemText(s.seen[5])).toContain('You are the helper.');
+    } finally {
+      release();
+    }
+  }, 40_000);
+
+  it("the idle cleanup passes by a seat its launch still holds: the seat keeps its GMI and its listing while the idle GMIs go, and its launch releases it", async () => {
+    const k = key();
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const hang = configTool('hang', async () => {
+      await hanging;
+      return 'done';
+    });
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Wait.', deadlineMs: 1_000, seats: [{ role: 'waiter', instructions: 'Call hang.', tools: ['hang'] }] }, 'l1'),
+        // The waiter's tool runs past the deadline and the grace, so the launch returns with the seat still held.
+        reply.tools([{ id: 'h1', name: 'hang', args: {} }]),
+        reply.text('Timed out.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, { tools: { search: configTool('search', async () => 'found'), hang } });
+    try {
+      await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-idle' });
+      const out = launchedIn(s.seen[2], 'l1');
+      expect(out.status).toBe('timed_out');
+      const [listed] = os.listAgencies();
+      expect(listed.metadata).toMatchObject({ kind: 'launched', status: 'closing' });
+      const waiterGmi = listed.seats.waiter.gmiInstanceId;
+      const manager = os.getGMIManager();
+      const leadGmi = manager.gmiSessionMap.get('r-idle');
+      expect(leadGmi).toBeDefined();
+      await sleep(5);
+
+      // The cleanup ran (the lead's idle GMI went), and the seat its launch still holds kept its GMI and its listing.
+      await manager.cleanupInactiveGMIs(0);
+      expect(manager.gmiSessionMap.has('r-idle')).toBe(false);
+      expect(await activeGmis(os)).not.toContain(leadGmi);
+      expect(await activeGmis(os)).toContain(waiterGmi);
+      expect(os.listAgencies().map((entry) => entry.agencyId)).toEqual([out.agencyId]);
+
+      // Once the tool returns, its launch releases the seat, and the team and its GMI go.
+      release();
+      await vi.waitFor(() => expect(os.listAgencies()).toEqual([]), { timeout: 10_000 });
+      expect(await activeGmis(os)).not.toContain(waiterGmi);
     } finally {
       release();
     }
