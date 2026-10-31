@@ -61,7 +61,7 @@ import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstructor.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
-import { lazyLogger } from '../core/logging/loggerFactory.js';
+import { moduleLogger } from '../core/logging/loggerFactory.js';
 import { errorFields, providerName } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
@@ -74,7 +74,7 @@ const console = createContentSafeConsole('stream_text');
  * written: a logger or a factory set with `setLogger` or `setLoggerFactory`
  * after this module was imported still receives every failover event.
  */
-const fallbackLogger = lazyLogger('fallback');
+const fallbackLogger = moduleLogger('fallback', 'stream_text');
 
 // A fallback skip's reason as one of the fixed words `llm.fallback_skipped` takes, never the reason's own text.
 function skipReason(reason: string): 'duplicate' | 'excluded' | 'capability' | 'refusal' | 'refill' | 'unknown' {

@@ -20,7 +20,7 @@ import type { AgentOSEvents, AgentOSContext } from './events.js';
 import { AGENTOS_CONTEXT } from './events.js';
 import { getLoggingState, type LoggerFactory, type Target } from './state.js';
 import { checkContext, defaultRoot, forward, isValidationError } from './forward.js';
-import { emitContentSafeLog, isContentSafeTelemetryEnabled } from './contentSafeTelemetry.js';
+import { emitContentSafeLog, isContentSafeTelemetryEnabled, type ContentSafeLogComponent } from './contentSafeTelemetry.js';
 export type { LoggerFactory } from './state.js';
 
 /**
@@ -94,10 +94,11 @@ export function resetLoggerFactory(): void {
 
 // An ILogger over the target `target()` returns at each write. A child merges its bindings onto its parent's. With
 // `strict` they are checked against AgentOS's context schema before the child is made: a child whose bindings fail
-// writes one `log_refused` line and then nothing, and under NODE_ENV=test the failure is thrown instead.
-function adapter(target: () => Target, bindings: Record<string, any>, strict: boolean, disabled = false): ILogger {
+// writes one `log_refused` line and then nothing, and under NODE_ENV=test the failure is thrown instead. While
+// content-safe telemetry is on, each line, a child's included, is one fixed event naming `origin`.
+function adapter(target: () => Target, bindings: Record<string, any>, strict: boolean, disabled = false, origin: ContentSafeLogComponent = 'library'): ILogger {
   const write = (level: Level) => (event: string, fields: Record<string, unknown> = {}) => {
-    if (!disabled) forward(target(), level, event, fields, bindings, strict);
+    if (!disabled) forward(target(), level, event, fields, bindings, strict, origin);
   };
   return {
     debug: write('debug'), info: write('info'), warn: write('warn'), error: write('error'), fatal: write('fatal'),
@@ -108,11 +109,11 @@ function adapter(target: () => Target, bindings: Record<string, any>, strict: bo
         catch (error) {
           if (!isValidationError(error)) throw error;
           if (process.env.NODE_ENV === 'test') throw error;
-          forward(target(), 'warn', 'log_refused', { reason: 'bad_context' }, {}, false);
-          return adapter(target, {}, strict, true);
+          forward(target(), 'warn', 'log_refused', { reason: 'bad_context' }, {}, false, origin);
+          return adapter(target, {}, strict, true, origin);
         }
       }
-      return adapter(target, merged, strict, disabled);
+      return adapter(target, merged, strict, disabled, origin);
     },
   };
 }
@@ -156,4 +157,19 @@ export function createLogger(name: string, bindings?: Record<string, any>): ILog
  */
 export function lazyLogger(component: string, context: AgentOSContext = {}): EventLogger<AgentOSEvents> {
   return adapter(() => getLoggingState().target, {}, true).child!({ component, ...context }) as EventLogger<AgentOSEvents>;
+}
+
+/**
+ * The handle an AgentOS module writes through: a {@link lazyLogger} handle whose lines, while
+ * content-safe telemetry is on, each reach the sink as one fixed event naming the module, as
+ * the module's console lines do. An origin outside `CONTENT_SAFE_COMPONENTS` reads as
+ * `library`.
+ *
+ * @param component - The component the lines come from.
+ * @param origin - The module's fixed word in `CONTENT_SAFE_COMPONENTS`.
+ * @returns The handle.
+ * @internal
+ */
+export function moduleLogger(component: string, origin: ContentSafeLogComponent): EventLogger<AgentOSEvents> {
+  return adapter(() => getLoggingState().target, {}, true, false, origin).child!({ component }) as EventLogger<AgentOSEvents>;
 }

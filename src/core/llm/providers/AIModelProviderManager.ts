@@ -35,12 +35,12 @@ import { LiteLLMProvider, LiteLLMProviderConfig } from './implementations/LiteLL
 import { MiniMaxProvider, MiniMaxProviderConfig } from './implementations/MiniMaxProvider';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
 import { createContentSafeConsole } from '../../logging/contentSafeConsole.js';
-import { lazyLogger } from '../../logging/loggerFactory.js';
+import { moduleLogger } from '../../logging/loggerFactory.js';
 import { providerName } from '../../logging/events.js';
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
 const console = createContentSafeConsole('provider_manager');
-const log = lazyLogger('llm.manager');
+const log = moduleLogger('llm.manager', 'provider_manager');
 
 /**
  * Configuration for a single AI model provider entry within the manager.

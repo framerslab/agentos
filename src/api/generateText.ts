@@ -28,7 +28,7 @@ import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
-import { lazyLogger } from '../core/logging/loggerFactory.js';
+import { moduleLogger } from '../core/logging/loggerFactory.js';
 import { errorFields, providerName } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
@@ -60,7 +60,7 @@ import { isCallerStop, markHookStop } from './runtime/callerStop.js';
  * written: a logger or a factory set with `setLogger` or `setLoggerFactory`
  * after this module was imported still receives every failover event.
  */
-const fallbackLogger = lazyLogger('fallback');
+const fallbackLogger = moduleLogger('fallback', 'generate_text');
 
 // A fallback skip's reason as one of the fixed words `llm.fallback_skipped` takes, never the reason's own text.
 function skipReason(reason: string): 'duplicate' | 'excluded' | 'capability' | 'refusal' | 'refill' | 'unknown' {

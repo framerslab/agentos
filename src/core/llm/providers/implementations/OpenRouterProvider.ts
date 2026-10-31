@@ -29,12 +29,12 @@ import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
 import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
-import { lazyLogger } from '../../../logging/loggerFactory.js';
+import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { errorFields } from '../../../logging/events.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
-const log = lazyLogger('llm');
+const log = moduleLogger('llm', 'openrouter_provider');
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
 const console = createContentSafeConsole('openrouter_provider');
