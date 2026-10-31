@@ -522,7 +522,7 @@ for await (const event of graph.stream({ topic: 'AI safety' })) {
 | `guardrail:hitl-override` | `nodeId`, `guardrailId`, `reason` | A human node's post-approval guardrails rejected the approval |
 | `run_end` | `runId`, `finalOutput` (the artifacts), `totalDurationMs` | The run ends |
 
-A `GraphRuntime` built with an `expansionHandler` also emits `mission:*` events; none of the builders sets one. The other event types the union declares (`text_delta`, `tool_call`, `tool_result`, `memory_read`, `memory_write`, `discovery_result`, `guardrail_result`) are not emitted by the runtime.
+A `GraphRuntime` built with an `expansionHandler` also emits `mission:*` events; none of the builders sets one. The checkpoint it saves before an expansion is described in [Checkpointing](./CHECKPOINTING.md#the-checkpoint-before-an-expansion). The other event types the union declares (`text_delta`, `tool_call`, `tool_result`, `memory_read`, `memory_write`, `discovery_result`, `guardrail_result`) are not emitted by the runtime.
 
 ---
 
