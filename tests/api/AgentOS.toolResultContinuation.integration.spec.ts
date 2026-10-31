@@ -30,6 +30,7 @@ import { InMemoryWorkingMemory } from '../../src/cognition/substrate/memory/InMe
 import type { ILearningLayer, TurnInputForLearning, TurnPreparation } from '../../src/cognition/learning/types';
 import { ConversationContext } from '../../src/core/conversation/ConversationContext';
 import type { RollingSummaryCompactionConfig } from '../../src/core/conversation/RollingSummaryCompactor';
+import type { RollingSummaryCompactionProfilesConfig } from '../../src/api/types/OrchestratorConfig';
 import { PromptEngine } from '../../src/core/llm/PromptEngine';
 import type { ChatMessage, ModelCompletionResponse } from '../../src/core/llm/providers/IProvider';
 import {
@@ -2493,28 +2494,39 @@ describe('AgentOS tool-result continuations', () => {
   });
 
   describe('with the rolling summary on', () => {
+    /** How many messages a compaction keeps at the head and the tail, and any other setting a test sets. */
+    type SummaryWindow = Pick<RollingSummaryCompactionConfig, 'headMessagesToKeep' | 'tailMessagesToKeep'> &
+      Partial<RollingSummaryCompactionConfig>;
+
+    /** Compaction settings that run a pass on every turn that has a message to summarize, with `window` over them. */
+    function summarySettings(window: SummaryWindow): RollingSummaryCompactionConfig {
+      return {
+        enabled: true,
+        modelId: 'summary-model',
+        providerId: 'summary-provider',
+        cooldownMs: 0,
+        minMessagesToSummarize: 1,
+        maxMessagesToSummarizePerPass: 48,
+        maxOutputTokens: 300,
+        ...window,
+      };
+    }
+
     /**
      * A runtime over `conversationId` whose rolling summary runs on every turn that has a message to summarize, with
-     * `window` over its settings. The compaction's model answers each pass with a summary, and `summarizedTurns` keeps
-     * the turns each pass sent it. Each message the runtime records gets a time of its own, later than the one before.
+     * `window` over its settings, and with the compaction profiles `profiles` when they are given. The compaction's
+     * model answers each pass with a summary, and `summarizedTurns` keeps the turns each pass sent it. Each message the
+     * runtime records gets a time of its own, later than the one before.
      */
     async function summaryRuntime(
       conversationId: string,
-      window: Pick<RollingSummaryCompactionConfig, 'headMessagesToKeep' | 'tailMessagesToKeep'> &
-        Partial<RollingSummaryCompactionConfig>,
+      window: SummaryWindow,
+      profiles?: RollingSummaryCompactionProfilesConfig,
     ) {
       const rt = await runtime(conversationId, {
         orchestratorConfig: {
-          rollingSummaryCompactionConfig: {
-            enabled: true,
-            modelId: 'summary-model',
-            providerId: 'summary-provider',
-            cooldownMs: 0,
-            minMessagesToSummarize: 1,
-            maxMessagesToSummarizePerPass: 48,
-            maxOutputTokens: 300,
-            ...window,
-          },
+          rollingSummaryCompactionConfig: summarySettings(window),
+          rollingSummaryCompactionProfilesConfig: profiles,
         },
       });
       const summarizedTurns: Array<Array<{ id: string }>> = [];
@@ -2673,6 +2685,82 @@ describe('AgentOS tool-result continuations', () => {
       const history = gmi.histories[4] ?? [];
       expect(history.map((message) => names.get(message.id))).toEqual(['question1', 'reply1', 'question4', 'reply4']);
     });
+
+    // The conversation's first four turns run under the compaction profile `first`, and its fifth turn, through
+    // `customFlags.mode`, under `second`, which keeps another number of messages at the head. Both profiles write the
+    // conversation's one summary state: the fourth turn's compaction is the conversation's first, the fifth turn's its
+    // second.
+    it.each([
+      [
+        'a shorter head',
+        'conv-summary-profile-shorter-head',
+        { headMessagesToKeep: 6, tailMessagesToKeep: 1 },
+        { headMessagesToKeep: 2, tailMessagesToKeep: 1 },
+        {
+          summarized: [['done'], ['question4', 'reply4']],
+          kept: ['question1', 'reply1', 'question2', 'reply2', 'question3', 'call', 'read', 'write'],
+        },
+      ],
+      [
+        'a longer head',
+        'conv-summary-profile-longer-head',
+        { headMessagesToKeep: 2, tailMessagesToKeep: 3 },
+        { headMessagesToKeep: 6, tailMessagesToKeep: 1 },
+        {
+          summarized: [['question2', 'reply2', 'question3'], ['call', 'read', 'write', 'done', 'question4', 'reply4']],
+          kept: ['question1', 'reply1'],
+        },
+      ],
+    ])(
+      'a turn under a compaction profile with %s than the summary was built with summarizes or sends each earlier message, once',
+      async (_label, conversationId, first, second, expected) => {
+        const { rt, summarizedTurns } = await summaryRuntime(conversationId, first, {
+          defaultProfileId: 'first',
+          defaultProfileByMode: { second: 'second' },
+          profiles: { first: { config: summarySettings(first) }, second: { config: summarySettings(second) } },
+        });
+        const gmi = scriptedTurnsGmi([TEXTS.reply1, TEXTS.reply2, [READ_CALL, WRITE_CALL], TEXTS.reply4, TEXTS.reply5], {
+          isFinal: true,
+          responseText: TEXTS.done,
+        });
+        rt.useGmi(gmi);
+
+        await runToolRoundTurns(rt);
+        await collect(rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question4 }));
+        const next = await collect(
+          rt.agentos.processRequest({ ...rt.input, textInput: TEXTS.question5, options: { customFlags: { mode: 'second' } } }),
+        );
+
+        expect((next.at(-1) as AgentOSFinalResponseChunk).finalResponseText).toBe(TEXTS.reply5);
+        const stored = rt.context.getAllMessages();
+        const names = new Map(stored.map((message) => [message.id, nameOf(message)]));
+        const history = gmi.histories[4] ?? [];
+        // each message before the fifth question is in one summary or in the history the fifth turn sends, and in one
+        // place only: a message in neither reaches no model call, and one in both reaches the model twice
+        const earlier = stored.slice(0, stored.findIndex((message) => names.get(message.id) === 'question5'));
+        const placesOf = (id: string) =>
+          [...summarizedTurns.flat(), ...history].filter((message) => message.id === id).length;
+        expect(Object.fromEntries(earlier.map((message) => [names.get(message.id), placesOf(message.id)]))).toEqual(
+          Object.fromEntries(earlier.map((message) => [names.get(message.id), 1])),
+        );
+        expect(summarizedTurns.map((turns) => turns.map((turn) => names.get(turn.id)))).toEqual(expected.summarized);
+        expect(history.map((message) => names.get(message.id))).toEqual(expected.kept);
+        // the fifth turn's compaction ran under `second`, and the summary state keeps the head `first` built it with
+        const boundary = stored.find((message) => names.get(message.id) === 'reply4')!.timestamp;
+        const metadata = next.find(
+          (r) => r.type === AgentOSResponseChunkType.METADATA_UPDATE && (r as any).updates?.rollingSummary,
+        ) as any;
+        expect(metadata?.updates.rollingSummary).toMatchObject({
+          profileId: 'second',
+          didCompact: true,
+          summaryUptoTimestamp: boundary,
+        });
+        expect(rt.context.getMetadata('rollingSummaryState')).toMatchObject({
+          summaryUptoTimestamp: boundary,
+          headMessagesToKeep: first.headMessagesToKeep,
+        });
+      },
+    );
   });
 
   describe('with the rolling summary off and a history limit', () => {
