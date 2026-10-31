@@ -269,9 +269,10 @@ function resolveStateKey(stateKey?: string): string {
  * The head is the one the summary state records: the pass that first writes the state records its
  * `headMessagesToKeep`, and every later pass keeps that head, whatever its own settings give, and reports it in the
  * result's `headMessagesToKeep` for the next turn. A pass over a state that records no head, as an earlier release
- * stored it, keeps the head its settings give, and records it when it writes the state. Messages the earlier
- * release's passes kept back with a longer head then stay out of both the summary and the history, since the stored
- * boundary does not show which messages those passes left to the head.
+ * stored it, keeps the head its settings give, and records it when it writes the state. The stored boundary does not
+ * show which messages the earlier release's passes left to the head: where they kept a longer head than this one,
+ * the messages between the two heads stay out of both the summary and the history, and where they kept a shorter
+ * one, those messages are in the summary and the next turn sends them again.
  *
  * A tool round (an assistant message that names tool calls, the tool messages that answer them and anything between)
  * stays on one side of the boundary, since providers refuse a call without its result and a result without its call:
