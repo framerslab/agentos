@@ -14,6 +14,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { GraphRuntime } from '../runtime/GraphRuntime.js';
 import { NodeExecutor } from '../runtime/NodeExecutor.js';
 import { InMemoryCheckpointStore } from '../checkpoint/InMemoryCheckpointStore.js';
+import type { Checkpoint } from '../checkpoint/ICheckpointStore.js';
 import type { CompiledExecutionGraph, GraphNode, GraphState } from '../ir/types.js';
 import { START, END } from '../ir/types.js';
 import type { NodeExecutionResult, NodeExecutorDeps } from '../runtime/NodeExecutor.js';
@@ -1604,6 +1605,7 @@ describe('GraphRuntime: the checkpoint a halted run resumes from', () => {
     expect(trace(resumed)).toEqual([
       'run_start',
       'node_end:approve',
+      'edge_transition:approve->publish',
       'node_start:publish',
       'node_end:publish',
       'edge_transition:publish->announce',
@@ -2457,5 +2459,271 @@ describe('GraphRuntime: a guardrail node a mission expansion adds to a parallel 
 
     expect(executeMock.mock.calls.map(([node]) => (node as GraphNode).id).sort()).toEqual(['a', 'notes', 'safety']);
     expect(events).toContainEqual({ type: 'interrupt', nodeId: 'safety', reason: 'guardrail_violation' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A checkpoint the store refuses to save
+// ---------------------------------------------------------------------------
+//
+// A store backed by a database or a network can refuse a save. The run ends
+// with the store's error where the runtime asked for the checkpoint, and a
+// resume by the run id continues from the last checkpoint the store saved. In
+// a parallel batch the other nodes finish first, so no node of the run still
+// runs, or saves a checkpoint, once stream() has thrown.
+
+/** A store that refuses, once, the checkpoint the runtime saves for each node named. */
+class RefusingStore extends InMemoryCheckpointStore {
+  private readonly refusing: Set<string>;
+
+  constructor(nodeIds: string[]) {
+    super();
+    this.refusing = new Set(nodeIds);
+  }
+
+  override async save(checkpoint: Checkpoint): Promise<void> {
+    if (this.refusing.delete(checkpoint.nodeId)) {
+      throw new Error(`the store refused the checkpoint of ${checkpoint.nodeId}`);
+    }
+    await super.save(checkpoint);
+  }
+}
+
+/** Reads `stream` until it throws, and gives the events read before it and the error. */
+async function readUntilThrown(stream: AsyncIterable<GraphEvent>): Promise<{ seen: GraphEvent[]; error: unknown }> {
+  const seen: GraphEvent[] = [];
+  try {
+    for await (const event of stream) seen.push(event);
+  } catch (error) {
+    return { seen, error };
+  }
+  throw new Error(`the stream ended without an error: ${trace(seen).join(', ')}`);
+}
+
+const AUDIT = 'Audit the release notes.';
+const AUDITED = 'Audit: the notes match the changelog.';
+const RECORD = 'Record the release.';
+const RECORDED = 'Recorded v2.';
+const REVISE = 'Revise the release notes.';
+
+function auditNode(overrides: Partial<GraphNode> = {}): GraphNode {
+  return { ...gmiNode({ instructions: AUDIT }), id: 'audit', ...overrides };
+}
+
+/** A node that saves a checkpoint after it runs. */
+function recordNode(): GraphNode {
+  return { ...gmiNode({ instructions: RECORD }), id: 'record', checkpoint: 'after' };
+}
+
+function reviseNode(): GraphNode {
+  return { ...gmiNode({ instructions: REVISE }), id: 'revise' };
+}
+
+describe('GraphRuntime: a checkpoint the store refuses to save', () => {
+  it("ends stream() with the store's error before the events of the node that waits for a person", async () => {
+    const store = new RefusingStore(['approve']);
+    const model = scriptedModel({ [DRAFT]: DRAFTED, [PUBLISH]: 'Published.' });
+    const runtime = runtimeOver(store, model.providerCall);
+    const draft: GraphNode = { ...draftNode(), checkpoint: 'after' };
+    const graph = makeLinearGraph('g-refused-halt', [draft, approveNode(), publishNode()]);
+
+    const { seen, error } = await readUntilThrown(runtime.stream(graph, {}));
+
+    expect((error as Error).message).toBe('the store refused the checkpoint of approve');
+    expect(trace(seen)).toEqual([
+      'run_start',
+      'node_start:draft',
+      'node_end:draft',
+      'edge_transition:draft->approve',
+      'checkpoint_saved:draft',
+      'node_start:approve',
+    ]);
+    // A resume by the run id continues from draft's checkpoint, the last the
+    // store saved, and asks the approval again.
+    expect(trace(await readAll(runtime.streamResume(graph, runIdOf(seen))))).toEqual([
+      'run_start',
+      'node_start:approve',
+      'node_end:approve',
+      'interrupt:approve',
+      'checkpoint_saved:approve',
+      'run_end',
+    ]);
+    expect(model.calls).toEqual([DRAFT]);
+  });
+
+  it('lets the other nodes of a parallel batch finish before stream() throws, and a resume continues from them', async () => {
+    const store = new RefusingStore(['audit']);
+    // record answers after audit has asked for its checkpoint.
+    const model = recordingModel({ [AUDIT]: AUDITED, [RECORD]: RECORDED, [PUBLISH]: 'Published.' }, [RECORD]);
+    const runtime = runtimeOver(store, model.providerCall);
+    const audit = auditNode({ checkpoint: 'after' });
+    const graph = makeParallelJoinGraph('g-refused-batch', audit, recordNode(), publishNode());
+
+    const { seen, error } = await readUntilThrown(runtime.stream(graph, {}));
+
+    expect((error as Error).message).toBe('the store refused the checkpoint of audit');
+    expect(trace(seen)).toEqual(['run_start']);
+    // record had run and saved its checkpoint when stream() threw, and nothing
+    // of the run is saved after it.
+    const savedWhenThrown = (await store.list(graph.id)).map((checkpoint) => checkpoint.nodeId);
+    expect(savedWhenThrown).toEqual(['record']);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((await store.list(graph.id)).map((checkpoint) => checkpoint.nodeId)).toEqual(savedWhenThrown);
+
+    const callsBeforeResume = model.calls.length;
+    expect(await runtime.resume(graph, runIdOf(seen))).toEqual({
+      audit: AUDITED,
+      record: RECORDED,
+      publish: 'Published.',
+    });
+    expect(model.calls.slice(callsBeforeResume).map((call) => call.instructions)).toEqual([PUBLISH]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A node of a parallel batch whose edges throw
+// ---------------------------------------------------------------------------
+//
+// A function on a conditional edge is the host's code and can throw. The node
+// it routes has run, but the run does not know where it goes, so no
+// checkpoint may list it as completed: a resume runs it again and follows the
+// edge it picks then, and only that edge.
+
+describe('GraphRuntime: a node of a parallel batch whose edges throw', () => {
+  it('runs again when the run resumes from the checkpoint another node of the batch saved', async () => {
+    const store = new InMemoryCheckpointStore();
+    const replies = { [AUDIT]: AUDITED, [RECORD]: RECORDED, [PUBLISH]: 'Published.', [REVISE]: 'Revised.' };
+    // record answers after audit's edges have thrown.
+    const model = recordingModel(replies, [RECORD]);
+    const runtime = runtimeOver(store, model.providerCall);
+    // audit's edges route on its verdict, which cannot be read the first time.
+    let verdictReads = 0;
+    const verdict = (): string => {
+      verdictReads += 1;
+      if (verdictReads === 1) throw new Error('the verdict could not be read');
+      return 'publish';
+    };
+    const graph = graphOf('g-batch-edges-threw', [auditNode(), recordNode(), publishNode(), reviseNode()], [
+      [START, 'audit'],
+      [START, 'record'],
+      ['record', END],
+      ['publish', END],
+      ['revise', END],
+    ]);
+    graph.edges.push(
+      {
+        id: 'audit-publish',
+        source: 'audit',
+        target: 'publish',
+        type: 'conditional',
+        condition: { type: 'function', fn: verdict },
+      },
+      {
+        id: 'audit-revise',
+        source: 'audit',
+        target: 'revise',
+        type: 'conditional',
+        condition: { type: 'function', fn: verdict },
+      },
+    );
+
+    const { seen, error } = await readUntilThrown(runtime.stream(graph, {}));
+
+    expect((error as Error).message).toBe('the verdict could not be read');
+    expect(trace(seen)).toEqual(['run_start']);
+    // record has saved the checkpoint after it ran, and a resume by the run
+    // id continues from it.
+    await vi.waitFor(async () => {
+      expect((await store.list(graph.id)).map((checkpoint) => checkpoint.nodeId)).toEqual(['record']);
+    });
+    const callsBeforeResume = model.calls.length;
+    expect(await runtime.resume(graph, runIdOf(seen))).toEqual({
+      audit: AUDITED,
+      record: RECORDED,
+      publish: 'Published.',
+    });
+    expect(model.calls.slice(callsBeforeResume).map((call) => call.instructions)).toEqual([AUDIT, PUBLISH]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A node a resume marks complete from its recorded result
+// ---------------------------------------------------------------------------
+//
+// A resume does not ask a person again: it marks the human node that
+// interrupted the run complete with its recorded result. The node's edges
+// still decide where the run goes, read from the state the run resumes with,
+// such as the decision a host writes into the checkpoint it forks.
+
+/**
+ * START -> approve, a node that waits for a person, whose two conditional
+ * edges lead to publish or revise as `route` picks, and both to END.
+ */
+function approvalRoutedBy(id: string, route: (state: GraphState) => string): CompiledExecutionGraph {
+  const graph = graphOf(id, [approveNode(), publishNode(), reviseNode()], [
+    [START, 'approve'],
+    ['publish', END],
+    ['revise', END],
+  ]);
+  graph.edges.push(
+    {
+      id: 'approve-publish',
+      source: 'approve',
+      target: 'publish',
+      type: 'conditional',
+      condition: { type: 'function', fn: route },
+    },
+    {
+      id: 'approve-revise',
+      source: 'approve',
+      target: 'revise',
+      type: 'conditional',
+      condition: { type: 'function', fn: route },
+    },
+  );
+  return graph;
+}
+
+describe('GraphRuntime: a node a resume marks complete from its recorded result', () => {
+  it('follows the edge its condition picks, and only that edge', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = scriptedModel({ [PUBLISH]: 'Published.', [REVISE]: 'Revised.' });
+    const runtime = runtimeOver(store, model.providerCall);
+    // approve's edges route on the decision the host records in scratch.
+    const graph = approvalRoutedBy('g-replayed-edges', (state) =>
+      (state.scratch as { decision?: string }).decision === 'publish' ? 'publish' : 'revise',
+    );
+
+    const runId = runIdOf(await readAll(runtime.stream(graph, {})));
+    const halted = await store.latest(runId);
+    if (!halted) throw new Error('the run saved no checkpoint');
+    // The person approves, and the host forks the checkpoint with the decision.
+    const approved = await store.fork(halted.id, { scratch: { decision: 'publish' } });
+
+    expect(trace(await readAll(runtime.streamResume(graph, approved)))).toEqual([
+      'run_start',
+      'node_end:approve',
+      'edge_transition:approve->publish',
+      'node_start:publish',
+      'node_end:publish',
+      'run_end',
+    ]);
+    expect(model.calls).toEqual([PUBLISH]);
+  });
+
+  it('routes on a state that records its visit, as the state after a node runs does', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = scriptedModel({ [PUBLISH]: 'Published.', [REVISE]: 'Revised.' });
+    const runtime = runtimeOver(store, model.providerCall);
+    // After a node runs, the state its edges read names it as the current
+    // node and lists it among the visited ones.
+    const graph = approvalRoutedBy('g-replayed-visit', (state) =>
+      state.currentNodeId === 'approve' && state.visitedNodes.includes('approve') ? 'publish' : 'revise',
+    );
+
+    const runId = runIdOf(await readAll(runtime.stream(graph, {})));
+
+    expect(await runtime.resume(graph, runId)).toEqual({ publish: 'Published.' });
+    expect(model.calls).toEqual([PUBLISH]);
   });
 });
