@@ -13,7 +13,7 @@ import { AdaptPersonalityTool, type AdaptPersonalityDeps } from '../AdaptPersona
 import { SelfEvaluateTool, type SelfEvaluateDeps, type SelfEvaluateInput } from '../SelfEvaluateTool';
 import type { ToolExecutionContext } from '../../../core/tools/ITool';
 import type { ToolCallResult, UserContext } from '../../substrate/IGMI';
-import { echoTool, makeForgeHost, type ForgeHost } from './helpers/forge-host';
+import { approvingHitl, echoTool, makeForgeHost, type ForgeHost } from './helpers/forge-host';
 
 type TurnLearning = { learner: 'bound' | 'none'; mode: 'on' | 'frozen' | 'off' };
 
@@ -35,6 +35,22 @@ function call(host: ForgeHost, name: string, args: Record<string, unknown>, lear
 const reasonOf = (result: ToolCallResult): string | undefined =>
   (result.errorDetails as { details?: { reason?: string } } | undefined)?.details?.reason;
 const TRAIT_CALL = { trait: 'openness', delta: 0.02, reasoning: 'The user asked for unconventional ideas.' };
+const FORGE = {
+  name: 'echo_twice',
+  description: 'Echoes the text twice.',
+  inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+  implementation: { mode: 'compose', steps: [{ name: 'first', tool: 'echo', inputMapping: { text: '$input.text' } }] },
+  testCases: [{ input: { text: 'a' } }],
+};
+const CREATE = { action: 'create', name: 'twice', description: 'Echo twice.', steps: [{ tool: 'echo', args: { text: 'a' } }] };
+const SELF_CHANGES: Array<[string, Record<string, unknown>]> = [
+  ['forge_tool', FORGE],
+  ['create_workflow', CREATE],
+  ['manage_skills', { action: 'enable', skillId: 'web-search' }],
+  ['manage_skills', { action: 'disable', skillId: 'web-search' }],
+  ['self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2, reasoning: 'Less variance.' }],
+];
+const bound: TurnLearning = { learner: 'bound', mode: 'on' };
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -139,23 +155,6 @@ describe("adapt_personality's bounds where a learning layer exists", () => {
 });
 
 describe('the other four self-modification tools through the tool orchestrator', () => {
-  const FORGE = {
-    name: 'echo_twice',
-    description: 'Echoes the text twice.',
-    inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
-    implementation: { mode: 'compose', steps: [{ name: 'first', tool: 'echo', inputMapping: { text: '$input.text' } }] },
-    testCases: [{ input: { text: 'a' } }],
-  };
-  const CREATE = { action: 'create', name: 'twice', description: 'Echo twice.', steps: [{ tool: 'echo', args: { text: 'a' } }] };
-  const SELF_CHANGES: Array<[string, Record<string, unknown>]> = [
-    ['forge_tool', FORGE],
-    ['create_workflow', CREATE],
-    ['manage_skills', { action: 'enable', skillId: 'web-search' }],
-    ['manage_skills', { action: 'disable', skillId: 'web-search' }],
-    ['self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2, reasoning: 'Less variance.' }],
-  ];
-  const bound: TurnLearning = { learner: 'bound', mode: 'on' };
-
   it('refuse with no_learner on a turn with no learner, off in mode off and frozen in mode frozen, with a layer, and change nothing', async () => {
     const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
     for (const [name, args] of SELF_CHANGES) {
@@ -231,5 +230,29 @@ describe("self_evaluate's evaluate on a turn the layer refuses", () => {
     expect(result.output).not.toHaveProperty('selfChangeRefused');
     expect(storeMemory).toHaveBeenCalledTimes(1);
     expect(setSessionParam).toHaveBeenCalledWith('temperature', 0.2, expect.anything());
+  });
+});
+
+describe('the self-modification tools behind the approval gate', () => {
+  it('answer a call the learning layer refuses with its refusal, and ask for no approval', async () => {
+    const { manager, requestApproval } = approvingHitl();
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()], hitlManager: manager, orchestratorConfig: { hitl: { enabled: true } } });
+    for (const [name, args] of SELF_CHANGES) {
+      expect(reasonOf(await call(host, name, args, { learner: 'bound', mode: 'off' })), name).toBe('off');
+    }
+    expect(reasonOf(await call(host, 'adapt_personality', TRAIT_CALL, { learner: 'none', mode: 'on' }))).toBe('no_learner');
+    expect(reasonOf(await call(host, 'adapt_personality', { ...TRAIT_CALL, trait: 'honesty' }, bound))).toBe('operator_only');
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(host.judge).not.toHaveBeenCalled();
+    // A call the layer lets act is asked about, as before.
+    expect((await call(host, 'create_workflow', { action: 'list' }, { learner: 'bound', mode: 'off' })).isError).toBe(false);
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('name the learning refusal, not a missing approval manager, with the gate on and no manager', async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()], orchestratorConfig: { hitl: { enabled: true } } });
+    expect(reasonOf(await call(host, 'forge_tool', FORGE, { learner: 'bound', mode: 'off' }))).toBe('off');
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    expect(reasonOf(await call(host, 'manage_skills', { action: 'enable', skillId: 'web-search' }))).toBe('frozen');
   });
 });
