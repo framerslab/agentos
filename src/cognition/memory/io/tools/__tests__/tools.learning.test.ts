@@ -9,15 +9,17 @@
  * organization a user context kept from an earlier turn; mode off and a suspension write with no row; only a freeze
  * stops a write; memory_reflect is withdrawn; a write that commits after its user was forgotten is taken back, with
  * the facade on a SQLite file of its own and on the learning store's adapter; and a trace the tools or the facade
- * delete takes its knowledge-graph copy with it, where a GMI's memory manager files into the facade's Brain.
+ * delete takes its knowledge-graph copy with it, where a GMI's memory manager files into the facade's Brain. Behind the
+ * tool orchestrator's approval gate, a write the tools refuse whatever a human answers is refused before anyone is asked.
  */
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import type { ITool, ToolExecutionContext } from '../../../../../core/tools/ITool';
-import type { UserContext } from '../../../../substrate/IGMI';
+import type { ToolCallResult, UserContext } from '../../../../substrate/IGMI';
 import { AdaptPersonalityTool } from '../../../../emergent/AdaptPersonalityTool';
+import { approvingHitl, makeForgeHost, type ForgeHost } from '../../../../emergent/__tests__/helpers/forge-host';
 import {
   createLearningLayer,
   InMemoryLearningStore,
@@ -671,5 +673,99 @@ describe("a deleted trace's knowledge-graph copy, where a GMI's memory manager f
     expect(await hasCopy(brain, deleted)).toBe(false);
     expect(await hasCopy(brain, merged)).toBe(false);
     expect(await hasCopy(brain, survivor)).toBe(true);
+  });
+});
+
+describe("the memory tools behind the tool orchestrator's approval gate", () => {
+  let gateCalls = 0;
+  /** Calls a tool the way a model's tool call reaches it: through the orchestrator, with the call's context. */
+  const viaOrchestrator = (host: ForgeHost, name: string, args: Record<string, unknown>, call: ToolExecutionContext): Promise<ToolCallResult> => {
+    gateCalls += 1;
+    return host.orchestrator.processToolCall({
+      toolCallRequest: { id: `gate-${gateCalls}`, name, arguments: args },
+      gmiId: call.gmiId,
+      personaId: call.personaId,
+      personaCapabilities: [],
+      userContext: call.userContext as UserContext,
+      ...(call.sessionData ? { sessionData: call.sessionData } : {}),
+    });
+  };
+  /** The reason a refusal names (`errorDetails.details.reason`), or undefined for any other result. */
+  const reasonOf = (result: ToolCallResult): string | undefined =>
+    (result.errorDetails as { details?: { reason?: string } } | undefined)?.details?.reason;
+
+  /** A learner's session and turn, the same turn with no recorder and with no thread to file under, and a trace it kept. */
+  async function turns(layer: ReturnType<typeof createLearningLayer>, tools: Record<string, ITool>) {
+    const session = await layer.forLearner(LEARNER_A, contextOf('s-a'));
+    const ofA = await turnOf(session, { userId: '42', namespace: 'A', sessionId: 's-a' });
+    const kept = traceIdOf(await tools.memory_add!.execute({ content: 'Kept before the gate.' }, ofA));
+    const learning = ofA.sessionData!.learning as { learner: string; mode: string; scopes: unknown };
+    const noRecorder: ToolExecutionContext = {
+      ...ofA,
+      sessionData: { ...ofA.sessionData, learning: { learner: learning.learner, mode: learning.mode, scopes: learning.scopes } },
+    };
+    const noThread: ToolExecutionContext = { ...ofA, sessionData: { learning } };
+    return { session, ofA, kept, noRecorder, noThread };
+  }
+
+  it('answer a write they refuse whatever a human answers with its refusal and ask no one, and ask about a write that may act', async () => {
+    quiet();
+    const { brain, memory, layer, tools } = await setUp();
+    const reflect = new MemoryReflectTool(brain, { run: vi.fn(), isRunning: false } as unknown as ConsolidationLoop);
+    const { manager, requestApproval } = approvingHitl();
+    const host = await makeForgeHost({
+      tools: [...memory.createTools({ includeReflect: false }), reflect],
+      hitlManager: manager,
+      orchestratorConfig: { hitl: { enabled: true } },
+    });
+    const { session, ofA, kept, noRecorder, noThread } = await turns(layer, tools);
+    const refused: Array<[string, Record<string, unknown>, ToolExecutionContext, string]> = [
+      ['memory_add', { content: 'Shared note.', scope: 'organization' }, ofA, 'organization_scope'],
+      ['memory_add', { content: 'Nowhere to file.', scope: 'thread' }, noThread, 'no_thread'],
+      ['memory_add', { content: 'Not recorded.' }, noRecorder, 'no_recorder'],
+      ['memory_update', { traceId: kept, content: 'Not recorded.' }, noRecorder, 'no_recorder'],
+      ['memory_delete', { traceId: kept }, noRecorder, 'no_recorder'],
+      ['memory_merge', { traceIds: [kept, kept] }, noRecorder, 'no_recorder'],
+      ['memory_reflect', {}, ofA, 'withdrawn'],
+    ];
+    for (const [name, args, call, reason] of refused) {
+      expect(reasonOf(await viaOrchestrator(host, name, args, call)), name).toBe(reason);
+    }
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    const frozen: Array<[string, Record<string, unknown>]> = [
+      ['memory_add', { content: 'Not written.' }],
+      ['memory_update', { traceId: kept, content: 'Not written.' }],
+      ['memory_delete', { traceId: kept }],
+      ['memory_merge', { traceIds: [kept, kept] }],
+      ['memory_reflect', {}],
+    ];
+    for (const [name, args] of frozen) {
+      for (const call of [ofA, NO_LAYER]) {
+        expect(reasonOf(await viaOrchestrator(host, name, args, call)), name).toBe('frozen');
+      }
+    }
+    vi.unstubAllEnvs();
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(await liveContents(brain)).toEqual(['Kept before the gate.']);
+
+    // A write the layer lets act is asked about, as before, and then runs.
+    expect((await viaOrchestrator(host, 'memory_add', { content: 'Asked about.' }, ofA)).isError).toBe(false);
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+    // A run-time freeze of the learner, read on the next turn, is answered before the gate too.
+    await layer.freeze({ learner: LEARNER_A }, 'ops');
+    const frozenTurn = await turnOf(session, { userId: '42', namespace: 'A', sessionId: 's-a' });
+    expect(reasonOf(await viaOrchestrator(host, 'memory_delete', { traceId: kept }, frozenTurn))).toBe('frozen');
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+    expect(await liveContents(brain)).toEqual(['Asked about.', 'Kept before the gate.']);
+  });
+
+  it('name the refusal, not the missing approval manager, with the gate on and no manager', async () => {
+    quiet();
+    const { memory, layer, tools } = await setUp();
+    const host = await makeForgeHost({ tools: memory.createTools({ includeReflect: false }), orchestratorConfig: { hitl: { enabled: true } } });
+    const { kept, noRecorder } = await turns(layer, tools);
+    expect(reasonOf(await viaOrchestrator(host, 'memory_delete', { traceId: kept }, noRecorder))).toBe('no_recorder');
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    expect(reasonOf(await viaOrchestrator(host, 'memory_add', { content: 'Not written.' }, NO_LAYER))).toBe('frozen');
   });
 });
