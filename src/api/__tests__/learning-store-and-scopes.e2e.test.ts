@@ -3593,6 +3593,31 @@ function racedStore(store: LearningStore, times: number): LearningStore {
   });
 }
 
+/** `store` over a disk that refuses every ledger row: each transaction's `insertLedgerRow` throws. */
+function refusingRows(store: LearningStore): LearningStore {
+  const refusing = (tx: LearningStoreTx): LearningStoreTx =>
+    new Proxy(tx, {
+      get(target, property) {
+        if (property === 'insertLedgerRow') {
+          return async () => {
+            throw new Error('the disk is full');
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  return new Proxy(store, {
+    get(target, property) {
+      if (property === 'transaction') {
+        return <T>(fn: (tx: LearningStoreTx) => Promise<T>): Promise<T> => target.transaction((tx) => fn(refusing(tx)));
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 /**
  * What the ledger does over a store, as a host calls it. `oneAtATime`: the store runs one transaction at a time in this
  * process (the in-process store, a SQLite file), so appends made at once all land.
@@ -3714,7 +3739,7 @@ function ledgerCases(name: string, open: () => Promise<OpenedLearningStore>, one
       expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
     });
 
-    it("runs the change in its rows' transaction: a change that throws leaves no row, no head and none of its own writes, a value with no JSON form writes nothing, and a change that returns commits with its rows", async () => {
+    it("runs the change in its rows' transaction: a change that throws leaves no row, no head and none of its own writes, a value with no JSON form writes nothing, a change that returns commits with its rows, and a store error writing the rows runs no change and leaves the head where it stood", async () => {
       const store = await fresh();
       const ledger = ledgerOver(store);
       const key = chainKeyOf(LEDGER_LEARNER);
@@ -3755,6 +3780,22 @@ function ledgerCases(name: string, open: () => Promise<OpenedLearningStore>, one
       expect(kept.verdict).toMatchObject({ rowType: 'verdict', candidateId: kept.candidate.id, verdict: 'kept', reason: 'kept', stateDigest: 'digest-1' });
       expect(kept.rows).toEqual([kept.candidate, kept.verdict]);
       expect(await store.traitRow('A', 'tutor', '42')).toEqual(stepped);
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+
+      // A store error writing the rows reaches the caller: the head the append moved first is back where it stood, and
+      // the change never runs, so a change with no record does not happen.
+      let ran = false;
+      await expect(
+        ledgerOver(refusingRows(store)).propose(selfChange('agreeableness'), {
+          verdict: 'kept',
+          change: async () => {
+            ran = true;
+          },
+        }),
+      ).rejects.toThrow('the disk is full');
+      expect(ran).toBe(false);
+      expect(await store.head(key)).toMatchObject({ seq: 2, lastId: kept.rows[1]!.id });
+      expect(await store.chainRows(key)).toHaveLength(2);
       expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
     });
 
