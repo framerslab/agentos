@@ -34,10 +34,12 @@ export {
   type ScopeIdPair,
 } from './scopes.js';
 export {
+  isTurnScopes,
   memoryWriteRefusal,
   readToolLearningContext,
   refusedSelfChange,
   selfChangeRefusal,
+  toolLearningContextFor,
   type SelfChangeRefusal,
 } from './toolContext.js';
 export {

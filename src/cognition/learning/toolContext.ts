@@ -9,10 +9,21 @@
  */
 import type { ToolExecutionResult } from '../../core/tools/ITool.js';
 import { processIsFrozen } from './config.js';
-import { LEARNING_MODES, type LearningMode, type ToolLearningContext, type TurnScopes } from './types.js';
+import {
+  LEARNING_MODES,
+  type ILearnerSession,
+  type LearningMode,
+  type SelfChangeTurn,
+  type SessionSelfChange,
+  type ToolLearningContext,
+  type TurnScopes,
+} from './types.js';
 
-/** Whether a value is a turn's scopes as the GMI writes them. */
-function isTurnScopes(value: unknown): value is TurnScopes {
+/**
+ * Whether a value is a turn's scopes as a learner session gives them: the GMI checks a preparation's before it files
+ * by them, and a tool before it reads them.
+ */
+export function isTurnScopes(value: unknown): value is TurnScopes {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
   return (
@@ -111,4 +122,43 @@ export function refusedSelfChange<T = never>(toolName: string, reason: string, w
     error: `${toolName} refused (${reason}): ${text}; nothing was changed.`,
     details: { status: 'rejected', reason },
   };
+}
+
+/**
+ * A turn's tool context (`sessionData.learning`) and the turn its recorded writes belong to, from a learner session
+ * and what it prepared for the turn. The GMI builds each turn's with it, and a product that runs its own turn loop
+ * puts the same on its tool calls. The recorder and the freeze read are bound to the turn and called on the session,
+ * each only where the session has it; the turn's conversation goes to the session row, so `forgetUser` deletes the
+ * conversation's thread.
+ *
+ * @param session - The learner session the turn was prepared by.
+ * @param turn - The turn's learner and mode, its scope ids where the session gives them, the explicit id of a second
+ *   user on a turn with no learner, and the turn's conversation id.
+ * @returns `tools`, what each tool call of the turn is told; `writeTurn`, what the session's recorder and guard are told
+ *   about the turn, `undefined` when the turn has no scope ids.
+ */
+export function toolLearningContextFor(
+  session: ILearnerSession,
+  turn: { learner: 'bound' | 'none'; mode: LearningMode; scopes?: TurnScopes; turnUserId?: string; conversationId?: string },
+): { tools: ToolLearningContext; writeTurn: SelfChangeTurn | undefined } {
+  const { scopes, turnUserId } = turn;
+  const writeTurn: SelfChangeTurn | undefined = scopes
+    ? {
+        learner: scopes.learner,
+        namespace: scopes.namespace,
+        ...(turnUserId ? { turnUserId } : {}),
+        ...(turn.conversationId ? { conversationId: turn.conversationId } : {}),
+      }
+    : undefined;
+  const tools: ToolLearningContext = {
+    learner: turn.learner,
+    mode: turn.mode,
+    ...(scopes ? { scopes } : {}),
+    ...(writeTurn && typeof session.recordSelfChange === 'function'
+      ? { recordSelfChange: <T>(input: SessionSelfChange<T>) => session.recordSelfChange!(input, writeTurn) }
+      : {}),
+    ...(turnUserId ? { turnUserId } : {}),
+    ...(typeof session.isFrozen === 'function' ? { frozen: () => session.isFrozen!(writeTurn) } : {}),
+  };
+  return { tools, writeTurn };
 }
