@@ -2877,4 +2877,39 @@ describe('GraphRuntime: a resume from the checkpoint saved before an expansion',
     expect(await runtime.resume(graph, runId)).toEqual({ audit: AUDITED, publish: 'Published.' });
     expect(model.calls.slice(callsBeforeResume).map((call) => call.instructions)).toEqual([AUDIT, PUBLISH]);
   });
+
+  it('follows the target an external node picked itself, as its recorded result names it', async () => {
+    const store = new InMemoryCheckpointStore();
+    // listen picks its own target, as the exit of a voice node does, from the
+    // two its edges lead to.
+    const executeMock = vi.fn(async (node: GraphNode): Promise<NodeExecutionResult> =>
+      node.id === 'listen'
+        ? { success: true, output: 'The caller asked to publish.', routeTarget: 'publish' }
+        : { success: true, output: `${node.id}-done` },
+    );
+    const runtime = new GraphRuntime({
+      checkpointStore: store,
+      nodeExecutor: makeExecutorWithMock(executeMock),
+      expansionHandler: plannerDownOnce(),
+      reevalInterval: 1,
+    });
+    const graph = graphOf(
+      'g-expansion-route-target',
+      [makeNode('listen', { effectClass: 'external' }), makeNode('publish'), makeNode('revise')],
+      [
+        [START, 'listen'],
+        ['listen', 'publish'],
+        ['listen', 'revise'],
+        ['publish', END],
+        ['revise', END],
+      ],
+    );
+
+    const { seen, error } = await readUntilThrown(runtime.stream(graph, {}));
+
+    expect((error as Error).message).toBe('the planner could not be reached');
+    executeMock.mockClear();
+    expect(await runtime.resume(graph, runIdOf(seen))).toEqual({ publish: 'publish-done' });
+    expect(executeMock.mock.calls.map(([node]) => node.id)).toEqual(['publish']);
+  });
 });
