@@ -682,8 +682,9 @@ export class LearnerSession implements ILearnerSession {
  * it. A turn the open failed for is read against the first one as the opened session reads it (a tool continuation
  * carries the GMI's own user, so only its namespace is read): the first such turn of another user or another namespace
  * is remembered, and once the session opens no turn has a learner. The first user the session saw is read by the
- * opened session against its own learner as it opens, so a turn of another user that came first ends its learner. A turn the opened session prepares, one that waited
- * on the same open included, is read by the session itself, in the order the turns came. A session that cannot take
+ * opened session against its own learner as it opens, so a turn of another user that came first ends its learner. A
+ * turn the opened session prepares, one that waited on the same open included, is read by the session itself, in the
+ * order the turns came. A session that cannot take
  * the loss ({@link LearnerSession.adoptLatch}, a host's own that has no `adoptLatch`) has its later turns answered with
  * no learner here: a turn it would bind renders the authored traits and files under the session's own form. Before
  * it opens it answers `scopesFor` with the session's own form and no learner, and its recorder and guard try the open
