@@ -341,7 +341,9 @@ class LearningLayer implements ILearningLayer, LearnerSessionHost {
 
   async forLearner(key: LearnerKey | null, context: LearnerContext): Promise<ILearnerSession> {
     if (this.closed) throw new Error('The learning layer is closed.');
-    await this.storage();
+    // Opens the store and reads the run-time freezes and suspensions again, so one another process set since this
+    // process last read them holds from the session's open: a suspended learner's open reads and writes no learned state.
+    await this.refreshFreezes();
     await this.adoptFacades();
     if (this.host.memory) await this.adoptMemory(this.host.memory);
     if (!this.manifestLogged) {
