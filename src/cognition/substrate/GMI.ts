@@ -56,7 +56,7 @@ import { ChatMessage, ModelCompletionOptions, ModelCompletionResponse, ModelUsag
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 import { checkStructuredReply, resolveStructuredReply, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
-import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types.js';
+import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
 
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI';

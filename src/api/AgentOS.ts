@@ -179,8 +179,8 @@ import {
 } from './runtime/SelfImprovementSessionManager';
 import { RagMemoryInitializer } from './runtime/RagMemoryInitializer';
 import type { AgencySession } from '../agents/agency/AgencyTypes';
-import { createRuntimeLaunchTool } from './runtime/agencyLaunch/runtimeLaunchTool.js';
-import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type LaunchLimits, type RuntimeAgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
+import { createRuntimeLaunchTool } from './runtime/agencyLaunch/runtimeLaunchTool';
+import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type LaunchLimits, type RuntimeAgencyLaunchOptions } from './runtime/agencyLaunch/types';
 import type { TurnPlannerConfig } from '../orchestration/turn-planner/TurnPlanner';
 import type {
   CapabilityDescriptor,

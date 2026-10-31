@@ -21,7 +21,7 @@ import type { ToolEffectRecord } from '../../core/tools/ITool';
 import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 import type { HexacoTraitValues } from './personas/hexaco';
 import type { ILearnerSession } from '../learning/types.js';
-import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types.js';
+import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
