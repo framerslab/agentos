@@ -8335,6 +8335,46 @@ describe("the memory tools a host builds over a Memory facade, by a turn's scope
     }
   });
 
+  it("files a learner's memory_add on the full runtime under the learner's scope in the turn's organization, with its rows, and the same user id in another organization finds none of it", async () => {
+    quiet();
+    const { memory, file } = await toolsOn();
+    const store = new InMemoryLearningStore();
+    const k = key();
+    const played = script('openai', k, { replies: [] });
+    const os = await AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: k } }] },
+      turnPlanning: { enabled: false },
+      personas: [{ id: 'tutor', name: 'Tutor', description: 'A tutor.', version: '1.0.0', baseSystemPrompt: 'You teach networking.', personalityTraits: TUTOR_PERSONA }],
+      memoryTools: { memory },
+      learning: { store, memoryTools: memory },
+    } as never);
+    const turn = async (input: Record<string, unknown>) => {
+      for await (const chunk of os.processRequest({ textInput: 'Remember this.', selectedPersonaId: 'tutor', ...input } as never)) {
+        if ((chunk as { type?: unknown }).type === 'error') throw new Error(`the turn failed: ${JSON.stringify(chunk)}`);
+      }
+    };
+    try {
+      played.replies.push(reply.tools([{ id: 'r1', name: 'memory_add', args: { content: 'Canary LARK-7.' } }]), reply.text('Noted.'));
+      await turn({ userId: 'ana', sessionId: 's-a', organizationId: 'A' });
+      const lark = traceOf(file, 'Canary LARK-7.')!;
+      expect(lark).toMatchObject({ scope: 'user', scopeId: 'A/ana', deleted: 0 });
+      expect((await writesOn(store, chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: 'ana' }))).map((row) => [row.rowType, row.subject, row.verdict])).toEqual([
+        ['candidate', lark.id, 'pending'],
+        ['verdict', lark.id, 'kept'],
+      ]);
+
+      played.replies.push(reply.tools([{ id: 'r2', name: 'memory_search', args: { query: 'canary' } }]), reply.text('Nothing.'));
+      await turn({ userId: 'ana', sessionId: 's-b', organizationId: 'B' });
+      expect(toolTexts(played)).toContain(JSON.stringify({ results: [] }));
+
+      played.replies.push(reply.tools([{ id: 'r3', name: 'memory_search', args: { query: 'canary' } }]), reply.text('Found.'));
+      await turn({ userId: 'ana', sessionId: 's-c', organizationId: 'A' });
+      expect(toolTexts(played).join('\n')).toContain('Canary LARK-7.');
+    } finally {
+      await os.shutdown();
+    }
+  });
+
   it("reaches by id only a live trace of its turn's own scopes that its own user filed, and changes one only while it holds what the call read: another user's in a shared scope is refused (other_user), one another writer moved answers conflict with a rejected row, and a turn with no recorder or no thread writes nothing", async () => {
     quiet();
     const { memory, file, call } = await toolsOn();
