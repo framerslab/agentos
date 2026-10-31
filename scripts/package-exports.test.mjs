@@ -36,12 +36,22 @@ test('package exports only point at shipped files', () => {
   assert.deepEqual(missing, []);
 });
 
+/**
+ * Errors a NodeNext consumer that checks every declaration (no skipLibCheck) meets in a dependency's own
+ * declarations, which this package cannot change: each names the file it sits in and its error code.
+ */
+const DEPENDENCY_DECLARATION_ERRORS = [
+  // @framers/sql-storage-adapter's declarations import sql.js, which ships no types, and the adapter does not depend
+  // on @types/sql.js.
+  { file: /node_modules\/@framers\/sql-storage-adapter\/dist\/adapters\/sqlJsAdapter\.d\.ts\(/, code: 'TS7016' },
+];
+
 test('the built declarations resolve their own relative imports under NodeNext', () => {
   // A relative import without its file's extension does not resolve under NodeNext: a consumer that checks the
   // declarations it reads (no skipLibCheck) gets TS2834 or TS2835 for each one. The consumer sits inside the repository,
-  // so @framers/agentos resolves to this checkout's build through its exports, as an installed copy does. The check
-  // passes only when tsc exits clean: a compiler that cannot run, a missing type library or any other error in the
-  // declarations fails it too.
+  // so @framers/agentos resolves to this checkout's build through its exports, as an installed copy does. Every other
+  // compiler error fails the check too (a compiler that cannot run, a missing type library, an unresolved import),
+  // except the errors listed in DEPENDENCY_DECLARATION_ERRORS, which sit in a dependency's own declarations.
   const work = mkdtempSync(resolve(pkgRoot, '.declarations-consumer-'));
   try {
     writeFileSync(resolve(work, 'package.json'), JSON.stringify({ name: 'declarations-consumer', private: true, type: 'module' }));
@@ -73,7 +83,12 @@ test('the built declarations resolve their own relative imports under NodeNext',
     assert.deepEqual(extensionless.slice(0, 20), [], `${extensionless.length} relative imports in the built declarations name no file`);
     assert.doesNotMatch(output, /consumer\.ts\(/, 'the consumer itself compiles');
     const errors = output.split('\n').filter((line) => /error TS\d+:/.test(line));
-    assert.equal(exitCode, 0, `tsc exits with ${exitCode} and ${errors.length} errors:\n${(errors.length ? errors : [output]).slice(0, 20).join('\n')}`);
+    const unlisted = errors.filter(
+      (line) => !DEPENDENCY_DECLARATION_ERRORS.some(({ file, code }) => file.test(line) && line.includes(`error ${code}:`)),
+    );
+    assert.deepEqual(unlisted.slice(0, 20), [], `${unlisted.length} compiler errors outside the listed dependency errors`);
+    // A compiler that exits with an error and prints no error line did not check the consumer.
+    assert.ok(exitCode === 0 || errors.length > 0, `tsc exits with ${exitCode} and prints no error:\n${output.slice(0, 2000)}`);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
