@@ -178,6 +178,7 @@ import {
   resolveGMIForToolContext,
 } from './runtime/SelfImprovementSessionManager';
 import { RagMemoryInitializer } from './runtime/RagMemoryInitializer';
+import type { AgencySession } from '../agents/agency/AgencyTypes';
 import { createRuntimeLaunchTool } from './runtime/agencyLaunch/runtimeLaunchTool.js';
 import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type LaunchLimits, type RuntimeAgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
 import type { TurnPlannerConfig } from '../orchestration/turn-planner/TurnPlanner';
@@ -1238,6 +1239,7 @@ export class AgentOS implements IAgentOS {
           createRuntimeLaunchTool({
             getGmiManager: () => this.gmiManager,
             getToolOrchestrator: () => this.toolOrchestrator,
+            getAgencyRegistry: () => this.workflowFacade?.getAgencyRegistry(),
             options: agencies,
             limits: launchLimits,
             gmiDefaults: this.config.gmiManagerConfig.defaultGMIBaseConfigDefaults,
@@ -2481,6 +2483,17 @@ export class AgentOS implements IAgentOS {
   public async listWorkflows(options?: WorkflowQueryOptions): Promise<WorkflowInstance[]> {
     this.ensureInitialized();
     return this.workflowFacade!.listWorkflows(options);
+  }
+
+  /**
+   * Copies of the agencies running now: a workflow's, and every team a persona's GMI launched with `launch_agency`
+   * (`agencies.launch`), whose entry has `metadata.kind: 'launched'` and lasts while its team runs.
+   *
+   * @returns The running agencies; empty on a runtime with no agency registry.
+   */
+  public listAgencies(): AgencySession[] {
+    this.ensureInitialized();
+    return this.workflowFacade?.getAgencyRegistry()?.listAgencies() ?? [];
   }
 
   public async getWorkflowProgress(

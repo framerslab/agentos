@@ -7,6 +7,7 @@
  * its allowlist alone. The engine is imported on the first call.
  * @internal
  */
+import type { AgencyRegistry } from '../../../agents/agency/AgencyRegistry.js';
 import type { GMIManager } from '../../../cognition/substrate/GMIManager.js';
 import type { IPersonaDefinition } from '../../../cognition/substrate/personas/IPersonaDefinition.js';
 import type { ILogger } from '../../../core/logging/ILogger.js';
@@ -17,7 +18,7 @@ import { resolveGMIForToolContext } from '../SelfImprovementSessionManager.js';
 import { outputEstimateTokens } from '../spendBudget.js';
 import type { LaunchEntry } from './launchRegistry.js';
 import type { LaunchHost, LaunchParent, ResolvedSeat } from './runLaunch.js';
-import { runtimeSeat } from './runtimeSeat.js';
+import { runtimeSeat, type RuntimeSeatHandle } from './runtimeSeat.js';
 import { seatToolView } from './seatToolView.js';
 import type { SeatHandle } from './sessionSeat.js';
 import {
@@ -33,12 +34,17 @@ import {
   type RuntimeAgencyLaunchOptions,
 } from './types.js';
 
+/** The most of a seat call's answer the call's entry in the registry's seat history keeps. */
+const HISTORY_PREVIEW_CHARS = 200;
+
 /** What createRuntimeLaunchTool needs of the runtime. */
 export interface RuntimeLaunchToolDeps {
   /** The runtime's GMI manager, read at each launch: it is built after the tool is registered. */
   getGmiManager(): GMIManager | undefined;
   /** The runtime's shared tool orchestrator. */
   getToolOrchestrator(): IToolOrchestrator | undefined;
+  /** The runtime's agency registry, read at each record; a runtime without one records nothing. */
+  getAgencyRegistry?(): AgencyRegistry | undefined;
   /** `AgentOSConfig.agencies`. */
   options: RuntimeAgencyLaunchOptions;
   /** The tree's limits, resolved at initialization. */
@@ -216,9 +222,19 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
           organizationId: parent.namespace,
           frame,
           gmi: built.gmi,
+          personaId: built.personaId,
           release: built.release,
           cutWhen,
           logError,
+          // Each call the seat ran, in the team's registry entry: its outcome, and the start of its answer when it answered.
+          onCall: (call) => {
+            deps.getAgencyRegistry?.()?.appendSeatHistory(launch.launchId, seat.role, {
+              timestamp: new Date().toISOString(),
+              status: call.status === 'completed' ? 'completed' : 'failed',
+              ...(call.status === 'completed' ? { outputPreview: call.summary.slice(0, HISTORY_PREVIEW_CHARS) } : {}),
+              metadata: { outcome: call.status, ...(call.error ? { error: { ...call.error } } : {}) },
+            });
+          },
         });
       } catch (error) {
         const code = (error as { code?: unknown } | null)?.code;
@@ -243,8 +259,35 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
       return { ...(provider ? { provider } : {}), ...(model ? { model } : {}) };
     },
 
-    // No AgencyRegistry record: the launch registry alone holds a launch while it runs.
-    recorder: { start: () => undefined, close: () => undefined },
+    // The team's entry in the runtime's AgencyRegistry while it runs (spec D14): made under the launch's agencyId with a
+    // seat per role once the team is built, a history entry per seat call (each seat's onCall), and at close the
+    // launch's status, closing time and usage merged, then the entry removed. A runtime with no registry records nothing.
+    recorder: {
+      start({ agencyId, conversationId, meta, seats }) {
+        const registry = deps.getAgencyRegistry?.();
+        if (!registry) return;
+        registry.upsertAgency({ agencyId, workflowId: `launch:${agencyId}`, conversationId, metadata: { ...meta } });
+        for (const seat of seats) {
+          const { role, form, member } = seat.record();
+          const { gmiId, personaId } = seat as Partial<Pick<RuntimeSeatHandle, 'gmiId' | 'personaId'>>;
+          if (!gmiId || !personaId) continue;
+          registry.registerSeat({ agencyId, roleId: role, gmiInstanceId: gmiId, personaId, metadata: { form, ...(member ? { member } : {}) } });
+        }
+      },
+      close(result) {
+        // Only an entry this registry holds: a registry made after the launch started has none to close.
+        const registry = deps.getAgencyRegistry?.();
+        const entry = registry?.getAgency(result.agencyId);
+        if (!registry || !entry) return;
+        registry.upsertAgency({
+          agencyId: result.agencyId,
+          workflowId: entry.workflowId,
+          conversationId: entry.conversationId,
+          metadata: { status: result.status, closedAt: result.provenance.closedAt, usage: { ...result.usage } },
+        });
+        registry.removeAgency(result.agencyId);
+      },
+    },
 
     logError,
   };

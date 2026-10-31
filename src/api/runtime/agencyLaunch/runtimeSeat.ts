@@ -4,7 +4,8 @@
  * (`createAgencySeat`). Each call runs one turn of that GMI under the call's stop, in the seat session, as the parent
  * turn's user and organization, with the launch frame in its metadata; the seat's calls run one at a time. A failed
  * turn rejects with its error's name and code alone, as a gmi() seat's does, the error itself going to the launch's
- * `logError` (spec D16).
+ * `logError` (spec D16). Each call that ran a turn is reported to `onCall` when it ends (the agency registry's seat
+ * history).
  * @internal
  */
 import { randomUUID } from 'node:crypto';
@@ -42,6 +43,8 @@ export interface RuntimeSeatOptions {
   organizationId: string;
   frame: AgencyLaunchFrame;
   gmi: IGMI;
+  /** The persona the seat's GMI runs. */
+  personaId: string;
   /** Shuts the seat's GMI down and takes it out of the manager. */
   release(): Promise<void>;
   /**
@@ -51,7 +54,15 @@ export interface RuntimeSeatOptions {
   cutWhen: () => boolean;
   /** Where a failed call's original error goes. */
   logError(error: unknown, where: string): void;
+  /**
+   * Called once each call that ran a turn has ended, answered or not, with the record as that call left it (the agency
+   * registry's seat history). A function that throws changes nothing about the call; its error goes to `logError`.
+   */
+  onCall?: (record: LaunchSeatRecord) => void;
 }
+
+/** A runtime seat: a roster member that names its GMI and the persona the GMI runs (the agency registry's seat). */
+export type RuntimeSeatHandle = SeatHandle & { readonly gmiId: string; readonly personaId: string };
 
 /** A turn's usage, from its output. */
 function usageOf(output: GMIOutput | undefined): TokenUsage {
@@ -104,10 +115,10 @@ function codeOf(error: unknown): string | undefined {
 }
 
 /**
- * @param options - The seat's GMI, session, user, organization, frame and record fields.
+ * @param options - The seat's GMI, persona, session, user, organization, frame and record fields.
  * @returns A roster member for the launch's child agency.
  */
-export function runtimeSeat(options: RuntimeSeatOptions): SeatHandle {
+export function runtimeSeat(options: RuntimeSeatOptions): RuntimeSeatHandle {
   const record: LaunchSeatRecord = {
     role: options.role,
     form: options.form,
@@ -136,6 +147,19 @@ export function runtimeSeat(options: RuntimeSeatOptions): SeatHandle {
     record.usage.completionTokens += usage.completionTokens;
     record.usage.totalTokens += usage.totalTokens;
     if (usage.costUSD !== undefined) record.usage.costUSD = (record.usage.costUSD ?? 0) + usage.costUSD;
+  };
+
+  /**
+   * Hands `onCall` a copy of the record as the call that ran a turn left it, before the seat's next turn can change it.
+   * A function that throws changes nothing about the call.
+   */
+  const reportCall = (): void => {
+    if (!options.onCall) return;
+    try {
+      options.onCall({ ...record, usage: { ...record.usage }, ...(record.error ? { error: { ...record.error } } : {}) });
+    } catch (error) {
+      options.logError(error, 'launch_agency record');
+    }
   };
 
   /** Records a failed call and returns the error the seat rejects with: the failure's name and code, never its message. */
@@ -218,8 +242,10 @@ export function runtimeSeat(options: RuntimeSeatOptions): SeatHandle {
     };
   };
 
-  const handle: SeatHandle = {
+  const handle: RuntimeSeatHandle = {
     seatId: options.seatSessionId,
+    gmiId: options.gmi.gmiId,
+    personaId: options.personaId,
     ...(options.description ? { description: options.description } : {}),
     ...(options.dependsOn ? { dependsOn: [...options.dependsOn] } : {}),
 
@@ -230,6 +256,7 @@ export function runtimeSeat(options: RuntimeSeatOptions): SeatHandle {
       try {
         // A GMI runs one turn at a time (GMI.ensureReady): a manager that delegates twice at once waits here.
         const release = await lock.acquire();
+        let ranTurn = false;
         try {
           if (closed) {
             // The launch closed the seat while this call waited for its earlier turn: the call is cut, and runs nothing.
@@ -237,8 +264,11 @@ export function runtimeSeat(options: RuntimeSeatOptions): SeatHandle {
             delete record.error;
             throw new Error('seat closed');
           }
+          ranTurn = true;
           return await runTurn(prompt, opts?.abortSignal as AbortSignal | undefined);
         } finally {
+          // The registry's seat history hears of every call that ran a turn, answered or not.
+          if (ranTurn) reportCall();
           release();
         }
       } finally {
