@@ -654,18 +654,21 @@ export class ConversationContext {
 
           // A history cleared while the summary was made no longer holds the messages it summarizes.
           if (this.messages !== messages) {
+            console.log(`ConversationContext (ID: ${this.sessionId}): Summary of ${messagesToSummarize.length} messages dropped: the history was cleared while it was made.`);
             return;
           }
           // A result recorded meanwhile for a call in the chunk, after other messages, ends the call's round past the
           // chunk: the summary would leave the result without its call. It is dropped, and the pass the result
           // started, which found this one making the summary, runs once the lock is released.
           if (toolRoundBounds(messages).end[chunkEndIndex - 1] >= chunkEndIndex) {
+            console.log(`ConversationContext (ID: ${this.sessionId}): Summary of ${messagesToSummarize.length} messages dropped: a tool result recorded while it was made answers a call in its chunk.`);
             return;
           }
           // A message of the chunk rewritten meanwhile (an output guardrail rewrites a stored reply) is no longer what
           // the summary read, and a summary of what it held could keep what the rewrite removed. The summary is
           // dropped, and a pass of its own makes it again from the message as it is once the lock is released.
           if (messagesToSummarize.some((m, index) => m.content !== summarizedContents[index])) {
+            console.log(`ConversationContext (ID: ${this.sessionId}): Summary of ${messagesToSummarize.length} messages dropped: a message of its chunk was rewritten while it was made, so it is made again.`);
             this.deferredHistoryPasses += 1;
             return;
           }
