@@ -275,3 +275,42 @@ describe('StateManager.mergeParallelBranches', () => {
     expect(merged.scratch).toEqual(base.scratch);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A key named __proto__
+// ---------------------------------------------------------------------------
+//
+// A patch parsed from JSON can hold "__proto__" as an ordinary key. It has to
+// stay a key of the partition, as the spread in updateArtifacts() keeps it,
+// and never become the partition's prototype.
+
+describe('StateManager: a key named __proto__', () => {
+  const written = JSON.parse('{"__proto__": {"approved": true}}') as Record<string, unknown>;
+
+  function expectOwnKey(partition: unknown): void {
+    expect(Object.getPrototypeOf(partition)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(partition, '__proto__')?.value).toEqual({ approved: true });
+    expect((partition as Record<string, unknown>).approved).toBeUndefined();
+  }
+
+  it('stays a key of scratch when a node writes it, with or without a reducer', () => {
+    const reducerSets: StateReducers[] = [{}, { 'scratch.__proto__': 'merge' }];
+    for (const reducers of reducerSets) {
+      const manager = makeManager(reducers);
+      const once = manager.updateScratch(manager.initialize({}), written);
+      expectOwnKey(once.scratch);
+      expectOwnKey(manager.updateScratch(once, written).scratch);
+    }
+  });
+
+  it('stays a key of scratch and artifacts when the branches of a batch are merged', () => {
+    const manager = makeManager();
+    const base = manager.initialize({});
+    const branch = { ...base, scratch: { ...written }, artifacts: { ...written } };
+
+    const merged = manager.mergeParallelBranches(base, [branch], [{ scratch: written, artifacts: written }]);
+
+    expectOwnKey(merged.scratch);
+    expectOwnKey(merged.artifacts);
+  });
+});

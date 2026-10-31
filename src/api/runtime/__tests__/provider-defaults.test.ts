@@ -51,6 +51,7 @@ describe('autoDetectProvider', () => {
       'OLLAMA_BASE_URL',
       'STABILITY_API_KEY',
       'REPLICATE_API_TOKEN',
+      'MINIMAX_API_KEY',
     ]) {
       if (origEnv[key] !== undefined) {
         process.env[key] = origEnv[key];
@@ -133,6 +134,47 @@ describe('autoDetectProvider', () => {
     }));
 
     expect(autoDetectProvider()).toBe('claude-code-cli');
+  });
+
+  const API_KEYS_BEFORE_MINIMAX = [
+    'OPENROUTER_API_KEY',
+    'OPENAI_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'GEMINI_API_KEY',
+    'GROQ_API_KEY',
+    'TOGETHER_API_KEY',
+    'MISTRAL_API_KEY',
+    'XAI_API_KEY',
+    'REQUESTY_API_KEY',
+  ];
+
+  it('ranks a MiniMax key with the other API keys for text, ahead of the CLIs and Ollama', () => {
+    for (const key of API_KEYS_BEFORE_MINIMAX) delete process.env[key];
+    process.env.MINIMAX_API_KEY = 'minimax-test';
+    process.env.OLLAMA_BASE_URL = 'http://localhost:11434';
+    // Both CLI binaries are on PATH.
+    hoisted.spawnSync.mockReturnValue({ status: 0 });
+
+    expect(autoDetectProvider('text')).toBe('minimax');
+    expect(autoDetectProvider()).toBe('minimax');
+    expect(resolveModelOption({}, 'text')).toEqual({ providerId: 'minimax', modelId: 'MiniMax-M3.1-Flash' });
+
+    // The API keys listed before it still come first.
+    process.env.REQUESTY_API_KEY = 'requesty-test';
+    expect(autoDetectProvider('text')).toBe('requesty');
+  });
+
+  it('keeps MiniMax after the other image providers', () => {
+    for (const key of API_KEYS_BEFORE_MINIMAX) delete process.env[key];
+    process.env.MINIMAX_API_KEY = 'minimax-test';
+    process.env.STABILITY_API_KEY = 'stability-test';
+    process.env.OLLAMA_BASE_URL = 'http://localhost:11434';
+
+    expect(autoDetectProvider('image')).toBe('ollama');
+    delete process.env.OLLAMA_BASE_URL;
+    expect(autoDetectProvider('image')).toBe('stability');
+    delete process.env.STABILITY_API_KEY;
+    expect(autoDetectProvider('image')).toBe('minimax');
   });
 });
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { defaultWordSegmenter, isUnspacedScript, stemWord, tagSegments } from '../tokens.js';
 
 describe('stemWord', () => {
@@ -117,5 +117,23 @@ describe('tagSegments', () => {
     const has = typeof (Intl as unknown as { Segmenter?: unknown }).Segmenter === 'function';
     expect(defaultWordSegmenter() !== null).toBe(has);
     expect(tagSegments('明日の会議資料').map((s) => s.text).join('')).toBe('明日の会議資料');
+  });
+
+  it('cuts an unspaced part into grapheme clusters where the runtime has no Intl at all', async () => {
+    // A fresh copy of the module, imported first: it looks for a segmenter on the first ask, which runs with no Intl.
+    vi.resetModules();
+    const fresh = await import('../tokens.js');
+    let found: unknown = 'not asked';
+    let pieces: string[][] = [];
+    vi.stubGlobal('Intl', undefined);
+    try {
+      found = fresh.defaultWordSegmenter();
+      pieces = fresh.tagSegments('明日の会議').map((s) => [s.text, s.unit]);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+    expect(found).toBeNull();
+    expect(pieces).toEqual([['明', 'grapheme'], ['日', 'grapheme'], ['の', 'grapheme'], ['会', 'grapheme'], ['議', 'grapheme']]);
   });
 });

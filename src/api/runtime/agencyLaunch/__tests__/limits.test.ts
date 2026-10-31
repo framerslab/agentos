@@ -1,5 +1,5 @@
 /**
- * resolveLaunchLimits (spec 4.1): the defaults of every bound, a RangeError naming the field for a value outside its
+ * resolveLaunchLimits: the defaults of every bound, a RangeError naming the field for a value outside its
  * range, an AgencyConfigError for approvals with no handler, and the members rule. Pure logic.
  */
 import { describe, expect, it } from 'vitest';
@@ -44,6 +44,22 @@ describe('resolveLaunchLimits', () => {
       expect(() => resolveLaunchLimits(options), field).toThrow(RangeError);
       expect(() => resolveLaunchLimits(options), field).toThrow(`agencies.${field}`);
     }
+  });
+
+  it('reads null as unset in every field, as a JSON or YAML config writes "unset"', () => {
+    const nulls = {
+      maxDepth: null,
+      maxSeats: null,
+      maxConcurrent: null,
+      budgetShare: null,
+      maxLaunchTokens: null,
+      maxLaunchCostUSD: null,
+      maxDeadlineMs: null,
+      defaultDeadlineMs: null,
+    } as unknown as AgencyLaunchOptions;
+    expect(resolveLaunchLimits(nulls)).toEqual(resolveLaunchLimits({}));
+    // null members and hitl are unset too.
+    expect(resolveLaunchLimits({ members: null, hitl: null } as unknown as AgencyLaunchOptions)).toEqual(resolveLaunchLimits({}));
   });
 
   it('refuses approvals with no handler, as agency() does', () => {

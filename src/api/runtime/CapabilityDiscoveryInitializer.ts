@@ -172,6 +172,37 @@ async function loadCuratedManifestDescriptors(
 }
 
 /**
+ * The curated registry's descriptors that may sit in the index beside the host's own sources.
+ *
+ * The index keeps one descriptor per id, the later one winning, and a curated descriptor says what the catalog says:
+ * `available: false` for the packs it lists as needing setup, and no input schema. So a curated descriptor whose id the
+ * host already holds (a tool it has loaded, which the index names `tool:<name>`, or one of its own manifests) is left
+ * out, and the tool keeps its own descriptor: available, with its input schema, among the capabilities the turn
+ * planner asks for. A pack the catalog lists under several entries brings its manifest's tools once per entry; each id
+ * is kept once.
+ *
+ * @param curated - Descriptors read from the curated packs' manifests, in catalog order.
+ * @param host - The host's own tools and manifests, as the index sources hold them.
+ * @returns The curated descriptors no host source holds, each id once, in their first order.
+ */
+export function curatedDescriptorsBeside(
+  curated: readonly CapabilityDescriptor[],
+  host: Pick<CapabilityIndexSources, 'tools' | 'manifests'>,
+): CapabilityDescriptor[] {
+  const taken = new Set<string>([
+    ...(host.tools ?? []).map((tool) => `tool:${tool.name}`),
+    ...(host.manifests ?? []).map((descriptor) => descriptor.id),
+  ]);
+  const kept: CapabilityDescriptor[] = [];
+  for (const descriptor of curated) {
+    if (taken.has(descriptor.id)) continue;
+    taken.add(descriptor.id);
+    kept.push(descriptor);
+  }
+  return kept;
+}
+
+/**
  * Dependencies injected into the initializer at construction time.
  */
 export interface CapabilityDiscoveryInitializerDependencies {
@@ -299,6 +330,25 @@ export class CapabilityDiscoveryInitializer {
   // ---------------------------------------------------------------------------
   // Public helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * The index sources the discovery engine starts from: the host's own (its loaded tools, packs, workflows, channels
+   * and configured sources), then the curated registry's descriptors that no host source already holds.
+   *
+   * @param overrides - Sources the host configured for discovery, merged as `buildCapabilityIndexSources` merges them.
+   * @param curated - Descriptors read from the curated packs' manifests.
+   * @returns Sources in which a tool the host has loaded keeps its own descriptor and each curated id appears once.
+   */
+  public indexSourcesWithCurated(
+    overrides: AgentOSCapabilityDiscoverySources | undefined,
+    curated: readonly CapabilityDescriptor[],
+  ): CapabilityIndexSources {
+    const sources = this.buildCapabilityIndexSources(overrides);
+    return {
+      ...sources,
+      manifests: [...(sources.manifests ?? []), ...curatedDescriptorsBeside(curated, sources)],
+    };
+  }
 
   /**
    * Build capability index sources from the active runtime registries.
@@ -461,13 +511,7 @@ export class CapabilityDiscoveryInitializer {
       discoveryConfig?.config,
     );
     const curatedManifestDescriptors = await loadCuratedManifestDescriptors(this.deps.logger);
-    const sources = this.buildCapabilityIndexSources({
-      ...discoveryConfig?.sources,
-      manifests: [
-        ...(discoveryConfig?.sources?.manifests ?? []),
-        ...curatedManifestDescriptors,
-      ],
-    });
+    const sources = this.indexSourcesWithCurated(discoveryConfig?.sources, curatedManifestDescriptors);
     await engine.initialize(sources, discoveryConfig?.sources?.presetCoOccurrences);
 
     if (discoveryConfig?.registerMetaTool !== false) {

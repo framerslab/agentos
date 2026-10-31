@@ -20,5 +20,5 @@ export {
   type TraitBand,
   type PersonalityRegister,
 } from './personas/personalityPrompt.js';
-export { HEXACO_TRAIT_KEYS, normalizeHexacoTraits, type HexacoTraitKey } from './personas/hexaco.js';
+export { HEXACO_TRAIT_KEYS, normalizeHexacoTraits, type HexacoTraitKey, type HexacoTraitValues } from './personas/hexaco.js';
 export type { IPersonaDefinition } from './personas/IPersonaDefinition.js';

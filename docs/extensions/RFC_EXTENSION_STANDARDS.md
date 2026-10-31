@@ -25,7 +25,7 @@ agentos-extensions/
 │   ├── channels/telegram/        # @framers/agentos-ext-telegram
 │   └── ...                       # auth, cloud, media, memory, safety, voice, ...
 ├── templates/                    # basic-tool, guardrail, multi-tool
-├── registry.json                 # rewritten from the packs on disk by the build
+├── registry.json                 # generated from the packs by the build; untracked, shipped by the root package
 └── CONTRIBUTING.md
 ```
 
@@ -190,7 +190,7 @@ Each pack has a README with installation, configuration (its options and secrets
 
 ## Publishing
 
-Packs are released with changesets (`pnpm changeset`: `patch` for a fix, `minor` for a new tool or export, `major` for a breaking change); the release workflow publishes each changed pack to npm. The [release guide](https://github.com/framerslab/agentos-extensions/blob/master/RELEASING.md) has the details.
+A merge to master publishes, in the same run, every publishable package whose shipped files it changed: the packs, libraries and templates that `scripts/package-roles.json` names, less those marked `private: true`, and after them the root package `@framers/agentos-extensions` when its catalog or its own shipped files changed. The release plan reads npm and the release tags and decides each version from the merged pull request's title and description. A change to a package's shipped files publishes its next patch, whatever the Conventional Commits type, and a change to the root package's catalog alone publishes the root's next patch. A breaking mark (`!` before the colon of the title, or a line of the description beginning `BREAKING CHANGE:` or `BREAKING-CHANGE:`) on a pull request that changed a package's shipped files publishes that package's next minor below 1.0.0; at 1.0.0 or above it refuses the run until the pull request writes the next major into the package's `package.json`, and a written version below that major is refused the same way. Any other version written into `package.json` above every published one publishes as written. The release job publishes the tarballs CI built and tested, with npm provenance, tags each version at the merge commit and writes its GitHub release. A pull request carries no changeset file, and no version pull request follows the merge. The [release guide](https://github.com/framerslab/agentos-extensions/blob/master/RELEASING.md) gives every rule.
 
 ## Security
 

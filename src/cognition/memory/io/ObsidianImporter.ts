@@ -15,14 +15,20 @@
  * 3. **`![[image.png]]`** — embedded-image syntax is detected and a warning
  *    is logged.  Embedded images are not imported in the current version.
  *
+ * 4. **A trace's own note** — a note whose front-matter `id` names a trace
+ *    the brain holds, and which holds that trace's text and what
+ *    `ObsidianExporter` writes after it, counts as skipped; the tags of its
+ *    tag line and the links of its **Related:** list that the trace does not
+ *    hold yet, such as a tag or a link added in Obsidian, are added to it.
+ *
  * @module memory/io/ObsidianImporter
  */
 
 import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
-import type { ImportResult } from './facade/types.js';
+import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
-import { MarkdownImporter } from './MarkdownImporter.js';
+import { MarkdownImporter, withLfLineBreaks, type HeldTrace } from './MarkdownImporter.js';
 
 // ---------------------------------------------------------------------------
 // Regex constants
@@ -36,6 +42,12 @@ import { MarkdownImporter } from './MarkdownImporter.js';
 const WIKILINK_RE = /(?<!!)\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
 
 /**
+ * Matches one whole wikilink, `[[Target]]` or `[[Target|Alias]]`, as
+ * {@link WIKILINK_RE} reads it. Capture group 1 is the target.
+ */
+const WIKILINK_TARGET_RE = /^\[\[([^\]|]+)(?:\|[^\]]+)?\]\]$/;
+
+/**
  * Matches Obsidian embedded images: `![[image.png]]`.
  * Used to emit a warning — embedded images are not yet supported for import.
  */
@@ -46,6 +58,105 @@ const EMBED_RE = /!\[\[[^\]]+\]\]/g;
  * Only captures the tag name (group 1) without the leading `#`.
  */
 const HASHTAG_RE = /(?<![[#])#([\w-]+)/g;
+
+/**
+ * The line of a trace's tags `ObsidianExporter` writes after its text: each
+ * tag as a `#tag` word, a space between two.
+ */
+const TAG_LINE_RE = /^#\S*(?: #\S*)*/;
+
+/** The heading `ObsidianExporter` writes above the list of a trace's links. */
+const RELATED_HEADING = '**Related:**';
+
+/** What opens each item of the **Related:** list: a line break and the opening of its link. */
+const RELATED_ITEM = '\n- [[';
+
+/** No labels with a line break: each link of a **Related:** list is read as one line. */
+const NO_LABELS: ReadonlySet<string> = new Set();
+
+// ---------------------------------------------------------------------------
+// What the export writes after a trace's text
+// ---------------------------------------------------------------------------
+
+/** What `ObsidianExporter` writes after a trace's text, read back from a note. */
+interface ExportedAdditions {
+  /** The tags of the tag line, without their `#`. */
+  tags: string[];
+  /** The labels of the **Related:** list's links, in its order. */
+  links: string[];
+}
+
+/**
+ * Read `additions` as what `ObsidianExporter` writes after a trace's text:
+ * the tag line, the **Related:** list, or the tag line, a blank line and the
+ * list.
+ *
+ * @param additions - What a note holds after a trace's text, without the whitespace around it.
+ * @param labels    - Labels that hold a line break, whose links run over more than one line.
+ * @returns The tags and links, or `undefined` when the note holds anything else there.
+ */
+function readExportedAdditions(additions: string, labels: ReadonlySet<string>): ExportedAdditions | undefined {
+  let at = 0;
+  let tags: string[] = [];
+  const tagLine = TAG_LINE_RE.exec(additions);
+  if (tagLine) {
+    tags = tagLine[0]
+      .split(' ')
+      .map((word) => word.slice(1))
+      .filter((tag) => tag !== '');
+    at = tagLine[0].length;
+    if (at === additions.length) return { tags, links: [] };
+    if (!additions.startsWith('\n\n', at)) return undefined;
+    at += 2;
+  }
+  if (!additions.startsWith(RELATED_HEADING, at)) return undefined;
+  const links = readRelatedList(additions, at + RELATED_HEADING.length, labels);
+  return links ? { tags, links } : undefined;
+}
+
+/**
+ * Read `additions`, from `from` to its end, as one or more links of a
+ * **Related:** list: each a line break, `- [[`, a label and `]]`. A label is
+ * the rest of its line when that line ends in `]]`, or one of `labels`, which
+ * runs over the line breaks it holds. The places a link may start are kept in
+ * a list and read one by one, each once, so a list of any length is read
+ * without recursion.
+ *
+ * @param additions - What a note holds after a trace's text, without the whitespace around it.
+ * @param from      - Where the first link starts.
+ * @param labels    - Labels that hold a line break, whose links run over more than one line.
+ * @returns The links' labels, in the list's order, or `undefined` when the links do not run to the end of `additions`.
+ */
+function readRelatedList(additions: string, from: number, labels: ReadonlySet<string>): string[] | undefined {
+  const toRead = [from];
+  // Each place a link ends, with the place it started and its label.
+  const reached = new Map<number, { from: number; label: string } | undefined>([[from, undefined]]);
+  let at: number | undefined;
+  while ((at = toRead.pop()) !== undefined) {
+    if (!additions.startsWith(RELATED_ITEM, at)) continue;
+    const start = at + RELATED_ITEM.length;
+    const lineBreak = additions.indexOf('\n', start);
+    const lineEnd = lineBreak === -1 ? additions.length : lineBreak;
+    const ends: Array<{ end: number; label: string }> = [];
+    if (lineEnd - start >= 2 && additions.endsWith(']]', lineEnd)) {
+      ends.push({ end: lineEnd, label: additions.slice(start, lineEnd - 2) });
+    }
+    for (const label of labels) {
+      if (additions.startsWith(`${label}]]`, start)) ends.push({ end: start + label.length + 2, label });
+    }
+    for (const { end, label } of ends) {
+      if (reached.has(end)) continue;
+      reached.set(end, { from: at, label });
+      if (end === additions.length) {
+        const links: string[] = [];
+        for (let link = reached.get(end); link; link = reached.get(link.from)) links.push(link.label);
+        return links.reverse();
+      }
+      toRead.push(end);
+    }
+  }
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -79,6 +190,17 @@ interface TraceFrontmatter {
  */
 export class ObsidianImporter extends MarkdownImporter {
   /**
+   * The labels of the brain's graph that hold a line break, read the first
+   * time an import meets a **Related:** list that does not read as one line a
+   * link. The export writes a label as the brain holds it, so a link to such
+   * a label runs over the label's line breaks.
+   */
+  private _labelsWithLineBreaks: Promise<ReadonlySet<string>> | undefined;
+
+  /** How many held traces this import has added a tag to. */
+  private _retagged = 0;
+
+  /**
    * @param brain - The target `Brain` to import into.
    */
   constructor(brain: Brain) {
@@ -86,8 +208,90 @@ export class ObsidianImporter extends MarkdownImporter {
   }
 
   // -------------------------------------------------------------------------
-  // Overridden hook
+  // Public API
   // -------------------------------------------------------------------------
+
+  /**
+   * Recursively walk `sourceDir` and import every `.md` file as
+   * `MarkdownImporter` does, reading each note's `#tags` and `[[wikilinks]]`
+   * as well. Each import reads the brain's graph afresh: the labels it holds
+   * that have a line break are read once, when a note first needs them (see
+   * {@link holdsTraceText}). An import that inserted a note, or added a tag
+   * to a trace the brain holds, rebuilds the brain's full-text index once,
+   * after its last note, so the full-text search finds the note and the tag.
+   *
+   * @param sourceDir - Directory to recursively scan for `.md` files.
+   * @param options   - `dedup` (default `true`) skips a note the brain holds.
+   * @returns `ImportResult` with counts of imported, skipped, and errored items.
+   */
+  override async import(sourceDir: string, options?: Pick<ImportOptions, 'dedup'>): Promise<ImportResult> {
+    this._labelsWithLineBreaks = undefined;
+    this._retagged = 0;
+    const result = await super.import(sourceDir, options);
+    if (result.imported > 0 || this._retagged > 0) await this._rebuildFullTextIndex();
+    return result;
+  }
+
+  // -------------------------------------------------------------------------
+  // Overridden hooks
+  // -------------------------------------------------------------------------
+
+  /**
+   * Whether a note's body holds a trace's text: the body is the text, as a
+   * Markdown note's is, or it opens with the text, without its leading and
+   * trailing whitespace, and holds after it, past whitespace, only what
+   * `ObsidianExporter` writes there: the tag line, the **Related:** list, or
+   * the tag line, a blank line and the list. Each link of the list is a line
+   * `- [[label]]`, or runs over the line breaks of a label the brain's graph
+   * holds, as the export writes a label that holds a line break; the graph is
+   * read for such labels once, when a list does not read as one line a link.
+   * The text is read whole, so a trace whose own text ends in a line of hashtags,
+   * and a trace with no text, are the duplicates of their own notes too, and
+   * a vault exported from a brain and imported into it adds nothing. A note
+   * that holds anything else after the text, such as a paragraph added in
+   * Obsidian before or after its links, is not the trace's own note. Line
+   * breaks are read as `\n` in the note, the text and the labels alike, so a
+   * note an editor saved again with CRLF line endings is its trace's own note.
+   *
+   * @param text - The text of the trace the note's `id` names.
+   * @param body - The note's body, without its leading and trailing whitespace.
+   * @returns A promise of `true` when the note holds the trace's text.
+   */
+  protected override async holdsTraceText(text: string, body: string): Promise<boolean> {
+    if (await super.holdsTraceText(text, body)) return true;
+    const own = withLfLineBreaks(text).trim();
+    const note = withLfLineBreaks(body);
+    if (!note.startsWith(own)) return false;
+    const rest = note.slice(own.length);
+    // The export writes a blank line between the text and what it adds; a trace with no text keeps none past the trim.
+    if (own !== '' && !/^\s/.test(rest)) return false;
+    return (await this._readAdditions(rest.trim())) !== undefined;
+  }
+
+  /**
+   * Add to a trace what its own note holds beyond the trace: the tags of the
+   * note's tag line the trace does not hold, a tag compared in the form the
+   * tag line writes it (whitespace as `-`), and links from the trace's node to
+   * the labels of the note's **Related:** list it does not link to, a link
+   * read as {@link postProcess} reads one. A note left as the export wrote it
+   * adds nothing to a trace that still holds the tags and links the export
+   * wrote; a tag or a link the trace lost after the export is added again.
+   *
+   * @param trace  - The trace the note is the note of.
+   * @param body   - The note's body, without its leading and trailing whitespace.
+   * @param result - Mutable result accumulator (errors recorded here).
+   */
+  protected override async addNoteToHeldTrace(trace: HeldTrace, body: string, result: ImportResult): Promise<void> {
+    const own = withLfLineBreaks(trace.content).trim();
+    const note = withLfLineBreaks(body);
+    if (!note.startsWith(own)) return;
+    const additions = note.slice(own.length).trim();
+    if (additions === '') return;
+    const read = await this._readAdditions(additions);
+    if (!read) return;
+    await this._addTagsToHeldTrace(trace, read.tags, result);
+    await this._addLinksToHeldTrace(trace.id, read.links, result);
+  }
 
   /**
    * Post-process a successfully imported Markdown file:
@@ -146,6 +350,127 @@ export class ObsidianImporter extends MarkdownImporter {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /**
+   * Read what a note holds after a trace's text as what `ObsidianExporter`
+   * writes there. A list that does not read as one line a link is read again
+   * with the labels of the brain's graph that hold a line break, which are
+   * read once an import first needs them.
+   *
+   * @param additions - What the note holds after the trace's text, without the whitespace around it.
+   * @returns The tags and links, or `undefined` when the note holds anything else there.
+   */
+  private async _readAdditions(additions: string): Promise<ExportedAdditions | undefined> {
+    const read = readExportedAdditions(additions, NO_LABELS);
+    if (read || !additions.includes(RELATED_HEADING)) return read;
+    // A link to a label that holds a line break runs over more than one line.
+    this._labelsWithLineBreaks ??= this._readLabelsWithLineBreaks();
+    return readExportedAdditions(additions, await this._labelsWithLineBreaks);
+  }
+
+  /**
+   * Add to a held trace the tags of its note's tag line that it does not hold.
+   *
+   * @param trace  - The trace the note is the note of.
+   * @param tags   - The tags of the note's tag line, without their `#`.
+   * @param result - Mutable result accumulator (errors recorded here).
+   */
+  private async _addTagsToHeldTrace(trace: HeldTrace, tags: readonly string[], result: ImportResult): Promise<void> {
+    let held: unknown = [];
+    try {
+      held = JSON.parse(trace.tags);
+    } catch {
+      held = [];
+    }
+    const heldTags = Array.isArray(held) ? held.filter((tag): tag is string => typeof tag === 'string') : [];
+    // The tag line writes a tag's whitespace as '-', so it names a held tag in that form.
+    const written = new Set(heldTags.map((tag) => tag.replace(/\s+/g, '-')));
+    const added = [...new Set(tags)].filter((tag) => !written.has(tag));
+    if (added.length === 0) return;
+    await this._mergeTagsIntoTrace(trace.id, added, result);
+    this._retagged++;
+  }
+
+  /**
+   * Link a held trace's node to the labels of its note's **Related:** list
+   * that it does not link to yet.
+   *
+   * @param traceId - The trace the note is the note of.
+   * @param links   - The labels of the note's links, in the list's order.
+   * @param result  - Mutable result accumulator (errors recorded here).
+   */
+  private async _addLinksToHeldTrace(traceId: string, links: readonly string[], result: ImportResult): Promise<void> {
+    if (links.length === 0) return;
+    let linked: Set<string>;
+    try {
+      linked = new Set((await this._linkedLabelsOf(traceId)).map(withLfLineBreaks));
+    } catch (err) {
+      result.errors.push(`Link read error for trace ${traceId}: ${String(err)}`);
+      return;
+    }
+    for (const link of links) {
+      if (linked.has(withLfLineBreaks(link))) continue;
+      const target = WIKILINK_TARGET_RE.exec(`[[${link}]]`)?.[1]?.trim();
+      if (!target || linked.has(withLfLineBreaks(target))) continue;
+      await this._upsertWikiEdge(traceId, target, result);
+      linked.add(withLfLineBreaks(target));
+    }
+  }
+
+  /**
+   * The labels of the nodes a trace's node links to in this brain's graph,
+   * read as `ObsidianExporter` reads the links it writes.
+   *
+   * @param traceId - The trace.
+   * @returns The labels, as the brain holds them.
+   */
+  private async _linkedLabelsOf(traceId: string): Promise<string[]> {
+    const { dialect } = this.brain.features;
+    const sourceTrace = dialect.ifnull(dialect.jsonExtract('src.properties', '$.trace_id'), 'ke.source_id');
+    const rows = await this.brain.all<{ label: string }>(
+      `SELECT kn.label
+         FROM knowledge_edges ke
+         JOIN knowledge_nodes src ON src.brain_id = ke.brain_id AND src.id = ke.source_id
+         JOIN knowledge_nodes kn ON kn.brain_id = ke.brain_id AND kn.id = ke.target_id
+        WHERE ke.brain_id = ? AND ${sourceTrace} = ?`,
+      [this.brain.brainId, traceId],
+    );
+    return rows.map((row) => row.label);
+  }
+
+  /**
+   * Rebuild the brain's full-text index (best-effort) with the statement
+   * `Brain.fullTextRebuild` returns. The import's rows are written, so a
+   * failure is logged and never fails the import.
+   */
+  private async _rebuildFullTextIndex(): Promise<void> {
+    try {
+      const rebuild = this.brain.fullTextRebuild();
+      await this.brain.run(rebuild.sql, rebuild.params);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // A database the index was never created in has nothing to rebuild.
+      if (message.includes('no such module: fts5') || message.includes('no such table: memory_traces_fts')) {
+        return;
+      }
+      console.warn(
+        `[ObsidianImporter] full-text index rebuild after an import failed for brain ${this.brain.brainId}: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Read the labels of the brain's graph that hold a line break.
+   *
+   * @returns The labels, each line break in them as `\n`.
+   */
+  private async _readLabelsWithLineBreaks(): Promise<ReadonlySet<string>> {
+    const rows = await this.brain.all<{ label: string }>(
+      'SELECT DISTINCT label FROM knowledge_nodes WHERE brain_id = ? AND (label LIKE ? OR label LIKE ?)',
+      [this.brain.brainId, '%\n%', '%\r%'],
+    );
+    return new Set(rows.map((row) => withLfLineBreaks(row.label)));
+  }
 
   /**
    * Merge a list of inline hashtag names into a trace's `tags` JSON column.

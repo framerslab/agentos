@@ -195,9 +195,10 @@ export function compileReviewLoop(
 
         draft = prodText;
 
+        // Each record holds the input its agent was sent, the approver's instructions included.
         agentCalls.push({
           agent: producerName,
-          input: prodPrompt,
+          input: prodGate.input,
           output: prodText,
           toolCalls: prodToolCalls,
           usage: buildAgentCallUsage(prodUsage),
@@ -242,7 +243,7 @@ export function compileReviewLoop(
 
         agentCalls.push({
           agent: reviewerName,
-          input: revPrompt,
+          input: revGate.input,
           output: revText,
           toolCalls: revToolCalls,
           usage: buildAgentCallUsage(revUsage),

@@ -334,10 +334,10 @@ type SchemaRead = { schema: JSONSchemaObject } | { error: string };
 
 function readSchemaColumn(raw: string | null, column: 'input_schema' | 'output_schema'): SchemaRead {
   if (raw == null || raw.trim() === '') {
-    // A tool may have no output schema; it always has an input schema.
-    return column === 'output_schema'
-      ? { schema: { type: 'object', properties: {} } }
-      : { error: `${column} is empty` };
+    // A tool may have no output schema (forge_tool does not ask for one); it
+    // always has an input schema. A missing output schema reads as the empty
+    // schema, which constrains no output, as the forged tool checked none.
+    return column === 'output_schema' ? { schema: {} } : { error: `${column} is empty` };
   }
   let parsed: unknown;
   try {
@@ -354,7 +354,9 @@ function readSchemaColumn(raw: string | null, column: 'input_schema' | 'output_s
 /**
  * Reads a row's schema columns. A column that does not hold a JSON object is
  * reported, never replaced by a schema that accepts any input; the loader
- * reads such a row as unreadable.
+ * reads such a row as unreadable. An empty `output_schema` column (a tool
+ * forged with no output schema) reads as `{}`, so the tool's output is
+ * checked against nothing after a reload, as it was before.
  */
 export function parseRowSchemas(
   row: Pick<PersistedToolRow, 'input_schema' | 'output_schema'>,

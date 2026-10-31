@@ -30,6 +30,7 @@ import type {
 } from '../../orchestration/workflows/storage/IWorkflowStore';
 import type { ConversationManager } from '../../core/conversation/ConversationManager';
 import type { GMIManager } from '../../cognition/substrate/GMIManager';
+import type { ILearningLayer } from '../../cognition/learning/types';
 import type { ExtensionManager } from '../../extensions';
 import type { IToolOrchestrator, ToolDefinitionForLLM } from '../../core/tools/IToolOrchestrator';
 import type { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
@@ -72,6 +73,21 @@ export interface IAgentOS {
    * @returns {AsyncGenerator<AgentOSResponse, void, undefined>} An async generator that yields
    * response chunks after processing the tool result.
    * @throws {Error} If the `streamId` or `toolCallId` is invalid.
+   *
+   * A pause is continued once. While the stream is open, a result for a pause
+   * that is being continued already, or for a call the stream's pause does not
+   * hold, yields one error chunk with the code `SYS_INVALID_STATE`; once the
+   * stream is closed (its continuation ended, a resume took the pause, or a
+   * newer turn ended it), a result yields the closed stream's error chunk
+   * (`TOOL_ERROR`). The GMI takes none of such results. A call of a pause
+   * that the results leave out is answered with a tool result that says it has
+   * none (code `EXTERNAL_TOOL_NOT_RUN`), in the conversation and in the results
+   * the GMI reads when it takes results together (`IGMI.handleToolResults()`),
+   * so pass every result of a pause together through `handleToolResults()`. A
+   * continuation that fails before the conversation records the results (the
+   * store refuses to save that the pause was taken, or a result has no JSON
+   * form) yields an error chunk and leaves the pause for
+   * `resumeExternalToolRequest()`.
    */
   handleToolResult(
     streamId: string,
@@ -90,6 +106,11 @@ export interface IAgentOS {
    * @returns {AsyncGenerator<AgentOSResponse, void, undefined>} An async generator that yields
    * response chunks after processing the tool results.
    * @throws {Error} If the `streamId` is invalid or the tool result batch is empty.
+   *
+   * The batch continues the pause once, as `handleToolResult()` does: on an
+   * open stream, a batch for a pause that is being continued already, or with
+   * a result for a call the stream's pause does not hold, yields one error
+   * chunk with the code `SYS_INVALID_STATE`.
    */
   handleToolResults?(
     streamId: string,
@@ -191,7 +212,9 @@ export interface IAgentOS {
 
   /**
    * Returns the pending external-tool pause snapshot for a conversation, if one
-   * was persisted during an actionable TOOL_CALL_REQUEST pause.
+   * was persisted during an actionable TOOL_CALL_REQUEST pause. A pause saved
+   * by a stream an output guardrail blocked is never returned: it is dropped
+   * once the stream's turn ends, and this returns `null` for it meanwhile.
    */
   getPendingExternalToolRequest(
     conversationId: string,
@@ -204,6 +227,23 @@ export interface IAgentOS {
    *
    * Hosts can re-assert runtime-only organization context through `options`
    * when the resumed turn needs organization-scoped memory or tenant routing.
+   *
+   * A pause is resumed once. When the conversation no longer holds the pause
+   * the snapshot names (its results were passed on its stream, an output
+   * guardrail blocked its stream, a newer turn ended it, or a newer pause
+   * replaced it), another resume of it is under way, or a result answers a call
+   * the pause does not hold, the stream yields one error chunk with the code
+   * `SYS_INVALID_STATE` and the GMI takes none of the results. Such a resume
+   * is refused before the session's GMI is acquired, so it changes neither the
+   * conversation nor that GMI. A resume ends the stream the pause was saved
+   * on. A resume whose organization the runtime refuses, or whose continuation
+   * fails before the conversation records the results, leaves the pause as it
+   * was.
+   *
+   * The once-only rule holds within one AgentOS instance: instances that share
+   * a conversation store do not see each other's resumes, so a deployment with
+   * several instances sends one conversation's resumes to one instance at a
+   * time.
    */
   resumeExternalToolRequest(
     pendingRequest: AgentOSPendingExternalToolRequest,
@@ -221,6 +261,11 @@ export interface IAgentOS {
    */
   getConversationManager(): ConversationManager;
   getGMIManager(): GMIManager;
+  /**
+   * The runtime's learning layer, or `undefined` when learning is off: no `learning` option and no layer passed in
+   * `gmiManagerConfig.learningLayer`. Optional, so an implementation written without the layer still compiles.
+   */
+  getLearningLayer?(): ILearningLayer | undefined;
   getExtensionManager(): ExtensionManager;
   getToolOrchestrator(): IToolOrchestrator;
   getExternalToolRegistry(): ExternalToolRegistry | undefined;

@@ -1025,8 +1025,10 @@ export interface EmergentConfig {
    * Which tools with side effects a composition or a workflow may chain as a
    * step. A tool that declares `hasSideEffects: false` is chained freely; one
    * that declares `true` only when its name is listed here; one that declares
-   * nothing is never chained. The list is read when a step is checked (at
-   * forge, at load, at promotion and on every run), not at construction.
+   * nothing is never chained. A tool named `launch_agency` is never chained,
+   * whatever it declares and whether or not it is listed here: a team is
+   * launched from a turn. The list is read when a step is checked (at forge,
+   * at load, at promotion and on every run), not at construction.
    * @default { sideEffectingTools: [] }
    */
   compose?: { sideEffectingTools?: string[] };

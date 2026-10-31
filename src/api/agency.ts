@@ -117,6 +117,16 @@ import type { RawData, WebSocket } from 'ws';
 /** The agency's own lines, to the host's logger factory whenever the host set it. */
 const agencyLogger = lazyLogger('agency');
 
+/**
+ * The finalized results whose text a `beforeReturn` approval replaced with a
+ * different one. The validation retry in `generate()` reads it: a
+ * replacement that does not match the output schema is the approver's
+ * answer, returned as it is and never run again. A replacement equal to the
+ * strategy's text replaced nothing and is not kept here: the retry treats it
+ * as an approval without modifications. Kept here so a result gains no field.
+ */
+const replacedByApproval = new WeakSet<object>();
+
 /** Every callback an agency fires, by name: a callback added to {@link AgencyCallbacks} must be listed here. */
 const CALLBACK_NAMES: Record<keyof AgencyCallbacks, true> = {
   agentStart: true,
@@ -215,6 +225,19 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       '[AgentOS] agency() accepted a cognitiveMechanisms config, but the lightweight helper does not run ' +
       'the cognitive mechanisms. Initialize a CognitiveMemoryManager with `cognitiveMechanisms`, or supply ' +
       'one through gmiManagerConfig.cognitiveMemoryFactory on the full runtime, to use them.',
+    );
+  }
+
+  /*
+   * `agencies` is a gmi() option, which AgencyOptions does not declare: an agency is not a GMI, launches no team
+   * itself and passes the option to none of its seats. It still arrives from JavaScript, or in an agent's options
+   * object spread into an agency's, so say so instead of dropping it silently. A seat that may launch teams sets it on
+   * itself.
+   */
+  if ((opts as { agencies?: unknown }).agencies != null) {
+    console.warn(
+      '[AgentOS] agency() accepted an agencies config, but an agency launches no team itself and passes the config ' +
+      "to none of its seats. Set agencies on a gmi() agent (gmi() or agent({ runtime: 'gmi' })) and seat that agent.",
     );
   }
 
@@ -484,6 +507,24 @@ export function agency(opts: AgencyOptions): AgencyInstance {
     return preparedPrompt;
   };
 
+  /**
+   * Turns one run of the strategy into the result the caller receives, in
+   * order: an empty text for a run that returned none (and the
+   * `agency_no_seat_answered` line when no seat answered), this agency's own
+   * ledger, the pool's mask, the output guardrails, the usage bill and the
+   * limit check, the `beforeReturn` approval, the mask over a replacement it
+   * carries, the output schema's parse of the text the caller receives, the
+   * `final-output` part, `agentEnd` and the provenance record.
+   * `generate()` and a session's `send()` call it once for each attempt of
+   * the validation retry; `stream()` and a session's `stream()` call it once.
+   *
+   * @param result - The strategy's result for this run.
+   * @param start - When the call started, for `durationMs`.
+   * @param sessionId - The session whose usage totals the run adds to, on a session's call.
+   * @param streamPartBuffer - Under `stream()`, where the approval and final-output parts go.
+   * @param seated - This call's seating, in an agency with a pool or a panel.
+   * @returns The finalized result; a new object when the approval carries a replacement.
+   */
   const finalizeExecutionResult = async (
     result: Record<string, unknown>,
     start: number,
@@ -557,10 +598,6 @@ export function agency(opts: AgencyOptions): AgencyInstance {
       finalized.text = await runGuardrails(finalized.text as string, outputGuards, 'output', opts.on);
     }
 
-    if (opts.output) {
-      finalized.parsed = parseStructuredOutput(finalized.text as string, opts.output);
-    }
-
     // A run's usage is counted before the limits are checked, so a run that
     // itself breaches a limit is billed and the next call's pre-check sees it.
     const resultUsage = normalizeUsage(finalized.usage);
@@ -585,10 +622,40 @@ export function agency(opts: AgencyOptions): AgencyInstance {
 
     // A replacement the approval carried is the handler's text, which no
     // seat's mask saw: in a pooled agency it passes the call's list as the
-    // strategy's text did, before the final-output part, agentEnd and the
-    // provenance record read it.
+    // strategy's text did, before the parse below, the final-output part,
+    // agentEnd and the provenance record read it.
     if (pooled && approvedResult !== finalized && typeof approvedResult.text === 'string') {
       approvedResult.text = mask.text(approvedResult.text);
+    }
+
+    // The output schema is read from the text the caller receives: the
+    // approval's replacement when it carries one, else the strategy's text
+    // after the output guardrails. A text the approval replaced is marked
+    // for the validation retry in generate(), which returns it as it is. A
+    // replacement equal to the strategy's text (an approver that sends the
+    // text back unedited; in a pooled agency, read after the mask above) is
+    // not marked: no text of the approver's would be thrown away, so a text
+    // that fails the schema is retried as after an approval without
+    // modifications.
+    const replacedText = approvedResult !== finalized && approvedResult.text !== finalized.text;
+    if (replacedText) replacedByApproval.add(approvedResult);
+    if (opts.output) {
+      approvedResult.parsed = parseStructuredOutput((approvedResult.text as string) ?? '', opts.output);
+      // A replacement that does not match is returned with parsed undefined
+      // and runs no validation retry; the line says why.
+      if (replacedText && approvedResult.parsed === undefined) {
+        agencyLogger.info('the approval replaced the final text with one the output schema does not match; parsed is undefined', {
+          event: 'agency_replacement_unparsed',
+          agency: agencyName,
+          strategy: chosenStrategy,
+        });
+      }
+    } else if (replacedText) {
+      // Without a schema, a parsed value the strategy's result carried (an
+      // agent's own, which sequential and graph pass on with their last
+      // seat's result under generate()) was read from the text the
+      // replacement changed, and nothing parsed the replacement.
+      delete approvedResult.parsed;
     }
 
     streamPartBuffer?.push({
@@ -697,8 +764,16 @@ export function agency(opts: AgencyOptions): AgencyInstance {
         // Success path: no validation required, OR validation produced a
         // `parsed` value. A run no seat answered is returned as it is: its
         // empty text is no reply to correct, and a retry would ask every
-        // approver again.
-        if (!hasValidation || finalized.parsed !== undefined || noSeatAnswered(result)) {
+        // approver again. A text a beforeReturn approval replaced with a
+        // different one is returned as it is too, with `parsed` undefined
+        // when it does not match: a retry would throw the approver's text
+        // away and ask for the approval again.
+        if (
+          !hasValidation ||
+          finalized.parsed !== undefined ||
+          noSeatAnswered(result) ||
+          replacedByApproval.has(finalized)
+        ) {
           slot.settled = true;
           return finalized;
         }
@@ -1322,7 +1397,9 @@ interface AgencySession {
  * - `strategy: 'panel'` cannot be combined with `adaptive: true`.
  * - `parallel` and `debate` strategies require an agency-level `model` or `provider`
  *   for their synthesis step.
- * - `runtime`, when set, is `'legacy'` or `'gmi'`.
+ * - `runtime`, the agency's and each config seat's (the panel's chair included), is `'legacy'` or `'gmi'` when
+ *   set; `null` is unset.
+ * - Each seat's `dependsOn`, config or pre-built, is a list of seat names when set; `null` is unset.
  *
  * An agency with a pool or a panel is checked further by `validatePoolOptions`.
  *
@@ -1335,8 +1412,25 @@ function validateAgencyOptions(opts: AgencyOptions): void {
   }
 
   // `runtime` is the config seats' default engine; anything else would reach agent() and be ignored there.
-  if (opts.runtime !== undefined && opts.runtime !== 'legacy' && opts.runtime !== 'gmi') {
-    throw new AgencyConfigError(`agency(): runtime must be 'legacy' or 'gmi', not ${JSON.stringify(opts.runtime)}`);
+  if (!isRuntimeName(opts.runtime)) {
+    throw new AgencyConfigError(`agency(): runtime must be 'legacy' or 'gmi', not ${printable(opts.runtime)}`);
+  }
+  // A seat's own runtime wins over the agency's, so a typo in it would run the seat on the legacy engine as silently.
+  // A `dependsOn` that is not a list of seat names would be dropped, and the seat would run without its dependencies.
+  const seats: Array<[string, unknown]> = [
+    ...Object.entries(opts.agents),
+    ...(opts.chair !== undefined && opts.chair !== false ? [['chair', opts.chair] as [string, unknown]] : []),
+  ];
+  for (const [name, seat] of seats) {
+    if (seat === null || typeof seat !== 'object') continue;
+    const runtime = isAgent(seat as Agent) ? undefined : (seat as { runtime?: unknown }).runtime;
+    if (!isRuntimeName(runtime)) {
+      throw new AgencyConfigError(`agency(): seat '${name}': runtime must be 'legacy' or 'gmi', not ${printable(runtime)}`);
+    }
+    const dependsOn = (seat as { dependsOn?: unknown }).dependsOn;
+    if (dependsOn != null && !(Array.isArray(dependsOn) && dependsOn.every((dep) => typeof dep === 'string'))) {
+      throw new AgencyConfigError(`agency(): seat '${name}': dependsOn must be a list of seat names, not ${printable(dependsOn)}`);
+    }
   }
 
   if (opts.emergent?.enabled && opts.strategy !== 'hierarchical' && !opts.adaptive) {
@@ -1378,6 +1472,39 @@ function validateAgencyOptions(opts: AgencyOptions): void {
     throw new AgencyConfigError(
       'Debate strategy requires an agency-level model or provider for synthesis',
     );
+  }
+}
+
+/** Whether `value` is unset (`undefined` or `null`), `'legacy'` or `'gmi'`. */
+function isRuntimeName(value: unknown): boolean {
+  return value == null || value === 'legacy' || value === 'gmi';
+}
+
+/**
+ * A value as a configuration error names it: JSON where JSON can print it, else its own text, else its tag. Never
+ * throws, so a value JSON cannot print (a BigInt, a circular object), or one no conversion can (a revoked proxy), still
+ * reaches the caller in an `AgencyConfigError`.
+ */
+function printable(value: unknown): string {
+  if (typeof value === 'bigint') return `${value}n`;
+  if (typeof value === 'function') return 'a function';
+  if (typeof value !== 'symbol') {
+    try {
+      const json = JSON.stringify(value);
+      if (json !== undefined) return json;
+    } catch {
+      // Below: the value's own text.
+    }
+  }
+  try {
+    return String(value);
+  } catch {
+    // Below: its tag, which a revoked proxy refuses as well.
+  }
+  try {
+    return Object.prototype.toString.call(value);
+  } catch {
+    return 'a value that cannot be printed';
   }
 }
 
@@ -1887,7 +2014,10 @@ async function maybeApproveFinalResult(
   // Even after HITL approves, run guardrails as a final safety net. The
   // check reads the strategy's text, and the replacement beside it when the
   // approval carries one, so a replacement the check blocks is refused as a
-  // blocked final text is.
+  // blocked final text is. A replacement does not clear a strategy text the
+  // check blocks: stream() has streamed that text before the approval was
+  // asked for, and under sequential, graph and review-loop the result's call
+  // records still hold it.
   if (decision.approved && opts.hitl.guardrailOverride !== false) {
     const postGuardrails = opts.hitl.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'];
     const output = (result.text as string) ?? '';
@@ -1943,7 +2073,8 @@ export interface GuardrailHitlOverrideResult {
  * caller then overrides the approval. A check that throws is skipped. The
  * final output is checked as the strategy produced it and, when the
  * approval's `modifications.output` replaces it, as the replacement the
- * caller receives, after the agency's output guardrails have read it.
+ * caller receives, after the agency's output guardrails have read it; a
+ * replacement does not clear a strategy text a check blocks.
  *
  * @param toolName - The approved tool's name, `agent:<name>` for an agent
  *   approval, or `return` for the final output.
@@ -1951,9 +2082,10 @@ export interface GuardrailHitlOverrideResult {
  *   strategy's input, plus `sent`, the text the agent is sent, when the
  *   approval's instructions were appended to it, and `parts`, the task and
  *   the other agents' output the strategy built the input from, each on its
- *   own, under graph, review-loop and debate; for the final output,
- *   `{ output }` with the strategy's text, plus `returned`, the approval's
- *   replacement, when it carries one.
+ *   own, under sequential (after its first agent), graph, review-loop and
+ *   debate and for the panel's chair; for the final output, `{ output }` with
+ *   the strategy's text, plus `returned`, the approval's replacement, when it
+ *   carries one.
  * @param guardrailIds - Ordered list of check IDs to run.
  * @param callbacks - Optional event callback map; each check's result goes to
  *   `guardrailResult`.
@@ -2046,7 +2178,13 @@ export async function runPostApprovalGuardrails(
  *
  * - `code-safety` — blocks a payload that matches one of its destructive
  *   command and statement patterns (e.g., `rm -rf /`, `DROP TABLE`,
- *   `format C:`).
+ *   `format C:`). Two of them match a statement only at the end of a text:
+ *   `rm -rf .`, and a `DELETE FROM <table>` with nothing after the table but
+ *   whitespace and a semicolon. The payload holds its texts as JSON, where a
+ *   text ends at its closing quote and a line break or a tab inside it is
+ *   written `\n` or `\t`, so both read those as the whitespace they stand
+ *   for, and a statement with whitespace after it still ends its text. Both
+ *   read a run of whitespace once, in time linear in its length.
  * - `pii-redaction` — blocks a payload that contains what looks like an
  *   unredacted SSN or credit card number.
  *
@@ -2071,7 +2209,9 @@ function evaluatePostApprovalGuardrail(
         /rm\s+-rf\s+\//i,
         /rm\s+-rf\s+~\//i,
         /rm\s+-rf\s+\*/i,
-        /rm\s+-rf\s+\.(?:["'\s/]|$)/i,
+        // `rm -rf .` before a quote, whitespace (a line break or a tab
+        // escaped in JSON included), a slash, or the end.
+        /rm\s+-rf\s+\.(?:["'\s/]|\\[nrt]|$)/i,
         /rm\s+-rf\s+\.\//i,
         /mkfs\./i,
         /dd\s+if=.*of=\/dev/i,
@@ -2079,7 +2219,18 @@ function evaluatePostApprovalGuardrail(
         /DROP\s+TABLE/i,
         /DROP\s+DATABASE/i,
         /TRUNCATE\s+TABLE/i,
-        /DELETE\s+FROM\s+\S+\s*;?\s*$/im,
+        // A `DELETE FROM <table>` that ends its line, with whitespace and a
+        // semicolon after the table at most. A semicolon right after the
+        // table is part of `\S+`, and one apart from it has whitespace before
+        // it, so no run of whitespace can be split two ways and a long run is
+        // read once.
+        /DELETE\s+FROM\s+\S+(?:\s+;)?\s*$/im,
+        // The same statement at the end of a text in the JSON payload, with
+        // whitespace, real or escaped, before the text's closing quote. The
+        // table is read as JSON characters (an escaped quote is part of a
+        // quoted name), never as whitespace or a semicolon, so the parts of
+        // the pattern never overlap.
+        /DELETE\s+FROM\s+(?:[^\s;"\\]|\\[^nrt])+(?:\s|\\[nrt])*(?:;(?:\s|\\[nrt])*)?",?$/im,
         /format\s+[A-Z]:/i,
         />\s*\/dev\/sd[a-z]/i,
         /chmod\s+-R\s+777\s+\//i,

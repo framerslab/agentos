@@ -127,7 +127,9 @@ export interface PromptComponents {
    * (structured input), then the assistant tool calls and tool results of
    * the turn's earlier calls. Token budgeting summarizes or truncates only
    * the messages before them, so the model always receives the request it
-   * answers and its own tool rounds. Defaults to 0.
+   * answers and its own tool rounds. A tool round the first of them belongs
+   * to is kept whole with them: a call before them whose result they hold is
+   * not dropped. Defaults to 0.
    */
   currentTurnMessageCount?: number;
   /** Current user input text. */

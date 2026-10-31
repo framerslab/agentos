@@ -39,6 +39,8 @@ interface TraceRow {
   strength: number;
   created_at: number;
   tags: string;
+  /** The trace's scope id; `''` for a trace filed under none. */
+  scope_id: string;
 }
 
 /** Result row when joining edges → nodes. */
@@ -132,14 +134,7 @@ export class ObsidianExporter extends MarkdownExporter {
     const body = trace.content + tagLine + wikiLinks;
 
     // The body is written as it is and never read for front matter of its own.
-    return writeFrontMatter(body, {
-      id: trace.id,
-      type: trace.type,
-      scope: trace.scope,
-      strength: trace.strength,
-      tags,
-      createdAt: trace.created_at,
-    });
+    return writeFrontMatter(body, this.frontMatterOf(trace, tags));
   }
 
   // -------------------------------------------------------------------------

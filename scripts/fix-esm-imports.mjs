@@ -9,14 +9,20 @@ const __dirname = path.dirname(__filename);
 const distDir = path.resolve(__dirname, '..', 'dist');
 const SELF_PACKAGE_NAME = '@framers/agentos';
 
-function collectJsFiles(dirPath) {
+/**
+ * The modules under `dirPath` whose relative imports need their file named: the compiled `.js` files, which Node
+ * loads, and the `.d.ts` files beside them, which a consumer's TypeScript reads. Under NodeNext a declaration's
+ * extensionless relative import resolves to nothing, so a consumer that skips library checks reads every type behind
+ * it as `any`. `./foo.js` in a declaration resolves to `./foo.d.ts`.
+ */
+function collectModuleFiles(dirPath) {
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
     const fullPath = path.join(dirPath, entry.name);
     if (entry.isDirectory()) {
-      files.push(...collectJsFiles(fullPath));
-    } else if (entry.isFile() && fullPath.endsWith('.js')) {
+      files.push(...collectModuleFiles(fullPath));
+    } else if (entry.isFile() && (fullPath.endsWith('.js') || fullPath.endsWith('.d.ts'))) {
       files.push(fullPath);
     }
   }
@@ -108,7 +114,7 @@ function copyIfPresent(sourcePath, targetPath) {
 
 /**
  * Walk the dist tree after rewriting and verify every static/dynamic relative
- * import has a resolvable extension. Catches the case where a previous build
+ * import, in a `.js` or a `.d.ts` file, has a resolvable extension. Catches the case where a previous build
  * left partial dist state (e.g. rimraf failed because another process held
  * files open) and the rewriter's regex didn't reach a stale file.
  *
@@ -116,12 +122,12 @@ function copyIfPresent(sourcePath, targetPath) {
  */
 export function findUnfixedRelativeImports(distDir) {
   const issues = [];
-  const jsFiles = collectJsFiles(distDir);
+  const moduleFiles = collectModuleFiles(distDir);
   const patterns = [
     /(^\s*(?:import|export)\s[\s\S]*?from\s+['"])([^'"]+)(['"])/gm,
     /(import\(\s*['"])([^'"]+)(['"]\s*\))/g,
   ];
-  for (const file of jsFiles) {
+  for (const file of moduleFiles) {
     const contents = fs.readFileSync(file, 'utf8');
     for (const pattern of patterns) {
       pattern.lastIndex = 0;
@@ -147,8 +153,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     process.exit(0);
   }
 
-  const jsFiles = collectJsFiles(distDir);
-  for (const file of jsFiles) {
+  const moduleFiles = collectModuleFiles(distDir);
+  for (const file of moduleFiles) {
     rewriteSpecifiers(file);
   }
 
@@ -157,7 +163,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     path.resolve(distDir, 'config', 'extension-secrets.json'),
   );
 
-  console.log(`[agentos fix-esm-imports] Processed ${jsFiles.length} files under ${distDir}.`);
+  console.log(`[agentos fix-esm-imports] Processed ${moduleFiles.length} files under ${distDir}.`);
   if (copiedExtensionSecrets) {
     console.log('[agentos fix-esm-imports] Mirrored extension-secrets.json into dist/config for public package exports.');
   }

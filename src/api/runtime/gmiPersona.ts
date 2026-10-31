@@ -4,8 +4,10 @@
  *
  * The base system prompt is the text the legacy path sends: `buildSystemPrompt(opts)`
  * (or the joined `systemBlocks`). With the agent's `learning` option on, the
- * personality section is left out of it: the GMI sends that section as a system
- * prompt of its own on every turn. The chain-of-thought instruction is not part of
+ * personality section is left out of it: a GMI given a learner session or the
+ * persona's traits (`GMIBaseConfig.learning`, `GMIBaseConfig.personaTraits`), as
+ * `gmi()` gives its GMIs both, sends that section as a system prompt of its own on
+ * every turn. The chain-of-thought instruction is not part of
  * it: `gmi()` puts it first in the system prompt of each model call that offers
  * tools, as `generateText` does. The completion options are the
  * ones `agent()` forwards on every call. Sentiment presets are expanded into
@@ -39,10 +41,19 @@ function personaIdFor(name: string): string {
   return slug || `agent-${createHash('sha256').update(name).digest('hex').slice(0, 12)}`;
 }
 
+/**
+ * The output cap each model call of an agent built from these options is sent with, as `agent()` forwards it:
+ * `maxTokens`, else `controls.maxTotalTokens`; undefined when neither is set. A launch's one-call floor counts a
+ * member's call with it.
+ */
+export function callMaxTokensOf(opts: Pick<AgentOptions, 'maxTokens' | 'controls'>): number | undefined {
+  return opts.maxTokens ?? opts.controls?.maxTotalTokens;
+}
+
 /** The completion options `agent()` forwards on every call (its `baseOpts`), unset ones left out. */
 function completionOptionsOf(opts: AgentOptions): Partial<ModelCompletionOptions> {
   const out: Partial<ModelCompletionOptions> = {};
-  const maxTokens = opts.maxTokens ?? opts.controls?.maxTotalTokens;
+  const maxTokens = callMaxTokensOf(opts);
   if (maxTokens !== undefined) out.maxTokens = maxTokens;
   if (opts.controls?.maxDurationMs !== undefined) out.requestTimeout = opts.controls.maxDurationMs;
   if (opts.thinking !== undefined) out.thinking = opts.thinking;
@@ -67,6 +78,9 @@ function basePrompt(opts: AgentOptions, learningOn: boolean): string {
  * @param opts - The agent's options.
  * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, and whether learning is on.
  * @param tools - The agent's tools, adapted: they decide the persona's capabilities.
+ * @returns The persona. With `cognition.learning` set its base prompt has no personality section: a GMI built from it
+ *   sends the section only when it is given a learner session (`GMIBaseConfig.learning`) or the persona's traits
+ *   (`GMIBaseConfig.personaTraits`), as `gmi()` gives it.
  * @throws {Error} When no provider or model can be resolved, as `generateText` throws.
  */
 export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedCognition, tools: ITool[]): IPersonaDefinition {

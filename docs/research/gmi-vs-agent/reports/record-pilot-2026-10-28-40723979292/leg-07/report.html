@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Study report: record-leg-7</title>
+<style>
+:root { color-scheme: light; }
+body { margin: 0; background: #ffffff; color: #1b1b1b; font: 10.5pt/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+main { max-width: 64rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+h1 { font-size: 1.55rem; margin: 0 0 0.75rem; }
+h2 { font-size: 1.15rem; margin: 1.8rem 0 0.5rem; padding-bottom: 0.25rem; border-bottom: 1px solid #c8c8c8; break-after: avoid; }
+p { margin: 0.4rem 0; }
+p.mode { padding: 0.6rem 0.8rem; border: 2px solid #8a5a00; background: #fff4dc; font-weight: 600; }
+p.not-run { color: #5f5f5f; font-style: italic; }
+table { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1rem; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+caption { caption-side: top; text-align: left; font-weight: 600; padding: 0.25rem 0; }
+caption .source { font-weight: 400; color: #5f5f5f; }
+th, td { border: 1px solid #c8c8c8; padding: 0.25rem 0.4rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+thead th { background: #f0f0f0; }
+tr { break-inside: avoid; }
+table.quality caption { color: #3d3d3d; }
+@page { margin: 16mm 14mm; }
+@media print { main { max-width: none; padding: 0; } }
+</style>
+</head>
+<body>
+<main>
+<h1>Study report: record-leg-7</h1>
+<p class="mode">Record mode: replies come from the stub; quality numbers are mechanics only.</p>
+<section id="run-identity">
+<h2>1. Run identity</h2>
+<p>Written 2026-10-28T16:33:29.012Z from the files the appendix lists; the generator calls no model.</p>
+<table>
+<caption>Run identity <span class="source">(source: results.json, calls.json, report-header.public.json)</span></caption>
+<thead><tr><th scope="col">Field</th><th scope="col">Value</th></tr></thead>
+<tbody>
+<tr><td>Study</td><td>gmi-vs-agent</td></tr>
+<tr><td>Run</td><td>record-leg-7</td></tr>
+<tr><td>Mode</td><td>record</td></tr>
+<tr><td>Task</td><td>T3</td></tr>
+<tr><td>Items</td><td>1: item 1</td></tr>
+<tr><td>Arms</td><td>B, C0, C1, B+S</td></tr>
+<tr><td>Sample</td><td>1</td></tr>
+<tr><td>C mode</td><td>warm</td></tr>
+<tr><td>Outcome</td><td>completed</td></tr>
+<tr><td>Subject</td><td>anthropic claude-haiku-4-5-20251001</td></tr>
+<tr><td>Vendors called</td><td>none: the stub answers every call (record mode)</td></tr>
+<tr><td>agentos</td><td>0.14.25</td></tr>
+<tr><td>Harness</td><td>agentos-bench, gmi-vs-agent family (unpublished), revision 8c0361f42073</td></tr>
+<tr><td>Runner</td><td>private runner at 2fdf749f5b55, CI run 40723979292</td></tr>
+<tr><td>Protocol</td><td>PROTOCOL-0a.md, SHA-256 10579b4e3eb9; addendum PROTOCOL-0a-addendum.md, SHA-256 684c21c83e02</td></tr>
+</tbody>
+</table>
+</section>
+<section id="question">
+<h2>2. The question</h2>
+<p>Does a GMI on the full AgentOS runtime improve companion-style, long-horizon conversation over the agent() loop the reference product runs, and at what cost in dollars and latency per turn?</p>
+<p>B (the reference), C0 (the GMI) and C1 (the GMI with its sentiment presets, the candidate) decide it; every other arm is a control or a diagnostic. C minus B is what the GMI runtime adds over the reference product's agent()-based path, which builds the same memory manager; B minus A is what that memory layer and the product's assembly add to agent(), since A is agent() with the reference product's prompt and tools and no memory; C minus A is the sum of the two and is reported as a description (on T1 it is read as the memory wiring check, not as a runtime effect). A minus Z is what agent() with those tools, some of them inert, and its chain-of-thought block adds over one plain call, and Z is the floor every arm is read against.</p>
+<p>The outcomes are GO, GO-COST, PORT, KILL, NOT SHOWN and NO VERDICT under the decision rules of the study's protocol (the Metrics and decision rules section of the study page, docs.agentos.sh/benchmarks/gmi-vs-agent). This report states what one run produced and applies no verdict rule.</p>
+</section>
+<section id="arms">
+<h2>3. The arms</h2>
+<p>Z is reported in every table and enters no decision rule. A minus Z, what agent() adds (its tools, the chain-of-thought block it prepends when tools are mounted, and its turn pipeline), is read on the A-against-Z pairs and the absolute scores. C against Z is read only on the absolute scores of the turns both arms ran, each arm on those turns alone (section 6); it is not measured on the axes judged only in pairs (better_reply, better_written), and no figure chains C minus A with A minus Z.</p>
+<table>
+<caption>The arms <span class="source">(source: results.json)</span></caption>
+<thead><tr><th scope="col">Arm</th><th scope="col">Construction</th><th scope="col">In this run</th><th scope="col">Turns</th><th scope="col">Failed turns</th></tr></thead>
+<tbody>
+<tr><td>B</td><td>The reference: the product's companion reply path as production runs it, driven by the private runner.</td><td>yes</td><td>8</td><td>0</td></tr>
+<tr><td>C0</td><td>A GMI on the full AgentOS runtime with B's model, memory configuration, system text per turn and tools.</td><td>yes</td><td>8</td><td>0</td></tr>
+<tr><td>C1</td><td>C0 with the shipped sentiment presets and two mood-keyed prompt elements: the candidate.</td><td>yes</td><td>8</td><td>0</td></tr>
+<tr><td>B+S</td><td>B with one frozen sentence as system context: notice frustration or confusion, acknowledge it, change approach.</td><td>yes</td><td>8</td><td>0</td></tr>
+<tr><td>A</td><td>agent() with B's static system blocks, the turn's addon, B's tools and limits, and no memory.</td><td>no</td><td>-</td><td>-</td></tr>
+<tr><td>A+gold</td><td>A with the gold evidence appended to the user turn (T1).</td><td>no</td><td>-</td><td>-</td></tr>
+<tr><td>R</td><td>Bench retrieval over the ingested store, then a reader on the subject model (T1 anchor set).</td><td>no</td><td>-</td><td>-</td></tr>
+<tr><td>Z</td><td>The bare loop: one streamed chat-completions call per turn over fetch, with A's model, A's static system blocks and the turn's addon, A's window and limits, and no chain-of-thought block, tools, memory or framework.</td><td>no</td><td>-</td><td>-</td></tr>
+</tbody>
+</table>
+</section>
+<section id="tasks">
+<h2>4. Task families and item counts</h2>
+<table>
+<caption>Task families and item counts <span class="source">(source: results.json)</span></caption>
+<thead><tr><th scope="col">Task</th><th scope="col">Measures</th><th scope="col">In this run</th><th scope="col">Items</th><th scope="col">Turns</th></tr></thead>
+<tbody>
+<tr><td>T1</td><td>Recall: LongMemEval-S and LOCOMO questions asked after ingestion at the datasets' dates, graded per question.</td><td>no</td><td>-</td><td>-</td></tr>
+<tr><td>T2</td><td>Persona conversations: personality, responses and in-conversation memory, with callbacks, persona facts, false premises and in-fiction pressure.</td><td>no</td><td>-</td><td>-</td></tr>
+<tr><td>T3</td><td>Sentiment adaptation: the replies after frustration and confusion cues, and false-positive scenes.</td><td>yes</td><td>1</td><td>8</td></tr>
+<tr><td>T4</td><td>Text quality: single-turn prompts with frozen context and memory, judged in pairs.</td><td>no</td><td>-</td><td>-</td></tr>
+</tbody>
+</table>
+</section>
+<section id="metrics">
+<h2>5. Metrics, judges and pins</h2>
+<p class="not-run">not run: no judgment set given</p>
+<p>Flags (persona-violation-v1, adaptation-v1, false-positive-v1): a judgment is the mean of the seats' hits, and an arm's figure is the mean over its judged replies. Grades (t1-grade, probe-grade): a judgment is 1 when the final grade is correct (J1 and J2 agree, else J3, else J1) and 0 otherwise.</p>
+<p>Pairs (pairwise-reply-v1, pairwise-text-v1): side a scores 1 for a win, 0.5 for a tie and 0 for a loss on each vote, over both orders and both seats; a mean above 0.50 favours side a. Planted controls, calibration items and the A/A control are left out of sections 6 and 7.</p>
+<p>Intervals: 95% percentile intervals of a cluster bootstrap with 10,000 resamples (clusterBootstrap), resampling cards (T1: the question's cluster from the T1 pack).</p>
+<p>Judges are model seats pinned by engine, model and effort; a reply whose header names another seat, engine, model or effort is discarded, and the seat runner asks again. An engine that reports no served model writes the requested slug in its header, so the model of J1 is recorded as requested and unverified, and J1 is read through its planted controls and repeats.</p>
+</section>
+<section id="results">
+<h2>6. Results per family</h2>
+<p class="not-run">not run: no judgment set given (the absolute judgments)</p>
+<table class="quality">
+<caption>Turns and failures per arm (record mode: mechanics only) <span class="source">(source: results.json)</span></caption>
+<thead><tr><th scope="col">Arm</th><th scope="col">Turns</th><th scope="col">Deadline</th><th scope="col">Error chunk</th><th scope="col">Memory missing</th><th scope="col">Not the subject model</th><th scope="col">Memory call error</th><th scope="col">Other</th></tr></thead>
+<tbody>
+<tr><td>B</td><td>8</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td>C0</td><td>8</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td>C1</td><td>8</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+<tr><td>B+S</td><td>8</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+</tbody>
+</table>
+<table class="quality">
+<caption>Sentiment firings per arm (T3) (record mode: mechanics only) <span class="source">(source: results.json)</span></caption>
+<thead><tr><th scope="col">Arm</th><th scope="col">Turns with a firing</th><th scope="col">Events</th></tr></thead>
+<tbody>
+<tr><td>B</td><td>0</td><td>0</td></tr>
+<tr><td>C0</td><td>0</td><td>0</td></tr>
+<tr><td>C1</td><td>0</td><td>0</td></tr>
+<tr><td>B+S</td><td>0</td><td>0</td></tr>
+</tbody>
+</table>
+</section>
+<section id="pairwise">
+<h2>7. Pairwise verdicts</h2>
+<p class="not-run">not run: no judgment set given</p>
+</section>
+<section id="cost">
+<h2>8. Cost per arm, tokens, cached tokens and the counterfactual</h2>
+<p class="not-run">not run: record mode: the stub answers every call and prices none</p>
+</section>
+<section id="latency">
+<h2>9. Latency per arm</h2>
+<p>Nearest-rank quantiles of the seam's timings from each turn's start; a turn cut at the deadline ranks above every completed turn and reads &quot;deadline&quot; where it holds the rank. Completion is the turn's end after the runner's output guard. The post-turn wait is the time a C arm waits after its reply for the work the turn queued, read from its post-turn-wait event; an arm that records none reads &quot;-&quot;. The study's latency ceilings read the first token's p50 and p95 and the last token's p95 against B.</p>
+<table class="quality">
+<caption>Latency per arm in milliseconds (record mode: mechanics only) <span class="source">(source: results.json)</span></caption>
+<thead><tr><th scope="col">Arm</th><th scope="col">Turns</th><th scope="col">Deadlines</th><th scope="col">First token p50</th><th scope="col">First token p95</th><th scope="col">Last token p50</th><th scope="col">Last token p95</th><th scope="col">Completion p50</th><th scope="col">Completion p95</th><th scope="col">Post-turn wait p95</th></tr></thead>
+<tbody>
+<tr><td>B</td><td>8</td><td>0</td><td>36</td><td>53</td><td>36</td><td>53</td><td>50</td><td>157</td><td>-</td></tr>
+<tr><td>C0</td><td>8</td><td>0</td><td>13</td><td>50</td><td>13</td><td>50</td><td>21</td><td>61</td><td>0</td></tr>
+<tr><td>C1</td><td>8</td><td>0</td><td>14</td><td>41</td><td>14</td><td>41</td><td>23</td><td>51</td><td>0</td></tr>
+<tr><td>B+S</td><td>8</td><td>0</td><td>35</td><td>49</td><td>35</td><td>49</td><td>45</td><td>61</td><td>-</td></tr>
+</tbody>
+</table>
+</section>
+<section id="determinism">
+<h2>10. The determinism gate and the stability check</h2>
+<p class="not-run">not run: no determinism record given (two record runs of one script compared by T5's gate)</p>
+<p class="not-run">not run: no judgment set given (the judging checks)</p>
+<p>The runner's error rows: each turn's failure, a call left unanswered or answered with an error status, a call from another arm's key during a turn (checked on the run's own call log), and harness errors.</p>
+<table>
+<caption>Checks on this run <span class="source">(source: results.json)</span></caption>
+<thead><tr><th scope="col">Check</th><th scope="col">Count</th></tr></thead>
+<tbody>
+<tr><td>Stray connections</td><td>0</td></tr>
+</tbody>
+</table>
+</section>
+<section id="ledger">
+<h2>11. The spend ledger</h2>
+<p class="not-run">not run: no ledger given (a record run spends nothing)</p>
+</section>
+<section id="limitations">
+<h2>12. Limitations</h2>
+<p>Record mode answers every call from the stub, so its quality figures measure the harness's mechanics and not the arms.</p>
+<p>B runs in a private runner on the reference product's own code: section 3 describes its construction, and its code is not published. Every other arm's code is in the agentos-bench family, which is not published with this report.</p>
+<p>Z is a control: a turn that needs a tool or a memory records Z's miss in the task's own measure, and Z enters no decision rule.</p>
+<p>Judges are model seats; their verdicts are read through the planted controls and the judging checks, not taken as ground truth.</p>
+<p>Intervals assume the clusters are independent; pairwise means pool both orders and both seats.</p>
+<p>This report decides nothing: the analysis applies the decision rules of the study's protocol.</p>
+<p>Deviation: Materials writer: Claude Code 2.1.289 with Claude Fable 5.1 at effort high, where the design named a Gemini model, which its client no longer offered on the day.</p>
+<p>Deviation: Routing: the runner sends every vendor call of the reference arm to the stub or the metering proxy by rewriting the vendors' hosts inside its own process, since the reference product's calls take no base address of their own.</p>
+<p>Deviation: The reference arm drives the product's streaming reply path, and its history is the last 50 stored messages the product reloads on every turn, where the other arms keep a window of 60.</p>
+<p>Deviation: A GMI turn stops its tool loop at 5 model steps where the reference arm allows 12; the pilot report counts the reference arm's turns past 5 steps.</p>
+<p>Deviation: The subject model was read from the reference product's reply records over the days they cover, a window shorter than the 30 days the design planned; every production setting along the reference arm's path is mirrored, beyond the list the design named.</p>
+</section>
+<section id="appendix">
+<h2>13. Appendix: rubric hashes, materials provenance and the price table</h2>
+<p class="not-run">not run: no judgment set given (the rubric hashes)</p>
+<p class="not-run">not run: no price table given (the day's prices)</p>
+<p>No material excluded.</p>
+<table>
+<caption>Inputs <span class="source">(source: every file this report read)</span></caption>
+<thead><tr><th scope="col">Input</th><th scope="col">File</th><th scope="col">SHA-256</th></tr></thead>
+<tbody>
+<tr><td>results</td><td>results.json</td><td>cbb479f465d5103c8751cb60b9394b864901b666efa0e860badb2eb245dcf7a7</td></tr>
+<tr><td>calls</td><td>calls.json</td><td>b04b7515efcaf987632b252e4ab062ecf7c1c0bd31538d597e5ea16c2fbe01ce</td></tr>
+<tr><td>header</td><td>report-header.public.json</td><td>0824c42b854b27dd5f7224a880bc97babebb159fe068ea8e2e36c98e218362ad</td></tr>
+<tr><td>materials</td><td>BRIEF.md</td><td>0984553b2f01690c6966e9af448cab652790f907cc235d62339c54dec9bea522</td></tr>
+<tr><td>materials</td><td>m01.prompt.md</td><td>c1f0dcd334483a5b6c8fd923ef68e238137d14c5f466331ae8b8d1a357b7e830</td></tr>
+<tr><td>materials</td><td>m01.reply.txt</td><td>2a29ccdc1b87e1556178bb06ad4296f900406033374a5173f38a797924c97d16</td></tr>
+<tr><td>T1 pack</td><td>haystack 1</td><td>a04ca369e5cab724ab65d7f85c16371bd0b93c5a46a360451828ce9afc841a49</td></tr>
+<tr><td>T1 pack</td><td>haystack 2</td><td>0bf5d2ff595e4791c0b02775c80fa7a0c2c3685c17a960627fbe21841b1e2577</td></tr>
+<tr><td>T1 pack</td><td>haystack 3</td><td>c0cde690ee161dd86ec63bbcac75637ec3ce6d633c06c659534884ac80d4c0ad</td></tr>
+<tr><td>T1 pack</td><td>haystack 4</td><td>ebdd85f075360012569dd75c85874c04dc1adf6dc81fc243137e3a955e94c516</td></tr>
+<tr><td>T1 pack</td><td>haystack 5</td><td>673bc98414fc02481be70f4fcf6658136a1358b9f5a4945869f91722b4f24379</td></tr>
+<tr><td>T1 pack</td><td>haystack 6</td><td>f2f08850af4a2b747483a5dd921af2b8a8ffc9c573cd3b74e822514b08412c99</td></tr>
+<tr><td>T1 pack</td><td>haystack 7</td><td>db4b45823a155be77669fa5fbe5930a409a0bdbe068d8bf1400fd0fd1f1ad224</td></tr>
+<tr><td>T1 pack</td><td>haystack 8</td><td>89c082198e64aae4a3bbfefbf769b222733564bbce87158d1e2def45d319d2ef</td></tr>
+<tr><td>T1 pack</td><td>haystack 9</td><td>90b3cfe022cf49ae69d4e925d2a636d4a07be9b7609c3c551e3fcfd0b509fcbf</td></tr>
+<tr><td>T1 pack</td><td>haystack 10</td><td>e647ec7ad89c528428c630dcea15c01341aca6aebc5304676c2222b71689141a</td></tr>
+<tr><td>T1 pack</td><td>pack.json</td><td>1085990f9b05ebfd35cdec94404a115e39d13ddc8b118a5f6ac7153e5885fde7</td></tr>
+</tbody>
+</table>
+<table>
+<caption>Materials files <span class="source">(source: materials)</span></caption>
+<thead><tr><th scope="col">Files</th><th scope="col">SHA-256 of the set</th></tr></thead>
+<tbody>
+<tr><td>3</td><td>c0eb554ce1db87d06e3f0fab50cd7e4c2154b84aab9f0a17693fadd59a9387c4</td></tr>
+</tbody>
+</table>
+<table>
+<caption>Materials batches <span class="source">(source: materials)</span></caption>
+<thead><tr><th scope="col">Batch</th><th scope="col">Seat</th><th scope="col">Engine</th><th scope="col">Model</th><th scope="col">Effort</th><th scope="col">Items</th><th scope="col">Reply SHA-256</th></tr></thead>
+<tbody>
+<tr><td>m01</td><td>M</td><td>claude-code 2.1.289</td><td>claude-fable-5-1</td><td>high</td><td>40</td><td>2a29ccdc1b87e1556178bb06ad4296f900406033374a5173f38a797924c97d16</td></tr>
+</tbody>
+</table>
+<table>
+<caption>T1 pack <span class="source">(source: T1 pack)</span></caption>
+<thead><tr><th scope="col">File</th><th scope="col">SHA-256</th></tr></thead>
+<tbody>
+<tr><td>longmemeval-s source: longmemeval_s.json</td><td>08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894</td></tr>
+<tr><td>locomo source: locomo10.json</td><td>79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4</td></tr>
+<tr><td>haystack 1</td><td>a04ca369e5cab724ab65d7f85c16371bd0b93c5a46a360451828ce9afc841a49</td></tr>
+<tr><td>haystack 2</td><td>0bf5d2ff595e4791c0b02775c80fa7a0c2c3685c17a960627fbe21841b1e2577</td></tr>
+<tr><td>haystack 3</td><td>c0cde690ee161dd86ec63bbcac75637ec3ce6d633c06c659534884ac80d4c0ad</td></tr>
+<tr><td>haystack 4</td><td>ebdd85f075360012569dd75c85874c04dc1adf6dc81fc243137e3a955e94c516</td></tr>
+<tr><td>haystack 5</td><td>673bc98414fc02481be70f4fcf6658136a1358b9f5a4945869f91722b4f24379</td></tr>
+<tr><td>haystack 6</td><td>f2f08850af4a2b747483a5dd921af2b8a8ffc9c573cd3b74e822514b08412c99</td></tr>
+<tr><td>haystack 7</td><td>db4b45823a155be77669fa5fbe5930a409a0bdbe068d8bf1400fd0fd1f1ad224</td></tr>
+<tr><td>haystack 8</td><td>89c082198e64aae4a3bbfefbf769b222733564bbce87158d1e2def45d319d2ef</td></tr>
+<tr><td>haystack 9</td><td>90b3cfe022cf49ae69d4e925d2a636d4a07be9b7609c3c551e3fcfd0b509fcbf</td></tr>
+<tr><td>haystack 10</td><td>e647ec7ad89c528428c630dcea15c01341aca6aebc5304676c2222b71689141a</td></tr>
+<tr><td>pack.json</td><td>1085990f9b05ebfd35cdec94404a115e39d13ddc8b118a5f6ac7153e5885fde7</td></tr>
+</tbody>
+</table>
+</section>
+</main>
+</body>
+</html>

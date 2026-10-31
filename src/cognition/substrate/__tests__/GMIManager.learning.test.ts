@@ -9,7 +9,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GMI } from '../GMI';
-import { GMIManager, type GMIAgencyContextOptions } from '../GMIManager';
+import { GMIManager, type GMIAgencyContextOptions, type GMIManagerConfig } from '../GMIManager';
 import type { IPersonaDefinition } from '../personas/IPersonaDefinition';
 import type { IPersonaLoader } from '../personas/IPersonaLoader';
 import { renderPersonalitySection } from '../personas/personalityPrompt';
@@ -42,7 +42,7 @@ const turn = (over: Partial<TurnInputForLearning> = {}): TurnInputForLearning =>
 const stateOf = (prepared: TurnPreparation) => (prepared.learner === 'bound' ? 'bound' : prepared.noLearnerReason);
 
 const managers: GMIManager[] = [];
-async function managerWith(learningLayer?: ILearningLayer): Promise<GMIManager> {
+async function managerWith(learningLayer?: ILearningLayer, extra: Partial<GMIManagerConfig> = {}): Promise<GMIManager> {
   const personaLoader: IPersonaLoader = {
     initialize: async () => undefined,
     loadPersonaById: async (id: string) => (id === persona.id ? persona : undefined),
@@ -52,7 +52,7 @@ async function managerWith(learningLayer?: ILearningLayer): Promise<GMIManager> 
     getOrCreateConversationContext: async () => new ConversationContext('conv-1'),
   } as unknown as ConversationManager;
   const manager = new GMIManager(
-    { personaLoaderConfig: { personaSource: 'in-memory' }, ...(learningLayer ? { learningLayer } : {}) },
+    { personaLoaderConfig: { personaSource: 'in-memory' }, ...(learningLayer ? { learningLayer } : {}), ...extra },
     undefined,
     undefined,
     conversationManager,
@@ -119,6 +119,41 @@ describe('a runtime with a learning layer', () => {
     expect(plainTurn.systemPrompts[0].content).toBe(renderPersonalitySection(persona.personalityTraits));
   });
 
+  it("reads a role overlay's patch written under an alias of a trait the persona sets by its canonical key", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const manager = await managerWith(createLearningLayer());
+    const seat: GMIAgencyContextOptions = {
+      agencyId: 'agency-1',
+      roleId: 'second-reader',
+      evolutionRules: [{ id: 'softer', trigger: 'always', patch: { personaTraits: { honestyHumility: 0.1, extraversion: 0.9 } } }],
+    };
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'seat-session', persona.id, undefined, undefined, undefined, undefined, seat, 'A');
+    const prepared = await gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' }));
+    // The persona's honesty stays, and the patch that names it under its SOUL.md spelling is warned about.
+    expect(prepared.systemPrompts[0].content).toBe(renderPersonalitySection({ honesty: 0.9, extraversion: 0.9 }));
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("persona 'reviewer' sets honesty"))).toBe(true);
+  });
+
+  it("opens a session whose first open failed under its first turn's organization, and keeps a hand-over made while it could not open", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const real = createLearningLayer();
+    let failures = 2;
+    const layer = recordingLayer(async (learnerKey, context) => {
+      if (failures-- > 0) throw new Error('store offline');
+      return real.forLearner(learnerKey, context);
+    });
+    const manager = await managerWith(layer);
+    // No organization from the caller: the session opens at the GMI's first prepared turn.
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id);
+    const session = gmi.getLearnerSession!()!;
+    await expect(session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow('store offline');
+    await expect(session.prepareTurn(turn({ namespace: 'B' }))).rejects.toThrow('store offline');
+    expect(stateOf(await session.prepareTurn(turn({ namespace: 'A' })))).toBe('other_namespace');
+    expect(stateOf(await session.prepareTurn(turn({ namespace: 'A' })))).toBe('other_namespace');
+    expect(vi.mocked(layer.forLearner).mock.calls.map(([learnerKey]) => learnerKey?.namespace)).toEqual(['A', 'A', 'A']);
+  });
+
   it("ends a GMI's learner session once the GMI shuts down", async () => {
     const endSession = vi.fn(async () => undefined);
     const layer = recordingLayer(async () => ({ prepareTurn: vi.fn(), endSession, currentTraits: () => ({}) }) as unknown as ILearnerSession);
@@ -156,6 +191,115 @@ describe('a runtime with a learning layer', () => {
     await expect(gmi.getLearnerSession!()!.prepareTurn(turn())).rejects.toThrow('layer down');
     expect(layer.forLearner).toHaveBeenCalledTimes(2);
   });
+
+  it('builds the GMI within the open budget when the layer does not answer, with a session the open answers when it comes', async () => {
+    // A runtime turn waits on GMI acquisition; an open that never settles would hold the turn for good.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let answer: ((session: ILearnerSession) => void) | undefined;
+    const layer = recordingLayer(() => new Promise<ILearnerSession>((resolve) => {
+      answer = resolve;
+    }));
+    // Long enough that the open is still the session's when it answers, past the acquisition's budget.
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 5_000 });
+    const startedAt = Date.now();
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_900);
+    expect(Date.now() - startedAt).toBeLessThan(4_000);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('no learner session'))).toBe(true);
+    // The late answer is the session's: the GMI's first turn takes it, and the layer is not asked again.
+    const session = gmi.getLearnerSession!()!;
+    const prepared = session.prepareTurn(turn({ namespace: 'A' }));
+    const late = await createLearningLayer().forLearner(
+      { namespace: 'A', agentKey: 'reviewer', userId: 'user-1' },
+      { sessionId: 'session-1', personaId: 'reviewer', authoredTraits: { honesty: 0.9, extraversion: 0.5 } },
+    );
+    answer!(late);
+    expect(stateOf(await prepared)).toBe('bound');
+    expect(layer.forLearner).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
+  it("asks the layer again at the GMI's first turn when the open its build left running fails before that turn", async () => {
+    // A failed open is no answer for a turn that comes after it: the turn asks the layer again.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const real = createLearningLayer();
+    let fail: ((error: Error) => void) | undefined;
+    let opens = 0;
+    const layer = recordingLayer((learnerKey, context) => {
+      opens += 1;
+      if (opens > 1) return real.forLearner(learnerKey, context);
+      return new Promise<ILearnerSession>((_resolve, reject) => {
+        fail = reject;
+      });
+    });
+    // Long enough that the open is still the session's when it fails, past the acquisition's budget.
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 5_000 });
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    // The open fails after the GMI was built and before its first turn.
+    fail!(new Error('layer down'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stateOf(await gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' })))).toBe('bound');
+    expect(layer.forLearner).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it('ends the learner session of a GMI that fails to initialize within shutdownTimeoutMs, when the session does not end', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const endSession = vi.fn(() => new Promise<void>(() => undefined));
+    const layer = recordingLayer(async () => ({ prepareTurn: vi.fn(), endSession, currentTraits: () => ({}) }) as unknown as ILearnerSession);
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 200 });
+    vi.spyOn(GMI.prototype, 'initialize').mockRejectedValueOnce(new Error('initialize failed'));
+    const startedAt = Date.now();
+    await expect(
+      manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, ''),
+    ).rejects.toThrow(/Failed to initialize new GMI instance/);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(endSession).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('did not end within 200 ms'))).toBe(true);
+  }, 10_000);
+
+  it('treats an answer of the layer that is not a learner session as a failed open, so each turn has no learner', async () => {
+    // A GMI with no session would tell its tools nothing, and they would act as on a host with no layer.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const layer = recordingLayer(async () => undefined as unknown as ILearnerSession);
+    const manager = await managerWith(layer);
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('no learner session'))).toBe(true);
+    const session = gmi.getLearnerSession!()!;
+    expect(session).toBeDefined();
+    await expect(session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow(/no learner session/);
+    expect(layer.forLearner).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats an answer with only some of a learner session as a failed open', async () => {
+    // A session that cannot end, or say its traits, would fail at the GMI's shutdown instead of at its open.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const layer = recordingLayer(async () => ({ prepareTurn: vi.fn() }) as unknown as ILearnerSession);
+    const manager = await managerWith(layer);
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('no learner session'))).toBe(true);
+    await expect(gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow(/no learner session/);
+  });
+
+  it('asks the layer again for a session an open has not given within shutdownTimeoutMs, and ends one it gives later', async () => {
+    // A stalled open would otherwise hold every later turn of the GMI to its preparation budget, with no new ask.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const real = createLearningLayer();
+    const lateEnd = vi.fn(async () => undefined);
+    let opens = 0;
+    const layer = recordingLayer(async (learnerKey, context) => {
+      opens += 1;
+      if (opens > 1) return real.forLearner(learnerKey, context);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      return { prepareTurn: vi.fn(), currentTraits: () => ({}), endSession: lateEnd } as unknown as ILearnerSession;
+    });
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 200 });
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    expect(stateOf(await gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' })))).toBe('bound');
+    expect(layer.forLearner).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(lateEnd).toHaveBeenCalledTimes(1));
+  }, 10_000);
 });
 
 describe('a runtime without a learning layer', () => {

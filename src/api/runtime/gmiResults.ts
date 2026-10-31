@@ -66,6 +66,8 @@ export interface GmiTurnFolderOptions {
    * streamText report it: it is the thread key for the next request's diagnostics.
    */
   cacheDiagnostics?: boolean;
+  /** Called once, when the turn's failure is first recorded (an ERROR chunk or a thrown error). */
+  onFailure?: () => void;
 }
 
 /**
@@ -122,11 +124,13 @@ export class GmiTurnFolder {
       }
       case GMIOutputChunkType.ERROR: {
         const details = chunk.errorDetails as { code?: unknown; details?: unknown } | undefined;
+        const first = this.failure === undefined;
         this.failure = {
           code: typeof details?.code === 'string' ? details.code : undefined,
           message: String(chunk.content),
           details: details?.details,
         };
+        if (first) this.options.onFailure?.();
         break;
       }
       default:
@@ -136,11 +140,13 @@ export class GmiTurnFolder {
 
   /** Marks the turn failed by a thrown error (the turn's generator itself threw). An ERROR chunk already seen wins. */
   fail(error: unknown): void {
-    this.failure ??= {
+    if (this.failure !== undefined) return;
+    this.failure = {
       code: error instanceof GMIError ? String(error.code) : undefined,
       message: error instanceof Error ? error.message : String(error),
       details: error instanceof GMIError ? error.details : undefined,
     };
+    this.options.onFailure?.();
   }
 
   /**
@@ -300,6 +306,13 @@ export interface GmiStreamOptions {
    * `fullStream` before the turn ended (a `break`, or `return()` on the iterator).
    */
   stop?: () => void;
+  /**
+   * The error the stream's `error` part carries in place of the turn's when the
+   * caller's signal stopped the turn (its reason); undefined to keep the turn's
+   * error. Read when the part is made, so the caller decides the stop when the
+   * turn's failure is recorded (`GmiTurnFolderOptions.onFailure`).
+   */
+  stoppedBy?: () => Error | undefined;
 }
 
 /**
@@ -313,7 +326,8 @@ export interface GmiStreamOptions {
  *
  * `textStream` yields every TEXT_DELTA as it arrives. `fullStream` maps
  * TEXT_DELTA to `text`, TOOL_CALL_REQUEST to `tool-call`, TOOL_RESULT to
- * `tool-result` and ERROR (or a thrown error) to a final `error` part. `text`
+ * `tool-result` and ERROR (or a thrown error) to a final `error` part, whose
+ * error is `options.stoppedBy`'s when it gives one. `text`
  * is the latest step's text; after an error it is the text the failed step
  * delivered, as streamText resolves it.
  *
@@ -387,7 +401,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
             break;
           }
           case GMIOutputChunkType.ERROR:
-            parts.push({ type: 'error', error: folder.toError() ?? new Error(String(chunk.content)) });
+            parts.push({ type: 'error', error: options.stoppedBy?.() ?? folder.toError() ?? new Error(String(chunk.content)) });
             break;
           default:
             break;
@@ -396,7 +410,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       }
     } catch (error) {
       folder.fail(error);
-      parts.push({ type: 'error', error: error instanceof Error ? error : new Error(String(error)) });
+      parts.push({ type: 'error', error: options.stoppedBy?.() ?? (error instanceof Error ? error : new Error(String(error))) });
     } finally {
       const last = folder.steps.at(-1);
       p.text.resolve(folder.error() && stepDelivered ? stepDelivered : folder.text());

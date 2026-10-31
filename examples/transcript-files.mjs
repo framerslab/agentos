@@ -107,7 +107,8 @@ const SAMPLES = {
 
 /** A file's turns, read by the format its name and its bytes give; `null` for a file that is none of them. */
 async function read(name, bytes) {
-  // The whole file: Fireflies's JSON can hold its sentences, and Otter's export its second turn, past a file's first bytes.
+  // The whole file: Fireflies's JSON can hold its sentences, and Otter's export its second turn or its closing line, past
+  // a file's first bytes.
   const format = transcriptFormatOf(name, bytes);
   if (format === null) return null;
   if (format === 'docx') {

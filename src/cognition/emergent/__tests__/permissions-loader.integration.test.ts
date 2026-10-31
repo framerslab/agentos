@@ -717,6 +717,33 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(await host.orchestrator.getTool('make_id')).toBeUndefined();
   });
 
+  it('a tool forged with no output schema returns the same output after a later start loads it', async () => {
+    // forge_tool asks for no output schema; its stored row holds none.
+    const db = createSqliteAdapter();
+    const shout = 'function execute(input) { return input.text + "!"; }';
+    const first = await makeForgeHost({ db });
+    const forged = await callTool(first.orchestrator, 'forge_tool', {
+      name: 'shout_it',
+      description: 'Returns the text with an exclamation mark.',
+      inputSchema: TEXT_IN,
+      implementation: { mode: 'sandbox', code: shout, allowlist: [] },
+      testCases: [{ input: { text: 'a' }, expectedOutput: 'a!' }],
+    }, { sessionId: 'sess-unshaped' });
+    expect(forged.isError).toBeFalsy();
+    const toolId = String(forged.output.toolId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const before = await callTool(first.orchestrator, 'shout_it', { text: 'b' });
+    expect(before.isError).toBeFalsy();
+    expect(before.output).toBe('b!');
+
+    const later = await makeForgeHost({ db });
+    const summary = await later.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-unshaped' });
+    expect(summary.outcomes).toEqual([{ toolId, name: 'shout_it', state: 'active', reason: null }]);
+    const after = await callTool(later.orchestrator, 'shout_it', { text: 'c' });
+    expect(after.isError).toBeFalsy();
+    expect(after.output).toBe('c!');
+  });
+
   it('with source persistence off, a tool forged in this process survives a later load, and demoteTool takes it out for good', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db, config: { persistSandboxSource: false } });

@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   LIVEKIT_TRANSCRIPTION_ATTRIBUTES,
+  readingOrder,
   TRANSCRIPTION_FAILED_ATTRIBUTE,
+  TRANSCRIPTION_RUN_OF_ATTRIBUTE,
+  TRANSCRIPTION_SPEAKER_ATTRIBUTE,
   TranscriptLedger,
   transcriptEventFromLiveKit,
+  type LedgerItem,
 } from '../transcriptLedger.js';
 import type { TranscriptEvent } from '../types.js';
 
@@ -175,5 +179,81 @@ describe('transcriptEventFromLiveKit', () => {
       { itemId: 'i1', text: 'The offsite is in Lisbon.', isFinal: true, startMs: 1200, endMs: 3400 },
       { itemId: 'i2', text: 'Budget.', isFinal: true },
     ]);
+  });
+});
+
+describe('speaker fields and independent reading order', () => {
+  it('round trips a concrete label, null and absence without changing the stored order', () => {
+    const ledger = new TranscriptLedger();
+    ledger.apply({ itemId: 'a', text: 'A', isFinal: true, speaker: 'connection:0' });
+    ledger.apply({ itemId: 'b', text: 'B', isFinal: true, speaker: null });
+    ledger.apply({ itemId: 'a.2', text: 'C', isFinal: true, runOf: 'a' });
+    const copy = TranscriptLedger.fromJSON(ledger.toJSON());
+    expect(copy.items()).toEqual(ledger.items());
+    expect(copy.get('b')?.speaker).toBeNull();
+    expect(copy.get('a.2')).not.toHaveProperty('speaker');
+    expect(copy.items().map((item) => item.itemId)).toEqual(['a', 'b', 'a.2']);
+    expect(readingOrder(copy.items()).map((item) => item.itemId)).toEqual(['a', 'a.2', 'b']);
+    expect(copy.resumeAfterId()).toBe('a.2');
+    expect(copy.finalsAfter('b')).toEqual([copy.get('a.2')]);
+  });
+
+  it('changes a same-text interim label, drops it and keeps a final immutable', () => {
+    const ledger = new TranscriptLedger();
+    const event = { itemId: 'a', text: 'Same', isFinal: false };
+    expect(ledger.apply({ ...event, speaker: 'connection:0' })).toBe(true);
+    expect(ledger.apply({ ...event, speaker: 'connection:1' })).toBe(true);
+    expect(ledger.get('a')?.speaker).toBe('connection:1');
+    expect(ledger.apply({ ...event, speaker: null })).toBe(true);
+    expect(ledger.apply({ ...event, speaker: null })).toBe(false);
+    expect(ledger.get('a')?.speaker).toBeNull();
+    expect(ledger.apply(event)).toBe(true);
+    expect(ledger.get('a')).not.toHaveProperty('speaker');
+    expect(ledger.apply(event)).toBe(false);
+    expect(ledger.apply({ ...event, isFinal: true, speaker: 'connection:2' })).toBe(true);
+    expect(ledger.apply({ ...event, isFinal: true, speaker: null })).toBe(false);
+    expect(ledger.get('a')?.speaker).toBe('connection:2');
+  });
+
+  it('ignores malformed optional JSON fields without losing a valid line', () => {
+    const ledger = TranscriptLedger.fromJSON({ v: 1, items: [
+      { itemId: 'a', text: 'A', isFinal: true, speaker: 3, runOf: {} },
+      { itemId: 'b', text: 'B', isFinal: true, speaker: null },
+    ] });
+    expect(ledger.get('a')).toEqual({ itemId: 'a', text: 'A', isFinal: true });
+    expect(ledger.get('b')?.speaker).toBeNull();
+  });
+
+  it('decodes the empty attribute as null and keeps an absent attribute absent', () => {
+    const attrs = { 'lk.segment_id': 'a', 'lk.transcription_final': 'true' };
+    expect(TRANSCRIPTION_SPEAKER_ATTRIBUTE).toBe('agentos.speaker');
+    expect(TRANSCRIPTION_RUN_OF_ATTRIBUTE).toBe('agentos.run_of');
+    expect(transcriptEventFromLiveKit('A', { ...attrs, 'agentos.speaker': '' })?.speaker).toBeNull();
+    expect(transcriptEventFromLiveKit('A', attrs)).not.toHaveProperty('speaker');
+    expect(transcriptEventFromLiveKit('A', { ...attrs, 'agentos.speaker': 'c:0', 'agentos.run_of': 'parent' }))
+      .toMatchObject({ speaker: 'c:0', runOf: 'parent' });
+  });
+
+  it.each([
+    [['a', 'a.3', 'a.2'], ['a', 'a.2', 'a.3']],
+    [['a.3', 'b', 'a', 'a.2', 'c'], ['a', 'a.2', 'a.3', 'b', 'c']],
+    [['x', 'a', 'a.2', 'b', 'a.3', 'y'], ['x', 'a', 'a.2', 'a.3', 'b', 'y']],
+    [['a.10', 'a.3', 'a.2'], ['a.2', 'a.3', 'a.10']],
+    [['x', 'b', 'a'], ['x', 'b', 'a']],
+  ])('reads %j in family order without mutating first-seen order', (ids, expected) => {
+    const items: LedgerItem[] = ids.map((itemId) => ({
+      itemId, text: itemId, isFinal: true, ...(itemId.startsWith('a.') ? { runOf: 'a' } : {}),
+    }));
+    const frozen = Object.freeze(items.map((item) => Object.freeze(item)));
+    expect(readingOrder(frozen).map((item) => item.itemId)).toEqual(expected);
+    expect(frozen.map((item) => item.itemId)).toEqual(ids);
+  });
+
+  it('keeps malformed or tied child suffixes stable after the valid runs', () => {
+    const ids = ['a.bad', 'a.3', 'a.2', 'a.02', 'a'];
+    const items: LedgerItem[] = ids.map((itemId) => ({
+      itemId, text: itemId, isFinal: true, ...(itemId === 'a' ? {} : { runOf: 'a' }),
+    }));
+    expect(readingOrder(items).map((item) => item.itemId)).toEqual(['a', 'a.2', 'a.02', 'a.3', 'a.bad']);
   });
 });

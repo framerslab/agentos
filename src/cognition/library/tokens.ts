@@ -4,7 +4,8 @@
  * order, in any script, each a letter or a digit followed by letters, digits and combining marks. It also holds the
  * rules tags match words by: a word's stem, whether a word's script is written without spaces, and the words of a text
  * as the tag rules read them, each with its place and what separates it from the word before (`tagSegments`); the
- * one-edit rule is FuzzyIndex's. A mark stays inside its word, so an accent written as a combining mark or a Devanagari vowel sign
+ * one-edit rule is FuzzyIndex's. It folds a text for matching with a map back to its source (`foldText`) and counts a
+ * text's words (`countWords`). A mark stays inside its word, so an accent written as a combining mark or a Devanagari vowel sign
  * does not split one, and a text reads the same words whether it came composed or decomposed. The rule stems nothing:
  * a prefix match stands in for stemming in every language.
  *
@@ -146,6 +147,108 @@ export function isUnspacedScript(word: string): boolean {
   return UNSPACED.test(word);
 }
 
+/** A text folded for matching, with the source interval of each of its UTF-16 units. */
+export interface FoldedText {
+  /**
+   * The folded text: each character decomposed (NFD), its combining marks dropped and a curly apostrophe made straight,
+   * then the whole lower-cased, so a capital sigma takes its final form by its neighbours, as `toLowerCase` gives it.
+   */
+  text: string;
+  /**
+   * For each UTF-16 unit of `text`, the half-open interval `[start, end)` of the source, in UTF-16 units, it came from.
+   * The units one source character yields share its interval (a Hangul syllable yields its three jamo, a character
+   * beyond the Basic Multilingual Plane its two units), and a combining mark dropped after a character widens that
+   * character's interval over it, so a match placed through the map never splits a letter from its marks.
+   */
+  map: readonly (readonly [number, number])[];
+}
+
+/**
+ * A text folded for matching, with the map back to the source: each code point decomposed (NFD), its combining marks
+ * dropped and a curly apostrophe (U+2019) made straight, then the text lower-cased whole, as a search lower-cases a
+ * whole word, so the folded text of a word is that word's fold. Lower case maps each code point alone but for a capital
+ * sigma, whose final form depends on its neighbours, and a sigma's two forms are one unit each, so each code point
+ * takes the piece of the whole text's lower case as long as its own lower case, and its units take the code point's
+ * interval. A code point that yields nothing, a combining mark, widens the interval of the character before it. The
+ * fold changes a text's length, so a match found in `text` is placed in the source through `map`, never by its offsets
+ * in `text`.
+ */
+export function foldText(text: string): FoldedText {
+  const points = Array.from(text);
+  const bare = points.map((point) => point.normalize('NFD').replace(/\p{M}+/gu, '').replace(/\u2019/g, "'"));
+  const own = bare.map((piece) => piece.toLowerCase());
+  const whole = bare.join('').toLowerCase();
+  // Were the two lower cases ever to differ in length, each code point's own lower case would stand instead.
+  const aligned = own.reduce((length, piece) => length + piece.length, 0) === whole.length;
+  const units: string[] = [];
+  const map: [number, number][] = [];
+  let source = 0;
+  let folded = 0;
+  // where the units of the last code point that yielded any begin in `map`, or -1 before the first
+  let last = -1;
+  for (let index = 0; index < points.length; index += 1) {
+    const start = source;
+    const end = start + points[index].length;
+    source = end;
+    const piece = aligned ? whole.slice(folded, folded + own[index].length) : own[index];
+    folded += own[index].length;
+    if (piece === '') {
+      if (last >= 0) for (let unit = last; unit < map.length; unit += 1) map[unit][1] = end;
+      continue;
+    }
+    last = map.length;
+    units.push(piece);
+    for (let unit = 0; unit < piece.length; unit += 1) map.push([start, end]);
+  }
+  return { text: units.join(''), map };
+}
+
+/** What the word rules read of a segment `Intl.Segmenter` cuts at the `word` granularity. */
+interface WordSegmentData {
+  /** The segment's text. */
+  segment: string;
+  /** True for a word: letters, numbers or ideographs; false or absent for spaces and punctuation. */
+  isWordLike?: boolean;
+}
+
+/**
+ * `Intl.Segmenter` at the `word` granularity, as the word rules call it; the package's TypeScript library, ES2021, has no
+ * type for it.
+ */
+type WordSegmenterConstructor = new (
+  locale?: string,
+  options?: { granularity: 'word' },
+) => { segment(text: string): Iterable<WordSegmentData> };
+
+/** `Intl.Segmenter` where the runtime has it, else undefined: a runtime with no segmenter, or with no `Intl` at all. */
+function runtimeSegmenter(): WordSegmenterConstructor | undefined {
+  if (typeof Intl === 'undefined') return undefined;
+  const Segmenter = (Intl as unknown as { Segmenter?: unknown }).Segmenter;
+  return typeof Segmenter === 'function' ? (Segmenter as WordSegmenterConstructor) : undefined;
+}
+
+/** The counter's segmenter, made on the first count and kept for the module's life; null where the runtime has none. */
+let wordCounter: InstanceType<WordSegmenterConstructor> | null | undefined;
+
+/**
+ * The words a text holds, as a person counts them: the segments `Intl.Segmenter` cuts at the `word` granularity and
+ * marks word-like (letters, numbers, ideographs), so `don't` and `1.2M` are one word each and punctuation is none.
+ * Chinese and Japanese are cut by a dictionary, so two runtimes can differ by a word or two on such a text. Where the
+ * runtime has no `Intl.Segmenter`, or no `Intl` at all, the runs between white space.
+ */
+export function countWords(text: string): number {
+  if (wordCounter === undefined) {
+    const Segmenter = runtimeSegmenter();
+    wordCounter = Segmenter === undefined ? null : new Segmenter(undefined, { granularity: 'word' });
+  }
+  if (wordCounter === null) return text.split(/\s+/u).filter((run) => run !== '').length;
+  let count = 0;
+  for (const segment of wordCounter.segment(text)) {
+    if (segment.isWordLike === true) count += 1;
+  }
+  return count;
+}
+
 /** A word of a text as the tag rules read it. */
 export interface TagSegment {
   /** The word as written in the text's NFC form, its combining marks kept with their letters. */
@@ -168,12 +271,15 @@ export type WordSegmenter = (run: string) => string[];
 /** The runtime's word segmenter, made once on the first ask, or null where the runtime has no `Intl.Segmenter`. */
 let runtimeWordSegmenter: WordSegmenter | null | undefined;
 
-/** `Intl.Segmenter`'s word boundaries where the runtime has it, else null. The segmenter is made once and shared. */
+/**
+ * `Intl.Segmenter`'s word boundaries where the runtime has it, else null, a runtime with no `Intl` at all among them.
+ * The segmenter is made once and shared.
+ */
 export function defaultWordSegmenter(): WordSegmenter | null {
   if (runtimeWordSegmenter !== undefined) return runtimeWordSegmenter;
-  const Segmenter = (Intl as unknown as { Segmenter?: new (locale?: string, options?: { granularity: 'word' }) => { segment(text: string): Iterable<{ segment: string }> } }).Segmenter;
+  const Segmenter = runtimeSegmenter();
   let found: WordSegmenter | null = null;
-  if (typeof Segmenter === 'function') {
+  if (Segmenter !== undefined) {
     const segmenter = new Segmenter(undefined, { granularity: 'word' });
     found = (run: string): string[] => Array.from(segmenter.segment(run), (part) => part.segment);
   }

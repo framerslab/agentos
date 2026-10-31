@@ -67,7 +67,7 @@ The index keeps no text: a hit carries its id, score and metadata, and the calle
 
 ### In a browser
 
-A page imports `@framers/agentos/cognition/library/browser`. It exports `LexicalIndex`, `FuzzyIndex`, `withinOneEdit`, `lexicalTokens`, `snippetAround` and `chunkTurns` with their types, the page's own storage: a key-value store over IndexedDB or memory, an outbox and `reconcileList`, and the readers of transcript files from other notetakers with the plan of an archive's entries. Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph. [Library Index: On a device](../features/LIBRARY_INDEX.md#on-a-device) lists every export and builds a page's index from a transcript's passages with `lexicalTokens`.
+A page imports `@framers/agentos/cognition/library/browser`. It exports `LexicalIndex`, `FuzzyIndex`, `withinOneEdit`, `lexicalTokens`, `snippetAround`, `countWords`, `foldText` and `chunkTurns` with their types, the page's own storage: a key-value store over IndexedDB, in memory or over a SQL table, an outbox and `reconcileList`, and the readers of transcript files from other notetakers with the plan of an archive's entries. Nothing it reaches imports a Node module, and the one package it reaches is `@framers/sql-storage-adapter/kv`, the library's key-value module, which imports no adapter; a test holds both by walking its import graph. [Library Index: On a device](../features/LIBRARY_INDEX.md#on-a-device) lists every export and builds a page's index from a transcript's passages with `lexicalTokens`.
 
 ## BM25Index
 
@@ -195,7 +195,7 @@ fuseRanked([notes, call], { idOf: (item) => item.id, weights: [1, 0.8], groupOf:
 
 ## Where it runs
 
-`LexicalIndex` and `FuzzyIndex`, through `@framers/agentos/cognition/library/browser`, run in a browser; nothing that entry reaches imports a Node module or a package. `BM25Index`, `HybridSearcher`, `InMemoryVectorStore` and `@framers/agentos/cognition/rag` run in Node. No index calls a model; `HybridSearcher` calls the embedder it is given once per search, and a hosted embedder needs its provider's key.
+`LexicalIndex` and `FuzzyIndex`, through `@framers/agentos/cognition/library/browser`, run in a browser; nothing that entry reaches imports a Node module, and the one package it reaches, `@framers/sql-storage-adapter/kv`, imports no adapter. `BM25Index`, `HybridSearcher`, `InMemoryVectorStore` and `@framers/agentos/cognition/rag` run in Node. No index calls a model; `HybridSearcher` calls the embedder it is given once per search, and a hosted embedder needs its provider's key.
 
 ## Examples
 

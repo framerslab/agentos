@@ -10,6 +10,7 @@ import type {
   ScopedStreamingSTTSession,
   StreamingSTTSession,
   TranscriptEvent,
+  TranscriptWord,
 } from '../types.js';
 import type { HealthyProvider } from '../HealthyProvider.js';
 
@@ -505,6 +506,27 @@ describe('StreamingSTTChain: the mid-utterance failover facade', () => {
     expect(b.sessions).toHaveLength(1);
     expect(b.sessions[0].pushed).toEqual([frame]);
     expect(chain.currentProviderId).toBe('b');
+  });
+
+  it("moves a backup's word times onto the facade's timeline with its bounds, and leaves those of a transcript that carries no bounds as its provider gave them", async () => {
+    const a = recordingProvider('a', 10);
+    const b = recordingProvider('b', 20);
+    const chain = new StreamingSTTChain([a.provider, b.provider], { enableMidUtteranceFailover: true, ringBufferCapacityMs: 500 });
+    const facade = await chain.startSession();
+    // the ring measures its audio by the frames' timestamps, so they stand half a second apart and it keeps the last
+    for (let i = 0; i < 3; i += 1) await facade.pushAudio({ ...halfSecond(), timestamp: i * 500 });
+    a.sessions[0].emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(b.sessions[0]?.pushed).toHaveLength(1));
+    const got: TranscriptEvent[] = [];
+    facade.on('transcript', (event: TranscriptEvent) => got.push(event));
+    // the backup's clock starts at its replay's first frame, a second into the facade's audio
+    const word = (text: string, start: number, end: number): TranscriptWord => ({ word: text, start, end, confidence: 0.9 });
+    b.sessions[0].emit('transcript', { text: 'bounded', confidence: 1, isFinal: true, startMs: 100, endMs: 400, words: [word('bounded', 100, 400)] });
+    b.sessions[0].emit('transcript', { text: 'no bounds', confidence: 1, isFinal: true, words: [word('no', 0, 300), word('bounds', 300, 700)] });
+    expect(got.map((event) => [event.startMs, event.endMs, event.words.map((w) => [w.start, w.end])])).toEqual([
+      [1_100, 1_400, [[1_100, 1_400]]],
+      [undefined, undefined, [[0, 300], [300, 700]]],
+    ]);
   });
 
   it('emits error on the facade once no backup is left', async () => {

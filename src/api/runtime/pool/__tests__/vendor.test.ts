@@ -28,6 +28,14 @@ describe('vendorOf', () => {
     expect(vendorOf('openai', 'gpt-4.1')).toBeUndefined();
     expect(vendorOf('anthropic', 'claude-opus-5-5')).toBe('anthropic');
   });
+  it('an empty or whitespace-only base URL is unset, as every call reads it, so the next source decides the vendor', () => {
+    vi.stubEnv('OPENAI_BASE_URL', '  ');
+    expect(vendorOf('openai', 'gpt-4.1')).toBe('openai');
+    expect(vendorOf('openai', 'gpt-4.1', { baseUrl: '' })).toBe('openai');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://proxy.local/v1');
+    expect(vendorOf('openai', 'gpt-4.1', { baseUrl: '' })).toBeUndefined();
+    expect(vendorOf('openai', 'gpt-4.1', { baseUrl: '  ' })).toBeUndefined();
+  });
 });
 
 describe('helpers', () => {

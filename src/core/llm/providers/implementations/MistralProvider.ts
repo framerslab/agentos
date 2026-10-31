@@ -24,7 +24,10 @@ import {
 import { sha256Hex } from '../../../utils/sha256';
 import { OpenAIProvider, type OpenAIProviderConfig } from './OpenAIProvider';
 import { keyPoolStrategyFromEnv } from '../../../providers/ApiKeyPool.js';
-import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('mistral_provider');
 
 /** Mistral accepts only tool call ids made of nine letters and digits. */
 const MISTRAL_TOOL_CALL_ID = /^[A-Za-z0-9]{9}$/;
@@ -60,6 +63,13 @@ function withMistralToolCallIds(messages: ChatMessage[]): ChatMessage[] {
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+
+/**
+ * Mistral's API base URL, which requests go to when the config names no `baseURL`. `embedText` posts Mistral
+ * embeddings under it too: Mistral serves `POST https://api.mistral.ai/v1/embeddings`
+ * (https://docs.mistral.ai/api/endpoint/embeddings, read 2026-10-25).
+ */
+export const MISTRAL_DEFAULT_BASE_URL = 'https://api.mistral.ai/v1';
 
 /**
  * Configuration for the MistralProvider.
@@ -192,7 +202,7 @@ export class MistralProvider implements IProvider {
     // Delegate to OpenAI provider with Mistral's endpoint
     await this.delegate.initialize({
       apiKey: config.apiKey,
-      baseURL: config.baseURL ?? 'https://api.mistral.ai/v1',
+      baseURL: config.baseURL ?? MISTRAL_DEFAULT_BASE_URL,
       defaultModelId: this.defaultModelId,
       requestTimeout: config.requestTimeout ?? 60000,
       // The host's pool options reach the delegate's pool, with this provider's own strategy variable: the strategy

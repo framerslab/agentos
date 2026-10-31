@@ -137,14 +137,15 @@ export function compileParallel(
           const start = Date.now();
           const result = (await a.generate(effectivePrompt, opts)) as Record<string, unknown>;
           const durationMs = Date.now() - start;
-          return { name, result, durationMs };
+          return { name, input: effectivePrompt, result, durationMs };
         }),
       );
 
       // Log errors from rejected agents and keep only fulfilled results.
       // This two-pass approach lets us collect error telemetry while still
       // producing a valid synthesis from the successful agents.
-      const settled: Array<{ name: string; result: Record<string, unknown>; durationMs: number }> = [];
+      // Each seat's input is the text it was sent, the approver's instructions included.
+      const settled: Array<{ name: string; input: string; result: Record<string, unknown>; durationMs: number }> = [];
       // The first seat that failed, in roster order: the run's error when no
       // seat is left.
       let firstFailure: Error | undefined;
@@ -201,13 +202,13 @@ export function compileParallel(
       const agentCalls: AgentCallRecord[] = [];
       const totalUsage: StrategyTotalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
-      for (const { name, result, durationMs } of settled) {
+      for (const { name, input, result, durationMs } of settled) {
         const resultUsage = (result.usage as ResultUsageSnapshot) ?? {};
         const resultToolCalls = (result.toolCalls as Array<{ name: string; args: unknown; result?: unknown; error?: string }>) ?? [];
 
         agentCalls.push({
           agent: name,
-          input: prompt,
+          input,
           output: (result.text as string) ?? '',
           toolCalls: resultToolCalls,
           usage: buildAgentCallUsage(resultUsage),

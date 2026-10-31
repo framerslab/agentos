@@ -1,0 +1,15 @@
+{
+  "about": "What otter-names-times-one-space.txt reads into. The file is written for these tests in the layout of the export Otter makes of a voice note (SOURCES.md): each header is the speaker's name, one space and the time, with nothing after it; the paragraph on the line after it; a blank line between turns; and the closing line with no line feed after it. The second turn's words end in a time, as a header does, and are words since they stand on the line straight after a header.",
+  "format": "otter",
+  "turns": [
+    { "seq": 1, "startMs": 3000, "endMs": null, "text": "Good morning. Shall we start with the budget?" },
+    { "seq": 2, "startMs": 9000, "endMs": null, "text": "The venue opens at 9:30" },
+    { "seq": 3, "startMs": 14000, "endMs": null, "text": "Then book it for forty people." }
+  ],
+  "labels": [
+    { "seq": 1, "label": "Unknown" },
+    { "seq": 2, "label": "Unknown" },
+    { "seq": 3, "label": "Unknown" }
+  ],
+  "durationMs": null
+}

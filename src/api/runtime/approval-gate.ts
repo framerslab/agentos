@@ -14,7 +14,10 @@
  */
 import type { AgencyOptions, ApprovalDecision, ApprovalRequest } from '../types.js';
 import { AgencyConfigError } from '../types.js';
-import { contentSafeConsole as console } from '../../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('approval_gate');
 
 /**
  * The only value that approves a tool call. A registered symbol, so a gate

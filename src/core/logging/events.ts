@@ -33,7 +33,7 @@ export type Fields<S extends Readonly<Record<string, FieldKind>>> = { [K in keyo
 export type ContextValues<C extends ContextSchema> = Fields<C>;
 
 /** The provider names a line may carry. Any other provider is written as `unknown`. */
-export const PROVIDERS = ['openai', 'openrouter', 'anthropic', 'gemini', 'ollama', 'requesty', 'groq', 'mistral', 'together', 'xai', 'litellm', 'unknown'] as const;
+export const PROVIDERS = ['openai', 'openrouter', 'anthropic', 'gemini', 'ollama', 'requesty', 'groq', 'mistral', 'together', 'xai', 'litellm', 'minimax', 'unknown'] as const;
 const provider = { enum: PROVIDERS };
 const api = { enum: ['generateText', 'streamText'] as const };
 // The fields every fallback event of generateText and streamText shares.

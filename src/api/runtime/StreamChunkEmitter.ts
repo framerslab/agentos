@@ -133,6 +133,7 @@ export class StreamChunkEmitter {
         chunk = {
           ...baseChunk,
           finalResponseText: data.finalResponseText,
+          finalResponseTextPlain: data.finalResponseTextPlain,
           finalToolCalls: data.finalToolCalls,
           finalUiCommands: data.finalUiCommands,
           audioOutput: data.audioOutput,

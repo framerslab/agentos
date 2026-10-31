@@ -47,7 +47,8 @@ import {
   DDL_ARCHIVE_ACCESS_LOG_IDX,
 } from '../../archive/SqlStorageMemoryArchive.js';
 import { MigrationRunner, MIGRATIONS, LATEST_SCHEMA_VERSION } from './migrations/index.js';
-import { ensureScopeIdColumn, postgresIndexExists } from './migrations/v2-to-v3.js';
+import { ensureScopeIdColumn, fillScopeIds, postgresIndexExists } from './migrations/v2-to-v3.js';
+import { retryLostCreate } from './migrations/lost-create.js';
 import { PORTABLE_TABLES, PORTABLE_TABLE_PRIMARY_KEYS } from './portable-tables.js';
 import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 
@@ -61,27 +62,6 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * Used by {@link Brain.open} when the caller does not supply an
  * explicit `brainId`.
  */
-/**
- * Runs one idempotent schema step, and once more if it lost a race. Every brain
- * in a Postgres database shares its tables, and `CREATE ... IF NOT EXISTS` is
- * not atomic there: two connections can both find an object missing, and the
- * second then fails on the catalog's unique index (23505, such as
- * pg_type_typname_nsp_index) or as duplicate_table (42P07), duplicate_object
- * (42710) or duplicate_column (42701). Run again, the step finds the object and
- * does nothing. Each statement commits on its own, so no table lock outlives it.
- */
-async function retryLostCreate(step: () => Promise<void>): Promise<void> {
-  try {
-    await step();
-  } catch (error) {
-    const code = (error as { code?: unknown } | null)?.code;
-    if (code !== '23505' && code !== '42P07' && code !== '42710' && code !== '42701') {
-      throw error;
-    }
-    await step();
-  }
-}
-
 /** Each `CREATE INDEX IF NOT EXISTS <name> ON <table> ...;` statement of a schema script, with the index's name and its table's. */
 const CREATE_INDEX_IF_NOT_EXISTS =
   /CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)\s+ON\s+([A-Za-z_][A-Za-z0-9_]*)\b[^;]*;?/gi;
@@ -1032,7 +1012,9 @@ export class Brain {
    * 3. Enable foreign key enforcement (dialect.pragma returns null on Postgres).
    * 4. Run the pending schema migrations (idempotent; no-op for fresh DBs and the latest schema).
    * 5. Apply full DDL via _initSchema().
-   * 6. Seed brain_meta defaults.
+   * 6. File the brain's traces that hold `scope_id` `''` while their metadata names a scope id (`fillScopeIds`).
+   * 7. Seed brain_meta defaults.
+   * 8. Repair the full-text index (SQLite).
    */
   private static async _initialize(
     adapter: StorageAdapter,
@@ -1050,6 +1032,9 @@ export class Brain {
 
     await MigrationRunner.runPending(adapter, features, brainId, MIGRATIONS);
     await brain._initSchema();
+    // A release older than `scope_id` writes the column's default, '', to a brain at version 3 too, whose migration
+    // never runs again.
+    await fillScopeIds(adapter, brainId);
     await brain._seedMeta();
     await brain._repairFullTextIndex();
 
@@ -1174,7 +1159,11 @@ export class Brain {
     }
 
     // A table another path created without `scope_id` (a migration engine's copy) gains it here; a fresh table has it.
-    await retryLostCreate(() => ensureScopeIdColumn(adapter));
+    // The step makes two indexes, and the first opens of several brains make them at the same moment, so an open can
+    // lose the race for one and then for the other: retryLostCreate runs the step until a run loses none.
+    await retryLostCreate(async () => {
+      await ensureScopeIdColumn(adapter);
+    });
 
     // FTS index via feature abstraction (FTS5 on SQLite, tsvector/GIN on Postgres).
     // SQL.js builds may not include FTS5, so keep the core schema independent.
@@ -1523,10 +1512,15 @@ export class Brain {
    * file. This means importing an `alice` snapshot into a Brain opened
    * with `brainId: 'alice-fork'` produces a fork with no shared identity.
    *
-   * **CAVEAT:** importing from a pre-0.3.0 SQLite file MUTATES the source
-   * file. Opening the source via `Brain.openSqlite` runs the v1 to v2
-   * migration in place. To preserve the source unchanged, copy the file to
-   * a temp path before calling this method.
+   * **CAVEAT:** importing from a file an older release wrote MUTATES the
+   * source file. Opening the source via `Brain.openSqlite` runs its pending
+   * migrations in place: v1 to v2 for a file from before 0.3.0, and v2 to v3,
+   * which adds `memory_traces.scope_id` and fills it, for a file from before
+   * 0.13.159. A release before 0.13.159 then fails to import the file into a
+   * table without the column, since its import copies every column it reads.
+   * The open also files the scope id of each source trace that a release
+   * older than the column wrote. To preserve the source unchanged, copy the
+   * file to a temp path before calling this method.
    *
    * @param sourcePath - Source SQLite file path (typically produced by
    *   `Brain.exportToSqlite`).

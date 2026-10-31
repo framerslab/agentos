@@ -37,6 +37,7 @@ import {
   ContextualPromptElementCriteria,
 } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { ConversationMessage as Message, MessageRole, ConversationToolCallRequest } from '../conversation/ConversationMessage'; // Corrected import: Used alias and added MessageRole
+import { toolRoundBounds } from '../conversation/toolRounds';
 import { ChatMessage, MessageContentPart } from './providers/IProvider'; // Added MessageContentPart
 import { ITool, JSONSchemaObject } from '../tools/ITool'; // Corrected import path
 import { sha256Hex } from '../utils/sha256';
@@ -826,15 +827,19 @@ export class PromptEngine implements IPromptEngine {
       if (historyTokens > budgets.history || currentTokens > budget) {
         // The turn being answered stays whole: summarizing or truncating it
         // would drop the request itself (a structured user message has no
-        // userInput copy) or split a tool call from its result. Only the
-        // messages before it are reduced, to what the budget leaves them.
+        // userInput copy) or split a tool call from its result. A tool round
+        // the turn's first message belongs to stays with it, so a call before
+        // the turn whose result the turn holds is kept with that result. Only
+        // the messages before them are reduced, to what the budget leaves them.
         const history = optimized.conversationHistory;
         const turnCount = Math.min(
           Math.max(0, Math.floor(optimized.currentTurnMessageCount ?? 0)),
           history.length,
         );
-        const turnMessages = history.slice(history.length - turnCount);
-        const earlier = history.slice(0, history.length - turnCount);
+        let turnStart = history.length - turnCount;
+        if (turnStart < history.length) turnStart = toolRoundBounds(history).start[turnStart];
+        const turnMessages = history.slice(turnStart);
+        const earlier = history.slice(0, turnStart);
         const turnTokens = await this.calculateTokensForMessages(turnMessages, modelInfo.modelId, sendsThinking);
         const earlierTokens = historyTokens - turnTokens;
         // The earlier history keeps its share of the history budget, and no
@@ -1015,9 +1020,12 @@ export class PromptEngine implements IPromptEngine {
 
   /**
    * Drops the oldest messages until the rest fit `targetTokenCount`, keeping
-   * at least `minKept`. A tool result left first would reach the provider
-   * without the assistant call it answers, which chat APIs reject, so leading
-   * tool results go too.
+   * at least `minKept`. Chat APIs reject a tool call without its result and a
+   * tool result without its call, so a tool round (an assistant message that
+   * names tool calls, the tool messages that answer them and anything between)
+   * is dropped whole or kept whole: when dropping it would leave fewer than
+   * `minKept` messages, it stays, over the budget. A tool result left first
+   * with no call before it in `messages` goes too.
    */
   private truncateMessages(
     messages: Message[],
@@ -1042,13 +1050,19 @@ export class PromptEngine implements IPromptEngine {
       return (contentChars + thinkingChars) / 4;
     };
     let currentTokens = messages.reduce((sum, msg) => sum + roughTokens(msg), 0);
-    while(currentTokens > targetTokenCount && messages.length > minKept) {
-      currentTokens -= roughTokens(messages.shift());
+    const rounds = toolRoundBounds(messages);
+    // `first` is always the first message of a tool round or a message outside every round.
+    let first = 0;
+    while (currentTokens > targetTokenCount && first < messages.length) {
+      const last = rounds.end[first];
+      if (messages.length - (last + 1) < minKept) break;
+      for (let index = first; index <= last; index += 1) currentTokens -= roughTokens(messages[index]);
+      first = last + 1;
     }
-    while (messages.length > minKept && messages[0]?.role === MessageRole.TOOL) {
-      messages.shift();
+    while (messages.length - first > minKept && messages[first]?.role === MessageRole.TOOL) {
+      first += 1;
     }
-    return messages;
+    return messages.slice(first);
   }
 
   private formatToolSchemasForModel(tools: ITool[], modelInfo: Readonly<ModelTargetInfo>): any[] {

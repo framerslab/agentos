@@ -269,7 +269,12 @@ export interface GuardrailConfig {
    *   runtime saved for that call when the turn stopped for it:
    *   `getPendingExternalToolRequest()` no longer returns it, the
    *   conversation answers the call with a refused tool result, and the
-   *   stream cannot be continued with a result for it.
+   *   stream cannot be continued with a result for it. A block on a chunk
+   *   that holds no actionable call (the chunk of calls the runtime runs
+   *   itself, or a streamed delta) ends the stream while the turn goes on
+   *   inside the runtime; when the turn then stops for calls the host runs,
+   *   AgentOS drops that pause the same way once the turn ends, and until
+   *   then the pause is neither offered nor resumed nor continued.
    * - SANITIZE cannot rewrite a tool call; it is applied as a BLOCK that keeps
    *   the guard's reason and reason code.
    * - FLAG and ALLOW pass the chunk on with the evaluation in its
@@ -277,11 +282,15 @@ export interface GuardrailConfig {
    *
    * AgentOS also asks the guard about each call the runtime executes itself
    * (`executionMode: 'internal'`) before the call runs, as a
-   * TOOL_CALL_REQUEST chunk holding that one call. A BLOCK (or a SANITIZE)
-   * refuses the call: the tool does not run, and the model receives a
-   * refused tool result (code `AUTH_PERMISSION_DENIED`), as it does for a
-   * permission refusal. The guard also judges the stream's chunk for that
-   * call, where a block ends the stream.
+   * TOOL_CALL_REQUEST chunk holding that one call, with the sources the turn
+   * retrieved in `ragSources`. A BLOCK (or a SANITIZE) refuses the call: the
+   * tool does not run, and the model receives a refused tool result (code
+   * `AUTH_PERMISSION_DENIED`), as it does for a permission refusal. When a
+   * model step asks for several such calls, each is judged before any of
+   * them runs, and the calls that pass alone are judged once more together,
+   * as the stream's chunk for the step holds them; a block there refuses
+   * each of them. The guard also judges the stream's chunk for the step,
+   * where a block ends the stream.
    *
    * When `false` (default), the guard never receives a tool-call chunk. The
    * flag is opt-in because a guard written for text may read any chunk it is

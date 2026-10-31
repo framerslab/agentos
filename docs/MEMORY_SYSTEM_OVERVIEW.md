@@ -149,6 +149,8 @@ The first call to `Brain.openPostgres` (or `openSqlite`) on an existing v1 datab
 
 A `pg_advisory_xact_lock` per `brainId` serializes concurrent first-opens so two workers booting the same brain don't race on schema migration.
 
+Different brains boot in parallel and set up the tables they share at the same time. An open whose `CREATE ... IF NOT EXISTS` loses the race to another open's, which Postgres reports once the other commits the object, runs that step again and finds the object, as many times as the step loses (up to eight runs). The [Postgres backend](./memory/POSTGRES_BACKEND.md) page gives the errors it reads as a lost race.
+
 ### Pool sizing
 
 Sharing a [`StorageAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/index.ts) across N brains shares the underlying connection pool. Five brains opened against a `max: 10` pool compete for the same 10 connections; one slow query starves the others. Size for total concurrent query load across all brains, not per-brain. For high-fan-out deployments (one process serving 50+ active brains), use a dedicated pool per brain via `Brain.openPostgres(connStr, { brainId, poolSize: N })` instead of sharing.

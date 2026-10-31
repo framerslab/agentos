@@ -5,7 +5,7 @@ Three functions exported from `@framers/agentos` turn a model call into data:
 | Function | Returns |
 |-----|---------|
 | [`generateObject()`](https://github.com/framerslab/agentos/blob/master/src/api/generateObject.ts) | An object validated against a Zod schema, retrying with the validation errors when a reply does not fit |
-| [`streamObject()`](https://github.com/framerslab/agentos/blob/master/src/api/streamObject.ts) | Partial objects while the reply streams, and the validated object when it ends |
+| [`streamObject()`](https://github.com/framerslab/agentos/blob/master/src/api/streamObject.ts) | Partial objects, and each completed element of one array field, while the reply streams, and the validated object when it ends |
 | [`embedText()`](https://github.com/framerslab/agentos/blob/master/src/api/embedText.ts) | One embedding vector per input text |
 
 [`StructuredOutputManager`](./STRUCTURED_OUTPUT.md) is the lower-level class that works with JSON Schema, and a [structured reply](../features/STRUCTURED_REPLY.md) asks for a schema answer inside an agent session.
@@ -79,7 +79,7 @@ When the reply does not parse or does not validate, the reply (shortened) and a 
 
 ## streamObject()
 
-`streamObject()` returns at once with an async iterable of partial objects and three promises:
+`streamObject()` returns at once with two async iterables, of partial objects and of the completed elements of one array field ([Elements of an array field](#elements-of-an-array-field)), and five promises:
 
 ```typescript
 import { streamObject } from '@framers/agentos';
@@ -106,11 +106,46 @@ const article = await object; // validated against ArticleSchema
 console.log(await usage);
 ```
 
-- The model call starts when `partialObjectStream` is first read, and `object`, `text` and `usage` settle after the stream ends. A caller that never reads `partialObjectStream` waits on them forever.
-- After each text chunk, the text so far is parsed with the open strings, arrays and objects closed, and an object is yielded when it differs from the last one yielded. The partial values are not validated: a field can hold a string that is still being written.
-- When the stream ends, the whole text is parsed (as in `generateObject()`: whole text, fenced block, first `{` to last `}`) and validated. `object` rejects with `ObjectGenerationError` when the text does not parse or does not validate; there is no retry, and `maxRetries` is accepted and not read.
-- `streamObject()` reads only the text of the stream. When the provider call fails, the text ends where it stopped and the iteration ends without throwing; the provider's error does not reach the caller, and `object` rejects with the parse or validation error of the text that arrived. When `abortSignal` aborts, the provider's stream stops, the iteration ends, and `object` rejects with the signal's reason.
-- The schema reaches the model only in the system prompt: `streamObject()` sends no provider-side format. Its options are `schema`, `schemaName` and `schemaDescription` (written into the system prompt), `maxRetries` (not read), and `provider`, `model`, `prompt`, `messages`, `system` (a string), `temperature`, `maxTokens`, `effort`, `thinking`, `apiKey`, `baseUrl`, `abortSignal`, `maxAttempts` and `onAttempt`, which go to `streamText()` ([Attempts](../getting-started/HIGH_LEVEL_API.md#attempts)). It takes no fallback, policy-tier, timeout or cache option, so `streamText()` runs its default fallback chain (built from the keys in the environment) when the first provider fails with a retryable error before any text arrives.
+- The model call starts when `partialObjectStream` or `elementStream` is first read, and `object`, `text`, `usage`, `reportedUsage` and `skipped` settle after the stream ends. A caller that reads neither waits on them forever. The two iterables can be read together, and the stream moves as fast as its readers read it. When every iterable that was read stops before the end (a `break` out of its loop), the request is closed: `object` rejects with `ObjectGenerationError` (`Stream interrupted: ...`), `text` resolves to the text that arrived, and `reportedUsage` to `undefined`. When `abortSignal` aborted before the stop, `object` rejects with the signal's reason instead.
+- After each text chunk, the text so far is parsed with the open strings, arrays and objects closed, and an object is yielded when it differs from the last one yielded. The partial values are not validated: a field can hold a string that is still being written. A reader of `partialObjectStream` that starts after `elementStream` began the stream receives the latest partial object first.
+- When the stream ends, the whole text is parsed (as in `generateObject()`: whole text, fenced block, first `{` to last `}`) and validated. `object` rejects with `ObjectGenerationError` when the text does not parse or does not validate; there is no retry, and `maxRetries` is accepted and not read. A rejection of `object` that nothing awaits is not reported as an unhandled rejection.
+- `streamObject()` reads the `fullStream` of `streamText()`, so a failed stream ends at its `error` part: `partialObjectStream` ends without throwing, `elementStream` throws the stream's error, and `object` rejects with `ObjectGenerationError` (`Stream interrupted: <message>`, the provider's message). When `abortSignal` aborts, the provider's stream stops, both iterations end, and `object` rejects with the signal's reason.
+- `usage` resolves to the token usage `streamText()` summed, in which usage the provider never reported counts as zero. `reportedUsage` resolves to that usage when the stream ended on its own and the provider reported usage, a report of zero tokens included, and to `undefined` when the stream failed, was aborted or was not read to its end, or no usage was reported, so a cut stream never reads as costing nothing.
+- The schema reaches the model only in the system prompt: `streamObject()` sends no provider-side format. Its options are `schema`, `schemaName` and `schemaDescription` (written into the system prompt), `elements` (below), `maxRetries` (not read), and `provider`, `model`, `prompt`, `messages`, `system` (a string), `temperature`, `maxTokens`, `effort`, `thinking`, `apiKey`, `baseUrl`, `abortSignal`, `requestTimeout` (the per-call request timeout in milliseconds), `maxAttempts` and `onAttempt`, which go to `streamText()` ([Attempts](../getting-started/HIGH_LEVEL_API.md#attempts)). It takes no fallback, policy-tier or cache option, so `streamText()` runs its default fallback chain (built from the keys in the environment) when the first provider fails with a retryable error before any text arrives.
+
+### Elements of an array field
+
+With `elements` naming one array field of the schema, `elementStream` yields each element of that array as soon as it is complete, so a caller can use the first item of an answer while the rest is still streaming:
+
+```typescript
+import { streamObject } from '@framers/agentos';
+import { z } from 'zod';
+
+const AnswerSchema = z.object({
+  sentences: z.array(z.object({ text: z.string().min(1), passage: z.number().int().min(1) })),
+});
+
+const { elementStream, skipped, reportedUsage } = streamObject({
+  provider: 'openai',
+  schema: AnswerSchema,
+  elements: 'sentences',
+  prompt: 'Answer from the passages, one sentence per claim, citing the passage number.',
+});
+
+for await (const sentence of elementStream) {
+  // { text: string; passage: number }, validated against the element schema
+  console.log(sentence.passage, sentence.text);
+}
+
+console.log(await skipped, await reportedUsage);
+```
+
+- An element is complete once the next element begins, and the last one once the array's closing bracket arrives, while any field the schema puts after the array is still streaming, or at the latest when the stream ends with text that parses. A reply cut off at the token limit never yields its unfinished last element.
+- When the stream ends with text that does not parse, such as a reply cut off at the token limit, `elementStream` throws the `ObjectGenerationError` that `object` rejects with (`Failed to parse streamed JSON: ...`) after the elements completed before the end, so a cut answer never reads as a finished one. An empty reply ends the iteration with nothing yielded, and `object` rejects.
+- Each element is parsed by the array's element schema and yielded as the value the schema parses it to. An element that fails the schema is skipped, and `skipped` resolves to the number skipped when the stream ends.
+- `elements` names a top-level field of the schema that holds an array; an optional, nullable or default array counts, and one behind a transform, a pipe or `z.lazy()` does not. Any other name throws a `TypeError` at the call, before a request is sent.
+- When the stream fails, `elementStream` throws the stream's error after the elements completed before it, so a failed answer never reads as a finished one. A reader of `elementStream` that starts after every iterable that was read stopped before the end throws `ObjectGenerationError` (`Stream interrupted: ...`) after the elements completed before the stop. When `abortSignal` aborts, the iteration ends.
+- Without `elements`, `elementStream` yields nothing and `skipped` resolves to 0.
 
 ---
 
@@ -138,12 +173,16 @@ OpenAI-compatible calls send inputs in order in requests of at most 2,048 inputs
 | `openai` | `text-embedding-3-small` | `/embeddings` at `https://api.openai.com/v1` or `OPENAI_BASE_URL` |
 | `gemini` | `gemini-embedding-2` | Gemini's own embedding API through `GeminiProvider`; a `baseUrl` other than Google's native endpoint uses `/embeddings` |
 | `ollama` | `nomic-embed-text` | `/api/embed` at `OLLAMA_BASE_URL` (or `baseUrl`); usage is reported as 0 |
-| `openrouter` | None: pass `model` | `/embeddings` at `https://openrouter.ai/api/v1` |
-| Any other provider | None: pass `model` | `/embeddings` at `baseUrl`, or at `https://api.openai.com/v1` when no `baseUrl` is passed |
+| `openrouter` | None: pass `model` | `/embeddings` at `https://openrouter.ai/api/v1` or `OPENROUTER_BASE_URL` |
+| `mistral` | None: pass `model`, such as `mistral-embed` | `/embeddings` at `https://api.mistral.ai/v1` |
+| `requesty` | None: pass `model` | `/embeddings` at `https://router.requesty.ai/v1` or `REQUESTY_BASE_URL` |
+| `anthropic`, `groq`, `together`, `xai`, `minimax`, the image providers and the CLIs | None | None: the call is refused before its key is read, whatever the base URL |
+| A provider id agentos does not know | None: pass `model` | `/embeddings` at the call's or the global default's `baseUrl`; the call is refused without one |
 
 - With neither `provider` nor `model`, the global default provider (`setDefaultProvider()`) is used when one is set, with the default's model when that is not a chat model and the provider's default embedding model otherwise; a provider without one throws. Without a global default, the first of OpenAI (`OPENAI_API_KEY`) and Ollama (`OLLAMA_BASE_URL`) found in the environment is used.
-- A vendor with its own OpenAI-compatible embeddings endpoint, such as Mistral, needs `baseUrl` (for example `https://api.mistral.ai/v1`) as well as `model`; without it the request goes to OpenAI's URL with the vendor's key.
-- `dimensions` is sent as the `dimensions` field on `/embeddings` and to Gemini as `outputDimensionality`; Ollama does not receive it. Vectors are returned as the provider sends them, with no normalisation.
+- A provider's key goes only to its own endpoint in the table or to a base URL the caller set: the call's `baseUrl`, the global default's, or the provider's base-URL variable. Each endpoint is the one the provider documents: [OpenAI](https://developers.openai.com/api/reference/resources/embeddings/methods/create), [OpenRouter](https://openrouter.ai/docs/api/api-reference/embeddings/submit-an-embedding-request), [Mistral](https://docs.mistral.ai/api/endpoint/embeddings) and [Requesty](https://docs.requesty.ai/api-reference/endpoint/embeddings-create) (read 2026-10-25). An OpenAI-compatible server of your own takes a provider id of your own with `baseUrl` and `apiKey`. A `baseUrl` that is empty or whitespace alone is unset, on the call, in the global default and in the variable alike: the next source applies, with none the provider's own endpoint in the table, and a provider with none (Ollama, a provider id agentos does not know) is refused with no request; no request is built on a relative `/embeddings`.
+- [Anthropic offers no embedding model](https://platform.claude.com/docs/en/build-with-claude/embeddings), the API references of [Groq](https://console.groq.com/docs/api-reference) and [xAI](https://docs.x.ai/llms.txt) list no embeddings endpoint, [Together AI serves no embedding model on serverless](https://docs.together.ai/docs/serverless-models) and [MiniMax's API reference](https://platform.minimax.io/docs/api-reference) names none (read 2026-10-25). agentos has no embeddings for `stability`, `replicate`, `fal`, `bfl`, `stable-diffusion-local`, `claude-code-cli` or `gemini-cli` either. A call to any of them rejects with an error that says why and names the providers that embed, and no request is sent; an Anthropic call is not sent on to OpenRouter.
+- `dimensions` is sent as the `dimensions` field on `/embeddings`, to Mistral as `output_dimension` (the field [Mistral's embeddings](https://docs.mistral.ai/api/endpoint/embeddings) take) and to Gemini as `outputDimensionality`; Ollama does not receive it. Vectors are returned as the provider sends them, with no normalisation.
 
 ### Storing the vectors
 

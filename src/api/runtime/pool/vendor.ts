@@ -4,7 +4,7 @@
  * model id's `<maker>/` prefix; Ollama, a custom endpoint and an id with no
  * prefix give undefined, and undefined never counts as a vendor.
  */
-import { providerEnvVars } from '../../model.js';
+import { baseUrlIfSet, providerEnvVars } from '../../model.js';
 
 const NATIVE_VENDORS: Record<string, string> = {
   anthropic: 'anthropic',
@@ -92,7 +92,9 @@ export function sameModelId(a: string, b: string): boolean {
  * determined. `opts.vendor` (declared on the pool entry or the fixed seat)
  * wins; a native provider on its own endpoint gives its maker, and on a
  * custom base URL (`opts.baseUrl`, or the provider's URL variable when none
- * is given) gives undefined; a host gives the model id's maker prefix.
+ * is given) gives undefined; a host gives the model id's maker prefix. An
+ * empty or whitespace-only URL counts as none, as every call reads one
+ * ({@link baseUrlIfSet}), so the next source decides.
  *
  * @param provider - The provider id the seat runs on, such as `'openrouter'`.
  * @param model - The model id sent to that provider.
@@ -104,7 +106,7 @@ export function vendorOf(provider: string, model: string, opts: { vendor?: strin
   const native = NATIVE_VENDORS[provider];
   if (native) {
     const urlVar = providerEnvVars(provider).url;
-    const baseUrl = opts.baseUrl ?? (urlVar ? process.env[urlVar] : undefined);
+    const baseUrl = baseUrlIfSet(opts.baseUrl) ?? (urlVar ? baseUrlIfSet(process.env[urlVar]) : undefined);
     if (baseUrl && !isProviderOwnEndpoint(provider, baseUrl)) return undefined;
     return native;
   }

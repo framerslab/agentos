@@ -31,7 +31,26 @@ const DEFAULTS: Record<string, { text: string; cheap: string }> = {
   },
   mistral: { text: 'mistral-large-latest', cheap: 'mistral-small-latest' },
   xai: { text: 'grok-2', cheap: 'grok-2-mini' },
+  minimax: { text: 'MiniMax-M3.1-Flash', cheap: 'MiniMax-M3.1-Flash' },
 };
+
+/*
+ * Provider preference per tier, first choice first; pickProvider() rotates
+ * over the ones that are available. Every provider in DEFAULTS is listed in
+ * each order, or a strategy never assigns it beside another provider. MiniMax
+ * comes after the hosted providers listed before it and ahead of local Ollama,
+ * as auto-detection ranks a MiniMax key after the other API keys; its place
+ * ranks neither price nor quality.
+ */
+
+/** The `best` strategy and the balanced strategy's strong tier. */
+const STRONG_ORDER = ['anthropic', 'openai', 'openrouter', 'gemini', 'groq', 'xai', 'mistral', 'together', 'minimax', 'ollama'];
+
+/** The `cheapest` strategy and the balanced strategy's cheap tier. */
+const CHEAP_ORDER = ['groq', 'gemini', 'openai', 'openrouter', 'together', 'mistral', 'xai', 'anthropic', 'minimax', 'ollama'];
+
+/** The balanced strategy's standard tier. */
+const STANDARD_ORDER = ['openai', 'openrouter', 'anthropic', 'gemini', 'groq', 'mistral', 'xai', 'together', 'minimax', 'ollama'];
 
 /** Node with an optional complexity annotation from the planner. */
 type AnnotatedNode = GraphNode & { complexity?: number };
@@ -89,10 +108,7 @@ export class ProviderAssignmentEngine {
   // ---------------------------------------------------------------------------
 
   private assignBest(node: AnnotatedNode): NodeProviderAssignment {
-    const provider = this.pickProvider(
-      'best',
-      ['anthropic', 'openai', 'openrouter', 'gemini', 'groq', 'xai', 'mistral', 'together', 'ollama'],
-    );
+    const provider = this.pickProvider('best', STRONG_ORDER);
     const defaults = DEFAULTS[provider];
     return {
       nodeId: node.id,
@@ -104,10 +120,7 @@ export class ProviderAssignmentEngine {
   }
 
   private assignCheapest(node: AnnotatedNode): NodeProviderAssignment {
-    const provider = this.pickProvider(
-      'cheapest',
-      ['groq', 'gemini', 'openai', 'openrouter', 'together', 'mistral', 'xai', 'anthropic', 'ollama'],
-    );
+    const provider = this.pickProvider('cheapest', CHEAP_ORDER);
     const defaults = DEFAULTS[provider];
     return {
       nodeId: node.id,
@@ -128,19 +141,10 @@ export class ProviderAssignmentEngine {
           : 'standard';
     const provider =
       tier === 'cheap'
-        ? this.pickProvider(
-            'balanced:cheap',
-            ['groq', 'gemini', 'openai', 'openrouter', 'together', 'mistral', 'xai', 'anthropic', 'ollama'],
-          )
+        ? this.pickProvider('balanced:cheap', CHEAP_ORDER)
         : tier === 'strong'
-          ? this.pickProvider(
-              'balanced:strong',
-              ['anthropic', 'openai', 'openrouter', 'gemini', 'groq', 'xai', 'mistral', 'together', 'ollama'],
-            )
-          : this.pickProvider(
-              'balanced:standard',
-              ['openai', 'openrouter', 'anthropic', 'gemini', 'groq', 'mistral', 'xai', 'together', 'ollama'],
-            );
+          ? this.pickProvider('balanced:strong', STRONG_ORDER)
+          : this.pickProvider('balanced:standard', STANDARD_ORDER);
     const defaults = DEFAULTS[provider];
 
     const model =

@@ -402,3 +402,70 @@ describe('LiveKitRoomAudioSource: following the participant, and the end', () =>
     expect(() => source[Symbol.asyncIterator]()).toThrow(/iterate it once/);
   });
 });
+
+describe('LiveKitRoomAudioSource: the participant it reads', () => {
+  it("moves to another participant's microphone on setParticipant(): the stream it read is cancelled, what it read meanwhile is dropped, and frames carry the new identity", async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    room.addParticipant('user-2', new FakePublication(new FakeTrack('TR_2')));
+    const source = new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+    expect(source.participantIdentity).toBe('user-1');
+    const frames = source[Symbol.asyncIterator]();
+    const first = frames.next();
+    await settle();
+    FakeAudioStream.opened[0].push(rtcFrame([16384]));
+    expect((await first).value.speakerHint).toBe('user-1');
+    const second = frames.next();
+    await settle();
+    // A frame of the first participant's arrives as the source moves on: it is not the second participant's.
+    FakeAudioStream.opened[0].push(rtcFrame([8192]));
+    source.setParticipant('user-2');
+    expect(source.participantIdentity).toBe('user-2');
+    await settle();
+    expect(FakeAudioStream.opened.map((stream) => [stream.track.sid, stream.cancelled])).toEqual([
+      ['TR_1', true],
+      ['TR_2', false],
+    ]);
+    expect(source.trackSid).toBe('TR_2');
+    FakeAudioStream.opened[1].push(rtcFrame([-16384]));
+    const { value } = await second;
+    expect(Array.from(value.samples)).toEqual([-0.5]);
+    expect(value.speakerHint).toBe('user-2');
+    source.close();
+    await source.whenClosed();
+  });
+
+  it('waits for an identity as it waits for a track, and reads once setParticipant() gives one', async () => {
+    const room = new FakeRoom();
+    const participant = room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const source = new LiveKitRoomAudioSource({ room, sampleRate: 24_000, rtc: fakeRtc() });
+    expect(source.participantIdentity).toBeUndefined();
+    const frames = source[Symbol.asyncIterator]();
+    const first = frames.next();
+    await settle();
+    // A microphone subscribed meanwhile is nobody's the source reads.
+    const publication = new FakePublication(undefined);
+    participant.trackPublications.set('PUB_LATE', publication);
+    room.subscribe(participant, publication, new FakeTrack('TR_LATE'));
+    await settle();
+    expect(FakeAudioStream.opened).toHaveLength(0);
+    source.setParticipant('user-1');
+    await settle();
+    expect(FakeAudioStream.opened.map((stream) => stream.track.sid)).toEqual(['TR_1']);
+    FakeAudioStream.opened[0].push(rtcFrame([16384]));
+    const { value } = await first;
+    expect(Array.from(value.samples)).toEqual([0.5]);
+    expect(value.speakerHint).toBe('user-1');
+    // Without an identity again it reads nobody: the stream is cancelled, and a read waits until the source closes.
+    const second = frames.next();
+    await settle();
+    source.setParticipant(undefined);
+    expect(source.participantIdentity).toBeUndefined();
+    await settle();
+    expect(FakeAudioStream.opened[0].cancelled).toBe(true);
+    expect(FakeAudioStream.opened).toHaveLength(1);
+    source.close();
+    expect(await second).toEqual({ done: true, value: undefined });
+    await source.whenClosed();
+  });
+});

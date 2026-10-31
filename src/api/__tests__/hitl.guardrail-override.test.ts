@@ -10,6 +10,9 @@
  * 5. Multiple guardrails — first block wins.
  * 6. PII guardrail blocks unredacted SSN.
  * 7. Unknown guardrail ID passes through (allow).
+ * 8. A statement code-safety matches only at the end of a text is matched
+ *    with whitespace after it, in each text the check reads, and a long run
+ *    of whitespace is read in time linear in its length.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -205,5 +208,57 @@ describe('post-approval guardrail override', () => {
     expect(result.passed).toBe(false);
     expect(result.guardrailId).toBe('pii-redaction');
     expect(result.reason).toContain('credit card');
+  });
+});
+
+/**
+ * Two code-safety patterns match a statement only at the end of a text: an
+ * `rm -rf .`, and a `DELETE FROM <table>` with nothing after the table. The
+ * check reads each text inside JSON, where the text ends at its closing quote
+ * and a line break or a tab inside it is written `\n` or `\t`.
+ */
+describe('code-safety: a statement at the end of a text', () => {
+  /** The shapes the check reads a text in: a tool's argument, a part of an agent's input, a final text's replacement. */
+  const shapes = (text: string): Array<[string, Record<string, unknown>]> => [
+    ['db_query', { sql: text }],
+    ['agent:ops', { input: 'Tidy the logs, then report.', parts: [text, 'Then report.'] }],
+    ['return', { output: 'Done.', returned: text }],
+  ];
+  const verdicts = async (text: string): Promise<boolean[]> =>
+    Promise.all(shapes(text).map(async ([tool, args]) => (await runPostApprovalGuardrails(tool, args, ['code-safety'])).passed));
+
+  it.each([
+    'DELETE FROM sessions;',
+    'DELETE FROM sessions; ',
+    'DELETE FROM sessions ',
+    'DELETE FROM sessions;\n',
+    'DELETE FROM sessions; \n\t',
+    'DELETE FROM "sessions"; ',
+    'Then empty the table: DELETE FROM sessions; ',
+    'clear the workspace with rm -rf .',
+    'clear the workspace with rm -rf .\n',
+    'clear the workspace with rm -rf .\t',
+  ])('blocks %j, whitespace after the statement included, in each text it reads', async (text) => {
+    expect(await verdicts(text)).toEqual([false, false, false]);
+  });
+
+  it.each([
+    'DELETE FROM sessions WHERE id = 1',
+    'DELETE FROM sessions WHERE id = 1 ',
+    'DELETE FROM "sessions" WHERE id = 1',
+    'DELETE FROM sessions; SELECT 1',
+    'clear the cache with rm -rf .cache\n',
+  ])('passes %j, a statement with more after it on its line', async (text) => {
+    expect(await verdicts(text)).toEqual([true, true, true]);
+  });
+
+  it('reads a long run of whitespace after a DELETE FROM in time linear in its length', async () => {
+    const run = ' '.repeat(50_000);
+    const started = Date.now();
+    const conditional = await runPostApprovalGuardrails('db_query', { sql: `DELETE FROM sessions${run}WHERE id = 1` }, ['code-safety']);
+    const unconditional = await runPostApprovalGuardrails('db_query', { sql: `DELETE FROM sessions${run}` }, ['code-safety']);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(conditional.passed).toBe(true);
+    expect(unconditional.passed).toBe(false);
   });
 });

@@ -31,16 +31,36 @@ export interface GlobalDefaultProvider {
   /**
    * Default text model for this provider (e.g. `"gpt-4o-mini"`), used by
    * `generateText`, `streamText` and agents. Embedding and image calls use it
-   * too unless it is recognizably a chat model (GPT, Claude, Gemini, Llama and
-   * similar families) sent to the provider's own endpoint, in which case the
-   * provider's default model for the task applies. With a custom endpoint
-   * (`baseUrl` here, inline, or the provider's base-URL env var), and for
-   * `embedText` on Ollama, it is always used.
+   * too unless it is recognizably a chat model (GPT, Claude, Gemini, Llama,
+   * MiniMax and similar families) sent to the provider's own endpoint, in
+   * which case the provider's default model for the task applies. With a
+   * custom endpoint, and for `embedText` on Ollama, it is always used. The
+   * endpoint is the base URL the call is sent to: the call's own `baseUrl`,
+   * else `baseUrl` here, else the provider's base-URL env var, each read as
+   * `resolveBaseUrl` in `model.ts` reads it: an empty or whitespace-only one
+   * is unset and the next source applies, and with none the call goes to the
+   * provider's own endpoint. OpenAI's API root `https://api.openai.com/v1` and
+   * the regional roots OpenAI's data residency guide names
+   * (`https://us.api.openai.com/v1`, `https://eu.api.openai.com/v1` and the
+   * au, ca, jp, in, sg, kr, gb and ae ones), and MiniMax's API roots,
+   * `https://api.minimax.io/v1`, the China root `https://api.minimax.cn/v1`
+   * that MiniMax's China documentation names and the older China root
+   * `https://api.minimaxi.com/v1`, are the provider's own endpoint, not a
+   * custom one, whether the call, this default or the base-URL env var gives
+   * them, compared as fetch sends the URL: the letter case of the scheme and
+   * the host, a default port, surrounding whitespace and trailing slashes
+   * make no difference.
    */
   model?: string;
   /** API key used when no inline override is supplied. */
   apiKey?: string;
-  /** Base URL override (useful for proxies, local Ollama, etc.). */
+  /**
+   * Base URL override (useful for proxies, local Ollama, etc.). An empty or
+   * whitespace-only value is unset: the provider's base-URL env var applies,
+   * and with none text and image calls go to the provider's own endpoint
+   * (Ollama and `stable-diffusion-local`, which have none, refuse them with
+   * no request).
+   */
   baseUrl?: string;
 }
 

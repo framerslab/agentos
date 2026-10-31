@@ -101,6 +101,28 @@ describe('createStepGate', () => {
     expect(ran).not.toHaveBeenCalled();
   });
 
+  it('a side-effecting step whose signal has aborted asks no one: it is refused before its approval', async () => {
+    const ran = vi.fn();
+    const requestApproval = vi.fn(
+      async (action: PendingAction): Promise<ApprovalDecision> => ({
+        actionId: action.actionId,
+        approved: true,
+        decidedBy: 'reviewer',
+        decidedAt: new Date(0),
+      }),
+    );
+    const gate = createStepGate({ resolve: () => undefined, hitlManager: { requestApproval }, hitl: { enabled: true } });
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await gate.run(tool('send', true, ran), { text: 'hi' }, ctx, controller.signal);
+
+    expect(result).toMatchObject({ success: false, details: { code: 'step_aborted' } });
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(ran).not.toHaveBeenCalled();
+    expect(String(result.error)).toMatch(/^step_aborted: the step was stopped before its tool ran/);
+  });
+
   it("a step tool's own refusal code arrives as innerCode, so it is not the composition's own refusal", async () => {
     const nested: ITool = {
       ...tool('nested', false),

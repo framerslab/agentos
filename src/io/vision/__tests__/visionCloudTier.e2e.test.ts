@@ -171,4 +171,30 @@ describe('performOCR on a key of its own', () => {
     );
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it.each(['', ' \t\n '])(
+    "reads a baseUrl of %j as unset: with no provider named, it transcribes on the detected provider's own key and endpoint",
+    async (baseUrl) => {
+      process.env.OPENAI_API_KEY = 'sk-openai-env';
+      route([
+        [/api\.openai\.com\/v1\/models/, modelList],
+        [/api\.openai\.com\/v1\/chat\/completions/, () => openAIChat('TOTAL $42.99')],
+      ]);
+
+      const result = await performOCR({ image: JPEG, strategy: 'cloud-only', baseUrl });
+
+      expect(result).toMatchObject({ text: 'TOTAL $42.99', tier: 'cloud-vision', provider: 'openai' });
+      const [, init] = requestsTo(/\/v1\/chat\/completions/)[0] as [unknown, RequestInit];
+      expect(new Headers(init.headers).get('authorization')).toBe('Bearer sk-openai-env');
+    },
+  );
+
+  it.each(['', ' \t\n '])('still refuses an apiKey with no provider beside a baseUrl of %j, before any request', async (baseUrl) => {
+    process.env.OPENAI_API_KEY = 'sk-openai-env';
+
+    await expect(performOCR({ image: JPEG, strategy: 'cloud-only', apiKey: 'sk-for-somewhere', baseUrl })).rejects.toThrow(
+      'cloudApiKey and cloudBaseUrl need cloudProvider',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

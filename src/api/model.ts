@@ -14,7 +14,10 @@ import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderMan
 import { baseUrlCredentials } from '../core/llm/providers/url-secrets.js';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from './runtime/provider-defaults.js';
 import { getDefaultProvider } from './runtime/global-default.js';
-import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('model');
 
 /**
  * The result of splitting a `provider:model` string at the first colon.
@@ -38,7 +41,11 @@ export interface ResolvedProvider {
   modelId: string;
   /** API key to use. Absent for providers that rely solely on a base URL (e.g. Ollama). */
   apiKey?: string;
-  /** Base URL override forwarded to the provider SDK. */
+  /**
+   * Base URL override forwarded to the provider SDK: the first of the call's own, the applicable global default's
+   * and the provider's base-URL variable that is set, never an empty or whitespace-only string (see
+   * {@link resolveBaseUrl}). Absent when none is set, which sends the call to the provider's own endpoint.
+   */
   baseUrl?: string;
   /**
    * The key pool's id for a key read from the environment, `<providerId>:<ENV_VAR>`, under which the pool's state
@@ -78,14 +85,61 @@ const ENV_URL_MAP: Record<string, string> = {
 
 /**
  * The environment variables a provider's API key and base URL are read from,
- * when it has them. `importAgent` uses it to decide whether a redacted base URL
- * can be dropped and resolved the way an unset one is.
+ * when it has them. The model pool reads a seat's key and URL from them.
  *
  * @param providerId - A provider id such as `'openai'`.
  * @returns The variable names; either is undefined when the provider has none.
  */
 export function providerEnvVars(providerId: string): { key?: string; url?: string } {
   return { key: ENV_KEY_MAP[providerId], url: ENV_URL_MAP[providerId] };
+}
+
+/**
+ * `value` when it is a base URL that is set; undefined for an unset one, which
+ * is an undefined, empty or whitespace-only string. Every place that reads a
+ * base URL to decide the endpoint a provider's key is sent to reads it this
+ * way: a blank value is read as absent, so the next source applies (the global
+ * default's URL, then the provider's base-URL variable), and with none the
+ * request goes to the provider's own endpoint. No request is built on a blank
+ * base. The URL parser strips surrounding whitespace, which leaves a relative
+ * reference such as `/embeddings`
+ * (https://url.spec.whatwg.org/#concept-basic-url-parser); a browser's fetch
+ * parses that against the page's API base URL and posts it to the page's own
+ * origin with the key (https://fetch.spec.whatwg.org/#dom-request, the Request
+ * constructor), and Node's fetch, with no page to parse against, rejects it as
+ * unparseable (both read 2026-10-25).
+ *
+ * @param value - A base URL from a call, a global default or a variable.
+ * @returns The value when it is set, else undefined.
+ */
+export function baseUrlIfSet(value: string | undefined): string | undefined {
+  return value !== undefined && value.trim() !== '' ? value : undefined;
+}
+
+/**
+ * The base URL a call to `providerId` is sent with: the call's own, else the
+ * global default's (when the default applies to the provider), else the
+ * provider's base-URL variable, each read with {@link baseUrlIfSet} so a blank
+ * one is passed over; undefined when every source is unset, which sends the
+ * call to the provider's own endpoint. This is the one reading of a base URL:
+ * resolveProvider and resolveMediaProvider send with this URL, withGlobalDefault
+ * decides by it whether a global default's model goes to a custom endpoint (a
+ * root the provider documents for its own service is not one; see
+ * {@link PROVIDER_API_ROOTS}), generateImage chooses the global default's
+ * image model by it, importAgent decides by it whether a redacted base URL can
+ * be dropped, and the model pool reads a seat's URL sources with
+ * {@link baseUrlIfSet}, so every decision follows the endpoint the call is
+ * sent to.
+ *
+ * @param providerId - The provider the call is sent to.
+ * @param inline - The call's own `baseUrl`.
+ * @param defaultBaseUrl - The global default's `baseUrl`, when the default
+ *   applies to `providerId`.
+ * @returns The base URL, or undefined when no source sets one.
+ */
+export function resolveBaseUrl(providerId: string, inline: string | undefined, defaultBaseUrl: string | undefined): string | undefined {
+  const envVar = ENV_URL_MAP[providerId];
+  return baseUrlIfSet(inline) ?? baseUrlIfSet(defaultBaseUrl) ?? baseUrlIfSet(envVar ? process.env[envVar] : undefined);
 }
 
 /**
@@ -190,12 +244,16 @@ export function parseModelString(model: string): ParsedModel {
  *   first image vendor with a key in the environment.
  *
  * A call with neither field, and a provider the global default names, pass.
+ * An empty or whitespace-only `baseUrl` is not a base URL the call gives: it
+ * is unset ({@link baseUrlIfSet}), names no endpoint, and passes as a call
+ * with none does. A key beside it is still refused.
  *
  * @throws {Error} Naming the provider the credentials would have gone to.
  */
 function refuseMisdirectedCredentials(opts: ModelOption, task: TaskType): void {
   const inline = opts as { apiKey?: unknown; baseUrl?: unknown };
-  if (typeof inline.apiKey !== 'string' && typeof inline.baseUrl !== 'string') return;
+  const baseUrl = typeof inline.baseUrl === 'string' ? baseUrlIfSet(inline.baseUrl) : undefined;
+  if (typeof inline.apiKey !== 'string' && baseUrl === undefined) return;
   const prefixed = opts.provider === 'ollama' ? undefined : knownProviderPrefixOf(opts.model);
   if (opts.provider && prefixed && prefixed !== opts.provider) {
     throw new Error(
@@ -222,7 +280,11 @@ function refuseMisdirectedCredentials(opts: ModelOption, task: TaskType): void {
  * @param providerId - Provider identifier (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
  * @param modelId - Model identifier within the provider.
  * @param overrides - Optional explicit API key and/or base URL that take precedence
- *   over environment variable lookups. `strict` (set for an agency seat) admits
+ *   over environment variable lookups. The base URL is the override's, else the
+ *   global default's, else the provider's base-URL variable, each read as
+ *   {@link resolveBaseUrl} reads it: an empty or whitespace-only one is unset
+ *   and the next source applies, so no request is built on a blank base.
+ *   `strict` (set for an agency seat) admits
  *   only a `setDefaultProvider()` default that names this provider, for the key
  *   and for the URL, and turns off the Anthropic → OpenRouter fallback, so a
  *   provider with no key of its own fails. `quiet` is for a lookup that sends
@@ -252,10 +314,7 @@ export function resolveProvider(
     overrides?.apiKey ??
     defApiKey ??
     (ENV_KEY_MAP[providerId] ? process.env[ENV_KEY_MAP[providerId]] : undefined);
-  const baseUrl =
-    overrides?.baseUrl ??
-    defBaseUrl ??
-    (ENV_URL_MAP[providerId] ? process.env[ENV_URL_MAP[providerId]] : undefined);
+  const baseUrl = resolveBaseUrl(providerId, overrides?.baseUrl, defBaseUrl);
 
   if (providerId === 'ollama') {
     if (!baseUrl) {
@@ -331,10 +390,7 @@ export function resolveMediaProvider(
     overrides?.apiKey ??
     (defAppliesToThisProvider ? def?.apiKey : undefined) ??
     (ENV_KEY_MAP[providerId] ? process.env[ENV_KEY_MAP[providerId]] : undefined);
-  const baseUrl =
-    overrides?.baseUrl ??
-    (defAppliesToThisProvider ? def?.baseUrl : undefined) ??
-    (ENV_URL_MAP[providerId] ? process.env[ENV_URL_MAP[providerId]] : undefined);
+  const baseUrl = resolveBaseUrl(providerId, overrides?.baseUrl, defAppliesToThisProvider ? def?.baseUrl : undefined);
 
   if (providerId === 'ollama') {
     if (!baseUrl) {
@@ -399,7 +455,13 @@ export interface ModelOption {
   model?: string;
   /** API key override (takes precedence over environment variables). */
   apiKey?: string;
-  /** Base URL override (useful for local proxies or Ollama). */
+  /**
+   * Base URL override (useful for local proxies or Ollama). An empty or
+   * whitespace-only value is unset: the global default's URL, then the
+   * provider's base-URL variable, apply as with no `baseUrl`, and with none the
+   * call goes to the provider's own endpoint. It is never refused as a base URL
+   * meant for another provider, since it names no endpoint.
+   */
   baseUrl?: string;
 }
 
@@ -510,13 +572,93 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
 /**
  * Chat model families, optionally behind a provider prefix such as `openai:`
  * and a gateway prefix such as `openai/` or `meta-llama/`
- * (`openrouter:openai/gpt-4o`).
+ * (`openrouter:openai/gpt-4o`). MiniMax's text models are `MiniMax-` names
+ * (`MiniMax-M3.1-Flash`); the hyphen keeps a bare `minimax:` provider prefix
+ * or `minimax/` gateway prefix from reading as the family.
  */
 const CHAT_MODEL_FAMILY =
-  /^(?:[\w.-]+:)?(?:[\w.-]+\/)?(?:gpt-|chatgpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|codestral|ministral|magistral|grok|deepseek|qwen|command|phi-|sonar|kimi|glm)/i;
+  /^(?:[\w.-]+:)?(?:[\w.-]+\/)?(?:gpt-|chatgpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|codestral|ministral|magistral|grok|deepseek|qwen|command|phi-|sonar|kimi|glm|minimax-)/i;
 
 /** Names that mark a non-chat model inside a chat family (gpt-image-2.5-flare, gemini-embedding-2). */
 const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|audio|realtime|moderation/i;
+
+/**
+ * API roots a provider documents for its own service, each serving the
+ * provider's own model names: a base URL among them picks a region, not a
+ * custom endpoint. The base URL compared with them is the one
+ * {@link resolveBaseUrl} gives, the first set source of the call's, the global
+ * default's and the provider's base-URL variable, so an empty or
+ * whitespace-only value at the call or the default never reaches the
+ * comparison: the next source does. OpenAI's root is https://api.openai.com/v1,
+ * where agentos sends an OpenAI call with no base URL (OPENAI_DEFAULT_BASE_URL
+ * in OpenAIProvider.ts) and where OpenAI's API reference sends its requests
+ * (https://developers.openai.com/api/reference/resources/embeddings/methods/create).
+ * Its regional roots put a region's prefix before that host: OpenAI's data
+ * residency guide says to "add the domain prefix as defined in the table below
+ * to each request", its table names the us, eu, au, ca, jp, in, sg, kr, gb and
+ * ae prefixes, and its examples send to https://us.api.openai.com/v1 and
+ * https://eu.api.openai.com/v1
+ * (https://developers.openai.com/api/docs/guides/your-data, read 2026-10-29).
+ * MiniMax's global root is https://api.minimax.io/v1
+ * (https://platform.minimax.io/docs/api-reference/text-openai-api; images at
+ * https://platform.minimax.io/docs/api-reference/image-generation-t2i). Its
+ * China root is https://api.minimax.cn/v1
+ * (https://platform.minimax.cn/docs/api-reference/text-openai-api; images at
+ * https://platform.minimax.cn/docs/api-reference/image-generation-t2i), where
+ * MiniMax's CLI moved its China region on 28 Sep 2026
+ * (https://github.com/MiniMax-AI/cli/commit/8746d48fa6e8c5ae9872a0baac8ed1ae5efd42d4).
+ * https://api.minimaxi.com/v1 is the older China root. MiniMax's documentation
+ * does not name it, but it answers as MiniMax's API (a request without a key
+ * gets MiniMax's own authentication error, as on api.minimax.cn; checked
+ * 2026-10-26), so it stays a root and a configuration that sends to it keeps
+ * working.
+ */
+const PROVIDER_API_ROOTS: Record<string, readonly string[]> = {
+  openai: [
+    'https://api.openai.com/v1',
+    ...['us', 'eu', 'au', 'ca', 'jp', 'in', 'sg', 'kr', 'gb', 'ae'].map((region) => `https://${region}.api.openai.com/v1`),
+  ],
+  minimax: ['https://api.minimax.io/v1', 'https://api.minimax.cn/v1', 'https://api.minimaxi.com/v1'],
+};
+
+/**
+ * `url` as a request built on it is sent: surrounding whitespace and every
+ * trailing slash removed, as MiniMax's image provider removes them before it
+ * appends a path, then parsed as fetch parses a URL, which lowercases the
+ * scheme and the host and drops a default port
+ * (https://url.spec.whatwg.org/#scheme-state,
+ * https://url.spec.whatwg.org/#concept-domain-to-ascii,
+ * https://url.spec.whatwg.org/#port-state). Undefined when nothing is left
+ * or the URL does not parse.
+ */
+function normalizedBaseUrl(url: string): string | undefined {
+  const trimmed = url.trim().replace(/\/+$/, '');
+  if (!trimmed) return undefined;
+  try {
+    return new URL(trimmed).href;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether `url`, the base URL {@link resolveBaseUrl} gives, is one other than
+ * an API root `provider` documents for its own service (see
+ * {@link PROVIDER_API_ROOTS}). The two are compared as the request is sent
+ * (see {@link normalizedBaseUrl}): the letter case of the scheme and the host,
+ * a default port, surrounding whitespace and trailing slashes make no
+ * difference. An unset URL is not custom: the call then goes to the provider's
+ * own endpoint. An empty or whitespace-only URL never reaches here, since
+ * resolveBaseUrl reads it as unset and the next source applies. A URL that
+ * does not parse is custom, as any other is.
+ */
+function isCustomBaseUrl(provider: string, url: string | undefined): boolean {
+  if (url === undefined) return false;
+  const roots = PROVIDER_API_ROOTS[provider];
+  if (!roots) return true;
+  const sent = normalizedBaseUrl(url);
+  return sent === undefined || !roots.some((root) => normalizedBaseUrl(root) === sent);
+}
 
 /**
  * `opts` with the global default's `provider` and `model` filled in when the
@@ -529,20 +671,26 @@ const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|au
 function withGlobalDefault(opts: ModelOption, task: TaskType): ModelOption {
   if (opts.provider || opts.model) return opts;
   const def = getDefaultProvider();
-  if (!def?.provider) return opts;
-  // A custom endpoint (the default's baseUrl, an inline baseUrl on callers
-  // such as embedText, or the provider's base-URL env var) may serve any
-  // model under any name, so the default's model stays.
+  const provider = def?.provider;
+  if (!def || !provider) return opts;
+  // A custom endpoint may serve any model under any name, so the default's
+  // model stays. The endpoint is the base URL the call is sent with, which
+  // resolveBaseUrl gives here as it gives resolveProvider and
+  // resolveMediaProvider the URL they send with: an inline baseUrl on callers
+  // such as embedText, else the default's baseUrl, else the provider's
+  // base-URL env var, an empty or whitespace-only one passed over; with none
+  // the call goes to the provider's own endpoint, and the default's model is
+  // kept only for a task it can serve there. A regional root the provider
+  // documents serves the provider's own names and is not custom, even when a
+  // setting the call does not use names a custom endpoint.
   const inlineBaseUrl = (opts as { baseUrl?: unknown }).baseUrl;
-  const envBaseUrlVar = def.provider ? ENV_URL_MAP[def.provider] : undefined;
-  const customEndpoint = Boolean(
-    def.baseUrl ||
-      (typeof inlineBaseUrl === 'string' && inlineBaseUrl) ||
-      (envBaseUrlVar && process.env[envBaseUrlVar]),
+  const customEndpoint = isCustomBaseUrl(
+    provider,
+    resolveBaseUrl(provider, typeof inlineBaseUrl === 'string' ? inlineBaseUrl : undefined, def.baseUrl),
   );
   return {
     ...opts,
-    provider: def.provider,
+    provider,
     model: customEndpoint ? def.model : globalModelForTask(def, task),
   };
 }

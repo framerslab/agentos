@@ -266,9 +266,10 @@ export function buildHierarchicalTools(
             error?: string;
           }>) ?? [];
 
+        // The record holds the task as the delegate was sent it, the approver's instructions included.
         agentCalls.push({
           agent: name,
-          input: args.task,
+          input: effectiveTask,
           output: resultText,
           toolCalls: resultToolCalls,
           usage: buildAgentCallUsage(resultUsage),

@@ -36,14 +36,23 @@ export interface ContextWindowManagerConfig {
   maxContextTokens: number;
   /** Infinite context configuration. */
   infiniteContext: Partial<InfiniteContextConfig>;
-  /** LLM invoker for summarization. */
-  llmInvoker: (prompt: string) => Promise<string>;
+  /**
+   * Writes the summaries. `infiniteContext.llmInvoker` takes its place when set.
+   * Without either, compaction runs on extractive summaries: each strategy takes
+   * the segment's user messages (or the hybrid strategy's observation notes),
+   * and the summary chain joins and cuts its oldest summaries.
+   */
+  llmInvoker?: (prompt: string) => Promise<string>;
   /** Optional: MemoryObserver for hybrid strategy. */
   observer?: MemoryObserver;
   /** Optional: MemoryReflector for hybrid strategy. */
   reflector?: MemoryReflector;
-  /** Callback to encode traces into long-term memory. */
-  onTracesCreated?: (traces: Partial<MemoryTrace>[]) => Promise<void>;
+  /**
+   * Encodes a compaction's traces into long-term memory. It runs after the turn
+   * goes on, and the ids it answers become the compaction's `tracesCreated` in
+   * the log.
+   */
+  onTracesCreated?: (traces: Partial<MemoryTrace>[]) => Promise<void | string[]>;
 }
 
 export class ContextWindowManager {
@@ -56,7 +65,7 @@ export class ContextWindowManager {
   private readonly chain: RollingSummaryChain;
   private readonly onTracesCreated?: (
     traces: Partial<MemoryTrace>[],
-  ) => Promise<void>;
+  ) => Promise<void | string[]>;
 
   /** Total compactions performed in this session. */
   private compactionCount = 0;
@@ -99,6 +108,13 @@ export class ContextWindowManager {
     role: 'user' | 'assistant' | 'system' | 'tool',
     content: string,
   ): void {
+    // A user message opens the next turn, and the replies and tool messages
+    // after it carry the same turn index. Messages before the first user
+    // message are turn 0.
+    if (role === 'user') {
+      this.turnCounter++;
+    }
+
     const msg: ContextMessage = {
       role,
       content,
@@ -107,11 +123,6 @@ export class ContextWindowManager {
       tokenEstimate: estimateTokens(content),
     };
     this.messages.push(msg);
-
-    // Increment turn counter on user messages (start of a new turn).
-    if (role === 'user') {
-      this.turnCounter++;
-    }
   }
 
   /**
@@ -155,6 +166,13 @@ export class ContextWindowManager {
         this.config,
       );
 
+      // A strategy that found nothing to summarize (the newest message alone, or
+      // the turns it keeps, fill the window) changes nothing, and no compaction
+      // is logged or counted.
+      if (result.newNodes.length === 0) {
+        return this.messages;
+      }
+
       // Update internal state.
       this.messages = result.messages;
       this.chain.addNodes(result.newNodes);
@@ -169,10 +187,20 @@ export class ContextWindowManager {
 
       // Encode any traces produced by the compaction (hybrid strategy).
       if (result.tracesToEncode.length > 0 && this.onTracesCreated) {
-        // Fire and forget — don't block the conversation turn.
-        this.onTracesCreated(result.tracesToEncode).catch(() => {
-          /* trace encoding failure is non-fatal */
-        });
+        const entryId = result.entry.id;
+        // Fire and forget — don't block the conversation turn. The ids of the
+        // stored traces go into the logged entry when the encoding ends.
+        this.onTracesCreated(result.tracesToEncode)
+          .then((ids) => {
+            const logged = this.log.getById(entryId);
+            if (!logged || !Array.isArray(ids)) return;
+            for (const id of ids) {
+              if (!logged.tracesCreated.includes(id)) logged.tracesCreated.push(id);
+            }
+          })
+          .catch(() => {
+            /* trace encoding failure is non-fatal */
+          });
       }
 
       return this.messages;

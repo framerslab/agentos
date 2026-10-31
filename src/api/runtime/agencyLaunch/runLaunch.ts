@@ -3,7 +3,7 @@
  * The launch engine: one run of `launch_agency` on either surface, through a host that knows the surface (gmi() or
  * the full runtime). It validates, resolves the parent (a frame naming a launch in flight, or the turn itself), applies
  * the bounds, sizes the child budget, admits the launch, builds the seats, runs the child agency once, settles under one
- * deadline and one grace, closes the team and returns one tool result. It never throws (spec 4.8).
+ * deadline and one grace, closes the team and returns one tool result. It never throws.
  * @internal
  */
 import { randomUUID } from 'node:crypto';
@@ -11,15 +11,17 @@ import { agency } from '../../agency.js';
 import type { Agent, AgencyCallbacks, AgencyOptions, AgencyStrategy } from '../../types.js';
 import { AgencyConfigError } from '../../types.js';
 import { IDENTIFIER_PATTERN } from '../../../cognition/emergent/ToolName.js';
+import type { GMIToolCallGate } from '../../../cognition/substrate/IGMI.js';
 import type { ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
 import type { ApprovalGateFn } from '../approval-gate.js';
-import { SpendBudget } from '../spendBudget.js';
+import { SpendBudget, type SpendLimitInfo } from '../spendBudget.js';
 import type { AgentOSUsageLedgerOptions } from '../usageLedger.js';
 import { launchRegistry, type LaunchEntry } from './launchRegistry.js';
 import type { SeatHandle } from './sessionSeat.js';
 import {
   LAUNCH_AGENCY_TOOL_NAME,
   LAUNCH_SETTLE_GRACE_MS,
+  LAUNCH_STRATEGIES,
   LAUNCH_TEXT_CHARS,
   MAX_ROLE_CHARS,
   MIN_LAUNCH_TOKENS,
@@ -38,8 +40,8 @@ import {
   type ToolCallHook,
 } from './types.js';
 
-/** The six strategies a launch offers (spec D17). */
-const STRATEGIES: readonly AgencyStrategy[] = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'];
+/** The six strategies a launch offers, the list the tool's input schema names. */
+const STRATEGIES: readonly AgencyStrategy[] = LAUNCH_STRATEGIES;
 const ARG_KEYS: ReadonlySet<string> = new Set(['goal', 'strategy', 'seats', 'budgetUsd', 'maxTokens', 'deadlineMs', 'maxRounds']);
 const SEAT_KEYS: ReadonlySet<string> = new Set(['role', 'instructions', 'agentKey', 'personaId', 'brief', 'tools', 'dependsOn']);
 /**
@@ -54,7 +56,7 @@ const MAX_BRIEF_CHARS = 1_000;
 
 const isStringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
 
-/** The launching turn, as a launch sees it (spec 4.8). */
+/** The launching turn, as a launch sees it. */
 export interface LaunchParent {
   gmiId: string;
   personaId: string;
@@ -70,9 +72,17 @@ export interface LaunchParent {
   namespace: string;
   /** ctx.correlationId: the parent turn, whose launch pool a root launch draws on. */
   turnId?: string;
-  /** The hooks the parent turn's calls ran under, outermost first (spec D12). */
+  /** The hooks the parent turn's calls ran under, outermost first. */
   toolHooks: readonly ToolCallHook[];
-  /** The output tokens one call of the route is counted with. */
+  /**
+   * The full runtime: the output guardrails' tool-call gate the parent turn asks before each of its calls (the call's
+   * `callerTurn.toolCallGate`). Every seat's turn asks it before each of its own calls.
+   */
+  toolCallGate?: GMIToolCallGate;
+  /**
+   * The output tokens one call of a temporary seat the launch builds is counted with, on the route its host builds it
+   * on. The one-call floor counts it for each temporary seat; a persistent member's call is counted on its own route.
+   */
   outputEstimateTokens: number;
   /**
    * The root scope's id: the launching session as its agent knows it, never the calling GMI. On
@@ -81,6 +91,12 @@ export interface LaunchParent {
    * launch's scope is its parent launch.
    */
   scopeId: string;
+  /**
+   * An object that lives as long as the GMI that runs the launching turn (on gmi(), the tool view the call came
+   * through, `callerTurn.dispatch`): a root launch's turn pool is kept by it, so no bound on root scopes drops the pool
+   * between two launches of a turn. Unset, the registry keeps the pool by scope, under that bound.
+   */
+  poolOwner?: object;
 }
 
 /** One seat after step 3: its form, its member, its names. */
@@ -93,9 +109,21 @@ export interface LaunchHost {
   surface: 'gmi' | 'runtime';
   /** The parent of a root launch (no frame): depth 0. */
   rootParent(ctx: ToolExecutionContext): Promise<LaunchParent | LaunchRefusal>;
+  /**
+   * The output tokens one call of a seat this host builds is counted with: the one-call floor of a nested launch it
+   * runs, whose seats it builds on its own route (a persistent member that launches from its seat builds them on the
+   * member's, not the root's). Unset, a nested launch counts the one its parent launch's entry holds.
+   */
+  outputEstimateTokens?(ctx: ToolExecutionContext): Promise<number>;
+  /**
+   * The output tokens one call of a persistent member's seat is counted with: its calls run on the member's own route
+   * (an `agentKey` member on gmi(), a `personaId` seat on the full runtime). Unset, or undefined for a member, the
+   * floor counts the parent's estimate for that seat.
+   */
+  memberOutputEstimateTokens?(ref: string): Promise<number | undefined>;
   /** A root launch's parent tool names; a nested launch reads its seat's from the entry. */
   parentToolNames(ctx: ToolExecutionContext, parent: LaunchParent): Promise<ReadonlySet<string>>;
-  /** A tool of the parent's table by name, read for a composition's step tools (spec D11). */
+  /** A tool of the parent's table by name, read for a composition's step tools. */
   toolOf(ctx: ToolExecutionContext, name: string): Promise<SeatToolLike | undefined>;
   /** Whether a member exists: an agentKey on gmi(), a personaId on the runtime. */
   hasMember(ref: string): boolean;
@@ -107,9 +135,16 @@ export interface LaunchHost {
   callbacks?: AgencyCallbacks;
   /** gmi(): the parent's usage ledger, which the coordinator's calls record to under source `launch_agency`. */
   usageLedger?: AgentOSUsageLedgerOptions;
-  /** The full runtime's registry entry; no-ops on gmi(). A recorder that throws is logged and the launch goes on. */
+  /**
+   * The full runtime's registry entry; no-ops on gmi(). `start` once the team is built; `close`, with the result the
+   * launch returned, when the launch's entry goes: before the launch returns when every seat is released by then,
+   * else once every seat is released and every launch its seats started is gone, `closing` being told at the return
+   * meanwhile. So the record lasts as long as the team holds a seat. A recorder that throws is logged and the launch
+   * goes on.
+   */
   recorder: {
     start(record: { agencyId: string; conversationId: string; meta: LaunchRecordMetadata; seats: SeatHandle[] }): void;
+    closing?(result: LaunchAgencyResult): void;
     close(result: LaunchAgencyResult): void;
   };
   logError(error: unknown, where: string): void;
@@ -123,6 +158,8 @@ type RunOutcome = { kind: 'resolved'; text: string } | { kind: 'rejected'; error
 /** Why the launch stopped early, set by the budget's function, the deadline and the parent's stop. */
 interface LaunchState {
   exhausted: boolean;
+  /** The refusal that marked the launch exhausted: its own budget's, or that of a budget its calls draw on. */
+  refusal?: SpendLimitInfo;
   timedOut: boolean;
   cancelled: boolean;
 }
@@ -157,8 +194,8 @@ function isRefusal(value: unknown): value is LaunchRefusal {
 
 /**
  * Logs through the host, ignoring a logger that throws: the launch's result and its seats' release come first, and
- * `runLaunch` never throws (spec 4.8, D16). A host's own logger, such as one passed to
- * `AgentOS.create`, makes no promise not to throw.
+ * `runLaunch` never throws. A host's own logger, such as one passed to `AgentOS.create`, makes no promise not to
+ * throw.
  */
 function logSafely(host: LaunchHost, error: unknown, where: string): void {
   try {
@@ -176,9 +213,10 @@ function frameIn(sessionData: Record<string, unknown> | undefined): AgencyLaunch
 }
 
 /**
- * Step 2: the parent. A frame naming a live entry gives the depth, the limits, the budget, the user, the namespace and
- * the calling seat's names; the call's own context gives the gate and the hooks it carries (the entry's then the
- * member's own), else the entry's. A frame naming a closing or missing entry is refused. No frame: the host's root.
+ * Step 2: the parent. A frame naming a live entry gives the depth, the limits, the user, the namespace and the calling
+ * seat's names; the call's own context gives the gate, the hooks it carries (the entry's then the member's own) and the
+ * budget (the seat's turn's: the entry's, held on gmi() beside a persistent member's own), else the entry's. A frame
+ * naming a closing or missing entry is refused. No frame: the host's root.
  */
 async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promise<{ parent: LaunchParent; toolNames: ReadonlySet<string>; frame?: AgencyLaunchFrame } | LaunchRefusal> {
   const frame = frameIn(ctx.sessionData);
@@ -193,6 +231,8 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
   }
   const gate = ctx.callerTurn?.approvalGate ?? entry.approvalGate;
   const conversationId = ctx.sessionData?.conversationId;
+  // The temporary seats this launch builds run on its host's route: the floor counts a call of one with its estimate.
+  const outputEstimateTokens = host.outputEstimateTokens ? await host.outputEstimateTokens(ctx) : entry.outputEstimateTokens;
   return {
     frame,
     toolNames: entry.seatTools.get(frame.role) ?? new Set<string>(),
@@ -203,18 +243,38 @@ async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promi
       ...(typeof conversationId === 'string' ? { conversationId } : {}),
       depth: entry.depth,
       limits: entry.limits,
-      budget: entry.budget,
+      // The seat's turn's budget draws on the entry's, so the tree stays under its root; a persistent member's own
+      // budget, held beside it, bounds the teams the member launches from its seat as it bounds the member's calls.
+      budget: ctx.callerTurn?.budget ?? entry.budget,
       ...(gate ? { approvalGate: gate } : {}),
       signal: ctx.signal ? AbortSignal.any([entry.signal, ctx.signal]) : entry.signal,
       ...(entry.providerUserId !== undefined ? { providerUserId: entry.providerUserId } : {}),
       namespace: entry.namespace,
       ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
       toolHooks: ctx.callerTurn?.toolHooks ?? entry.toolHooks,
-      outputEstimateTokens: entry.outputEstimateTokens,
-      // A nested launch's scope is the launch its team comes from (spec D8).
+      // The guardrails' gate the seat's turn asks: the nested team's seats are asked it too.
+      ...(ctx.callerTurn?.toolCallGate ? { toolCallGate: ctx.callerTurn.toolCallGate } : {}),
+      outputEstimateTokens,
+      // A nested launch's scope is the launch its team comes from.
       scopeId: frame.launchId,
     },
   };
+}
+
+/**
+ * Step 4's one-call floor: the output tokens of the largest call one of the launch's seats makes, so the cap covers a
+ * call of any seat, counted alone. A temporary seat runs on the route its host builds it on
+ * (`parent.outputEstimateTokens`); a persistent member on its own, as its host counts it. A coordinator's call (a
+ * hierarchical manager's, a parallel or debate synthesizer's) is not in the floor: like every call, it is checked
+ * against the launch's budget before it is sent.
+ */
+async function seatsOutputEstimate(host: LaunchHost, parent: LaunchParent, seats: readonly ResolvedSeat[]): Promise<number> {
+  let estimate = 0;
+  for (const seat of seats) {
+    const own = seat.form === 'persistent' ? await host.memberOutputEstimateTokens?.(seat.ref) : undefined;
+    estimate = Math.max(estimate, own ?? parent.outputEstimateTokens);
+  }
+  return estimate;
 }
 
 /** Every tool the allowlists name and, for each composition, its step tools in turn, each read once. */
@@ -339,7 +399,7 @@ function recordStart(launch: AdmittedLaunch, seats: SeatHandle[]): void {
   }
 }
 
-/** The child agency (spec D17): the parent's route as its own, the seats as its roster, the root's hitl at the root only. */
+/** The child agency: the parent's route as its own, the seats as its roster, the root's hitl at the root only. */
 async function childAgencyOptions(launch: AdmittedLaunch, seats: SeatHandle[]): Promise<AgencyOptions> {
   const route = await launch.host.agencyRoute(launch.parent);
   return {
@@ -381,12 +441,26 @@ function statusOf(state: LaunchState, outcome: RunOutcome): LaunchStatus {
   return outcome.kind === 'resolved' ? 'completed' : 'failed';
 }
 
-function reasonOf(status: LaunchStatus, launch: AdmittedLaunch, seats: LaunchSeatRecord[], outcome: RunOutcome): string | undefined {
+/**
+ * The result's reason, for every status but 'completed': whose budget refused a call and why, the deadline, the
+ * parent's stop, or what failed (the first failed seat by its error's name and code, else the team's error by its name
+ * and code, else that the team did not settle or that no seat ran). Never an error's message.
+ */
+function reasonOf(status: LaunchStatus, launch: AdmittedLaunch, seats: LaunchSeatRecord[], outcome: RunOutcome, state: LaunchState): string | undefined {
   switch (status) {
     case 'completed':
       return undefined;
-    case 'budget_exhausted':
-      return `the launch's budget is spent: ${launch.child.tokensUsed()} of ${launch.caps.maxTotalTokens} tokens`;
+    case 'budget_exhausted': {
+      const refusal = state.refusal;
+      const used = launch.child.tokensUsed();
+      // A budget the launch draws on (its parent's, its pool) or one a seat's call draws on (a persistent member's own)
+      // names the cap that refused. The launch's own token cap reads from the launch's count once its calls have used it
+      // up; a call whose estimate alone would pass what the cap has left is told in the refusal's own words, as every
+      // other cap's refusal is.
+      if (refusal && refusal.budgetId !== launch.child.id) return `a budget the team draws on refused a call: ${refusal.reason}`;
+      if (refusal && (refusal.capType !== 'tokens' || used < launch.caps.maxTotalTokens)) return `the launch's budget refused a call: ${refusal.reason}`;
+      return `the launch's budget is spent: ${used} of ${launch.caps.maxTotalTokens} tokens`;
+    }
     case 'timed_out':
       return `the deadline of ${launch.deadlineMs} ms passed`;
     case 'cancelled':
@@ -405,11 +479,11 @@ function reasonOf(status: LaunchStatus, launch: AdmittedLaunch, seats: LaunchSea
 }
 
 /**
- * Step 10: the result, recorded, as the tool's output.
+ * Step 10: the result, the tool's output. The team's record closes when the launch's entry goes ({@link closeRecord}).
  *
  * @param state - The launch's state when the run settled (a stop that came during the close does not change it).
  */
-function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome, state: LaunchState = launch.state): ToolExecutionResult<LaunchAgencyResult> {
+function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome, state: LaunchState = launch.state): LaunchAgencyResult {
   const seats = launch.seats.map((seat, i) => built[i]?.record() ?? notRun(seat));
   const usage = seats.reduce<LaunchUsage>((sum, record) => {
     sum.promptTokens += record.usage.promptTokens;
@@ -419,7 +493,7 @@ function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome
     return sum;
   }, ZERO_USAGE());
   const status = statusOf(state, outcome);
-  const reason = reasonOf(status, launch, seats, outcome);
+  const reason = reasonOf(status, launch, seats, outcome, state);
   const text = outcome.kind === 'resolved' ? outcome.text : '';
   const truncated = text.length > LAUNCH_TEXT_CHARS;
   const closedAt = new Date();
@@ -450,20 +524,44 @@ function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome
       },
     },
   };
-  try {
-    launch.host.recorder.close(result);
-  } catch (error) {
-    logSafely(launch.host, error, 'launch_agency record');
+  return result;
+}
+
+/**
+ * Closes the team's record with the launch's result when the launch's entry goes: at once when it is gone already
+ * (every seat released within the grace), else when it is removed (every seat released, every launch the seats
+ * started gone), the recorder told meanwhile that the launch returned and its team is closing. The record lasts as
+ * long as the team holds a seat. A recorder that throws is logged and the launch goes on.
+ */
+function closeRecord(launch: AdmittedLaunch, result: LaunchAgencyResult): void {
+  const { host, entry } = launch;
+  const close = (): void => {
+    try {
+      host.recorder.close(result);
+    } catch (error) {
+      logSafely(host, error, 'launch_agency record');
+    }
+  };
+  if (!launchRegistry.get(entry.launchId)) {
+    close();
+    return;
   }
-  return { success: true, output: result };
+  try {
+    host.recorder.closing?.(result);
+  } catch (error) {
+    logSafely(host, error, 'launch_agency record');
+  }
+  void launchRegistry.whenRemoved(entry.launchId).then(close);
 }
 
 /**
  * Steps 6 to 10. One real-time timer per launch (never the learning layer's clock): at the deadline, or when the
  * parent turn stops, the launch signal aborts, which every seat's turn and the coordinator's calls run under. The
+ * parent's stop ends the timer, so a deadline that passes while the team settles leaves the launch cancelled. The
  * launch then waits one grace for the run to settle and the team to close, together, and returns; a run that resolved
  * before any abort gets the whole grace for its close. Once the run has settled the signal aborts in any case, before
- * the seats close, so no seat's call runs on past its launch.
+ * the seats close, so no seat's call runs on past its launch. The launch's registry entry goes once every seat is
+ * released and every launch its seats started is gone; until then it stays closing. The team's record closes with it.
  */
 async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<LaunchAgencyResult>> {
   const { host, parent, entry, controller, state } = launch;
@@ -483,6 +581,8 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
   }, launch.deadlineMs);
   const onParentStop = (): void => {
     state.cancelled = true;
+    // The parent stopped first: the deadline no longer runs, however long the team takes to settle.
+    clearTimeout(timer);
     controller.abort(parent.signal?.reason);
   };
   if (parent.signal?.aborted) onParentStop();
@@ -492,6 +592,8 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
   let team: Agent | undefined;
   let outcome: RunOutcome = { kind: 'not_run' };
   let settled: LaunchState | undefined;
+  /** Whether the team's record started: only then is it closed. */
+  let recorded = false;
   try {
     // 6. Seats, each racing the launch's signal (a runtime seat's GMI can take long to start).
     for (const seat of launch.seats) entry.seatTools.set(seat.role, seat.toolNames);
@@ -501,8 +603,14 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
       const building = host.buildSeat(seat, entry, parent, frameFor(entry, seat.role), cutWhen);
       const raced = await untilAborted(building, controller.signal);
       if (raced.kind === 'aborted') {
-        // A seat whose build settles after the abort is released at once.
-        void hold(building.then((late) => (isRefusal(late) ? undefined : late.close())));
+        // A seat whose build settles after the abort is released at once, a close that rejects logged as every other
+        // close's is; a build that rejects after the abort is logged too.
+        void hold(
+          building.then(
+            (late) => (isRefusal(late) ? undefined : closeAll([late], host)),
+            (error: unknown) => logSafely(host, error, 'launch_agency'),
+          ),
+        );
         break;
       }
       if (isRefusal(raced.value)) {
@@ -529,6 +637,7 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
       }
       // The record starts once the child is built, so a configuration agency() refuses leaves no record behind.
       recordStart(launch, built);
+      recorded = true;
       const run = runTeam(launch, team);
       void hold(run);
       // 8. Settle: the run, or the abort and then one grace for the run and the close together.
@@ -549,7 +658,7 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
       // aborts now: a run can reject while a seat still runs (a graph tier awaits its seats together and rejects at the
       // first that fails), and that seat stops instead of running on past its launch.
       if (!controller.signal.aborted) controller.abort(Object.assign(new Error('the launch has ended'), { name: 'LaunchEndedError' }));
-      // 9. Close: every seat once, every close attempted (spec D20). Not team.close(): agency().close() stops at the
+      // 9. Close: every seat once, every close attempted. Not team.close(): agency().close() stops at the
       // first member that rejects, which would free the scope with later seats open.
       const closing = hold(closeAll(built, host));
       await within(closing, graceEnds - Date.now());
@@ -562,20 +671,25 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
   } finally {
     clearTimeout(timer);
     parent.signal?.removeEventListener('abort', onParentStop);
+    // A team one of the seats launched holds seats of this tree too: the entry waits for each such launch to go, so a
+    // tool that hangs in a nested team holds this launch's scope as one in its own team does.
+    for (const nested of launchRegistry.nestedUnder(entry.launchId)) void hold(launchRegistry.whenRemoved(nested.launchId));
     // The entry goes once every seat is released. Until then it stays, closing: it admits nothing under it and
     // counts toward its scope's maxConcurrent, so retries against a tool that hangs past the deadline are refused
-    // instead of piling up seats (spec R6).
+    // instead of piling up seats.
     if (holding.size === 0) launchRegistry.remove(entry.launchId);
     else {
       launchRegistry.markClosing(entry.launchId);
       void Promise.all([...holding]).then(() => launchRegistry.remove(entry.launchId));
     }
   }
-  return finish(launch, built, outcome, settled ?? { ...state });
+  const result = finish(launch, built, outcome, settled ?? { ...state });
+  if (recorded) closeRecord(launch, result);
+  return { success: true, output: result };
 }
 
 /**
- * One run of `launch_agency` (spec 4.8): validate, resolve the parent, check the bounds, size the budget, admit, then
+ * One run of `launch_agency`: validate, resolve the parent, check the bounds, size the budget, admit, then
  * build, run, settle, close and report. Never throws: a refusal is `{ success: false, error: '<code>: <reason>',
  * details }`, every launch that started is `{ success: true, output }` whatever its status, and an unexpected error
  * before admission is logged and reported as a `failed` launch.
@@ -594,11 +708,12 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
     const seats = await checkBounds(host, ctx, args, parent, toolNames);
     if (isRefusal(seats)) return refused(seats);
 
-    // 4. The budget: a root launch draws on its turn's pool; a nested one on its parent launch's budget.
+    // 4. The budget: a root launch draws on its turn's pool; a nested one on its parent launch's budget, and on a
+    // persistent member's own as well when the member launches it from its seat.
     // A root launch's scope is the launching session as its host names it, never the calling GMI.
     const scopeKey = frame ? frame.launchId : `${host.surface}:${parent.scopeId}`;
-    const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget);
-    const caps = childBudgetCaps(parent.budget, pool, parent.limits, args, parent.outputEstimateTokens);
+    const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget, parent.poolOwner);
+    const caps = childBudgetCaps(parent.budget, pool, parent.limits, args, await seatsOutputEstimate(host, parent, seats));
     if (isRefusal(caps)) return refused(caps);
     const state: LaunchState = { exhausted: false, timedOut: false, cancelled: false };
     const upstream = pool ?? parent.budget;
@@ -607,8 +722,10 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
       maxTotalTokens: caps.maxTotalTokens,
       unpriced: 'allow',
       ...(upstream ? { parent: upstream } : {}),
-      // Runs before every refusal, this budget's own or an ancestor's: the launch reads exhaustion from here.
-      onLimitReached: () => {
+      // Runs before every refusal, this budget's own, an ancestor's, or that of a persistent member's own budget held
+      // beside it on a seat's call: the launch reads exhaustion, and the first refusal, from here.
+      onLimitReached: (info) => {
+        state.refusal ??= info;
         state.exhausted = true;
       },
     });
@@ -671,7 +788,8 @@ export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: T
 
 /**
  * Step 1: the arguments' own rules (types, required fields and the strategy's names are the input schema's too, so a
- * call the schema refuses never reaches here). Counts against a host's bounds are step 3's.
+ * call the schema refuses never reaches here). Counts against a host's bounds are step 3's. A `dependsOn` cycle is
+ * refused naming a seat on it, and a chain of any length is checked without recursion.
  *
  * @returns `invalid_arguments` naming the first problem, or undefined.
  */
@@ -723,19 +841,38 @@ export function validateLaunchArgs(args: LaunchAgencyArgs): LaunchRefusal | unde
     }
     dependsOn.set(seat.role, deps);
   }
-  // A cycle: a seat that, through dependsOn, waits for itself.
+  // A cycle: a seat that, through dependsOn, waits for itself. The refusal names the seat at which the walk meets one
+  // it is still visiting, which is on the cycle. The walk keeps its own stack: the seat count is bounded after this
+  // step (maxSeats), so a chain of any length must be walked without exhausting the call stack.
   const visiting = new Set<string>();
   const done = new Set<string>();
-  const cyclic = (role: string): boolean => {
-    if (done.has(role)) return false;
-    if (visiting.has(role)) return true;
-    visiting.add(role);
-    const found = (dependsOn.get(role) ?? []).some(cyclic);
-    visiting.delete(role);
-    done.add(role);
-    return found;
+  const cycleAt = (start: string): string | undefined => {
+    if (done.has(start)) return undefined;
+    const path: Array<{ role: string; next: number }> = [{ role: start, next: 0 }];
+    visiting.add(start);
+    while (path.length > 0) {
+      const top = path[path.length - 1];
+      const deps = dependsOn.get(top.role) ?? [];
+      if (top.next < deps.length) {
+        const dep = deps[top.next];
+        top.next += 1;
+        if (visiting.has(dep)) return dep;
+        if (!done.has(dep)) {
+          visiting.add(dep);
+          path.push({ role: dep, next: 0 });
+        }
+      } else {
+        path.pop();
+        visiting.delete(top.role);
+        done.add(top.role);
+      }
+    }
+    return undefined;
   };
-  for (const role of roles) if (cyclic(role)) return invalid(`dependsOn makes a cycle through '${role}'`);
+  for (const role of roles) {
+    const at = cycleAt(role);
+    if (at !== undefined) return invalid(`dependsOn makes a cycle through '${at}'`);
+  }
 
   if (strategy === 'review-loop' && args.seats.length !== 2) return invalid('review-loop takes exactly 2 seats');
   if ((strategy === 'parallel' || strategy === 'debate') && args.seats.length < 2) return invalid(`${strategy} takes at least 2 seats`);
@@ -747,12 +884,13 @@ export function validateLaunchArgs(args: LaunchAgencyArgs): LaunchRefusal | unde
 }
 
 /**
- * Step 4: the child budget's caps (spec D9). Dollars: the least of `budgetUsd`, the parent's remaining dollars times
+ * Step 4: the child budget's caps. Dollars: the least of `budgetUsd`, the parent's remaining dollars times
  * `budgetShare` and, at a root launch, what the turn's launch pool has left (Infinity when none of them caps). Tokens:
- * the least of `maxTokens`, the parent's remaining tokens times `budgetShare` (when it has a token cap) and the pool's
- * remaining tokens (`limits.maxLaunchTokens` when nothing else caps them).
+ * the least of `maxTokens`, the parent's remaining tokens times `budgetShare` (when it has a token cap), the pool's
+ * remaining tokens and `limits.maxLaunchTokens`.
  *
- * @param outputEstimateTokens - The output tokens one call is counted with.
+ * @param outputEstimateTokens - The output tokens the floor counts one call with: the largest a seat's call is counted
+ *   with.
  * @returns The caps, or `budget_unavailable` when the token cap cannot cover one call (`MIN_LAUNCH_TOKENS` plus the
  *   output estimate) or no dollars are left.
  */
@@ -773,7 +911,8 @@ export function childBudgetCaps(
   if (args.maxTokens !== undefined) tokens = Math.min(tokens, args.maxTokens);
   if (parentLeft?.tokens !== undefined) tokens = Math.min(tokens, Math.floor(parentLeft.tokens * limits.budgetShare));
   if (poolLeft?.tokens !== undefined) tokens = Math.min(tokens, poolLeft.tokens);
-  if (!Number.isFinite(tokens)) tokens = limits.maxLaunchTokens;
+  // Never past the tree's own bound, whatever the arguments ask, and that bound when nothing else caps the tokens.
+  tokens = Math.min(tokens, limits.maxLaunchTokens);
   const floor = MIN_LAUNCH_TOKENS + outputEstimateTokens;
   if (tokens < floor) {
     return { code: 'budget_unavailable', reason: `the launch's token cap, ${tokens}, cannot cover one call (${floor}: ${MIN_LAUNCH_TOKENS} for the prompt and ${outputEstimateTokens} for the output)` };

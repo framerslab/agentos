@@ -13,6 +13,11 @@
  * - Converts each frame's Int16 samples to Float32 in [-1, 1].
  * - Follows the participant: when the track is unpublished and a new one is
  *   published (a reconnect), reading moves to the new track.
+ * - Moves to another participant on
+ *   {@link LiveKitRoomAudioSource.setParticipant}: the stream of the
+ *   participant read so far is cancelled and reading moves to the new
+ *   participant's microphone. A source without a participant reads nobody and
+ *   waits for one, as it waits for a track.
  * - Ends when {@link LiveKitRoomAudioSource.close} is called or the room
  *   disconnects, a room already disconnected at the first read included.
  * - Closes itself when a read fails (the peer missing, a stream that does not
@@ -177,8 +182,12 @@ export interface LiveKitRoomAudioSourceOptions {
    * source is first read ends the source at once.
    */
   room: LiveKitRoomLike;
-  /** Identity of the participant whose audio is read. */
-  participantIdentity: string;
+  /**
+   * Identity of the participant whose audio is read. Without it the source
+   * reads nobody, and its reads wait, until
+   * {@link LiveKitRoomAudioSource.setParticipant} names a participant.
+   */
+  participantIdentity?: string;
   /**
    * Sample rate of the frames yielded, a whole number of samples per second;
    * LiveKit resamples to it. Match the consumer: 24000 for OpenAI Realtime
@@ -222,8 +231,12 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
   private started = false;
   private listening = false;
   private closing: Promise<void> | undefined;
-  /** The reads waiting for a track; a subscription or the end wakes every one of them. */
+  /** The reads waiting for a track; a subscription, a change of participant or the end wakes every one of them. */
   private readonly waiters = new Set<() => void>();
+  /** The participant whose microphone is read; `undefined` while none is named. */
+  private identity: string | undefined;
+  /** The cancellations of the readers a change of participant let go; a close waits for them with its own. */
+  private released: Promise<void> = Promise.resolve();
 
   /**
    * @throws {RangeError} When `sampleRate` is not a whole number of samples
@@ -250,11 +263,43 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
       );
     }
     this.rtc = options.rtc;
+    this.identity = options.participantIdentity;
   }
 
   /** SID of the track being read, or `undefined` between tracks. */
   get trackSid(): string | undefined {
     return this.readingTrack?.sid;
+  }
+
+  /** Identity of the participant whose audio is read, or `undefined` while none is named. */
+  get participantIdentity(): string | undefined {
+    return this.identity;
+  }
+
+  /**
+   * Reads another participant's microphone, or nobody with `undefined`. The
+   * stream of the participant read so far is cancelled and a frame it
+   * delivered meanwhile is dropped; every read waiting for a track looks for
+   * the new participant's, and frames carry the new identity as their
+   * `speakerHint`. The identity read already, or a closed source, changes
+   * nothing.
+   *
+   * @param identity - The participant to read, or `undefined` for none.
+   */
+  setParticipant(identity: string | undefined): void {
+    if (this.isClosed || identity === this.identity) return;
+    this.identity = identity;
+    // The track whose stream ended belonged to the participant before.
+    this.endedTrack = undefined;
+    const reader = this.reader;
+    this.reader = undefined;
+    this.readingTrack = undefined;
+    if (reader) {
+      const cancelled = Promise.resolve().then(() => reader.cancel());
+      this.released = Promise.all([this.released, cancelled]).then(() => {});
+      void this.released.catch(() => {});
+    }
+    this.wakeUp();
   }
 
   /** `true` once {@link close} was called or the room disconnected. */
@@ -295,11 +340,11 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
       this.options.room.off(this.rtc.RoomEvent.Disconnected, this.onDisconnected);
     }
     const reader = this.reader; this.reader = undefined; this.readingTrack = undefined;
-    this.closing = Promise.resolve().then(() => reader?.cancel()).then(() => {});
+    this.closing = Promise.all([this.released, Promise.resolve().then(() => reader?.cancel())]).then(() => {});
     void this.closing.catch(() => {});
     this.wakeUp();
   }
-  /** Resolves only when the native input reader acknowledges cancellation. */
+  /** Resolves only when every native input reader has acknowledged its cancellation, those a change of participant let go among them. */
   whenClosed(): Promise<void> { return this.closing ?? Promise.reject(new Error('audio source still open')); }
 
   /** The next frame; a read that fails closes the source, then rejects. */
@@ -324,6 +369,8 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
       }
       const result = await reader.read();
       if (this.isClosed) return { done: true, value: undefined };
+      // A reader a change of participant let go: what it delivered is the participant's before.
+      if (this.reader !== reader) continue;
       if (result.done || !result.value) {
         // The track went away (unpublished, unsubscribed or ended): wait for its successor.
         this.detach(reader);
@@ -350,7 +397,8 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
 
   /** Opens an `AudioStream` on the participant's subscribed microphone track, when there is one. */
   private openSubscribedTrack(rtc: LiveKitRtcModule): LiveKitAudioStreamReaderLike | undefined {
-    const participant = this.options.room.remoteParticipants.get(this.options.participantIdentity);
+    if (this.identity === undefined) return undefined;
+    const participant = this.options.room.remoteParticipants.get(this.identity);
     if (!participant) return undefined;
     for (const publication of participant.trackPublications.values()) {
       const track = publication.track;
@@ -397,7 +445,7 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
     publication: LiveKitTrackPublicationLike,
     participant: LiveKitParticipantLike
   ): void => {
-    if (participant.identity !== this.options.participantIdentity) return;
+    if (participant.identity !== this.identity) return;
     if (!this.rtc || !isMicrophone(publication, this.rtc)) return;
     if (track === this.endedTrack) this.endedTrack = undefined;
     this.wakeUp();
@@ -424,7 +472,7 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
       samples,
       sampleRate: frame.sampleRate,
       timestamp,
-      speakerHint: this.options.participantIdentity,
+      speakerHint: this.identity,
     };
   }
 }

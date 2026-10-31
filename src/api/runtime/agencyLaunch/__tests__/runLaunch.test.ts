@@ -1,5 +1,5 @@
 /**
- * The launch engine (spec 4.8), with a fake host and fake seats under the real agency(): validation, the child's
+ * The launch engine, with a fake host and fake seats under the real agency(): validation, the child's
  * caps, one case per refusal code, the run and its statuses, and the deadline and the grace. Pure engine logic; the
  * surfaces' own tests run the real seats.
  */
@@ -28,16 +28,21 @@ describe('validateLaunchArgs', () => {
     expect(validateLaunchArgs(args())).toBeUndefined();
     expect(validateLaunchArgs(args({ strategy: 'review-loop', seats: [seat('writer'), seat('critic')] }))).toBeUndefined();
     expect(validateLaunchArgs(args({ strategy: 'graph', seats: [seat('a'), seat('b', { dependsOn: ['a'] })] }))).toBeUndefined();
+    expect(validateLaunchArgs(args({ strategy: 'hierarchical' }))).toBeUndefined();
+    expect(validateLaunchArgs(args({ strategy: 'parallel', seats: [seat('a'), seat('b')] }))).toBeUndefined();
+    expect(validateLaunchArgs(args({ strategy: 'debate', seats: [seat('a'), seat('b')], maxRounds: 3 }))).toBeUndefined();
     expect(validateLaunchArgs(args({ seats: [{ role: 'tutor', agentKey: 'tutor', brief: 'Check the maths.' }] as LaunchAgencyArgs['seats'] }))).toBeUndefined();
   });
 
   it('refuses each malformed argument with invalid_arguments, naming the first problem', () => {
     const cases: Array<[LaunchAgencyArgs, RegExp]> = [
       [args({ goal: '' }), /goal/],
+      [args({ goal: '   ' }), /goal/],
       [args({ goal: 'x'.repeat(8_001) }), /goal/],
       [args({ extra: true }), /unknown argument 'extra'/],
       [args({ strategy: 'panel' as never }), /strategy/],
       [args({ seats: [] }), /at least one seat/],
+      [args({ seats: ['writer'] as never }), /seat 1 must be an object/],
       [args({ seats: [seat('writer', { colour: 'blue' })] }), /unknown key 'colour'/],
       [args({ seats: [seat('9lives')] }), /role/],
       [args({ seats: [seat('r'.repeat(53))] }), /52 characters/],
@@ -46,25 +51,44 @@ describe('validateLaunchArgs', () => {
       [args({ seats: [seat('writer'), seat('writer')] }), /unique/],
       [args({ seats: [{ role: 'writer' } as never] }), /exactly one of instructions, agentKey and personaId/],
       [args({ seats: [{ role: 'w', instructions: 'x', agentKey: 'k' } as never] }), /exactly one/],
+      [args({ seats: [{ role: 'w', instructions: '   ' } as never] }), /instructions must be a non-blank string/],
       [args({ seats: [seat('writer', { instructions: 'x'.repeat(8_193) })] }), /8,192/],
       [args({ seats: [{ role: 'tutor', agentKey: 'tutor', brief: 'x'.repeat(1_001) }] as never }), /1,000/],
       [args({ seats: [seat('writer', { brief: 'Short.' })] }), /brief/],
       [args({ seats: [seat('writer', { tools: 'search' })] }), /tools/],
       [args({ seats: [seat('a', { dependsOn: ['ghost'] })] }), /dependsOn names 'ghost'/],
+      [args({ seats: [seat('a', { dependsOn: 'b' }), seat('b')] }), /dependsOn must be a list of roles/],
+      [args({ seats: [seat('a', { dependsOn: ['a'] })] }), /dependsOn names 'a', which is not another seat/],
       [args({ strategy: 'graph', seats: [seat('a', { dependsOn: ['b'] }), seat('b', { dependsOn: ['a'] })] }), /cycle/],
+      // The refusal names a seat on the cycle, not the first seat from which the walk reached it.
+      [args({ strategy: 'graph', seats: [seat('a', { dependsOn: ['b'] }), seat('b', { dependsOn: ['c'] }), seat('c', { dependsOn: ['b'] })] }), /cycle through 'b'/],
       [args({ strategy: 'review-loop', seats: [seat('a'), seat('b'), seat('c')] }), /review-loop takes exactly 2 seats/],
       [args({ strategy: 'parallel' }), /parallel takes at least 2 seats/],
       [args({ strategy: 'debate' }), /debate takes at least 2 seats/],
       [args({ deadlineMs: 999 }), /deadlineMs/],
       [args({ maxRounds: 4 }), /maxRounds/],
+      [args({ maxRounds: 0 }), /maxRounds/],
+      [args({ maxRounds: 2.5 }), /maxRounds/],
       [args({ budgetUsd: 0 }), /budgetUsd/],
       [args({ maxTokens: -1 }), /maxTokens/],
+      [args({ deadlineMs: Number.NaN }), /deadlineMs/],
+      [args({ deadlineMs: Number.POSITIVE_INFINITY }), /deadlineMs/],
+      [args({ budgetUsd: Number.NaN }), /budgetUsd/],
+      [args({ budgetUsd: Number.POSITIVE_INFINITY }), /budgetUsd/],
+      [args({ maxTokens: Number.NaN }), /maxTokens/],
+      [args({ maxTokens: Number.POSITIVE_INFINITY }), /maxTokens/],
     ];
     for (const [input, reason] of cases) {
       const refusal = validateLaunchArgs(input);
       expect(refusal?.code, String(reason)).toBe('invalid_arguments');
       expect(refusal?.reason).toMatch(reason);
     }
+  });
+
+  it('walks a dependsOn chain of any length without overflowing the stack, so the seat count is what refuses it', () => {
+    // Each seat waits for the next: the walk from the first goes the whole chain deep.
+    const seats = Array.from({ length: 50_000 }, (_, i) => seat(`s${i}`, i < 49_999 ? { dependsOn: [`s${i + 1}`] } : {}));
+    expect(validateLaunchArgs(args({ strategy: 'graph', seats }))).toBeUndefined();
   });
 });
 
@@ -90,6 +114,15 @@ describe('childBudgetCaps', () => {
     const parent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
     parent.record(undefined, 4_000, 'step');
     expect(childBudgetCaps(parent, pool(), limits, {}, 1_000)).toEqual({ maxCostUSD: 0.5, maxTotalTokens: 3_000 });
+  });
+
+  it("holds the tokens to maxLaunchTokens, whatever the arguments ask, and floors the parent's share", () => {
+    // Nothing else caps the tokens: maxLaunchTokens does, and an explicit maxTokens above it is held to it.
+    expect(childBudgetCaps(undefined, undefined, limits, {}, 1_000)).toEqual({ maxCostUSD: Number.POSITIVE_INFINITY, maxTotalTokens: 200_000 });
+    expect(childBudgetCaps(undefined, undefined, limits, { maxTokens: 500_000 }, 1_000)).toEqual({ maxCostUSD: Number.POSITIVE_INFINITY, maxTotalTokens: 200_000 });
+    // Half of an odd remainder is floored: 30,001 left, 15,000 for the child.
+    const parent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 30_001, unpriced: 'allow' });
+    expect(childBudgetCaps(parent, pool(), limits, {}, 1_000)).toEqual({ maxCostUSD: 0.5, maxTotalTokens: 15_000 });
   });
 
   it('refuses a cap that cannot cover one call, and a spent parent', () => {
@@ -372,11 +405,50 @@ describe('runLaunch: the run and its result', () => {
 
   it("an agency() configuration error is invalid_arguments in agency()'s own words, and the seats are released", async () => {
     const made: FakeSeat[] = [];
+    const started: string[] = [];
+    const recorder: LaunchHost['recorder'] = {
+      start: (record) => {
+        started.push(record.agencyId);
+      },
+      close: () => undefined,
+    };
+    // The recorder hears of a launch whose team is built (the precondition).
+    const ran = (await runLaunch(fakeHost({ recorder }), args(), ctxFor())).output as LaunchAgencyResult;
+    expect(started).toEqual([ran.agencyId]);
     // parallel needs an agency-level route, which this host does not give.
-    const host = fakeHost({ route: {}, seat: (s) => { const f = fakeSeat(s.role); made.push(f); return f; } });
+    const host = fakeHost({ route: {}, recorder, seat: (s) => { const f = fakeSeat(s.role); made.push(f); return f; } });
     const refusal = await refusalOf(host, args({ strategy: 'parallel', seats: [seat('a'), seat('b')] }));
     expect(refusal).toMatchObject({ code: 'invalid_arguments', reason: expect.stringContaining('Parallel strategy requires') });
+    // The record starts once the child is built, so a team agency() refuses leaves none.
+    expect(started).toEqual([ran.agencyId]);
     await vi.waitFor(() => expect(made.every((f) => f.closed)).toBe(true));
+  });
+
+  it("the reason names the cap that refused: the launch's own token cap by its count once it is used up, any other refusal in its own words", async () => {
+    /** A seat that records `tokens` (and `usd`), asks for `ask` more tokens, and answers with what it has. */
+    const spender = (tokens: number, ask: number, usd?: number) => (s: ResolvedSeat, launch: LaunchEntry) =>
+      fakeSeat(s.role, async () => {
+        launch.budget.record(usd, tokens, 'test');
+        try {
+          launch.budget.assertCanSpend(usd === undefined ? undefined : 0.01, ask, 'test');
+        } catch {
+          // The seat stops spending and answers with what it has.
+        }
+        return 'Partial.';
+      });
+    const launched = async (seats: FakeHostOptions['seat'], extra: Parameters<typeof args>[0]): Promise<LaunchAgencyResult> =>
+      (await runLaunch(fakeHost({ seat: seats }), args(extra), ctxFor())).output as LaunchAgencyResult;
+
+    // A call too large for what the cap has left, before anything was spent: the refusal's words.
+    const early = await launched(spender(0, 9_000), { maxTokens: 8_000 });
+    expect(early.provenance.budget).toMatchObject({ maxTotalTokens: 8_000, tokensUsed: 0 });
+    expect(early).toMatchObject({ status: 'budget_exhausted', reason: "the launch's budget refused a call: 9000 tokens would pass 8000" });
+    // Calls that used the cap up: its count.
+    const spent = await launched(spender(9_000, 1), { maxTokens: 8_000 });
+    expect(spent).toMatchObject({ status: 'budget_exhausted', reason: "the launch's budget is spent: 9000 of 8000 tokens" });
+    // The launch's dollar cap: in its own words.
+    const dollars = await launched(spender(10, 1, 1), { budgetUsd: 0.5 });
+    expect(dollars).toMatchObject({ status: 'budget_exhausted', reason: "the launch's budget refused a call: Session cost $1.0100 would exceed limit $0.50" });
   });
 
   it('a recorder that throws and a close that rejects are logged; the launch completes and its entry goes', async () => {
@@ -507,6 +579,52 @@ describe("runLaunch: the deadline and the parent's stop", () => {
     expect(Date.now() - started).toBeLessThan(1_000 + 500);
     expect(made[0].closed).toBe(true);
   }, 10_000);
+
+  it("the parent's stop returns cancelled when the deadline passes while the team settles", async () => {
+    const parentTurn = new AbortController();
+    // Rejects 700 ms after its call's signal aborts: past the deadline, inside the grace.
+    const slow = fakeSeat('writer', (_input, opts) =>
+      new Promise<string>((_resolve, reject) => {
+        const signal = opts?.abortSignal as AbortSignal;
+        signal.addEventListener('abort', () => setTimeout(() => reject(signal.reason), 700), { once: true });
+      }),
+    );
+    const host = fakeHost({ seat: () => slow });
+    host.settleGraceMs = 1_500;
+    setTimeout(() => parentTurn.abort(), 500);
+    const out = (await runLaunch(host, args({ deadlineMs: 1_000 }), ctxFor({ signal: parentTurn.signal }))).output as LaunchAgencyResult;
+    // The deadline passed while the team settled (the precondition); the parent turn had stopped first.
+    expect(out.durationMs).toBeGreaterThan(1_000);
+    expect(out).toMatchObject({ status: 'cancelled', reason: 'the parent turn stopped' });
+    expect(out.seats[0].status).toBe('cut');
+  }, 10_000);
+
+  it('a seat whose build settles after the deadline is released, and a close of it that rejects is logged', async () => {
+    let finish!: (made: SeatHandle) => void;
+    const late = fakeSeat('slow', undefined, async () => {
+      throw new Error('close failed');
+    });
+    const host = fakeHost({ seat: () => new Promise<SeatHandle>((resolve) => { finish = resolve; }) });
+    const out = (await runLaunch(host, args({ deadlineMs: 1_000 }), ctxFor())).output as LaunchAgencyResult;
+    expect(out.status).toBe('timed_out');
+    finish(late);
+    // The late seat's close ran (the precondition), and its rejection is logged as every other close's is.
+    await vi.waitFor(() => expect(late.closed).toBe(true));
+    await vi.waitFor(() => expect(host.logged.map(([, where]) => where)).toContain('launch_agency close'));
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+  }, 10_000);
+
+  it('a launch whose parent turn has already stopped returns cancelled and builds no seat', async () => {
+    const host = fakeHost();
+    // A live turn's launch builds its seat (the precondition).
+    expect(((await runLaunch(host, args(), ctxFor())).output as LaunchAgencyResult).status).toBe('completed');
+    expect(host.built).toEqual(['writer']);
+    const out = (await runLaunch(host, args(), ctxFor({ signal: AbortSignal.abort() }))).output as LaunchAgencyResult;
+    expect(out).toMatchObject({ status: 'cancelled', reason: 'the parent turn stopped' });
+    expect(out.seats.map((r) => r.status)).toEqual(['not_run']);
+    expect(host.built).toEqual(['writer']);
+    expect(launchRegistry.get(out.agencyId)).toBeUndefined();
+  });
 });
 
 describe('runLaunch: the grace and the closing entry', () => {
@@ -535,5 +653,106 @@ describe('runLaunch: the grace and the closing entry', () => {
     expect((await refusalOf(host, args())).code).toBe('concurrency_exceeded');
     releaseClose();
     await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+  }, 10_000);
+
+  it('a run that resolves first and a close that hangs return within one grace, completed though the parent stops during the close', async () => {
+    let releaseClose!: () => void;
+    const hangingClose = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const parentTurn = new AbortController();
+    // The run resolves at once; the close hangs, and the parent turn stops while the launch waits for it.
+    const writer = fakeSeat('writer', async () => 'Done.', () => {
+      setTimeout(() => parentTurn.abort(), 50);
+      return hangingClose;
+    });
+    const host = fakeHost({ seat: () => writer });
+    const started = Date.now();
+    const out = (await runLaunch(host, args(), ctxFor({ signal: parentTurn.signal }))).output as LaunchAgencyResult;
+    // At most the grace for a close that still hangs; the parent's stop came during it (the precondition).
+    expect(Date.now() - started).toBeLessThan(200 + 300);
+    expect(writer.closed).toBe(true);
+    expect(parentTurn.signal.aborted).toBe(true);
+    // The status is what the run came to: a stop during the close does not change it.
+    expect(out).toMatchObject({ status: 'completed', text: 'Done.' });
+    expect(out.reason).toBeUndefined();
+    expect(launchRegistry.get(out.agencyId)?.state).toBe('closing');
+    releaseClose();
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+  }, 10_000);
+
+  it("the team's record closes when the launch's entry goes: before the result when nothing holds a seat, else marked closing until the seats are released", async () => {
+    const heard: string[] = [];
+    // A recorder that also hears of a launch that returns closing, given as a value of its own.
+    const recorder = {
+      start: () => {
+        heard.push('start');
+      },
+      closing: (result: LaunchAgencyResult) => {
+        heard.push(`closing ${result.status}`);
+      },
+      close: (result: LaunchAgencyResult) => {
+        heard.push(`close ${result.status}`);
+      },
+    };
+    // Seats released within the grace: the record is closed by the time the launch returns.
+    await runLaunch(fakeHost({ recorder }), args(), ctxFor());
+    expect(heard).toEqual(['start', 'close completed']);
+
+    heard.length = 0;
+    let releaseClose!: () => void;
+    const hangingClose = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const host = fakeHost({ seat: (s) => fakeSeat(s.role, async () => 'Done.', () => hangingClose), recorder });
+    const out = (await runLaunch(host, args(), ctxFor())).output as LaunchAgencyResult;
+    // The launch returned while its seat's close still runs (the precondition): its entry stays, closing.
+    expect(out.status).toBe('completed');
+    expect(launchRegistry.get(out.agencyId)?.state).toBe('closing');
+    // The record stays as long as the seat is held, marked closing, and closes with the result once the entry goes.
+    expect(heard).toEqual(['start', 'closing completed']);
+    releaseClose();
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+    await vi.waitFor(() => expect(heard).toEqual(['start', 'closing completed', 'close completed']));
+  }, 10_000);
+
+  it("a team a seat launched keeps the launch it came from closing while that team's seat outlives the grace, so the session's next launch waits for it", async () => {
+    let releaseWaiter!: () => void;
+    const waited = new Promise<string>((resolve) => {
+      releaseWaiter = () => resolve('Waited.');
+    });
+    // Its call runs on past every abort until released, as a seat whose tool hangs does.
+    const waiter = fakeSeat('waiter', () => waited);
+    let lead: FakeSeat | undefined;
+    let nested: LaunchAgencyResult | undefined;
+    const host: FakeHost = fakeHost({
+      seat: (s, launch) => {
+        if (s.role === 'waiter') return waiter;
+        if (s.role !== 'lead') return fakeSeat(s.role);
+        // The lead's call is a tool call that launches a team from its seat: a launch nested under the lead's team.
+        lead = fakeSeat('lead', async () => {
+          nested = (await runLaunch(host, args({ seats: [seat('waiter')] }), framed(launch, 'lead'))).output as LaunchAgencyResult;
+          return 'Lead done.';
+        });
+        return lead;
+      },
+    });
+    const out = (await runLaunch(host, args({ seats: [seat('lead')], deadlineMs: 1_000 }), ctxFor())).output as LaunchAgencyResult;
+    expect(out.status).toBe('timed_out');
+    // The lead's team stopped with its parent and came back while its waiter still holds its call (the precondition).
+    await vi.waitFor(() => expect(nested?.status).toBe('cancelled'));
+    expect(waiter.inputs).toHaveLength(1);
+    expect(launchRegistry.get(nested!.agencyId)?.state).toBe('closing');
+    // The lead itself is released: its call returned and its close ran, and every hold of either settles before the
+    // next task runs.
+    await vi.waitFor(() => expect(lead?.closed).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The launch stays closing for the seat its lead's team holds, and counts toward the session's one launch in flight.
+    expect(launchRegistry.get(out.agencyId)?.state).toBe('closing');
+    expect((await refusalOf(host, args())).code).toBe('concurrency_exceeded');
+    releaseWaiter();
+    await vi.waitFor(() => expect(launchRegistry.get(nested!.agencyId)).toBeUndefined());
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+    expect((await runLaunch(host, args(), ctxFor())).output).toMatchObject({ status: 'completed' });
   }, 10_000);
 });

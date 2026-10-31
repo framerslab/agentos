@@ -143,6 +143,7 @@ const publicationManifest = [
   siteDoc('architecture/skills-vs-tools-vs-extensions.md', 'architecture/skills-vs-tools-vs-extensions.md', 'Skills vs Tools vs Extensions', 'Architecture', 8.5),
   agentosDoc('OBSERVABILITY.md', 'architecture/observability.md', 'Observability (OpenTelemetry)', 'Architecture', 9),
   agentosDoc('LOGGING.md', 'architecture/logging.md', 'Logging (Pino + OpenTelemetry)', 'Architecture', 10),
+  agentosDoc('CONTENT_SAFE_VOICE.md', 'architecture/content-safe-voice.md', 'Content-Safe Voice Diagnostics', 'Architecture', 10.5),
   agentosDoc('TOOL_CALLING_AND_LOADING.md', 'architecture/tool-calling-and-loading.md', 'Tool Calling & Lazy Loading', 'Tools & Capabilities', 11),
   agentosDoc('LLM_PROVIDERS.md', 'architecture/llm-providers.md', 'LLM Providers', 'Architecture', 12),
   agentosDoc('KEY_ROTATION.md', 'architecture/key-rotation.md', 'API Key Rotation', 'Architecture', 12.5),

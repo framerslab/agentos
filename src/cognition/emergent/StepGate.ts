@@ -36,9 +36,9 @@ export interface StepGate {
 /**
  * Why a step may not be chained: no gate to resolve it (`compose_needs_gate`),
  * no tool under its name (`step_missing`), a tool with side effects the host
- * has not listed (`step_not_chainable`), a tool that does not declare
- * `hasSideEffects` (`side_effects_undeclared`), or a chain that reaches itself
- * (`step_cycle`).
+ * has not listed, or one that is never a step (`step_not_chainable`), a tool
+ * that does not declare `hasSideEffects` (`side_effects_undeclared`), or a
+ * chain that reaches itself (`step_cycle`).
  */
 export type ChainRefusalCode =
   | 'compose_needs_gate'
@@ -69,8 +69,18 @@ export const COMPOSE_NEEDS_GATE_MESSAGE =
 export const MAX_COMPOSITION_DEPTH = 8;
 
 /**
+ * Tools that are never a step, whatever the host lists. A team is launched
+ * from a turn: a workflow's step runs under the workflow's own timer, which
+ * would cut a team outside its launch's deadline and close path, and a
+ * composed tool would launch a team on every call of what the model sees as
+ * one tool.
+ */
+export const UNCHAINABLE_TOOLS: ReadonlySet<string> = new Set(['launch_agency']);
+
+/**
  * The one rule for chaining a tool as a step.
  *
+ * - a tool in {@link UNCHAINABLE_TOOLS}: by no one, listed or not.
  * - `hasSideEffects: false`: chained freely.
  * - `hasSideEffects: true`: only when the host lists the tool's name.
  * - flag unset: by no one, listed or not; the host declares it first.
@@ -81,6 +91,13 @@ export function checkChainable(
   tool: ITool | undefined,
   sideEffectingTools: readonly string[],
 ): Chainability {
+  if (UNCHAINABLE_TOOLS.has(stepTool)) {
+    return {
+      ok: false,
+      code: 'step_not_chainable',
+      message: `step tool "${stepTool}" can never be a step: a team is launched from a turn`,
+    };
+  }
   if (!tool) {
     return { ok: false, code: 'step_missing', message: `step tool "${stepTool}" is not registered` };
   }
@@ -130,6 +147,15 @@ export interface StepGateOptions {
   };
 }
 
+/** The refusal of a step whose `signal` aborted before its tool ran: nothing ran. */
+function stepStopped(): ToolExecutionResult {
+  return {
+    success: false,
+    error: 'step_aborted: the step was stopped before its tool ran (its call stopped or its time ran out)',
+    details: { code: 'step_aborted' },
+  };
+}
+
 /**
  * A gate for a host that builds the engine itself. `ToolOrchestrator` does
  * not use this: its gate runs each step through `processToolCall`.
@@ -137,6 +163,9 @@ export interface StepGateOptions {
  * Built with `resolve` alone, the gate runs a step by calling the tool: no
  * permission check and no approval, as a direct call has in a host with
  * neither manager. The chainability rule is applied by the builder either way.
+ * A step whose `signal` has aborted by the time its checks pass is refused
+ * (`step_aborted`) before its approval is asked; one whose signal aborts while
+ * its approval is pending is refused after it. Nothing runs either way.
  */
 export function createStepGate(options: StepGateOptions): StepGate {
   return {
@@ -161,6 +190,11 @@ export function createStepGate(options: StepGateOptions): StepGate {
             details: { ...(verdict.details ?? {}), code: 'permission_denied' },
           };
         }
+      }
+      // A step whose stop has already come asks no one: no approval is asked
+      // for a step that cannot run.
+      if (signal?.aborted) {
+        return stepStopped();
       }
       const hitl = options.hitl;
       // A step that is itself a composition is not asked: its own
@@ -208,11 +242,7 @@ export function createStepGate(options: StepGateOptions): StepGate {
         }
       }
       if (signal?.aborted) {
-        return {
-          success: false,
-          error: 'step_aborted: the step expired before its tool ran',
-          details: { code: 'step_aborted' },
-        };
+        return stepStopped();
       }
       return withInnerCode(await tool.execute(args, context));
     },

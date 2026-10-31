@@ -128,6 +128,8 @@ order and uses the first one found:
 11. `which gemini` → Gemini CLI (PATH detection — no API key, uses Google account)
 12. `OLLAMA_BASE_URL` → Ollama
 
+An `OLLAMA_BASE_URL` that is empty or whitespace alone is unset, as the call reads it, so detection passes over Ollama.
+
 LiteLLM is never auto-detected: name it with `provider: 'litellm'` ([LiteLLM](#litellm)).
 
 You can override auto-detection in four ways, highest priority first:
@@ -660,7 +662,10 @@ does not cover:
    ```
 
    The endpoint must answer `GET /models`: the provider lists the models when
-   it initializes, and a listing that fails fails the call.
+   it initializes, and a listing that fails fails the call. A `baseUrl` that
+   is empty or whitespace alone is unset: `OPENAI_BASE_URL` applies, and with
+   neither the request goes to `https://api.openai.com/v1`; no request is
+   built on a blank base.
 
 2. **A gateway.** [OpenRouter](#openrouter), [Requesty](#requesty) and a
    self-hosted [LiteLLM](#litellm) proxy each put many vendors behind one
@@ -781,6 +786,8 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 | Gemini | `gemini-embedding-001`, `gemini-embedding-2` | 3072 | 100 |
 | Mistral | `mistral-embed` | 1024 | 512 |
 | Ollama | `nomic-embed-text`, `mxbai-embed-large` | 768–1024 | 512 |
+
+`embedText()` posts an OpenAI, OpenRouter, Mistral or Requesty call to that provider's own `/embeddings` endpoint, or to the base URL the caller set, so a key never goes to another provider's host. It refuses Anthropic, Groq, Together, xAI, MiniMax, the image providers and the CLIs before their key is read, and a provider id agentos does not know needs `baseUrl`. [embedText()](../orchestration/STRUCTURED_OUTPUT_API.md#embedtext) lists each provider's endpoint and the documentation it comes from.
 
 ---
 

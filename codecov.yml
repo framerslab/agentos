@@ -34,9 +34,6 @@ parsers:
       method: no
       macro: no
 
-comment:
-  layout: "reach,diff,flags,tree,betaprofiling"
-  behavior: default
-  require_changes: no
-  require_base: no
-  require_head: yes
+# A pull request's figures are in the codecov/project and codecov/patch statuses
+# and the CI job's log; no comment is posted.
+comment: false

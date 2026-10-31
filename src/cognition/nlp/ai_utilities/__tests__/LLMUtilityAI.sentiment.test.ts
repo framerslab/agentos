@@ -124,4 +124,29 @@ describe('LLMUtilityAI — analyzeSentiment', () => {
     expect(result.positiveTokens).toEqual([]);
     expect(result.negativeTokens).toEqual([]);
   });
+
+  it('reads a sentiment reply inside a Markdown code fence with no repair call', async () => {
+    // claude-haiku-4-5's answer to the sentiment prompt.
+    const fencedReply =
+      '```json\n{\n  "score": 0.6,\n  "polarity": "positive",\n  "intensity": 0.6,\n  "positiveTokens": ["glad", "helpful"],\n  "negativeTokens": []\n}\n```';
+
+    (mockProvider.generateCompletion as any).mockResolvedValueOnce(<ModelCompletionResponse>{
+      id: 'cmp-sent-fenced', object: 'chat.completion', created: Date.now(), modelId: 'default-llm-model',
+      choices: [{ index: 0, message: { role: 'assistant', content: fencedReply }, text: fencedReply, finishReason: 'stop' }],
+      usage: { totalTokens: 60 },
+    });
+
+    const result = await llmUtility.analyzeSentiment('I am glad this was so helpful.');
+
+    expect(result).toEqual({
+      score: 0.6,
+      polarity: 'positive',
+      comparative: 0.6,
+      intensity: 0.6,
+      positiveTokens: [{ token: 'glad' }, { token: 'helpful' }],
+      negativeTokens: [],
+      neutralTokens: [],
+    });
+    expect(mockProvider.generateCompletion).toHaveBeenCalledTimes(1);
+  });
 });

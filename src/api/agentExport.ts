@@ -53,7 +53,7 @@ export type { AgentExportConfig, ExportAgentConfigOptions, PrebuiltSeatMarker } 
 import type { AgentExportConfig } from './agentExportCore.js';
 import { REDACTED, REDACTED_ENCODED, INSTANCE_MARKER_KEY, copyExportTree, isUrlString } from './agentExportRedact.js';
 import { PROVIDER_DEFAULTS } from './runtime/provider-defaults.js';
-import { providerEnvVars } from './model.js';
+import { resolveBaseUrl } from './model.js';
 import { getDefaultProvider } from './runtime/global-default.js';
 import { isAgent } from './runtime/strategies/shared.js';
 
@@ -159,7 +159,8 @@ const SEAT_KEY_POINTER = /^\/agents\/[^/]+\/(apiKey|baseUrl)$/;
  * unset key does (an applicable `setDefaultProvider()` default, then the
  * environment). A redacted `baseUrl` beside one is dropped when a default
  * naming that provider carries a `baseUrl` or the provider's URL variable is
- * set, and listed otherwise.
+ * set, each read as the call reads it (an empty or whitespace-only one is
+ * unset), and listed otherwise.
  * Every other unrestored placeholder and every unrestored instance marker is
  * collected in `unresolved`. An object put in through `values` is the
  * caller's own and is not walked (it may be a class instance with cycles).
@@ -200,13 +201,17 @@ function restoreDocument(
       const providerId =
         typeof siblings.provider === 'string' ? siblings.provider : String(siblings.model).split(':')[0];
       // Dropped, the URL resolves to a same-provider default's URL or to the URL
-      // variable, in that order: the importer's own configured endpoint, never the
-      // vendor's default and never one the file chose. With neither, the path is
-      // listed and import throws.
+      // variable, in that order, each read as resolveProvider reads it (an empty
+      // or whitespace-only one is unset): the importer's own configured endpoint,
+      // never the vendor's default and never one the file chose. With neither,
+      // the path is listed and import throws.
       const def = getDefaultProvider();
-      const defaultUrl = def?.provider === providerId && typeof def.baseUrl === 'string' && def.baseUrl !== '';
-      const urlVar = providerEnvVars(providerId).url;
-      if (defaultUrl || (urlVar && process.env[urlVar])) {
+      const configured = resolveBaseUrl(
+        providerId,
+        undefined,
+        def?.provider === providerId && typeof def.baseUrl === 'string' ? def.baseUrl : undefined,
+      );
+      if (configured !== undefined) {
         delete siblings.baseUrl;
         return;
       }
@@ -249,8 +254,11 @@ function restoreDocument(
  * knows, with no entry, resolves as an unset key does (an applicable
  * `setDefaultProvider()` default, then the environment). A redacted `baseUrl`
  * beside one, with no entry, is dropped when a default naming that provider
- * carries a `baseUrl` or the provider's URL variable is set. A roster seat's
- * own key or URL, and a key beside any other provider, is listed.
+ * carries a `baseUrl` or the provider's URL variable is set, each read as the
+ * agent's calls read it: an empty or whitespace-only one is unset, so a
+ * default with `baseUrl: ''` leaves the variable to apply, and neither lists
+ * the path. A roster seat's own key or URL, and a key beside any other
+ * provider, is listed.
  *
  * The document is copied in the serialized form (functions left out, class
  * instances as markers), so importing the object form of an unredacted

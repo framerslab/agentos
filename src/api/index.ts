@@ -98,6 +98,16 @@ export type {
 } from './runtime/agencyLaunch/types.js';
 export { sessionSeat, type SeatHandle, type SessionSeatOptions } from './runtime/agencyLaunch/sessionSeat.js';
 export type { SeatMetadata } from './types.js';
+// The rest of the launch surface: the runtime's `agencies` option, the limits, the frame, the caller turn, a tool hook
+// and the registry record.
+export type {
+  AgencyLaunchFrame,
+  CallerTurnContext,
+  LaunchLimits,
+  LaunchRecordMetadata,
+  RuntimeAgencyLaunchOptions,
+  ToolCallHook,
+} from './runtime/agencyLaunch/index.js';
 export {
   createAgentCognitiveMemory,
   type AgentCognitiveMemory,

@@ -125,6 +125,7 @@ describe('AgentOSOrchestrator (API layer)', () => {
     // Create mock Conversation Manager
     mockConversationManager = {
       getOrCreateContext: vi.fn().mockResolvedValue(mockConversationContext),
+      getConversation: vi.fn().mockResolvedValue(null),
       saveContext: vi.fn().mockResolvedValue(undefined),
       saveConversation: vi.fn().mockResolvedValue(undefined),
     } as unknown as ConversationManager;
@@ -541,6 +542,8 @@ describe('AgentOSOrchestrator (API layer)', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       expect(mockGMIManager.getOrCreateGMIForSession).toHaveBeenCalledTimes(1);
+      // A refused organization binds no learner at acquisition: the GMI's learner session opens at its first prepared turn.
+      expect((mockGMIManager.getOrCreateGMIForSession as any).mock.calls[0][8]).toBeUndefined();
       const types = (mockStreamingManager.pushChunk as any).mock.calls.map((call: any[]) => call[1]?.type);
       const progress = types.indexOf(AgentOSResponseChunkType.SYSTEM_PROGRESS);
       expect(progress).toBeGreaterThanOrEqual(0);
@@ -1560,6 +1563,8 @@ describe('AgentOSOrchestrator (API layer)', () => {
         gmi: resumeGmi,
         conversationContext: statefulConversationContext,
       });
+      // the stored conversation, which holds the pause the resume takes
+      vi.mocked(mockConversationManager.getConversation).mockResolvedValue(statefulConversationContext);
 
       const streamId = await orchestrator.orchestrateResumedToolResults(pendingRequest, [
         {
@@ -1684,6 +1689,8 @@ describe('AgentOSOrchestrator (API layer)', () => {
         gmi: resumeGmi,
         conversationContext: statefulConversationContext,
       });
+      // the stored conversation, which holds the pause the resume takes
+      vi.mocked(mockConversationManager.getConversation).mockResolvedValue(statefulConversationContext);
 
       await orchestrator.orchestrateResumedToolResults(
         pendingRequest,

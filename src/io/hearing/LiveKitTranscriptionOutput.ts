@@ -6,7 +6,9 @@
  * stream holding the line's whole text, with `lk.segment_id` (the transcript's
  * `itemId`), `lk.transcription_final` and `lk.transcribed_track_id`, and on a
  * final whose transcript has times, `agentos.start_ms` and `agentos.end_ms`
- * (whole milliseconds on the session's audio clock), which
+ * (whole milliseconds on the session's audio clock); a line with speaker
+ * information carries `agentos.speaker` (an empty string for `null`), and a
+ * later run of a final split by speaker `agentos.run_of`, all of which
  * `transcriptEventFromLiveKit()` reads back. Writes go out in the order they
  * were asked for. The finals are kept in a {@link TranscriptLedger}, so a
  * participant that reconnects can be sent again the finals after the last line
@@ -33,6 +35,8 @@ import {
   LIVEKIT_TRANSCRIPTION_TOPIC,
   TRANSCRIPTION_FAILED_ATTRIBUTE,
   TRANSCRIPTION_TIME_ATTRIBUTES,
+  TRANSCRIPTION_SPEAKER_ATTRIBUTE,
+  TRANSCRIPTION_RUN_OF_ATTRIBUTE,
   TranscriptLedger,
   type LedgerItem,
 } from '../voice-pipeline/transcriptLedger.js';
@@ -95,26 +99,35 @@ export class LiveKitTranscriptionOutput {
    * participant, as it does for one that rejoins.
    *
    * @param extra - `itemId` when the transcript carries none; `failed`, a short
-   *   reason, for a line the provider could not transcribe.
+   *   reason, for a line the provider could not transcribe; `speaker`, an
+   *   optional override including explicit null. Undefined uses the event's
+   *   label. The event's runOf is carried into the replay ledger unchanged.
    * @throws {RangeError} When neither the transcript nor `extra` gives a line id.
    * @throws {Error} When the room has no local participant, or the send fails.
    */
-  write(event: TranscriptEvent, extra: { itemId?: string; failed?: string } = {}): Promise<boolean> {
+  write(
+    event: TranscriptEvent,
+    extra: { itemId?: string; failed?: string; speaker?: string | null } = {},
+  ): Promise<boolean> {
     const itemId = extra.itemId ?? event.itemId;
-    if (!itemId) {
+    if (itemId === undefined || itemId === '') {
       return Promise.reject(new RangeError('LiveKitTranscriptionOutput: the transcript has no itemId; pass one in the second argument'));
     }
+    const speaker = extra.speaker === undefined ? event.speaker : extra.speaker;
     const changed = this.ledger.apply({
       itemId,
       text: event.text,
       isFinal: event.isFinal,
-      ...(event.startMs !== undefined ? { startMs: event.startMs } : {}),
-      ...(event.endMs !== undefined ? { endMs: event.endMs } : {}),
-      ...(event.language !== undefined ? { language: event.language } : {}),
-      ...(extra.failed !== undefined ? { failed: extra.failed } : {}),
+      ...(event.startMs === undefined ? {} : { startMs: event.startMs }),
+      ...(event.endMs === undefined ? {} : { endMs: event.endMs }),
+      ...(event.language === undefined ? {} : { language: event.language }),
+      ...(extra.failed === undefined ? {} : { failed: extra.failed }),
+      ...(speaker === undefined ? {} : { speaker }),
+      ...(event.runOf === undefined ? {} : { runOf: event.runOf }),
     });
-    if (!changed) return Promise.resolve(false);
-    const line = this.ledger.get(itemId)!;
+    if (changed === false) return Promise.resolve(false);
+    const line = this.ledger.get(itemId);
+    if (line === undefined) return Promise.reject(new Error('LiveKitTranscriptionOutput: applied line missing'));
     return this.enqueue(() => this.send(line, undefined)).then(() => true);
   }
 
@@ -139,6 +152,7 @@ export class LiveKitTranscriptionOutput {
     return next;
   }
 
+  /** Sends one line's text stream with its attributes, to everyone or to the given participants. */
   private async send(line: LedgerItem, destinationIdentities: string[] | undefined): Promise<void> {
     const local = this.options.room.localParticipant;
     if (!local) throw new Error('LiveKitTranscriptionOutput: the room has no local participant; connect it first');
@@ -148,6 +162,9 @@ export class LiveKitTranscriptionOutput {
       // The ledger's line keeps the times its final was written with, so a replay sends the same two.
       ...(line.isFinal ? timeAttributes(line) : {}),
     };
+    if (line.speaker === null) attributes[TRANSCRIPTION_SPEAKER_ATTRIBUTE] = '';
+    else if (typeof line.speaker === 'string') attributes[TRANSCRIPTION_SPEAKER_ATTRIBUTE] = line.speaker;
+    if (line.isFinal && typeof line.runOf === 'string') attributes[TRANSCRIPTION_RUN_OF_ATTRIBUTE] = line.runOf;
     const sid = this.options.trackSid?.();
     if (sid) attributes[LIVEKIT_TRANSCRIPTION_ATTRIBUTES.trackId] = sid;
     if (line.failed) attributes[TRANSCRIPTION_FAILED_ATTRIBUTE] = line.failed;

@@ -318,11 +318,14 @@ export class EmergentJudge {
    * @param _toolId - The ID of the tool being reused (reserved for future
    *   anomaly detection; currently unused).
    * @param output - The actual output value produced by the tool invocation.
-   * @param schema - The tool's declared output JSON Schema.
+   * @param schema - The tool's declared output JSON Schema; a tool forged with none (`forge_tool` does not ask for
+   *   one) gives every output `valid: true`.
    * @returns A {@link ReuseVerdict} with `valid: true` if the output conforms,
    *   or `valid: false` with a `schemaErrors` array describing each mismatch.
    */
-  validateReuse(_toolId: string, output: unknown, schema: JSONSchemaObject): ReuseVerdict {
+  validateReuse(_toolId: string, output: unknown, schema: JSONSchemaObject | undefined): ReuseVerdict {
+    // A tool forged with no output schema declares nothing its output can break.
+    if (!schema || typeof schema !== 'object') return { valid: true, schemaErrors: [], anomaly: false };
     // Use the full recursive validator instead of type-only checking.
     // This catches constraint violations (minLength, maximum, pattern, etc.)
     // that the old type-only check silently ignored.

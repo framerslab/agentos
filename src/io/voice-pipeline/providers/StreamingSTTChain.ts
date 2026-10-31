@@ -39,6 +39,11 @@ import { AudioRingBuffer } from '../AudioRingBuffer.js';
 import { TranscriptDedupe } from '../TranscriptDedupe.js';
 import { authorizeProviderOpening, freezeProviderPolicy, legacyProviderPolicy, selectPolicyProviders, type ProviderSelectionPolicy } from '../ProviderPolicy.js';
 import { SttConnectionAuthorizationError } from '../SttConnectionAuthorizationError.js';
+import { createContentSafeConsole } from '../../../core/logging/contentSafeConsole.js';
+import { isContentSafeTelemetryEnabled } from '../../../core/logging/contentSafeTelemetry.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('streaming_stt_chain');
 
 /** Selected provider notification retained for existing hosts. */
 export interface ProviderSelectedEvent {
@@ -363,7 +368,8 @@ export class StreamingSTTChain implements IStreamingSTT {
           ...event,
           ...(event.startMs === undefined ? {} : { startMs: origin + event.startMs }),
           ...(event.endMs === undefined ? {} : { endMs: origin + event.endMs }),
-          ...(event.words === undefined ? {} : { words: event.words.map((word) => ({ ...word, start: origin + word.start, end: origin + word.end })) }),
+          // A transcript with no bounds counts its words from its own audio, so they stay as the provider gave them.
+          ...(event.words === undefined || (event.startMs === undefined && event.endMs === undefined) ? {} : { words: event.words.map((word) => ({ ...word, start: origin + word.start, end: origin + word.end })) }),
         };
         // An empty final retracts interim text its own provider showed and repeats no one's words, so it is never
         // a duplicate.
@@ -374,11 +380,13 @@ export class StreamingSTTChain implements IStreamingSTT {
         if (!closed && session === current) facade.emit(name, ...args);
       });
       session.on('warning', (warning: Error) => {
-        if (closed || session !== current) return;
-        // A provider session prints a warning nobody listens for; the legacy facade does the same, and a strict
-        // policy's facade forwards no provider text.
+        if (closed || (session === current) === false) return;
+        // A strict policy keeps its existing fixed event and silent unlistened fallback.
         if (facade.listenerCount('warning')) facade.emit('warning', this.policy.mode === 'legacy' ? warning : new Error('provider warning'));
-        else if (this.policy.mode === 'legacy') console.warn('[' + id + '] ' + warning.message);
+        else if (this.policy.mode === 'legacy') {
+          if (isContentSafeTelemetryEnabled()) console.warn();
+          else console.warn('[' + id + '] ' + warning.message);
+        }
       });
       // Supplier usage is not output: a retired session's final quantities still belong to its request.
       session.on('usage', (event: unknown) => facade.emit('usage', event));

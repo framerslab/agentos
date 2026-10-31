@@ -29,7 +29,7 @@ export type HexacoTraitKey = (typeof HEXACO_TRAIT_KEYS)[number];
 export type HexacoTraitValues = Partial<Record<HexacoTraitKey, number>>;
 
 /** Alternate spellings accepted on input, mapped to their canonical key. */
-const HEXACO_TRAIT_ALIASES: ReadonlyArray<readonly [alias: string, canonical: HexacoTraitKey]> = [
+export const HEXACO_TRAIT_ALIASES: ReadonlyArray<readonly [alias: string, canonical: HexacoTraitKey]> = [
   ['honestyHumility', 'honesty'],
   ['honesty_humility', 'honesty'],
   ['opennessToExperience', 'openness'],

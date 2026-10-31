@@ -333,7 +333,8 @@ describe('toolFromRow', () => {
 
   it('reads the schema columns, and refuses a row whose input_schema is not a JSON object', () => {
     const inputSchema = { type: 'object', properties: { n: { type: 'number' } } };
-    const empty = { type: 'object', properties: {} };
+    // A missing output schema reads as one that constrains no output, as a forge with none checks none.
+    const empty = {};
     expect(parseRowSchemas({ input_schema: JSON.stringify(inputSchema), output_schema: null })).toEqual({
       inputSchema,
       outputSchema: empty,

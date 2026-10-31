@@ -82,7 +82,10 @@
 
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../llm/providers/errors/errorCodes.js';
 import { classifyKeyFailure } from '../providers/quotaErrors.js';
-import { contentSafeConsole as console } from '../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('provider_health');
 
 /** Snapshot of breaker state for a single provider. */
 export interface LLMProviderHealthStats {

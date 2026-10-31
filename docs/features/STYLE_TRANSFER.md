@@ -41,7 +41,7 @@ A provider without a call that takes both images is refused. For a variation of 
 | `policyTier` | `string` | — | Accepted and not read: it does not change the provider routing below |
 | `providerOptions` | `object` | — | Provider-specific options (see [Providers](#providers)) |
 | `apiKey` | `string` | the provider's env var | Key for the provider named by `provider` or a prefixed `model` (`openai:gpt-image-2.5-sunburst`); refused without one |
-| `baseUrl` | `string` | the provider's env var, then its default | Base URL for the provider named by `provider` or a prefixed `model`; refused without one, like `apiKey` |
+| `baseUrl` | `string` | the provider's env var, then its default | Base URL for the provider named by `provider` or a prefixed `model`; refused without one, like `apiKey`. An empty or whitespace-only value is unset and needs neither |
 
 ## Provider routing
 
@@ -54,7 +54,7 @@ When no provider is named, `transferStyle()` takes the first provider whose key 
 | 3 | `STABILITY_API_KEY` | Stability | `stable-image-style-transfer` (the endpoint takes no model) |
 | 4 | `OPENAI_API_KEY` | OpenAI | `gpt-image-2.5-sunburst` |
 
-The provider picked this way reads its base URL from its own variable when one is set (`REPLICATE_BASE_URL`, `FAL_BASE_URL`, `STABILITY_BASE_URL`, `OPENAI_BASE_URL`). A `baseUrl` in the call needs a named provider, as `apiKey` does, so neither reaches a provider the environment chose.
+The provider picked this way reads its base URL from its own variable when one is set (`REPLICATE_BASE_URL`, `FAL_BASE_URL`, `STABILITY_BASE_URL`, `OPENAI_BASE_URL`). A `baseUrl` in the call needs a named provider, as `apiKey` does, so neither reaches a provider the environment chose. An empty or whitespace-only `baseUrl` is unset: it names no endpoint, so it needs no provider, and the provider picked this way reads its own variable as it does with none.
 
 With `provider` named and no `model`, the call runs on that provider's default above. The global default model (`setDefaultProvider`) is not used for a style transfer: it is a generation default. A known `provider:` prefix on `model` wins over `provider`.
 

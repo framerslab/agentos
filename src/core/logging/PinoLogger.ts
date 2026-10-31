@@ -120,7 +120,7 @@ export class PinoLogger implements ILogger {
    * @param meta - Fields of the record.
    */
   info(message: string, meta?: Record<string, any>): void {
-    if (emitContentSafeLog('info')) return;
+    if (emitContentSafeLog('info', 'pino_logger')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.info(metaWithTrace, message);
     maybeEmitOtelLog('info', message, metaWithTrace, this.base.bindings());
@@ -133,7 +133,7 @@ export class PinoLogger implements ILogger {
    * @param meta - Fields of the record.
    */
   warn(message: string, meta?: Record<string, any>): void {
-    if (emitContentSafeLog('warn')) return;
+    if (emitContentSafeLog('warn', 'pino_logger')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.warn(metaWithTrace, message);
     maybeEmitOtelLog('warn', message, metaWithTrace, this.base.bindings());
@@ -147,7 +147,7 @@ export class PinoLogger implements ILogger {
    *   record's exception attributes.
    */
   error(message: string, meta?: Record<string, any>): void {
-    if (emitContentSafeLog('error')) return;
+    if (emitContentSafeLog('error', 'pino_logger')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.error(metaWithTrace, message);
     maybeEmitOtelLog('error', message, metaWithTrace, this.base.bindings());
@@ -160,7 +160,7 @@ export class PinoLogger implements ILogger {
    * @param meta - Fields of the record.
    */
   debug(message: string, meta?: Record<string, any>): void {
-    if (emitContentSafeLog('debug')) return;
+    if (emitContentSafeLog('debug', 'pino_logger')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.debug(metaWithTrace, message);
     maybeEmitOtelLog('debug', message, metaWithTrace, this.base.bindings());
@@ -174,7 +174,7 @@ export class PinoLogger implements ILogger {
    * @param meta - Fields for the line.
    */
   fatal(message: string, meta?: Record<string, any>): void {
-    if (emitContentSafeLog('error')) return;
+    if (emitContentSafeLog('error', 'pino_logger')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.fatal(metaWithTrace, message);
     maybeEmitOtelLog('fatal', message, metaWithTrace, this.base.bindings());
@@ -191,7 +191,7 @@ export class PinoLogger implements ILogger {
    * @param fields - The event's fields and context.
    */
   writeEvent(level: Level, event: string, fields: Record<string, unknown>): void {
-    if (emitContentSafeLog(level === 'fatal' ? 'error' : level)) return;
+    if (emitContentSafeLog(level === 'fatal' ? 'error' : level, 'pino_logger')) return;
     const meta = maybeAttachTraceMeta({ ...fields, event });
     this.base[level](meta);
     maybeEmitOtelLog(level, event, meta, this.base.bindings());

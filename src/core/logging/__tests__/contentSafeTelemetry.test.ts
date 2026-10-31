@@ -76,7 +76,7 @@ describe('content-safe server telemetry', () => {
     for (const level of native) contentSafeConsole[level]('fixture-secret-console', hostile);
     expect(output.length).toBe(13);
     for (const event of output) {
-      expect(Object.keys(event).sort()).toEqual(['kind', 'n', 'state']);
+      expect(Object.keys(event).sort()).toEqual(['component', 'kind', 'n', 'state']);
       expect(event.kind).toBe('library_event');
       expect(event.n).toBe(1);
       expect(Object.isFrozen(event)).toBe(true);

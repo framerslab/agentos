@@ -36,6 +36,23 @@ export interface ParallelBranchWrites {
   artifacts?: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * The value `target` holds under `key` as an own property, and `undefined` when
+ * it only inherits one, as it inherits `__proto__` and `constructor`.
+ */
+function ownValue(target: Record<string, unknown>, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(target, key) ? target[key] : undefined;
+}
+
+/**
+ * Set `key` on `target` as an own, enumerable property. Assigning `__proto__`
+ * would set the object's prototype instead, and the state would then hold, under
+ * every key the new prototype has, a value no node wrote.
+ */
+function setOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
 // ---------------------------------------------------------------------------
 // StateManager
 // ---------------------------------------------------------------------------
@@ -98,23 +115,28 @@ export class StateManager {
    *    values.
    *  - Otherwise the incoming value simply overwrites (last-write-wins semantics).
    *
+   * Each key becomes an own property of the new scratch, `__proto__` included, as
+   * a patch parsed from JSON can carry it: it never sets the prototype of the
+   * scratch, so nothing reads a value no node wrote.
+   *
    * @param state - Current graph state (not mutated).
    * @param patch - Partial scratch update emitted by a completed node.
    * @returns New `GraphState` with the merged scratch partition.
    */
   updateScratch(state: GraphState, patch: Record<string, unknown>): GraphState {
-    const newScratch = { ...(state.scratch as any) };
+    const newScratch: Record<string, unknown> = { ...(state.scratch as Record<string, unknown>) };
 
     for (const [key, value] of Object.entries(patch)) {
       const reducerKey = `scratch.${key}`;
       const reducer = this.reducers[reducerKey];
+      const existing = ownValue(newScratch, key);
 
-      if (reducer !== undefined && newScratch[key] !== undefined) {
+      if (reducer !== undefined && existing !== undefined) {
         // A reducer is configured and a prior value exists — merge them.
-        newScratch[key] = this.applyReducer(reducer, newScratch[key], value);
+        setOwn(newScratch, key, this.applyReducer(reducer, existing, value));
       } else {
         // No reducer or no prior value — overwrite.
-        newScratch[key] = value;
+        setOwn(newScratch, key, value);
       }
     }
 
@@ -175,6 +197,9 @@ export class StateManager {
    * `baseState`'s value again. `GraphRuntime` passes each branch's state with the
    * scratch values its node wrote.
    *
+   * Each merged key is an own property of the merged partition, `__proto__`
+   * included, as `updateScratch()` and `updateArtifacts()` keep it.
+   *
    * The `memory`, `diagnostics`, `visitedNodes`, and `iteration` fields of
    * `baseState` are preserved unchanged — the caller is responsible for merging
    * those separately if needed.
@@ -225,15 +250,16 @@ export class StateManager {
       const values = (branch[partition] ?? {}) as Record<string, unknown>;
       const written = writes
         ? Object.keys(writes[index]?.[partition] ?? {})
-        : Object.keys(values).filter((key) => !Object.is(values[key], base[key]));
+        : Object.keys(values).filter((key) => !Object.is(values[key], ownValue(base, key)));
 
       for (const key of written) {
         const reducer = this.reducers[`${partition}.${key}`];
+        const existing = ownValue(merged, key);
 
-        if (reducer !== undefined && merged[key] !== undefined) {
-          merged[key] = this.applyReducer(reducer, merged[key], values[key]);
+        if (reducer !== undefined && existing !== undefined) {
+          setOwn(merged, key, this.applyReducer(reducer, existing, ownValue(values, key)));
         } else {
-          merged[key] = values[key];
+          setOwn(merged, key, ownValue(values, key));
         }
       }
     });

@@ -479,6 +479,27 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it("a send's own signal that aborts during a tool of the turn's last step ends the turn as it does in an earlier step, though no model call follows", async () => {
+    // maxSteps: 1, so the tool round is the turn's last step: no model call comes after it to read the stop.
+    const k = key();
+    const s = script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'x' } }])] });
+    const controller = new AbortController();
+    const reason = new Error('the caller moved on');
+    // The caller stops the turn while the tool runs, and the tool finishes.
+    const lookup = lookupTool(async () => {
+      controller.abort(reason);
+      return { success: true, output: { found: 'x' } };
+    });
+    const session = agent(base(k, { tools: [lookup], maxSteps: 1 })).session('s');
+
+    const outcome = await session.send('find x', { abortSignal: controller.signal }).then(() => 'resolved', (error: unknown) => error);
+    // The send rejects with the signal's reason, never as a turn that ran out of steps.
+    expect(outcome).toBe(reason);
+    // The tool round ran (the precondition) after the turn's one model call, and its step is kept, marked partial.
+    expect(s.seen).toHaveLength(1);
+    expect(session.messages().at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'c1', partial: true });
+  });
+
   it('close() during a provider request held open aborts it and returns at once; the send rejects with the abort error', async () => {
     const k = key(); const g = gate();
     const s = script('openai', k, { replies: [reply.hold([], g.opened, reply.text('Late.'))] });

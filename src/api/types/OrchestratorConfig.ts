@@ -24,6 +24,12 @@ export interface RollingSummaryCompactionProfileDefinition {
   systemPrompt?: string;
 }
 
+/**
+ * Rolling-summary compaction profiles, one picked for each turn by the turn's mode (`customFlags.mode`, else the persona
+ * id): the profile `defaultProfileByMode` maps the mode to, else `defaultProfileId`. The profiles share the
+ * conversation's one summary state (`rollingSummaryStateKey`), and the `headMessagesToKeep` of the pass that first
+ * wrote it stays the conversation's head under every profile.
+ */
 export interface RollingSummaryCompactionProfilesConfig {
   defaultProfileId: string;
   defaultProfileByMode?: Record<string, string>;
@@ -117,6 +123,10 @@ export interface AgentOSOrchestratorConfig {
   rollingSummaryCompactionConfig?: RollingSummaryCompactionConfig | null;
   rollingSummaryCompactionProfilesConfig?: RollingSummaryCompactionProfilesConfig | null;
   rollingSummarySystemPrompt?: string;
+  /**
+   * The conversation metadata key that holds the rolling summary's state (`rollingSummaryState` by default): the
+   * summary, its boundary and the head it was built with. Every compaction profile reads and writes this one state.
+   */
   rollingSummaryStateKey?: string;
   longTermMemoryRecall?: AgentOSLongTermMemoryRecallConfig;
   tenantRouting?: AgentOSTenantRoutingConfig;

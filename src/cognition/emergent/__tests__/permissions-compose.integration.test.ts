@@ -1366,4 +1366,25 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(second).toEqual([{ text: 'q4' }]);
     expect((requestApproval.mock.calls[1][0] as PendingAction).actionId).toContain('report-v2');
   });
+
+  it('runs a composition forged with no output schema, whose output nothing constrains', async () => {
+    // forge_tool asks for no output schema, and a use read one that was not there.
+    const host = await makeForgeHost({ tools: [echoTool()] });
+    const forged = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      {
+        name: 'echo_unshaped',
+        description: 'Echoes the text.',
+        inputSchema: TEXT_IN,
+        implementation: { mode: 'compose', steps: [{ name: 'only', tool: 'echo', inputMapping: { text: '$input.text' } }] },
+        testCases: [{ input: { text: 'a' } }],
+      },
+      { sessionId: 'sess-unshaped' },
+    );
+    expect(forged.isError).toBeFalsy();
+    const used = await callTool(host.orchestrator, 'echo_unshaped', { text: 'b' }, { sessionId: 'sess-unshaped' });
+    expect(used.isError).toBeFalsy();
+    expect(used.output).toEqual({ text: 'b' });
+  });
 });

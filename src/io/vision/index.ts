@@ -199,8 +199,11 @@ export async function createVisionPipeline(
   // provider a cloudModel prefix names, which generateText follows) > env
   // var auto-detect. A key or a base URL the caller gives goes only to a
   // provider the caller named: with none named, detection would pick one
-  // from the environment and send it there.
-  const keyed = config?.cloudApiKey !== undefined || config?.cloudBaseUrl !== undefined;
+  // from the environment and send it there. An empty or whitespace-only
+  // cloudBaseUrl is unset, as generateText reads it (baseUrlIfSet in
+  // model.ts): it names no endpoint, so it needs no provider.
+  const { baseUrlIfSet } = await import('../../api/model.js');
+  const keyed = config?.cloudApiKey !== undefined || baseUrlIfSet(config?.cloudBaseUrl) !== undefined;
   let named = config?.cloudProvider;
   let cloudModel = config?.cloudModel;
   if (config?.cloudModel) {

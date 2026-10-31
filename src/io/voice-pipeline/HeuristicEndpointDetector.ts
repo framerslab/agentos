@@ -80,8 +80,10 @@
  *    waits for no late final of the last turn before.
  *
  * 6. A final its provider marks `beforeSpeechEnd` belongs to the speech it
- *    arrives in: `DeepgramStreamingSTT` marks every result, since Deepgram
- *    sends a segment's final before the end of speech of its utterance.
+ *    arrives in: `DeepgramStreamingSTT` marks each result of an item whose
+ *    speech has not ended, since Deepgram sends a segment's final before the
+ *    end of speech of its utterance, and marks a final delayed past its
+ *    item's end of speech `false`, so that final answers the end waiting.
  *    Such an item-keyed final is never a late final, after a completed turn
  *    or after a reset while its speech was spoken (a barge-in's cut makes
  *    one), and it answers its own speech's coming `speech_end`, never one

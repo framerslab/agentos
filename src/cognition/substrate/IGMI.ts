@@ -21,6 +21,7 @@ import type { ToolEffectRecord } from '../../core/tools/ITool';
 import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 import type { HexacoTraitValues } from './personas/hexaco';
 import type { ILearnerSession } from '../learning/types.js';
+import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
@@ -125,12 +126,33 @@ export interface GMIToolCallRefusal {
 }
 
 /**
+ * What the GMI tells a {@link GMIToolCallGate} beside the call it asks about.
+ * @interface GMIToolCallGateContext
+ */
+export interface GMIToolCallGateContext {
+  /**
+   * Every call of the model step the call belongs to, in the order the model asked for them, the call among them. The
+   * GMI asks about each call of a step before the first of them runs and passes the same array with each question, so
+   * a gate can judge the calls together as well as one by one.
+   */
+  stepCalls?: readonly ToolCallRequest[];
+  /**
+   * The sources the turn retrieved for the model, when it retrieved any. A tool continuation retrieves nothing of
+   * its own and passes the sources of the user turn it continues.
+   */
+  ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
+}
+
+/**
  * Asked before the GMI runs a call of its own tool round. Resolving to null lets the call run. A refusal turns the call
  * into a refused tool result that the model reads (an error with the code `AUTH_PERMISSION_DENIED`, as a permission
- * refusal is recorded), and the tool is not called; a gate that throws refuses the call too. AgentOS builds one from its
- * output guardrails that set `config.evaluateToolCalls`.
+ * refusal is recorded), and the tool is not called; a gate that throws refuses the call too. The GMI asks about every
+ * call of a step, with the step's calls and the turn's retrieved sources in `context`, before any call of the step
+ * runs. AgentOS builds one from its output guardrails that set `config.evaluateToolCalls`: it judges each call alone,
+ * then the calls of the step that pass alone together, as the stream's `TOOL_CALL_REQUEST` chunk for the step holds
+ * them, each time with the turn's sources; a block on the calls together refuses each of them.
  */
-export type GMIToolCallGate = (call: ToolCallRequest) => Promise<GMIToolCallRefusal | null>;
+export type GMIToolCallGate = (call: ToolCallRequest, context?: GMIToolCallGateContext) => Promise<GMIToolCallRefusal | null>;
 
 /**
  * Options for the continuation a tool result starts.
@@ -321,6 +343,12 @@ export interface GMITurnInput {
      */
     memoryScope?: { userId?: string; sessionId?: string } | null;
     /**
+     * The launched team this turn's GMI sits in (`launch_agency`): the launch, the seat's role and the team's level.
+     * The GMI hands each tool call of the turn a frozen copy in `sessionData.agencyLaunch`, where a launch from that
+     * call reads its parent; a tool continuation that names none keeps the frame of the turn it continues.
+     */
+    agencyLaunch?: AgencyLaunchFrame;
+    /**
      * Asked before each call of this turn's tool round runs (see {@link GMIToolCallGate}). A tool continuation that names
      * none asks the gate of the turn it continues.
      */
@@ -502,8 +530,19 @@ export interface UICommand {
  * @interface GMIOutput
  */
 export interface GMIOutput {
+    /**
+     * `false` with `toolCalls` stops the turn for the host: the runtime saves the pending request, and the host runs
+     * those calls and passes their results back. Any other output, final or naming no calls, ends the turn, or the
+     * tool-result continuation, with `FINAL_RESPONSE`.
+     */
     isFinal: boolean;
     responseText?: string | null;
+    /**
+     * On an output with `isFinal: false`, the calls the host runs: the runtime reads every one of them as a call that
+     * waits on the host, since a call carries no mode of its own, so a GMI leaves out of such an output the calls it ran
+     * itself. On a final output, the calls of the GMI's own tool rounds, each one run or refused by the tool-call gate:
+     * `FINAL_RESPONSE.finalToolCalls` lists them, and nothing waits on them.
+     */
     toolCalls?: ToolCallRequest[];
     uiCommands?: UICommand[];
     audioOutput?: AudioOutputConfig;
@@ -513,9 +552,12 @@ export interface GMIOutput {
     error?: { code: string; message: string; details?: any };
     /**
      * Retrieved RAG chunks for the turn, populated when the GMI performed a
-     * RAG retrieval. Threaded into the FINAL_RESPONSE chunk so client code and
-     * the output-guardrail layer (Grounding Guard, Citation Verifier) can
-     * verify generated claims against the same sources the model saw.
+     * RAG retrieval; a tool continuation retrieves nothing of its own and
+     * carries the chunks of the user turn it continues, when the same GMI ran
+     * that turn (a pause stores no retrieved chunk). Threaded into the
+     * FINAL_RESPONSE chunk so client code and the output-guardrail layer
+     * (Grounding Guard, Citation Verifier) can verify generated claims against
+     * the same sources the model saw.
      */
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
     /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */
@@ -711,6 +753,14 @@ export interface IGMI {
     options?: GMIToolResultOptions,
   ): Promise<GMIOutput>;
 
+  /**
+   * Continues the turn with several tool results at once: a batch the host passes, or a pause the host answers in
+   * part. For a pause answered in part, the results hold, after the host's, one error result for each call of the
+   * pause the host left out (`isError: true`, `errorDetails.code` `EXTERNAL_TOOL_NOT_RUN`), so the GMI's own history
+   * answers every call of the pause before it writes again. An `IGMI` without it takes one result at a time: a pause
+   * answered in part continues it through `handleToolResult()` with the host's result alone, and a batch of several
+   * results ends the continuation with an error.
+   */
   handleToolResults?(
     toolResults: ToolCallResult[],
     userId: string,
@@ -718,9 +768,35 @@ export interface IGMI {
     options?: GMIToolResultOptions,
   ): Promise<GMIOutput>;
 
+  /**
+   * Makes `conversationHistory` the whole conversation history. The runtime calls it before a resume continues a
+   * pause, and before results on the paused stream continue it on a GMI whose own history holds a turn of another
+   * conversation, or that replaced the GMI the turn paused on: with the history the paused GMI held of the turn when
+   * it paused (what its `getConversationHistory()` returned, or the conversation's stored history before the turn and
+   * what its `getLastTurnHistory()` returned), with the pause's calls, when the runtime kept one, and with the
+   * conversation's stored history otherwise.
+   */
   hydrateConversationHistory?(
     conversationHistory: ConversationMessage[],
   ): void;
+
+  /**
+   * The conversation history as the GMI holds it, the calls of its own tool rounds, their results and the assistant
+   * turns' thinking blocks included; `hydrateConversationHistory()` sets it back. With conversational persistence on,
+   * the runtime reads it when a turn stops for the host on a GMI whose history holds only that turn's conversation,
+   * and keeps it with the turn's stream for the continuation.
+   */
+  getConversationHistory?(): ConversationMessage[];
+
+  /**
+   * The messages of the conversation history from the input of the GMI's last turn on, as `getConversationHistory()`
+   * gives them: that input, the assistant turns and tool results of the turn's tool rounds, and what a tool
+   * continuation of the turn added; empty when no turn ran, or when the history no longer holds that input. With
+   * conversational persistence on, the runtime reads it when a turn stops for the host on a GMI whose history also
+   * holds a turn of another conversation, and keeps the conversation's stored history before the turn, followed by
+   * these messages, with the turn's stream for the continuation.
+   */
+  getLastTurnHistory?(): ConversationMessage[];
 
   /**
    * Makes `messages` the whole conversation history. An empty array is authoritative.
@@ -731,11 +807,21 @@ export interface IGMI {
   /** Empties the conversation history; `GMI` drops what it recorded about its turns, as for `replaceHistory`. */
   clearHistory?(): void;
 
+  /**
+   * Sets the turn a tool continuation goes on with: the session, conversation and organization the continuation runs
+   * under, and the sources the paused turn retrieved (`ragSources`), which its tool calls and reply are judged with.
+   * The runtime calls it when it calls `hydrateConversationHistory()`, and also when the conversation holds no history
+   * to set. A blank organization means the turn has none; an empty `ragSources` means it retrieved none; a field left
+   * out keeps what the GMI holds. A conversation other than the one of the GMI's last turn also drops what `GMI` kept
+   * for that turn (its memory scope, tool-call gate, learning preparation, model hop and sources), so the continuation
+   * starts as on a GMI built for it.
+   */
   hydrateTurnContext?(
     context: {
       sessionId?: string;
       conversationId?: string;
       organizationId?: string;
+      ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
     },
   ): void;
 

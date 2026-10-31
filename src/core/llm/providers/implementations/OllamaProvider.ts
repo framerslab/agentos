@@ -32,7 +32,10 @@ import {
 } from '../IProvider';
 import { stripForeignVendorParams } from '../openrouter-only-params';
 import { OllamaProviderError } from '../errors/OllamaProviderError';
-import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('ollama_provider');
 
 /**
  * Configuration specific to the OllamaProvider.

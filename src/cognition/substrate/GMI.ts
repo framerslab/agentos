@@ -39,7 +39,7 @@ import {
   UICommand, // Assuming UICommand is used internally if GMI constructs them
   // AudioOutputConfig, ImageOutputConfig are part of GMIOutput
 } from './IGMI';
-import type { GMIToolCallGate, GMIToolCallRefusal, GMIToolResultOptions, StepFinishedChunkPayload, ToolResultChunkPayload } from './IGMI';
+import type { GMIToolCallGate, GMIToolCallGateContext, GMIToolCallRefusal, GMIToolResultOptions, StepFinishedChunkPayload, ToolResultChunkPayload } from './IGMI';
 import { refusedToolCallResult } from './toolCallGate';
 import {
   IPersonaDefinition,
@@ -56,6 +56,7 @@ import { ChatMessage, ModelCompletionOptions, ModelCompletionResponse, ModelUsag
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 import { checkStructuredReply, resolveStructuredReply, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
+import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
 
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI';
@@ -196,6 +197,32 @@ function toolCallGateOf(turnInput: GMITurnInput): GMIToolCallGate | undefined {
   return typeof gate === 'function' ? gate : undefined;
 }
 
+/**
+ * `gate`, asked beside `sources` as well as the sources of the call it is asked about: the gate a turn's tool call
+ * carries (`callerTurn.toolCallGate`), so a team the call launches has its seats' calls judged beside what the
+ * launching turn retrieved, though their own turns retrieve nothing. `gate` itself when the turn retrieved nothing.
+ */
+function withTurnSources(
+  gate: GMIToolCallGate,
+  sources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined,
+): GMIToolCallGate {
+  if (!sources || sources.length === 0) return gate;
+  return (call, context) => {
+    const own = context?.ragSources ?? [];
+    return gate(call, { ...context, ragSources: [...own, ...sources.filter((source) => !own.includes(source))] });
+  };
+}
+
+/**
+ * The launched team a turn names in `metadata.agencyLaunch`, copied; undefined when it names none, or one without a
+ * string launch id, a string role and a numeric depth.
+ */
+function launchFrameOf(turnInput: GMITurnInput): AgencyLaunchFrame | undefined {
+  const frame = turnInput.metadata?.agencyLaunch as Partial<AgencyLaunchFrame> | undefined;
+  if (!frame || typeof frame.launchId !== 'string' || typeof frame.role !== 'string' || typeof frame.depth !== 'number') return undefined;
+  return { launchId: frame.launchId, role: frame.role, depth: frame.depth };
+}
+
 /** Adds one provider usage report to the turn's total. */
 function addUsage(total: CostAggregator, usage: ModelUsage): void {
   total.promptTokens += usage.promptTokens || 0;
@@ -290,6 +317,26 @@ export class GMI implements IGMI {
    */
   private turnToolCallGate: GMIToolCallGate | undefined;
 
+  /**
+   * The launched team the turn sits in, when the turn named one (`metadata.agencyLaunch`). Set when a user turn starts;
+   * a tool continuation that names none sits in this one.
+   */
+  private turnLaunchFrame: AgencyLaunchFrame | undefined;
+
+  /**
+   * The sources the user turn retrieved, when it retrieved any. Cleared when a
+   * user turn starts; a tool continuation retrieves nothing of its own, so the
+   * tool-call gate is asked about its calls with these.
+   */
+  private turnRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
+
+  /**
+   * The first message the input of the last turn added to the history, which
+   * `getLastTurnHistory()` reads the history from. A tool continuation belongs
+   * to the turn it continues, so it leaves this as it is.
+   */
+  private lastTurnInput: ChatMessage | undefined;
+
   /** The learner session the host passed (`GMIBaseConfig.learning`), when its learning option is on. */
   private learnerSession: ILearnerSession | undefined;
 
@@ -301,8 +348,9 @@ export class GMI implements IGMI {
   private ownPersonalitySection: string | null = null;
 
   /**
-   * What the learning layer prepared for the turn in progress. Set once per user turn, before the tool loop;
-   * a tool continuation keeps the preparation of the turn it continues.
+   * What the learning layer prepared for the latest turn. Set once per user turn, before the tool loop; a tool
+   * continuation reuses the preparation of the turn it continues. A turn's tool calls read the turn's own preparation,
+   * not this field, which a newer turn replaces.
    */
   private turnLearning: TurnLearning | undefined;
 
@@ -837,14 +885,38 @@ export class GMI implements IGMI {
    * Asks the turn's tool-call gate about one call. A gate that throws refuses
    * the call, so a check that fails never lets a call through.
    */
-  private async askToolCallGate(gate: GMIToolCallGate, call: ToolCallRequest): Promise<GMIToolCallRefusal | null> {
+  private async askToolCallGate(
+    gate: GMIToolCallGate,
+    call: ToolCallRequest,
+    context: GMIToolCallGateContext,
+  ): Promise<GMIToolCallRefusal | null> {
     try {
-      return await gate(call);
+      return await gate(call, context);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.addTraceEntry(ReasoningEntryType.WARNING, `The tool-call gate failed on '${call.name}'; the call is refused.`, { reqId: call.id, error: message });
       return { reason: `The call to '${call.name}' was refused because its check failed: ${message}`, reasonCode: 'TOOL_CALL_GATE_ERROR' };
     }
+  }
+
+  /**
+   * Asks the turn's tool-call gate about every call of one model step, in
+   * order, before any of them runs: each question names the step's calls and
+   * the sources the turn retrieved, so the gate can judge the calls together
+   * and against those sources. Returns each call's refusal, or null, by the
+   * call's position in the step.
+   */
+  private async askToolCallGateForStep(
+    gate: GMIToolCallGate,
+    stepCalls: ToolCallRequest[],
+    ragSources: GMIToolCallGateContext['ragSources'],
+  ): Promise<Array<GMIToolCallRefusal | null>> {
+    const context: GMIToolCallGateContext = { stepCalls, ...(ragSources && ragSources.length > 0 ? { ragSources } : {}) };
+    const refusals: Array<GMIToolCallRefusal | null> = [];
+    for (const call of stepCalls) {
+      refusals.push(await this.askToolCallGate(gate, call, context));
+    }
+    return refusals;
   }
 
   /**
@@ -872,7 +944,15 @@ export class GMI implements IGMI {
     return { sessionId, conversationId: namedConversation || sessionId, organizationId };
   }
 
-  private buildToolSessionData(turnInput: GMITurnInput): Record<string, any> | undefined {
+  /**
+   * The session data each tool call of a turn carries: its session, conversation and organization, the launched team
+   * the turn sits in, and the turn's own learning, never a newer turn's.
+   *
+   * @param turnInput - The turn's input.
+   * @param learning - The turn's own learning preparation.
+   * @param launchFrame - The launched team the turn sits in, for a seat's turn.
+   */
+  private buildToolSessionData(turnInput: GMITurnInput, learning: TurnLearning | undefined, launchFrame?: AgencyLaunchFrame): Record<string, any> | undefined {
     const sessionId = typeof turnInput.sessionId === 'string' ? turnInput.sessionId.trim() : '';
     const conversationId = this.getConversationIdForTurn(turnInput);
     const organizationId = this.getOrganizationIdForTurn(turnInput);
@@ -888,9 +968,17 @@ export class GMI implements IGMI {
       sessionData.organizationId = organizationId;
     }
 
+    // The launched team the turn sits in, where a launch from this call reads its parent: a frozen copy for each call,
+    // so no tool changes the frame a later call is handed.
+    if (launchFrame) {
+      sessionData.agencyLaunch = Object.freeze({ launchId: launchFrame.launchId, role: launchFrame.role, depth: launchFrame.depth });
+    }
+
     // The turn's learner and mode, on a GMI with a learner session: a self-modification tool reads them before it acts.
-    if (this.turnLearning?.tools) {
-      sessionData.learning = { ...this.turnLearning.tools };
+    // They come from the turn's own preparation, so a newer turn or a continuation that ran during this turn's tool
+    // call never changes them.
+    if (learning?.tools) {
+      sessionData.learning = { ...learning.tools };
     }
     return Object.keys(sessionData).length > 0 ? sessionData : undefined;
   }
@@ -939,6 +1027,28 @@ export class GMI implements IGMI {
   }
 
   /**
+   * The conversation history as this GMI holds it, as messages `hydrateConversationHistory()` takes back: the calls of
+   * its own tool rounds with their results, and the thinking blocks and thought signatures of its assistant turns.
+   */
+  public getConversationHistory(): ConversationMessage[] {
+    return this.conversationHistoryManager.buildForPrompt();
+  }
+
+  /**
+   * The messages of the conversation history from the input of this GMI's last turn on, as `getConversationHistory()`
+   * gives them: that input, the assistant turns and tool results of the turn's tool rounds, and what a tool
+   * continuation of the turn added. Empty when no turn ran, or when the history no longer holds that input (it was
+   * replaced, cleared or trimmed past it).
+   */
+  public getLastTurnHistory(): ConversationMessage[] {
+    const history = this.conversationHistoryManager.history;
+    const start = this.lastTurnInput ? history.indexOf(this.lastTurnInput) : -1;
+    return start < 0
+      ? []
+      : history.slice(start).map((message) => this.conversationHistoryManager.convertToConversationMessage(message));
+  }
+
+  /**
    * Makes `messages` the whole conversation history. An empty array is
    * authoritative: it empties the history (unlike
    * `metadata.conversationHistoryForPrompt`, which a turn ignores when empty).
@@ -960,19 +1070,42 @@ export class GMI implements IGMI {
     this.forgetTurnsOutside([]);
   }
 
+  /**
+   * Sets the turn a tool continuation goes on with: the ids its continuation runs under and the sources its tool
+   * calls and reply are judged with. A blank session or conversation id leaves the GMI's as it is; a blank
+   * organization means the turn has none, and clears the GMI's. `ragSources` replaces the sources the GMI keeps for
+   * the turn (an empty array clears them); without it they stay. A conversation other than the one of the GMI's last
+   * turn drops what the GMI kept for that turn, which a continuation would otherwise go on with: the model hop that
+   * served it, its memory scope, its tool-call gate, its learning preparation and its sources. The continuation then
+   * starts as on a GMI built for it: on the route's first hop that can start, with a learning preparation asked for the
+   * continuation.
+   */
   public hydrateTurnContext(context: {
     sessionId?: string;
     conversationId?: string;
     organizationId?: string;
+    ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
   }): void {
     if (typeof context.sessionId === 'string' && context.sessionId.trim()) {
       this.reasoningTrace.sessionId = context.sessionId.trim();
     }
     if (typeof context.conversationId === 'string' && context.conversationId.trim()) {
-      this.reasoningTrace.conversationId = context.conversationId.trim();
+      const conversationId = context.conversationId.trim();
+      if (conversationId !== this.reasoningTrace.conversationId) {
+        // the GMI's last turn was another conversation's: nothing it kept for that turn belongs to this one
+        this.turnResolution = undefined;
+        this.turnMemoryScope = undefined;
+        this.turnToolCallGate = undefined;
+        this.turnLearning = undefined;
+        this.turnRagSources = undefined;
+      }
+      this.reasoningTrace.conversationId = conversationId;
     }
-    if (typeof context.organizationId === 'string' && context.organizationId.trim()) {
-      this.reasoningTrace.organizationId = context.organizationId.trim();
+    if (typeof context.organizationId === 'string') {
+      this.reasoningTrace.organizationId = context.organizationId.trim() || undefined;
+    }
+    if (Array.isArray(context.ragSources)) {
+      this.turnRagSources = context.ragSources.length > 0 ? [...context.ragSources] : undefined;
     }
   }
 
@@ -1165,10 +1298,17 @@ export class GMI implements IGMI {
       this.turnMemoryScope = memoryScopeOf(turnInput);
       this.turnLearning = undefined;
       this.turnToolCallGate = toolCallGateOf(turnInput);
+      this.turnLaunchFrame = launchFrameOf(turnInput);
+      this.turnRagSources = undefined;
     }
     // The gate this turn's tool round asks before each call: the one the input names; a continuation that names none
     // asks the gate of the turn it continues.
     const toolCallGate = toolCallGateOf(turnInput) ?? this.turnToolCallGate;
+    // The launched team this turn's tool calls sit in, likewise: a continuation that names none sits in its turn's.
+    const launchFrame = launchFrameOf(turnInput) ?? this.turnLaunchFrame;
+    // A continuation retrieves nothing of its own: the gate is asked about its calls with the sources the turn it
+    // continues retrieved.
+    const continuedTurnSources = turnInput.metadata?.isToolContinuation === true ? this.turnRagSources : undefined;
     this.stateOwnerTurn = turnNumber;
     // False once a newer turn has started; lifecycle writes below check it.
     const ownsState = (): boolean => this.stateOwnerTurn === turnNumber;
@@ -1249,6 +1389,9 @@ export class GMI implements IGMI {
       const currentUserMessage = historyAtTurnStart.find(
         (message) => message.role === 'user' && !messagesBeforeInput.has(message),
       );
+      if (turnInput.metadata?.isToolContinuation !== true) {
+        this.lastTurnInput = historyAtTurnStart.find((message) => !messagesBeforeInput.has(message));
+      }
       // The turn's input, so a later replaceHistory() or clearHistory() can tell
       // whether the history still holds this turn. Bounded like the trace:
       // every turn on the trace has at least one entry there.
@@ -1374,6 +1517,7 @@ export class GMI implements IGMI {
             const ragResult = await this.retrievalAugmentor.retrieveContext(currentQueryForRag, retrievalOptions);
             augmentedContextFromRAG = ragResult.augmentedContext;
             lastRagSources = ragResult.retrievedChunks;
+            if (ownsState()) this.turnRagSources = ragResult.retrievedChunks;
             this.addTraceEntry(ReasoningEntryType.RAG_QUERY_RESULT, 'RAG context retrieved.', {
               length: augmentedContextFromRAG.length,
               chunkCount: ragResult.retrievedChunks?.length ?? 0,
@@ -1406,8 +1550,9 @@ export class GMI implements IGMI {
                     ? [{ content: this.activePersona.baseSystemPrompt, priority: 1}]
                     : [];
 
-        // The personality section sorts right after the base prompt (priority 2 after priority 1). With no
-        // learner session and no persona traits passed there is none, and the prompt is the one sent before.
+        // The personality section sorts after a string or template base prompt (priority 2 after priority 1); the
+        // entries of a list keep their own priorities. With no learner session and no persona traits passed there is
+        // none, and the prompt is the one sent before.
         const systemPrompts = [...baseSystemPrompts, ...turnLearning.systemPrompts];
         const rollingSummaryText = typeof turnInput.metadata?.rollingSummary?.text === 'string'
           ? turnInput.metadata.rollingSummary.text.trim()
@@ -1960,25 +2105,40 @@ export class GMI implements IGMI {
           let callInFlight: ToolCallRequest | undefined;
           let toolRoundFailure: { error: unknown } | undefined;
           try {
-            for (const toolCallReq of currentIterationToolCallRequests) {
+            // The gate is asked about every call of the step before any of them runs, as the stream's chunk for the
+            // step holds them all.
+            const refusals = toolCallGate
+              ? await this.askToolCallGateForStep(toolCallGate, currentIterationToolCallRequests, lastRagSources ?? continuedTurnSources)
+              : [];
+            for (const [callIndex, toolCallReq] of currentIterationToolCallRequests.entries()) {
               const requestDetails: ToolExecutionRequestDetails = {
                 toolCallRequest: toolCallReq,
                 gmiId: this.gmiId, personaId: this.activePersona.id,
                 personaCapabilities: this.activePersona.allowedCapabilities || [],
                 userContext: this.currentUserContext, correlationId: turnId,
-                sessionData: this.buildToolSessionData(turnInput),
+                sessionData: this.buildToolSessionData(turnInput, turnLearning, launchFrame),
+                // The turn's stop: a call whose checks or approval finish after the turn stopped is refused before it
+                // runs (STEP_ABORTED), and the tool receives it as its context's signal; a composed tool hands it to
+                // each step, so it stops between steps. A call already running is never cut.
+                signal: stop.signal,
+                // The gate the turn asks before each call, beside the turn's sources: a team the call launches has its
+                // seats' calls asked it too.
+                ...(toolCallGate ? { callerTurn: { toolCallGate: withTurnSources(toolCallGate, lastRagSources ?? continuedTurnSources) } } : {}),
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;
-              // A call the gate refuses is recorded as a refused result the model reads; the tool is not called.
-              const refusal = toolCallGate ? await this.askToolCallGate(toolCallGate, toolCallReq) : null;
+              // A call the gate refused is recorded as a refused result the model reads; the tool is not called.
+              const refusal = refusals[callIndex] ?? null;
               const result = refusal
                 ? refusedToolCallResult(toolCallReq, refusal)
                 : await this.toolOrchestrator.processToolCall(requestDetails);
               callInFlight = undefined;
               toolExecutionResults.push(result);
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_RESULT, `Tool '${toolCallReq.name}' result. Success: ${!result.isError}`, { result });
-              if (result.isError && plannedToolFailureMode === 'fail_closed') {
+              // A call that fails once the turn has stopped (refused for the stop, or running when it came) is the
+              // stop's, not a tool failure: the turn ends as a stopped turn does, with the stop's abort, under any
+              // failure mode.
+              if (result.isError && plannedToolFailureMode === 'fail_closed' && !stop.signal.aborted) {
                 throw new GMIError(
                   `Tool '${toolCallReq.name}' failed and execution policy is fail_closed.`,
                   GMIErrorCode.TOOL_ERROR,
@@ -2014,6 +2174,15 @@ export class GMI implements IGMI {
             yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TOOL_RESULT, toolResultPayload);
           }
           if (toolRoundFailure) throw toolRoundFailure.error;
+          // A turn that stopped during this round ends as a stopped turn: its next model call ends with the stop's
+          // abort. When this round is the turn's last step no model call follows, so the round ends it with that error.
+          if (stop.signal.aborted && safetyBreak >= maxToolLoopIterations) {
+            throw new GMIError(
+              "Turn aborted: it was stopped during its last step's tool calls.",
+              GMIErrorCode.LLM_PROVIDER_ERROR,
+              { turnId },
+            );
+          }
           if (ownsState()) this.state = GMIPrimeState.PROCESSING;
           continue main_processing_loop;
         }
@@ -2046,7 +2215,9 @@ export class GMI implements IGMI {
         uiCommands: aggregatedUiCommands.length > 0 ? aggregatedUiCommands : undefined, // Assuming GMI can populate these
         usage: aggregatedUsage,
         error: lastErrorForOutput,
-        ragSources: lastRagSources,
+        // a continuation retrieves nothing of its own: its reply carries the sources of the turn it continues, which
+        // its calls are judged with too
+        ragSources: lastRagSources ?? continuedTurnSources,
         ...(structuredResult ? { structuredOutput: structuredResult } : {}),
       };
       return finalTurnOutput; // Return the aggregated output

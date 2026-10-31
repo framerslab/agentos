@@ -17,7 +17,10 @@
 import { IModelRouter, ModelRouteParams, ModelRouteResult } from './IModelRouter';
 import { ModelInfo } from '../providers/IProvider';
 import { AIModelProviderManager } from '../providers/AIModelProviderManager';
-import { contentSafeConsole as console } from '../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('model_router');
 
 /**
  * Custom error class for ModelRouter specific operational errors.

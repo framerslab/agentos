@@ -178,6 +178,9 @@ import {
   resolveGMIForToolContext,
 } from './runtime/SelfImprovementSessionManager';
 import { RagMemoryInitializer } from './runtime/RagMemoryInitializer';
+import type { AgencySession } from '../agents/agency/AgencyTypes';
+import { createRuntimeLaunchTool } from './runtime/agencyLaunch/runtimeLaunchTool';
+import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type LaunchLimits, type RuntimeAgencyLaunchOptions } from './runtime/agencyLaunch/types';
 import type { TurnPlannerConfig } from '../orchestration/turn-planner/TurnPlanner';
 import type {
   CapabilityDescriptor,
@@ -781,10 +784,24 @@ export interface AgentOSConfig {
    * as a system prompt of its own on every turn, and each session is bound to a learner: its persona with the user
    * and the resolved organization of its first turn. `namespace` is refused here, because the runtime takes the
    * organization from each turn. A host that built a layer itself passes it in `gmiManagerConfig.learningLayer`
-   * instead. {@link AgentOS.getLearningLayer} returns the layer.
+   * instead: a layer passed there turns learning on whatever this option says, and `true` or a config beside one is
+   * refused. {@link AgentOS.getLearningLayer} returns the layer.
    * @default false
    */
   learning?: boolean | LearningConfig;
+
+  /**
+   * Teams a persona's GMI may launch from a turn (`launch_agency`). With `launch: true` the runtime registers the
+   * tool, which requires the `agency:launch` capability, so only a persona whose `allowedCapabilities` names it lists
+   * and calls it (with `toolPermissionManagerConfig.strictCapabilityChecking`, on by default). Each call builds a
+   * temporary `agency()` team whose seats are GMIs of this runtime (a registered persona by `personaId`, or one made
+   * from the caller's for the seat's instructions), runs the goal once and returns one tool result, bounded by depth,
+   * seats, launches in flight, one wall deadline and the caller's tools; the output guardrails that judge the caller's
+   * tool calls judge the seats' calls too. The bounds are checked at initialization
+   * whenever this is set; with `launch: true`, a config tool named `launch_agency` fails initialization too.
+   * @default undefined (no tool)
+   */
+  agencies?: RuntimeAgencyLaunchOptions;
 }
 
 export interface AgentOSActiveConversationSnapshot {
@@ -967,8 +984,25 @@ export class AgentOS implements IAgentOS {
 
     this.validateConfiguration(config);
     this.assertLearningConfig(config);
+    // `agencies`: its bounds are checked whenever it is set; the tool is registered only with `launch: true`.
+    let launchLimits: LaunchLimits | undefined;
+    try {
+      launchLimits = config.agencies ? resolveLaunchLimits(config.agencies) : undefined;
+    } catch (error) {
+      throw AgentOSServiceError.wrap(error, GMIErrorCode.CONFIGURATION_ERROR, 'The agencies option is not valid', 'AgentOS.initialize');
+    }
     const resolvedConfig = RagMemoryInitializer.resolveConfig(config);
     const normalizedConfigTools = adaptToolsToMap(resolvedConfig.tools);
+    // With `launch`, launch_agency joins the config tools after the host's own, and a tool of that name would be
+    // replaced without a word: the configuration is refused, as gmi() refuses it at construction.
+    if (launchLimits && config.agencies?.launch === true && normalizedConfigTools[LAUNCH_AGENCY_TOOL_NAME]) {
+      throw new AgentOSServiceError(
+        `The agencies option is not valid: agencies.launch registers '${LAUNCH_AGENCY_TOOL_NAME}', and the runtime's tools already hold a tool of that name.`,
+        GMIErrorCode.CONFIGURATION_ERROR,
+        { toolName: LAUNCH_AGENCY_TOOL_NAME },
+        'AgentOS.initialize',
+      );
+    }
     const normalizedExternalTools = normalizeExternalToolRegistry(resolvedConfig.externalTools);
     const {
       externalTools: _externalTools,
@@ -1201,6 +1235,22 @@ export class AgentOS implements IAgentOS {
           }
         : undefined;
       const initialConfigTools = adaptTools(this.config.tools);
+      const agencies = this.config.agencies;
+      if (launchLimits && agencies?.launch === true) {
+        initialConfigTools.push(
+          createRuntimeLaunchTool({
+            getGmiManager: () => this.gmiManager,
+            getToolOrchestrator: () => this.toolOrchestrator,
+            getAgencyRegistry: () => this.workflowFacade?.getAgencyRegistry(),
+            options: agencies,
+            limits: launchLimits,
+            gmiDefaults: this.config.gmiManagerConfig.defaultGMIBaseConfigDefaults,
+            providerEntry: (providerId: string) => this.modelProviderManager.getProviderEntry(providerId),
+            providerForModel: (modelId: string) => this.modelProviderManager.getProviderForModel(modelId)?.providerId,
+            logger: this.logger,
+          }),
+        );
+      }
 
       await this.toolOrchestrator.initialize(
         this.config.toolOrchestratorConfig,
@@ -1259,6 +1309,10 @@ export class AgentOS implements IAgentOS {
           ...this.config.gmiManagerConfig,
           personaLoaderConfig: personaSource.personaLoaderConfig,
           ...(this.learningLayer ? { learningLayer: this.learningLayer } : {}),
+          // The seats of launched teams get a prompt engine of their own, which makes no model call.
+          ...(this.config.agencies && !this.config.gmiManagerConfig.agencySeatPromptEngineConfig
+            ? { agencySeatPromptEngineConfig: this.config.promptEngineConfig }
+            : {}),
         },
         this.subscriptionService,
         this.authService,
@@ -1499,30 +1553,50 @@ export class AgentOS implements IAgentOS {
   }
 
   /**
-   * The output guards' verdict on a stream. A block that withheld actionable tool calls drops the pause the
-   * orchestrator saved for them, so neither `getPendingExternalToolRequest()` nor the stream offers them again; then
-   * a replaced or rewritten reply is written to the stored conversation. A store that refuses the save of the dropped
-   * pause is logged: the stream is closed all the same, and the stored conversation keeps the pause until the
-   * conversation is saved again. Nothing here throws into the stream.
+   * The output guards' verdict on a stream. A block drops the pause the orchestrator saved for the stream, so neither
+   * `getPendingExternalToolRequest()` nor the stream offers its calls again. A block that withheld actionable tool
+   * calls drops their pause before the verdict reaches the caller. A block that withheld none (on a streamed delta, or
+   * on the chunk of calls the runtime runs itself) ends the caller's stream while the turn goes on inside the runtime:
+   * a pause the turn saves when it then stops for calls the host runs is dropped once the turn ends, and the verdict
+   * does not wait for that; from the verdict on, the stream is held as blocked, so that pause is neither offered nor
+   * resumed nor continued meanwhile. Then a replaced or rewritten reply is written to the stored conversation. A store
+   * that refuses the save of the dropped pause is logged: the stream is closed all the same, and the stored
+   * conversation keeps the pause until the conversation is saved again. Nothing here throws into the stream.
    */
   private async onOutputVerdict(conversationKey: string, verdict: GuardrailOutputVerdict): Promise<void> {
-    const withheld = verdict.toolCallIds ?? [];
-    if (verdict.action === GuardrailAction.BLOCK && withheld.length > 0) {
-      try {
-        await this.agentOSOrchestrator.discardBlockedToolCalls(verdict.streamId, withheld, {
-          reason: 'An output guardrail blocked the reply that requested this tool call, so the call was not run.',
-          ...(verdict.reasonCode ? { reasonCode: verdict.reasonCode } : {}),
-          ...(verdict.guardrailId ? { guardrailId: verdict.guardrailId } : {}),
-        });
-      } catch (error) {
-        this.logger.warn('The refusal of a blocked tool call could not be saved: the stored conversation keeps its pause until it is saved again', {
-          streamId: verdict.streamId,
-          toolCallIds: withheld,
-          error: error instanceof Error ? error.message : String(error),
-        });
+    if (verdict.action === GuardrailAction.BLOCK) {
+      const withheld = verdict.toolCallIds ?? [];
+      const dropped = this.dropBlockedPause(verdict, withheld);
+      // the withheld calls' pause is dropped before the caller reads the verdict; a block that withheld none waits for
+      // the rest of the turn, which the caller's stream, already ended, does not wait for
+      if (withheld.length > 0) {
+        await dropped;
       }
     }
     await this.recordGuardedReply(conversationKey, verdict);
+  }
+
+  /**
+   * Drops the pause a blocked stream saved, or saves before its turn ends: the calls the block withheld, or, for a
+   * block that withheld none, whatever calls the stream's pause holds. A failure is logged, never thrown.
+   */
+  private async dropBlockedPause(verdict: GuardrailOutputVerdict, withheld: readonly string[]): Promise<void> {
+    try {
+      await this.agentOSOrchestrator.discardBlockedToolCalls(verdict.streamId, withheld.length > 0 ? withheld : undefined, {
+        reason:
+          withheld.length > 0
+            ? 'An output guardrail blocked the reply that requested this tool call, so the call was not run.'
+            : 'An output guardrail blocked the turn that requested this tool call, so the call was not run.',
+        ...(verdict.reasonCode ? { reasonCode: verdict.reasonCode } : {}),
+        ...(verdict.guardrailId ? { guardrailId: verdict.guardrailId } : {}),
+      });
+    } catch (error) {
+      this.logger.warn('The refusal of a blocked tool call could not be saved: the stored conversation keeps its pause until it is saved again', {
+        streamId: verdict.streamId,
+        ...(withheld.length > 0 ? { toolCallIds: [...withheld] } : {}),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -1814,19 +1888,48 @@ export class AgentOS implements IAgentOS {
           : off('emergentConfig.selfImprovement is off'),
       forged_code_executor:
         emergent && this.config.emergentConfig?.allowSandboxTools === true ? { live: true } : off('sandbox forging is off'),
-      // The tool orchestrator's approval gate runs only with toolOrchestratorConfig.hitl.enabled.
-      hitl:
-        this.config.toolOrchestratorConfig?.hitl?.enabled === true
-          ? this.config.hitlManager
-            ? { live: true }
-            : { live: true, detail: 'no hitlManager: side-effect tools are refused unless hitl.autoApproveWhenNoManager is set' }
-          : off('toolOrchestratorConfig.hitl.enabled is off'),
-      tool_policy:
-        this.config.orchestratorConfig.adaptiveExecution?.enabled === false
-          ? off('orchestratorConfig.adaptiveExecution is off')
-          : { live: true },
+      hitl: this.hitlLoop(),
+      tool_policy: this.toolPolicyLoop(),
       rag: this.ragMemoryInitializer?.retrievalAugmentor ? { live: true } : off('no retrieval augmentor'),
     };
+  }
+
+  /**
+   * The tool orchestrator's approval gate, for the manifest: it asks only with `hitl.enabled`, only for a tool that
+   * has side effects unless `requireApprovalForSideEffects` is false (then for none), and with no manager it refuses
+   * such a tool unless `autoApproveWhenNoManager` approves every one.
+   */
+  private hitlLoop(): LoopState {
+    const hitl = this.config.toolOrchestratorConfig?.hitl;
+    if (hitl?.enabled !== true) return { live: false, detail: 'toolOrchestratorConfig.hitl.enabled is off' };
+    if (hitl.requireApprovalForSideEffects === false) {
+      return { live: false, detail: 'toolOrchestratorConfig.hitl.requireApprovalForSideEffects is off: the gate asks for no tool' };
+    }
+    if (!this.config.hitlManager) {
+      return hitl.autoApproveWhenNoManager === true
+        ? { live: false, detail: 'no hitlManager, and hitl.autoApproveWhenNoManager approves every call' }
+        : { live: true, detail: 'no hitlManager: side-effect tools are refused' };
+    }
+    return { live: true };
+  }
+
+  /**
+   * The adaptive tool-policy switch, for the manifest: it changes a turn plan's tool policy from task-outcome
+   * telemetry, so it needs adaptive execution, the telemetry and a turn planner. The planner is built before the
+   * learning layer, so it is read set or not.
+   */
+  private toolPolicyLoop(): LoopState {
+    const orchestratorConfig = this.config.orchestratorConfig;
+    if (orchestratorConfig.adaptiveExecution?.enabled === false) {
+      return { live: false, detail: 'orchestratorConfig.adaptiveExecution is off' };
+    }
+    if (orchestratorConfig.taskOutcomeTelemetry?.enabled === false) {
+      return { live: false, detail: 'orchestratorConfig.taskOutcomeTelemetry is off: the switch reads no success rate' };
+    }
+    if (!this.discoveryInitializer?.turnPlanner) {
+      return { live: false, detail: 'no turn planner: the switch has no turn plan to change' };
+    }
+    return { live: true };
   }
 
   public getExtensionManager(): ExtensionManager {
@@ -2341,13 +2444,18 @@ export class AgentOS implements IAgentOS {
         }
       }
     } catch (error: unknown) {
+      // results the stream does not wait on (its pause continued, resumed, ended by a newer turn or replaced, or its
+      // stream blocked) are refused before the GMI takes them, and keep their code, as a refused resume does
+      const refused = error instanceof GMIError && error.code === GMIErrorCode.INVALID_STATE;
       const serviceError = AgentOSServiceError.wrap(
         error,
-        GMIErrorCode.TOOL_ERROR, // Default code for facade-level tool result errors
+        refused ? GMIErrorCode.INVALID_STATE : GMIErrorCode.TOOL_ERROR, // Default code for facade-level tool result errors
         `Error during AgentOS.handleToolResults for stream '${streamId}'`,
         'AgentOS.handleToolResults'
       );
-      console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      if (!refused) {
+        console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      }
 
       const errorChunk: AgentOSErrorChunk = {
         type: AgentOSResponseChunkType.ERROR,
@@ -2408,6 +2516,17 @@ export class AgentOS implements IAgentOS {
   public async listWorkflows(options?: WorkflowQueryOptions): Promise<WorkflowInstance[]> {
     this.ensureInitialized();
     return this.workflowFacade!.listWorkflows(options);
+  }
+
+  /**
+   * Copies of the agencies running now: a workflow's, and every team a persona's GMI launched with `launch_agency`
+   * (`agencies.launch`), whose entry has `metadata.kind: 'launched'` and lasts while its team runs.
+   *
+   * @returns The running agencies; empty on a runtime with no agency registry.
+   */
+  public listAgencies(): AgencySession[] {
+    this.ensureInitialized();
+    return this.workflowFacade?.getAgencyRegistry()?.listAgencies() ?? [];
   }
 
   public async getWorkflowProgress(
@@ -2530,7 +2649,13 @@ export class AgentOS implements IAgentOS {
       return null;
     }
 
-    const pendingRequest = context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY);
+    const pendingRequest = context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    // a pause a stream saves after an output guardrail blocked it is dropped once the turn ends, and never offered
+    if (pendingRequest && this.agentOSOrchestrator.isStreamBlocked(pendingRequest.streamId)) {
+      return null;
+    }
     return pendingRequest ?? null;
   }
 
@@ -2587,13 +2712,17 @@ export class AgentOS implements IAgentOS {
         }
       }
     } catch (error: unknown) {
+      // a resume of a pause the conversation no longer holds is refused before its stream is made, and keeps its code
+      const refused = error instanceof GMIError && error.code === GMIErrorCode.INVALID_STATE;
       const serviceError = AgentOSServiceError.wrap(
         error,
-        GMIErrorCode.TOOL_ERROR,
+        refused ? GMIErrorCode.INVALID_STATE : GMIErrorCode.TOOL_ERROR,
         `Error during AgentOS.resumeExternalToolRequest for conversation '${pendingRequest.conversationId}'`,
         'AgentOS.resumeExternalToolRequest'
       );
-      console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      if (!refused) {
+        console.error(`${serviceError.name}: ${serviceError.message}`, serviceError.toJSON());
+      }
 
       const errorChunk: AgentOSErrorChunk = {
         type: AgentOSResponseChunkType.ERROR,

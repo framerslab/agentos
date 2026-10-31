@@ -45,6 +45,18 @@ export interface RollingSummaryPhaseResult {
   summaryText: string;
 }
 
+/**
+ * Runs the turn's rolling-summary pass under the compaction profile the turn's mode picks (`defaultProfileByMode`, else
+ * `defaultProfileId`), or under the base settings when no profiles are configured or the picked one is not among them.
+ * Every profile reads and writes the conversation's one summary state (`rollingSummaryStateKey`), and that state keeps
+ * the head it was built with: the `headMessagesToKeep` of the pass that first wrote it stays the conversation's head
+ * under every profile, so a turn under a profile with another head neither leaves out nor repeats the messages between
+ * the two heads. The turn's profile sets the rest: whether the summary is on, the kept tail, the limits of a pass, the
+ * cooldown, the model and the system prompt.
+ *
+ * @param input - The turn's conversation, its mode, the base settings, the profiles and the state key.
+ * @returns The pass's result, the profile it ran under and its settings, and the summary text for the prompt.
+ */
 export async function executeRollingSummaryPhase(
   input: RollingSummaryPhaseInput,
 ): Promise<RollingSummaryPhaseResult> {

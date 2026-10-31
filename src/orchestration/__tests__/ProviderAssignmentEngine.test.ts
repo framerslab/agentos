@@ -144,6 +144,26 @@ describe('ProviderAssignmentEngine', () => {
     });
   });
 
+  describe('MiniMax beside another provider', () => {
+    // Each case's two nodes fall in one rotation bucket (balanced splits by complexity), so a provider that is in
+    // the bucket's preference list takes one of them.
+    const cases: Array<['best' | 'cheapest' | 'balanced', number]> = [
+      ['best', 0.5],
+      ['cheapest', 0.5],
+      ['balanced', 0.1],
+      ['balanced', 0.5],
+      ['balanced', 0.9],
+    ];
+    it.each(cases)('puts MiniMax in the %s rotation (complexity %s)', (strategy, complexity) => {
+      const engine = new ProviderAssignmentEngine(['minimax', 'openai']);
+      const nodes = [makeGmiNode('first', complexity), makeGmiNode('second', complexity)];
+      const assignments = engine.assign(nodes, { strategy });
+
+      expect(assignments.map((assignment) => assignment.provider).sort()).toEqual(['minimax', 'openai']);
+      expect(assignments.find((assignment) => assignment.provider === 'minimax')?.model).toBe('MiniMax-M3.1-Flash');
+    });
+  });
+
   describe('availability check', () => {
     it('reports missing providers', () => {
       const engine = new ProviderAssignmentEngine(['openai']);

@@ -8,10 +8,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createConversationMessage, MessageRole } from '../../../core/conversation/ConversationMessage';
 import type { ChatMessage } from '../../../core/llm/providers/IProvider';
+import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator';
+import type { ToolExecutionRequestDetails } from '../../../core/tools/ToolExecutor';
 import type { ILearnerSession, TurnInputForLearning, TurnPreparation } from '../../learning/types';
-import { ReasoningEntryType } from '../IGMI';
+import { ReasoningEntryType, type ToolCallResult } from '../IGMI';
 import { renderPersonalitySection } from '../personas/personalityPrompt';
-import { createScriptedGmi, runTurn, scriptedProvider, textReply, textTurn, toolCallReply } from './helpers/scriptedGmi';
+import { createScriptedGmi, LOOKUP_TOOL, runTurn, scriptedProvider, textReply, textTurn, toolCallReply } from './helpers/scriptedGmi';
 
 const BASE = 'You are the scripted test persona.';
 const SECTION = renderPersonalitySection({ extraversion: 0.9 })!;
@@ -191,5 +193,64 @@ describe('a learner session that does not prepare the turn', () => {
     const { output } = await runTurn(gmi, textTurn('t1', 'Hi.'));
     expect(output.responseText).toBe('Still here.');
     expect(systemOf(received[0])).toBe(BASE);
+  });
+});
+
+describe("a turn's tool calls while other turns run on its GMI", () => {
+  /** A promise and the function that settles it. */
+  const deferred = <T>() => {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((settle) => {
+      resolve = settle;
+    });
+    return { promise, resolve };
+  };
+
+  it('carry the learner and mode of their own turn through a continuation and a newer turn', async () => {
+    const callA = { started: deferred<void>(), release: deferred<void>() };
+    const callB = { started: deferred<void>(), release: deferred<void>() };
+    const newerPrepared = deferred<TurnPreparation>();
+    const learningOf: Record<string, unknown> = {};
+    const processToolCall = vi.fn(async ({ toolCallRequest, sessionData }: ToolExecutionRequestDetails): Promise<ToolCallResult> => {
+      learningOf[toolCallRequest.id] = sessionData?.learning;
+      for (const [id, call] of [['call_a', callA], ['call_b', callB]] as const) {
+        if (toolCallRequest.id === id) {
+          call.started.resolve();
+          await call.release.promise;
+        }
+      }
+      return { toolCallId: toolCallRequest.id, toolName: toolCallRequest.name, output: { ok: true } };
+    });
+    const { provider } = scriptedProvider([
+      toolCallReply([{ id: 'call_a', name: 'lookup', args: { q: 'a' } }]),
+      textReply('Continued.'),
+      toolCallReply([{ id: 'call_b', name: 'lookup', args: { q: 'b' } }]),
+      textReply('The newer turn answers.'),
+      toolCallReply([{ id: 'call_c', name: 'lookup', args: { q: 'c' } }]),
+      textReply('Found it.'),
+    ]);
+    const { session } = stubSession((input) => (input.turnId === 'newer' ? newerPrepared.promise : Promise.resolve(prepared())));
+    const toolOrchestrator = { orchestratorId: 'scripted-tools', listAvailableTools: vi.fn(async () => [LOOKUP_TOOL]), processToolCall };
+    const { gmi } = await createScriptedGmi({
+      provider,
+      config: { learning: session, toolOrchestrator: toolOrchestrator as unknown as IToolOrchestrator },
+    });
+
+    const first = runTurn(gmi, textTurn('first', 'Look it up.'));
+    await callA.started.promise;
+    // A tool-result continuation runs to its end while the first turn's call is pending, as a resume does.
+    await gmi.handleToolResults([{ toolCallId: 'call_x', toolName: 'lookup', output: { ok: true } }], 'user-1');
+    // A newer turn starts and waits for its preparation; the first turn makes its next call meanwhile.
+    const newer = runTurn(gmi, textTurn('newer', 'Next question.'));
+    callA.release.resolve();
+    await callB.started.promise;
+    // The newer turn is prepared with no learner, in mode frozen; the first turn makes its last call after that.
+    newerPrepared.resolve(prepared({ learner: 'none', noLearnerReason: 'other_user', mode: 'frozen' }));
+    await newer;
+    callB.release.resolve();
+    expect((await first).output.responseText).toBe('Found it.');
+
+    const own = { learner: 'bound', mode: 'on' };
+    expect(learningOf).toEqual({ call_a: own, call_b: own, call_c: own });
   });
 });

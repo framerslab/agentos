@@ -1,0 +1,13 @@
+{
+  "about": "What otter-times.txt reads into. The file is a real export made without the speakers' names, cut from a published transcript: its first five turns and its closing line (SOURCES.md). Each header is the time alone with two spaces after it, so the turns have starts and no labels.",
+  "format": "otter",
+  "turns": [
+    { "seq": 1, "startMs": 4000, "endMs": null, "text": "Here we introduce how to do error analysis inside seguard. So the first step is to use the seguard shortcut from our repo to open the APK can analyze it after analysis, you get" },
+    { "seq": 2, "startMs": 24000, "endMs": null, "text": "dot graph, which is full dependency graph. And" },
+    { "seq": 3, "startMs": 32000, "endMs": null, "text": "the next step it's used the explore-graph shortcut to open that full graph and distill it into a smaller graph." },
+    { "seq": 4, "startMs": 43000, "endMs": null, "text": "The first step is to distill to assign it to h or whatever and then you use h.render_pdf() to show it visualization. If you compare the visualization here with what are we having in our error analysis" },
+    { "seq": 5, "startMs": 59000, "endMs": null, "text": "archive you can see that they are actually not the same, this could be frequent and it is caused by the inconsistency between the code that generates the the graph on the left and the code that we have now. So what to do is is we don't care and let's just look into this sample" }
+  ],
+  "labels": [],
+  "durationMs": null
+}

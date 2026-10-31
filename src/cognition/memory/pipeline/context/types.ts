@@ -20,7 +20,12 @@ export interface InfiniteContextConfig {
   strategy: CompactionStrategy;
   /** Trigger compaction when context reaches this fraction of max tokens (0–1). */
   compactionThreshold: number;
-  /** Never compact the most recent N turns. */
+  /**
+   * Turns kept as they are, newest first (two messages a turn), while older
+   * messages remain to summarize. A conversation shorter than that, over its
+   * threshold all the same, gives up its two oldest messages; the newest
+   * message is never summarized.
+   */
   preserveRecentTurns: number;
   /** Transparency logging level. */
   transparencyLevel: TransparencyLevel;
@@ -30,7 +35,11 @@ export interface InfiniteContextConfig {
   maxSummaryChainTokens: number;
   /** Target compression ratio for summaries (e.g. 8 = 8:1). */
   targetCompressionRatio: number;
-  /** LLM invoker for summarization. Falls back to Observer/Reflector invokers. */
+  /**
+   * Writes the summaries. CognitiveMemoryManager falls back to the reflector's,
+   * the observer's or the feature-detection invoker; without any, and when a
+   * call fails or answers nothing, compaction writes extractive summaries.
+   */
   llmInvoker?: (prompt: string) => Promise<string>;
   /** Model ID for summarization calls. */
   modelId?: string;
@@ -53,6 +62,7 @@ export interface ContextMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   timestamp: number;
+  /** The turn: each user message opens the next one, from 1; earlier messages are turn 0. */
   turnIndex: number;
   tokenEstimate: number;
   /** Set to true after this message has been compacted into a summary. */

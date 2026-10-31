@@ -13,7 +13,7 @@
  * 
  * @version 1.0.0
  * @author AgentOS Team
- * @license MIT
+ * @license Apache-2.0
  */
 
 import type {
@@ -23,6 +23,31 @@ import type {
   IMessageQueryOptions,
   ITokenUsage,
 } from './IStorageAdapter.js';
+
+/**
+ * A copy of a JSON value that shares no object with the original. Metadata and
+ * tool calls are copied through JSON because that is how SqlStorageAdapter
+ * stores them, so both adapters hand back the same values.
+ */
+function jsonCopy<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/** A conversation that shares no object with the one it was copied from. */
+function copyConversation(conversation: IConversation): IConversation {
+  const copy: IConversation = { ...conversation };
+  if (conversation.metadata !== undefined) copy.metadata = jsonCopy(conversation.metadata);
+  return copy;
+}
+
+/** A message that shares no object with the one it was copied from. */
+function copyMessage(message: IConversationMessage): IConversationMessage {
+  const copy: IConversationMessage = { ...message };
+  if (message.usage !== undefined) copy.usage = { ...message.usage };
+  if (message.toolCalls !== undefined) copy.toolCalls = jsonCopy(message.toolCalls);
+  if (message.metadata !== undefined) copy.metadata = jsonCopy(message.metadata);
+  return copy;
+}
 
 /**
  * In-memory storage adapter for AgentOS.
@@ -124,12 +149,13 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
       throw new Error(`Conversation already exists: ${conversation.id}`);
     }
 
-    // Deep clone to prevent external mutations
-    const stored = { ...conversation };
+    // The store keeps a copy and hands out copies, so a change the caller makes
+    // to either object, its metadata included, never reaches the stored one.
+    const stored = copyConversation(conversation);
     this.conversations.set(conversation.id, stored);
     this.messagesByConversation.set(conversation.id, []);
 
-    return { ...stored };
+    return copyConversation(stored);
   }
 
   /**
@@ -142,7 +168,7 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
     this.ensureInitialized();
 
     const conversation = this.conversations.get(conversationId);
-    return conversation ? { ...conversation } : null;
+    return conversation ? copyConversation(conversation) : null;
   }
 
   /**
@@ -164,10 +190,10 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
       throw new Error(`Conversation not found: ${conversationId}`);
     }
 
-    const updated = { ...existing, ...updates };
+    const updated = copyConversation({ ...existing, ...updates });
     this.conversations.set(conversationId, updated);
 
-    return { ...updated };
+    return copyConversation(updated);
   }
 
   /**
@@ -223,17 +249,18 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
     const offset = options?.offset || 0;
     const limit = options?.limit || conversations.length;
 
-    return conversations.slice(offset, offset + limit).map((conv) => ({ ...conv }));
+    return conversations.slice(offset, offset + limit).map(copyConversation);
   }
 
   // ==================== Message Operations ====================
 
   /**
    * Stores a message.
-   * 
+   *
    * @param {IConversationMessage} message - Message to store
    * @returns {Promise<IConversationMessage>} The stored message
-   * @throws {Error} If conversation doesn't exist
+   * @throws {Error} If conversation doesn't exist, or a message with the same ID
+   *   is already stored (SqlStorageAdapter's primary key refuses it too)
    */
   async storeMessage(message: IConversationMessage): Promise<IConversationMessage> {
     this.ensureInitialized();
@@ -242,9 +269,12 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
     if (!conversation) {
       throw new Error(`Conversation not found: ${message.conversationId}`);
     }
+    if (this.messages.has(message.id)) {
+      throw new Error(`Message already exists: ${message.id}`);
+    }
 
     // Store message
-    const stored = { ...message };
+    const stored = copyMessage(message);
     this.messages.set(message.id, stored);
 
     // Add to conversation's message list
@@ -255,7 +285,7 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
     // Update conversation lastActivity
     conversation.lastActivity = message.timestamp;
 
-    return { ...stored };
+    return copyMessage(stored);
   }
 
   /**
@@ -268,7 +298,7 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
     this.ensureInitialized();
 
     const message = this.messages.get(messageId);
-    return message ? { ...message } : null;
+    return message ? copyMessage(message) : null;
   }
 
   /**
@@ -310,7 +340,7 @@ export class InMemoryStorageAdapter implements IStorageAdapter {
     const offset = options?.offset || 0;
     const limit = options?.limit || messages.length;
 
-    return messages.slice(offset, offset + limit).map((msg) => ({ ...msg }));
+    return messages.slice(offset, offset + limit).map(copyMessage);
   }
 
   /**

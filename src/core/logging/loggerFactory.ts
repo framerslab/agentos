@@ -54,19 +54,19 @@ export function setLogger(logger: Logger | null): void {
 function guarded(raw?: ILogger): ILogger {
   const logger: ILogger = {
     info(...args: Parameters<ILogger['info']>) {
-      if (!emitContentSafeLog('info')) raw?.info(...args);
+      if (!emitContentSafeLog('info', 'logger_factory')) raw?.info(...args);
     },
     warn(...args: Parameters<ILogger['warn']>) {
-      if (!emitContentSafeLog('warn')) raw?.warn(...args);
+      if (!emitContentSafeLog('warn', 'logger_factory')) raw?.warn(...args);
     },
     error(...args: Parameters<ILogger['error']>) {
-      if (!emitContentSafeLog('error')) raw?.error(...args);
+      if (!emitContentSafeLog('error', 'logger_factory')) raw?.error(...args);
     },
     debug(...args: Parameters<NonNullable<ILogger['debug']>>) {
-      if (!emitContentSafeLog('debug')) raw?.debug?.(...args);
+      if (!emitContentSafeLog('debug', 'logger_factory')) raw?.debug?.(...args);
     },
     fatal(...args: Parameters<NonNullable<ILogger['fatal']>>) {
-      if (emitContentSafeLog('error')) return;
+      if (emitContentSafeLog('error', 'logger_factory')) return;
       if (raw?.fatal) raw.fatal(...args);
       else raw?.error(...args);
     },

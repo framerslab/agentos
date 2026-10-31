@@ -9,7 +9,11 @@
  *
  * - Postgres: uses `adapter.transaction()` to keep all queries on one pooled
  *   connection. Acquires a transaction-scoped advisory lock with
- *   `pg_advisory_xact_lock`, which auto-releases on COMMIT/ROLLBACK.
+ *   `pg_advisory_xact_lock`, which auto-releases on COMMIT/ROLLBACK. The lock
+ *   is the brain's, while a migration changes the tables every brain of the
+ *   database shares, so another brain's open can make the same object at the
+ *   same moment; a transaction that loses that race rolls back and runs again
+ *   (`retryLostCreate`), and finds the object.
  * - SQLite: uses explicit `BEGIN IMMEDIATE` via `adapter.exec`. Single
  *   connection per file, so the connection-pool concern doesn't apply.
  *   IMMEDIATE acquires the reserved write lock immediately, eliminating the
@@ -19,11 +23,18 @@
  */
 
 import type { StorageAdapter, StorageFeatures } from '@framers/sql-storage-adapter';
+import { retryLostCreate } from './lost-create.js';
 import type { Migration } from './types.js';
 
 export class MigrationRunner {
   /**
    * Run all pending migrations against the adapter, scoped by brainId.
+   *
+   * On Postgres they run in one transaction that holds the brain's advisory
+   * lock. A migration's statement that loses the race for a shared table,
+   * column or index to another brain's open fails the transaction, which rolls
+   * back and runs again, up to `LOST_CREATE_RUNS` runs; each run finds what the
+   * runs before it lost.
    *
    * @returns The list of migration versions that were applied.
    */
@@ -36,13 +47,15 @@ export class MigrationRunner {
     const isPostgres = adapter.kind.includes('postgres');
 
     if (isPostgres) {
-      return adapter.transaction(async (trx) => {
-        await trx.run(
-          `SELECT pg_advisory_xact_lock(hashtext($1))`,
-          [`agentos_brain:${brainId}`],
-        );
-        return MigrationRunner._runMigrations(trx, features, brainId, migrations);
-      });
+      return retryLostCreate(() =>
+        adapter.transaction(async (trx) => {
+          await trx.run(
+            `SELECT pg_advisory_xact_lock(hashtext($1))`,
+            [`agentos_brain:${brainId}`],
+          );
+          return MigrationRunner._runMigrations(trx, features, brainId, migrations);
+        }),
+      );
     }
 
     // SQLite path: explicit BEGIN IMMEDIATE for single-connection serialization.

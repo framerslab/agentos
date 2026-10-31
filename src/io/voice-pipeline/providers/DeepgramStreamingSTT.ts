@@ -10,6 +10,12 @@
  * - **Endpoint:** `wss://api.deepgram.com/v1/listen`
  * - **Authentication:** `Authorization: Token <apiKey>` on the upgrade
  * - **Inbound (client → Deepgram):** 16 kHz mono PCM16 frames, converted from each frame's own rate
+ * - **KeepAlive:** a `{"type":"KeepAlive"}` text frame after every 3 s that sends no
+ *   audio, since Deepgram closes a socket whose audio pauses for 10 s without
+ *   one (`NET-0001`), so a source whose capture pauses keeps its session instead of
+ *   losing the socket and paying for a reconnect. A `KeepAlive` alone does not
+ *   keep a socket that has received no audio at all, so when nothing has gone
+ *   out 3 s after the socket opened, 20 ms of silence goes first
  * - **Outbound (Deepgram → client):** JSON messages with transcript results
  * - **Close:** Send `CloseStream`, then close the socket after draining
  *
@@ -20,9 +26,12 @@
  * - `is_final: false` → emits `'transcript'` with `isFinal: false` (interim)
  * - every interim and the final of one segment share an `itemId`, and carry
  *   `startMs` and `endMs` on the socket's audio clock
- * - every result carries `beforeSpeechEnd: true`: Deepgram sends a segment's
- *   final before the end of speech of its utterance, so the session's
- *   `'speech_end'` for that speech follows it
+ * - a result carries `beforeSpeechEnd: true` while its item's speech has not
+ *   ended: Deepgram sends a segment's final before the end of speech of its
+ *   utterance, so the session's `'speech_end'` for that speech follows it.
+ *   A result of an item whose speech ended before its final came (an
+ *   `UtteranceEnd` or `speech_final` preceded it) carries
+ *   `beforeSpeechEnd: false` and begins no new speech span
  * - `speech_final: true` or `UtteranceEnd` → emits `'speech_end'` VAD event
  * - `SpeechStarted` or a segment's first words → emits `'speech_start'`
  * - the audio sent on the socket → `'usage'` (an `SttMeasuredUsageEvent`)
@@ -52,6 +61,7 @@ import { sttLanguageOptions } from '../LowestCostStt.js';
 import { SttConnectionMeter } from './SttConnectionMeter.js';
 import { SttConnectionAuthorizationError } from '../SttConnectionAuthorizationError.js';
 import { RollingSTTSession } from './RollingSTTSession.js';
+import { lineSpeaker } from '../transcriptSpeakers.js';
 
 /**
  * Shape of the injected health probe used for deterministic tests.
@@ -135,6 +145,8 @@ export interface DeepgramStreamingSTTConfig {
 /** Word-level data from Deepgram streaming response. */
 interface DGWord {
   word: string;
+  /** The provider's display token, preserving punctuation in a split final. */
+  punctuated_word?: string;
   start: number;
   end: number;
   confidence: number;
@@ -202,6 +214,27 @@ const CONNECT_TIMEOUT_MS = 8_000;
 const WIRE_SAMPLE_RATE = 16_000;
 
 /**
+ * Idle gap after the last audio frame that triggers a `KeepAlive` text frame.
+ * Deepgram closes a streaming socket whose audio pauses for 10 seconds without
+ * a `KeepAlive` (`NET-0001`) and asks for a `{"type":"KeepAlive"}` text frame
+ * every 3 to 5 seconds while audio pauses, so 3 seconds keeps the socket alive
+ * with a margin and sends nothing while frames keep flowing.
+ *
+ * @see https://developers.deepgram.com/docs/audio-keep-alive
+ */
+const KEEPALIVE_IDLE_MS = 3_000;
+
+/**
+ * 20 ms of silence at the wire rate, sent in place of the first `KeepAlive` on a
+ * socket no audio has reached: Deepgram closes a socket that receives no audio
+ * within 10 seconds of opening whatever `KeepAlive` frames it gets ("you must
+ * send at least one audio message"), and takes silent audio to keep it open.
+ *
+ * @see https://developers.deepgram.com/docs/stt-troubleshooting-websocket-data-and-net-errors
+ */
+const OPENING_SILENCE_SAMPLES = WIRE_SAMPLE_RATE / 50;
+
+/**
  * A live streaming STT session connected to Deepgram over one WebSocket.
  * Emits `transcript`, `speech_start`, `speech_end`, `usage`, `error`, and
  * `close` events as required by the voice pipeline orchestrator.
@@ -215,11 +248,28 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
   private samplesSent = 0;
   private utteranceSequence = 0;
   private itemId: string | undefined;
+  /**
+   * Whether the open item's speech has ended: an `UtteranceEnd` or `speech_final`
+   * came while its final was still awaited. Its later results come after that
+   * end of speech, so they begin no new speech span and carry
+   * `beforeSpeechEnd: false`. Holds only while an item is open: the item's
+   * final or retraction clears it.
+   */
+  private openItemSpeechEnded = false;
   private usageTimer: ReturnType<typeof setInterval> | undefined;
+  private keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Whether `flush()` sent `CloseStream`: the stream is ending, so no `KeepAlive` follows. */
+  private draining = false;
 
   /** Wire seconds sent on this socket so far. */
   get audioSeconds(): number {
     return this.samplesSent / WIRE_SAMPLE_RATE;
+  }
+
+  /** Whether this connection requested the current model option or the legacy flag. */
+  private get diarized(): boolean {
+    const opts = this.sessionConfig.providerOptions ?? {};
+    return (typeof opts.diarize_model === 'string' && opts.diarize_model.length > 0) || Boolean(opts.diarize);
   }
 
   /** The host's funded ceiling for this socket, in wire seconds; unbounded without the hook. */
@@ -264,13 +314,15 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     if (event) this.emit('usage', event);
   }
 
-  /** Ends the session once: its timer and speech, its final usage report, then `'close'`. */
+  /** Ends once, retracting an open item before speech, usage and close finish. */
   private finish(): void {
     if (this.closed) return;
     this.closed = true;
-    if (this.usageTimer !== undefined) clearInterval(this.usageTimer);
+    if (this.usageTimer) clearInterval(this.usageTimer);
     this.usageTimer = undefined;
+    this.clearKeepAlive();
     this.meter.cancelAuthorization();
+    this.retractOpenItem();
     this.endSpeech();
     this.reportUsage(true);
     this.emit('close');
@@ -313,7 +365,13 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     // Deepgram feature flags from providerOptions
     if (opts.sentiment) params.set('sentiment', 'true');
     if (opts.smart_format) params.set('smart_format', 'true');
-    if (opts.diarize) params.set('diarize', 'true');
+    if (typeof opts.diarize_model === 'string' && opts.diarize_model.length > 0) {
+      params.delete('diarize');
+      params.set('diarize_model', opts.diarize_model);
+    } else if (opts.diarize) {
+      params.delete('diarize_model');
+      params.set('diarize', 'true');
+    }
     if (opts.utterance_end_ms) params.set('utterance_end_ms', String(opts.utterance_end_ms));
     if (this.config.mipOptOut === true || opts.mip_opt_out === true) params.set('mip_opt_out', 'true');
     if (Array.isArray(opts.keywords)) {
@@ -368,6 +426,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
         if ((this.config.usageIntervalMs ?? 0) > 0) {
           this.usageTimer = setInterval(() => this.reportUsage(false), this.config.usageIntervalMs);
         }
+        this.scheduleKeepAlive();
         resolve();
       });
       socket.on('error', (error) => fail(error as Error));
@@ -403,20 +462,35 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
       const sample = Math.max(-1, Math.min(1, samples[i]!));
       pcm.writeInt16LE(Math.trunc(sample < 0 ? sample * 0x8000 : sample * 0x7fff), i * 2);
     }
-    const next = (this.samplesSent + samples.length) / WIRE_SAMPLE_RATE;
+    if (!this.sendWire(this.ws, pcm, samples.length)) return;
+    // Frames flowing keep the socket fed; restart the idle clock each time so
+    // a KeepAlive goes out only during a pause.
+    this.scheduleKeepAlive();
+  }
+
+  /**
+   * Sends PCM16 at the wire rate within the host's funded limit and counts its
+   * samples. False when the limit refused it: nothing is sent, and the refusal
+   * ends the socket.
+   */
+  private sendWire(socket: WebSocket, pcm: Buffer, sampleCount: number): boolean {
+    const next = (this.samplesSent + sampleCount) / WIRE_SAMPLE_RATE;
     if (this.sessionConfig.connectionHooks?.beforeAudio?.(this.meter.opening, next) === false) {
-      // The host's funded limit: nothing of this frame is sent, and the refusal ends the socket.
       this._emitErrorSafe(new SttConnectionAuthorizationError());
       this.close();
-      return;
+      return false;
     }
-    this.ws.send(pcm);
-    this.samplesSent += samples.length;
+    socket.send(pcm);
+    this.samplesSent += sampleCount;
+    return true;
   }
 
   /** Requests final results; the existing 200 ms drain bound is preserved. */
   async flush(): Promise<void> {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    // The stream ends here: a frame pushed during the drain arms no KeepAlive.
+    this.draining = true;
+    this.clearKeepAlive();
     this.ws.send(JSON.stringify({ type: 'CloseStream' }));
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
   }
@@ -441,26 +515,78 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     this.emit('speech_start');
   }
 
+  /**
+   * Arms the one-shot idle timer whose expiry sends Deepgram's `KeepAlive`, or
+   * 20 ms of silence on a socket no audio has reached yet.
+   * Rescheduled by every frame actually sent (`pushAudio`) and by each
+   * `KeepAlive` itself, so the frame goes out only while audio pauses; a
+   * session that has ended, a socket that is no longer open, or a stream
+   * `flush` ended with `CloseStream` arms nothing, even when audio still
+   * arrives during the drain.
+   */
+  private scheduleKeepAlive(): void {
+    this.clearKeepAlive();
+    if (this.closed || this.draining) return;
+    this.keepAliveTimer = setTimeout(() => {
+      this.keepAliveTimer = undefined;
+      const socket = this.ws;
+      if (this.closed || this.draining || !socket || socket.readyState !== WebSocket.OPEN) return;
+      if (this.samplesSent === 0) {
+        // No audio has reached this socket, and a KeepAlive alone does not keep it: silence goes first, metered as audio.
+        if (!this.sendWire(socket, Buffer.alloc(OPENING_SILENCE_SAMPLES * 2), OPENING_SILENCE_SAMPLES)) return;
+      } else {
+        socket.send(JSON.stringify({ type: 'KeepAlive' }));
+      }
+      this.scheduleKeepAlive();
+    }, KEEPALIVE_IDLE_MS);
+  }
+
+  private clearKeepAlive(): void {
+    if (this.keepAliveTimer) clearTimeout(this.keepAliveTimer);
+    this.keepAliveTimer = undefined;
+  }
+
+  /** Ends VAD without ending an item whose final can still arrive. */
   private endSpeech(): void {
-    // An empty terminal message ends VAD but never promotes speculative interim text.
-    this.itemId = undefined;
-    if (!this.speechActive) return;
+    if (this.speechActive === false) return;
     this.speechActive = false;
+    // The item still awaiting its final gets it after this end of speech.
+    if (this.itemId !== undefined) this.openItemSpeechEnded = true;
     this.emit('speech_end');
   }
 
   /**
-   * Parse and dispatch a Deepgram WebSocket message. Every final segment ends
-   * its transcript identity, so later interim and final segments get a new
-   * `itemId`, within one VAD span too. An empty terminal discards unfinalized
-   * interim text, emits one speech end and never fabricates a final.
+   * Takes back speculative text exactly once when no final text can follow,
+   * marked before its speech end unless that end has already come.
+   */
+  private retractOpenItem(): void {
+    const itemId = this.itemId;
+    if (itemId === undefined) return;
+    this.itemId = undefined;
+    const beforeSpeechEnd = !this.openItemSpeechEnded;
+    this.openItemSpeechEnded = false;
+    const event: TranscriptEvent = {
+      itemId, text: '', isFinal: true, confidence: 0, words: [],
+      beforeSpeechEnd,
+      ...(this.diarized ? { speaker: null } : {}),
+    };
+    this.emit('transcript', event);
+  }
+
+  /**
+   * Maps results to keyed lines. A final closes its item; an empty final
+   * retracts an open item. Speech boundaries alone leave its identity intact.
+   * A result of an item whose speech has ended is that speech's: it begins no
+   * new speech span and is not marked before its speech end, so a detector
+   * pairs the delayed final with the end of speech already waiting.
+   * The line label is connection-scoped while each word retains its raw label.
    */
   private _handleMessage(raw: string): void {
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      return; // Malformed JSON — skip
+      return;
     }
     if (this.closed) return;
     const metadata = msg.metadata as { request_id?: unknown } | undefined;
@@ -469,7 +595,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
       try {
         this.meter.bindSupplierRequest(requestId);
       } catch {
-        // The socket's first valid request id stays bound; usage keeps that identity.
+        // The first valid request id remains the usage identity.
       }
     }
     if (msg.type === 'SpeechStarted') {
@@ -480,45 +606,56 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
       this.endSpeech();
       return;
     }
-    if (msg.type !== 'Results') return;
-    const result = msg as unknown as DGResult;
-    const alt = result.channel?.alternatives?.[0];
-    if (alt?.transcript?.trim()) {
-      const startMs = Math.round(result.start * 1000);
-      const endMs = Math.round((result.start + result.duration) * 1000);
-      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs < 0 || endMs < startMs) return;
-      this.beginSpeech();
-      this.itemId ??= `${this.meter.opening.connectionId}:${++this.utteranceSequence}`;
-      const event: TranscriptEvent = {
-        itemId: this.itemId,
-        text: alt.transcript,
-        confidence: alt.confidence,
-        isFinal: result.is_final,
-        startMs,
-        endMs,
-        durationMs: endMs - startMs,
-        // Speech has begun above, and its end (`speech_final`, `UtteranceEnd` or the close) follows this result.
-        beforeSpeechEnd: true,
-        words: (alt.words ?? []).map((word) => ({
-          word: word.word,
-          start: Math.round(word.start * 1000), // seconds → ms
+    if (msg.type === 'Results') {
+      const result = msg as unknown as DGResult;
+      const alt = result.channel?.alternatives?.[0];
+      if (alt?.transcript?.trim()) {
+        const startMs = Math.round(result.start * 1000);
+        const endMs = Math.round((result.start + result.duration) * 1000);
+        if (Number.isFinite(startMs) === false || Number.isFinite(endMs) === false || startMs < 0 || endMs < startMs) return;
+        // A result of an item whose speech has ended comes after that end: it begins no new speech span.
+        const afterSpeechEnd = this.openItemSpeechEnded;
+        if (!afterSpeechEnd) this.beginSpeech();
+        this.itemId ??= `${this.meter.opening.connectionId}:${++this.utteranceSequence}`;
+        const words = (alt.words ?? []).map((word) => ({
+          word: word.punctuated_word ?? word.word,
+          start: Math.round(word.start * 1000),
           end: Math.round(word.end * 1000),
           confidence: word.confidence,
           ...(word.speaker === undefined ? {} : { speaker: String(word.speaker) }),
-        })),
-      };
-      // Attach sentiment when Deepgram returns it
-      if (result.sentiments?.average) {
-        event.sentiment = {
-          label: result.sentiments.average.sentiment,
-          confidence: Math.abs(result.sentiments.average.sentiment_score),
+        }));
+        const rawSpeaker = lineSpeaker(words, this.diarized);
+        const event: TranscriptEvent = {
+          itemId: this.itemId,
+          text: alt.transcript,
+          confidence: alt.confidence,
+          isFinal: result.is_final,
+          startMs,
+          endMs,
+          durationMs: endMs - startMs,
+          beforeSpeechEnd: !afterSpeechEnd,
+          words,
+          ...(rawSpeaker === undefined ? {} : {
+            speaker: rawSpeaker === null ? null : `${this.meter.opening.connectionId}:${rawSpeaker}`,
+          }),
         };
+        if (result.sentiments?.average) {
+          event.sentiment = {
+            label: result.sentiments.average.sentiment,
+            confidence: Math.abs(result.sentiments.average.sentiment_score),
+          };
+        }
+        // Close the identity before listeners run, so a reentrant close emits no second final.
+        if (event.isFinal) {
+          this.itemId = undefined;
+          this.openItemSpeechEnded = false;
+        }
+        this.emit('transcript', event);
+      } else if (result.is_final) {
+        this.retractOpenItem();
       }
-      this.emit('transcript', event);
-      if (event.isFinal) this.itemId = undefined;
+      if (result.speech_final) this.endSpeech();
     }
-    // speech_final indicates the speaker paused — emit speech_end
-    if (result.speech_final) this.endSpeech();
   }
 }
 

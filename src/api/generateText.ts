@@ -31,7 +31,7 @@ import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/
 import { lazyLogger } from '../core/logging/loggerFactory.js';
 import { errorFields, providerName } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
-import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
@@ -121,6 +121,9 @@ import type {
   CacheDiagnostics,
   AttemptOutcome,
 } from '../core/llm/providers/IProvider.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('generate_text');
 
 // Re-export multimodal types for downstream consumers
 export type { MessageContent, MessageContentPart };
@@ -861,6 +864,18 @@ export interface GenerateTextOptions {
    */
   __maskError?: (error: unknown) => unknown;
   /**
+   * Internal — set by `streamObject()`. `streamText()` calls it each time it
+   * counts usage a provider reported into the stream's `usage`: a provider
+   * stream's final chunk, a prompt-shim round's response, the planning
+   * call's response, and an error that carries its step's usage (a refused
+   * turn); every fallback leg, which runs with the same options, calls it
+   * too. `usage` counts what was never reported as zero, so this tells a
+   * report of zero tokens from no report. `generateText()` does not read it.
+   *
+   * @internal
+   */
+  __onUsageReport?: () => void;
+  /**
    * @internal Used by generateObject and AgentSession.send (with
    * responseSchema) to forward a provider-specific response_format
    * payload to the provider. Not part of the public API.
@@ -1185,8 +1200,9 @@ function planningModelParams(params: Record<string, unknown> | undefined): Recor
  * @param userMessages - The user-supplied messages that describe the task.
  * @param toolNames - Names of available tools (informational context for the planner).
  * @param config - Optional planning configuration overrides, the call's abort signal, which the planning request
- *   is handed as it is handed `requestTimeout`, and the call's `customModelParams`, of which the planning request
- *   takes the routing keys (`PLANNING_INHERITED_PARAM_KEYS`).
+ *   is handed as it is handed `requestTimeout`, the call's `customModelParams`, of which the planning request
+ *   takes the routing keys (`PLANNING_INHERITED_PARAM_KEYS`), and `onUsageReport`, called when the planning
+ *   response reports usage (streamText passes its call's `__onUsageReport` there).
  * @param totalUsage - Mutable usage aggregator: the planning call's tokens are added here.
  * @param spend - The run's spend budget, the provider the planning call is sent to, and what to call the call in the
  *   budget's records: the planning call is checked against the budget before it is made and recorded after it.
@@ -1199,7 +1215,15 @@ export async function createPlan(
   modelId: string,
   userMessages: Array<Record<string, unknown>>,
   toolNames: string[],
-  config: (PlanningConfig & { abortSignal?: AbortSignal; customModelParams?: Record<string, unknown>; maxAttempts?: number; onAttempt?: (outcome: AttemptOutcome) => void }) | undefined,
+  config:
+    | (PlanningConfig & {
+        abortSignal?: AbortSignal;
+        customModelParams?: Record<string, unknown>;
+        maxAttempts?: number;
+        onAttempt?: (outcome: AttemptOutcome) => void;
+        onUsageReport?: () => void;
+      })
+    | undefined,
   totalUsage: TokenUsage,
   spend?: { budget: SpendBudget; providerId: string; what: string },
 ): Promise<Plan | undefined> {
@@ -1251,6 +1275,7 @@ export async function createPlan(
 
   // Accumulate planning call usage
   if (response.usage) {
+    config?.onUsageReport?.();
     totalUsage.promptTokens += response.usage.promptTokens ?? 0;
     totalUsage.completionTokens += response.usage.completionTokens ?? 0;
     totalUsage.totalTokens += response.usage.totalTokens ?? 0;
@@ -2304,6 +2329,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         }
       }
 
+      // A blank baseUrl counts here and changes nothing: resolveProvider drops it, so the record is the provider's own.
       const ownCredentials =
         providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
       // An agency seat resolves strictly: no provider-less default, no reroute.
@@ -3000,6 +3026,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           messages.push({
             role: 'assistant',
             content: textContent,
+            ...(resolved.providerId === 'minimax' && choice.message?.reasoningText !== undefined
+              ? { reasoningText: choice.message.reasoningText } : {}),
             ...(((choice.message as unknown as { thinking?: unknown } | undefined)?.thinking) !== undefined
               ? { thinking: (choice.message as unknown as { thinking?: unknown }).thinking }
               : {}),
@@ -3040,6 +3068,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             role: 'assistant',
             content: textContent || null,
             tool_calls: toolCallsInChoice,
+            ...(resolved.providerId === 'minimax' && choice.message?.reasoningText !== undefined
+              ? { reasoningText: choice.message.reasoningText } : {}),
             ...(stepThinkingBlocks && stepThinkingBlocks.length > 0
               ? { thinkingBlocks: stepThinkingBlocks }
               : {}),
@@ -3206,6 +3236,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         messages.push({
           role: 'assistant',
           content: textContent,
+          ...(resolved.providerId === 'minimax' && choice.message?.reasoningText !== undefined
+            ? { reasoningText: choice.message.reasoningText } : {}),
           ...(((choice.message as unknown as { thinking?: unknown } | undefined)?.thinking) !== undefined
             ? { thinking: (choice.message as unknown as { thinking?: unknown }).thinking }
             : {}),
@@ -3414,6 +3446,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // never reaches it), can keep the record of the key it sends
         // (providerHealthKey), which the call below reads before it sends;
         // a failure of another key skips none of them.
+        // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
         const legProvider = fallbackEntrySentAs(fb).provider;
         const legOnSharedCredentials =
           fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;

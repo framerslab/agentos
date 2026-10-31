@@ -46,6 +46,8 @@ export type SessionTranscriptMessage =
        * precedence over `thinking` when both are present.
        */
       thinkingBlocks?: ThinkingBlock[];
+      /** Separate MiniMax reasoning content, replayed with assistant tool history. */
+      reasoningText?: string;
       /**
        * Set on the last message of a turn that failed after these steps
        * completed (GMI path, `agent({ runtime: 'gmi' })`). Never sent to a
@@ -167,6 +169,7 @@ export function toProviderReplayMessage(message: {
 }): Record<string, unknown> {
   const m = message as Record<string, unknown>;
   const out: Record<string, unknown> = { role: m.role, content: m.content };
+  if (m.role === 'assistant' && typeof m.reasoningText === 'string') out.reasoningText = m.reasoningText;
   if (typeof m.name === 'string') out.name = m.name;
   if (typeof m.tool_call_id === 'string') out.tool_call_id = m.tool_call_id;
   if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) out.tool_calls = m.tool_calls;

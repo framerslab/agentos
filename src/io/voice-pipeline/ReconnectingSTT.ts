@@ -13,7 +13,12 @@ import { EventEmitter } from 'node:events';
 import { AudioRingBuffer } from './AudioRingBuffer.js';
 import { TranscriptDedupe } from './TranscriptDedupe.js';
 import { openScopedReconnect } from './scopedReconnect.js';
-import type { AudioFrame, IStreamingSTT, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent } from './types.js';
+import type { AudioFrame, IStreamingSTT, StreamingSTTConfig, StreamingSTTSession, TranscriptEvent, TranscriptWord } from './types.js';
+import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
+import { isContentSafeTelemetryEnabled } from '../../core/logging/contentSafeTelemetry.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('reconnecting_stt');
 
 /** Options of {@link ReconnectingSTT}. */
 export interface ReconnectingSTTOptions {
@@ -58,10 +63,11 @@ const frameMs = (f: AudioFrame): number => (f.samples.length / f.sampleRate) * 1
  * `maxAttemptsPerMinute` times in any sixty seconds. The new session hears the
  * buffered audio first (the last `ringBufferCapacityMs`, when there is at least
  * `minReplayMs` of it), then the frames pushed while it opened, then live
- * audio. Its `startMs` and `endMs` are moved onto one timeline, the audio
- * pushed since the session began, and a final that repeats one already
- * emitted over the same audio is dropped. Only finals with finite start and end
- * bounds and a positive duration enter the dedupe history; others pass through.
+ * audio. Its `startMs` and `endMs`, and the `start` and `end` of each word
+ * that carries them, are moved onto one timeline, the audio pushed since the
+ * session began, and a final that repeats one already emitted over the same
+ * audio is dropped. Only finals with finite start and end bounds and a
+ * positive duration enter the dedupe history; others pass through.
  * Queue overflow leaves a gap after the replay, preserving the original times
  * of both replayed and retained audio. Each reconnect emits
  * `stt:reconnected` ({@link SttReconnectedEvent}) and `stt:gap`
@@ -172,6 +178,12 @@ export class ReconnectingSTT implements IStreamingSTT {
       // End bounds are exclusive: an utterance ending exactly at the replay
       // boundary still belongs to the audio before the gap.
       const mapTime = (time: number, end = false): number => time + sessionOffsetMs + ((end ? time > replayedMs : time >= replayedMs) ? gapMs : 0);
+      /** Moves a word's `start` and `end`, where the word carries them, as the transcript's bounds are moved. */
+      const mapWord = (word: TranscriptWord): TranscriptWord => ({
+        ...word,
+        ...(typeof word.start === 'number' ? { start: mapTime(word.start) } : {}),
+        ...(typeof word.end === 'number' ? { end: mapTime(word.end, true) } : {}),
+      });
       session.on('transcript', (raw: TranscriptEvent) => {
         if (ended) return;
         activity();
@@ -179,6 +191,8 @@ export class ReconnectingSTT implements IStreamingSTT {
           ...raw,
           ...(raw.startMs !== undefined ? { startMs: mapTime(raw.startMs) } : {}),
           ...(raw.endMs !== undefined ? { endMs: mapTime(raw.endMs, true) } : {}),
+          // A transcript with no bounds counts its words from its own audio, so they stay as the provider gave them.
+          ...(raw.words?.length && (raw.startMs !== undefined || raw.endMs !== undefined) ? { words: raw.words.map(mapWord) } : {}),
         };
         if (evt.isFinal && evt.startMs !== undefined && evt.endMs !== undefined && Number.isFinite(evt.startMs) && Number.isFinite(evt.endMs) && evt.endMs > evt.startMs) {
           const r = dedupe.evaluate({ provider: providerId, text: evt.text, audioStartMs: evt.startMs, audioEndMs: evt.endMs, isFinal: true });
@@ -201,9 +215,9 @@ export class ReconnectingSTT implements IStreamingSTT {
       session.on('warning', (warning: Error) => {
         if (ended) return;
         activity();
-        // Listening here must not silence a warning: a provider session prints one nobody listens for, so the
-        // session prints it when its own caller does not listen either.
+        // Existing subscribers own the warning event; the fallback never reads its text in safe mode.
         if (facade.listenerCount('warning') > 0) facade.emit('warning', warning);
+        else if (isContentSafeTelemetryEnabled()) console.warn();
         else console.warn(`[${this.inner.providerId}] ${warning.message}`);
       });
       session.on('error', (err: Error) => {

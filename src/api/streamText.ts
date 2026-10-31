@@ -64,7 +64,10 @@ import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation
 import { lazyLogger } from '../core/logging/loggerFactory.js';
 import { errorFields, providerName } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
-import { contentSafeConsole as console } from '../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('stream_text');
 
 /**
  * The `fallback` component's events, to the target current when each is
@@ -628,6 +631,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         }
       }
 
+      // A blank baseUrl counts here and changes nothing: resolveProvider drops it, so the record is the provider's own.
       const ownCredentials =
         providerId === credentialProviderId && (opts.apiKey !== undefined || opts.baseUrl !== undefined);
       // An agency seat resolves strictly: no provider-less default, no reroute.
@@ -814,6 +818,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
             ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
             ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
+            // The planning call's usage report counts into `usage` too.
+            ...(opts.__onUsageReport ? { onUsageReport: opts.__onUsageReport } : {}),
           },
           usage,
           budget ? { budget, providerId: resolved.providerId, what: 'stream_text.plan' } : undefined,
@@ -926,6 +932,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // earlier rounds consumed. The loop's own {totalTokens} sum is
             // left unused, or it would count twice.
             if (r.usage) {
+              opts.__onUsageReport?.();
               if (typeof r.usage.totalTokens === 'number') usage.totalTokens += r.usage.totalTokens;
               if (typeof r.usage.promptTokens === 'number') usage.promptTokens += r.usage.promptTokens;
               if (typeof r.usage.completionTokens === 'number') usage.completionTokens += r.usage.completionTokens;
@@ -1082,10 +1089,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         );
 
         const reconstructor = new StreamingReconstructor();
+        let stepReasoningText = '';
         stepTextSoFar = '';
 
         try {
           for await (const chunk of stream) {
+            if (resolved.providerId === 'minimax' && chunk.reasoningTextDelta) {
+              stepReasoningText += chunk.reasoningTextDelta;
+            }
             // Capture the provider-reported identity from EVERY chunk (not
             // only the usage-final one) so an error or abandonment after a
             // model-bearing chunk still resolves responseModel/serviceTier.
@@ -1122,6 +1133,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             }
 
             if (chunk.isFinal && chunk.usage) {
+              // A report of zero tokens is a report: the caller that asked is told one came.
+              opts.__onUsageReport?.();
               addModelUsage(stepUsage, chunk.usage);
               usage.promptTokens += chunk.usage.promptTokens ?? 0;
               usage.completionTokens += chunk.usage.completionTokens ?? 0;
@@ -1338,6 +1351,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           role: 'assistant',
           content: effectiveStepText || null,
           tool_calls: streamedToolCalls,
+          ...(stepReasoningText ? { reasoningText: stepReasoningText } : {}),
           ...(stepThinkingBlocks && stepThinkingBlocks.length > 0
             ? { thinkingBlocks: stepThinkingBlocks }
             : {}),
@@ -1580,6 +1594,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // earlier final chunks already reported is left out.
       const unreported = usageBeyond(usageOfError(err), stepUsage);
       if (unreported) {
+        opts.__onUsageReport?.();
         addTokenUsage(usage, unreported);
         // The spend budget is charged it too: the step's stream charged only
         // what its chunks reported.
@@ -1688,6 +1703,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // never reaches it), can keep the record of the key it sends
           // (providerHealthKey), which the call below reads before it sends;
           // a failure of another key skips none of them.
+          // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
           const legProvider = fallbackEntrySentAs(fb).provider;
           const legOnSharedCredentials =
             fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;

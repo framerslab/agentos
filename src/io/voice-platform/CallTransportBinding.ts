@@ -25,7 +25,12 @@ export interface CallAttachment {
   token: string; origin: string; transportEpoch: number; participantId: string;
   transport: CallTransport; physical: IPlaybackTransport;
 }
-/** Stable logical transport. Only end emits terminal close; a physical close initiates detach. */
+/**
+ * Stable logical transport. Only end emits terminal close; a physical close initiates detach. The client's messages
+ * are an allowlist: the controls mute and unmute and typed text (`text_input`, which the call takes as a user turn,
+ * and reports and drops when `isClientTextInputMessage()` refuses it) go to the call, stop ends the call, and any
+ * other client message ends it as a transport failure.
+ */
 export class CallTransportBinding extends EventEmitter implements IPlaybackTransport {
   readonly id: string;
   private physical?: IPlaybackTransport;
@@ -101,6 +106,9 @@ export class CallTransportBinding extends EventEmitter implements IPlaybackTrans
       const gap = (event: unknown): void => { if (this.attached && this.physical === physical && !this.terminal) this.emit('gap', event); };
       const message = (value: { type?: string; action?: { type?: string } }): void => {
         if (!this.attached || this.physical !== physical || this.terminal) return;
+        // Typed text is a user turn the pipeline takes. The pipeline checks it, as it does without a binding, and reports
+        // and drops a text the check refuses, saying why, and the call goes on.
+        if (value?.type === 'text_input') { this.emit('message', value); return; }
         if (value?.type !== 'control' || !['mute', 'unmute', 'stop'].includes(value.action?.type ?? '')) { void this.end('transport_failure').catch(() => {}); return; }
         if (value.action!.type === 'stop') { void this.end('client_stop').catch(() => {}); return; }
         this.emit('message', value);

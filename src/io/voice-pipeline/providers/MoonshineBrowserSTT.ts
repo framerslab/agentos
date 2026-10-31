@@ -1023,10 +1023,14 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
   }
 
   private toEvent(line: MoonshineLineLike, isFinal: boolean): TranscriptEvent {
+    const startMs = Math.round(this.runStartMs + line.startTime * 1000);
+    // Moonshine times a line's words on the clock of the run, as it times the line. The words go out on the
+    // session's clock, where `startMs` and `endMs` are, as every provider's do; a word the model places before
+    // its line's start is kept at the line's start.
     const words: TranscriptWord[] = line.words.map((word) => ({
       word: word.text,
-      start: Math.max(0, Math.round((word.start - line.startTime) * 1000)),
-      end: Math.max(0, Math.round((word.end - line.startTime) * 1000)),
+      start: startMs + Math.max(0, Math.round((word.start - line.startTime) * 1000)),
+      end: startMs + Math.max(0, Math.round((word.end - line.startTime) * 1000)),
       confidence: word.confidence,
     }));
     return {
@@ -1038,7 +1042,7 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
       isFinal,
       ...(isFinal ? { durationMs: Math.round(line.duration * 1000) } : {}),
       itemId: line.id,
-      startMs: Math.round(this.runStartMs + line.startTime * 1000),
+      startMs,
       endMs: Math.round(this.runStartMs + (line.startTime + line.duration) * 1000),
       language: this.language,
     };

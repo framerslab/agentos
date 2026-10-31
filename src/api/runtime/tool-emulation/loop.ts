@@ -4,7 +4,10 @@ import { renderToolSystemBlock } from './renderer';
 import { parseToolCalls } from './parser';
 import { formatToolResponse } from './activation';
 import { markHookStop } from '../callerStop';
-import { contentSafeConsole as console } from '../../../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../core/logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('tool_loop');
 
 export interface EmulatedLoopMessage { role: string; content: string; }
 

@@ -233,12 +233,12 @@ describe('fenced delivery', () => {
     });
     const sending = dispatcher.deliverDue();
     await reached.promise;
-    await report(id, 'chat_message', { text: 'please stop taking notes', sender: 'participant-1' });
+    await report(id, 'chat_message', { text: 'Stop taking notes!', sender: 'participant-1' });
     // the stop's own delivery did not wait for the send under way: the fence is up and the bot is told at once
     expect((await h.stores.runs.get(id))?.state).toBe('purging');
     expect(h.provider.commands.get(id)?.slice(-2)).toEqual([{ name: 'suspendCapture' }, { name: 'leave', reason: 'stopped_by_participant' }]);
     expect(await sending).toEqual({ delivered: 0, failed: 0 });
-    expect(JSON.stringify(await outbox.listByRun(id))).not.toContain('please stop taking notes');
+    expect(JSON.stringify(await outbox.listByRun(id))).not.toContain('Stop taking notes!');
   });
 
   it('scrubs pending and delivered content at ordinary completion with keep none', async () => {

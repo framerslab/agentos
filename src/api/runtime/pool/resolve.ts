@@ -7,7 +7,7 @@
  */
 import { PROVIDER_DEFAULTS, isBinaryOnPathCached } from '../provider-defaults.js';
 import { getDefaultProvider } from '../global-default.js';
-import { knownProviderPrefixOf, providerEnvVars, resolveProvider } from '../../model.js';
+import { baseUrlIfSet, knownProviderPrefixOf, providerEnvVars, resolveProvider } from '../../model.js';
 import { providerHealthKey, type ProviderCredentials } from '../providerHealthKey.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import type { AgencyOptions } from '../../types.js';
@@ -102,11 +102,13 @@ export function resolveSeatCredentials(input: ResolveInput, agency: AgencyOption
     (onAgencyProvider ? nonEmpty(agency.apiKey) : undefined) ??
     (defNamesProvider ? nonEmpty(def?.apiKey) : undefined) ??
     (env.key && input.variables !== false ? nonEmpty(process.env[env.key]) : undefined);
+  // A URL is read as every call reads one (model.ts, baseUrlIfSet): empty or
+  // whitespace alone counts as missing, so no seat's request is built on it.
   const baseUrl =
-    nonEmpty(input.baseUrl) ??
-    (onAgencyProvider ? nonEmpty(agency.baseUrl) : undefined) ??
-    (defNamesProvider ? nonEmpty(def?.baseUrl) : undefined) ??
-    (env.url && input.variables !== false ? nonEmpty(process.env[env.url]) : undefined);
+    baseUrlIfSet(input.baseUrl) ??
+    (onAgencyProvider ? baseUrlIfSet(agency.baseUrl) : undefined) ??
+    (defNamesProvider ? baseUrlIfSet(def?.baseUrl) : undefined) ??
+    (env.url && input.variables !== false ? baseUrlIfSet(process.env[env.url]) : undefined);
   return { ok: true, value: { provider, model, apiKey, baseUrl } };
 }
 

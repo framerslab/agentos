@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@framers/sql-storage-adapter':
-        specifier: ^0.8.1
-        version: 0.8.1(better-sqlite3@13.0.3)
+        specifier: ^0.8.4
+        version: 0.8.4(better-sqlite3@13.0.3)
       '@livekit/rtc-node':
         specifier: ^1.1.0
         version: 1.1.0
@@ -106,11 +106,11 @@ importers:
         specifier: link:.
         version: 'link:'
       '@framers/agentos-ext-account-sources':
-        specifier: ^0.9.3
-        version: 0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1)
+        specifier: ^0.11.0
+        version: 0.11.0(@framers/agentos@)(better-sqlite3@13.0.3)
       '@framers/agentos-extensions-registry':
-        specifier: ^0.18.13
-        version: 0.18.13(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)
+        specifier: ^0.18.15
+        version: 0.18.15(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)
       '@jitl/quickjs-wasmfile-release-sync':
         specifier: 0.32.0
         version: 0.32.0
@@ -159,6 +159,9 @@ importers:
       '@vitest/browser-playwright':
         specifier: 5.0.3
         version: 5.0.3(playwright@1.63.0)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))(vitest@5.0.3)
+      '@vitest/coverage-v8':
+        specifier: 5.0.3
+        version: 5.0.3(@vitest/browser@5.0.3)(vitest@5.0.3)
       better-sqlite3:
         specifier: ^13.0.3
         version: 13.0.3
@@ -224,7 +227,7 @@ importers:
         version: 8.71.0(eslint@10.12.0)(typescript@5.9.3)
       vitest:
         specifier: ^5.0.3
-        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
+        version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/coverage-v8@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
     optionalDependencies:
       '@huggingface/transformers':
         specifier: ^3.8.1
@@ -468,9 +471,26 @@ packages:
     resolution: {integrity: sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==}
     engines: {node: '>=6.9.0'}
 
+  '@babel/helper-string-parser@7.29.7':
+    resolution: {integrity: sha512-Pb5ijPrZ89GDH8223L4UP8i6QApWxs04RbPQJTeWDV0/keR2E36MeKnyr6LYmUUvqRRI+Iv87SuF1W6ErINzYw==}
+    engines: {node: '>=6.9.0'}
+
   '@babel/helper-validator-identifier@7.29.7':
     resolution: {integrity: sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg==}
     engines: {node: '>=6.9.0'}
+
+  '@babel/parser@7.29.9':
+    resolution: {integrity: sha512-CjXrNHTnvqBVqHgdBysY3vk2T8tpJHb5/RMeHJBTyVa9xgugCB0CJTx/3oO8RV2QRQP391RWpB7D6hLjm8V9uA==}
+    engines: {node: '>=6.0.0'}
+    hasBin: true
+
+  '@babel/types@7.29.8':
+    resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
+    engines: {node: '>=6.9.0'}
+
+  '@bcoe/v8-coverage@1.0.2':
+    resolution: {integrity: sha512-6zABk/ECA/QYSCQ1NGiVwwbQerUCZ+TQbp64Q3AgmfNvurHH0j8TtXa1qbShXA6qqkpAj4V5W8pP6mLe1mcMqA==}
+    engines: {node: '>=18'}
 
   '@blazediff/core@1.10.0':
     resolution: {integrity: sha512-AOQff0zgR7cGsZL+4E7hVkmujoPUpm0J9xzWGWZj5wCjd3gmxESXAPfKyuzs93VdpQNFhHlBhfOjrcZ+XTERtQ==}
@@ -744,9 +764,9 @@ packages:
   '@fast-csv/parse@4.3.6':
     resolution: {integrity: sha512-uRsLYksqpbDmWaSmzvJcuApSEe38+6NQZBUsuAyMZKqHxH0g1wcJgsKUvN3WC8tewaqFjBMMGrkHmC+T7k8LvA==}
 
-  '@framers/agentos-ext-account-sources@0.9.3':
-    resolution: {integrity: sha512-lrqzTBRuCSxaDWpnODhYiVemBl5f1rB1GlhnssZKwvvvHnhgNZAdSNQ0OfT3aaBPz4MXoI/5m47F4xXve9sc6A==}
-    engines: {node: '>=20.19.0'}
+  '@framers/agentos-ext-account-sources@0.11.0':
+    resolution: {integrity: sha512-b3zyIxOYScLVvTpJ8J7qymjF+gUjtiY1Szubm1v0ia7ZeF1prPOsfcqLWaHh75EyIBmkn6EnYvQg6NkT84LAPw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.13.134'
 
@@ -1050,8 +1070,8 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-code-safety@0.2.2':
-    resolution: {integrity: sha512-dVd2fFGCNhIJcDVjteyv1qVLeHfA8NINBrc2PCM3cInzFgUgyTwLwBlARmummGspz5A5uWZSHE7nIVaGPI7IxA==}
+  '@framers/agentos-ext-code-safety@0.2.3':
+    resolution: {integrity: sha512-05CnwxaAJQetpsnIm4KXzibBNpFOKsanYBhzqXzIFJAvoyp0vFNePd0U8xtZo1lmXCZA3ie7Wb1oOV3n24vvkg==}
     peerDependencies:
       '@framers/agentos': '>=0.7.0'
 
@@ -1151,8 +1171,8 @@ packages:
       '@framers/agentos': '>=0.13.144'
       '@framers/agentos-ext-account-sources': '>=0.8.0'
 
-  '@framers/agentos-ext-grounding-guard@0.8.0':
-    resolution: {integrity: sha512-ApJj+Ok9BhITmEwZmnIL9diHdbwnHDTvb92R72P/cOo8/WyWWgZpY6psk7UKGDXp2hmPql0O5PAR5LGjhQiWnw==}
+  '@framers/agentos-ext-grounding-guard@0.8.1':
+    resolution: {integrity: sha512-wSuPAQo1I0XtTucsQfBNWh1OJMLwGGubmJcfFp8KHG3JHlZyGW2WDDFHaRGYiOEn57Bw3jBBMwafGa5HEQKpWg==}
     peerDependencies:
       '@framers/agentos': '>=0.12.0'
 
@@ -1177,8 +1197,8 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-ml-classifiers@0.3.1':
-    resolution: {integrity: sha512-ycRsYlAY9ITmfky8NUdtoGGsRqW+sltpuMQVge4U+8+fuEWKhnJ24Q2poYELzQUgFwIIZHm+L1aluoJE8drs+A==}
+  '@framers/agentos-ext-ml-classifiers@0.3.2':
+    resolution: {integrity: sha512-Mlkr4FxwtTuubk9xEQiHl3+DSy6e1UNjcB01xjpL3j2ClZjY43ADB8lq7enE01n6fqQYBUZ/iq5TlMBYeIGktA==}
     peerDependencies:
       '@framers/agentos': '>=0.7.0'
 
@@ -1203,8 +1223,8 @@ packages:
       '@framers/agentos': '>=0.10.40'
       onnxruntime-node: ^1.17.0
 
-  '@framers/agentos-ext-pii-redaction@0.3.1':
-    resolution: {integrity: sha512-PCjIbvUUT1vLgb5iZAEUj0Pbs4aXC0RxbW9yxikcDBgWdn8h3upJAzmd0LTsGx662gyJtULwv06WcCVJR8dQvA==}
+  '@framers/agentos-ext-pii-redaction@0.3.2':
+    resolution: {integrity: sha512-W3iRv2WEe+aloGf/d9IKwZBBixH1oZxD+bSvvW81Xaq3G503ndu/3MmNzlJ4Nnay1zhsuJAu7T84Kxdhf1Qxdw==}
     peerDependencies:
       '@framers/agentos': '>=0.12.0'
 
@@ -1219,9 +1239,9 @@ packages:
       '@framers/agentos': '>=0.10.40'
       '@picovoice/porcupine-node': ^3.0.0
 
-  '@framers/agentos-ext-public-sources@0.2.0':
-    resolution: {integrity: sha512-y3zznmcWcvEZsZpoP7TsmytrH1wIRsECetCaM7/12L57WVHJZP64B245Pf6J6ehbCum0WFeJk1AWwxRlKwO9+w==}
-    engines: {node: '>=20.19.0'}
+  '@framers/agentos-ext-public-sources@0.2.1':
+    resolution: {integrity: sha512-psvsV4xwybP0iDXw4JkX6MFtdgkt1zq/HAQpd1vNpB5eRuDCyHtxRGje3SKGf7BLR28s8eUzrx/b09ZnQCWGrg==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -1266,8 +1286,8 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-topicality@0.2.2':
-    resolution: {integrity: sha512-sGRM17ClYN+w+nOVO9FetBsH383e1OJPNmCoItblCi2E/KWoXOa+fh12p6Ec60NKM3Lu9bh3oIdW7Lkg0/UNfA==}
+  '@framers/agentos-ext-topicality@0.2.3':
+    resolution: {integrity: sha512-8GHC1jRZjNck8hr12whqZsS7673pM/ofgmTvEFuGIdemfPLDHMVi85fY2vW5vLTrUOT/EfkgT0dwxzIlIl84Xw==}
     peerDependencies:
       '@framers/agentos': '>=0.7.0'
 
@@ -1325,8 +1345,8 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-extensions-registry@0.18.13':
-    resolution: {integrity: sha512-dKYe69w3coF+T4CQ73PLqWeKjspJnDjHFtKFPLRnEjM8+t45PUvKzxIbpLUWs/+5aMy4+GqKD8ZRbl5c3dcH1A==}
+  '@framers/agentos-extensions-registry@0.18.15':
+    resolution: {integrity: sha512-K6H2EW6YN6IueH0K9esJ+guIca9XWlf91uYwAX6ddFNrszZmBo7A0HLOgIvnGnqZqlBxP42uPQ2lX9ie99DqCQ==}
     peerDependencies:
       '@framers/agentos': '>=0.10.34'
     peerDependenciesMeta:
@@ -1336,28 +1356,8 @@ packages:
   '@framers/agentos-skills@0.10.2':
     resolution: {integrity: sha512-YVYU/5RSOBcasaXEfnZC9OjnC23jnNn9dUZDUuCDelzV14Ty2L0glzRX56Mxr5QvnGScCsJ6nU0UY7X5iwNovA==}
 
-  '@framers/sql-storage-adapter@0.6.9':
-    resolution: {integrity: sha512-eUcRV/XIEXVDzJtbsC6qpOoBh/4zlixGQNm6nPCXXGPgcEXoJUgIF/zWsuzNE5JY+h1EjJ5SCgcjOBjpuPxYkw==}
-    peerDependencies:
-      '@aws-sdk/client-s3': ^3.0.0
-      '@capacitor-community/sqlite': ^6.0.0
-      better-sqlite3: ^12.0.0 || ^13.0.0
-      electron: '>=20.0.0'
-      pg: ^8.13.1
-    peerDependenciesMeta:
-      '@aws-sdk/client-s3':
-        optional: true
-      '@capacitor-community/sqlite':
-        optional: true
-      better-sqlite3:
-        optional: true
-      electron:
-        optional: true
-      pg:
-        optional: true
-
-  '@framers/sql-storage-adapter@0.8.1':
-    resolution: {integrity: sha512-Zcw3ChiT19XH+JWJI+9SBm0YbqhKoeLOT1KbNp1BVB6NQ9qexDhRj1FIka2nlkIZ9rlMKVqlQVbXD2MoY2nT6Q==}
+  '@framers/sql-storage-adapter@0.8.4':
+    resolution: {integrity: sha512-mAFsMXB7CDoqySZ1EbbxN1cHKeRNFRM0Ib88aF8SVEcoDFyMNIh6X0sxKPjGkgp9C0idiEQ1SWlclkb0d7lFnw==}
     peerDependencies:
       '@aws-sdk/client-s3': ^3.0.0
       '@capacitor-community/sqlite': ^6.0.0 || ^7.0.0 || ^8.0.0
@@ -2325,6 +2325,7 @@ packages:
   '@smithy/core@3.35.1':
     resolution: {integrity: sha512-i4YPS4B6ts7bjn7UwLnGjiZdprOvHvgGobFZsYK3GIY3E5hIqtj0rReU69BcTpGp+fvtraSNXeG1l+jtJvF55w==}
     engines: {node: '>=18.0.0'}
+    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/credential-provider-imds@4.5.2':
     resolution: {integrity: sha512-A9uSdn72ozbRUSit0eib0TW7nXuNPlaeM0zcGkJ+nE6tFcSDbnmtwoxbTCFBukVQcszDAyvsd7+rTduPTXpygg==}
@@ -2522,6 +2523,9 @@ packages:
   '@types/duplexify@3.6.5':
     resolution: {integrity: sha512-fB56ACzlW91UdZ5F3VXplVMDngO8QaX5Y2mjvADtN01TT2TMy4WjF0Lg+tFDvt4uMBeTe4SgaD+qCrA7dL5/tA==}
 
+  '@types/emscripten@1.41.6':
+    resolution: {integrity: sha512-uN+9i8bFT5CUcZfyIEYDrSueACEyKGbUs5kC/72DGlZZoinh84sJfVV0i8UOJD1asdzkvLPBRrKs41kZ8MdEXg==}
+
   '@types/esrecurse@4.3.1':
     resolution: {integrity: sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw==}
 
@@ -2608,6 +2612,9 @@ packages:
 
   '@types/serve-static@1.15.10':
     resolution: {integrity: sha512-tRs1dB+g8Itk72rlSI2ZrW6vZg0YrLI81iQSTkMmOqnqCaNr/8Ek4VwWcN5vZgCYWbg/JJSGBlUaYGAOP73qBw==}
+
+  '@types/sql.js@1.4.11':
+    resolution: {integrity: sha512-QXIx38p2ZThJaK9vP5ZdqdlRe1FG9I8SmCZOS7FHfB/2qPAjZwkL7/vlfPg6N/oWHuuOaGg/P/IRwfP2W0kWVQ==}
 
   '@types/tmi.js@1.8.6':
     resolution: {integrity: sha512-LVzNK7AxTMyh9qHLanAQR1o0I9XzfbIcXk85cx85igmCJHHO1Sm71sdhQ8Mj1WmRGzynPIoCXx6mVaFynWbsQw==}
@@ -2717,6 +2724,23 @@ packages:
     resolution: {integrity: sha512-7KHIkVA/gTRxQV9qPa9qLK+g5INZG6iRrlwXSFG5EKsOomW3UzzW7wsdt1Yp5PufzQ43lniuONlb4lUVCC2qSg==}
     peerDependencies:
       vitest: 5.0.3
+
+  '@vitest/coverage-v8@5.0.3':
+    resolution: {integrity: sha512-+klsyz7BvT1vCU28Zkfzms1Ia78XD0V41U3FUtRaa3S+vOr/EXvK1O6BvVD7l1RzEjm6SONR2aybOvDDf9u0mQ==}
+    peerDependencies:
+      '@vitest/browser': 5.0.3
+      vitest: 5.0.3
+    peerDependenciesMeta:
+      '@vitest/browser':
+        optional: true
+
+  '@vitest/istanbul-lib-coverage@1.0.2':
+    resolution: {integrity: sha512-9J/JMwOf9AoJhAywhrn7ScKTL38hsWQP/qPG60OtaAFcQ5OXPwKsxZFlbnuCKmZ61m8/lGgHYnFpdyQZUvG/iA==}
+    engines: {node: '>=22'}
+
+  '@vitest/istanbul-lib-report@1.0.2':
+    resolution: {integrity: sha512-gUsfXZJbzPamoIY5TvHFiMMoXESBrUMo+xqaj+rYrWI69+EnvRlYBlP96ZnHPY4vX8kyUpgAnFUCg5wZG/HkDQ==}
+    engines: {node: '>=22'}
 
   '@vitest/mocker@5.0.3':
     resolution: {integrity: sha512-T8sWAIbkSyAjkwTcaEc3Iu0o9A27X1/kdXrizhZkGuSKScRQtRzclfAMpOTcGdXCsqxeWlpGy3XjqaW8CpLORg==}
@@ -2983,6 +3007,9 @@ packages:
   ast-types@0.13.4:
     resolution: {integrity: sha512-x1FCFnFifvYDDzTaLII71vG5uvDwgtmDTEVWAxrgeiR8VjMONcCXJx7E+USjDtHlwFmt9MysbqgF9b9Vjr6w+w==}
     engines: {node: '>=4'}
+
+  ast-v8-to-istanbul@1.0.7:
+    resolution: {integrity: sha512-kFL68AG6ajd8fg248zwM9GQrUWEp79gsmjum34OEXjs4yHuUMZfYKwOLW9GMmB4oNvVrj+EAGxsP7ye2UR9UlA==}
 
   async-function@1.0.0:
     resolution: {integrity: sha512-hsU18Ae8CDTR6Kgu9DYf0EbCr/a5iGL0rytQDobUcdpYOKokk8LEjVphnXkDkgpi0wYVsqrXuP0bZxJaTqdgoA==}
@@ -4910,6 +4937,9 @@ packages:
   js-md5@0.8.3:
     resolution: {integrity: sha512-qR0HB5uP6wCuRMrWPTrkMaev7MJZwJuuw4fnwAzRgP4J4/F8RwtodOKpGp4XpqsLBFzzgqIO42efFAyz2Et6KQ==}
 
+  js-tokens@10.0.0:
+    resolution: {integrity: sha512-lM/UBzQmfJRo9ABXbPWemivdCW8V2G8FHaHdypQaIy523snUjog0W71ayWXTjiR+ixeMyVHN2XcpnTd/liPg/Q==}
+
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
 
@@ -5176,6 +5206,9 @@ packages:
 
   magic-string@1.4.2:
     resolution: {integrity: sha512-vG+rjFRj1PqdIBozIxAGMjPlOhaVe+GXpbttY/iSK7rGcJRMlwNJO7dcUwmUqkymsFLJiNGI06t4D7Fr7yRC9g==}
+
+  magicast@0.5.5:
+    resolution: {integrity: sha512-UicdXN8zQ3JHlxVq+28afMXPr1z7WNY6+7EJnzTdQWkTAlMLF5fNCCKxJHBQwGaNGR11581EiQmQzx73+MvszA==}
 
   make-asynchronous@1.1.0:
     resolution: {integrity: sha512-ayF7iT+44LXdxJLTrTd3TLQpFDDvPCBxXxbv+pMUSuHA5Q8zyAfwkRP6aHHwNVFBUFWtxAHqwNJxF8vMZLAbVg==}
@@ -8209,7 +8242,20 @@ snapshots:
       js-tokens: 4.0.0
       picocolors: 1.1.1
 
+  '@babel/helper-string-parser@7.29.7': {}
+
   '@babel/helper-validator-identifier@7.29.7': {}
+
+  '@babel/parser@7.29.9':
+    dependencies:
+      '@babel/types': 7.29.8
+
+  '@babel/types@7.29.8':
+    dependencies:
+      '@babel/helper-string-parser': 7.29.7
+      '@babel/helper-validator-identifier': 7.29.7
+
+  '@bcoe/v8-coverage@1.0.2': {}
 
   '@blazediff/core@1.10.0': {}
 
@@ -8472,17 +8518,17 @@ snapshots:
       lodash.uniq: 4.5.0
     optional: true
 
-  '@framers/agentos-ext-account-sources@0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1)':
+  '@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3)':
     dependencies:
       '@framers/agentos': 'link:'
-      '@framers/agentos-ext-public-sources': 0.2.0(@framers/agentos@)
-      '@framers/sql-storage-adapter': 0.6.9(better-sqlite3@13.0.3)(pg@8.23.1)
+      '@framers/agentos-ext-public-sources': 0.2.1(@framers/agentos@)
+      '@framers/sql-storage-adapter': 0.8.4(better-sqlite3@13.0.3)
     transitivePeerDependencies:
       - '@aws-sdk/client-s3'
       - '@capacitor-community/sqlite'
       - better-sqlite3
       - electron
-      - pg
+      - pg-native
 
   '@framers/agentos-ext-agent-delegation@0.1.3(@framers/agentos@)':
     dependencies:
@@ -8515,11 +8561,11 @@ snapshots:
       - encoding
     optional: true
 
-  '@framers/agentos-ext-calendar-google@1.0.3(@framers/agentos-ext-account-sources@0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)':
+  '@framers/agentos-ext-calendar-google@1.0.3(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
-      '@framers/agentos-ext-account-sources': 0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1)
-      '@framers/agentos-ext-google-drive': 1.2.0(@framers/agentos-ext-account-sources@0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)
+      '@framers/agentos-ext-account-sources': 0.11.0(@framers/agentos@)(better-sqlite3@13.0.3)
+      '@framers/agentos-ext-google-drive': 1.2.0(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
       googleapis: 183.0.0
     transitivePeerDependencies:
       - supports-color
@@ -8882,7 +8928,7 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-code-safety@0.2.2(@framers/agentos@)':
+  '@framers/agentos-ext-code-safety@0.2.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
@@ -8971,10 +9017,10 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-github@0.5.0(@framers/agentos-ext-account-sources@0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)':
+  '@framers/agentos-ext-github@0.5.0(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
-      '@framers/agentos-ext-account-sources': 0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1)
+      '@framers/agentos-ext-account-sources': 0.11.0(@framers/agentos@)(better-sqlite3@13.0.3)
       '@octokit/rest': 22.0.1
     optional: true
 
@@ -8990,13 +9036,13 @@ snapshots:
       '@google-cloud/text-to-speech': 5.8.1
     optional: true
 
-  '@framers/agentos-ext-google-drive@1.2.0(@framers/agentos-ext-account-sources@0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)':
+  '@framers/agentos-ext-google-drive@1.2.0(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
-      '@framers/agentos-ext-account-sources': 0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1)
+      '@framers/agentos-ext-account-sources': 0.11.0(@framers/agentos@)(better-sqlite3@13.0.3)
     optional: true
 
-  '@framers/agentos-ext-grounding-guard@0.8.0(@framers/agentos@)':
+  '@framers/agentos-ext-grounding-guard@0.8.1(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optionalDependencies:
@@ -9023,7 +9069,7 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-ml-classifiers@0.3.1(@framers/agentos@)':
+  '@framers/agentos-ext-ml-classifiers@0.3.2(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optionalDependencies:
@@ -9051,7 +9097,7 @@ snapshots:
       onnxruntime-node: 1.21.0
     optional: true
 
-  '@framers/agentos-ext-pii-redaction@0.3.1(@framers/agentos@)(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)':
+  '@framers/agentos-ext-pii-redaction@0.3.2(@framers/agentos@)(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)':
     dependencies:
       '@framers/agentos': 'link:'
     optionalDependencies:
@@ -9077,7 +9123,7 @@ snapshots:
       '@picovoice/porcupine-node': 3.0.6
     optional: true
 
-  '@framers/agentos-ext-public-sources@0.2.0(@framers/agentos@)':
+  '@framers/agentos-ext-public-sources@0.2.1(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       htmlparser2: 12.0.0
@@ -9151,7 +9197,7 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-topicality@0.2.2(@framers/agentos@)':
+  '@framers/agentos-ext-topicality@0.2.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optionalDependencies:
@@ -9232,14 +9278,14 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-extensions-registry@0.18.13(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)':
+  '@framers/agentos-extensions-registry@0.18.15(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)':
     optionalDependencies:
       '@framers/agentos': 'link:'
       '@framers/agentos-ext-agent-delegation': 0.1.3(@framers/agentos@)
       '@framers/agentos-ext-amazon-polly': 0.2.3(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@)
       '@framers/agentos-ext-auth': 1.2.1(@framers/agentos@)
       '@framers/agentos-ext-browser-automation': 0.3.0(@framers/agentos@)
-      '@framers/agentos-ext-calendar-google': 1.0.3(@framers/agentos-ext-account-sources@0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)
+      '@framers/agentos-ext-calendar-google': 1.0.3(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
       '@framers/agentos-ext-channel-blog-publisher': 0.1.4(@framers/agentos@)
       '@framers/agentos-ext-channel-bluesky': 0.1.3(@framers/agentos@)
       '@framers/agentos-ext-channel-discord': 0.1.3(@framers/agentos@)
@@ -9288,7 +9334,7 @@ snapshots:
       '@framers/agentos-ext-cloud-netlify': 0.1.3(@framers/agentos@)
       '@framers/agentos-ext-cloud-railway': 0.1.3(@framers/agentos@)
       '@framers/agentos-ext-cloud-vercel': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-code-safety': 0.2.2(@framers/agentos@)
+      '@framers/agentos-ext-code-safety': 0.2.3(@framers/agentos@)
       '@framers/agentos-ext-content-extraction': 0.1.3(@framers/agentos@)
       '@framers/agentos-ext-content-policy-rewriter': 0.1.2(@framers/agentos@)
       '@framers/agentos-ext-credential-vault': 0.1.3(@framers/agentos@)
@@ -9302,20 +9348,20 @@ snapshots:
       '@framers/agentos-ext-email-gmail': 0.1.6(@framers/agentos@)
       '@framers/agentos-ext-endpoint-semantic': 0.2.3(@framers/agentos@)
       '@framers/agentos-ext-giphy': 1.1.1(@framers/agentos@)
-      '@framers/agentos-ext-github': 0.5.0(@framers/agentos-ext-account-sources@0.9.3(@framers/agentos@)(better-sqlite3@13.0.3)(pg@8.23.1))(@framers/agentos@)
+      '@framers/agentos-ext-github': 0.5.0(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
       '@framers/agentos-ext-google-cloud-stt': 0.3.6(@framers/agentos@)(@google-cloud/speech@6.7.1)
       '@framers/agentos-ext-google-cloud-tts': 0.3.6(@framers/agentos@)(@google-cloud/text-to-speech@5.8.1)
-      '@framers/agentos-ext-grounding-guard': 0.8.0(@framers/agentos@)
+      '@framers/agentos-ext-grounding-guard': 0.8.1(@framers/agentos@)
       '@framers/agentos-ext-hacker-news': 1.1.2(@framers/agentos@)
       '@framers/agentos-ext-image-generation': 2.1.0(@framers/agentos@)
       '@framers/agentos-ext-image-search': 1.1.1(@framers/agentos@)
       '@framers/agentos-ext-letterboxd': 1.1.2(@framers/agentos@)
-      '@framers/agentos-ext-ml-classifiers': 0.3.1(@framers/agentos@)
+      '@framers/agentos-ext-ml-classifiers': 0.3.2(@framers/agentos@)
       '@framers/agentos-ext-news-search': 1.1.1(@framers/agentos@)
       '@framers/agentos-ext-notifications': 0.1.4(@framers/agentos@)
       '@framers/agentos-ext-omdb': 1.1.2(@framers/agentos@)
       '@framers/agentos-ext-openwakeword': 0.2.3(@framers/agentos@)(onnxruntime-node@1.21.0)
-      '@framers/agentos-ext-pii-redaction': 0.3.1(@framers/agentos@)(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)
+      '@framers/agentos-ext-pii-redaction': 0.3.2(@framers/agentos@)(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)
       '@framers/agentos-ext-piper': 0.2.3(@framers/agentos@)
       '@framers/agentos-ext-porcupine': 0.2.3(@framers/agentos@)(@picovoice/porcupine-node@3.0.6)
       '@framers/agentos-ext-stealth-browser': 1.1.2(@framers/agentos@)
@@ -9326,7 +9372,7 @@ snapshots:
       '@framers/agentos-ext-telegram': 1.2.1(@framers/agentos@)(request@2.88.2)
       '@framers/agentos-ext-tool-multi-channel-post': 0.1.3(@framers/agentos@)
       '@framers/agentos-ext-tool-site-deploy': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-topicality': 0.2.2(@framers/agentos@)
+      '@framers/agentos-ext-topicality': 0.2.3(@framers/agentos@)
       '@framers/agentos-ext-voice-plivo': 0.2.0(@framers/agentos@)
       '@framers/agentos-ext-voice-synthesis': 3.1.0(@framers/agentos@)
       '@framers/agentos-ext-voice-telnyx': 0.2.0(@framers/agentos@)
@@ -9369,15 +9415,9 @@ snapshots:
   '@framers/agentos-skills@0.10.2':
     optional: true
 
-  '@framers/sql-storage-adapter@0.6.9(better-sqlite3@13.0.3)(pg@8.23.1)':
+  '@framers/sql-storage-adapter@0.8.4(better-sqlite3@13.0.3)':
     dependencies:
-      sql.js: 1.14.2
-    optionalDependencies:
-      better-sqlite3: 13.0.3
-      pg: 8.23.1
-
-  '@framers/sql-storage-adapter@0.8.1(better-sqlite3@13.0.3)':
-    dependencies:
+      '@types/sql.js': 1.4.11
       pg: 8.23.1
       sql.js: 1.14.2
     optionalDependencies:
@@ -10659,6 +10699,8 @@ snapshots:
       '@types/node': 22.20.5
     optional: true
 
+  '@types/emscripten@1.41.6': {}
+
   '@types/esrecurse@4.3.1': {}
 
   '@types/estree@1.0.9': {}
@@ -10782,6 +10824,11 @@ snapshots:
       '@types/node': 22.20.5
       '@types/send': 0.17.6
     optional: true
+
+  '@types/sql.js@1.4.11':
+    dependencies:
+      '@types/emscripten': 1.41.6
+      '@types/node': 22.20.5
 
   '@types/tmi.js@1.8.6':
     optional: true
@@ -10951,7 +10998,7 @@ snapshots:
       '@vitest/mocker': 5.0.3(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
       playwright: 1.63.0
       tinyrainbow: 3.2.0
-      vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
+      vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/coverage-v8@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
     transitivePeerDependencies:
       - bufferutil
       - msw
@@ -10968,13 +11015,33 @@ snapshots:
       pngjs: 7.0.0
       sirv: 3.0.2
       tinyrainbow: 3.2.0
-      vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
+      vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/coverage-v8@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
       ws: 8.22.0
     transitivePeerDependencies:
       - bufferutil
       - msw
       - utf-8-validate
       - vite
+
+  '@vitest/coverage-v8@5.0.3(@vitest/browser@5.0.3)(vitest@5.0.3)':
+    dependencies:
+      '@bcoe/v8-coverage': 1.0.2
+      '@vitest/istanbul-lib-coverage': 1.0.2
+      '@vitest/istanbul-lib-report': 1.0.2
+      ast-v8-to-istanbul: 1.0.7
+      magicast: 0.5.5
+      obug: 2.2.1
+      std-env: 4.3.0
+      tinyrainbow: 3.2.0
+      vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/coverage-v8@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
+    optionalDependencies:
+      '@vitest/browser': 5.0.3(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))(vitest@5.0.3)
+
+  '@vitest/istanbul-lib-coverage@1.0.2': {}
+
+  '@vitest/istanbul-lib-report@1.0.2':
+    dependencies:
+      '@vitest/istanbul-lib-coverage': 1.0.2
 
   '@vitest/mocker@5.0.3(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))':
     dependencies:
@@ -10999,7 +11066,7 @@ snapshots:
       pathe: 2.0.3
       sirv: 3.0.2
       tinyrainbow: 3.2.0
-      vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
+      vitest: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/coverage-v8@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
 
   '@vitest/utils@5.0.3':
     dependencies:
@@ -11296,6 +11363,12 @@ snapshots:
     dependencies:
       tslib: 2.8.1
     optional: true
+
+  ast-v8-to-istanbul@1.0.7:
+    dependencies:
+      '@jridgewell/trace-mapping': 0.3.31
+      estree-walker: 3.0.3
+      js-tokens: 10.0.0
 
   async-function@1.0.0: {}
 
@@ -13802,6 +13875,8 @@ snapshots:
   js-md5@0.8.3:
     optional: true
 
+  js-tokens@10.0.0: {}
+
   js-tokens@4.0.0: {}
 
   js-yaml@3.15.2:
@@ -14104,6 +14179,12 @@ snapshots:
   magic-string@1.4.2:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  magicast@0.5.5:
+    dependencies:
+      '@babel/parser': 7.29.9
+      '@babel/types': 7.29.8
+      source-map-js: 1.2.2
 
   make-asynchronous@1.1.0:
     dependencies:
@@ -16712,7 +16793,7 @@ snapshots:
       tsx: 4.23.15
       yaml: 2.9.1
 
-  vitest@5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1)):
+  vitest@5.0.3(@opentelemetry/api@1.9.1)(@types/node@22.20.5)(@vitest/browser-playwright@5.0.3)(@vitest/coverage-v8@5.0.3)(@vitest/ui@5.0.3)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1)):
     dependencies:
       '@types/chai': 5.2.3
       '@vitest/mocker': 5.0.3(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))
@@ -16732,6 +16813,7 @@ snapshots:
       '@opentelemetry/api': 1.9.1
       '@types/node': 22.20.5
       '@vitest/browser-playwright': 5.0.3(playwright@1.63.0)(vite@7.3.6(@types/node@22.20.5)(tsx@4.23.15)(yaml@2.9.1))(vitest@5.0.3)
+      '@vitest/coverage-v8': 5.0.3(@vitest/browser@5.0.3)(vitest@5.0.3)
       '@vitest/ui': 5.0.3(vitest@5.0.3)
     transitivePeerDependencies:
       - msw

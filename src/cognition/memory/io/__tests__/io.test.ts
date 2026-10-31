@@ -341,6 +341,53 @@ describe('JsonExporter + JsonImporter', () => {
     expect(second.imported).toBe(0);
   });
 
+  it('stores a node or edge whose properties or metadata are not an object with an object that names its import hash', async () => {
+    const brain = await openBrain();
+    const payload = JSON.stringify({
+      traces: [],
+      nodes: [
+        { id: 'kn_array', type: 'concept', label: 'Array node', properties: '["x"]', created_at: 1 },
+        { id: 'kn_null', type: 'concept', label: 'Null node', properties: 'null', created_at: 1 },
+      ],
+      edges: [
+        { id: 'ke_array', source_id: 'kn_array', target_id: 'kn_null', type: 'related_to', metadata: '["x"]', created_at: 1 },
+        { id: 'ke_null', source_id: 'kn_null', target_id: 'kn_array', type: 'related_to', metadata: 'null', created_at: 1 },
+      ],
+    });
+    /** Whether a stored JSON column holds an object that names an import hash. */
+    const hashed = (json: string): boolean => {
+      const parsed: unknown = JSON.parse(json);
+      return parsed !== null && typeof parsed === 'object' && typeof (parsed as { import_hash?: unknown }).import_hash === 'string';
+    };
+    const importer = new JsonImporter(brain);
+
+    expect(await importer.importFromString(payload)).toMatchObject({ imported: 4, errors: [] });
+    const nodes = await brain.all<{ id: string; properties: string }>('SELECT id, properties FROM knowledge_nodes ORDER BY id');
+    expect(nodes.map((node) => [node.id, hashed(node.properties)])).toEqual([
+      ['kn_array', true],
+      ['kn_null', true],
+    ]);
+    const edges = await brain.all<{ id: string; metadata: string }>('SELECT id, metadata FROM knowledge_edges ORDER BY id');
+    expect(edges.map((edge) => [edge.id, hashed(edge.metadata)])).toEqual([
+      ['ke_array', true],
+      ['ke_null', true],
+    ]);
+    // A second import finds each node and edge by its import hash.
+    expect(await importer.importFromString(payload)).toMatchObject({ imported: 0, skipped: 4, errors: [] });
+  });
+
+  it("reports a trace record that is not an object as an error, and imports the file's other records", async () => {
+    const brain = await openBrain();
+    const payload = JSON.stringify({ traces: [null, { id: 'mt_kept', content: 'Kept words.', created_at: 1 }] });
+
+    const result = await new JsonImporter(brain).importFromString(payload);
+
+    expect(result).toMatchObject({ imported: 1, skipped: 0 });
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('Trace import error');
+    expect((await brain.all<{ id: string }>('SELECT id FROM memory_traces')).map((row) => row.id)).toEqual(['mt_kept']);
+  });
+
   it('returns an error for invalid JSON file', async () => {
     const dir = tempDir();
     const badPath = path.join(dir, 'bad.json');
@@ -907,8 +954,260 @@ describe('ChatGptImporter', () => {
     expect(first.imported).toBeGreaterThan(0);
 
     const second = await importer.import(jsonPath);
-    // New conversation rows are created (OR IGNORE), but trace content is duped.
+    // The conversation's row is found again, and its pair is a duplicate.
     expect(second.skipped).toBeGreaterThan(0);
+  });
+
+  it('a later import of one conversation adds no conversations row, and files the pairs it adds under the row', async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    fs.writeFileSync(jsonPath, JSON.stringify(buildMockConversations()), 'utf8');
+
+    const brain = await openBrain();
+    const importer = new ChatGptImporter(brain);
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+
+    // A later export of the same conversation: a question asked since, and a later update time.
+    const later = buildMockConversations() as Array<{
+      update_time: number;
+      mapping: Record<string, { children?: string[] } & Record<string, unknown>>;
+    }>;
+    later[0]!.update_time = 1711240000;
+    later[0]!.mapping['assistant-msg-1']!.children = ['user-msg-2'];
+    later[0]!.mapping['user-msg-2'] = {
+      id: 'user-msg-2',
+      message: {
+        author: { role: 'user' },
+        content: { parts: ['And generic constraints?'] },
+        create_time: 1711239000,
+      },
+      parent: 'assistant-msg-1',
+      children: [],
+    };
+    fs.writeFileSync(jsonPath, JSON.stringify(later), 'utf8');
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 1, skipped: 1, errors: [] });
+
+    const rows = await brain.all<{ id: string; title: string; updated_at: number }>(
+      'SELECT id, title, updated_at FROM conversations WHERE brain_id = ?',
+      [brain.brainId],
+    );
+    expect(rows.map((row) => row.title)).toEqual(['Discussion about TypeScript generics']);
+    expect(Number(rows[0]!.updated_at)).toBe(1711240000000);
+    const traces = await brain.all<{ metadata: string }>(
+      'SELECT metadata FROM memory_traces WHERE brain_id = ? ORDER BY created_at',
+      [brain.brainId],
+    );
+    expect(traces.map((trace) => (JSON.parse(trace.metadata) as { conversation_id: string }).conversation_id)).toEqual([
+      rows[0]!.id,
+      rows[0]!.id,
+    ]);
+  });
+
+  it("finds a conversation's row by the export's id for it, through a rename and without a creation time", async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    const brain = await openBrain();
+    const importer = new ChatGptImporter(brain);
+    const rowsOf = () =>
+      brain.all<{ id: string; title: string; updated_at: number }>(
+        'SELECT id, title, updated_at FROM conversations WHERE brain_id = ? ORDER BY title',
+        [brain.brainId],
+      );
+
+    // The export names the conversation by its id; a later export carries the title it was renamed to.
+    const named = buildMockConversations() as Array<Record<string, unknown>>;
+    named[0]!.conversation_id = 'conv-generics';
+    named[0]!.id = 'conv-generics';
+    fs.writeFileSync(jsonPath, JSON.stringify(named), 'utf8');
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    named[0]!.title = 'Generics, renamed';
+    named[0]!.update_time = 1711240000;
+    fs.writeFileSync(jsonPath, JSON.stringify(named), 'utf8');
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+    const renamed = await rowsOf();
+    expect(renamed.map((row) => [row.title, Number(row.updated_at)])).toEqual([['Generics, renamed', 1711240000000]]);
+
+    // A conversation the export gives no creation time is found again by its id alone.
+    const undated = buildMockConversations() as Array<Record<string, unknown>>;
+    undated[0]!.conversation_id = 'conv-undated';
+    undated[0]!.title = 'Undated';
+    delete undated[0]!.create_time;
+    delete undated[0]!.update_time;
+    const mapping = undated[0]!.mapping as Record<string, { message?: { content?: { parts?: string[] } } | null }>;
+    mapping['user-msg-1']!.message!.content!.parts = ['What is a mapped type?'];
+    fs.writeFileSync(jsonPath, JSON.stringify(undated), 'utf8');
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+    expect((await rowsOf()).map((row) => row.title)).toEqual(['Generics, renamed', 'Undated']);
+  });
+
+  it('keeps one row for a conversation whose row another import writes while this import runs', async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    const named = buildMockConversations() as Array<Record<string, unknown>>;
+    named[0]!.conversation_id = 'conv-generics';
+    fs.writeFileSync(jsonPath, JSON.stringify(named), 'utf8');
+
+    // Another import of the file runs to its end just before this import writes the conversation's row.
+    const brain = await openBrain();
+    let other: ReturnType<ChatGptImporter['import']> | undefined;
+    const meanwhile = new Proxy(brain, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target) as unknown;
+        if (property === 'run') {
+          return async (...args: Parameters<Brain['run']>) => {
+            if (!other && /^\s*INSERT\b[\s\S]*\bconversations\b/i.test(args[0])) {
+              other = new ChatGptImporter(brain).import(jsonPath);
+              await other;
+            }
+            return target.run(...args);
+          };
+        }
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+
+    expect(await new ChatGptImporter(meanwhile).import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+    expect(await other).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    const rows = await brain.all<{ id: string }>('SELECT id FROM conversations WHERE brain_id = ?', [brain.brainId]);
+    expect(rows).toHaveLength(1);
+    const traces = await brain.all<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ?', [
+      brain.brainId,
+    ]);
+    expect(traces.map((trace) => (JSON.parse(trace.metadata) as { conversation_id: string }).conversation_id)).toEqual([
+      rows[0]!.id,
+    ]);
+  });
+
+  it("stores a message pair once when another import stores it between this import's check for it and its write", async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    fs.writeFileSync(jsonPath, JSON.stringify(buildMockConversations()), 'utf8');
+
+    // Another import of the file runs to its end just before this import writes the pair it found no duplicate of.
+    const brain = await openBrain();
+    let other: ReturnType<ChatGptImporter['import']> | undefined;
+    const meanwhile = new Proxy(brain, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target) as unknown;
+        if (property === 'run') {
+          return async (...args: Parameters<Brain['run']>) => {
+            if (!other && /^\s*INSERT\b[\s\S]*\bmemory_traces\b/i.test(args[0])) {
+              other = new ChatGptImporter(brain).import(jsonPath);
+              await other;
+            }
+            return target.run(...args);
+          };
+        }
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+
+    expect(await new ChatGptImporter(meanwhile).import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+    expect(await other).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    const traces = await brain.all<{ content: string }>('SELECT content FROM memory_traces WHERE brain_id = ?', [
+      brain.brainId,
+    ]);
+    expect(traces.map((trace) => trace.content)).toEqual([
+      '[user]: How do TypeScript generics work?\n[assistant]: TypeScript generics allow you to write reusable, type-safe code...',
+    ]);
+    expect(await brain.all('SELECT id FROM conversations WHERE brain_id = ?', [brain.brainId])).toHaveLength(1);
+  });
+
+  it('stores each pair again at each import with deduplication off', async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    fs.writeFileSync(jsonPath, JSON.stringify(buildMockConversations()), 'utf8');
+    const brain = await openBrain();
+    const importer = new ChatGptImporter(brain);
+    expect(await importer.import(jsonPath, { dedup: false })).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    expect(await importer.import(jsonPath, { dedup: false })).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    expect(await brain.all('SELECT id FROM memory_traces WHERE brain_id = ?', [brain.brainId])).toHaveLength(2);
+    expect(await brain.all('SELECT id FROM conversations WHERE brain_id = ?', [brain.brainId])).toHaveLength(1);
+  });
+
+  it('takes no row it did not name: two conversations of one title and creation time keep apart, and the rows of that title and time stay as they were', async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    const brain = await openBrain();
+    // Two rows of the title and creation time under names the import does not give, as other conversations' rows can be.
+    for (const id of ['cv_a1', 'cv_b2']) {
+      await brain.run(
+        'INSERT INTO conversations (brain_id, id, title, created_at, updated_at, metadata) VALUES (?, ?, ?, ?, ?, ?)',
+        [brain.brainId, id, 'Same title', 1711234567000, 1711234567000, '{"source":"chatgpt_export"}'],
+      );
+    }
+    const conversation = (exportId: string, question: string) => ({
+      conversation_id: exportId,
+      title: 'Same title',
+      create_time: 1711234567,
+      update_time: 1711234600,
+      mapping: {
+        [`${exportId}-q`]: {
+          id: `${exportId}-q`,
+          parent: null,
+          children: [],
+          message: { author: { role: 'user' }, content: { parts: [question] }, create_time: 1711234567 },
+        },
+      },
+    });
+    fs.writeFileSync(
+      jsonPath,
+      JSON.stringify([conversation('conv-x', 'First question?'), conversation('conv-y', 'Second question?')]),
+      'utf8',
+    );
+    expect(await new ChatGptImporter(brain).import(jsonPath)).toMatchObject({ imported: 2, skipped: 0, errors: [] });
+
+    const rows = await brain.all<{ id: string; title: string; updated_at: number; metadata: string }>(
+      'SELECT id, title, updated_at, metadata FROM conversations WHERE brain_id = ? ORDER BY id',
+      [brain.brainId],
+    );
+    expect(rows).toHaveLength(4);
+    expect(
+      rows
+        .filter((row) => row.id === 'cv_a1' || row.id === 'cv_b2')
+        .map((row) => [row.id, row.title, Number(row.updated_at), row.metadata]),
+    ).toEqual([
+      ['cv_a1', 'Same title', 1711234567000, '{"source":"chatgpt_export"}'],
+      ['cv_b2', 'Same title', 1711234567000, '{"source":"chatgpt_export"}'],
+    ]);
+    const filedUnder = (
+      await brain.all<{ metadata: string }>('SELECT metadata FROM memory_traces WHERE brain_id = ? ORDER BY content', [
+        brain.brainId,
+      ])
+    ).map((trace) => (JSON.parse(trace.metadata) as { conversation_id: string }).conversation_id);
+    expect(new Set(filedUnder).size).toBe(2);
+    expect(filedUnder.filter((id) => id === 'cv_a1' || id === 'cv_b2')).toEqual([]);
+  });
+
+  it("finds a conversation's row in a brain a JSON export of it was imported into, whatever spacing the row's metadata holds", async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    const named = buildMockConversations() as Array<Record<string, unknown>>;
+    named[0]!.conversation_id = 'conv-generics';
+    fs.writeFileSync(jsonPath, JSON.stringify(named), 'utf8');
+    const first = await openBrain();
+    expect(await new ChatGptImporter(first).import(jsonPath)).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+
+    // The brain's JSON export, its conversation's metadata written again with spaces, imported into another brain.
+    const payload = JSON.parse(await new JsonExporter(first).exportToString()) as {
+      conversations: Array<{ metadata: string }>;
+    };
+    expect(payload.conversations).toHaveLength(1);
+    for (const row of payload.conversations) row.metadata = JSON.stringify(JSON.parse(row.metadata), null, 2);
+    const second = await openBrain();
+    expect((await new JsonImporter(second).importFromString(JSON.stringify(payload))).errors).toEqual([]);
+
+    // The conversation, renamed since, imported into that brain.
+    named[0]!.title = 'Generics, renamed';
+    named[0]!.update_time = 1711240000;
+    fs.writeFileSync(jsonPath, JSON.stringify(named), 'utf8');
+    expect(await new ChatGptImporter(second).import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+    const rows = await second.all<{ title: string }>('SELECT title FROM conversations WHERE brain_id = ?', [
+      second.brainId,
+    ]);
+    expect(rows.map((row) => row.title)).toEqual(['Generics, renamed']);
   });
 
   it('handles empty conversations.json gracefully', async () => {

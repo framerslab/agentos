@@ -6,6 +6,7 @@ import {
   UnpricedModelError,
   asSpendBudget,
   assertCallWithinBudget,
+  bothBudgets,
   costOfUsageUSD,
   estimateCallCostUSD,
   promptCharsOf,
@@ -119,6 +120,26 @@ describe('SpendBudget', () => {
     const budget = new SpendBudget({ maxCostUSD: 0.01 });
     budget.recordExternal(0.0095, 'stt');
     expect(() => budget.assertCanSpend(0.001, 0, 'next')).toThrow(CostCapExceededError);
+  });
+});
+
+describe('bothBudgets', () => {
+  it('charges a total two budgets share by guard and id once for each call and each outside cost, and lets each count the tokens', () => {
+    const guard = new CostGuard({ maxDailyCostUsd: 100, maxSingleOperationCostUsd: 100 });
+    // A launch's budget draws on the host's; the member's own is another budget on the host's guard and id.
+    const host = new SpendBudget({ maxCostUSD: 5, guard, budgetId: 'account' });
+    const launch = new SpendBudget({ maxCostUSD: 5, parent: host });
+    const own = new SpendBudget({ maxCostUSD: 5, guard, budgetId: 'account' });
+    const turn = bothBudgets(launch, own);
+
+    turn.record(0.3, 15, 'gmi.step');
+    expect(guard.getSnapshot('account').sessionCostUsd).toBeCloseTo(0.3, 10);
+    expect(launch.spentUSD()).toBeCloseTo(0.3, 10);
+    expect([launch.tokensUsed(), host.tokensUsed(), own.tokensUsed()]).toEqual([15, 15, 15]);
+
+    turn.recordExternal(0.2, 'stt');
+    expect(guard.getSnapshot('account').sessionCostUsd).toBeCloseTo(0.5, 10);
+    expect(launch.spentUSD()).toBeCloseTo(0.5, 10);
   });
 });
 

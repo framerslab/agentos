@@ -6,7 +6,7 @@ description: "How AgentOS tests whether a GMI on the full runtime improves compa
 
 This study compares a GMI on the full AgentOS runtime with the `agent()`-based reply path of a reference product, the companion chat of wilds.ai, on the same model. It reads both against `agent()` on its own and against a bare loop that calls the model with no framework. [Generalized Mind Instances (GMIs)](../GMI.md) describes what a GMI adds over a plain agent, and [Two API Paths](../API_PATHS.md) describes the runtime and the lightweight helper the arms are built on. This page sets out the study's design and lists each report set once it is published. It states no measured number: measurements are published only in the report sets.
 
-Status: design published; protocol not yet registered; no report published.
+Status: design published; protocol 0a registered 2026-10-29; record-mode reports published.
 
 ## The question
 
@@ -105,12 +105,12 @@ GO requires a win: at least one primary endpoint better, with both judges on the
 
 ## Judges, calibration and the stability check
 
-Two model judges from two vendors, J1 and J2, each pinned by engine, model and effort before the first confirmatory item and named in every report's pins table, judge the study's replies. A third grading pass, J3, settles a disagreement between J1's and J2's grades when their agreement falls below its bar. A named alternate replaces J1 only when J1 becomes unavailable, and then re-judges the whole task, since no judge is swapped inside a task. When no calibrated replacement is found, the task continues with one judge, and its judged endpoints can support only KILL or NOT SHOWN.
+Two model judges from two vendors, J1 and J2, each pinned by engine, model and effort before the first confirmatory item and named in the pins table of every report that carries judgments, judge the study's replies. A third grading pass, J3, settles a disagreement between J1's and J2's grades when their agreement falls below its bar. A named alternate replaces J1 only when J1 becomes unavailable, and then re-judges the whole task, since no judge is swapped inside a task. When no calibrated replacement is found, the task continues with one judge, and its judged endpoints can support only KILL or NOT SHOWN.
 
 The judges are command-line model clients that answer prompt files CI writes; CI parses and scores the replies. The clients expose no temperature, so the harness measures each judge's stability by repeats. J1's client reports no served model, so J1's model is recorded as requested and unverified, and J1 is read through its planted controls and repeats.
 
 - Judging is blind: arm codes are random, labels are swapped, and every pair is judged in both orders. No prompt names an arm, a GMI or `agent()`.
-- Rubric versions are hashed, and every report prints the hashes.
+- Rubric versions are hashed, and every report that carries judgments prints the hashes.
 - Planted controls calibrate each judge on each rubric before any confirmatory item is judged. A judge passes when it detects at least 0.90 of the strong controls and 0.75 of the mild ones, flags at most 0.15 of the clean items, gives the same verdict in both orders on at least 0.80 of the control pairs, and agrees with the other judge at κ ≥ 0.60 on flags and κ ≥ 0.40 on pairs.
 - A seeded 10% of the judgments and every control are judged twice, and a judge must give the same verdict on at least 0.90 of the flags and 0.80 of the pairs. Both checks are read on every judging tranche, and a fall below either bar is treated as a judge that became unavailable.
 - The A/A control judges each of B and C0 against a second sample of itself, on 30 prompts each.
@@ -167,13 +167,21 @@ Every table names the files its figures come from. An input a run did not have r
 
 ## Reports and results
 
-No report set is published.
+- 2026-10-28, CI run 40723979292, record mode, legs 01 to 10: [set README](https://github.com/framerslab/agentos/blob/master/docs/research/gmi-vs-agent/reports/record-pilot-2026-10-28-40723979292/README.md)
+
+Protocol 0a: SHA-256 `10579b4e3eb958f8fbc5e17983fdb121e53f764bc36e9d3bf1657912099dd186`, frozen 2026-10-14.
+
+Amendments to 0a, each dated by its commit in the private runner's repository:
+
+- 2026-10-28: Z takes the vendor's chat-completions compatibility route only when the day's probe finds that the route refuses an invalid `thinking` and an invalid `output_config.effort` and answers a valid call; otherwise Z speaks the vendor's Messages API for the run. Until this amendment the probe checked the valid call only when the subject accepted temperature 0, so with a subject that refuses it, a route that answers no valid call would have been taken, and every Z call of the pilot's two recall legs would have failed. No pilot probe had run.
+- 2026-10-29: every arm's turn starts with AgentOS's provider health breakers closed. A breaker times its cooldown by the clock the harness pins while a turn runs, and each item's clock starts again at the same instants, so a breaker that one turn opened would have refused later items' turns before they were sent, or moved B's and A's calls to a fallback model, a failure the study counts as a main reply not served by the subject model, while C, which does not consult the breakers, called the subject. A breaker that opens inside a turn acts on the rest of that turn. No pilot leg had run live.
+- 2026-10-29: the run's call checks count a call that its arm left before the answer (A cancels its call when its turn is cut at the deadline) under the cut turn's failure, as the record-mode checks do, and the call log counts such a call as settled; a call an arm left that no cut turn holds counts as unanswered, with that reason.
 
 The research paper's method draft is at [docs/research/gmi-vs-agent/paper.md](https://github.com/framerslab/agentos/blob/master/docs/research/gmi-vs-agent/paper.md) in this repository, with its [references](https://github.com/framerslab/agentos/blob/master/docs/research/gmi-vs-agent/references.md); its results are pending the confirmatory analysis.
 
 ## What the study does not cover
 
-A result covers only the configuration measured: C1 with the five presets on and no trait adjustment, no retrieval augmentor and no RAG, the reference product's memory configuration and history window, the pinned AgentOS version, and the reference product's companions. `agent({ runtime: 'gmi' })` and `gmi()` are not arms. The study uses one subject model and materials written for it. Another product reruns the persona, sentiment and text tasks with its own setup before it acts on a result. Each report states whether B is the production path or the strongest lightweight configuration.
+A result covers only the configuration measured: C1 with the five presets on and no trait adjustment, no retrieval augmentor and no RAG, the reference product's memory configuration, a 60-message history window, the pinned AgentOS version, and the reference product's companions. `agent({ runtime: 'gmi' })` and `gmi()` are not arms. The study uses one subject model and materials written for it. Another product reruns the persona, sentiment and text tasks with its own setup before it acts on a result. Each report states whether B is the production path or the strongest lightweight configuration.
 
 ## Further reading
 

@@ -22,8 +22,14 @@ import { SlidingSummaryStrategy } from './strategies/SlidingSummaryStrategy.js';
 export class CompactionEngine {
   private strategies: Map<CompactionStrategy, ICompactionStrategy> = new Map();
 
+  /**
+   * @param llmInvoker - Writes the summaries. Without one, each strategy writes
+   *   an extractive summary from the conversation itself.
+   * @param observer - For the hybrid strategy's observation notes.
+   * @param reflector - For the hybrid strategy's memory traces.
+   */
   constructor(
-    llmInvoker: (prompt: string) => Promise<string>,
+    llmInvoker?: (prompt: string) => Promise<string>,
     observer?: MemoryObserver,
     reflector?: MemoryReflector,
   ) {

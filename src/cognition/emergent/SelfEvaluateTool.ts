@@ -267,6 +267,19 @@ export class SelfEvaluateTool implements ITool<SelfEvaluateInput> {
   // --------------------------------------------------------------------------
 
   /**
+   * The learning layer's refusal of an `adjust`, before the approval gate: adjusting a setting or a trait is a
+   * self-change. An `evaluate` on such a turn still runs (it scores and stores nothing), and a `report` reads.
+   *
+   * @param args - The call's arguments.
+   * @param context - The call's context.
+   */
+  refusalBeforeApproval(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult | undefined {
+    if (args?.action !== 'adjust') return undefined;
+    const refusal = selfChangeRefusal(context.sessionData);
+    return refusal ? refusedSelfChange(this.name, refusal) : undefined;
+  }
+
+  /**
    * Execute the requested self-evaluation action.
    *
    * @param args - Action type and associated parameters.

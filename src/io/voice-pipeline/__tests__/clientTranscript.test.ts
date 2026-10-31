@@ -59,6 +59,55 @@ describe('client transcript messages', () => {
     });
   });
 
+  it("carries a null speaker, a labelled speaker and a split run's runOf through the relay, and refuses malformed ones", () => {
+    const voice = '7c0a3a1e-5f4b-4a8e-9d2c-1b6e8f0a2d44:0';
+    const cases: Array<[string, Pick<TranscriptEvent, 'itemId' | 'speaker' | 'runOf'>]> = [
+      ['a speaker that is not yet one voice', { itemId: '7', speaker: null }],
+      ['a labelled speaker', { itemId: '7', speaker: voice }],
+      ['a later run of a split final', { itemId: '7.2', runOf: '7', speaker: voice }],
+    ];
+    for (const [label, fields] of cases) {
+      const message = toClientTranscriptMessage({ ...finalEvent(), ...fields });
+      expect(message, label).toStrictEqual({
+        type: 'transcript',
+        text: 'Hello there.',
+        isFinal: true,
+        confidence: 0.8,
+        startMs: 1200,
+        endMs: 2100,
+        language: 'en',
+        ...fields,
+      });
+      const received: unknown = JSON.parse(JSON.stringify(message));
+      expect(isClientTranscriptMessage(received), label).toBe(true);
+      expect(transcriptEventFromClient(received as ClientTranscriptMessage), label).toStrictEqual({
+        text: 'Hello there.',
+        confidence: 0.8,
+        words: [],
+        isFinal: true,
+        durationMs: 900,
+        startMs: 1200,
+        endMs: 2100,
+        language: 'en',
+        ...fields,
+      });
+    }
+    const valid = { type: 'transcript', text: 'Hi', itemId: '8', isFinal: false };
+    expect(isClientTranscriptMessage({ ...valid, speaker: 's'.repeat(128), runOf: '7'.repeat(128) })).toBe(true);
+    const malformed: Array<[string, unknown]> = [
+      ['a speaker that is neither a string nor null', { ...valid, speaker: 0 }],
+      ['an empty speaker', { ...valid, speaker: '' }],
+      ['a speaker over 128 characters', { ...valid, speaker: 's'.repeat(129) }],
+      ['a runOf that is not a string', { ...valid, runOf: 7 }],
+      ['a null runOf', { ...valid, runOf: null }],
+      ['an empty runOf', { ...valid, runOf: '' }],
+      ['a runOf over 128 characters', { ...valid, runOf: '7'.repeat(129) }],
+    ];
+    for (const [label, value] of malformed) {
+      expect(isClientTranscriptMessage(value), label).toBe(false);
+    }
+  });
+
   it('takes the line id it is given, leaves out what the event lacks, and refuses an event with no id', () => {
     const interim: TranscriptEvent = { text: 'Hello', confidence: 1, words: [], isFinal: false };
     expect(toClientTranscriptMessage(interim, 'line-1')).toStrictEqual({

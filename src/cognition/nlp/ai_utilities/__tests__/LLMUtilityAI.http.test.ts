@@ -368,6 +368,31 @@ describe('LLMUtilityAI over a provider manager', () => {
     ]);
   });
 
+  it('reads a sentiment reply inside a Markdown code fence with one request, and a repair answered inside one', async () => {
+    // claude-haiku-4-5's answer to the sentiment prompt.
+    replies = [
+      '```json\n{\n  "score": 0.6,\n  "polarity": "positive",\n  "intensity": 0.6,\n  "positiveTokens": ["glad", "helpful"],\n  "negativeTokens": []\n}\n```',
+    ];
+    expect(await utility.analyzeSentiment('I am glad this was so helpful.')).toMatchObject({ score: 0.6, polarity: 'positive', intensity: 0.6 });
+    expect(received).toHaveLength(1);
+
+    // A reply that holds no JSON goes back for repair once, and the repair's answer is read inside its fence too.
+    replies = ['The text reads as positive.', 'Here it is:\n```json\n{"score": 0.6, "polarity": "positive"}\n```'];
+    expect((await utility.analyzeSentiment('I am glad this was so helpful.')).score).toBe(0.6);
+    expect(received).toHaveLength(3);
+  });
+
+  it('reads JSON inside a code fence in both classes, so a hybrid asks for no repair', async () => {
+    const stats = new StatisticalUtilityAI('stat-for-fences');
+    await stats.initialize({ utilityId: 'stat-for-fences' });
+    const hybrid = new HybridUtilityAI({ llm: utility, statistical: stats });
+    for (const parser of [utility, stats, hybrid]) {
+      expect(await parser.parseJsonSafe('```json\n{"ok": true}\n```', { attemptFixWithLLM: true })).toEqual({ ok: true });
+      expect(await parser.parseJsonSafe('Here it is:\n```\n["a", "b"]\n```\nDone.', { attemptFixWithLLM: true })).toEqual(['a', 'b']);
+    }
+    expect(received).toHaveLength(0);
+  });
+
   it('normalizes text on textNormalizationModelId, in any language and with none named', async () => {
     const normalizer = new LLMUtilityAI('llm-normalizer');
     await normalizer.initialize({

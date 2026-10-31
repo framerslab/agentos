@@ -32,10 +32,14 @@ import { GeminiProvider, GeminiProviderConfig } from './implementations/GeminiPr
 import { ClaudeCodeProvider, ClaudeCodeProviderConfig } from './implementations/ClaudeCodeProvider';
 import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/GeminiCLIProvider';
 import { LiteLLMProvider, LiteLLMProviderConfig } from './implementations/LiteLLMProvider';
+import { MiniMaxProvider, MiniMaxProviderConfig } from './implementations/MiniMaxProvider';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
-import { contentSafeConsole as console } from '../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../logging/contentSafeConsole.js';
 import { lazyLogger } from '../../logging/loggerFactory.js';
 import { providerName } from '../../logging/events.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('provider_manager');
 const log = lazyLogger('llm.manager');
 
 /**
@@ -45,7 +49,7 @@ const log = lazyLogger('llm.manager');
 export interface ProviderConfigEntry {
   providerId: string;
   enabled: boolean;
-  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | RequestyProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | Record<string, any>>;
+  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | RequestyProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | MiniMaxProviderConfig | Record<string, any>>;
   isDefault?: boolean;
 }
 
@@ -68,6 +72,8 @@ export class AIModelProviderManager {
   private allModelsCache: ModelInfo[] | null = null;
   /** Errors thrown by providers that failed to initialize, keyed by configured provider id. */
   private readonly providerInitErrors: Map<string, unknown> = new Map();
+  /** The entry each provider in {@link providers} was initialized from, keyed as that map is. */
+  private readonly providerEntries: Map<string, ProviderConfigEntry> = new Map();
   public isInitialized: boolean = false;
 
   constructor() {}
@@ -112,6 +118,7 @@ export class AIModelProviderManager {
       // same store, and no call reaches a provider while it shuts down.
       const replaced = Array.from(this.providers.values());
       this.providers.clear();
+      this.providerEntries.clear();
       this.modelToProviderMap.clear();
       this.providerInitErrors.clear();
       this.allModelsCache = null;
@@ -173,6 +180,9 @@ export class AIModelProviderManager {
           case 'litellm':
             providerInstance = new LiteLLMProvider();
             break;
+          case 'minimax':
+            providerInstance = new MiniMaxProvider();
+            break;
           default:
             console.warn(`AIModelProviderManager: Unknown provider ID '${providerEntry.providerId}'. Skipping.`);
             continue;
@@ -180,6 +190,7 @@ export class AIModelProviderManager {
 
         await providerInstance.initialize(providerEntry.config || {});
         this.providers.set(providerInstance.providerId, providerInstance);
+        this.providerEntries.set(providerInstance.providerId, providerEntry);
         log.debug('llm.provider_ready', { provider: providerName(providerInstance.providerId) });
 
         if (providerEntry.isDefault && !this.defaultProviderId) {
@@ -254,6 +265,20 @@ export class AIModelProviderManager {
     this.ensureInitialized(); // Corrected: using ensureInitialized
     const provider = this.providers.get(providerId);
     return provider?.isInitialized ? provider : undefined;
+  }
+
+  /**
+   * The configuration entry a provider is served from: of the enabled entries whose `providerId` names it, in any
+   * letter case, the last one whose provider initialized. A later entry's provider replaces an earlier one's, and an
+   * entry whose provider fails to initialize leaves the one served before it.
+   *
+   * @param providerId - The provider's id, in any letter case.
+   * @returns The entry as configured, or undefined when the provider is not served.
+   */
+  public getProviderEntry(providerId: string): ProviderConfigEntry | undefined {
+    this.ensureInitialized();
+    const id = providerId.toLowerCase();
+    return this.getProvider(id) ? this.providerEntries.get(id) : undefined;
   }
 
   public getDefaultProvider(): IProvider | undefined {
@@ -410,6 +435,7 @@ export class AIModelProviderManager {
     }
     await Promise.allSettled(shutdownPromises);
     this.providers.clear();
+    this.providerEntries.clear();
     this.modelToProviderMap.clear();
     this.allModelsCache = null;
     this.defaultProviderId = undefined;

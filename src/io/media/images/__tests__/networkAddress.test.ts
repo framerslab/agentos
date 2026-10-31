@@ -34,6 +34,9 @@ describe('isPublicNetworkAddress', () => {
     '64:ff9b::a9fe:a9fe',
     '64:ff9b:1::1',
     '64:ff9b:0:1::808:808',
+    // Begins `64:ff9b::` as the /96 form does, written as a URL parser
+    // writes it, yet its sixth group is not zero: outside 64:ff9b::/96.
+    '64:ff9b::5db8:d70e:1',
     '2002:c0a8:101::',
     '100::1',
     '2001:db8::1',
@@ -115,6 +118,17 @@ describe('isPublicNetworkAddress with the network\'s NAT64 prefixes', () => {
     ['2001:4860:4860::8888', NAT64_96],
   ])('%s stays public', (address, prefix) => {
     expect(isPublicNetworkAddress(address, { nat64Prefixes: [prefix] })).toBe(true);
+  });
+
+  // A prefix only adds refusals: a resolver's answer never clears an address
+  // its own range refuses, though it carries a public IPv4 address under it.
+  it.each<[string, Nat64Prefix]>([
+    // The local-use prefix 64:ff9b:1::/48 (RFC 8215), outside 2000::/3.
+    ['64:ff9b:1::5db8:d70e', { bytes: [0, 0x64, 0xff, 0x9b, 0, 0x01, 0, 0, 0, 0, 0, 0], length: 96 }],
+    // Unique local.
+    ['fd00::5db8:d70e', { bytes: [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], length: 96 }],
+  ])('%s stays refused under a prefix that has it carry 93.184.215.14', (address, prefix) => {
+    expect(isPublicNetworkAddress(address, { nat64Prefixes: [prefix] })).toBe(false);
   });
 
   it('takes an index for its second argument as no prefixes, as Array.prototype.every passes one', () => {

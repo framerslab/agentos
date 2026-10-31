@@ -5,6 +5,7 @@ import { CircuitBreaker } from '../CircuitBreaker.js';
 import { defaultCapabilities } from '../HealthyProvider.js';
 import type { EncodedAudioChunk, IStreamingTTS, StreamingTTSSession } from '../types.js';
 import type { HealthyProvider } from '../HealthyProvider.js';
+import type { ProviderPolicy } from '../ProviderPolicy.js';
 
 function mkSession(providerId: string) {
   const ee = new EventEmitter() as unknown as StreamingTTSSession & {
@@ -201,7 +202,7 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     session.setAudioSink!(async () => {});
     await session.writeTokens!('Hello world.');
     a.emit('error', new Error('socket hang up'));
-    return { chain, breaker, failover, errors, third };
+    return { chain, session, breaker, failover, errors, third };
   }
 
   it.each(['error', 'close'] as const)('passes over a backup that reports %s while it takes the replayed text, for the next provider', async (event) => {
@@ -366,6 +367,316 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(a.flush).not.toHaveBeenCalled();
   });
 
+  it('takes nothing from a provider after the error that began the switch, though it ends its segment and completes its flush within the same call: the backup takes the text and is flushed in its place', async () => {
+    const a = pushSession();
+    // As DeepgramAuraStreamingTTS does when its socket closes mid-reply: the error, then, in the same call, the frame it
+    // held and the flush_complete that ends its flush, then its close.
+    a.flush.mockImplementation(() => new Promise<void>(() => {}));
+    const b = pushSession();
+    b.flush.mockImplementation(async () => {
+      b.emit('audio', { audio: Buffer.from([9, 9]), format: 'pcm', sampleRate: 24000, durationMs: 0, text: '' });
+      b.emit('flush_complete');
+    });
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    const heard: number[] = [];
+    const flushes = vi.fn();
+    const errors = vi.fn();
+    session.on('audio', (chunk: EncodedAudioChunk) => heard.push(chunk.audio[0]!));
+    session.on('flush_complete', flushes);
+    session.on('error', errors);
+    session.pushTokens('One. Two.');
+    const flushing = session.flush();
+    await vi.waitFor(() => expect(a.flush).toHaveBeenCalledOnce());
+    a.emit('error', new Error('deepgram aura ws closed (code 1011)'));
+    a.emit('audio', { audio: Buffer.from([1, 1]), format: 'pcm', sampleRate: 24000, durationMs: 0, text: 'One.' });
+    a.emit('flush_complete');
+    a.emit('close');
+    // Nothing of the failed provider's reaches the facade: its flush_complete would end the request as spoken.
+    expect(flushes).not.toHaveBeenCalled();
+    expect(heard).toEqual([]);
+    await flushing;
+    expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+    expect(b.pushTokens).toHaveBeenCalledWith('One. Two.');
+    expect(b.flush).toHaveBeenCalledOnce();
+    expect(heard).toEqual([9]);
+    expect(flushes).toHaveBeenCalledOnce();
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it('goes on with a switch a cancel() comes in on: the backup takes the next request and none of the cut one, and the flush the cut request began flushes nothing of the next', async () => {
+    const a = pushSession();
+    // As a provider whose connection drops mid-flush: its flush waits for a reply that never comes.
+    a.flush.mockImplementation(() => new Promise<void>(() => {}));
+    const b = pushSession();
+    b.flush.mockImplementation(async () => {
+      b.emit('flush_complete');
+    });
+    const second = provider('b', 20, b);
+    // The backup's connection takes a while to open, as a socket's does: the cancel and the next request come meanwhile.
+    let opened!: () => void;
+    second.startSession.mockImplementation(() => new Promise<StreamingTTSSession>((resolve) => {
+      opened = () => resolve(b);
+    }));
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    const flushes = vi.fn();
+    const errors = vi.fn();
+    const closes = vi.fn();
+    session.on('flush_complete', flushes);
+    session.on('error', errors);
+    session.on('close', closes);
+    session.pushTokens('One. Two.');
+    const cut = session.flush();
+    await vi.waitFor(() => expect(a.flush).toHaveBeenCalledOnce());
+    a.emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(second.startSession).toHaveBeenCalledOnce());
+    // A barge-in while the backup opens cuts the request, and the next request begins before the backup has opened.
+    session.cancel();
+    session.pushTokens('Three.');
+    opened();
+    await cut;
+    // The backup takes the next request's text, none of the cut one's, and the flush the cut request began ends
+    // without flushing it: its flush_complete would end the next request before its text has all come.
+    expect(b.pushTokens.mock.calls).toEqual([['Three.']]);
+    expect(failover).toHaveBeenCalledWith(expect.objectContaining({ from: 'a', to: 'b' }));
+    expect(b.flush).not.toHaveBeenCalled();
+    expect(flushes).not.toHaveBeenCalled();
+    // The rest of the next request goes to the backup, and the request ends as a request does.
+    session.pushTokens(' Four.');
+    expect(b.pushTokens.mock.calls).toEqual([['Three.'], [' Four.']]);
+    await session.flush();
+    expect(b.flush).toHaveBeenCalledOnce();
+    expect(flushes).toHaveBeenCalledOnce();
+    expect(chain.currentProviderId).toBe('b');
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['once the switch has ended', false],
+    ['while the backup still opens', true],
+  ] as const)("ends a writeTokens() that waited on the switch with the cancel() that came meanwhile: the backup takes the next request's text alone, written %s, and a later switch replays none of the cut one's", async (_when, early) => {
+    const a = pullSession();
+    const b = pullSession();
+    const c = pullSession();
+    const second = provider('b', 20, b);
+    // The backup's connection takes a while to open, as a socket's does: the cancel and the next request come meanwhile.
+    let opened!: () => void;
+    second.startSession.mockImplementation(() => new Promise<StreamingTTSSession>((resolve) => {
+      opened = () => resolve(b);
+    }));
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts, provider('c', 30, c).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    const errors = vi.fn();
+    session.on('error', errors);
+    session.setAudioSink!(async () => {});
+    await session.writeTokens!('Hello world. ');
+    // The provider in use fails, and the reply's next write waits on the switch while the backup opens.
+    a.emit('error', new Error('socket hang up'));
+    const cut = session.writeTokens!('How are you?');
+    await vi.waitFor(() => expect(second.startSession).toHaveBeenCalledOnce());
+    // A barge-in cuts the request before the backup has opened: the write that waited was issued before it and is the
+    // cut request's. The next request's text comes once the switch has ended, or while the backup still opens.
+    session.cancel();
+    const next = early ? session.writeTokens!('Sure.') : undefined;
+    opened();
+    // A write the cancel cut resolves, as one cut in flight does, and admits nothing.
+    await expect(cut).resolves.toBeUndefined();
+    if (next) await next;
+    else await session.writeTokens!('Sure.');
+    expect(failover).toHaveBeenCalledWith(expect.objectContaining({ from: 'a', to: 'b' }));
+    expect(b.writeTokens.mock.calls).toEqual([['Sure.']]);
+    // The backup fails during the next request: the next provider takes that request's text and none of the cut one's,
+    // which the facade never kept.
+    b.emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledTimes(2));
+    expect(failover.mock.calls[1]![0]).toMatchObject({ from: 'b', to: 'c' });
+    expect(c.writeTokens.mock.calls).toEqual([['Sure.']]);
+    expect(chain.currentProviderId).toBe('c');
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it('resolves a writeTokens() that waited on the switch and that a cancel() cut, when the switch then finds no provider and ends the facade', async () => {
+    const a = pullSession();
+    const second = provider('b', 20, pullSession());
+    // The backup's opening fails once the cancel has come, so no provider takes over and the facade ends on a failure.
+    let refuse!: () => void;
+    second.startSession.mockImplementation(() => new Promise<StreamingTTSSession>((_resolve, reject) => {
+      refuse = () => reject(new Error('connect ECONNREFUSED'));
+    }));
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts], { enableMidSynthesisFailover: true });
+    const session = await chain.startSession();
+    const errors = vi.fn();
+    const closes = vi.fn();
+    session.on('error', errors);
+    session.on('close', closes);
+    session.setAudioSink!(async () => {});
+    await session.writeTokens!('Hello world. ');
+    a.emit('error', new Error('socket hang up'));
+    const cut = session.writeTokens!('How are you?');
+    await vi.waitFor(() => expect(second.startSession).toHaveBeenCalledOnce());
+    session.cancel();
+    refuse();
+    // The write the cancel cut resolves and admits nothing, though the switch then ended the facade.
+    await expect(cut).resolves.toBeUndefined();
+    expect(errors).toHaveBeenCalledOnce();
+    expect(closes).toHaveBeenCalledOnce();
+    // A write issued after the end throws.
+    await expect(session.writeTokens!('Sure.')).rejects.toThrow('synthesis closed');
+  });
+
+  it('throws from a writeTokens() that waited on the switch when close() came, cancel() or not', async () => {
+    const a = pullSession();
+    const b = pullSession();
+    const second = provider('b', 20, b);
+    let opened!: () => void;
+    second.startSession.mockImplementation(() => new Promise<StreamingTTSSession>((resolve) => {
+      opened = () => resolve(b);
+    }));
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts], { enableMidSynthesisFailover: true });
+    const session = await chain.startSession();
+    session.setAudioSink!(async () => {});
+    await session.writeTokens!('Hello world. ');
+    a.emit('error', new Error('socket hang up'));
+    const waiting = session.writeTokens!('How are you?');
+    await vi.waitFor(() => expect(second.startSession).toHaveBeenCalledOnce());
+    session.cancel();
+    session.close();
+    opened();
+    await expect(waiting).rejects.toThrow('synthesis closed');
+    expect(b.writeTokens).not.toHaveBeenCalled();
+  });
+
+  it('takes nothing from a backup once its failure is recorded during the switch: an error and a flush_complete it emits in one call, as it takes text pushed after the replay, leave the text to the next provider', async () => {
+    const a = pushSession();
+    const b = pushSession();
+    const c = pushSession();
+    const failover = vi.fn();
+    const completed = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts, provider('c', 30, c).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    session.on('flush_complete', completed);
+    session.pushTokens('One.');
+    // The backup takes the replay, and the caller's next text comes in the promise job after it, before the switch has
+    // ended. The backup fails as it takes that text: it reports the lost connection and completes its flush in one call.
+    b.pushTokens
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => session.pushTokens(' Two.'));
+      })
+      .mockImplementationOnce(() => {
+        b.emit('error', new Error('socket hang up'));
+        b.emit('flush_complete');
+      });
+    a.emit('error', new Error('socket hang up'));
+    await session.flush();
+    // The request is not ended as spoken: the next provider takes all of its text and is flushed in its place.
+    expect(completed).not.toHaveBeenCalled();
+    expect(failover).toHaveBeenCalledTimes(2);
+    expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+    expect(failover.mock.calls[1]![0]).toMatchObject({ from: 'b', to: 'c' });
+    expect(c.pushTokens.mock.calls).toEqual([['One.'], [' Two.']]);
+    expect(c.flush).toHaveBeenCalledOnce();
+  });
+
+  it("takes an error the backup reports after a cancel() during the switch as the cut request's, though the next request's text has come: the backup takes that text and is not passed over", async () => {
+    const b = pullSession();
+    let release: () => void = () => {};
+    // The replay's write of the cut request is under way when the cancel comes, and settles only after the backup has
+    // reported the cut as an error, once the next request's text has come.
+    b.writeTokens.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const c = pullSession();
+    const f = await switchingFacade(b, c);
+    await vi.waitFor(() => expect(b.writeTokens).toHaveBeenCalledWith('Hello world.'));
+    f.session.cancel();
+    f.session.pushTokens('Next one.');
+    b.emit('error', new Error('request cancelled'));
+    release();
+    await vi.waitFor(() => expect(f.failover).toHaveBeenCalledOnce());
+    expect(f.failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+    expect(b.writeTokens.mock.calls).toEqual([['Hello world.'], ['Next one.']]);
+    expect(f.third.startSession).not.toHaveBeenCalled();
+    expect(f.chain.currentProviderId).toBe('b');
+    expect(f.breaker.isAvailable('b')).toBe(true);
+    expect(f.errors).not.toHaveBeenCalled();
+  });
+
+  it('sends the backup the text pushed in the promise job after it took the replay, before the switch has ended', async () => {
+    const a = pushSession();
+    const b = pushSession();
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    session.pushTokens('One.');
+    // The caller's next text comes in the promise job after the backup took the replay, as the next token of a stream
+    // under way does, while the switch has yet to end.
+    b.pushTokens.mockImplementationOnce(() => {
+      queueMicrotask(() => session.pushTokens(' Two.'));
+    });
+    a.emit('error', new Error('socket hang up'));
+    await session.flush();
+    expect(failover).toHaveBeenCalledOnce();
+    // The backup takes that text as well, before its flush: the reply it speaks is the whole reply.
+    expect(b.pushTokens.mock.calls).toEqual([['One.'], [' Two.']]);
+    expect(b.flush).toHaveBeenCalledOnce();
+  });
+
+  it('counts a request as flushed by its own flush alone: the flush of a cut request that settles once the next one has begun leaves a close during the next one a failure, and the backup takes its text', async () => {
+    const a = pushSession();
+    // As a provider whose flush settles once its server has answered the cancel.
+    let settle!: () => void;
+    a.flush.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      settle = resolve;
+    }));
+    const b = pushSession();
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    const closes = vi.fn();
+    session.on('close', closes);
+    session.pushTokens('One.');
+    const cut = session.flush();
+    await vi.waitFor(() => expect(a.flush).toHaveBeenCalledOnce());
+    // A barge-in cuts the request, and the next one begins before the cut one's flush settles.
+    session.cancel();
+    session.pushTokens('Two.');
+    settle();
+    await cut;
+    // The provider's connection drops while the next request is under way, before its flush: a failure, not the end of
+    // a flushed request, so the facade goes on through the backup, which takes the next request's text.
+    a.emit('close');
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+    expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+    expect(b.pushTokens.mock.calls).toEqual([['Two.']]);
+    expect(closes).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['at once', false],
     ['after a timer, as a connection does', true],
@@ -396,5 +707,84 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(b.flush).not.toHaveBeenCalled();
     expect(chain.currentProviderId).toBe('c');
     expect(errors).not.toHaveBeenCalled();
+  });
+});
+
+describe('StreamingTTSChain: warnings of the provider session in use', () => {
+  /** A provider whose sessions are kept as they open. */
+  function recording(id: string, priority: number) {
+    const sessions: Array<ReturnType<typeof mkSession>> = [];
+    const tts = {
+      providerId: id,
+      priority,
+      capabilities: defaultCapabilities({ streaming: true }),
+      async startSession() {
+        const session = mkSession(id);
+        sessions.push(session);
+        return session;
+      },
+      async healthCheck() {
+        return { ok: true };
+      },
+    } as IStreamingTTS & HealthyProvider;
+    return { tts, sessions };
+  }
+
+  it('carries a warning of the session in use to the facade whole, and none of a session the facade moved off', async () => {
+    const a = recording('a', 10);
+    const b = recording('b', 20);
+    const failover = vi.fn();
+    const facade = await new StreamingTTSChain([a.tts, b.tts], { enableMidSynthesisFailover: true, onProviderFailover: failover }).startSession();
+    const warnings: Error[] = [];
+    facade.on('warning', (warning: Error) => warnings.push(warning));
+    const first = a.sessions[0]! as unknown as EventEmitter;
+    const refused = new Error('a ws failed to open for a reply (HTTP 400); the reply ends unplayed');
+    first.emit('warning', refused);
+    expect(warnings).toEqual([refused]);
+
+    // The session in use fails and the backup takes over: what the failed session reports afterwards is not the facade's.
+    facade.pushTokens('Hello world.');
+    first.emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+    first.emit('warning', new Error('a late warning'));
+    (b.sessions[0]! as unknown as EventEmitter).emit('warning', new Error('b segment spoken again'));
+    expect(warnings.map((warning) => warning.message)).toEqual([refused.message, 'b segment spoken again']);
+    facade.close();
+  });
+
+  it('carries a warning as Error(provider warning) under a ProviderPolicy, without the provider text, and prints one nobody listens for only under the legacy policy', async () => {
+    const identity = { scopeId: 'scope-a', callId: 'call-a', turnId: 'turn-a', generation: { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 } };
+    const a = recording('a', 10);
+    const policy: ProviderPolicy = {
+      mode: 'hosted',
+      fallback: 'none',
+      identity,
+      purposes: ['tts'],
+      providers: [{ providerId: 'a', locality: 'remote', purposes: ['tts'], priceVersion: 'rate-a' }],
+      authorize: vi.fn(async () => {}),
+      onFallback: vi.fn(),
+    };
+    const strict = await new StreamingTTSChain([a.tts], { enableMidSynthesisFailover: true, policy }).startSession();
+    const warnings: Error[] = [];
+    strict.on('warning', (warning: Error) => warnings.push(warning));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      (a.sessions[0]! as unknown as EventEmitter).emit('warning', new Error('a ws rejected: HTTP 400: {"err_msg":"voice not found"}'));
+      expect(warnings.map((warning) => warning.message)).toEqual(['provider warning']);
+      // Nobody listens on the strict facade: nothing is printed.
+      strict.removeAllListeners('warning');
+      (a.sessions[0]! as unknown as EventEmitter).emit('warning', new Error('a ws rejected: HTTP 400'));
+      expect(warn).not.toHaveBeenCalled();
+
+      // Nobody listens on the legacy facade: one line names the provider and the warning, as the provider would.
+      const legacy = recording('b', 10);
+      const facade = await new StreamingTTSChain([legacy.tts], { enableMidSynthesisFailover: true }).startSession();
+      (legacy.sessions[0]! as unknown as EventEmitter).emit('warning', new Error('b ws failed to open for a reply'));
+      expect(warn.mock.calls).toEqual([['[b] b ws failed to open for a reply']]);
+      facade.close();
+    } finally {
+      warn.mockRestore();
+      strict.close();
+    }
   });
 });

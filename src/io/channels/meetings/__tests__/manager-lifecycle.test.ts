@@ -22,7 +22,7 @@ describe('the stop command and the purge sequence', () => {
     await h.stores.transcript.append({ runId, seq: 1, turnId: `${runId}:1`, at: 1, text: 'a sentence' });
     const purged: string[] = [];
     h.manager.addPurgeHook(async (id) => { purged.push(id); });
-    await h.report(runId, 'chat_message', { text: 'ok, STOP TAKING NOTES now', sender: 'Sam' });
+    await h.report(runId, 'chat_message', { text: 'STOP TAKING NOTES!', sender: 'Sam' });
     expect(h.provider.commands.get(runId)?.slice(1)).toEqual([{ name: 'suspendCapture' }, { name: 'leave', reason: 'stopped_by_participant' }]);
     await expect(h.stores.transcript.append({ runId, seq: 2, turnId: `${runId}:2`, at: 2, text: 'late' })).rejects.toBeInstanceOf(FencedError);
     expect((await h.stores.runs.get(runId))?.state).toBe('purging');
@@ -748,7 +748,7 @@ describe('a report whose application fails, and the worker\'s retry of it', () =
       }
       return update(id, patch, expected);
     });
-    const stop = mockEventContext(runId, 'chat_message', { text: 'please stop taking notes', sender: 'participant-1' }, h.clock.now(), h.provider.tokenOf(runId));
+    const stop = mockEventContext(runId, 'chat_message', { text: 'Stop taking notes.', sender: 'participant-1' }, h.clock.now(), h.provider.tokenOf(runId));
     await expect(h.manager.processProviderEvent('mock', stop)).rejects.toThrow('run store unavailable');
     expect((await h.stores.runs.get(runId))?.state).toBe('in_call');
     expect(await h.manager.processProviderEvent('mock', stop)).toEqual({ accepted: true, applied: 1 });
@@ -911,7 +911,7 @@ describe('the completion hook', () => {
     const calls: string[] = [];
     const h = harness({ beforeComplete: async (run) => void calls.push(run.runId) });
     const stopped = await heard(h, 'none');
-    await h.report(stopped, 'chat_message', { text: 'ok, STOP TAKING NOTES now', sender: 'Sam' });
+    await h.report(stopped, 'chat_message', { text: 'STOP TAKING NOTES!', sender: 'Sam' });
     await h.report(stopped, 'left', { reason: 'stopped_by_participant', seconds: 30 });
     await h.report(stopped, 'done', { seconds: 30 });
     await h.manager.tick();

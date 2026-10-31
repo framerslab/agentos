@@ -147,16 +147,22 @@ export interface ToolExecutionContext {
    */
   personaCapabilities?: string[];
   /**
-   * The call's expiry signal, when the call carries one (a workflow step's
-   * timer: `ToolExecutionRequestDetails.signal`). A tool that runs other
+   * The call's stop, when the call carries one
+   * (`ToolExecutionRequestDetails.signal`): its turn's stop on a call a GMI
+   * makes; on a step, the one its composed call passes on, or a workflow
+   * step's timer joined with the workflow call's own. A tool that runs other
    * tools on the caller's behalf (a composed tool) passes it on, so a step
-   * whose call expired starts nothing, however late its approval arrives.
+   * whose call stopped starts nothing: it is refused before its approval is
+   * asked, or after the approval when the stop came while it was pending. A
+   * tool may end its own work when it aborts; nothing else cuts a call already
+   * running.
    */
   signal?: AbortSignal;
   /**
    * Live objects of the turn that made the call: its approval gate, its budget, its explicit user, a seat's tool names
-   * and hooks, and the `processToolCall` of the view the call came through (`dispatch`). Set by gmi()'s tool hook and by
-   * a runtime seat's view; the step gate runs each step of a composed tool through `dispatch`.
+   * and hooks, the `processToolCall` of the view the call came through (`dispatch`) and the output guardrails' tool-call
+   * gate the turn asks (`toolCallGate`). Set by gmi()'s tool hook, by a runtime seat's view, and by a GMI whose turn
+   * asks such a gate; the step gate runs each step of a composed tool through `dispatch`.
    */
   callerTurn?: CallerTurnContext;
 }
@@ -315,6 +321,20 @@ export interface ITool<TInput extends Record<string, any> = any, TOutput = any> 
    * @optional
    */
   validateArgs?(args: Record<string, any>): { isValid: boolean; errors?: any[] };
+
+  /**
+   * Optional. The refusal a call meets before it acts, whatever a human would answer: the result the tool returns
+   * without changing anything, or `undefined` when the call may run. The tool orchestrator asks it before its approval
+   * gate and returns such a refusal in place of asking for approval, so no one is asked to approve a call that cannot
+   * act. The self-modification tools answer the learning layer's refusals here (`selfChangeRefusal`); a tool that
+   * leaves it out is gated as before. The tool's `execute` refuses the same call itself.
+   *
+   * @param args - The call's arguments as the model sent them, before the input schema is checked.
+   * @param context - The call's context, its session data among it.
+   * @returns The refusal, or `undefined`.
+   * @optional
+   */
+  refusalBeforeApproval?(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<TOutput> | undefined;
 
   /**
    * Optional. A method to gracefully shut down the tool and release any resources it holds

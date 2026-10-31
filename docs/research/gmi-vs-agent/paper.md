@@ -78,7 +78,7 @@ Holm's procedure tests several hypotheses in sequence and controls the family-wi
 
 **A, `agent()` without memory.** [`agent()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) without `runtime: 'gmi'`, given B's static system blocks, the turn's addon appended before generation, B's tool definitions with implementations over A's own stores, a chain-of-thought block, an output cap of 6,000 tokens and a 60-second duration limit, with its history reseeded from the script and no memory. On T1, A also runs as the oracle arm, with the gold evidence appended to the user turn.
 
-**Z, the bare loop.** One streamed chat-completions call per turn over `fetch`, to the root every arm's main calls reach (the stub in record mode, the metering proxy in live mode): the subject model; one system message holding B's static blocks joined with a blank line, then the turn's addon; A's 60-message window over Z's own transcript, ending with the user turn; and an output cap of 6,000 tokens. Z has no tools, no memory, no metaprompts, no chain-of-thought block and no AgentOS module. A call that fails before any text is sent again at most twice, and never past the deadline. With an Anthropic subject, Z reaches the model through Anthropic's OpenAI-compatible endpoint, which hoists system messages into one system field joined with a single newline, ignores `reasoning_effort` and supports no prompt caching [30]. A probe on the day of a live run sends an invalid value of each sampling field on that route and expects a refusal for each; when the route ignores a field, Z speaks the vendor's Messages API for the run, and the report records the deviation.
+**Z, the bare loop.** One streamed chat-completions call per turn over `fetch`, to the root every arm's main calls reach (the stub in record mode, the metering proxy in live mode): the subject model; one system message holding B's static blocks joined with a blank line, then the turn's addon; A's 60-message window over Z's own transcript, ending with the user turn; and an output cap of 6,000 tokens. Z has no tools, no memory, no metaprompts, no chain-of-thought block and no AgentOS module. A call that fails before any text is sent again at most twice, and never past the deadline. With an Anthropic subject, Z reaches the model through Anthropic's OpenAI-compatible endpoint, which hoists system messages into one system field joined with a single newline, ignores `reasoning_effort` and supports no prompt caching [30]. A probe on the day of a live run sends that route an invalid `thinking` and an invalid `output_config.effort` and expects a refusal for each, and one valid call, which it expects answered; when the route ignores either field or refuses the valid call, Z speaks the vendor's Messages API for the run, and the report records the deviation.
 
 **The other arms.** R, the retrieval anchor, runs the bench's retrieval over the ingested store and then a reader on the subject model, on 60 T1 questions. B with one frozen sentence (notice frustration or confusion, acknowledge it, change approach) runs on T3. The port arms run only on an endpoint the GMI wins: on T4, `agent()` given C0's captured system text and memory block item by item; on T2 and T3, `agent()` with the host assembling the GMI's memory context and persona rendering; and a host-side sentiment tracker and metaprompt executor around `agent()` over B's prompt. B′ and C0′, second samples of B and C0, form the A/A control. C0 and C1 also run T3 in a cold-session mode, with a new GMI on every turn and the history hydrated from the arm's own transcript.
 
@@ -151,7 +151,7 @@ Candidate order: C1 is evaluated first. When C1 does not reach GO, C0 is evaluat
 
 ### 4.5 Judges, rubrics and calibration
 
-Two model judges from two vendors, J1 and J2, judge the replies. Each is pinned by engine, model and effort before the first confirmatory item and named in every report's pins table. A third grading pass, J3, settles a disagreement between J1's and J2's grades when their agreement falls below its bar: on T1, at 30 double-graded answers and again at the end, a κ below 0.80 or a raw agreement below 95% sends every B and C answer to both graders and every disagreement to the third pass. A named alternate replaces J1 only when J1 becomes unavailable, and then re-judges the whole task, since no judge is swapped inside a task.
+Two model judges from two vendors, J1 and J2, judge the replies. Each is pinned by engine, model and effort before the first confirmatory item and named in the pins table of every report that carries judgments. A third grading pass, J3, settles a disagreement between J1's and J2's grades when their agreement falls below its bar: on T1, at 30 double-graded answers and again at the end, a κ below 0.80 or a raw agreement below 95% sends every B and C answer to both graders and every disagreement to the third pass. A named alternate replaces J1 only when J1 becomes unavailable, and then re-judges the whole task, since no judge is swapped inside a task.
 
 The judges run as command-line model clients: CI writes one prompt file per judgment, the clients answer the files, and CI parses the replies and scores them. The clients expose no temperature, so the harness measures each judge's stability by repeats instead of setting it. J1's client reports no served model, so J1's model is recorded as requested and unverified, and J1 is read through its planted controls and repeats. A reply whose header names another engine, model or effort is discarded and asked again.
 
@@ -223,7 +223,7 @@ Pilot data never enter the analysis. A harness defect found after the pilot void
 
 ### 5.1 The subject model
 
-The subject is the model of the reference product's quality tier that served the most companion replies over the window its reply records cover before 0a is frozen, read once and read-only. Those records start on 2026-10-05, so the window is shorter than the 30 days the design planned. 0a records the window, the counts and the model, and every report names the model; this section names it once 0a is frozen.
+The subject is the model of the reference product's quality tier that served the most companion replies over the window its reply records cover before 0a is frozen, read once and read-only. Those records start on 2026-10-05, so the window is shorter than the 30 days the design planned. 0a records the window, the counts and the model, and every report names the model. The subject is Anthropic's `claude-haiku-4-5-20251001` (provider `anthropic`), as 0a records it and every report prints it.
 
 ### 5.2 Vendors, keys and spend controls
 
@@ -344,13 +344,15 @@ It then follows these rules. A tie reads "no advantage detected; the study had 8
 
 **Statistical.** The intervals assume that clusters are independent [26, 27]. LOCOMO's ten conversations are too few clusters for pooling, so LOCOMO is reported apart from R1. The primary endpoints are tested as one family under Holm's procedure [25].
 
-**External.** One subject model, one configuration (C1 with the five presets on and no trait adjustment, no retrieval augmentor or RAG, the reference product's memory configuration and window) and one pinned AgentOS version.
+**External.** One subject model, one configuration (C1 with the five presets on and no trait adjustment, no retrieval augmentor or RAG, the reference product's memory configuration and a 60-message history window) and one pinned AgentOS version.
 
-**Z's construction.** With an Anthropic subject, Z reaches the model through a compatibility layer that its vendor describes as primarily intended to test and compare model capabilities and not as a long-term or production-ready solution for most use cases, that supports no prompt caching, and that joins system messages with a single newline [30]. The probe on the day of a live run checks each sampling field, and Z falls back to the vendor's Messages API when a field is ignored. Z enters no decision rule.
+**Z's construction.** With an Anthropic subject, Z reaches the model through a compatibility layer that its vendor describes as primarily intended to test and compare model capabilities and not as a long-term or production-ready solution for most use cases, that supports no prompt caching, and that joins system messages with a single newline [30]. The probe on the day of a live run checks the `thinking` and `output_config.effort` fields and one valid call, and Z falls back to the vendor's Messages API when a field is ignored or the valid call is refused. Z enters no decision rule.
 
 ## 9. Reproducibility
 
 Public: the method (the [study page](../../evaluation/GMI_VS_AGENT.md) and this paper) and the arms' library code in AgentOS; then, as each is produced, the SHA-256 of 0a and of 0b on the study page, each before the data it governs, and the report sets, listed under the study page's "Reports and results", with each report's run identity in public form (the harness named as the unpublished agentos-bench gmi-vs-agent family with its revision, and the CI run id) and each file's SHA-256 in the set's README. Private: the gmi-vs-agent family's code, which is not in the public agentos-bench repository (the revision the reports print is that private code's), the runner that drives B, the materials, the raw outputs, the judgments and the ledger, kept in a private repository with durable storage. Record mode runs in the project's CI on every change to the harness, and a record-mode report set shows the harness's mechanics, not the arms. The family's code is not published with this paper, so record mode runs only in the project's CI; a release of the family is a separate decision.
+
+The record-mode pilot's report set: [reports/record-pilot-2026-10-28-40723979292/README.md](reports/record-pilot-2026-10-28-40723979292/README.md).
 
 ## Competing interests
 
@@ -442,7 +444,7 @@ The confirmatory analysis's report comes from the same generator over the pooled
 
 ## Appendix B: rubrics
 
-The rubric texts are fixed in the protocol and stay private; every report prints their hashes in its appendix.
+The rubric texts are fixed in the protocol and stay private; every report that carries judgments prints their hashes in its appendix.
 
 | Rubric | What it judges |
 |---|---|

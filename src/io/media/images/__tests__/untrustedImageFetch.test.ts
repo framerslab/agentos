@@ -370,6 +370,41 @@ describe('fetchUntrustedImage', () => {
     expect(received).toEqual([]);
   });
 
+  it('refuses an IPv6 address its own range refuses before the NAT64 prefixes are asked for, by name and as a literal', async () => {
+    // A resolver that would reveal 64:ff9b:1::/96, under the local-use prefix
+    // 64:ff9b:1::/48 (RFC 8215), and answers the name with 93.184.215.14
+    // under it, recording each name it is asked about. The address is
+    // outside 2000::/3, so its own range refuses it whatever it carries,
+    // and the prefixes are asked for only for an IPv6 address its own range
+    // passes.
+    const asked: string[] = [];
+    const lookup: LookupFunction = (hostname, _options, callback) => {
+      asked.push(hostname);
+      const address = hostname === 'ipv4only.arpa' ? '64:ff9b:1::c000:aa' : '64:ff9b:1::5db8:d70e';
+      callback(null, [{ address, family: 6 }]);
+    };
+
+    const byName: unknown = await fetchUntrustedImage(`http://images.example.test:${port}/image.png`, { lookup }).catch(
+      (reason: unknown) => reason,
+    );
+    const byLiteral: unknown = await fetchUntrustedImage(`http://[64:ff9b:1::5db8:d70e]:${port}/image.png`, {
+      lookup,
+    }).catch((reason: unknown) => reason);
+
+    expect(byName).toMatchObject({
+      code: 'IMAGE_URL_REFUSED',
+      message: 'imageToBuffer: images.example.test does not resolve to a public network address.',
+    });
+    expect(imageUrlRefusalDetail(byName)).toEqual({ resolvedAddress: '64:ff9b:1::5db8:d70e' });
+    expect(byLiteral).toMatchObject({
+      code: 'IMAGE_URL_REFUSED',
+      message: 'imageToBuffer: 64:ff9b:1::5db8:d70e is not a public network address.',
+    });
+    // The name alone was looked up: ipv4only.arpa never was.
+    expect(asked).toEqual(['images.example.test']);
+    expect(received).toEqual([]);
+  });
+
   it('checks an https URL the same way: a refused name opens no connection, an allowed one opens its own', async () => {
     // A plain TCP server stands in for the https host: it counts connections
     // and ends each one, so the TLS handshake fails after the connection the

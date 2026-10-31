@@ -2,8 +2,9 @@
  * Fakes of the @livekit/rtc-node surface that the LiveKit modules of the
  * hearing layer and the speaking transport use: a room whose local participant
  * records the text streams it sends and the tracks it publishes, participants
- * (a phone caller among them), publications, tracks, an AudioStream backed by a
- * real web ReadableStream, and an AudioSource that records what it is given and
+ * (a phone caller among them) that join, leave, change their attributes and
+ * send chat messages, publications, tracks, an AudioStream backed by a real
+ * web ReadableStream, and an AudioSource that records what it is given and
  * plays it out when a test says so. Tests drive frames, re-publications,
  * disconnects and playout with them; no LiveKit server is involved.
  */
@@ -32,8 +33,39 @@ export const SOURCE_SCREENSHARE_AUDIO = 4;
 
 /** rtc-node's `ParticipantKind.STANDARD`: a person's page or app. */
 export const PARTICIPANT_KIND_STANDARD = 0;
+/** rtc-node's `ParticipantKind.EGRESS`: a recorder LiveKit Egress brought into the room. */
+export const PARTICIPANT_KIND_EGRESS = 2;
 /** rtc-node's `ParticipantKind.SIP`: a phone caller LiveKit SIP brought into the room. */
 export const PARTICIPANT_KIND_SIP = 3;
+/** rtc-node's `ParticipantKind.AGENT`: another agent, an avatar worker among them. */
+export const PARTICIPANT_KIND_AGENT = 4;
+
+/** The topic LiveKit's chat and LiveKit Agents' text input use. */
+export const CHAT_TOPIC = 'lk.chat';
+
+/**
+ * A text stream as rtc-node's `TextStreamReader` delivers one: `readAll()` resolves the text, the async iterator yields
+ * it once and `close()` resolves. Each is a mock, so a test tells a stream that was read from one closed unread.
+ */
+export function textReader(text: string) {
+  return {
+    readAll: vi.fn(async () => text),
+    close: vi.fn(async () => undefined),
+    [Symbol.asyncIterator]: vi.fn(() =>
+      (async function* () {
+        yield text;
+      })()
+    ),
+  };
+}
+
+/** One text stream the local participant sent: its text, topic, attributes and destinations. */
+export interface SentTextStream {
+  text: string;
+  topic?: string;
+  attributes?: Record<string, string>;
+  destinationIdentities?: string[];
+}
 
 /** A remote track, known by its SID. */
 export class FakeTrack {
@@ -160,6 +192,64 @@ export class FakeRoom extends EventEmitter {
     caller.kind = PARTICIPANT_KIND_SIP;
     caller.attributes = { 'sip.callID': 'SCL_example', 'sip.phoneNumber': '+12125550147', 'sip.callStatus': 'active' };
     return caller;
+  }
+
+  /**
+   * A participant joins, as rtc-node reports one: it is added with its publications and `participantConnected` is
+   * emitted, then each publication that holds a track is subscribed (`trackSubscribed`), as auto-subscription does.
+   */
+  join(identity: string, kind: number = PARTICIPANT_KIND_STANDARD, ...publications: FakePublication[]): FakeParticipant {
+    const participant = this.addParticipant(identity, ...publications);
+    participant.kind = kind;
+    this.emit('participantConnected', participant);
+    for (const publication of publications) {
+      if (publication.track) this.emit('trackSubscribed', publication.track, publication, participant);
+    }
+    return participant;
+  }
+
+  /**
+   * A participant leaves, as rtc-node reports one: its subscribed tracks go (`trackUnsubscribed`, and their streams
+   * end), it is removed from the room, and `participantDisconnected` is emitted.
+   */
+  leave(identity: string): FakeParticipant {
+    const participant = this.remoteParticipants.get(identity);
+    if (!participant) throw new Error(`FakeRoom: no participant ${identity}`);
+    for (const publication of participant.trackPublications.values()) {
+      if (publication.track) this.unsubscribe(participant, publication);
+    }
+    this.remoteParticipants.delete(identity);
+    this.emit('participantDisconnected', participant);
+    return participant;
+  }
+
+  /** A participant's attributes change: they are merged in, then `participantAttributesChanged(changed, participant)`. */
+  setAttributes(identity: string, attributes: Record<string, string>): void {
+    const participant = this.remoteParticipants.get(identity);
+    if (!participant) throw new Error(`FakeRoom: no participant ${identity}`);
+    participant.attributes = { ...participant.attributes, ...attributes };
+    this.emit('participantAttributesChanged', { ...attributes }, participant);
+  }
+
+  /**
+   * A participant sends a chat message on `lk.chat`: the handler registered on that topic is called with a
+   * {@link textReader} of the text and the sender's identity.
+   *
+   * @returns The reader, so a test tells whether it was read or closed unread.
+   */
+  chat(identity: string, text: string): ReturnType<typeof textReader> {
+    const handler = this.textHandlers.get(CHAT_TOPIC);
+    if (!handler) throw new Error(`FakeRoom: nothing handles ${CHAT_TOPIC}`);
+    const reader = textReader(text);
+    handler(reader, { identity });
+    return reader;
+  }
+
+  /** The text streams the local participant sent on `topic`, in the order it sent them. */
+  sentOn(topic: string): SentTextStream[] {
+    return this.localParticipant.sendText.mock.calls
+      .map(([text, options]) => ({ text, ...(options as Omit<SentTextStream, 'text'> | undefined) }))
+      .filter((stream) => stream.topic === topic);
   }
 
   /** What rtc-node does on a subscription: the publication holds the track, then `trackSubscribed`. */

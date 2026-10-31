@@ -486,6 +486,11 @@ export class WorkflowRuntime {
     }
   }
 
+  /**
+   * Runs a tool task through the tool orchestrator, which applies the disabled list, the permission check and the
+   * approval a direct call meets. The task is the workflow's, not a call a model requested, so the output guardrails
+   * that evaluate tool calls never judge it.
+   */
   private async executeToolTask(
     workflowDefinition: WorkflowDefinition,
     taskDefinition: WorkflowTaskDefinition,

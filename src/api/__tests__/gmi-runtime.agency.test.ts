@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import { agency } from '../agency';
 import { agent } from '../agent';
+import { gmi } from '../gmi';
+import { DEFAULT_COT_INSTRUCTION } from '../generateText';
+import { sessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 import type { ApprovalDecision, ApprovalRequest } from '../types';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -105,5 +108,30 @@ describe('agency() with a member served by GMIs', () => {
     expect(order).toEqual(['asked search']);
     const toolMessage = s.seen[1].messages.find((m) => m.role === 'tool');
     expect(String(toolMessage?.content)).toContain('searches are paused');
+  });
+
+  it("a seat whose names leave no tool offers none and sends no tool instruction, and onBeforeGeneration sees the tools the turn offers", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Lesson.'), reply.text('Answer.')] });
+    const offered: string[][] = [];
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Teach.',
+      tools: searchTools([]),
+      onBeforeGeneration: async (context) => {
+        offered.push(context.tools.map((tool) => tool.name));
+      },
+    });
+    const team = agency({ provider: 'openai', model: 'stub-model', apiKey: k, agents: { tutor: sessionSeat(member, { tools: [] }) } });
+    const instruction = DEFAULT_COT_INSTRUCTION.split('\n')[0];
+
+    await team.generate('Teach the team.');
+    await team.close();
+    expect(s.seen[0].options.tools ?? []).toEqual([]);
+    expect(systemText(s.seen[0])).not.toContain(instruction);
+    // The precondition: the member's own turn offers its tool, the instruction first.
+    await member.session('own').send('Search for cats.');
+    expect(s.seen[1].options.tools).toHaveLength(1);
+    expect(systemText(s.seen[1])).toContain(instruction);
+    expect(offered).toEqual([[], ['search']]);
   });
 });

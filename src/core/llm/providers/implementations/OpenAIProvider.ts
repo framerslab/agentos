@@ -46,9 +46,13 @@ import { redactUrlSecrets } from '../url-secrets.js';
 import { OPENAI_MODEL_PRICING, openAIModelPricing } from './openaiPricing.js';
 import { lazyLogger } from '../../../logging/loggerFactory.js';
 import { errorFields } from '../../../logging/events.js';
-import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 import { AttemptBudgetExhaustedError, CountingAttemptBudget } from '../../../../safety/runtime/ModelAttemptBudget.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('openai_provider');
 const log = lazyLogger('llm');
+
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
 // import fetch, { RequestInit, Response as FetchResponse, AbortController } from 'node-fetch'; // Example for Node
@@ -91,6 +95,7 @@ namespace OpenAIAPITypes {
   export interface ChatMessage {
     role: string;
     content: string | null;
+    reasoning_content?: string;
     tool_calls?: ToolCall[];
   }
   export interface ChatChoice {
@@ -116,6 +121,7 @@ namespace OpenAIAPITypes {
   export interface StreamDelta {
     role?: string;
     content?: string | null;
+    reasoning_content?: string;
     tool_calls?: ToolCallDelta[];
   }
   export interface StreamChoice {
@@ -229,6 +235,12 @@ namespace OpenAIAPITypes {
     param?: string | null;
   }
 }
+
+/**
+ * The OpenAI API's base URL, which requests go to when the config names no `baseURL`. `embedText` posts OpenAI
+ * embeddings under it too.
+ */
+export const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
 /**
  * Configuration specific to the OpenAIProvider.
@@ -960,7 +972,7 @@ export class OpenAIProvider implements IProvider {
     await this.keyPool?.close();
 
     this.config = {
-      baseURL: 'https://api.openai.com/v1',
+      baseURL: OPENAI_DEFAULT_BASE_URL,
       maxRetries: 3,
       requestTimeout: 60000, // 60 seconds
       ...config, // User-provided config overrides defaults
@@ -1008,7 +1020,7 @@ export class OpenAIProvider implements IProvider {
    * @private
    * @throws {OpenAIProviderError} If fetching or parsing models fails.
    */
-  private async refreshAvailableModels(): Promise<void> {
+  protected async refreshAvailableModels(): Promise<void> {
     const apiKey = await this.getApiKey();
     const response = await this.makeApiRequest<OpenAIAPITypes.ListModelsResponse>(
       '/models',
@@ -1836,7 +1848,7 @@ export class OpenAIProvider implements IProvider {
    * Builds the payload for OpenAI's Chat Completions API.
    * @private
    */
-  private buildChatCompletionPayload(
+  protected buildChatCompletionPayload(
     modelId: string,
     messages: ChatMessage[],
     options: ModelCompletionOptions,
@@ -2362,6 +2374,8 @@ export class OpenAIProvider implements IProvider {
         message: {
           role: c.message.role as ModelCompletionChoice['message']['role'],
           content: c.message.content,
+          ...(this.providerId === 'minimax' && c.message.reasoning_content !== undefined
+            ? { reasoningText: c.message.reasoning_content } : {}),
           tool_calls: c.message.tool_calls,
         },
         finishReason: c.finish_reason,
@@ -2490,6 +2504,8 @@ export class OpenAIProvider implements IProvider {
             modelId: apiChunk.model,
             choices: [responseChoice],
             responseTextDelta,
+            ...(this.providerId === 'minimax' && choice.delta.reasoning_content !== undefined
+              ? { reasoningTextDelta: choice.delta.reasoning_content } : {}),
             toolCallsDeltas,
             isFinal,
             usage: finalUsage, // Only on the very final message from the stream

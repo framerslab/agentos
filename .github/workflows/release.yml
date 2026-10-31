@@ -90,10 +90,31 @@ jobs:
           npm install -g npm@11.20.0
           test "$(npm --version)" = 11.20.0
 
+      # npm publish --provenance records its provenance statement in Sigstore's transparency log before it uploads the
+      # package. When the log records the entry but its reply does not reach npm, sigstore-js sends the entry again,
+      # the log answers 409, and npm fails with TLOG_CREATE_ENTRY_ERROR: no npm release fetches the existing entry
+      # instead (https://github.com/npm/cli/issues/10078). semantic-release has pushed the tag by then, so the version
+      # reaches neither npm nor GitHub, and the next run finds nothing after the tag (runs 41126134054 and 41131650556).
+      # After such a failure the script deletes the tag that attempt pushed, once npm and GitHub show no release of it,
+      # and semantic-release runs once more after a 30-second pause, signing anew. A second conflict deletes that
+      # attempt's tag too and fails the job, so the next run releases; any other failure fails the job as before.
+      # shell: bash adds pipefail, so the if reads semantic-release's status rather than tee's.
       - name: Semantic Release
         if: steps.guard.outputs.should_release == 'true'
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm exec semantic-release
+        run: |
+          for attempt in 1 2; do
+            output="$RUNNER_TEMP/semantic-release-$attempt.log"
+            if pnpm exec semantic-release 2>&1 | tee "$output"; then
+              exit 0
+            fi
+            node .github/scripts/drop-unpublished-release-tag.mjs "$output" || exit 1
+            if [ "$attempt" = 1 ]; then
+              sleep 30
+            fi
+          done
+          exit 1

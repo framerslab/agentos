@@ -22,6 +22,8 @@ import type {
   InfiniteContextConfig,
   SummaryChainNode,
 } from '../../../core/types.js';
+import { compactionSplitIndex } from './compactionSplit.js';
+import { earlierSummaries, extractiveSummary, summaryRoom } from './extractiveSummary.js';
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -33,12 +35,22 @@ function generateId(): string {
 
 export class HybridStrategy implements ICompactionStrategy {
   readonly name = 'hybrid' as const;
-  private readonly llmInvoker: (prompt: string) => Promise<string>;
+  private readonly llmInvoker?: (prompt: string) => Promise<string>;
   private readonly observer?: MemoryObserver;
   private readonly reflector?: MemoryReflector;
 
+  /**
+   * @param llmInvoker - Writes the narrative summary. Without one, or when it
+   *   fails or answers nothing, the summary is the ten most important
+   *   observation notes, or without notes the segment's first three user
+   *   messages, cut to the tokens the segment held less the summary message's
+   *   header, after an earlier summary in the segment, carried forward as far as
+   *   the window has room for it under the compaction threshold.
+   * @param observer - Extracts observation notes from the segment.
+   * @param reflector - Consolidates the notes into memory traces.
+   */
   constructor(
-    llmInvoker: (prompt: string) => Promise<string>,
+    llmInvoker?: (prompt: string) => Promise<string>,
     observer?: MemoryObserver,
     reflector?: MemoryReflector,
   ) {
@@ -54,11 +66,8 @@ export class HybridStrategy implements ICompactionStrategy {
     const startTime = Date.now();
     const { messages } = input;
 
-    const preserveCount = Math.min(
-      config.preserveRecentTurns * 2,
-      messages.length - 2,
-    );
-    const splitIdx = messages.length - preserveCount;
+    // The newest turns stay as they are; see compactionSplitIndex.
+    const splitIdx = compactionSplitIndex(messages.length, config.preserveRecentTurns);
     if (splitIdx <= 0) {
       return this.noopResult(messages, startTime);
     }
@@ -133,6 +142,10 @@ export class HybridStrategy implements ICompactionStrategy {
       observationNotes,
       tracesToEncode,
       config,
+      // An extractive summary takes no more tokens than the segment, less the summary message's header, and carries
+      // an earlier summary forward only as far as the window has room for it.
+      Math.max(25, inputTokens - 30),
+      summaryRoom(input, config, toKeep.reduce((s, m) => s + m.tokenEstimate, 0), 30),
     );
 
     const outputTokens = estimateTokens(summary);
@@ -204,6 +217,8 @@ export class HybridStrategy implements ICompactionStrategy {
     notes: ObservationNote[],
     traces: Partial<MemoryTrace>[],
     config: InfiniteContextConfig,
+    maxFallbackTokens: number,
+    roomTokens: number,
   ): Promise<string> {
     const conversationText = messages
       .map((m) => `[${m.role}] ${m.content}`)
@@ -251,23 +266,33 @@ export class HybridStrategy implements ICompactionStrategy {
       'Summary:',
     ].join('\n');
 
-    try {
-      return (await this.llmInvoker(prompt)).trim();
-    } catch {
-      // Fallback: use observation notes as summary.
-      if (notes.length > 0) {
-        return notes
-          .sort((a, b) => b.importance - a.importance)
-          .slice(0, 10)
-          .map((n) => `[${n.type}] ${n.content}`)
-          .join('\n');
+    if (this.llmInvoker) {
+      try {
+        const written = (await this.llmInvoker(prompt)).trim();
+        if (written) return written;
+      } catch {
+        // The extractive summary below.
       }
-      return `Conversation turns ${messages[0].turnIndex}–${messages[messages.length - 1].turnIndex}: ${messages
-        .filter((m) => m.role === 'user')
-        .slice(0, 3)
-        .map((m) => m.content.slice(0, 100))
-        .join('; ')}`;
     }
+    // No summarizer, a failed call or an empty answer: the most important
+    // observation notes or the segment's first user messages stand for it,
+    // within `maxFallbackTokens`, so the summary takes no more of the window
+    // than the turns it replaces, after an earlier summary in the segment,
+    // carried forward as far as `roomTokens` leaves room for it.
+    const earlier = earlierSummaries(messages);
+    const own =
+      notes.length > 0
+        ? [...notes]
+            .sort((a, b) => b.importance - a.importance)
+            .slice(0, 10)
+            .map((n) => `[${n.type}] ${n.content}`)
+            .join('\n')
+        : `Conversation turns ${messages[0].turnIndex}–${messages[messages.length - 1].turnIndex}: ${messages
+            .filter((m) => m.role === 'user')
+            .slice(0, 3)
+            .map((m) => m.content.slice(0, 100))
+            .join('; ')}`;
+    return extractiveSummary(earlier, own, maxFallbackTokens, roomTokens);
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
