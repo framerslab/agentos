@@ -150,6 +150,31 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
   // ---------------------------------------------------------------------------
 
   /**
+   * The refusal a write meets whatever a human would answer, read before the tool orchestrator's approval gate
+   * (`ITool.refusalBeforeApproval`), so no one is asked to approve a write that cannot act: a freeze, and, with the
+   * turn's scope ids on the call, an `organization` trace, a `thread` trace with nothing to file it under, and a session
+   * that records no writes. `execute` refuses the same call itself, in the same order; a type or scope outside the input
+   * schema's lists is left to it.
+   *
+   * @param args - The call's arguments, before the input schema is checked.
+   * @param context - The call's context.
+   * @returns The refusal, or `undefined` when the call may run.
+   */
+  refusalBeforeApproval(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<MemoryAddOutput> | undefined {
+    const refusal = memoryWriteRefusal(context.sessionData);
+    if (refusal) return refusedMemoryWrite(this.name, refusal);
+    const turn = memoryToolTurnOf(context);
+    if (!turn) return undefined;
+    const type: unknown = args?.type ?? 'episodic';
+    const scope: unknown = args?.scope ?? 'user';
+    if (typeof type !== 'string' || !(MEMORY_TYPES as readonly string[]).includes(type)) return undefined;
+    if (typeof scope !== 'string' || !(MEMORY_SCOPES as readonly string[]).includes(scope)) return undefined;
+    if (scope === 'organization') return refusedMemoryWrite(this.name, 'organization_scope');
+    if (!resolveMemoryToolScopeId(scope, context)) return refusedMemoryWrite(this.name, 'no_thread');
+    return turn.record ? undefined : refusedMemoryWrite(this.name, 'no_recorder');
+  }
+
+  /**
    * Insert a new memory trace row into `memory_traces`.
    *
    * Defaults applied when optional fields are absent:

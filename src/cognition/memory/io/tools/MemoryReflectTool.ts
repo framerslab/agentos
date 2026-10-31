@@ -110,6 +110,21 @@ export class MemoryReflectTool implements ITool<MemoryReflectInput, Consolidatio
   // ---------------------------------------------------------------------------
 
   /**
+   * The refusal a consolidation meets whatever a human would answer, read before the tool orchestrator's approval gate
+   * (`ITool.refusalBeforeApproval`), so no one is asked to approve a run that cannot act: a freeze, then any call that
+   * carries a learning layer's session data (`withdrawn`). `execute` refuses the same call itself, in the same order.
+   *
+   * @param _args - The call's arguments.
+   * @param context - The call's context.
+   * @returns The refusal, or `undefined` when the call may run.
+   */
+  refusalBeforeApproval(_args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<ConsolidationResult> | undefined {
+    const refusal = memoryWriteRefusal(context.sessionData);
+    if (refusal) return refusedMemoryWrite(this.name, refusal);
+    return readToolLearningContext(context.sessionData) ? refusedMemoryWrite(this.name, 'withdrawn') : undefined;
+  }
+
+  /**
    * Run one full consolidation cycle and return the statistics.
    *
    * If a consolidation cycle is already in progress (mutex guard in
