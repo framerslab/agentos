@@ -12,6 +12,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { GraphRuntime } from '../runtime/GraphRuntime.js';
+import type { GraphExpansionContext, GraphExpansionHandler } from '../runtime/GraphRuntime.js';
 import { NodeExecutor } from '../runtime/NodeExecutor.js';
 import { InMemoryCheckpointStore } from '../checkpoint/InMemoryCheckpointStore.js';
 import type { Checkpoint } from '../checkpoint/ICheckpointStore.js';
@@ -2725,5 +2726,190 @@ describe('GraphRuntime: a node a resume marks complete from its recorded result'
 
     expect(await runtime.resume(graph, runId)).toEqual({ publish: 'Published.' });
     expect(model.calls).toEqual([PUBLISH]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The checkpoint saved before an expansion
+// ---------------------------------------------------------------------------
+//
+// A runtime with an expansion handler saves a checkpoint after a node that
+// asks for an expansion, or that reaches a planner reevaluation, before it
+// hands the request to the handler; the node's edges are decided after the
+// expansion, on the graph the expansion leaves. The handler can throw, as when
+// the planner's model cannot be reached, and the run then ends with that
+// checkpoint its latest. A resume from it follows the edge the node's
+// condition picks, and only that edge.
+
+/**
+ * An expansion handler whose planner cannot be reached the first time it is
+ * asked, and that applies no expansion after. `askedAfter` lists the node each
+ * request came after.
+ */
+function plannerDownOnce(): GraphExpansionHandler & { askedAfter: string[] } {
+  const askedAfter: string[] = [];
+  return {
+    askedAfter,
+    async handle(context: GraphExpansionContext) {
+      askedAfter.push(context.nodeId);
+      if (askedAfter.length === 1) throw new Error('the planner could not be reached');
+      return null;
+    },
+  };
+}
+
+/** A runtime that asks `expansionHandler` to reevaluate the plan after every node. */
+function runtimeReevaluatingOver(
+  store: InMemoryCheckpointStore,
+  providerCall: NodeExecutorDeps['providerCall'],
+  expansionHandler: GraphExpansionHandler,
+): GraphRuntime {
+  return new GraphRuntime({
+    checkpointStore: store,
+    nodeExecutor: new NodeExecutor({ loopController: new LoopController(), providerCall }),
+    expansionHandler,
+    reevalInterval: 1,
+  });
+}
+
+/**
+ * START -> the nodes in `before` -> audit, whose two conditional edges lead to
+ * publish when the audit passes and to revise when it does not, and both to
+ * END. The audit passes.
+ */
+function auditRouted(id: string, audit: GraphNode, before: GraphNode[] = []): CompiledExecutionGraph {
+  const chain = [START, ...before.map((node) => node.id), audit.id];
+  const graph = graphOf(id, [...before, audit, publishNode(), reviseNode()], [
+    ...chain.slice(1).map((target, i): [string, string] => [chain[i]!, target]),
+    ['publish', END],
+    ['revise', END],
+  ]);
+  const verdict = (): string => 'publish';
+  graph.edges.push(
+    {
+      id: 'audit-publish',
+      source: audit.id,
+      target: 'publish',
+      type: 'conditional',
+      condition: { type: 'function', fn: verdict },
+    },
+    {
+      id: 'audit-revise',
+      source: audit.id,
+      target: 'revise',
+      type: 'conditional',
+      condition: { type: 'function', fn: verdict },
+    },
+  );
+  return graph;
+}
+
+describe('GraphRuntime: a resume from the checkpoint saved before an expansion', () => {
+  it('runs a read node again, from the state it ran on, and follows the edge it picks then', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel({ [AUDIT]: AUDITED, [PUBLISH]: 'Published.', [REVISE]: 'Revised.' });
+    const planner = plannerDownOnce();
+    const runtime = runtimeReevaluatingOver(store, model.providerCall, planner);
+    const graph = auditRouted('g-expansion-read', auditNode());
+
+    const { seen, error } = await readUntilThrown(runtime.stream(graph, {}));
+
+    expect((error as Error).message).toBe('the planner could not be reached');
+    expect(trace(seen)).toEqual([
+      'run_start',
+      'node_start:audit',
+      'node_end:audit',
+      'checkpoint_saved:audit',
+      'mission:checkpoint_saved:audit',
+    ]);
+    const callsBeforeResume = model.calls.length;
+    expect(await runtime.resume(graph, runIdOf(seen))).toEqual({ audit: AUDITED, publish: 'Published.' });
+    const resumed = model.calls.slice(callsBeforeResume);
+    expect(resumed.map((call) => call.instructions)).toEqual([AUDIT, PUBLISH]);
+    // audit runs on the state it ran on the first time, which holds nothing it
+    // wrote, and asks the planner again.
+    expect(resumed[0]!.artifacts).toEqual({});
+    expect(planner.askedAfter).toEqual(['audit', 'audit', 'publish']);
+  });
+
+  it('marks an external node complete with its recorded output, and follows the edge it picks', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel({ [AUDIT]: AUDITED, [PUBLISH]: 'Published.', [REVISE]: 'Revised.' });
+    const runtime = runtimeReevaluatingOver(store, model.providerCall, plannerDownOnce());
+    // audit files its verdict with a service, so a resume does not run it again.
+    const graph = auditRouted('g-expansion-external', auditNode({ effectClass: 'external' }));
+
+    const { seen, error } = await readUntilThrown(runtime.stream(graph, {}));
+
+    expect((error as Error).message).toBe('the planner could not be reached');
+    const callsBeforeResume = model.calls.length;
+    const resumed = await readAll(runtime.streamResume(graph, runIdOf(seen)));
+    expect(trace(resumed)).toEqual([
+      'run_start',
+      'node_end:audit',
+      'edge_transition:audit->publish',
+      'node_start:publish',
+      'node_end:publish',
+      'checkpoint_saved:publish',
+      'mission:checkpoint_saved:publish',
+      'run_end',
+    ]);
+    expect(resumed[resumed.length - 1]).toMatchObject({
+      type: 'run_end',
+      finalOutput: { audit: AUDITED, publish: 'Published.' },
+    });
+    expect(model.calls.slice(callsBeforeResume).map((call) => call.instructions)).toEqual([PUBLISH]);
+  });
+
+  it('follows one edge when the run that saved the checkpoint was itself a resumed run', async () => {
+    const store = new InMemoryCheckpointStore();
+    const model = recordingModel({ [AUDIT]: AUDITED, [PUBLISH]: 'Published.', [REVISE]: 'Revised.' });
+    const runtime = runtimeReevaluatingOver(store, model.providerCall, plannerDownOnce());
+    const graph = auditRouted('g-expansion-resumed', auditNode(), [approveNode()]);
+
+    // The run waits for the person at approve. Once they approve, the resumed
+    // run audits the notes, and the planner cannot be reached.
+    const runId = runIdOf(await readAll(runtime.stream(graph, {})));
+    const { error } = await readUntilThrown(runtime.streamResume(graph, runId));
+    expect((error as Error).message).toBe('the planner could not be reached');
+
+    const callsBeforeResume = model.calls.length;
+    expect(await runtime.resume(graph, runId)).toEqual({ audit: AUDITED, publish: 'Published.' });
+    expect(model.calls.slice(callsBeforeResume).map((call) => call.instructions)).toEqual([AUDIT, PUBLISH]);
+  });
+
+  it('follows the target an external node picked itself, as its recorded result names it', async () => {
+    const store = new InMemoryCheckpointStore();
+    // listen picks its own target, as the exit of a voice node does, from the
+    // two its edges lead to.
+    const executeMock = vi.fn(async (node: GraphNode): Promise<NodeExecutionResult> =>
+      node.id === 'listen'
+        ? { success: true, output: 'The caller asked to publish.', routeTarget: 'publish' }
+        : { success: true, output: `${node.id}-done` },
+    );
+    const runtime = new GraphRuntime({
+      checkpointStore: store,
+      nodeExecutor: makeExecutorWithMock(executeMock),
+      expansionHandler: plannerDownOnce(),
+      reevalInterval: 1,
+    });
+    const graph = graphOf(
+      'g-expansion-route-target',
+      [makeNode('listen', { effectClass: 'external' }), makeNode('publish'), makeNode('revise')],
+      [
+        [START, 'listen'],
+        ['listen', 'publish'],
+        ['listen', 'revise'],
+        ['publish', END],
+        ['revise', END],
+      ],
+    );
+
+    const { seen, error } = await readUntilThrown(runtime.stream(graph, {}));
+
+    expect((error as Error).message).toBe('the planner could not be reached');
+    executeMock.mockClear();
+    expect(await runtime.resume(graph, runIdOf(seen))).toEqual({ publish: 'publish-done' });
+    expect(executeMock.mock.calls.map(([node]) => node.id)).toEqual(['publish']);
   });
 });

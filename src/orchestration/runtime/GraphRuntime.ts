@@ -18,7 +18,7 @@
  * - Edge evaluation is a pure function of `GraphEdge[]`, `GraphState`, and `NodeExecutionResult`.
  */
 
-import type { CompiledExecutionGraph, EffectClass, GraphEdge, GraphState } from '../ir/types.js';
+import type { CompiledExecutionGraph, EffectClass, GraphEdge, GraphNode, GraphState } from '../ir/types.js';
 import { END } from '../ir/types.js';
 import type {
   GraphEvent,
@@ -79,6 +79,17 @@ export interface GraphExpansionContext {
   nodeId: string;
   state: GraphState;
   request: GraphExpansionRequest;
+  /**
+   * The checkpoint the runtime saved after the node and before it handed any of
+   * this step's expansion requests to the handler. The node's edges are decided
+   * after the expansion, on the graph it leaves, so the checkpoint does not list
+   * the node in `visitedNodes`, and a resume from it routes the node once by its
+   * edges. A `write`, `external` or `human` node keeps its result and what it
+   * wrote, and a resume marks it complete with its recorded output; a `pure` or
+   * `read` node is saved as it was before it ran, and a resume runs it again.
+   * After a parallel batch, whose nodes' edges are decided before the expansion,
+   * the checkpoint lists every node of the batch.
+   */
   checkpointIdBefore?: string;
   completedNodes: string[];
   skippedNodes: string[];
@@ -205,8 +216,10 @@ export class GraphRuntime {
    * node of the batch runs to the end first, none of the batch's events is yielded,
    * and the error is the first in the order the nodes are declared; a node of the
    * batch counts as completed only once its edges are decided, so a node whose edges
-   * threw is in no checkpoint as completed. A resume by the `runId` of `run_start`
-   * continues from the last checkpoint the store saved.
+   * threw is in no checkpoint as completed. The checkpoint saved before an expansion
+   * does not list the node the expansion came after as completed either (see
+   * {@link GraphExpansionContext.checkpointIdBefore}). A resume by the `runId` of
+   * `run_start` continues from the last checkpoint the store saved.
    *
    * @param graph - Compiled execution graph to run.
    * @param input - Initial user-provided input; frozen into `GraphState.input`.
@@ -227,7 +240,7 @@ export class GraphRuntime {
     /** Node ids that were bypassed due to conditional routing. */
     const skippedNodes: string[] = [];
     /** Per-node execution results accumulated for checkpoint persistence. */
-    const nodeResults: Record<string, { effectClass: EffectClass; output: unknown; durationMs: number }> = {};
+    const nodeResults: Record<string, RecordedResult> = {};
 
     yield { type: 'run_start', runId, graphId: graph.id };
 
@@ -335,7 +348,7 @@ export class GraphRuntime {
             // no result, so a resume executes it again.
             const failed = !result.success && !result.interrupt;
             if (!failed) {
-              nodeResults[nodeId] = { effectClass: node.effectClass, output: result.output, durationMs };
+              nodeResults[nodeId] = recordedResult(node, result, durationMs);
             }
 
             const scratchWrite = failed ? undefined : result.scratchUpdate;
@@ -697,12 +710,10 @@ export class GraphRuntime {
         // node again, whatever its effect class.
         const failed = !result.success && !result.interrupt;
         if (!failed) {
-          nodeResults[nodeId] = {
-            effectClass: node.effectClass,
-            output: result.output,
-            durationMs,
-          };
+          nodeResults[nodeId] = recordedResult(node, result, durationMs);
         }
+        // The state the node ran on, for the checkpoint saved before an expansion.
+        const stateBeforeWrites = state;
 
         // Apply state patches produced by the node.
         if (result.scratchUpdate && !failed) {
@@ -809,13 +820,20 @@ export class GraphRuntime {
 
           for (const request of expansionRequests) {
             if (!checkpointIdBefore) {
+              // The node's edges are decided after the expansion, so this
+              // checkpoint does not list it as completed: a resume from it
+              // routes the node once, rather than making every target of its
+              // edges ready.
+              const beforeExpansion = checkpointBeforeExpansion(
+                node, state, stateBeforeWrites, nodeResults, completedNodes,
+              );
               checkpointIdBefore = await this.saveCheckpoint(
                 activeGraph,
                 runId,
                 nodeId,
-                state,
-                nodeResults,
-                completedNodes,
+                beforeExpansion.state,
+                beforeExpansion.nodeResults,
+                beforeExpansion.visitedNodes,
                 skippedNodes,
                 [],
               );
@@ -912,8 +930,9 @@ export class GraphRuntime {
    * evaluated on the restored state with the node's visit recorded
    * (`currentNodeId` names the node and `visitedNodes` lists it), as a node's
    * are after it runs, so the run follows the targets they pick and skips the
-   * others. A node that failed recorded no result and wrote nothing, so it runs
-   * again, from the state it ran on.
+   * others; a replayed node that picked its target itself, as the exit of a voice
+   * node does, goes to the target its recorded result names. A node that failed
+   * recorded no result and wrote nothing, so it runs again, from the state it ran on.
    *
    * @param graph - The same compiled graph that was originally invoked.
    * @param runOrCheckpointId - Either the original run id or an exact checkpoint id.
@@ -1014,12 +1033,7 @@ export class GraphRuntime {
         // Nodes with side-effects that were recorded are replayed from stored output
         // to prevent duplicate writes/calls.
         const recorded = checkpoint.nodeResults[nodeId];
-        if (
-          recorded &&
-          (recorded.effectClass === 'write' ||
-            recorded.effectClass === 'external' ||
-            recorded.effectClass === 'human')
-        ) {
+        if (recorded && REPLAYED_EFFECT_CLASSES.has(recorded.effectClass)) {
           yield { type: 'node_end', nodeId, output: recorded.output, durationMs: recorded.durationMs };
 
           // The node does not run again, but its edges still decide where the
@@ -1028,13 +1042,14 @@ export class GraphRuntime {
           // checkpoint it forked, and the targets the node does not pick are
           // skipped. That state records the node's visit, as the state after
           // a node runs does: `currentNodeId` names the node and
-          // `visitedNodes` lists it.
+          // `visitedNodes` lists it. A node that picked its target itself, as
+          // a voice node's exit does, goes to the target its result recorded.
           state = stateManager.recordNodeVisit(state, nodeId);
           const replayedEdges = activeGraph.edges.filter(e => e.source === nodeId);
           const replayedTargets = await this.evaluateEdges(
             replayedEdges,
             state,
-            { success: true, output: recorded.output },
+            { success: true, output: recorded.output, routeTarget: recorded.routeTarget },
           );
           for (const potentialTarget of replayedEdges.map(e => e.target)) {
             if (
@@ -1081,8 +1096,10 @@ export class GraphRuntime {
         // result, so a later resume executes it again.
         const failed = !result.success && !result.interrupt;
         if (!failed) {
-          nodeResults[nodeId] = { effectClass: node.effectClass, output: result.output, durationMs };
+          nodeResults[nodeId] = recordedResult(node, result, durationMs);
         }
+        // The state the node ran on, for the checkpoint saved before an expansion.
+        const stateBeforeWrites = state;
 
         if (result.scratchUpdate && !failed) state = stateManager.updateScratch(state, result.scratchUpdate);
         if (result.artifactsUpdate && !failed) {
@@ -1172,13 +1189,20 @@ export class GraphRuntime {
 
           for (const request of expansionRequests) {
             if (!checkpointIdBefore) {
+              // The node's edges are decided after the expansion, so this
+              // checkpoint does not list it as completed: a resume from it
+              // routes the node once, rather than making every target of its
+              // edges ready.
+              const beforeExpansion = checkpointBeforeExpansion(
+                node, state, stateBeforeWrites, nodeResults, completedNodes,
+              );
               checkpointIdBefore = await this.saveCheckpoint(
                 activeGraph,
                 runId,
                 nodeId,
-                state,
-                nodeResults,
-                completedNodes,
+                beforeExpansion.state,
+                beforeExpansion.nodeResults,
+                beforeExpansion.visitedNodes,
                 skippedNodes,
                 [],
               );
@@ -1364,7 +1388,7 @@ export class GraphRuntime {
     runId: string,
     nodeId: string,
     state: GraphState,
-    nodeResults: Record<string, { effectClass: EffectClass; output: unknown; durationMs: number }>,
+    nodeResults: Record<string, RecordedResult>,
     visitedNodes: string[],
     skippedNodes: string[],
     pendingEdges: string[],
@@ -1500,6 +1524,74 @@ function resultsOf<TResult>(
       .filter((id) => Object.prototype.hasOwnProperty.call(nodeResults, id))
       .map((id) => [id, nodeResults[id]] as [string, TResult]),
   );
+}
+
+/** A node's result as the run records it and a checkpoint holds it. */
+type RecordedResult = Checkpoint['nodeResults'][string];
+
+/**
+ * The result the run records for a node that completed or interrupted, with the
+ * target the node picked itself, when it did, so that a resume that marks the
+ * node complete from it goes there.
+ *
+ * @param node       - The node that ran.
+ * @param result     - What its executor returned.
+ * @param durationMs - How long its last attempt took.
+ */
+function recordedResult(node: GraphNode, result: NodeExecutionResult, durationMs: number): RecordedResult {
+  return {
+    effectClass: node.effectClass,
+    output: result.output,
+    durationMs,
+    ...(result.routeTarget ? { routeTarget: result.routeTarget } : {}),
+  };
+}
+
+/**
+ * The effect classes of the nodes a resume marks complete with their recorded
+ * output instead of running them again: a `write` or `external` node would
+ * repeat what it did outside the graph, and a `human` node would ask again.
+ */
+const REPLAYED_EFFECT_CLASSES: ReadonlySet<EffectClass> = new Set<EffectClass>(['write', 'external', 'human']);
+
+/**
+ * What the checkpoint saved before an expansion holds for the node after which
+ * the runtime hands expansion requests to the handler.
+ *
+ * The node's edges are decided after the expansion, on the graph it leaves, and
+ * a node counts as completed once its edges are decided, so the checkpoint
+ * leaves the node out of `visitedNodes`: a resume from it routes the node once
+ * by its edges. A node a resume marks complete with its recorded output keeps
+ * its result and what it wrote, as in the checkpoint of a node that interrupts.
+ * Any other node is saved as it was before it ran, with neither its result nor
+ * its writes, so a resume runs it again on the state it ran on, where a reducer
+ * does not count its writes twice, and the expansion requests it makes then go
+ * to the handler.
+ *
+ * @param node            - The node the expansion requests came after.
+ * @param stateAfterNode  - The run's state after the node ran.
+ * @param stateBeforeNode - The state the node ran on.
+ * @param nodeResults     - The results recorded in the run, the node's included.
+ * @param completedNodes  - The nodes completed in the run, the node included.
+ */
+function checkpointBeforeExpansion<TResult>(
+  node: GraphNode,
+  stateAfterNode: GraphState,
+  stateBeforeNode: GraphState,
+  nodeResults: Record<string, TResult>,
+  completedNodes: readonly string[],
+): { state: GraphState; nodeResults: Record<string, TResult>; visitedNodes: string[] } {
+  const visitedNodes = completedNodes.filter((id) => id !== node.id);
+  if (REPLAYED_EFFECT_CLASSES.has(node.effectClass)) {
+    return { state: stateAfterNode, nodeResults, visitedNodes };
+  }
+  return {
+    state: stateBeforeNode,
+    nodeResults: Object.fromEntries(
+      Object.entries(nodeResults).filter(([resultNodeId]) => resultNodeId !== node.id),
+    ),
+    visitedNodes,
+  };
 }
 
 /**
