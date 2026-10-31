@@ -16,7 +16,7 @@
  */
 
 import type { EventLogger, Level, Logger, LogMethod } from '../Logger.js';
-import { AGENTOS_CONTEXT, AGENTOS_EVENTS, errorFields, safeWord, valid, type ContextSchema, type EventMap, type Fields } from '../events.js';
+import { AGENTOS_CONTEXT, AGENTOS_EVENTS, errorFields, safeWord, valid, type AgentOSEvents, type ContextSchema, type EventMap, type Fields } from '../events.js';
 import { checkContext, checkFields, isValidationError, LogValidationError, sinkCall, type RefusalReason } from '../forward.js';
 import { admit, burstOwner, closeOwner } from './burst.js';
 
@@ -51,7 +51,8 @@ const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call
  * @param options.events - The product's event map.
  * @param options.context - The context keys a child may bind, AgentOS's own unless given.
  * @param options.burst - Lines a minute for each event and each refusal reason, 30 unless set. Every kit in the process shares the budgets, at the smallest bound asked for.
- * @returns The kit.
+ * @returns The kit, typed over AgentOS's events and the product's map, so it also takes the
+ * `console_line` and `process.*` lines `captureConsole` and `installProcessHandlers` write.
  * @throws {TypeError} When `burst` is not a positive integer, an event's name is not a word of at most 64 characters or is `log_refused` or `log_held`, or an event declares a context key, `event`, `level` or `time` as a field.
  *
  * @example
@@ -64,7 +65,7 @@ const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call
  */
 export function createAllowListLogger<E extends EventMap, C extends ContextSchema = typeof AGENTOS_CONTEXT>(options: {
   logger: Logger; events: E; context?: C; burst?: number;
-}): AllowListLogger<E, C> {
+}): AllowListLogger<E & AgentOSEvents, C> {
   const events: EventMap = { ...AGENTOS_EVENTS, ...options.events };
   const schema = (options.context ?? AGENTOS_CONTEXT) as C;
   const limit = options.burst ?? 30;
@@ -157,6 +158,7 @@ export function createAllowListLogger<E extends EventMap, C extends ContextSchem
     };
     return api as AllowListLogger<E, C>;
   }
-  return make({});
+  // The map the kit checks against always holds AgentOS's own events, so its type does too.
+  return make({}) as unknown as AllowListLogger<E & AgentOSEvents, C>;
 }
 export { safeWord };

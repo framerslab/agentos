@@ -130,6 +130,11 @@
       "import": "./dist/core/logging/index.js",
       "default": "./dist/core/logging/index.js"
     },
+    "./logging/kit": {
+      "types": "./dist/core/logging/kit/index.d.ts",
+      "import": "./dist/core/logging/kit/index.js",
+      "default": "./dist/core/logging/kit/index.js"
+    },
     "./orchestration": {
       "import": "./dist/orchestration/index.js",
       "default": "./dist/orchestration/index.js",

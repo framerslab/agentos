@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {
   AGENTOS_CONTEXT, AGENTOS_EVENTS, lazyLogger, resetLoggerFactory, setLogger,
-  type EventLogger, type Logger, type LogMethod,
+  type AgentOSEvents, type EventLogger, type Logger, type LogMethod,
 } from '@framers/agentos/logging';
 import {
   captureConsole, createAllowListLogger, installProcessHandlers, LogValidationError, type AllowListLogger,
@@ -41,13 +41,16 @@ function item(name: string, run: () => void): void {
 
 const events = { 'job.done': { ms: 'int', state: { enum: ['ok', 'failed'] } } } as const;
 const records: Record_[] = [];
-const kit: AllowListLogger<typeof events, typeof AGENTOS_CONTEXT> = createAllowListLogger({ logger: recorder(records), events });
+const kit = createAllowListLogger({ logger: recorder(records), events });
+// The kit's declared type: the product's map and AgentOS's own events, over AgentOS's context keys.
+const declared: AllowListLogger<typeof events & AgentOSEvents, typeof AGENTOS_CONTEXT> = kit;
 
 item('both subpaths serve the values their declarations name', () => {
   for (const value of [setLogger, lazyLogger, resetLoggerFactory, createAllowListLogger, captureConsole, installProcessHandlers]) {
     assert.equal(typeof value, 'function');
   }
   assert.equal(typeof LogValidationError, 'function');
+  assert.equal(typeof declared.asLogger, 'function');
   assert.ok(Object.prototype.hasOwnProperty.call(AGENTOS_EVENTS, 'http.request'));
   assert.deepEqual(Object.keys(AGENTOS_CONTEXT).sort(), ['component', 'extension', 'requestId']);
 });
