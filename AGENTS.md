@@ -48,7 +48,7 @@ Available scripts that CI does not run: `pnpm run build:knowledge`, `pnpm run do
 - TSDoc on every exported symbol, and comments where the code is not obvious.
 - Use `pnpm run typecheck` for the type check.
 - A new public module needs an entry in the `exports` map of `package.json`.
-- The build rewrites relative import specifiers in `dist`, in the compiled modules and in their declarations, so a NodeNext consumer resolves both ([`scripts/fix-esm-imports.mjs`](https://github.com/framerslab/agentos/blob/master/scripts/fix-esm-imports.mjs)); follow the import style of the file you edit.
+- The build rewrites relative import specifiers in `dist`, in the compiled modules and in their declarations, so a NodeNext consumer resolves both ([`scripts/fix-esm-imports.mjs`](https://github.com/framerslab/agentos/blob/master/scripts/fix-esm-imports.mjs)); `scripts/package-exports.test.mjs` compiles such a consumer with library checks on and fails on any compiler error but those it lists in a dependency's own declarations; follow the import style of the file you edit.
 - New LLM providers follow the [provider integration guide](https://github.com/framerslab/agentos/blob/master/docs/contributing/new-provider.md): a provider SDK is an optional or peer dependency loaded lazily, never a new required dependency of the core.
 - Provider support is decided on technical merit. Sponsorship never affects whether a provider is accepted, code review, merge decisions or the roadmap, and sponsored placement is always labeled ([SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md)).
 - Benchmarks live in [agentos-bench](https://github.com/framerslab/agentos-bench), not here.
