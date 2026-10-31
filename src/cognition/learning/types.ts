@@ -43,6 +43,64 @@ export type LearningKind =
 /** A candidate's state: its latest verdict row decides it. */
 export type LedgerVerdict = 'pending' | 'kept' | 'reverted' | 'rejected';
 
+/** Whose a ledger row is: a learner, or, with `userId: null`, the agent (a turn with no learner, a persona-scope change). */
+export interface LedgerLearner {
+  namespace: string;
+  agentKey: string;
+  userId: string | null;
+}
+
+/** What a ledger row cites. */
+export interface LedgerEvidence {
+  outcomeIds?: string[];
+  feedbackEventId?: string;
+  signals?: Record<string, number | string>;
+  probeRunId?: string;
+  hiddenTestRunId?: string;
+  approvalId?: string;
+  note?: string;
+}
+
+/** The versions a row was written under. */
+export interface LedgerVersions {
+  agentos: string;
+  rules: string;
+  renderer: number;
+  probes: string;
+  writer?: string;
+  model: string;
+}
+
+/** One ledger row. Rows are never updated; a verdict is a row of its own that names its candidate. */
+export interface LedgerEntry {
+  /** A ULID. */
+  id: string;
+  rowType: 'candidate' | 'verdict';
+  candidateId: string;
+  learner: LedgerLearner;
+  kind: LearningKind;
+  /** `operator:<id>`, `operator:persona`, `tool:<name>`, `memory:<writer>`, `rule:<id>@<version>`, `gate`, `user:<id>`. */
+  actor: string;
+  /** A trait name or `traits`, a trace id or a set's id, a setting's name. */
+  subject: string;
+  before: unknown;
+  after: unknown;
+  evidence: LedgerEvidence;
+  verdict: LedgerVerdict;
+  reason: string;
+  versions: LedgerVersions;
+  sessionId?: string;
+  /** On a `userId: null` row, the explicit id of a second user whose turn it records. */
+  turnUserId?: string;
+  /** The hash of the chain's previous row; 64 zeros on the first. */
+  prevHash: string;
+  /** The row's place in its chain, from 1. */
+  seq: number;
+  /** On a row that changes its subject's stored state, the digest of that state after the change. */
+  stateDigest?: string;
+  createdAt: string;
+}
+
 /** One agent with one user, in one namespace: what learned state belongs to. */
 export interface LearnerKey {
   /** The organization the user belongs to; `''` when the host has none. */
