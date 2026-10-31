@@ -46,12 +46,18 @@ import type { ILearnerSession, ILearningLayer, LearnerContext } from '../learnin
  */
 const LEARNER_OPEN_BUDGET_MS = 2_000;
 
-/** A layer's answer as a learner session; an answer with no `prepareTurn` is a failed open. */
+/** A layer's answer as a learner session; an answer that lacks one of a session's calls is a failed open. */
 function asLearnerSession(answer: unknown): ILearnerSession {
-  if (!answer || typeof (answer as ILearnerSession).prepareTurn !== 'function') {
+  const session = answer as Partial<ILearnerSession> | null | undefined;
+  if (
+    !session ||
+    typeof session.prepareTurn !== 'function' ||
+    typeof session.endSession !== 'function' ||
+    typeof session.currentTraits !== 'function'
+  ) {
     throw new Error('the learning layer answered with no learner session');
   }
-  return answer as ILearnerSession;
+  return session as ILearnerSession;
 }
 
 /**
