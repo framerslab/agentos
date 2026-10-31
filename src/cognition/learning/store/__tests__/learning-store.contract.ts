@@ -5,7 +5,8 @@
  * by candidate and by learner, and a chain's rows with its head in one read; a chain head is advanced by
  * compare-and-swap, moved only in its last row, hash and seq,
  * and refused once marked forgotten; trait rows are updated by version; freezes, sessions and tombstones are kept,
- * freezes listed in one order and a session row's start kept when it is written again; text is ordered by UTF-16 code
+ * freezes listed in one order, a session row's start kept when it is written again and a session row written at the
+ * version its writer read; text is ordered by UTF-16 code
  * unit, whatever order the database sorts text in; a user's rows are deleted in one namespace only, and the tombstone
  * stays; a transaction that throws takes back every write it made, a deletion included, and no read sees one of them;
  * a transaction's handle refuses every call once its transaction has ended; every row a store is given or hands out is
@@ -293,6 +294,21 @@ export function runLearningStoreContract(name: string, open: () => Promise<Learn
         const again = { personaId: 'coach', conversationIds: ['c-1', 'c-2'], brainIds: ['b-1', 'b-2'], version: 2 };
         await store.putSessionRow(sessionRow({ ...again, startedAt: LATER }));
         expect(await store.sessionRow('A', 'tutor', 's-1', '42', 'learner')).toEqual(sessionRow(again));
+      }));
+
+    it('writes a session row at the version its writer read, and leaves a row another writer moved on', () =>
+      withStore(async (store) => {
+        // A writer that read no row puts it in only while there is none.
+        await store.putSessionRow(sessionRow(), 0);
+        await store.putSessionRow(sessionRow({ conversationIds: ['c-9'] }), 0);
+        expect(await store.sessionRow('A', 'tutor', 's-1', '42', 'learner')).toEqual(sessionRow());
+        // Of two writers that read version 1, the first writes over it, and the second leaves the row as it is.
+        const first = { conversationIds: ['c-1', 'c-2'], version: 2 };
+        await store.putSessionRow(sessionRow(first), 1);
+        await store.putSessionRow(sessionRow({ conversationIds: ['c-1', 'c-3'], version: 2 }), 1);
+        expect(await store.sessionRow('A', 'tutor', 's-1', '42', 'learner')).toEqual(sessionRow(first));
+        await store.transaction((tx) => tx.putSessionRow(sessionRow({ ...first, brainIds: ['b-1', 'b-2'], startedAt: LATER, version: 3 }), 2));
+        expect(await store.sessionRow('A', 'tutor', 's-1', '42', 'learner')).toEqual(sessionRow({ ...first, brainIds: ['b-1', 'b-2'], version: 3 }));
       }));
 
     it("deletes a user's rows in one namespace, keyed by user or by turnUserId, and keeps the tombstone", () =>
