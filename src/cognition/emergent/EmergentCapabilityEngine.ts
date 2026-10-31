@@ -229,6 +229,13 @@ export type EmergentExecutableTool = ITool<Record<string, unknown>, unknown> & {
    * step of a composition instead of at the composed call.
    */
   readonly emergentMode: 'compose' | 'sandbox';
+  /**
+   * A composition's step tools: the names its steps call, each once; a
+   * code-forged tool has none. `launch_agency` reads them to refuse a seat
+   * whose allowlist names the composition and leaves one of them out, since
+   * the composition could not run whole in that seat.
+   */
+  readonly stepTools?: readonly string[];
 };
 
 /** What happened to one stored tool at load. */
@@ -2345,6 +2352,9 @@ export class EmergentCapabilityEngine {
       outputSchema: tool.outputSchema,
       category: 'emergent',
       emergentMode: tool.implementation.mode,
+      ...(tool.implementation.mode === 'compose'
+        ? { stepTools: [...new Set(tool.implementation.steps.map((step) => step.tool))] }
+        : {}),
       // A composition has side effects when one of its steps does (or is a
       // composition itself); each such step is then asked at the step (see
       // ToolOrchestrator), not at the composed call.
