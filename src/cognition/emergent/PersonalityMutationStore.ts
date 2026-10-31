@@ -11,7 +11,16 @@
  * Uses the same {@link IStorageAdapter} interface as EmergentToolRegistry,
  * keeping storage concerns decoupled from a database driver: every statement
  * the store issues runs on SQLite (3.24.0 or later) and on PostgreSQL, so the
- * runtime's storage adapter can be either.
+ * runtime's storage adapter can be either. A mutation reads back with a number
+ * in each numeric field on both, `createdAt` among them, although PostgreSQL's
+ * driver hands its `created_at` BIGINT over as a string.
+ *
+ * The REAL columns (`strength`, `delta`, `baseline_value` and `mutated_value`)
+ * hold eight-byte floats on SQLite (https://www.sqlite.org/datatype3.html) and
+ * four-byte floats on PostgreSQL, which keep about six significant digits
+ * (https://www.postgresql.org/docs/current/datatype-numeric.html). On
+ * PostgreSQL a value can read back different from the one written past its
+ * sixth significant digit.
  *
  * @module @framers/agentos/emergent/PersonalityMutationStore
  */
@@ -100,6 +109,42 @@ export interface DecayResult {
 
   /** Number of mutations deleted for falling at or below the 0.1 threshold. */
   pruned: number;
+}
+
+// ============================================================================
+// ROW READS
+// ============================================================================
+
+/**
+ * A numeric column of a row the store reads, as a number. PostgreSQL's driver
+ * hands a BIGINT (`created_at`, a millisecond time) over as a string by default
+ * (https://github.com/brianc/node-pg-types#readme), and as a BigInt when the
+ * adapter is made with `@framers/sql-storage-adapter`'s
+ * `typeParsers: { int8: 'bigint' }`; SQLite hands over a number. A millisecond
+ * time is far below `Number.MAX_SAFE_INTEGER`, so the conversion is exact.
+ * Every numeric column the store reads goes through here.
+ */
+function readNumber(value: unknown): number {
+  return typeof value === 'number' ? value : Number(value);
+}
+
+/**
+ * A `personality_mutations` row as a {@link PersonalityMutation}, each numeric
+ * column read with `readNumber`, so the record is the same on SQLite and on
+ * PostgreSQL.
+ */
+function toMutation(row: Record<string, unknown>): PersonalityMutation {
+  return {
+    id: row.id as string,
+    agentId: row.agent_id as string,
+    trait: row.trait as string,
+    delta: readNumber(row.delta),
+    reasoning: row.reasoning as string,
+    baselineValue: readNumber(row.baseline_value),
+    mutatedValue: readNumber(row.mutated_value),
+    strength: readNumber(row.strength),
+    createdAt: readNumber(row.created_at),
+  };
 }
 
 // ============================================================================
@@ -336,17 +381,7 @@ export class PersonalityMutationStore {
       [agentId],
     );
 
-    return (rows as Record<string, unknown>[]).map((r) => ({
-      id: r.id as string,
-      agentId: r.agent_id as string,
-      trait: r.trait as string,
-      delta: r.delta as number,
-      reasoning: r.reasoning as string,
-      baselineValue: r.baseline_value as number,
-      mutatedValue: r.mutated_value as number,
-      strength: r.strength as number,
-      createdAt: r.created_at as number,
-    }));
+    return (rows as Record<string, unknown>[]).map(toMutation);
   }
 
   // --------------------------------------------------------------------------
@@ -409,8 +444,8 @@ export class PersonalityMutationStore {
     let decayed = 0;
     let pruned = 0;
 
-    for (const row of all as Array<{ id: string; strength: number }>) {
-      const newStrength = row.strength - rate;
+    for (const row of all as Array<{ id: string; strength: unknown }>) {
+      const newStrength = readNumber(row.strength) - rate;
 
       if (newStrength <= 0.1) {
         await this.db.run('DELETE FROM personality_mutations WHERE id = ?', [row.id]);
@@ -511,10 +546,10 @@ export class PersonalityMutationStore {
       const rows = (await tx.all(
         'SELECT id, strength FROM personality_mutations WHERE agent_id = ?',
         [agentId],
-      )) as Array<{ id: string; strength: number }>;
+      )) as Array<{ id: string; strength: unknown }>;
       let decayed = 0;
       for (const row of rows) {
-        const newStrength = row.strength - rate;
+        const newStrength = readNumber(row.strength) - rate;
         if (newStrength <= 0.1) {
           await tx.run('DELETE FROM personality_mutations WHERE id = ?', [row.id]);
           pruned++;

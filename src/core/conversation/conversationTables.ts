@@ -124,8 +124,9 @@ async function hasMessageColumns(adapter: StorageAdapter, columns: readonly stri
  * Adds the columns of {@link ADDED_MESSAGE_COLUMNS} that the table lacks. The
  * columns are read first and an ALTER runs only for a missing one: on
  * PostgreSQL an ALTER TABLE takes an ACCESS EXCLUSIVE lock even when it
- * changes nothing. Neither SQLite before 3.35 nor a portable statement has ADD
- * COLUMN IF NOT EXISTS, so when an ALTER fails the column is read again: a
+ * changes nothing. SQLite has no ADD COLUMN IF NOT EXISTS
+ * (https://www.sqlite.org/lang_altertable.html), so the ALTER is the plain ADD
+ * COLUMN both databases run, and when it fails the column is read again: a
  * second process that opened the same database may have added it.
  */
 async function addMissingMessageColumns(adapter: StorageAdapter): Promise<string[]> {
