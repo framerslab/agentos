@@ -262,6 +262,30 @@ describe('ConversationContext history cuts', () => {
       expect(summary?.content).toBe('The user asked about the weather.');
     });
 
+    it('runs the passes of the messages recorded while a summary is made once it ends', async () => {
+      // A history loaded past its limit of ten, summarized four messages at a time. Three messages are recorded while
+      // the first summary is made, and their passes find it holding the lock. They run once it ends, each summarizing
+      // the next four messages, until the history is within its limit.
+      let finish: (summary: string) => void = () => {};
+      const summarize = vi
+        .fn(async () => 'The user asked about the weather.')
+        .mockImplementationOnce(() => new Promise<string>((resolve) => { finish = resolve; }));
+      const context = summarizingContext(
+        ['q1', 'r1', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4', 'q5', 'r5', 'q6', 'r6', 'q7', 'r7'],
+        summarize,
+      );
+
+      context.addMessage(fields('q8'));
+      expect(summarize).toHaveBeenCalledTimes(1);
+      for (const name of ['r8', 'q9', 'r9']) context.addMessage(fields(name));
+      finish('The user asked about the notes.');
+
+      await vi.waitFor(() =>
+        expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'q7', 'r7', 'q8', 'r8', 'q9', 'r9']),
+      );
+      expect(summarize).toHaveBeenCalledTimes(3);
+    });
+
     it('summarizes the whole part of a chunk size that is not a whole number', async () => {
       const summarize = vi.fn(async () => 'The user asked about the notes.');
       const context = summarizingContext(['q1', 'r1', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4', 'q5', 'r5'], summarize, {
