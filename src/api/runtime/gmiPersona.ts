@@ -41,10 +41,19 @@ function personaIdFor(name: string): string {
   return slug || `agent-${createHash('sha256').update(name).digest('hex').slice(0, 12)}`;
 }
 
+/**
+ * The output cap each model call of an agent built from these options is sent with, as `agent()` forwards it:
+ * `maxTokens`, else `controls.maxTotalTokens`; undefined when neither is set. A launch's one-call floor counts a
+ * member's call with it.
+ */
+export function callMaxTokensOf(opts: Pick<AgentOptions, 'maxTokens' | 'controls'>): number | undefined {
+  return opts.maxTokens ?? opts.controls?.maxTotalTokens;
+}
+
 /** The completion options `agent()` forwards on every call (its `baseOpts`), unset ones left out. */
 function completionOptionsOf(opts: AgentOptions): Partial<ModelCompletionOptions> {
   const out: Partial<ModelCompletionOptions> = {};
-  const maxTokens = opts.maxTokens ?? opts.controls?.maxTotalTokens;
+  const maxTokens = callMaxTokensOf(opts);
   if (maxTokens !== undefined) out.maxTokens = maxTokens;
   if (opts.controls?.maxDurationMs !== undefined) out.requestTimeout = opts.controls.maxDurationMs;
   if (opts.thinking !== undefined) out.thinking = opts.thinking;

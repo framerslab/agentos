@@ -1,15 +1,19 @@
 /**
  * @file types.ts
  * The types and bounds of teams a GMI launches from a turn (`launch_agency`), and of the seats such a team and
- * `sessionSeat()` build. The package root and `src/api` export {@link LAUNCH_AGENCY_TOOL_NAME}, `sessionSeat()` and
- * the types of the `agencies` option, the tool's arguments and result and a seat; the launch registry, the engine
- * (`runLaunch`) and the tool factory (`createGmiLaunchTool`) stay internal.
+ * `sessionSeat()` build, with the tool's schema and description, which both surfaces offer. The package root and
+ * `src/api` export {@link LAUNCH_AGENCY_TOOL_NAME}, `sessionSeat()` and the types of the `agencies` options, a launch
+ * tree's limits, the tool's arguments and result, a seat, the frame a seat's turns carry, the turn a tool call came
+ * from, a tool hook and a launched team's registry record (`./index.ts` gathers them); neither exports the launch
+ * registry, the engine (`runLaunch`) or the tool factories (`createGmiLaunchTool`, `createRuntimeLaunchTool`).
  */
 import type { AgentOptions } from '../../agent.js';
 import type { Agent, AgencyStrategy, HitlConfig } from '../../types.js';
 import { AgencyConfigError } from '../../types.js';
 import type { ApprovalGateFn } from '../approval-gate.js';
 import type { SpendBudget } from '../spendBudget.js';
+import type { GMIToolCallGate } from '../../../cognition/substrate/IGMI.js';
+import type { JSONSchemaObject } from '../../../core/tools/ITool.js';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator.js';
 
 export type { SeatMetadata } from '../../types.js';
@@ -18,7 +22,12 @@ export type { SeatMetadata } from '../../types.js';
 export const LAUNCH_AGENCY_TOOL_NAME = 'launch_agency';
 /** The six strategies a launch offers: the tool's input schema lists them and the engine accepts them. */
 export const LAUNCH_STRATEGIES = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'] as const satisfies readonly AgencyStrategy[];
-/** The capability a full-runtime persona's grant would name for the tool. No code reads it: gmi() is the one surface that registers `launch_agency`. */
+/**
+ * The capability the full runtime's `launch_agency` requires (`requiredCapabilities`): only a persona whose
+ * `allowedCapabilities` names it lists and calls the tool, while the runtime checks capabilities strictly (its
+ * `toolPermissionManagerConfig.strictCapabilityChecking`, on by default). gmi() registers the tool for its agent alone
+ * and checks no capability.
+ */
 export const LAUNCH_CAPABILITY = 'agency:launch';
 /** The five self-modification tools, which a seat never gets. */
 export const SELF_MODIFICATION_TOOLS = ['forge_tool', 'create_workflow', 'manage_skills', 'self_evaluate', 'adapt_personality'] as const;
@@ -45,7 +54,10 @@ export const LAUNCH_SETTLE_GRACE_MS = 5_000;
 export const LAUNCH_TEXT_CHARS = 16_000;
 /** The longest seat summary a launch returns. */
 export const SEAT_SUMMARY_CHARS = 1_000;
-/** The prompt's allowance in the smallest launch: a child's token cap must cover it plus one call's output estimate. */
+/**
+ * The prompt's allowance in the smallest launch: a child's token cap must cover it plus the output estimate of one call,
+ * the largest a seat of the team makes.
+ */
 export const MIN_LAUNCH_TOKENS = 2_000;
 /** The longest role: `delegate_to_<role>` stays within the 64 characters OpenAI allows a function name. */
 export const MAX_ROLE_CHARS = 52;
@@ -59,7 +71,18 @@ export interface AgencyLaunchOptions {
    * Registers `launch_agency` on the agent's tool table. Default false. On gmi(), a launched team's manager, synthesizers
    * and temporary seats run on the provider and model the agent's first call resolved: those its options name, else the
    * environment's pair at that call, whatever the environment names later. A call that names its own provider or model
-   * runs on that pair alone; a team it launches runs on the agent's.
+   * runs on that pair alone; a team it launches runs on the agent's. A temporary seat also takes the agent's other route
+   * and completion settings, its `onBeforeGeneration` and `onAfterGeneration` hooks and, of its controls,
+   * `controls.maxDurationMs` alone: a cap the agent's calls take from `controls.maxTotalTokens` does not reach a seat's
+   * calls, which the launch's budget bounds. Every seat's tool calls run the `onBeforeToolExecution` hooks of the turn
+   * that launched the team, a member's before its own. The manager and synthesizers, which agency() builds on agent(),
+   * take that pair with the agent's key and base URL alone: none of its hooks and no request timeout reach their calls,
+   * which the launch's deadline and budget bound. A seat whose call fails rejects with its error's name and code alone,
+   * so a provider's or a handler's message reaches no model of the team and not the result; the error itself goes to
+   * the agent's `on.error`, under `launch_agency seat <role>` (the console without one), as do the launch's other
+   * failures, a failed run apart: the team reports its run once, under `launch:<agencyId>`, with the error it rejected
+   * with. A seat's name holds its role and not its team, so two teams' seats of one role report under one name. A
+   * callback that throws or rejects fails no launch.
    */
   launch?: boolean;
   /** The deepest team level a launch tree reaches: an integer from 1 to 4, default 2. */
@@ -82,15 +105,55 @@ export interface AgencyLaunchOptions {
   defaultDeadlineMs?: number;
   /** The longest deadline a launch may name, in ms: from 1,000 to 3,600,000, default 600,000. */
   maxDeadlineMs?: number;
-  /** gmi() only: the persistent members a launch may seat by agentKey, each a gmi() handle. */
+  /**
+   * gmi() only: the persistent members a launch may seat by agentKey, each a gmi() handle. The record is read once,
+   * when the agent is built: a member put in it afterwards, under a new key or an old one, is never seated.
+   */
   members?: Record<string, Agent>;
-  /** The approval policy every launched team runs under after the gate the launching turn carries; applied at a root launch and inherited below it. */
+  /**
+   * The approval policy of the team a root launch builds, asked after the gate the launching turn carries. A nested
+   * launch passes that team's gate on, so `beforeTool` covers the seats of every team below it, each tool call asked
+   * once. `beforeAgent` and `beforeReturn` are asked in the root team alone: no nested team's seat or answer waits
+   * for them.
+   */
   hitl?: HitlConfig;
 }
 
-/** The bounds of a launch on the full runtime, with the route of its coordinator. AgentOSConfig takes no `agencies` option: gmi() is the one surface that registers `launch_agency`. */
-export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'members'> {
-  /** The route of a launched team's manager and synthesizers (they call generateText). Default: the parent persona's provider and model, with the key and base URL of the runtime's entry for that provider. */
+/**
+ * `AgentOSConfig.agencies`: whether the full runtime registers `launch_agency`, and every launch's bounds. `launch: true`
+ * registers the tool, which requires {@link LAUNCH_CAPABILITY}, so only a persona granted it lists and calls it. A
+ * seat is a GMI of the runtime's GMIManager: a registered persona a launch names by `personaId` (in place of
+ * `agentKey`), or a persona made for a temporary seat from the calling GMI's (its route, completion options,
+ * capabilities and hard limits, with the seat's instructions as its prompt). Every seat runs through a view of the
+ * runtime's tools that lists and runs its allowlist alone, as the parent turn's user and organization, with no
+ * cognitive memory, no retrieval and no learner.
+ */
+export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'members' | 'launch'> {
+  /**
+   * Registers `launch_agency` among the runtime's config tools, for the personas granted `agency:launch`: a config tool
+   * of the host's own by that name then fails initialization. Default false. A seat whose call fails rejects with its
+   * error's name and code alone, so a provider's or a handler's message reaches no model of the team and not the
+   * result; the error itself goes to the runtime's logger (the one `AgentOS.create` takes, else its own), at warn,
+   * under `launch_agency seat <role>`, as do the launch's other failures (a failed run under `launch_agency run`). A
+   * logger that throws fails no launch. The output guardrails that judge the launching turn's tool calls
+   * (`config.evaluateToolCalls`) judge each call of every seat, a nested team's included, before it runs, beside the
+   * sources the launching turn retrieved, and a call they block is refused as the launching turn's would be. The usage
+   * the runtime's spend meter (`spendMeter`) records for the launching turn is that turn's own model calls: a team's
+   * calls are its seats' GMIs' and its coordinator's, which the launch's result reports (`usage`, `coordinatorUsage`).
+   */
+  launch?: boolean;
+  /**
+   * The route of a launched team's manager and synthesizers (they call generateText). Default: the provider and model of
+   * the persona of the GMI that launched the team, else the GMIs' defaults
+   * (`gmiManagerConfig.defaultGMIBaseConfigDefaults`); when neither names a provider, the one the runtime's provider
+   * manager serves that model from, as for the GMI itself. A route that names neither `apiKey` nor `baseUrl` takes the
+   * key of the entry in `modelProviderManagerConfig.providers` the runtime serves its provider from (the last enabled one
+   * whose provider started), and sends it where the runtime's provider sends it: to that entry's base URL, else to the
+   * provider's own endpoint, never to a base URL a global default or an environment variable names. An entry with a base
+   * URL and no key gives its base URL alone to an Ollama route only. What the route takes nothing for, generateText
+   * resolves for the provider, key and base URL together, as for any call that names neither. A route that names either
+   * keeps what it names and takes nothing of the entry.
+   */
   coordinator?: { provider: string; model: string; apiKey?: string; baseUrl?: string };
 }
 
@@ -131,6 +194,13 @@ export interface CallerTurnContext {
   toolHooks?: readonly ToolCallHook[];
   /** The processToolCall of the view that made the call; the step gate runs each step of a composed tool through it. */
   dispatch?: IToolOrchestrator['processToolCall'];
+  /**
+   * The full runtime: the gate the turn's output guardrails that judge tool calls (`config.evaluateToolCalls`) ask
+   * before each call of the turn's own tool round. A GMI whose turn has one passes it with every call it makes, asked
+   * beside the sources the turn retrieved, and a team a call launches gives it to each of its seats' turns, so a seat's
+   * calls are judged as the launching turn's are, beside what that turn read.
+   */
+  toolCallGate?: GMIToolCallGate;
 }
 
 /** One seat a launch names: exactly one of `instructions`, `agentKey` (gmi()) or `personaId` (the full runtime). */
@@ -177,9 +247,12 @@ export type LaunchStatus = 'completed' | 'timed_out' | 'budget_exhausted' | 'can
  *   or a composed tool one of whose steps its allowlist leaves out.
  * - `seat_form_unsupported`: a seat form the surface does not run (`personaId` on gmi(), `agentKey` on the full runtime).
  * - `unknown_member`: a seat names a member the surface does not have.
- * - `member_unavailable`: a member could not be seated.
+ * - `member_unavailable`: a seat could not be built: a member that cannot take a seat (on the full runtime, a persona
+ *   the user's tier or strict validation refuses), or the agent or GMI made for a temporary seat.
  * - `duplicate_member`: two seats name one member.
- * - `budget_unavailable`: the launch's token cap cannot cover one call, or it has no dollars left.
+ * - `budget_unavailable`: the launch's token cap cannot cover one call of the seat whose calls are largest
+ *   (`MIN_LAUNCH_TOKENS` for the prompt and that seat's output estimate, on the route its calls run on), or it has no
+ *   dollars left.
  * - `parent_launch_closed`: the team the calling seat sits in is closing or gone.
  */
 export type LaunchRefusalCode =
@@ -283,8 +356,14 @@ export interface LaunchRecordMetadata {
   /** The goal's first 200 characters. */
   goalPreview: string;
   startedAt: string;
+  /**
+   * 'running' while the team runs; 'closing' once the launch has returned while a seat, or a launch its seats started,
+   * still holds a GMI; the launch's own status, merged with `closedAt` and `usage` just before the entry is removed.
+   */
   status: 'running' | 'closing' | LaunchStatus;
+  /** When the launch returned its result. */
   closedAt?: string;
+  /** The seats' usage, as the launch's result reports it. */
   usage?: LaunchUsage;
 }
 
@@ -296,6 +375,16 @@ export function isGmiHandle(value: unknown): value is Agent {
 /** The options a gmi() handle was built with, or undefined for any other value. */
 export function gmiOptionsOf(value: unknown): AgentOptions | undefined {
   return isGmiHandle(value) ? (value as { __config?: AgentOptions }).__config : undefined;
+}
+
+/**
+ * Reads the provider and model a gmi() handle's persona resolved (the pair its options name, else the environment's at
+ * its first build), or undefined for any other value. The read builds the agent's shared state, as its first session
+ * does.
+ */
+export function gmiRouteOf(value: unknown): (() => Promise<{ provider?: string; model?: string }>) | undefined {
+  const route = isGmiHandle(value) ? (value as { __route?: unknown }).__route : undefined;
+  return typeof route === 'function' ? (route as () => Promise<{ provider?: string; model?: string }>) : undefined;
 }
 
 /**
@@ -374,6 +463,99 @@ export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgency
     maxDeadlineMs,
     ...(options.hitl ? { hitl: options.hitl } : {}),
   };
+}
+
+/**
+ * The persistent members a surface's `launch_agency` seats as themselves: gmi()'s `agencies.members` by `agentKey`, or
+ * the full runtime's registered personas by `personaId`.
+ */
+export type LaunchMemberForm = { field: 'agentKey'; keys: readonly string[] } | { field: 'personaId' };
+
+/** The words the schema and the description give a member form. */
+function memberWords(members: LaunchMemberForm): { property: string; brief: string; tools: string; offer: string; rule: string } {
+  if (members.field === 'agentKey') {
+    const keys = members.keys.join(', ');
+    return {
+      property: `A persistent member to seat as itself, in place of instructions: one of ${keys}.`,
+      brief: "A member's brief for this team, at most 1,000 characters; only with agentKey.",
+      tools: '; for a member, only those it also has',
+      offer: `, or a member you seat as itself by agentKey (${keys})`,
+      rule: "A member's seat may name only tools the member also has.",
+    };
+  }
+  return {
+    property: 'A registered persona to seat as itself, in place of instructions: its own prompt, model and capabilities.',
+    brief: "A persona's brief for this team, at most 1,000 characters; only with personaId.",
+    tools: "; for a persona, only those its capabilities allow",
+    offer: ', or a registered persona you seat as itself by personaId',
+    rule: "A persona's seat may name only tools its capabilities allow.",
+  };
+}
+
+/**
+ * The input schema `launch_agency` offers the model. Counts, unknown keys and the forms' rules are the engine's
+ * (`validateLaunchArgs`), with its codes.
+ *
+ * @param limits - The tree's limits: the seat count and the deadlines the schema states.
+ * @param members - The members the surface seats as themselves; none, and the schema offers instructions alone.
+ */
+export function launchAgencyInputSchema(limits: LaunchLimits, members?: LaunchMemberForm): JSONSchemaObject {
+  const words = members ? memberWords(members) : undefined;
+  const names = { type: 'array', items: { type: 'string' } };
+  const seat: JSONSchemaObject = {
+    type: 'object',
+    properties: {
+      role: { type: 'string', description: "The seat's name in the team, unique: a letter, then letters, digits, '_' or '-', at most 52 characters." },
+      instructions: { type: 'string', description: 'Who the seat is and what it does: the system prompt of an agent made for this team.' },
+      ...(members && words
+        ? {
+            [members.field]: { type: 'string', description: words.property },
+            brief: { type: 'string', description: words.brief },
+          }
+        : {}),
+      tools: { ...names, description: `The names of your own tools this seat may use${words?.tools ?? ''}. A seat given none uses none.` },
+      dependsOn: { ...names, description: 'For the graph strategy: the roles this seat waits for; their outputs are its input.' },
+    },
+    required: ['role'],
+  };
+  return {
+    type: 'object',
+    properties: {
+      goal: { type: 'string', description: 'What the team must produce, in full: its members see nothing of this conversation. At most 8,000 characters.' },
+      strategy: {
+        type: 'string',
+        enum: [...LAUNCH_STRATEGIES],
+        description:
+          "How the seats work together. sequential (the default): each seat receives the task and the previous seat's output. parallel: every seat answers at once, and one answer is made from theirs. debate: the seats argue in rounds, and their arguments are summed up. review-loop: exactly two seats, the first writes and the second reviews until it approves. hierarchical: a manager delegates to the seats. graph: a seat runs once the seats its dependsOn names have answered.",
+      },
+      seats: { type: 'array', items: seat, description: `The team, at most ${limits.maxSeats} seats.` },
+      budgetUsd: { type: 'number', description: 'The most the team may spend, in US dollars; the launch takes the least of this and its own bounds.' },
+      maxTokens: { type: 'number', description: 'The most tokens the team may use; the launch takes the least of this and its own bounds.' },
+      deadlineMs: { type: 'number', description: `The team's deadline in milliseconds, at least 1,000; default ${limits.defaultDeadlineMs}, at most ${limits.maxDeadlineMs}.` },
+      maxRounds: { type: 'integer', description: 'The rounds of debate and review-loop: 1, 2 or 3 (the default).' },
+    },
+    required: ['goal', 'seats'],
+  };
+}
+
+/**
+ * What the model reads about `launch_agency`.
+ *
+ * @param limits - The tree's limits: the seat count the description states.
+ * @param members - The members the surface seats as themselves; none, and every seat is an agent made for the team.
+ */
+export function launchAgencyDescription(limits: LaunchLimits, members?: LaunchMemberForm): string {
+  const words = members ? memberWords(members) : undefined;
+  return [
+    "Launches a temporary team of agents on one goal and returns the team's answer as this call's result.",
+    `Each seat is an agent with the instructions you give it${words?.offer ?? ''}.`,
+    'One seat makes a subagent.',
+    "The team sees nothing of this conversation, so put everything it needs in the goal and each seat's instructions.",
+    'A seat uses only the tools its tools list names, from your own tools.',
+    ...(words ? [words.rule] : []),
+    `At most ${limits.maxSeats} seats; the team runs within a share of this turn's budget and a deadline.`,
+    'A launch that is refused returns an error that starts with its code, such as too_many_seats or invalid_arguments.',
+  ].join(' ');
 }
 
 /** A tool as the seat rules read it: its name and, for a composed tool, the tools its steps call. */

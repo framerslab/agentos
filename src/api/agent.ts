@@ -350,8 +350,10 @@ export interface AgentOptions extends BaseAgentConfig {
    * Temporary teams this agent launches from a turn, with `runtime: 'gmi'`: `launch: true` registers the
    * `launch_agency` tool, which runs an `agency()` team on one goal and returns its answer as the call's result, and
    * the other fields bound every launch (depth, seats, launches in flight, budget share and pool, deadline, `members`
-   * a launch may seat by key, `hitl`). Every bound is checked at construction. Off unless `launch` is true; the legacy
-   * runtime throws when it is.
+   * a launch may seat by key, `hitl`). Every bound is checked, and the `members` record read, at construction: a member
+   * put in the record afterwards is never seated. Off unless `launch` is true; the legacy
+   * runtime throws when it is, and its construction warning names `agencies` when another field is set, since it
+   * applies none of them.
    */
   agencies?: AgencyLaunchOptions;
   /** Explicit runtime binding. No provider is discovered from the process environment for this path. */
@@ -421,9 +423,10 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    */
   abortSignal?: AbortSignal;
   /**
-   * A spend budget for this send in place of the agent's: every provider call of the send is checked against it
-   * before it is made and recorded after it (settings make a new {@link SpendBudget} for the send). With
-   * `runtime: 'gmi'`, every completion call of the turn, metaprompts included.
+   * A spend budget for this send in place of the agent's; on a seat session (`sessionSeat()`, or a member a launched
+   * team seats) held beside it, each call checked against both and charged to both. Every provider call of the send
+   * is checked against it before it is made and recorded after it (settings make a new {@link SpendBudget} for the
+   * send). With `runtime: 'gmi'`, every completion call of the turn, metaprompts included.
    */
   budget?: SpendBudget | SpendBudgetOptions;
 }

@@ -13,8 +13,13 @@
  * Constraints:
  * - Maximum step count is enforced via `config.maxSteps`.
  * - Only tools from `config.allowedTools` may be used in steps.
+ * - With `deps.checkStep` (the emergent engine supplies it), a step its chaining
+ *   rule refuses is refused at creation, and each step is checked again just
+ *   before it runs; that rule never chains `launch_agency`, listed or not.
  * - Recursive workflow creation is blocked (`create_workflow` cannot appear in steps).
  * - Each step execution has a 30-second timeout enforced via `Promise.race`.
+ * - A step that would start after the workflow's own call stopped (`ToolExecutionContext.signal`)
+ *   is refused before its tool runs.
  */
 
 import type {
@@ -98,8 +103,11 @@ export interface CreateWorkflowDeps {
   };
   /**
    * Execute a tool by name with the given arguments. `signal` is aborted when
-   * the step expires: an implementation that waits on an approval checks it
-   * before the tool starts, so a late approval starts nothing.
+   * the step expires or the workflow's own call stops (its
+   * `ToolExecutionContext.signal`): an implementation that asks an approval
+   * checks it before it asks and again before the tool starts, so a step whose
+   * signal has aborted asks no one and a late approval starts nothing, as
+   * `processToolCall` does.
    */
   executeTool: (
     name: string,
@@ -286,6 +294,8 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
    * - Step count does not exceed maxSteps
    * - No step references `create_workflow` (prevent recursion)
    * - All step tools exist in the available tool list
+   * - Every step tool is permitted by `config.allowedTools` and, with
+   *   `checkStep`, by the chaining rule
    */
   private async handleCreate(
     args: CreateWorkflowInput,
@@ -543,12 +553,15 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
   ): Promise<unknown> {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const expiry = new AbortController();
+    // The step's run stops when the step expires and when the workflow's own call stops (the turn's stop a GMI's
+    // call carries): a step whose approval arrives after either starts nothing.
+    const signal = context.signal ? AbortSignal.any([expiry.signal, context.signal]) : expiry.signal;
 
     try {
       return await Promise.race([
         checkedTool
-          ? this.deps.executeTool(toolName, args, context, expiry.signal, checkedTool)
-          : this.deps.executeTool(toolName, args, context, expiry.signal),
+          ? this.deps.executeTool(toolName, args, context, signal, checkedTool)
+          : this.deps.executeTool(toolName, args, context, signal),
         new Promise<never>((_, reject) => {
           timeoutId = setTimeout(() => {
             // Revoke the step's run: an approval that arrives after this

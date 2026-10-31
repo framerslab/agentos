@@ -16,6 +16,28 @@ import type {
 } from './AgencyTypes';
 
 /**
+ * A copy of plain data: arrays and plain objects copied at every depth, any other value (a string, a `Date`, a class
+ * instance, a function) kept as it is. Each object is copied once, so a record that refers to itself does not loop.
+ */
+function copyPlainData<T>(value: T, copies: Map<object, unknown> = new Map()): T {
+  if (typeof value !== 'object' || value === null) return value;
+  const known = copies.get(value);
+  if (known !== undefined) return known as T;
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    copies.set(value, copy);
+    for (const item of value) copy.push(copyPlainData(item, copies));
+    return copy as T;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const copy: Record<string, unknown> = {};
+  copies.set(value, copy);
+  for (const [key, item] of Object.entries(value)) copy[key] = copyPlainData(item, copies);
+  return copy as T;
+}
+
+/**
  * Tracks the Agencies (multi-GMI collectives) active inside the AgentOS runtime.
  *
  * @remarks
@@ -134,6 +156,19 @@ export class AgencyRegistry {
   public getAgencyByWorkflow(workflowId: string): AgencySession | undefined {
     const agencyId = this.workflowToAgency.get(workflowId);
     return agencyId ? this.agencies.get(agencyId) : undefined;
+  }
+
+  /**
+   * Copies of the agency sessions running now, in the order they were created: workflow agencies, and the teams a GMI
+   * launched on the full runtime (`launch_agency`), whose metadata has `kind: 'launched'`. Each copy's seats, their
+   * histories, its metadata and its memory config are copied as far down as they hold arrays and plain objects, so a
+   * caller cannot change the registry through them; a value of another kind in a metadata record (a `Date`, a class
+   * instance) is the registry's own.
+   *
+   * @returns The running sessions.
+   */
+  public listAgencies(): AgencySession[] {
+    return [...this.agencies.values()].map((session) => copyPlainData(session));
   }
 
   /**
