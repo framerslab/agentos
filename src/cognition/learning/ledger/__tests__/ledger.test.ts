@@ -6,9 +6,11 @@
  * tombstone after it committed runs the user's deletion again, and an error in that second read or deletion never
  * turns a committed append into a failed one; a freeze, the host's or the process's, refuses a new candidate and lets
  * an operator act; a verdict follows only a candidate it can decide, and a revert's verdict only a kept candidate of
- * its own chain; rows with no learner chain per agent and per visitor. On SQLite, edits made outside the layer: a
- * row's text, an indexed column, a row moved to another chain, the newest row deleted, a row whose text is no ledger
- * entry, and a chain recomputed without the key; and an operator's reanchor, from which a broken chain verifies again.
+ * its own chain; rows with no learner chain per agent and per visitor, and a row with a learner names no visitor. The
+ * canonical text orders every key by UTF-16 code unit and refuses a value that contains itself. On SQLite, edits made
+ * outside the layer: a row's text, an indexed column, a row moved to another chain, the newest row deleted, a row
+ * whose text is no ledger entry, and a chain recomputed without the key; and an operator's reanchor, from which a
+ * broken chain verifies again.
  * (The cases of two adapters appending to one chain on Postgres run in learning-store.sql.test.ts.)
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -63,6 +65,20 @@ describe('ids and canonical JSON', () => {
     expect(canonicalJson(value)).toBe('{"amount":{"a":[null,2],"z":1},"at":"1970-01-01T00:00:00.000Z"}');
     const itself = { b: 2, a: 1, toJSON() { return this; } };
     expect(canonicalJson({ itself, f: () => 1, list: [() => 1, Symbol('s')] })).toBe('{"itself":{"a":1,"b":2},"list":[null,null]}');
+  });
+
+  it('orders keys by UTF-16 code unit at every depth, keys that are array indexes among them', () => {
+    // JSON.stringify writes an array-index key ('9', '10') before every other key, in numeric order.
+    expect(canonicalJson({ b: 1, 10: 2, 9: 3, a: { 2: 'x', 10: 'y', B: 'z' } })).toBe('{"10":2,"9":3,"a":{"10":"y","2":"x","B":"z"},"b":1}');
+    expect(canonicalJson(undefined)).toBe('null');
+  });
+
+  it('throws a TypeError for a value that contains itself, as JSON.stringify does, and writes a shared object at each place', () => {
+    const cyclic: Record<string, unknown> = { a: 1 };
+    cyclic.self = { back: cyclic };
+    expect(() => canonicalJson(cyclic)).toThrow(TypeError);
+    const shared = { x: 1 };
+    expect(canonicalJson({ b: shared, a: [shared, shared] })).toBe('{"a":[{"x":1},{"x":1}],"b":{"x":1}}');
   });
 });
 
@@ -385,6 +401,20 @@ describe.each([
     expect((await store.chainRows('a|A|coach')).map((r) => r.turnUserId)).toEqual([null, null]);
     expect((await store.head('a|A|coach'))?.userId).toBeNull();
     expect(await ledger.verifyChain('a|A|coach')).toEqual({ ok: true, keyed: false });
+  });
+
+  it("refuses a second user's id on a row with a learner, whose chain that user's deletion would break", async () => {
+    const store = await open();
+    const ledger = new Ledger({ store });
+    await expect(ledger.propose({ ...candidate(), turnUserId: 'bo' }, { verdict: 'kept' })).rejects.toThrow(/turnUserId/);
+    expect(await store.chainRows(chainKeyOf(LEARNER))).toEqual([]);
+    expect(await store.head(chainKeyOf(LEARNER))).toBeUndefined();
+
+    // A blank id names no one, so the row is the learner's alone.
+    expect((await ledger.propose({ ...candidate(), turnUserId: '' }, { verdict: 'kept' })).status).toBe('kept');
+    await store.deleteUserRows('A', 'bo');
+    expect((await store.chainRows(chainKeyOf(LEARNER))).map((r) => r.turnUserId)).toEqual([null, null]);
+    expect(await ledger.verifyChain(chainKeyOf(LEARNER))).toEqual({ ok: true, keyed: false });
   });
 });
 
