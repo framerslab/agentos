@@ -5,7 +5,8 @@
  * back to the state a snapshot holds, its vector kept where its content is) and `brainId`. A delete takes the rows that
  * name a trace (its feedback, the chunk it was filed from) and its memory-graph node and edges, whichever facade on
  * the Brain wrote them, a relation a host made to the node included; a second user's words stay a trace of their own
- * beside the same words of the session's owner.
+ * beside the same words of the session's owner, through `remember` and through an import in each format (a Markdown or
+ * Obsidian note names its user in its front matter), so a delete of either user's traces leaves the other's.
  * `deleteScope` finds the rows a release older than the `scope_id` column wrote under the scope after the facade
  * opened, and refuses an empty scope id. A snapshot read before the Brain was re-filed in the encoded scope-id form
  * restores under the encoded id, so a plain user's trace never comes back under a namespaced user's id. A real SQLite
@@ -362,4 +363,80 @@ describe('Memory.restoreTrace on Postgres', () => {
     );
     expect([row?.scope_id, JSON.parse(row!.metadata).scopeId]).toEqual(['team%2Fana', 'team%2Fana']);
   });
+});
+
+describe("Memory imports beside a second user's traces", () => {
+  // Each row as its words and the second user it names, `''` for the session owner's.
+  const byUser = async (brain: Brain) =>
+    (await brain.all<{ content: string; metadata: string }>('SELECT content, metadata FROM memory_traces WHERE deleted = 0'))
+      .map((row) => `${row.content}|${(JSON.parse(row.metadata) as { turnUserId?: string }).turnUserId ?? ''}`)
+      .sort();
+
+  // The target holds a second user's words that the source holds as the session owner's, and the reverse.
+  async function target(): Promise<{ memory: Memory; brain: Brain }> {
+    const into = await facade();
+    await into.memory.remember('Same words.', { scope: 'user', scopeId: '/s-1', metadata: { turnUserId: 'bo' } });
+    await into.memory.remember('Other words.', { scope: 'user', scopeId: '/s-1' });
+    return into;
+  }
+  async function source(): Promise<{ memory: Memory; brain: Brain; file: string }> {
+    const from = await facade();
+    await from.memory.remember('Same words.', { scope: 'user', scopeId: '/s-1' });
+    await from.memory.remember('Other words.', { scope: 'user', scopeId: '/s-1', metadata: { turnUserId: 'bo' } });
+    return from;
+  }
+
+  // Each user's words stay a trace of their own, so the second user's delete takes theirs and leaves the owner's.
+  async function expectEachUsersOwn(into: { memory: Memory; brain: Brain }): Promise<void> {
+    expect(await byUser(into.brain)).toEqual(['Other words.|', 'Other words.|bo', 'Same words.|', 'Same words.|bo']);
+    expect(await into.memory.deleteScope('user', '/s-1', { turnUserId: 'bo' })).toEqual({ deleted: 2 });
+    expect(await byUser(into.brain)).toEqual(['Other words.|', 'Same words.|']);
+  }
+
+  it("a JSON import files the session owner's words beside a second user's same words, and theirs beside the owner's", async () => {
+    const from = await source();
+    const into = await target();
+
+    await into.memory.importFromString(await from.memory.exportToString(), 'json');
+
+    await expectEachUsersOwn(into);
+  });
+
+  it("a CSV import files a row that names a second user beside the session owner's same words, and the reverse", async () => {
+    const into = await target();
+    const csv = [
+      'content,scope,scope_id,metadata',
+      'Same words.,user,/s-1,',
+      'Other words.,user,/s-1,"{""turnUserId"":""bo""}"',
+    ].join('\n');
+
+    await into.memory.importFromString(csv, 'csv');
+
+    await expectEachUsersOwn(into);
+  });
+
+  it("a SQLite import files the session owner's words beside a second user's same words, and theirs beside the owner's", async () => {
+    const from = await source();
+    const into = await target();
+    const file = path.join(path.dirname(from.file), 'export.sqlite');
+    await from.memory.export(file);
+
+    await into.memory.importFrom(file);
+
+    await expectEachUsersOwn(into);
+  });
+
+  it.each(['markdown', 'obsidian'] as const)(
+    "a %s export and import keep a second user's trace theirs, beside the session owner's same words",
+    async (format) => {
+      const from = await source();
+      const into = await target();
+      const dir = path.join(path.dirname(from.file), `${format}-export`);
+      await from.memory.export(dir, { format });
+
+      await into.memory.importFrom(dir, { format });
+
+      await expectEachUsersOwn(into);
+    },
+  );
 });
