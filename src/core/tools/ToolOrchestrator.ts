@@ -30,7 +30,7 @@
 
 import { uuidv4 } from '../utils/uuid.js';
 import { IToolOrchestrator, ToolDefinitionForLLM } from './IToolOrchestrator';
-import { ITool, JSONSchemaObject, ToolExecutionResult } from './ITool';
+import { ITool, JSONSchemaObject, ToolExecutionContext, ToolExecutionResult } from './ITool';
 import {
   IToolPermissionManager,
   PermissionCheckContext,
@@ -725,6 +725,41 @@ export class ToolOrchestrator implements IToolOrchestrator {
   }
 
   /**
+   * The refusal a tool names for a call before the approval gate ({@link ITool.refusalBeforeApproval}), read with the
+   * context the executor would give the call. A tool without the method, or one whose method throws, names none, and
+   * the call is gated as before.
+   */
+  private refusalBeforeApproval(tool: ITool, requestDetails: ToolExecutionRequestDetails): ToolExecutionResult | undefined {
+    if (typeof tool.refusalBeforeApproval !== 'function') return undefined;
+    const { toolCallRequest, gmiId, personaId, personaCapabilities, userContext, correlationId, sessionData, signal } = requestDetails;
+    let args: Record<string, any> = {};
+    try {
+      const raw = toolCallRequest.arguments as unknown;
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as Record<string, any>;
+    } catch {
+      // Arguments that do not parse name no refusal here; the executor reports them.
+      return undefined;
+    }
+    const context: ToolExecutionContext = {
+      gmiId,
+      personaId,
+      userContext,
+      ...(correlationId ? { correlationId } : {}),
+      ...(sessionData ? { sessionData } : {}),
+      ...(personaCapabilities ? { personaCapabilities } : {}),
+      ...(signal ? { signal } : {}),
+      ...(requestDetails.callerTurn ? { callerTurn: requestDetails.callerTurn } : {}),
+    };
+    try {
+      const refusal = tool.refusalBeforeApproval(args, context);
+      return refusal && refusal.success === false ? refusal : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * @inheritdoc
    */
   public async processToolCall(
@@ -887,6 +922,23 @@ export class ToolOrchestrator implements IToolOrchestrator {
       // A composed tool's side-effecting steps are each asked when they run,
       // through the step gate; asking at the composed call too would ask twice.
       (tool as { emergentMode?: string }).emergentMode !== 'compose';
+
+    // A call the tool refuses whatever a human would answer (a self-modification tool on a turn the learning layer
+    // refuses) is answered with that refusal, so no one is asked to approve a call that cannot act.
+    const refusedBeforeApproval = requiresSideEffectsApproval ? this.refusalBeforeApproval(tool, requestDetails) : undefined;
+    if (refusedBeforeApproval) {
+      console.warn(`${logPrefix} Tool '${toolName}' refused the call before the approval gate: ${refusedBeforeApproval.error ?? 'refused'}`);
+      return {
+        toolCallId: llmProvidedCallId,
+        toolName,
+        output: null,
+        isError: true,
+        errorDetails: {
+          message: refusedBeforeApproval.error || `Tool '${toolName}' refused the call.`,
+          details: refusedBeforeApproval.details,
+        },
+      };
+    }
 
     if (requiresSideEffectsApproval) {
       if (!this.hitlManager) {

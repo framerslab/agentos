@@ -257,6 +257,19 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
   // --------------------------------------------------------------------------
 
   /**
+   * The learning layer's refusal of a `create`, before the approval gate: storing a workflow is a self-change, and
+   * running or listing one is not.
+   *
+   * @param args - The call's arguments.
+   * @param context - The call's context.
+   */
+  refusalBeforeApproval(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult | undefined {
+    if (args?.action !== 'create') return undefined;
+    const refusal = selfChangeRefusal(context.sessionData);
+    return refusal ? refusedSelfChange(this.name, refusal) : undefined;
+  }
+
+  /**
    * Execute the requested workflow action.
    *
    * @param args - Action type and associated parameters.
