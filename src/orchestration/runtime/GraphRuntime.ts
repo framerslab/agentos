@@ -168,6 +168,8 @@ export class GraphRuntime {
    * @param graph - Compiled execution graph to run.
    * @param input - Initial user-provided input; frozen into `GraphState.input`.
    * @returns The `GraphState.artifacts` value after the last node completes.
+   * @throws The error of a checkpoint save the store refuses, or of a conditional
+   *   edge's function that throws, as {@link stream()} throws it.
    */
   async invoke(graph: CompiledExecutionGraph, input: unknown): Promise<unknown> {
     let finalOutput: unknown;
@@ -195,9 +197,22 @@ export class GraphRuntime {
    * resume the run. The `checkpoint_saved` event for that checkpoint comes after
    * `interrupt` or `error`, so such a consumer resumes by the `runId` of `run_start`.
    *
+   * A checkpoint save the store refuses (its `save()` rejects) or a function on a
+   * conditional edge that throws ends the run: the generator throws that error where
+   * the runtime asked for the checkpoint or evaluated the edge. The checkpoint of a
+   * node that interrupts or fails is saved before the node's events, so when the
+   * store refuses it the error comes before them. In a parallel batch, every other
+   * node of the batch runs to the end first, none of the batch's events is yielded,
+   * and the error is the first in the order the nodes are declared; a node of the
+   * batch counts as completed only once its edges are decided, so a node whose edges
+   * threw is in no checkpoint as completed. A resume by the `runId` of `run_start`
+   * continues from the last checkpoint the store saved.
+   *
    * @param graph - Compiled execution graph to run.
    * @param input - Initial user-provided input; frozen into `GraphState.input`.
    * @yields {GraphEvent} Runtime events in causal order.
+   * @throws The error of a checkpoint save the store refuses, or of a conditional
+   *   edge's function that throws.
    */
   async *stream(graph: CompiledExecutionGraph, input: unknown): AsyncGenerator<GraphEvent> {
     const runId = crypto.randomUUID();
@@ -223,14 +238,13 @@ export class GraphRuntime {
 
       // ── Parallel execution ───────────────────────────────────────────────
       // When multiple nodes are ready simultaneously (e.g. fan-out from START),
-      // execute them in parallel via Promise.all and merge what they write to
-      // scratch and artifacts using StateManager.mergeParallelBranches(). This
-      // is the key optimisation that makes fan-out/fan-in graphs like the
+      // execute them in parallel via Promise.allSettled and merge what they
+      // write to scratch and artifacts using StateManager.mergeParallelBranches().
+      // This is the key optimisation that makes fan-out/fan-in graphs like the
       // parallel agency strategy actually run concurrently instead of
       // sequentially.
       //
-      // Single-node batches fall through to the same code path (Promise.all
-      // with a single element) so the logic is unified.
+      // A batch of one node takes the sequential path below.
       const parallelBatchSize =
         readyNodes.length > 1
           ? (
@@ -251,7 +265,7 @@ export class GraphRuntime {
         const baseState = state;
 
         // Collect events from parallel branches so we can yield them in order
-        // after all branches complete. We cannot yield from inside Promise.all
+        // after all branches complete. We cannot yield from inside the branches
         // because async generators do not support concurrent yields.
         const branchResults: Array<{
           nodeId: string;
@@ -267,7 +281,15 @@ export class GraphRuntime {
         // for the checkpoints the branches save while the batch runs.
         const completedInBatch: Array<CompletedBranch | undefined> = [];
 
-        const parallelOutcomes = await Promise.all(
+        // Every branch runs to the end before the run goes on or ends, the
+        // branches beside one that threw included. A branch throws when the
+        // store refuses a checkpoint it saves or a function on one of its
+        // edges throws, and the run then ends with the first such error in
+        // batch order once the others have finished: a branch still running
+        // after stream() has thrown would go on calling its model and saving
+        // checkpoints with nobody reading it, and a host that resumed the run
+        // on the error would run it again beside it.
+        const settledBranches = await Promise.allSettled(
           parallelReadyNodes.map(async (nodeId, batchIndex) => {
             const node = activeGraph.nodes.find(n => n.id === nodeId);
             if (!node) {
@@ -365,10 +387,13 @@ export class GraphRuntime {
             }
 
             events.push({ type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata });
-            completedNodes.push(nodeId);
-            completedInBatch[batchIndex] = { state: stateAsWritten(branchState, writes), writes };
 
-            // Edge routing for this parallel branch.
+            // Edge routing for this parallel branch. The node counts as
+            // completed once its edges are decided, with the targets it did not
+            // pick skipped: a checkpoint another branch saves before then,
+            // while the edges are evaluated or after a function on one of them
+            // threw, leaves the node out, so a resume from it runs the node
+            // again and follows the edges it picks then, never every target.
             const outEdges = activeGraph.edges.filter(e => e.source === nodeId);
             const targets = await this.evaluateEdges(outEdges, branchState, result);
 
@@ -377,6 +402,8 @@ export class GraphRuntime {
                 skippedNodes.push(potentialTarget);
               }
             }
+            completedNodes.push(nodeId);
+            completedInBatch[batchIndex] = { state: stateAsWritten(branchState, writes), writes };
 
             for (const target of targets) {
               if (target !== END) {
@@ -425,6 +452,10 @@ export class GraphRuntime {
             };
           }),
         );
+        const parallelOutcomes = settledBranches.map((settled) => {
+          if (settled.status === 'rejected') throw settled.reason;
+          return settled.value;
+        });
 
         // A branch that interrupted or failed stops the run, and the first one
         // in batch order is the one the run reports. Every branch has run, so
@@ -612,7 +643,7 @@ export class GraphRuntime {
       } else {
         // ── Sequential execution (single ready node) ─────────────────────────
         // Original single-node path preserved for simplicity and to avoid
-        // the overhead of Promise.all for the common single-node case.
+        // the overhead of Promise.allSettled for the common single-node case.
         const nodeId = readyNodes[0];
         const node = activeGraph.nodes.find(n => n.id === nodeId);
         if (!node) {
@@ -877,13 +908,19 @@ export class GraphRuntime {
    * that had not yet completed when the run was suspended. A node the checkpoint
    * records as `write`, `external`, or `human` effect-class (the node that
    * interrupted the run) is replayed from its stored output to avoid duplicate
-   * side-effects; all other nodes are re-executed. A node that failed recorded no
-   * result and wrote nothing, so it runs again, from the state it ran on.
+   * side-effects; all other nodes are re-executed. A replayed node's edges are
+   * evaluated on the restored state with the node's visit recorded
+   * (`currentNodeId` names the node and `visitedNodes` lists it), as a node's
+   * are after it runs, so the run follows the targets they pick and skips the
+   * others. A node that failed recorded no result and wrote nothing, so it runs
+   * again, from the state it ran on.
    *
    * @param graph - The same compiled graph that was originally invoked.
    * @param runOrCheckpointId - Either the original run id or an exact checkpoint id.
    * @returns The final `GraphState.artifacts` value after resumption completes.
    * @throws {Error} When no checkpoint exists for the given identifier.
+   * @throws The error of a checkpoint save the store refuses, or of a conditional
+   *   edge's function that throws, as {@link stream()} throws it.
    */
   async resume(graph: CompiledExecutionGraph, runOrCheckpointId: string): Promise<unknown> {
     let finalOutput: unknown;
@@ -904,6 +941,8 @@ export class GraphRuntime {
    * @param runOrCheckpointId - Either the original run id or an exact checkpoint id.
    * @yields {GraphEvent} Runtime events in causal order from the checkpoint onward.
    * @throws {Error} When no checkpoint exists for the given identifier.
+   * @throws The error of a checkpoint save the store refuses, or of a conditional
+   *   edge's function that throws, as {@link stream()} throws it.
    */
   async *streamResume(
     graph: CompiledExecutionGraph,
@@ -981,8 +1020,38 @@ export class GraphRuntime {
             recorded.effectClass === 'external' ||
             recorded.effectClass === 'human')
         ) {
-          completedNodes.push(nodeId);
           yield { type: 'node_end', nodeId, output: recorded.output, durationMs: recorded.durationMs };
+
+          // The node does not run again, but its edges still decide where the
+          // run goes, as after a node that runs: a condition reads the state
+          // the run resumed with, such as the decision a host wrote into the
+          // checkpoint it forked, and the targets the node does not pick are
+          // skipped. That state records the node's visit, as the state after
+          // a node runs does: `currentNodeId` names the node and
+          // `visitedNodes` lists it.
+          state = stateManager.recordNodeVisit(state, nodeId);
+          const replayedEdges = activeGraph.edges.filter(e => e.source === nodeId);
+          const replayedTargets = await this.evaluateEdges(
+            replayedEdges,
+            state,
+            { success: true, output: recorded.output },
+          );
+          for (const potentialTarget of replayedEdges.map(e => e.target)) {
+            if (
+              !replayedTargets.includes(potentialTarget) &&
+              !completedNodes.includes(potentialTarget) &&
+              !skippedNodes.includes(potentialTarget)
+            ) {
+              skippedNodes.push(potentialTarget);
+            }
+          }
+          completedNodes.push(nodeId);
+          for (const target of replayedTargets) {
+            if (target !== END) {
+              const edgeType = replayedEdges.find(e => e.target === target)?.type ?? 'static';
+              yield { type: 'edge_transition', sourceId: nodeId, targetId: target, edgeType };
+            }
+          }
           continue;
         }
 

@@ -222,6 +222,8 @@ interface ActiveStreamContext {
   userApiKeys?: Record<string, string>;
   processingOptions?: ProcessingOptions;
   languageNegotiation?: any; // multilingual negotiation metadata
+  /** The sources the stream's turn retrieved, as the stream announced them; a continuation of the turn reads them. */
+  ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
   // Iterator is managed within the orchestrateTurn method directly
 }
 
@@ -798,7 +800,11 @@ export class AgentOSOrchestrator {
       const { gmiInput, streamContext } = prepared;
       const longTermMemoryFeedbackPayload = prepared.longTermMemoryFeedbackPayload;
 
-      // The output guardrails' tool-call gate, which the GMI asks before each call it runs itself.
+      // The output guardrails' tool-call gate, which the GMI asks before each call it runs itself. The stream keeps it
+      // for a continuation given none of its own, whatever GMI that continuation runs on.
+      if (toolCallGate) {
+        streamContext.toolCallGate = toolCallGate;
+      }
       const gmiToolCallGate = gmiToolCallGateFor(toolCallGate, agentOSStreamId, gmiInstanceIdForChunks, streamContext);
       if (gmiToolCallGate) {
         gmiInput.metadata = { ...(gmiInput.metadata ?? {}), toolCallGate: gmiToolCallGate };
@@ -864,6 +870,9 @@ export class AgentOSOrchestrator {
           throw new Error('AgentOSOrchestrator: GMI not initialized (unexpected).');
         }
         const gmiForTurn = gmi;
+        // The GMI records the turn in its own history, which a continuation of another conversation on the session
+        // must not read.
+        this.toolResultHandler.noteTurnOnGmi(gmiForTurn, streamContext.conversationId);
 
         await withAgentOSSpan('agentos.gmi.process_turn_stream', async (span) => {
           span?.setAttribute('agentos.stream_id', agentOSStreamId);
