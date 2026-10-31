@@ -2,11 +2,12 @@
  * @file learning-layer.host-calls.test.ts
  * The layer's host calls over a real store: a run-time freeze and a suspension persist, hold for a new layer over the
  * same store and are lifted; operatorSet sets a learner's traits inside their bands and honesty-humility through the
- * ledger, runs under a freeze, re-anchors a record that does not verify and refuses a learner it holds no row for;
- * revert takes an operator's change back, keeps a later change to another trait, and refuses a load's row and a
- * change that is not kept; export and import carry a learner into a fresh store, never honesty-humility, and refuse
- * what this release cannot admit; and a store that does not open fails every host call naming it, forgetUser included,
- * so an account deletion is never reported done without its tombstone.
+ * ledger, runs under a freeze, re-anchors a record that does not verify and refuses a learner it holds no row for, and
+ * the load that raises honesty-humility's floor again after an operator lowered it says so (floor_raised); revert takes
+ * an operator's change back, keeps a later change to another trait, takes an import that created the trait row back to
+ * the persona, and refuses a load's row and a change that is not kept; export and import carry a learner into a fresh
+ * store, never honesty-humility, and refuse what this release cannot admit; and a store that does not open fails every
+ * host call naming it, forgetUser included, so an account deletion is never reported done without its tombstone.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderPersonalitySection } from '../../substrate/personas/personalityPrompt';
@@ -139,6 +140,25 @@ describe('operatorSet', () => {
     expect(warn.mock.calls.filter((call) => String(call[0]).includes('does not verify'))).toHaveLength(1);
   });
 
+  it("records the load that raises honesty-humility's floor after an operator lowered it as floor_raised, which revert refuses", async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store });
+    const session = await layer.forLearner(KEY, context());
+    await layer.operatorSet({ learner: KEY, traits: { honesty: 0.2 }, by: 'ops' });
+
+    expect(section(await session.prepareTurn(turn()))).toBe(renderPersonalitySection({ ...PERSONA, honesty: 0.2 }));
+
+    // The persona did not change: the load raised the floor under honesty-humility back to the persona's 0.9.
+    const candidates = (await store.chainRows(CHAIN)).filter((row) => row.rowType === 'candidate');
+    expect(candidates.map((row) => JSON.parse(row.body))).toMatchObject([
+      { reason: 'created' },
+      { reason: 'set' },
+      { actor: 'operator:persona', reason: 'floor_raised', after: { honestyAtLastLoad: 0.9 } },
+    ]);
+    await expect(layer.revert(candidates[2]!.id, 'ops')).rejects.toThrow(/floor_raised/);
+  });
+
   it('refuses a learner it holds no row for, a placeholder user and traits that are not a map', async () => {
     quiet();
     const layer = createLearningLayer({ store: new InMemoryLearningStore() });
@@ -167,6 +187,24 @@ describe('revert', () => {
     const created = (await store.chainRows(CHAIN))[0]!;
     await expect(layer.revert(created.id, 'ops')).rejects.toThrow(/created/);
     await expect(layer.revert('01NOSUCHCANDIDATE000000000', 'ops')).rejects.toThrow(/no candidate/);
+  });
+});
+
+describe('a revert of an import', () => {
+  it('takes back an import that created the trait row: each trait it took goes back to the persona', async () => {
+    quiet();
+    const source = createLearningLayer({ store: new InMemoryLearningStore() });
+    await source.forLearner(KEY, context());
+    await source.operatorSet({ learner: KEY, traits: { openness: 0.7 }, by: 'ops' });
+    const store = new InMemoryLearningStore();
+    const target = createLearningLayer({ store });
+    const report = await target.importLearnedState(await source.exportLearnedState(KEY));
+
+    const reverted = await target.revert(report.ledgerId!, 'ops');
+
+    expect(reverted).toMatchObject({ kind: 'operator_set', reason: 'revert', after: { current: { openness: 0.5 } } });
+    const session = await target.forLearner(KEY, context());
+    expect(section(await session.prepareTurn(turn()))).toBe(renderPersonalitySection(PERSONA));
   });
 });
 

@@ -2,12 +2,14 @@
  * @file learning-layer.forget.test.ts
  * Account deletion and the memory writes a layer takes back, over real memory. forgetUser commits the tombstone, then
  * deletes the user's traces in every memory manager and facade the layer holds (a second user's traces on another
- * user's session by turnUserId), then the user's learning rows, and names the stores it did not reach; another
- * tenant's user of the same id keeps everything; a write in flight reaches its verdict first and is deleted with the
- * rest; with a namespace, the user's plain-form traces are counted and named in one WARNING. A memory write's revert
- * deletes what it created and restores what it deleted; a crash's pending write is decided at the learner's next
- * session by whether its traces hold it, and stays pending where the layer holds no facade of its brain; the agent's
- * chain is read off the open's path, at most once per fifteen minutes.
+ * user's session by turnUserId), then the user's learning rows, and names the stores it did not reach; another tenant's
+ * user of the same id keeps everything; a write in flight reaches its verdict first and is deleted with the rest; with
+ * a namespace, the user's plain-form traces are counted and named in one WARNING that names the tombstone, never the
+ * user; a session another process holds stops rendering the forgotten learner's kept traits at its next turn. A memory
+ * write's revert deletes what it created and restores what it deleted; a crash's pending write is decided at the
+ * learner's next session by whether its traces hold it, and stays pending where the layer holds no facade of its brain;
+ * the agent's chains with no learner, a second user's included, are read off the open's path, at most once per fifteen
+ * minutes; and a write whose writer decides it while the recovery reads its traces stays as its writer decided it.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Memory } from '../../memory/io/facade/Memory';
@@ -198,7 +200,26 @@ describe('forgetUser', () => {
     expect(report.plainFormLeft).toBe(1);
     const lines = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('refileScope'));
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('user:42');
+    // A line about a forgotten user names the tombstone, never the user: the caller holds the id it deleted.
+    expect(lines[0]).toContain(`tombstone ${(await tombstoneHash('A', '42')).slice(0, 16)}`);
+    expect(lines[0]).toContain("the user's plain id in its user scope");
+    expect(lines[0]).not.toContain('user:42');
+  });
+
+  it("stops rendering a forgotten learner's kept traits at the next turn of a session another process holds", async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    // Two processes over one store: one serves the learner's session, the other deletes the user.
+    const serving = createLearningLayer({ store });
+    const deleting = createLearningLayer({ store });
+    const session = await serving.forLearner(KEY, context());
+    await serving.operatorSet({ learner: KEY, traits: { extraversion: 0.6 }, by: 'ops' });
+    expect((await session.prepareTurn(turn())).systemPrompts[0]?.content).toBe(renderPersonalitySection({ ...PERSONA, extraversion: 0.6 }));
+
+    await deleting.forgetUser('42', { namespace: 'A' });
+
+    expect((await session.prepareTurn(turn())).systemPrompts[0]?.content).toBe(renderPersonalitySection(PERSONA));
+    expect(session.currentTraits()).toMatchObject({ extraversion: 0.8 });
   });
 
   it('refuses a blank user id', async () => {
@@ -282,6 +303,77 @@ describe('a memory write, taken back', () => {
     expect(await verdict(elsewhere)).toBe('pending');
     expect(await verdict(young)).toBe('rejected');
     expect(await verdict(late)).toBe('pending');
+  });
+
+  it("decides a crash's pending write of a second user's turn and of a turn with no user, off the open's path", async () => {
+    quiet();
+    let now = Date.UTC(2026, 9, 12, 12);
+    const { memory: tools } = await facadeAt(tempFile(), 'tools-brain');
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: tools, clock: () => now });
+    const crashed = new Ledger({ store, clock: () => now });
+    const pending = async (created: string, turnUserId?: string) => {
+      const result = await crashed.propose({
+        learner: { namespace: 'A', agentKey: 'tutor', userId: null },
+        kind: 'memory_write',
+        actor: 'tool:memory_add',
+        subject: created,
+        before: null,
+        after: { brainId: 'tools-brain', created: [created], changed: [], deleted: [] },
+        sessionId: 's-0',
+        ...(turnUserId ? { turnUserId } : {}),
+      });
+      if (!('candidate' in result)) throw new Error(result.status);
+      return result.candidate.id;
+    };
+    // Bo spoke on another user's session (its own chain of a second user); the other write had no user.
+    const visitor = await pending('mt-bo', 'bo');
+    await tools.remember('Bo keeps snakes.', { id: 'mt-bo', scope: 'user', scopeId: 'A//s-0', metadata: { turnUserId: 'bo' } });
+    const anonymous = await pending('mt-lost');
+    now += 16 * 60_000;
+
+    await layer.forLearner(KEY, context());
+
+    await vi.waitFor(async () => {
+      expect(await crashed.latestVerdict(visitor)).toBe('kept');
+      expect(await crashed.latestVerdict(anonymous)).toBe('rejected');
+    });
+  });
+
+  it('leaves a pending write to its writer when the writer decides it while the recovery reads its traces', async () => {
+    quiet();
+    let now = Date.UTC(2026, 9, 12, 12);
+    const { memory: tools, brain } = await facadeAt(tempFile(), 'tools-brain');
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: tools, clock: () => now });
+    await layer.forLearner(KEY, context());
+    // Another process's write that has run for 16 minutes on this layer's clock: a slow write, or a clock behind.
+    const writer = new Ledger({ store, clock: () => now });
+    const proposed = await writer.propose({
+      learner: KEY,
+      kind: 'memory_write',
+      actor: 'tool:memory_add',
+      subject: 'mt-slow',
+      before: null,
+      after: { brainId: 'tools-brain', created: ['mt-slow'], changed: [], deleted: [] },
+      sessionId: 's-0',
+    });
+    if (!('candidate' in proposed)) throw new Error(proposed.status);
+    const id = proposed.candidate.id;
+    now += 16 * 60_000;
+    const read = tools.readTrace.bind(tools);
+    vi.spyOn(tools, 'readTrace').mockImplementationOnce(async (traceId: string) => {
+      const seen = await read(traceId);
+      // The write and its verdict land while the recovery reads the trace the write names.
+      await tools.remember('Written late.', { id: 'mt-slow', scope: 'user', scopeId: 'A/42' });
+      await writer.decide(id, 'kept', 'written');
+      return seen;
+    });
+
+    await layer.forLearner(KEY, context({ sessionId: 's-2' }));
+
+    expect(await writer.latestVerdict(id)).toBe('kept');
+    expect(await liveContents(brain)).toEqual(['Written late.']);
   });
 
   it("reads the agent's chain off the open's path, at most once per fifteen minutes", async () => {
