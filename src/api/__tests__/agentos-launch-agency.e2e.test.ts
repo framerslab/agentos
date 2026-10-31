@@ -887,7 +887,7 @@ describe('launch_agency on the full runtime', () => {
     const engine = (booted.getToolOrchestrator() as ToolOrchestrator).getEmergentEngine()!;
     const find = { name: 'find', tool: 'search', inputMapping: { q: '$input.q' } };
     const mail = { name: 'send', tool: 'send_email', inputMapping: { q: '$input.q' } };
-    const forgeNotify = (steps: Array<typeof find>, testCase: Record<string, unknown>) =>
+    const forgeNotify = (steps: Array<typeof find>, testCase: { expectedOutput: unknown; stepOutputs?: Record<string, unknown> }) =>
       engine.forge(
         {
           name: 'notify',
