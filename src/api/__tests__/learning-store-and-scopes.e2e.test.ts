@@ -214,7 +214,7 @@ import {
   type TurnScopes,
 } from '@framers/agentos/cognition/learning/index';
 import { canonicalJson, hmacSha256Hex, sha256Hex, ulid } from '@framers/agentos/cognition/learning/ledger/index';
-import { OPERATOR_ONLY_TRAITS, renderPersonalitySection, type GMI } from '@framers/agentos/cognition/substrate';
+import { OPERATOR_ONLY_TRAITS, renderPersonalitySection } from '@framers/agentos/cognition/substrate';
 import { traitOverlayPatch } from '@framers/agentos/cognition/substrate/personas/personalityPrompt';
 import { HEXACO_TRAIT_ALIASES } from '@framers/agentos/cognition/substrate/personas/hexaco';
 import { createPostgresAdapter, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
@@ -7212,22 +7212,23 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
     const layer = createLearningLayer({ store });
     const session = await layer.forLearner(LEARNER, hostContext(memory));
     const { provider, received } = scriptedProvider(replies);
-    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning: session, cognitiveMemory: memory } });
+    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning: session, cognitiveMemory: memory as never } });
     return { gmi, layer, session, store, processToolCall, received };
   }
 
+  type HostGmi = Awaited<ReturnType<typeof createScriptedGmi>>['gmi'];
   const lookupStep = () => toolCallReply([{ id: 'call_a', name: 'lookup', args: { q: 'a' } }]);
   /** The scope list one recall asked the memory manager for. */
   const recallScopes = (spy: { mock: { calls: unknown[][] } }, call = 0) =>
     (spy.mock.calls[call]?.[3] as { scopes?: Array<{ scope: string; scopeId: string }> } | undefined)?.scopes ?? [];
   const organizationsOf = (scopes: Array<{ scope: string; scopeId: string }>) => scopes.filter((entry) => entry.scope === 'organization').map((entry) => entry.scopeId);
   /** What a GMI's reasoning trace says of the filings it did not make: each entry's type, role and reason. */
-  const refusedFilings = (gmi: GMI) =>
+  const refusedFilings = (gmi: HostGmi) =>
     gmi
       .getReasoningTrace()
       .entries.filter((entry) => entry.message.includes('did not file'))
       .map((entry) => ({ type: entry.type, ...(entry.details as { role: string; reason: string }) }));
-  const traceText = (gmi: GMI) => JSON.stringify(gmi.getReasoningTrace().entries.filter((entry) => entry.message.includes('did not file')));
+  const traceText = (gmi: HostGmi) => JSON.stringify(gmi.getReasoningTrace().entries.filter((entry) => entry.message.includes('did not file')));
 
   /** A memory write a tool would record, which writes nothing. */
   const memoryWrite = (subject: string): SessionSelfChange<string> => ({
@@ -7544,7 +7545,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
     const owned = await memoryOnFile();
     const layer = createLearningLayer({ store: new InMemoryLearningStore() });
     const session = await layer.forLearner({ ...LEARNER, namespace: OWNER }, hostContext(owned.memory));
-    const { gmi } = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: session, cognitiveMemory: owned.memory } });
+    const { gmi } = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: session, cognitiveMemory: owned.memory as never } });
     const assembleOwned = vi.spyOn(owned.memory, 'assembleForPrompt');
     await runTurn(gmi, textTurn('t1', 'Hello.', { organizationId: OWNER }));
     expect(organizationsOf(recallScopes(assembleOwned))).toEqual([OWNER]);
@@ -7688,7 +7689,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
     const layer = createLearningLayer({ store: new InMemoryLearningStore(), mode });
     const session = await layer.forLearner(LEARNER, hostContext(memory));
     const { provider } = scriptedProvider([lookupStep(), textReply('Found.'), textReply('Hello.')]);
-    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning: session, cognitiveMemory: memory } });
+    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning: session, cognitiveMemory: memory as never } });
 
     await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
     expect(await filed(brain)).toEqual(
@@ -7772,7 +7773,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
       },
     }) as ILearnerSession;
     const steps = [lookupStep(), toolCallReply([{ id: 'call_b', name: 'lookup', args: { q: 'b' } }]), textReply('First done.'), textReply('Second done.')];
-    const { gmi, processToolCall } = await createScriptedGmi({ provider: scriptedProvider(steps).provider, config: { learning: gated, cognitiveMemory: memory } });
+    const { gmi, processToolCall } = await createScriptedGmi({ provider: scriptedProvider(steps).provider, config: { learning: gated, cognitiveMemory: memory as never } });
     let release!: () => void;
     const held = new Promise<void>((resolve) => (release = resolve));
     let reached!: () => void;
@@ -7824,7 +7825,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
       },
     }) as ILearnerSession;
     const steps = [lookupStep(), textReply('Found.'), lookupStep(), textReply('Found too.'), textReply('Hello.')];
-    const { gmi, processToolCall } = await createScriptedGmi({ provider: scriptedProvider(steps).provider, config: { learning: failing, cognitiveMemory: memory } });
+    const { gmi, processToolCall } = await createScriptedGmi({ provider: scriptedProvider(steps).provider, config: { learning: failing, cognitiveMemory: memory as never } });
 
     await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
     expect(await filed(brain)).toEqual(
@@ -7860,7 +7861,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
     const layer = createLearningLayer({ store: new InMemoryLearningStore() });
     const session = await layer.forLearner(LEARNER, hostContext(memory));
     const late = Object.create(session, { prepareTurn: { value: () => new Promise(() => undefined) } }) as ILearnerSession;
-    const { gmi } = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: late, cognitiveMemory: memory } });
+    const { gmi } = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: late, cognitiveMemory: memory as never } });
 
     await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
 
@@ -7972,7 +7973,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
     quiet();
     const { brain, memory } = await memoryOnFile();
     const { provider } = scriptedProvider([textReply('Noted.')]);
-    const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: memory, ...(learning ? { learning } : {}) } });
+    const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: memory as never, ...(learning ? { learning } : {}) } });
     const assemble = vi.spyOn(memory, 'assembleForPrompt');
 
     await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.'));
@@ -7994,7 +7995,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
     const scopes: TurnScopes = { learner: 'bound', mode: 'on', userScopeId: 'hq/ana', personaScopeId: `hq/ana::${PERSONA_ID}`, namespace: 'hq' };
     const learning = hostSession({ prepareTurn: async () => ({ systemPrompts: [], learner: 'bound', mode: 'on', scopes }) });
     const { provider } = scriptedProvider([lookupStep(), textReply('Found.')]);
-    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning, cognitiveMemory: memory } });
+    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning, cognitiveMemory: memory as never } });
 
     await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.'));
     await gmi.recordUserFeedback({ polarity: 'positive', text: 'Good.', userId: 'user-1' });
@@ -8017,7 +8018,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
       prepareTurn: async () => ({ systemPrompts: [], learner: 'none', mode: 'on', scopes: { userScopeId: '' } }),
       scopesFor: () => scopes,
     });
-    const first = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: asked, cognitiveMemory: named.memory } });
+    const first = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: asked, cognitiveMemory: named.memory as never } });
     await runTurn(first.gmi, textTurn('t1', 'My canary is LARK-7.'));
     expect(await filed(named.brain)).toEqual(
       expect.arrayContaining([
@@ -8032,7 +8033,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
         throw new Error('no ids here');
       },
     });
-    const second = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: throwing, cognitiveMemory: thrown.memory } });
+    const second = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: throwing, cognitiveMemory: thrown.memory as never } });
     await runTurn(second.gmi, textTurn('t1', 'My canary is LARK-7.'));
     expect(await filed(thrown.brain)).toEqual(
       expect.arrayContaining([
@@ -8056,7 +8057,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
     const named = await memoryOnFile();
     const layer = createLearningLayer({ store: new InMemoryLearningStore(), namespace: 'acme' });
     const session = await layer.forLearner({ ...LEARNER, namespace: '' }, hostContext(named.memory));
-    const scripted = await createScriptedGmi({ provider: scriptedProvider([textReply('One.'), textReply('Two.')]).provider, config: { learning: session, cognitiveMemory: named.memory } });
+    const scripted = await createScriptedGmi({ provider: scriptedProvider([textReply('One.'), textReply('Two.')]).provider, config: { learning: session, cognitiveMemory: named.memory as never } });
     const assembleNamed = vi.spyOn(named.memory, 'assembleForPrompt');
     await runTurn(scripted.gmi, { ...textTurn('t1', 'Hello.'), userContextOverride: { organizationId: 'acme' } });
     await runTurn(scripted.gmi, { ...textTurn('t2', 'Hello.'), userContextOverride: { organizationId: 'hq' } });
@@ -8096,6 +8097,9 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
 
     // A session that gives none of them, and a turn with no scope ids.
     expect(toolLearningContextFor(hostSession(), { learner: 'none', mode: 'on' })).toEqual({ tools: { learner: 'none', mode: 'on' }, writeTurn: undefined });
+    const onlyFreeze = toolLearningContextFor(hostSession({ isFrozen: () => true }), { learner: 'none', mode: 'on' });
+    expect(onlyFreeze.tools.frozen!()).toBe(true);
+    expect(onlyFreeze.tools.recordSelfChange).toBeUndefined();
   });
 
   it.skipIf(!POSTGRES_URL)("files a learner's turn on a Brain on the learning store's Postgres adapter, and a user another process forgot files nothing", async () => {
