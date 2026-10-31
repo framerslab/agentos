@@ -62,6 +62,18 @@
  * unset on agent(), gmi(), the full runtime and an agency's members; the store, ledger key, clock and memory-tools
  * fields are checked at construction. A host tool reads its turn's learner and mode from its call, and a self-change
  * and a memory write refuse by them: a freeze stops both, mode off and a turn with no learner the self-change alone.
+ *
+ * A learner's trait row, on gmi(), the full runtime and a host's own turn loop (`createLearningLayer`; the stores,
+ * the ledger, the freeze keys and the trait bounds on the learning module's own path). A learner's first session
+ * writes the row from the persona's authored traits with its creation in the ledger; each later session checks the
+ * learner's chain and the row's digest, so an edit made outside the layer renders the authored traits and counts as a
+ * broken chain, a ledger key's included; a persona that moved clamps each learnable trait within 0.2 of its new value,
+ * and the row holds the band a trait rendered and the higher honesty-humility. Run-time freezes and suspensions another
+ * process writes set each turn's mode. A host's own turn loop records its memory writes (pending, then kept or
+ * rejected, taken back for a user forgotten while it runs) and guards its filing by the tombstone; a store that does
+ * not open degrades the layer until a later call opens it; a session named at its first turn opens under that turn's
+ * namespace and keeps a hand-over made while it could not open; and a persona's own alias beside its canonical key is
+ * no role overlay.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -91,13 +103,17 @@ import {
   type IKnowledgeGraph,
   type ILearnerSession,
   type ILearningLayer,
+  type LearnerContext,
+  type LearnerKey,
   type LearningConfig,
+  type LoopManifest,
   type MemoryCopyFilter,
   type MemoryDeletion,
   type MemoryTrace,
   type PADState,
   type RememberOptions,
   type ToolLearningContext,
+  type TurnInputForLearning,
 } from '@framers/agentos';
 import { readTraceSnapshot, type TraceSnapshot } from '@framers/agentos/cognition/memory/retrieval/store/tracePersistence';
 import {
@@ -114,25 +130,19 @@ import {
 import { JsonExporter, MarkdownExporter, ObsidianImporter } from '@framers/agentos/cognition/memory';
 import { MigrationEngine } from '@framers/agentos/cognition/rag';
 import {
+  GENESIS_HASH,
   InMemoryLearningStore,
+  LEARNABLE_TRAITS,
   LEARNING_SCHEMA_DDL,
   LEARNING_TABLES,
+  LIFETIME_BAND,
+  Ledger,
   SqlLearningStore,
-  ensureLearningSchema,
-  type ChainHead,
-  type FreezeRow,
-  type LearningColumnAddition,
-  type LearningStore,
-  type LearningStoreTx,
-  type LearningTable,
-  type SessionRow,
-  type SqlLearningStoreOptions,
-  type StoredLedgerRow,
-  type StoredTraitRow,
-} from '@framers/agentos/cognition/learning/store/index';
-import type { LearningKind, LedgerEntry, LedgerLearner, LedgerVerdict } from '@framers/agentos/cognition/learning/types';
-import {
+  chainKeyOf,
   couldBeSessionForm,
+  deferLearnerSession,
+  ensureLearningSchema,
+  freezeScopeKey,
   learnerScopeIds,
   learnerUserScopeId,
   memoryWriteRefusal,
@@ -141,30 +151,41 @@ import {
   selfChangeRefusal,
   sessionScopeIds,
   taggedScopeId,
-  type FreezeScope,
-  type LearningLayerHandle,
-  type LearningMemoryTools,
-  type ProposalResult,
-  type ScopeIdPair,
-  type SessionSelfChange,
-  type TurnScopes,
-} from '@framers/agentos/cognition/learning/index';
-import {
-  GENESIS_HASH,
-  Ledger,
-  canonicalJson,
-  chainKeyOf,
-  hmacSha256Hex,
-  sha256Hex,
   tombstoneHash,
-  ulid,
   type CandidateInput,
   type ChainCheck,
+  type ChainHead,
   type DecideResult,
+  type FreezeRow,
+  type FreezeScope,
+  type LearningColumnAddition,
+  type LearningKind,
+  type LearningLayerHandle,
+  type LearningMemoryTools,
+  type LearningStore,
+  type LearningStoreTx,
+  type LearningTable,
+  type LedgerEntry,
+  type LedgerLearner,
   type LedgerOptions,
+  type LedgerVerdict,
+  type OperatorTraits,
+  type ProposalResult,
   type ProposeOptions,
   type ProposeResult,
-} from '@framers/agentos/cognition/learning/ledger/index';
+  type ScopeIdPair,
+  type SessionRow,
+  type SessionSelfChange,
+  type SqlLearningStoreOptions,
+  type StoredLedgerRow,
+  type StoredTraitRow,
+  type TraitState,
+  type TurnScopes,
+} from '@framers/agentos/cognition/learning/index';
+import { canonicalJson, hmacSha256Hex, sha256Hex, ulid } from '@framers/agentos/cognition/learning/ledger/index';
+import { OPERATOR_ONLY_TRAITS, renderPersonalitySection } from '@framers/agentos/cognition/substrate';
+import { traitOverlayPatch } from '@framers/agentos/cognition/substrate/personas/personalityPrompt';
+import { HEXACO_TRAIT_ALIASES } from '@framers/agentos/cognition/substrate/personas/hexaco';
 import { createPostgresAdapter, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import Database from 'better-sqlite3';
 import { reply, script } from './helpers/stubProviders';
@@ -4925,6 +4946,958 @@ describe('the learning option and its fields, on gmi() and the full runtime', ()
   });
 });
 
+/** A persona's traits as a host writes them: honesty-humility and extraversion high, the other four left out (0.5). */
+const TUTOR_PERSONA = { honesty: 0.9, extraversion: 0.8 };
+/** The chain of learner `ana` of the gmi() agent named `Tutor` (persona id `tutor`) or the runtime's persona `tutor`. */
+const ANA_CHAIN = chainKeyOf({ namespace: '', agentKey: 'tutor', userId: 'ana' });
+const LEARNER_42: LearnerKey = { namespace: 'A', agentKey: 'tutor', userId: '42' };
+const IN_PROCESS_STORE = 'in process: the ledger and the state it records end with the process';
+
+/** The line a trait renders in the personality section at `value`, a value of its high or its low band. */
+function directiveFor(trait: string, value: number): string {
+  const section = renderPersonalitySection({ [trait]: value });
+  if (!section) throw new Error(`${trait} at ${value} renders no directive`);
+  return section.split('\n').at(-1)!;
+}
+
+/** The system text of one model call. */
+const systemTextOf = (call: { messages: Array<{ role: string; content: unknown }> } | undefined): string =>
+  (call?.messages ?? [])
+    .filter((message) => message.role === 'system')
+    .map((message) => (typeof message.content === 'string' ? message.content : JSON.stringify(message.content)))
+    .join('\n');
+
+/** The digest a ledger row carries for a trait row's state: SHA-256 of the canonical text of the fields a change sets. */
+const stateDigestOf = (state: TraitState): Promise<string> =>
+  sha256Hex(canonicalJson({ baseline: state.baseline, current: state.current, bands: state.bands, honestyAtLastLoad: state.honestyAtLastLoad }));
+
+/** A learner's trait row's state, as the store holds it. */
+async function traitStateOf(store: LearningStore, userId = 'ana', namespace = ''): Promise<TraitState> {
+  const row = await store.traitRow(namespace, 'tutor', userId);
+  if (!row) throw new Error(`no trait row for '${userId}' in '${namespace}'`);
+  return JSON.parse(row.state) as TraitState;
+}
+
+/** A memory write a host makes through its learner session, watched: what it took back, and why. */
+function watchedWrite(subject: string, apply: () => Promise<string> = async () => subject) {
+  const undone: Array<[string, string]> = [];
+  const input: SessionSelfChange<string> = {
+    kind: 'memory_write',
+    actor: 'tool:memory_add',
+    subject,
+    before: null,
+    after: { created: [subject], changed: [], deleted: [] },
+    brainId: 'brain-1',
+    apply,
+    undo: async (result, reason) => {
+      undone.push([result, reason]);
+    },
+  };
+  return { input, undone };
+}
+
+/** A turn of a host's own turn loop: by default user `42` of tenant `A`. */
+const productTurn = (over: Partial<TurnInputForLearning> = {}): TurnInputForLearning => ({
+  turnId: 't-1',
+  userId: '42',
+  namespace: 'A',
+  text: 'Hello.',
+  modelIds: ['stub-model'],
+  workflowSeat: false,
+  ...over,
+});
+
+/** What a host's own turn loop tells the layer of a session of persona `tutor`. */
+const productContext = (sessionId: string, over: Partial<LearnerContext> = {}): LearnerContext => ({
+  sessionId,
+  personaId: 'tutor',
+  authoredTraits: TUTOR_PERSONA,
+  ...over,
+});
+
+describe("a learner's trait row and its ledger, on gmi(), the full runtime and a host's own turn loop", () => {
+  let keys = 0;
+  const key = () => `k-qa-traits-${++keys}`;
+  const adapters: StorageAdapter[] = [];
+  afterEach(async () => {
+    for (const adapter of adapters.splice(0).reverse()) await adapter.close().catch(() => undefined);
+  });
+
+  /** A process over the host's SQLite file: the file opened (again) and a learning store over it. */
+  async function processOver(file: string): Promise<{ adapter: StorageAdapter; store: SqlLearningStore }> {
+    const adapter = await openSqliteAt(file);
+    adapters.push(adapter);
+    return { adapter, store: new SqlLearningStore({ adapter }) };
+  }
+
+  /** A gmi() agent named `Tutor` (persona id `tutor`), its provider the stub played under `apiKey`. */
+  const tutorAgent = (apiKey: string, personality: Record<string, number>, learning: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    gmi({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey,
+      fallbackProviders: [],
+      name: 'Tutor',
+      instructions: 'You teach networking.',
+      personality,
+      learning,
+      ...extra,
+    } as never);
+
+  /** One session of one turn of `userId` on a new gmi() tutor: the system text its model was sent, and its layer's manifest. */
+  async function oneTurn(
+    personality: Record<string, number>,
+    learning: Record<string, unknown>,
+    sessionId = 's1',
+    userId = 'ana',
+  ): Promise<{ system: string; manifest: LoopManifest }> {
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('Noted.')] });
+    const tutor = tutorAgent(k, personality, learning);
+    try {
+      await tutor.session(sessionId, { userId }).send('Hello.');
+      return { system: systemTextOf(played.seen.at(-1)), manifest: await tutor.learning!.manifest() };
+    } finally {
+      await tutor.close();
+    }
+  }
+
+  /** The full runtime over one persona `tutor` with `traits`, its provider the stub played under `apiKey`. */
+  const bootRuntime = (apiKey: string, traits: Record<string, number>, learning: unknown): Promise<AgentOS> =>
+    AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey } }] },
+      turnPlanning: { enabled: false },
+      personas: [{ id: 'tutor', name: 'Tutor', description: 'A tutor.', version: '1.0.0', baseSystemPrompt: 'You teach networking.', personalityTraits: traits }],
+      learning,
+    } as never);
+
+  /** One turn of user `ana` on the full runtime: the system text of the turn's streamed model call. */
+  async function runtimeTurn(os: AgentOS, played: ReturnType<typeof script>): Promise<string> {
+    for await (const _chunk of os.processRequest({ textInput: 'Hello.', userId: 'ana', sessionId: 's-ana', selectedPersonaId: 'tutor' } as never)) {
+      // Drained: the turn's answer is not what is read here.
+    }
+    return systemTextOf(played.seen.filter((call) => call.streamed).at(-1));
+  }
+
+  it("writes a learner's trait row at the first session with its creation in the ledger, and across restarts moves its baseline with the persona, keeps each learnable trait within 0.2 of it, holds the band it rendered and the higher honesty-humility", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const file = learningFile();
+
+    // The first session: the row is the persona's authored traits, 0.5 where it leaves one out.
+    const first = await processOver(file);
+    const one = await oneTurn(TUTOR_PERSONA, { store: first.store });
+    expect(one.system).toContain(renderPersonalitySection(TUTOR_PERSONA)!);
+    expect(await first.store.traitRow('', 'tutor', 'ana')).toMatchObject({ personaId: 'tutor', version: 1 });
+    const created = await traitStateOf(first.store);
+    expect(created.baseline).toEqual({ honesty: 0.9, emotionality: 0.5, extraversion: 0.8, agreeableness: 0.5, conscientiousness: 0.5, openness: 0.5 });
+    expect(created.current).toEqual({ extraversion: 0.8, agreeableness: 0.5, conscientiousness: 0.5, openness: 0.5 });
+    expect(created.honestyAtLastLoad).toBe(0.9);
+    const createdRows = await first.store.chainRows(ANA_CHAIN);
+    expect(createdRows.map((row) => [row.rowType, row.kind, row.verdict, row.sessionId])).toEqual([
+      ['candidate', 'operator_set', 'pending', 's1'],
+      ['verdict', 'operator_set', 'kept', 's1'],
+    ]);
+    expect(JSON.parse(createdRows[0].body)).toMatchObject({
+      actor: 'operator:persona',
+      subject: 'traits',
+      reason: 'created',
+      before: null,
+      after: { baseline: created.baseline, current: created.current, honestyAtLastLoad: 0.9, operatorTraits: {} },
+    });
+    expect(createdRows[1].stateDigest).toBe(await stateDigestOf(created));
+    expect(one.manifest.loops.ledger).toEqual({ live: true, detail: 'sql store the host passed; unkeyed' });
+    expect(one.manifest.loops.personality_rendering).toEqual({ live: true });
+    expect((await first.store.sessionRowsOf('', 'ana')).map((row) => [row.sessionId, row.kind, row.agentKey, row.personaId])).toEqual([
+      ['s1', 'learner', 'tutor', 'tutor'],
+    ]);
+
+    // A restart with the same persona reads the row: no ledger row, one more session row.
+    const second = await processOver(file);
+    const two = await oneTurn(TUTOR_PERSONA, { store: second.store }, 's2');
+    expect(two.system).toContain(renderPersonalitySection(TUTOR_PERSONA)!);
+    expect(await second.store.chainRows(ANA_CHAIN)).toHaveLength(2);
+    expect((await second.store.traitRow('', 'tutor', 'ana'))!.version).toBe(1);
+    expect((await second.store.sessionRowsOf('', 'ana')).map((row) => row.sessionId)).toEqual(['s1', 's2']);
+
+    // The persona moves extraversion to 0.44: the kept 0.8 is clamped to 0.64, within 0.2 of it, and keeps the band it
+    // rendered (high, until it falls past 0.63), where the persona alone renders it moderate.
+    const nudged = { honesty: 0.9, extraversion: 0.44 };
+    const third = await processOver(file);
+    const three = await oneTurn(nudged, { store: third.store }, 's3');
+    expect(three.system).toContain(directiveFor('extraversion', 0.8));
+    expect(renderPersonalitySection(nudged)).not.toContain(directiveFor('extraversion', 0.8));
+    const held = await traitStateOf(third.store);
+    expect(held.baseline.extraversion).toBe(0.44);
+    expect(held.current.extraversion).toBeCloseTo(0.64, 10);
+    expect(held.bands.extraversion).toBe('high');
+    const movedRows = await third.store.chainRows(ANA_CHAIN);
+    expect(movedRows.map((row) => row.verdict)).toEqual(['pending', 'kept', 'pending', 'kept']);
+    expect(JSON.parse(movedRows[2].body)).toMatchObject({
+      actor: 'operator:persona',
+      reason: 'persona_changed',
+      before: { baseline: { extraversion: 0.8 }, current: { extraversion: 0.8 } },
+      after: { baseline: { extraversion: 0.44 }, bands: { extraversion: 'high' } },
+    });
+    expect(movedRows[3].stateDigest).toBe(await stateDigestOf(held));
+
+    // The persona lowers honesty-humility to 0.2 and sets emotionality 0.1 and extraversion 0.3: honesty-humility keeps
+    // rendering the 0.9 the learner had, emotionality renders the persona's, and extraversion is clamped to 0.5
+    // (moderate, no directive), where the persona alone renders it low.
+    const lowered = { honesty: 0.2, emotionality: 0.1, extraversion: 0.3 };
+    const fourth = await processOver(file);
+    const four = await oneTurn(lowered, { store: fourth.store }, 's4');
+    expect(four.system).toContain(renderPersonalitySection({ honesty: 0.9, emotionality: 0.1, extraversion: 0.5 })!);
+    expect(four.system).not.toContain(directiveFor('honesty', 0.2));
+    expect(four.system).not.toContain(directiveFor('extraversion', 0.3));
+    const floored = await traitStateOf(fourth.store);
+    expect(floored.baseline).toMatchObject({ honesty: 0.2, emotionality: 0.1, extraversion: 0.3 });
+    expect(floored.honestyAtLastLoad).toBe(0.9);
+    expect(floored.current.extraversion).toBeCloseTo(0.5, 10);
+    expect(await fourth.store.chainRows(ANA_CHAIN)).toHaveLength(6);
+    expect(await new Ledger({ store: fourth.store }).verifyChain(ANA_CHAIN)).toEqual({ ok: true, keyed: false });
+    expect(four.manifest.loops.ledger).toEqual({ live: true, detail: 'sql store the host passed; unkeyed' });
+  });
+
+  it('writes the trait row at a first session in mode frozen and under the process freeze, and none in mode off, where the session row is still written', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const frozen = new InMemoryLearningStore();
+    expect((await oneTurn(TUTOR_PERSONA, { store: frozen, mode: 'frozen' })).manifest.mode).toBe('frozen');
+    expect(await frozen.traitRow('', 'tutor', 'ana')).toMatchObject({ personaId: 'tutor', version: 1 });
+
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    const processFrozen = new InMemoryLearningStore();
+    await oneTurn(TUTOR_PERSONA, { store: processFrozen });
+    expect(await processFrozen.traitRow('', 'tutor', 'ana')).toMatchObject({ version: 1 });
+    vi.unstubAllEnvs();
+
+    const off = new InMemoryLearningStore();
+    const offTurn = await oneTurn(TUTOR_PERSONA, { store: off, mode: 'off' });
+    expect(offTurn.system).toContain(renderPersonalitySection(TUTOR_PERSONA)!);
+    expect(await off.traitRow('', 'tutor', 'ana')).toBeUndefined();
+    expect(await off.chainRows(ANA_CHAIN)).toEqual([]);
+    expect((await off.sessionRowsOf('', 'ana')).map((row) => [row.sessionId, row.kind])).toEqual([['s1', 'learner']]);
+  });
+
+  it("renders the persona's authored traits, writes nothing and counts the learner as chain broken when an edit made outside the layer breaks the learner's record", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const doesNotVerify = (reason: string) =>
+      warn.mock.calls.some((call) =>
+        String(call[0]).includes(`the learning record of learner 'ana' of agent 'tutor' in namespace '' does not verify (${reason})`),
+      );
+
+    // The trait row edited inside its band: the edited 0.6 would render extraversion moderate.
+    const edits = learningFile();
+    const before = await processOver(edits);
+    await oneTurn(TUTOR_PERSONA, { store: before.store });
+    const edited = await traitStateOf(before.store);
+    edited.current.extraversion = 0.6;
+    edited.bands.extraversion = 'moderate';
+    await before.adapter.run('UPDATE agentos_learning_traits SET state = ? WHERE agent_key = ? AND user_id = ?', [JSON.stringify(edited), 'tutor', 'ana']);
+    const after = await processOver(edits);
+    const read = await oneTurn(TUTOR_PERSONA, { store: after.store }, 's2');
+    expect(read.system).toContain(renderPersonalitySection(TUTOR_PERSONA)!);
+    expect(read.manifest.loops.ledger).toEqual({ live: true, detail: 'sql store the host passed; unkeyed; chain broken for 1 learner' });
+    expect(doesNotVerify('its trait row does not match its newest ledger row')).toBe(true);
+    expect(await after.store.chainRows(ANA_CHAIN)).toHaveLength(2);
+    expect((await traitStateOf(after.store)).current.extraversion).toBe(0.6);
+
+    // The newest ledger rows deleted with the head set back: every remaining row verifies, but the row holds the moved
+    // state, which no remaining row's digest names.
+    warn.mockClear();
+    const rollback = learningFile();
+    const moved = { honesty: 0.9, extraversion: 0.3 };
+    await oneTurn(TUTOR_PERSONA, { store: (await processOver(rollback)).store });
+    const later = await processOver(rollback);
+    await oneTurn(moved, { store: later.store }, 's2');
+    const rows = await later.adapter.all<{ id: string; hash: string }>('SELECT id, hash FROM agentos_learning_ledger WHERE chain_key = ? ORDER BY seq', [ANA_CHAIN]);
+    expect(rows).toHaveLength(4);
+    await later.adapter.run('DELETE FROM agentos_learning_ledger WHERE chain_key = ? AND seq > 2', [ANA_CHAIN]);
+    await later.adapter.run('UPDATE agentos_learning_heads SET last_id = ?, last_hash = ?, seq = 2 WHERE chain_key = ?', [rows[1].id, rows[1].hash, ANA_CHAIN]);
+    const rolled = await processOver(rollback);
+    const back = await oneTurn(moved, { store: rolled.store }, 's3');
+    // The persona's own extraversion (0.3, low) renders, where the row's 0.5 renders none.
+    expect(back.system).toContain(renderPersonalitySection(moved)!);
+    expect(back.manifest.loops.ledger.detail).toBe('sql store the host passed; unkeyed; chain broken for 1 learner');
+    expect(doesNotVerify('its trait row does not match its newest ledger row')).toBe(true);
+    expect(await rolled.store.chainRows(ANA_CHAIN)).toHaveLength(2);
+  });
+
+  it('with learning.ledgerKey, reads a chain hashed without the key as broken, and keys every hash of a learner it starts, which verifies across a restart', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const file = learningFile();
+    const moved = { honesty: 0.9, extraversion: 0.3 };
+    const unkeyed = await oneTurn(TUTOR_PERSONA, { store: (await processOver(file)).store });
+    expect(unkeyed.manifest.loops.ledger.detail).toBe('sql store the host passed; unkeyed');
+
+    // A layer that holds the key reads ana's chain, hashed without it, as broken: the moved persona's own traits render.
+    const keyed = await processOver(file);
+    const brokenUnderKey = await oneTurn(moved, { store: keyed.store, ledgerKey: LEDGER_KEY }, 's2');
+    expect(brokenUnderKey.system).toContain(renderPersonalitySection(moved)!);
+    expect(brokenUnderKey.manifest.loops.ledger).toEqual({ live: true, detail: 'sql store the host passed; keyed; chain broken for 1 learner' });
+    expect(await keyed.store.chainRows(ANA_CHAIN)).toHaveLength(2);
+
+    // A learner the keyed layer starts: every hash is HMAC-SHA-256 of its row's text under the key.
+    const boChain = chainKeyOf({ namespace: '', agentKey: 'tutor', userId: 'bo' });
+    const started = await oneTurn(TUTOR_PERSONA, { store: keyed.store, ledgerKey: LEDGER_KEY }, 's3', 'bo');
+    expect(started.manifest.loops.ledger.detail).toBe('sql store the host passed; keyed');
+    const boRows = await keyed.store.chainRows(boChain);
+    expect(boRows).toHaveLength(2);
+    for (const row of boRows) expect(row.hash).toBe(await hmacSha256Hex(LEDGER_KEY, row.body));
+
+    // Across a restart under the same key, bo's chain verifies and the persona's move renders the clamped value.
+    const restarted = await processOver(file);
+    const again = await oneTurn(moved, { store: restarted.store, ledgerKey: LEDGER_KEY }, 's4', 'bo');
+    expect(again.system).toContain(renderPersonalitySection({ honesty: 0.9, extraversion: 0.5 })!);
+    expect(again.system).not.toContain(directiveFor('extraversion', 0.3));
+    expect(again.manifest.loops.ledger.detail).toBe('sql store the host passed; keyed');
+    expect(await new Ledger({ store: restarted.store, ledgerKey: LEDGER_KEY }).verifyChain(boChain)).toEqual({ ok: true, keyed: true });
+    // The store holds no copy of the key.
+    for (const table of LEARNING_TABLES) {
+      expect(JSON.stringify(await restarted.adapter.all<Record<string, unknown>>(`SELECT * FROM ${table}`))).not.toContain(LEDGER_KEY);
+    }
+  });
+
+  it("reads the run-time freezes and suspensions another process writes into the store at each turn: a learner's freeze and every agent's freeze make the turn frozen, an agent's suspension makes it off, and a host tool's refusals answer by them", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const file = learningFile();
+    // The learner's row first, so the row (extraversion clamped to 0.5) and the persona's own traits (0.3, low) render apart.
+    await oneTurn(TUTOR_PERSONA, { store: (await processOver(file)).store });
+    const agentProcess = await processOver(file);
+    const operator = await processOver(file);
+    const learnerScope = freezeScopeKey({ learner: { namespace: '', agentKey: 'tutor', userId: 'ana' } });
+    const agentScope = freezeScopeKey({ agentKey: 'tutor' });
+    const freezeRow = (scopeKey: string, mode: FreezeRow['mode']): FreezeRow => ({
+      scopeKey,
+      mode,
+      namespace: '',
+      agentKey: scopeKey === 'all' ? null : 'tutor',
+      userId: scopeKey === learnerScope ? 'ana' : null,
+      setBy: 'operator:ops',
+      createdAt: LEARNED_AT,
+    });
+
+    const seen: Array<{ context: unknown; selfChange: unknown; memoryWrite: unknown }> = [];
+    const probe = {
+      name: 'probe_learning',
+      description: 'Reads what the turn tells its tools about learning.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async (_args: Record<string, unknown>, context: { sessionData?: Record<string, unknown> }) => {
+        seen.push({
+          context: readToolLearningContext(context.sessionData),
+          selfChange: selfChangeRefusal(context.sessionData),
+          memoryWrite: memoryWriteRefusal(context.sessionData),
+        });
+        return { success: true, output: 'read' };
+      },
+    };
+    const k = key();
+    const played = script('openai', k, {
+      replies: Array.from({ length: 5 }, (_, at) => [reply.tools([{ id: `c${at}`, name: 'probe_learning', args: {} }]), reply.text('Done.')]).flat(),
+    });
+    const moved = { honesty: 0.9, extraversion: 0.3 };
+    const tutor = tutorAgent(k, moved, { store: agentProcess.store }, { tools: [probe] });
+    const session = tutor.session('s1', { userId: 'ana' });
+    /** One turn: the system text it sent, and what the probe read. */
+    const probed = async () => {
+      seen.length = 0;
+      await session.send('Read it.');
+      expect(seen).toHaveLength(1);
+      return { system: systemTextOf(played.seen.at(-1)), read: seen[0] };
+    };
+    const rowSection = renderPersonalitySection({ honesty: 0.9, extraversion: 0.5 })!;
+    const lowExtraversion = directiveFor('extraversion', 0.3);
+    try {
+      const on = await probed();
+      expect(on.read).toEqual({ context: { learner: 'bound', mode: 'on' }, selfChange: undefined, memoryWrite: undefined });
+      expect(on.system).toContain(rowSection);
+      expect(on.system).not.toContain(lowExtraversion);
+
+      await operator.store.insertFreeze(freezeRow(learnerScope, 'frozen'));
+      const frozen = await probed();
+      expect(frozen.read).toEqual({ context: { learner: 'bound', mode: 'frozen' }, selfChange: 'frozen', memoryWrite: 'frozen' });
+      expect(frozen.system).toContain(rowSection);
+      expect(frozen.system).not.toContain(lowExtraversion);
+
+      await operator.store.deleteFreeze(learnerScope, 'frozen');
+      await operator.store.insertFreeze(freezeRow(agentScope, 'off'));
+      const suspended = await probed();
+      expect(suspended.read).toEqual({ context: { learner: 'bound', mode: 'off' }, selfChange: 'off', memoryWrite: undefined });
+      expect(suspended.system).toContain(renderPersonalitySection(moved)!);
+
+      await operator.store.deleteFreeze(agentScope, 'off');
+      await operator.store.insertFreeze(freezeRow('all', 'frozen'));
+      expect((await probed()).read).toEqual({ context: { learner: 'bound', mode: 'frozen' }, selfChange: 'frozen', memoryWrite: 'frozen' });
+
+      await operator.store.deleteFreeze('all', 'frozen');
+      expect((await probed()).read).toEqual({ context: { learner: 'bound', mode: 'on' }, selfChange: undefined, memoryWrite: undefined });
+    } finally {
+      await tutor.close();
+    }
+  });
+
+  it("records a host's memory writes through its own turn loop over its storage adapter: pending while the write runs, then kept, rejected when it fails, taken back when its user is forgotten, and a second user's under the agent", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { adapter } = await processOver(learningFile());
+    const layer = createLearningLayer({ storageAdapter: adapter });
+    // The host reads what the layer wrote through a store of its own over the same adapter.
+    const store = new SqlLearningStore({ adapter });
+    const chain = chainKeyOf(LEARNER_42);
+    try {
+      expect((await layer.manifest()).loops.ledger).toEqual({ live: true, detail: "sql store over the host's storage adapter; unkeyed" });
+      const session = await layer.forLearner(LEARNER_42, productContext('s-1'));
+      const prepared = await session.prepareTurn(productTurn());
+      expect(prepared).toMatchObject({
+        learner: 'bound',
+        mode: 'on',
+        scopes: { learner: 'bound', mode: 'on', userScopeId: 'A/42', personaScopeId: 'A/42::tutor', namespace: 'A' },
+      });
+      expect(prepared.systemPrompts).toEqual([{ content: renderPersonalitySection(TUTOR_PERSONA), priority: 2, source: 'learning:personality' }]);
+
+      // While the write runs its candidate is pending; then its verdict is kept.
+      const verdictsSeen: string[] = [];
+      const kept = watchedWrite('mt-1', async () => {
+        verdictsSeen.push((await store.chainRows(chain)).at(-1)!.verdict);
+        return 'mt-1';
+      });
+      const keptResult = await session.recordSelfChange!(kept.input, { learner: 'bound', namespace: 'A', conversationId: 'conv-1' });
+      expect(keptResult).toMatchObject({ status: 'kept', result: 'mt-1' });
+      expect(verdictsSeen).toEqual(['pending']);
+      const written = (await store.chainRows(chain)).filter((row) => row.kind === 'memory_write');
+      expect(written.map((row) => [row.rowType, row.subject, row.verdict, row.sessionId])).toEqual([
+        ['candidate', 'mt-1', 'pending', 's-1'],
+        ['verdict', 'mt-1', 'kept', 's-1'],
+      ]);
+      expect(keptResult.status === 'kept' ? keptResult.ledgerId : undefined).toBe(written[0].id);
+      expect(JSON.parse(written[0].body)).toMatchObject({
+        actor: 'tool:memory_add',
+        subject: 'mt-1',
+        before: null,
+        after: { brainId: 'brain-1', created: ['mt-1'], changed: [], deleted: [] },
+      });
+      expect(await store.sessionRowsOf('A', '42')).toMatchObject([{ sessionId: 's-1', kind: 'learner', conversationIds: ['conv-1'], brainIds: ['brain-1'] }]);
+
+      // A write that throws: rejected, its verdict rejected with the reason write_failed, nothing taken back.
+      const failing = watchedWrite('mt-2', async () => {
+        throw new Error('disk full');
+      });
+      expect(await session.recordSelfChange!(failing.input, { learner: 'bound', namespace: 'A' })).toMatchObject({ status: 'rejected', reason: 'write_failed' });
+      const failedRows = (await store.chainRows(chain)).filter((row) => row.subject === 'mt-2');
+      expect(failedRows.map((row) => [row.rowType, row.verdict])).toEqual([
+        ['candidate', 'pending'],
+        ['verdict', 'rejected'],
+      ]);
+      expect(JSON.parse(failedRows[1].body).reason).toBe('write_failed');
+      expect(failing.undone).toEqual([]);
+      expect(await new Ledger({ store }).verifyChain(chain)).toEqual({ ok: true, keyed: false });
+
+      // A second user's turn on 42's session has no learner; its write chains under the agent with that user's id.
+      const visitorTurn = await session.prepareTurn(productTurn({ userId: 'bo' }));
+      expect(visitorTurn).toMatchObject({
+        learner: 'none',
+        noLearnerReason: 'other_user',
+        turnUserId: 'bo',
+        mode: 'on',
+        scopes: { learner: 'none', userScopeId: 'A//s-1', personaScopeId: 'A//s-1::tutor', namespace: 'A' },
+      });
+      expect(visitorTurn.systemPrompts[0]?.content).toBe(renderPersonalitySection(TUTOR_PERSONA));
+      const visitor = watchedWrite('mt-3');
+      expect(await session.recordSelfChange!(visitor.input, { learner: 'none', namespace: 'A', turnUserId: 'bo', conversationId: 'conv-9' })).toMatchObject({
+        status: 'kept',
+      });
+      const visitorChain = chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }, 'bo');
+      expect((await store.chainRows(visitorChain)).map((row) => [row.userId, row.turnUserId, row.sessionId, row.verdict])).toEqual([
+        [null, 'bo', 's-1', 'pending'],
+        [null, 'bo', 's-1', 'kept'],
+      ]);
+      expect(await store.sessionRowsOf('A', 'bo')).toMatchObject([{ sessionId: 's-1', kind: 'visitor', conversationIds: ['conv-9'], brainIds: ['brain-1'] }]);
+      const learnerAgain = await session.prepareTurn(productTurn());
+      expect(learnerAgain).toMatchObject({ learner: 'none', noLearnerReason: 'other_user' });
+      expect(learnerAgain.turnUserId).toBeUndefined();
+
+      // 42 is forgotten while a write runs: the write is taken back for good and 42's learning rows go; bo's stay.
+      const racing = watchedWrite('mt-4', async () => {
+        await store.insertForgotten(await tombstoneHash('A', '42'), LEARNED_AT);
+        return 'mt-4';
+      });
+      expect(await session.recordSelfChange!(racing.input, { learner: 'bound', namespace: 'A' })).toEqual({ status: 'rejected', reason: 'forgotten' });
+      expect(racing.undone).toEqual([['mt-4', 'forgotten']]);
+      expect(await store.chainRows(chain)).toEqual([]);
+      expect(await store.traitRow('A', 'tutor', '42')).toBeUndefined();
+      expect(await store.sessionRowsOf('A', '42')).toEqual([]);
+      expect(await store.chainRows(visitorChain)).toHaveLength(2);
+      // A later write of 42's is refused before it runs.
+      const late = vi.fn(async () => 'mt-5');
+      expect(await session.recordSelfChange!(watchedWrite('mt-5', late).input, { learner: 'bound', namespace: 'A' })).toEqual({
+        status: 'rejected',
+        reason: 'forgotten',
+      });
+      expect(late).not.toHaveBeenCalled();
+    } finally {
+      await layer.close();
+    }
+  });
+
+  it("guards a host's own filing between two reads of the tombstone, refuses a recorded write under a freeze with a suspension beside it, writes no learned state in mode off, and refuses the writes of an id the store cannot hold", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { adapter } = await processOver(learningFile());
+    const layer = createLearningLayer({ storageAdapter: adapter });
+    const store = new SqlLearningStore({ adapter });
+    const learner7: LearnerKey = { namespace: 'A', agentKey: 'tutor', userId: '7' };
+    const operatorRow = (scopeKey: string, mode: FreezeRow['mode'], userId: string | null): FreezeRow => ({
+      scopeKey,
+      mode,
+      namespace: 'A',
+      agentKey: 'tutor',
+      userId,
+      setBy: 'operator:ops',
+      createdAt: LEARNED_AT,
+    });
+    try {
+      const session = await layer.forLearner(learner7, productContext('s-2'));
+      expect((await session.prepareTurn(productTurn({ userId: '7' }))).mode).toBe('on');
+
+      // A freeze on the learner refuses a recorded write before it runs, with the agent suspended beside it.
+      await store.insertFreeze(operatorRow(freezeScopeKey({ agentKey: 'tutor' }), 'off', null));
+      await store.insertFreeze(operatorRow(freezeScopeKey({ learner: learner7 }), 'frozen', '7'));
+      expect((await session.prepareTurn(productTurn({ userId: '7' }))).mode).toBe('off');
+      expect(session.isFrozen!()).toBe(true);
+      const blocked = vi.fn(async () => 'mt-7');
+      expect(await session.recordSelfChange!(watchedWrite('mt-7', blocked).input)).toEqual({ status: 'rejected', reason: 'frozen' });
+      expect(blocked).not.toHaveBeenCalled();
+
+      // The suspension alone: the write is made with no ledger row.
+      await store.deleteFreeze(freezeScopeKey({ learner: learner7 }), 'frozen');
+      expect((await session.prepareTurn(productTurn({ userId: '7' }))).mode).toBe('off');
+      expect(session.isFrozen!()).toBe(false);
+      expect(await session.recordSelfChange!(watchedWrite('mt-8').input)).toEqual({ status: 'written', result: 'mt-8' });
+      expect((await store.chainRows(chainKeyOf(learner7))).filter((row) => row.kind === 'memory_write')).toEqual([]);
+
+      // The process freeze is read at the call.
+      await store.deleteFreeze(freezeScopeKey({ agentKey: 'tutor' }), 'off');
+      expect((await session.prepareTurn(productTurn({ userId: '7' }))).mode).toBe('on');
+      expect(session.isFrozen!()).toBe(false);
+      vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+      expect(session.isFrozen!()).toBe(true);
+      vi.unstubAllEnvs();
+
+      // The guard: a write between two reads of the tombstone, taken back when the tombstone lands while it runs, and
+      // refused before it runs once the user is forgotten.
+      expect(await session.guardMemoryWrite!({ apply: async () => 'trace-1', undo: async () => undefined })).toEqual({ status: 'written', result: 'trace-1' });
+      const takenBack: string[] = [];
+      expect(
+        await session.guardMemoryWrite!({
+          apply: async () => {
+            await store.insertForgotten(await tombstoneHash('A', '7'), LEARNED_AT);
+            return 'trace-2';
+          },
+          undo: async (id) => {
+            takenBack.push(id);
+          },
+        }),
+      ).toEqual({ status: 'rejected', reason: 'forgotten' });
+      expect(takenBack).toEqual(['trace-2']);
+      const never = vi.fn(async () => 'trace-3');
+      expect(await session.guardMemoryWrite!({ apply: never, undo: async () => undefined })).toEqual({ status: 'rejected', reason: 'forgotten' });
+      expect(never).not.toHaveBeenCalled();
+
+      // Mode off: no trait row read or written; the learner's session row and the scopes stay; a write has no row.
+      const off = createLearningLayer({ storageAdapter: adapter, mode: 'off' });
+      try {
+        const offSession = await off.forLearner({ namespace: 'B', agentKey: 'tutor', userId: '42' }, productContext('s-3'));
+        const offTurn = await offSession.prepareTurn(productTurn({ namespace: 'B' }));
+        expect(offTurn).toMatchObject({
+          learner: 'bound',
+          mode: 'off',
+          scopes: { learner: 'bound', mode: 'off', userScopeId: 'B/42', personaScopeId: 'B/42::tutor', namespace: 'B' },
+        });
+        expect(offTurn.systemPrompts[0]?.content).toBe(renderPersonalitySection(TUTOR_PERSONA));
+        expect(await store.traitRow('B', 'tutor', '42')).toBeUndefined();
+        expect((await store.sessionRowsOf('B', '42')).map((row) => [row.sessionId, row.kind])).toEqual([['s-3', 'learner']]);
+        expect(await offSession.recordSelfChange!(watchedWrite('mt-9').input)).toEqual({ status: 'written', result: 'mt-9' });
+        expect(await store.chainRows(chainKeyOf({ namespace: 'B', agentKey: 'tutor', userId: '42' }))).toEqual([]);
+      } finally {
+        await off.close();
+      }
+
+      // A user id a SQL text column cannot hold (a lone surrogate): the authored traits render, and the writes that
+      // need the store are refused.
+      const lone = await layer.forLearner({ namespace: 'A', agentKey: 'tutor', userId: 'a\uD800' }, productContext('s-4'));
+      const loneTurn = await lone.prepareTurn(productTurn({ userId: 'a\uD800' }));
+      expect(loneTurn).toMatchObject({ learner: 'bound', mode: 'on' });
+      expect(loneTurn.systemPrompts[0]?.content).toBe(renderPersonalitySection(TUTOR_PERSONA));
+      const refused = vi.fn(async () => 'mt-10');
+      expect(await lone.recordSelfChange!(watchedWrite('mt-10', refused).input)).toMatchObject({ status: 'rejected', reason: 'store_unavailable' });
+      expect(await lone.guardMemoryWrite!({ apply: refused, undo: async () => undefined })).toEqual({ status: 'rejected', reason: 'store_unavailable' });
+      expect(refused).not.toHaveBeenCalled();
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("a learner's trait row could not be read"))).toBe(true);
+    } finally {
+      await layer.close();
+    }
+  });
+
+  it("degrades while its store does not open: the persona's traits render, the writes that need the store are refused, the manifest says why, and a later call opens it", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    /** An in-process store whose first read fails until the host unlocks it, as a store over a locked file does. */
+    class LockedStore extends InMemoryLearningStore {
+      locked = true;
+      reads = 0;
+      async freezeRows(): Promise<FreezeRow[]> {
+        this.reads += 1;
+        if (this.locked) throw new Error('brain file locked');
+        return super.freezeRows();
+      }
+    }
+
+    // gmi() with learning.store.
+    const locked = new LockedStore();
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('One.'), reply.text('Two.')] });
+    const tutor = tutorAgent(k, TUTOR_PERSONA, { store: locked });
+    try {
+      const session = tutor.session('s1', { userId: 'ana' });
+      await session.send('Hello.');
+      expect(systemTextOf(played.seen[0])).toContain(renderPersonalitySection(TUTOR_PERSONA)!);
+      const degraded = await tutor.learning!.manifest();
+      expect(degraded.loops.ledger).toEqual({ live: false, detail: 'store unavailable: brain file locked' });
+      expect(degraded.loops.personality_rendering).toEqual({ live: true, detail: 'traits: degraded (brain file locked)' });
+      expect(await locked.traitRow('', 'tutor', 'ana')).toBeUndefined();
+      expect(locked.reads).toBeGreaterThan(1);
+      expect(warn.mock.calls.filter((call) => String(call[0]).includes('the learning store did not open (brain file locked)'))).toHaveLength(1);
+      locked.locked = false;
+      await session.send('Again.');
+      expect(await locked.traitRow('', 'tutor', 'ana')).toMatchObject({ personaId: 'tutor', version: 1 });
+      const opened = await tutor.learning!.manifest();
+      expect(opened.loops.ledger).toEqual({ live: true, detail: `${IN_PROCESS_STORE}; unkeyed` });
+      expect(opened.loops.personality_rendering).toEqual({ live: true });
+    } finally {
+      await tutor.close();
+    }
+
+    // A host's own turn loop that opens its store on first use.
+    const { adapter } = await processOver(learningFile());
+    const sql = new SqlLearningStore({ adapter });
+    let unlocked = false;
+    let opens = 0;
+    const layer = createLearningLayer({
+      openStore: async () => {
+        opens += 1;
+        if (!unlocked) throw new Error('brain file locked');
+        return sql;
+      },
+    });
+    try {
+      const session = await layer.forLearner(LEARNER_42, productContext('s-1'));
+      const prepared = await session.prepareTurn(productTurn());
+      expect(prepared.systemPrompts[0]?.content).toBe(renderPersonalitySection(TUTOR_PERSONA));
+      expect(prepared.scopes).toMatchObject({ learner: 'bound', userScopeId: 'A/42' });
+      const refused = vi.fn(async () => 'mt-1');
+      expect(await session.recordSelfChange!(watchedWrite('mt-1', refused).input)).toMatchObject({ status: 'rejected', reason: 'store_unavailable' });
+      expect(await session.guardMemoryWrite!({ apply: refused, undo: async () => undefined })).toEqual({ status: 'rejected', reason: 'store_unavailable' });
+      expect(refused).not.toHaveBeenCalled();
+      expect((await layer.manifest()).loops.ledger).toEqual({ live: false, detail: 'store unavailable: brain file locked' });
+      unlocked = true;
+      await session.prepareTurn(productTurn());
+      expect((await layer.manifest()).loops.ledger).toEqual({ live: true, detail: "sql store over the agent's memory store; unkeyed" });
+      expect(await sql.traitRow('A', 'tutor', '42')).toMatchObject({ version: 1 });
+      expect(await session.recordSelfChange!(watchedWrite('mt-2').input)).toMatchObject({ status: 'kept', result: 'mt-2' });
+      expect(opens).toBeGreaterThan(2);
+    } finally {
+      await layer.close();
+    }
+  });
+
+  it("says in the manifest where its store lives and whether its hashes are keyed: the store the host passed, SQL over the host's adapter, in process for an adapter without transactions or none", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { adapter } = await processOver(learningFile());
+    const ledgerLoop = async (options: Parameters<typeof createLearningLayer>[0]) => {
+      const layer = createLearningLayer(options);
+      try {
+        return (await layer.manifest()).loops.ledger;
+      } finally {
+        await layer.close();
+      }
+    };
+    expect(await ledgerLoop({})).toEqual({ live: true, detail: `${IN_PROCESS_STORE}; unkeyed` });
+    expect(await ledgerLoop({ storageAdapter: adapter })).toEqual({ live: true, detail: "sql store over the host's storage adapter; unkeyed" });
+    expect(await ledgerLoop({ storageAdapter: adapter, ledgerKey: LEDGER_KEY })).toEqual({ live: true, detail: "sql store over the host's storage adapter; keyed" });
+    const noTransactions = { kind: 'kv', capabilities: new Set<string>() } as unknown as StorageAdapter;
+    expect(await ledgerLoop({ storageAdapter: noTransactions })).toEqual({
+      live: true,
+      detail: 'in process: the storage adapter has no transactions; the ledger and the state it records end with the process; unkeyed',
+    });
+    expect(await ledgerLoop({ store: new SqlLearningStore({ adapter }) })).toEqual({ live: true, detail: 'sql store the host passed; unkeyed' });
+    expect(await ledgerLoop({ store: new InMemoryLearningStore(), ledgerKey: LEDGER_KEY })).toEqual({ live: true, detail: `${IN_PROCESS_STORE}; keyed` });
+    // The store the host passed wins over its adapter.
+    expect(await ledgerLoop({ store: new InMemoryLearningStore(), storageAdapter: adapter })).toEqual({ live: true, detail: `${IN_PROCESS_STORE}; unkeyed` });
+    // gmi() with no store keeps its ledger in process.
+    expect((await oneTurn(TUTOR_PERSONA, {})).manifest.loops.ledger).toEqual({ live: true, detail: `${IN_PROCESS_STORE}; unkeyed` });
+  });
+
+  it("opens a learner session named at its first turn under that turn's namespace on every attempt, keeps a hand-over made while it could not open, and answers and refuses before it opens", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const layer = createLearningLayer();
+    const openLearner = (namespace: string): Promise<ILearnerSession> =>
+      layer.forLearner({ namespace, agentKey: 'tutor', userId: 'ana' }, productContext('s-1'));
+    /** A session named at its first turn whose first `failures` opens fail, and the namespaces it opened under. */
+    const namedAtFirstTurn = (
+      failures: number,
+      openSession: (namespace: string) => Promise<ILearnerSession> = openLearner,
+      extra: { defaultNamespace?: string; mode?: () => 'on' | 'off' | 'frozen' } = {},
+    ) => {
+      const opened: string[] = [];
+      let left = failures;
+      const session = deferLearnerSession({
+        traits: TUTOR_PERSONA,
+        sessionId: 's-1',
+        personaId: 'tutor',
+        ...extra,
+        open: async (namespace) => {
+          opened.push(namespace);
+          if (left-- > 0) throw new Error('store offline');
+          return openSession(namespace);
+        },
+      });
+      return { session, opened };
+    };
+    const anaTurn = (namespace: string, userId = 'ana') => productTurn({ userId, namespace });
+    try {
+      // The first open fails: the next turn opens under the first turn's namespace and is read against it.
+      const one = namedAtFirstTurn(1);
+      await expect(one.session.prepareTurn(anaTurn('A'))).rejects.toThrow('store offline');
+      expect(await one.session.prepareTurn(anaTurn('B'))).toMatchObject({ learner: 'none', noLearnerReason: 'other_namespace' });
+      expect(one.opened).toEqual(['A', 'A']);
+
+      // A hand-over to another user while it could not open holds once it opens.
+      const two = namedAtFirstTurn(2);
+      await expect(two.session.prepareTurn(anaTurn('A'))).rejects.toThrow('store offline');
+      await expect(two.session.prepareTurn(anaTurn('A', 'bo'))).rejects.toThrow('store offline');
+      expect(await two.session.prepareTurn(anaTurn('A'))).toMatchObject({ learner: 'none', noLearnerReason: 'other_user' });
+
+      // An open that succeeds at the first turn: a learner's turn.
+      expect(await namedAtFirstTurn(0).session.prepareTurn(anaTurn('A'))).toMatchObject({ learner: 'bound', mode: 'on', scopes: { userScopeId: 'A/ana' } });
+
+      // Before it opens: the session's own form with no learner, under the agent's namespace for a turn with none, and
+      // the writes that need the store refused.
+      const down = namedAtFirstTurn(Number.POSITIVE_INFINITY, openLearner, { defaultNamespace: 'A' });
+      expect(down.session.scopesFor!({ userId: 'ana', namespace: '', workflowSeat: false })).toEqual({
+        learner: 'none',
+        mode: 'on',
+        userScopeId: 'A//s-1',
+        personaScopeId: 'A//s-1::tutor',
+        namespace: 'A',
+      });
+      const refused = vi.fn(async () => 'mt-1');
+      expect(await down.session.recordSelfChange!(watchedWrite('mt-1', refused).input)).toMatchObject({ status: 'rejected', reason: 'store_unavailable' });
+      expect(await down.session.guardMemoryWrite!({ apply: refused, undo: async () => undefined })).toEqual({ status: 'rejected', reason: 'store_unavailable' });
+      expect(refused).not.toHaveBeenCalled();
+      expect(down.session.currentTraits()).toEqual(TUTOR_PERSONA);
+      expect(down.session.isFrozen!()).toBe(false);
+      vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+      expect(down.session.isFrozen!()).toBe(true);
+      vi.unstubAllEnvs();
+      const frozenDown = namedAtFirstTurn(Number.POSITIVE_INFINITY, openLearner, { mode: () => 'frozen' });
+      expect(frozenDown.session.scopesFor!({ userId: 'ana', namespace: '', workflowSeat: false })).toMatchObject({ learner: 'none', mode: 'frozen', userScopeId: '/s-1' });
+      expect(frozenDown.session.isFrozen!()).toBe(true);
+
+      // A host's own session, which cannot take the loss: the turns after a hand-over made while it could not open have
+      // no learner, render the persona's traits and file under the session's own form.
+      const hostSession = async (): Promise<ILearnerSession> => ({
+        prepareTurn: async () => ({ systemPrompts: [], learner: 'bound', mode: 'on' }),
+        endSession: async () => undefined,
+        currentTraits: () => ({}),
+      });
+      const own = namedAtFirstTurn(2, hostSession);
+      await expect(own.session.prepareTurn(anaTurn('A'))).rejects.toThrow('store offline');
+      await expect(own.session.prepareTurn(anaTurn('A', 'bo'))).rejects.toThrow('store offline');
+      expect(await own.session.prepareTurn(anaTurn('A'))).toEqual({
+        systemPrompts: [{ content: renderPersonalitySection(TUTOR_PERSONA), priority: 2, source: 'learning:personality' }],
+        learner: 'none',
+        noLearnerReason: 'other_user',
+        mode: 'on',
+        scopes: { learner: 'none', mode: 'on', userScopeId: 'A//s-1', personaScopeId: 'A//s-1::tutor', namespace: 'A' },
+      });
+      expect(await own.session.prepareTurn(anaTurn('A'))).toMatchObject({ learner: 'none', noLearnerReason: 'other_user' });
+      expect(own.session.scopesFor!({ userId: 'ana', namespace: 'A', workflowSeat: false })).toMatchObject({ learner: 'none', userScopeId: 'A//s-1' });
+    } finally {
+      await layer.close();
+    }
+  });
+
+  it("reads a band only by one of its three names from the map's own property, an overlay's patch written under an alias, and one list of the operator's traits", () => {
+    // A stored row is read at run time, so a band is not checked by the compiler.
+    expect(renderPersonalitySection({}, { bands: { openness: 'HIGH' as never } })).toBeNull();
+    expect(renderPersonalitySection({}, { bands: { openness: 'toString' as never } })).toBeNull();
+    expect(renderPersonalitySection({}, { bands: Object.create({ openness: 'high' }) })).toBeNull();
+    expect(renderPersonalitySection({ openness: 0.9 }, { bands: { openness: 'nonsense' as never } })).toBe(renderPersonalitySection({ openness: 0.9 }));
+    expect(renderPersonalitySection({}, { bands: { openness: 'high' } })).toBe(renderPersonalitySection({ openness: 0.9 }));
+    expect(traitOverlayPatch({ honesty: 0.8 }, { honesty: 0.8, honestyHumility: 0.1 })).toEqual({ honesty: 0.1 });
+    expect(traitOverlayPatch({ openness: 0.4 }, { openness: 0.4, opennessToExperience: 0.9 })).toEqual({ openness: 0.9 });
+    expect(traitOverlayPatch({ openness: 0.4, opennessToExperience: 0.9 }, { openness: 0.4, opennessToExperience: 0.9 })).toBeUndefined();
+    expect(HEXACO_TRAIT_ALIASES).toEqual([
+      ['honestyHumility', 'honesty'],
+      ['honesty_humility', 'honesty'],
+      ['opennessToExperience', 'openness'],
+    ]);
+    expect(OPERATOR_ONLY_TRAITS).toEqual(['honesty', 'emotionality']);
+    expect(LEARNABLE_TRAITS).toEqual(['extraversion', 'agreeableness', 'conscientiousness', 'openness']);
+    expect(LIFETIME_BAND).toBe(0.2);
+  });
+
+  it('renders a trait a persona writes under its canonical key and an alias by the canonical key, with no role overlay, on gmi() and the full runtime', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const both = { honesty: 0.9, openness: 0.4, opennessToExperience: 0.9 };
+    // The canonical key wins, as the normalizer reads it: openness 0.4 renders no directive.
+    const expected = renderPersonalitySection({ honesty: 0.9, openness: 0.4 })!;
+    const highOpenness = directiveFor('openness', 0.9);
+    const viaGmi = await oneTurn(both, { store: new InMemoryLearningStore() });
+    expect(viaGmi.system).toContain(expected);
+    expect(viaGmi.system).not.toContain(highOpenness);
+
+    const k = key();
+    const played = script('openai', k, { replies: Array.from({ length: 8 }, () => reply.text('Noted.')), whole: true });
+    const os = await bootRuntime(k, both, true);
+    try {
+      const system = await runtimeTurn(os, played);
+      expect(system).toContain(expected);
+      expect(system).not.toContain(highOpenness);
+    } finally {
+      await os.shutdown();
+    }
+  });
+
+  it("keeps the full runtime's learners in the store its learning option names, under its key: across a restart a persona's move renders the clamped value and the chain verifies", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const file = learningFile();
+    const k = key();
+    const played = script('openai', k, { replies: Array.from({ length: 16 }, () => reply.text('Noted.')), whole: true });
+
+    const first = await processOver(file);
+    const booted = await bootRuntime(k, TUTOR_PERSONA, { store: first.store, ledgerKey: LEDGER_KEY });
+    try {
+      expect(await runtimeTurn(booted, played)).toContain(renderPersonalitySection(TUTOR_PERSONA)!);
+      expect((await booted.getLearningLayer()!.manifest()).loops.ledger).toEqual({ live: true, detail: 'sql store the host passed; keyed' });
+    } finally {
+      await booted.shutdown();
+    }
+    expect(await first.store.traitRow('', 'tutor', 'ana')).toMatchObject({ personaId: 'tutor', version: 1 });
+
+    const moved = { honesty: 0.9, extraversion: 0.3 };
+    const second = await processOver(file);
+    const rebooted = await bootRuntime(k, moved, { store: second.store, ledgerKey: LEDGER_KEY });
+    try {
+      const system = await runtimeTurn(rebooted, played);
+      expect(system).toContain(renderPersonalitySection({ honesty: 0.9, extraversion: 0.5 })!);
+      expect(system).not.toContain(directiveFor('extraversion', 0.3));
+      expect((await rebooted.getLearningLayer()!.manifest()).loops.ledger.detail).toBe('sql store the host passed; keyed');
+    } finally {
+      await rebooted.shutdown();
+    }
+    expect((await second.store.chainRows(ANA_CHAIN)).map((row) => JSON.parse(row.body).reason)).toEqual(['created', 'created', 'persona_changed', 'persona_changed']);
+    expect(await new Ledger({ store: second.store, ledgerKey: LEDGER_KEY }).verifyChain(ANA_CHAIN)).toEqual({ ok: true, keyed: true });
+  });
+
+  it("names the stores, the ledger, the freeze keys and a trait's bounds on the learning module's own path, as the same objects their own paths hold", async () => {
+    const storePath = await import('@framers/agentos/cognition/learning/store/index');
+    const ledgerPath = await import('@framers/agentos/cognition/learning/ledger/index');
+    expect(InMemoryLearningStore).toBe(storePath.InMemoryLearningStore);
+    expect(SqlLearningStore).toBe(storePath.SqlLearningStore);
+    expect(ensureLearningSchema).toBe(storePath.ensureLearningSchema);
+    expect(LEARNING_TABLES).toBe(storePath.LEARNING_TABLES);
+    expect(LEARNING_SCHEMA_DDL).toBe(storePath.LEARNING_SCHEMA_DDL);
+    expect(Ledger).toBe(ledgerPath.Ledger);
+    expect(chainKeyOf).toBe(ledgerPath.chainKeyOf);
+    expect(tombstoneHash).toBe(ledgerPath.tombstoneHash);
+    expect(GENESIS_HASH).toBe(ledgerPath.GENESIS_HASH);
+    expect(freezeScopeKey({ scope: 'all' })).toBe('all');
+    expect(freezeScopeKey({ agentKey: 'tutor' })).toBe('agent|tutor');
+    expect(freezeScopeKey({ learner: { namespace: 'A', agentKey: 'tutor', userId: '42' } })).toBe('learner|A|tutor|42');
+    expect(freezeScopeKey({ learner: { namespace: '', agentKey: 'tutor', userId: 'ana' } })).toBe('learner||tutor|ana');
+    // Each part encoded, so no id moves a part's boundary.
+    expect(freezeScopeKey({ learner: { namespace: 'org one', agentKey: 'tu|tor', userId: 'a/b' } })).toBe('learner|org%20one|tu%7Ctor|a%2Fb');
+    expect(freezeScopeKey({ agentKey: 'a|b' })).not.toBe(freezeScopeKey({ learner: { namespace: 'a', agentKey: 'b', userId: '' } }));
+    expectTypeOf<OperatorTraits>().toEqualTypeOf<Partial<Record<'honesty' | 'emotionality', number>>>();
+    expectTypeOf<TraitState['honestyAtLastLoad']>().toEqualTypeOf<number>();
+    expectTypeOf<TraitState['rendererVersion']>().toEqualTypeOf<1>();
+  });
+});
+
+describe.skipIf(!POSTGRES_URL)("a learner's trait row on Postgres", () => {
+  /** This run's own mark, in the names of the schemas its cases make and drop. */
+  const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const segments: string[] = [];
+  const adapters: StorageAdapter[] = [];
+
+  /** The host's Postgres adapter over `segment`, a schema of this run's own. */
+  async function openPostgresAdapter(segment: string): Promise<StorageAdapter> {
+    const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, segment, max: 5 });
+    await adapter.open();
+    adapters.push(adapter);
+    return adapter;
+  }
+
+  afterEach(async () => {
+    for (const adapter of adapters.splice(0)) await adapter.close().catch(() => undefined);
+  });
+
+  afterAll(async () => {
+    if (segments.length === 0) return;
+    const admin = createPostgresAdapter({ connectionString: POSTGRES_URL! });
+    await admin.open();
+    try {
+      for (const segment of segments) await admin.exec(`DROP SCHEMA IF EXISTS "${segment}" CASCADE`);
+    } finally {
+      await admin.close();
+    }
+  });
+
+  it("keeps a host's learners in SQL over its Postgres adapter, and of two processes that open one learner's first session at once writes one trait row and one creation, which verifies", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const segment = `qa_traits_${run}_${segments.length}`;
+    segments.push(segment);
+    const one = await openPostgresAdapter(segment);
+    const two = await openPostgresAdapter(segment);
+    // Each process has made or found the tables before they meet.
+    const first = new SqlLearningStore({ adapter: one });
+    const second = new SqlLearningStore({ adapter: two });
+    expect(await first.isForgotten('warm-up')).toBe(false);
+    expect(await second.isForgotten('warm-up')).toBe(false);
+    const layerOne = createLearningLayer({ storageAdapter: one });
+    const layerTwo = createLearningLayer({ storageAdapter: two });
+    try {
+      expect((await layerOne.manifest()).loops.ledger).toEqual({ live: true, detail: "sql store over the host's storage adapter; unkeyed" });
+      const [a, b] = await Promise.all([
+        layerOne.forLearner(LEARNER_42, productContext('s-1')),
+        layerTwo.forLearner(LEARNER_42, productContext('s-2')),
+      ]);
+      const [turnA, turnB] = await Promise.all([a.prepareTurn(productTurn()), b.prepareTurn(productTurn())]);
+      expect(turnA.systemPrompts[0]?.content).toBe(renderPersonalitySection(TUTOR_PERSONA));
+      expect(turnB.systemPrompts[0]?.content).toBe(renderPersonalitySection(TUTOR_PERSONA));
+      expect(await second.traitRow('A', 'tutor', '42')).toMatchObject({ personaId: 'tutor', version: 1 });
+      const rows = await first.chainRows(chainKeyOf(LEARNER_42));
+      expect(rows.map((row) => [row.rowType, row.kind, row.verdict])).toEqual([
+        ['candidate', 'operator_set', 'pending'],
+        ['verdict', 'operator_set', 'kept'],
+      ]);
+      expect(await new Ledger({ store: second }).verifyChain(chainKeyOf(LEARNER_42))).toEqual({ ok: true, keyed: false });
+      expect((await first.sessionRowsOf('A', '42')).map((row) => row.sessionId)).toEqual(['s-1', 's-2']);
+      expect((await layerTwo.manifest()).loops.ledger).toEqual({ live: true, detail: "sql store over the host's storage adapter; unkeyed" });
+      // Each process records its own writes on the one chain.
+      expect(await a.recordSelfChange!(watchedWrite('mt-a').input)).toMatchObject({ status: 'kept' });
+      expect(await b.recordSelfChange!(watchedWrite('mt-b').input)).toMatchObject({ status: 'kept' });
+      expect(await new Ledger({ store: first }).verifyChain(chainKeyOf(LEARNER_42))).toEqual({ ok: true, keyed: false });
+    } finally {
+      await layerOne.close();
+      await layerTwo.close();
+    }
+  });
+});
+
 describe("gmi(): memory.persistAccessState", () => {
   let keys = 0;
   const key = () => `k-qa-scopes-${++keys}`;
@@ -5040,5 +6013,22 @@ describe('the docs a host reads about it', () => {
       'Before it copies any table, the engine compares each brain the source holds with the same brain id in the target',
     );
     expect(doc('docs/memory/MEMORY_STORAGE.md')).toContain("Its `brain_meta` rows carry the brain's scope-id form record where the brain has one");
+  });
+
+  it("describe a learner's trait row, where the ledger lives and its key, and what a host's own turn loop records", () => {
+    const gmiDoc = doc('docs/GMI.md');
+    expect(gmiDoc).toMatch(/^### The trait row and the ledger$/m);
+    expect(gmiDoc).toContain('| `store` | Where the trait rows, the ledger and the run-time freezes live');
+    expect(gmiDoc).toContain('| `ledgerKey` | A secret that keys every ledger hash (HMAC-SHA-256)');
+    expect(gmiDoc).toContain("| `clock` | The layer's clock in milliseconds since the epoch");
+    expect(gmiDoc).toContain("| `memoryTools` | The `Memory` facade the host's memory tools are built over.");
+    expect(gmiDoc).toContain("with an `operator_set` ledger row (actor `operator:persona`, reason `created`) whose verdict carries the row's digest");
+    expect(gmiDoc).toContain('so a learner who had extraversion 0.8 renders 0.5 once the persona sets 0.3');
+    expect(gmiDoc).toContain("Each trait keeps the band it rendered last until its value passes the band's threshold by 0.02.");
+    expect(gmiDoc).toContain("| `on` | The learner's trait row; the authored traits on a turn with no learner |");
+    expect(gmiDoc).toContain('(`chain broken for 1 learner`)');
+    expect(gmiDoc).toContain('`traits: degraded (<reason>)`');
+    expect(gmiDoc).toContain('A session records a memory write the product makes (`recordSelfChange`)');
+    expect(doc('docs/memory/HEXACO_PERSONALITY.md')).toContain("the section renders the learner's trait row, which the tool does not change");
   });
 });
