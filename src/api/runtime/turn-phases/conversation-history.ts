@@ -23,7 +23,10 @@ export interface ConversationHistoryPhaseInput {
  * Build a conversation history snapshot for prompt construction.
  * When rolling summary is active, trims history to head messages + unsummarized tail, and keeps a tool round (an
  * assistant message that names tool calls, the tool messages that answer them and anything between) whole when it
- * keeps any message of it: providers refuse a call without its result and a result without its call.
+ * keeps any message of it: providers refuse a call without its result and a result without its call. The head is the
+ * one the conversation's summary state records (`rollingSummaryResult.headMessagesToKeep`), which the turn's own
+ * `headMessagesToKeep` replaces only for a result that reports none, so a turn under a compaction profile with another
+ * head sends the messages the summary left to the head, and none it summarized.
  * Deduplicates the current user message if already in history.
  */
 export function assembleConversationHistory(input: ConversationHistoryPhaseInput): any[] | null {
@@ -59,7 +62,10 @@ export function assembleConversationHistory(input: ConversationHistoryPhaseInput
 
   // When rolling summary is active, keep head messages + unsummarized tail
   if (useTrimmedHistory) {
-    const headCount = Math.max(0, input.rollingSummaryConfigForTurn?.headMessagesToKeep ?? 0);
+    const headCount = Math.max(
+      0,
+      input.rollingSummaryResult?.headMessagesToKeep ?? input.rollingSummaryConfigForTurn?.headMessagesToKeep ?? 0,
+    );
     const boundary = (input.rollingSummaryResult as any).summaryUptoTimestamp;
     const inHeadOrTail = historyForPrompt.map((m: any, index: number) => index < headCount || m.timestamp > boundary);
     // A kept message keeps the rest of its tool round. The compactor ends a summary where a round ends, and this
