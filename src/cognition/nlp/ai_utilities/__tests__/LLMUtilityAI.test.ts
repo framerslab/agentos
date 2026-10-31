@@ -117,6 +117,9 @@ describe('LLMUtilityAI', () => {
     ['a fence closed on a line with words after it, whose string holds backticks', 'Here:\n```json\n{"note": "use ``` here"}\n``` Done.', { note: 'use ``` here' }],
     ['a fence closed right after its JSON, with words after it', 'Here it is:\n```json\n{"ok": true}``` Hope this helps.', { ok: true }],
     ['a fence of four backticks', '````json\n{"ok": true}\n````', { ok: true }],
+    ['a fence after a sentence that holds backticks', 'Use ``` to mark JSON:\n```json\n{"ok": true}\n```', { ok: true }],
+    ['a fence opened after words on its line', 'Here is the JSON: ```json\n{"ok": true}\n```', { ok: true }],
+    ['a fence opened after words, with its JSON on that line', 'Here it is: ```{"ok": true}``` Hope this helps.', { ok: true }],
     ['the first of two fences', '```json\n{"ok": true}\n```\nor\n```json\n{"ok": false}\n```', { ok: true }],
     ['a fence whose JSON starts on its opening line', '```{"ok": true}\n```', { ok: true }],
   ])('parseJsonSafe reads %s with no repair call', async (_name, reply, expected) => {
@@ -138,6 +141,15 @@ describe('LLMUtilityAI', () => {
     // within the test's time limit.
     const unclosed = '```json\n' + ' \n'.repeat(200_000) + 'x';
     expect(await llmUtility.parseJsonSafe(unclosed)).toBeNull();
+  });
+
+  it('parseJsonSafe answers null at once for a reply whose one line holds many backticks in its sentences', async () => {
+    // No run of backticks here opens a fence. Reading the rest of the line again for each run would take time that
+    // grows with the square of the reply's length.
+    const sentences = 'x ``` '.repeat(400_000);
+    const startedAt = Date.now();
+    expect(await llmUtility.parseJsonSafe(sentences)).toBeNull();
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
   });
 
   it('keeps malformed input and repaired model text out of parsing diagnostics', async () => {
