@@ -65,7 +65,7 @@ export function resolveLearningConfig(config: LearningConfig, profile: LearningP
     throw new Error('learning.store must be a LearningStore (InMemoryLearningStore or SqlLearningStore).');
   }
   const memoryTools = field('memoryTools');
-  if (memoryTools !== undefined && typeof memoryTools !== 'object') {
+  if (memoryTools !== undefined && (typeof memoryTools !== 'object' || Array.isArray(memoryTools))) {
     throw new Error('learning.memoryTools must be an object: the Memory facade the memory tools are built over.');
   }
   const asked = profile === 'full';

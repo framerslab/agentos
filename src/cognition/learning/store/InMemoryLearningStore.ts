@@ -235,11 +235,13 @@ class MemoryTx implements LearningStoreTx {
     return row ? copySession(row) : undefined;
   }
 
-  async putSessionRow(row: SessionRow): Promise<void> {
+  async putSessionRow(row: SessionRow, expectedVersion?: number): Promise<void> {
     const t = this.open();
     assertStorableText('session row', row);
     const key = keyOf(row.namespace, row.agentKey, row.sessionId, row.userId, row.kind);
-    const startedAt = t.sessions.get(key)?.startedAt ?? row.startedAt;
+    const current = t.sessions.get(key);
+    if (expectedVersion !== undefined && (current?.version ?? 0) !== expectedVersion) return;
+    const startedAt = current?.startedAt ?? row.startedAt;
     this.log.set(t.sessions, key, { ...copySession(row), startedAt });
   }
 

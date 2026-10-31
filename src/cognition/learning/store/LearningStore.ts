@@ -158,8 +158,13 @@ export interface LearningStoreTx {
   deleteFreeze(scopeKey: string, mode: FreezeRow['mode']): Promise<boolean>;
 
   sessionRow(namespace: string, agentKey: string, sessionId: string, userId: string, kind: SessionRow['kind']): Promise<SessionRow | undefined>;
-  /** Inserts the row, or writes it over the row of the same learner, session and kind, keeping that row's `startedAt`. */
-  putSessionRow(row: SessionRow): Promise<void>;
+  /**
+   * Inserts the row, or writes it over the row of the same learner, session and kind, keeping that row's `startedAt`.
+   * With `expectedVersion`, the version its writer read, it writes over the row only at that version, and inserts it
+   * only where there is none for `0`: a row another writer moved on since is left as it is, which a read of the row
+   * shows, so two writers that read one row never drop each other's ids.
+   */
+  putSessionRow(row: SessionRow, expectedVersion?: number): Promise<void>;
   /** One user's session rows of both kinds in one namespace, every agent's, ordered by session id and kind. */
   sessionRowsOf(namespace: string, userId: string): Promise<SessionRow[]>;
 
@@ -219,7 +224,7 @@ export abstract class TransactionalLearningStore implements LearningStore {
   insertFreeze(row: FreezeRow) { return this.transaction((tx) => tx.insertFreeze(row)); }
   deleteFreeze(scopeKey: string, mode: FreezeRow['mode']) { return this.transaction((tx) => tx.deleteFreeze(scopeKey, mode)); }
   sessionRow(namespace: string, agentKey: string, sessionId: string, userId: string, kind: SessionRow['kind']) { return this.transaction((tx) => tx.sessionRow(namespace, agentKey, sessionId, userId, kind)); }
-  putSessionRow(row: SessionRow) { return this.transaction((tx) => tx.putSessionRow(row)); }
+  putSessionRow(row: SessionRow, expectedVersion?: number) { return this.transaction((tx) => tx.putSessionRow(row, expectedVersion)); }
   sessionRowsOf(namespace: string, userId: string) { return this.transaction((tx) => tx.sessionRowsOf(namespace, userId)); }
   isForgotten(hash: string) { return this.transaction((tx) => tx.isForgotten(hash)); }
   insertForgotten(hash: string, forgottenAt: string) { return this.transaction((tx) => tx.insertForgotten(hash, forgottenAt)); }

@@ -7,7 +7,9 @@
  * no learner, a turn in mode `off`, a learner whose record does not verify and a store that cannot be read render the
  * persona's authored traits. Every turn gets the scope ids it files and reads its memory under (`scopes.ts`), and
  * a turn with no learner whose user is explicit gets that user's id (`turnUserId`), so `forgetUser` for that user finds
- * what the turn wrote. The session records the memory writes of the memory tools and the rolling-summary sink
+ * what the turn wrote. A write into a learner's own session that names no other user (a workflow turn of the learner,
+ * the learner's turn after another user's) is the learner's: the learner's deletion takes the session's own form. The
+ * session records the memory writes of the memory tools and the rolling-summary sink
  * (`recordSelfChange`: a `pending` row, the write, the tombstone read again, the verdict) and guards the bridge's own
  * filing (`guardMemoryWrite`), each inside its user's write chain, so `forgetUser`, which takes the same chain,
  * deletes only after every write this process admitted before it has reached its verdict.
@@ -95,7 +97,10 @@ export type SessionBinding = { key: LearnerKey; openedUnder: string } | { reason
 interface WriteTarget {
   /** The ledger row's learner: the session's learner on a learner's turn, else the agent with no user. */
   learner: LedgerLearner;
-  /** On a turn with no learner: the explicit id of the user whose turn it is. */
+  /**
+   * On a turn with no learner: the user whose turn it is (an explicit second user's id), or, for a write into the
+   * session's own form of a learner's session, the session's learner, whose deletion takes that form.
+   */
   turnUserId?: string;
   /** The user whose tombstone the write reads and whose session row it notes; none for a write that names no user. */
   user?: { namespace: string; userId: string; kind: 'learner' | 'visitor' };
@@ -123,6 +128,28 @@ function brainIdOf(memory: ICognitiveMemoryManager | undefined): string | undefi
   } catch {
     return undefined;
   }
+}
+
+/** What a write touched: the brain it went to and the traces it names, for the line about a write not taken back. */
+interface Touched {
+  brainId?: string;
+  traceIds?: readonly string[];
+  /** A recorded write, whose `pending` ledger row stays when it is not taken back. */
+  recorded?: boolean;
+}
+
+/** The trace ids a recorded write names: those it creates, changes and deletes. */
+function traceIdsOf(after: SessionSelfChange['after'] | undefined): string[] {
+  const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  const changed = list(after?.changed).map((change) => (change && typeof change === 'object' ? (change as { id?: unknown }).id : undefined));
+  const ids = [...list(after?.created), ...changed, ...list(after?.deleted)];
+  return [...new Set(ids.filter((id): id is string => typeof id === 'string'))];
+}
+
+/** Where what a write wrote lies: its brain and its traces, as far as the session knows them. */
+function placeOf(touched: Touched): string {
+  const traces = touched.traceIds?.length ? ` (traces ${touched.traceIds.join(', ')})` : '';
+  return touched.brainId ? `brain ${touched.brainId}${traces}` : `the memory store it was written to${traces}`;
 }
 
 export class LearnerSession implements ILearnerSession {
@@ -265,8 +292,8 @@ export class LearnerSession implements ILearnerSession {
       const result = await input.apply();
       const after = await this.tombstoneAfter(storage.store, write);
       if (after !== 'clear') {
-        await this.takeBack(input.undo, result, write, after === 'forgotten');
-        return { status: 'rejected', reason: after === 'forgotten' ? 'forgotten' : 'store_unavailable' };
+        const gone = await this.takeBack(storage.store, input.undo, result, write, after === 'forgotten', { brainId: this.brainId });
+        return { status: 'rejected', reason: gone ? 'forgotten' : 'store_unavailable' };
       }
       return { status: 'written', result };
     });
@@ -348,10 +375,17 @@ export class LearnerSession implements ILearnerSession {
       };
     }
     const namespace = this.namespaceOf(turn ? turn.namespace : this.lastNamespace);
-    const turnUserId = turn?.turnUserId && !this.host.isAnonymous(turn.turnUserId) ? turn.turnUserId : undefined;
+    const visitor = turn?.turnUserId && !this.host.isAnonymous(turn.turnUserId) ? turn.turnUserId : undefined;
+    // A write that names no other user, into the session's own form of a learner's session in the learner's namespace
+    // (a workflow turn of the learner, the learner's turn after another user's), is the learner's: forgetUser deletes
+    // that form with the learner's sessions, so the write reads the learner's tombstone inside the learner's write chain
+    // and its row names the learner, which the learner's deletion takes with the learner's other rows.
+    const owner = visitor === undefined && this.key && namespace === this.key.namespace ? this.key.userId : undefined;
+    const turnUserId = visitor ?? owner;
+    const kind = this.key && turnUserId === this.key.userId && namespace === this.key.namespace ? 'learner' : 'visitor';
     return {
       learner: { namespace, agentKey: this.agentKey, userId: null },
-      ...(turnUserId ? { turnUserId, user: { namespace, userId: turnUserId, kind: 'visitor' as const } } : {}),
+      ...(turnUserId ? { turnUserId, user: { namespace, userId: turnUserId, kind } } : {}),
       chainKey: turnUserId ? userChainKey(namespace, turnUserId) : sessionChainKey(this.context.sessionId),
       ...conversation,
       target: this.targetFor(false),
@@ -403,7 +437,8 @@ export class LearnerSession implements ILearnerSession {
       console.warn(`[agentos] learning: a learner's trait row could not be read (${this.traits.reason}); the persona's authored traits render, and the next turn reads it again.`);
     }
     this.traitsEpoch = epoch;
-    this.host.noteChain(key, this.traits.status === 'broken');
+    // A read that failed says nothing of the record: a learner counted as broken stays counted until a read verifies it.
+    if (this.traits.status !== 'unavailable') this.host.noteChain(key, this.traits.status === 'broken');
     if (this.traits.status === 'broken') {
       console.warn(
         `[agentos] learning: the learning record of learner '${key.userId}' of agent '${key.agentKey}' in namespace '${key.namespace}' does not verify (${this.traits.reason}); the persona's authored traits render until an operator calls operatorSet.`,
@@ -438,11 +473,9 @@ export class LearnerSession implements ILearnerSession {
       const storage = await this.host.storage();
       if (!storage) return;
       try {
-        const noted = await this.noteSession(storage.store, write, this.brainId);
+        // A forgotten learner gets no row, and a row a deletion of another process missed is deleted again.
+        await this.noteSession(storage.store, write, this.brainId);
         this.learnerRowWritten = true;
-        if (noted === 'noted' && (await this.tombstoneAfter(storage.store, write)) === 'forgotten') {
-          await this.host.purgeUserRows(key.namespace, key.userId);
-        }
       } catch (error) {
         console.warn(`[agentos] learning: a learner's session row was not written (${messageOf(error)}); the next turn writes it.`);
       }
@@ -452,7 +485,12 @@ export class LearnerSession implements ILearnerSession {
   /**
    * Adds a write's brain and conversation to its user's session row (the learner's, or the visitor's, written at that
    * user's first write on the session), in a store transaction that reads the tombstone first, so a forgotten user
-   * gets no row. A row another process wrote over in that time is read again and noted again, up to three times.
+   * gets no row. The row is written at the version this transaction read it at, so a write of it another process
+   * committed in that time is never written over: the row is read and noted again, up to three times. Once a note has
+   * committed the tombstone is read again: a `forgetUser` of another process that committed its tombstone while the
+   * note ran deleted the user's rows without this one, so the user's rows are deleted again and the write is refused.
+   *
+   * @throws {Error} When the store fails, or the row kept moving under three notes: the write is refused.
    */
   private async noteSession(store: LearningStore, write: WriteTarget, brainId: string | undefined): Promise<'noted' | 'forgotten'> {
     const user = write.user;
@@ -465,10 +503,10 @@ export class LearnerSession implements ILearnerSession {
       (!brainId || row.brainIds.includes(brainId)) &&
       (!write.conversationId || row.conversationIds.includes(write.conversationId));
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const outcome = await store.transaction(async (tx): Promise<'noted' | 'forgotten'> => {
+      const outcome = await store.transaction(async (tx): Promise<'held' | 'written' | 'forgotten'> => {
         if (await tx.isForgotten(tomb)) return 'forgotten';
         const current = await tx.sessionRow(user.namespace, agentKey, sessionId, user.userId, user.kind);
-        if (holds(current)) return 'noted';
+        if (holds(current)) return 'held';
         await tx.putSessionRow({
           namespace: user.namespace,
           agentKey,
@@ -480,14 +518,19 @@ export class LearnerSession implements ILearnerSession {
           brainIds: [...new Set([...(current?.brainIds ?? []), ...(brainId ? [brainId] : [])])],
           startedAt: current?.startedAt ?? new Date(this.host.now()).toISOString(),
           version: (current?.version ?? 0) + 1,
-        });
-        return 'noted';
+        }, current?.version ?? 0);
+        return 'written';
       });
       if (outcome === 'forgotten') return outcome;
-      // A write of the same row by another process between this read and its commit would drop this note.
+      if (outcome === 'held') return 'noted';
+      if (await store.isForgotten(tomb)) {
+        await this.host.purgeUserRows(user.namespace, user.userId);
+        return 'forgotten';
+      }
+      // A note another process committed after this one read the row left this one unwritten: it is made again.
       if (holds(await store.sessionRow(user.namespace, agentKey, sessionId, user.userId, user.kind))) return 'noted';
     }
-    return 'noted';
+    throw new Error('the session row kept moving under three notes');
   }
 
   /** The tombstone read again once a write has committed. */
@@ -502,27 +545,55 @@ export class LearnerSession implements ILearnerSession {
 
   /**
    * Takes back a write that finished after its user was forgotten, whose tombstone could not be read again or whose
-   * verdict could not be written, and, for a forgotten user, deletes the user's learning rows once more.
-   * The writer's `undo` is told which (`forgotten` deletes for good; `unrecorded` restores the
-   * before-state). A line about a forgotten user names the tombstone's hash, never the user.
+   * verdict did not land, and, for a forgotten user, deletes the user's learning rows once more. The writer's `undo` is
+   * told which (`forgotten` deletes for good; `unrecorded` restores the before-state). The tombstone is read before an
+   * `unrecorded` undo and again once it has run: a `forgetUser` of another process, which this process's write chain
+   * does not order, may have deleted the user's traces meanwhile, and a restore would bring back the words it removed,
+   * so a write whose user is forgotten by then is taken back for good. A line about a forgotten user names the
+   * tombstone's hash and where the write lies, never the user.
+   *
+   * @returns Whether the write was taken back for good, its user forgotten.
    */
   private async takeBack<T>(
+    store: LearningStore,
     undo: (result: T, reason: 'forgotten' | 'unrecorded') => Promise<void>,
     result: T,
     write: WriteTarget,
     forgotten: boolean,
+    touched: Touched,
+  ): Promise<boolean> {
+    if (!forgotten && (await this.tombstoneAfter(store, write)) !== 'forgotten') {
+      await this.undoWrite(undo, result, 'unrecorded', write, touched);
+      if ((await this.tombstoneAfter(store, write)) !== 'forgotten') return false;
+    }
+    await this.undoWrite(undo, result, 'forgotten', write, touched);
+    if (write.user) await this.host.purgeUserRows(write.user.namespace, write.user.userId);
+    return true;
+  }
+
+  /** Runs a writer's `undo`; one that fails is traced with where the write lies, and never fails the call. */
+  private async undoWrite<T>(
+    undo: (result: T, reason: 'forgotten' | 'unrecorded') => Promise<void>,
+    result: T,
+    reason: 'forgotten' | 'unrecorded',
+    write: WriteTarget,
+    touched: Touched,
   ): Promise<void> {
     try {
-      await undo(result, forgotten ? 'forgotten' : 'unrecorded');
+      await undo(result, reason);
     } catch (error) {
-      if (forgotten && write.user) {
+      if (reason === 'forgotten' && write.user) {
         const hash = (await tombstoneHash(write.user.namespace, write.user.userId)).slice(0, 16);
-        console.warn(`[agentos] learning: a memory write that finished after its user was forgotten (tombstone ${hash}) was not taken back (${messageOf(error)}); a second forgetUser call for the user deletes it.`);
+        console.warn(
+          `[agentos] learning: a memory write that finished after its user was forgotten (tombstone ${hash}) was not taken back (${messageOf(error)}); what it wrote stays in ${placeOf(touched)} until it is deleted there.`,
+        );
       } else {
-        console.warn(`[agentos] learning: a memory write whose record could not be completed was not taken back (${messageOf(error)}); its pending ledger row stays, and the learner's next load decides it by whether the write holds.`);
+        const row = touched.recorded ? '; its pending ledger row stays to be decided by whether the write holds' : '';
+        console.warn(
+          `[agentos] learning: a memory write whose record could not be completed was not taken back (${messageOf(error)}); it stays in ${placeOf(touched)}${row}.`,
+        );
       }
     }
-    if (forgotten && write.user) await this.host.purgeUserRows(write.user.namespace, write.user.userId);
   }
 
   private async recordInChain<T>(input: SessionSelfChange<T>, write: WriteTarget): Promise<ProposalResult<T>> {
@@ -554,6 +625,7 @@ export class LearnerSession implements ILearnerSession {
     }
     if (!('candidate' in proposed)) return { status: 'rejected', reason: proposed.status };
     const ledgerId = proposed.candidate.id;
+    const touched: Touched = { brainId: input.brainId, traceIds: traceIdsOf(input.after), recorded: true };
     this.host.inFlight.add(ledgerId);
     try {
       let result: T;
@@ -567,20 +639,23 @@ export class LearnerSession implements ILearnerSession {
       }
       const after = await this.tombstoneAfter(store, write);
       if (after !== 'clear') {
-        await this.takeBack(input.undo, result, write, after === 'forgotten');
-        return after === 'forgotten' ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'store_unavailable', ledgerId };
+        const gone = await this.takeBack(store, input.undo, result, write, after === 'forgotten', touched);
+        return gone ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'store_unavailable', ledgerId };
       }
       let decided: DecideResult;
       try {
         decided = await ledger.decide(ledgerId, 'kept', 'written');
       } catch (error) {
         // A change with no record does not happen: the write is taken back and its pending row stays to be decided.
-        await this.takeBack(input.undo, result, write, false);
-        return { status: 'rejected', reason: 'store_unavailable', ledgerId, error };
+        const gone = await this.takeBack(store, input.undo, result, write, false, touched);
+        return gone ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'store_unavailable', ledgerId, error };
       }
       if (decided.status === 'kept') return { status: 'kept', ledgerId, result };
-      await this.takeBack(input.undo, result, write, decided.status === 'forgotten');
-      return decided.status === 'forgotten' ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'conflict', ledgerId };
+      // The verdict did not land: the user forgotten meanwhile (the chain's head marked, or the candidate deleted with
+      // the user's rows by another process), another verdict first, or a head that kept moving. The tombstone decides
+      // how the write is taken back.
+      const gone = await this.takeBack(store, input.undo, result, write, decided.status === 'forgotten', touched);
+      return gone ? { status: 'rejected', reason: 'forgotten' } : { status: 'rejected', reason: 'conflict', ledgerId };
     } finally {
       this.host.inFlight.delete(ledgerId);
     }
@@ -596,8 +671,9 @@ export class LearnerSession implements ILearnerSession {
     }
     const after = await this.tombstoneAfter(store, write);
     if (after !== 'clear') {
-      await this.takeBack(input.undo, result, write, after === 'forgotten');
-      return { status: 'rejected', reason: after === 'forgotten' ? 'forgotten' : 'store_unavailable' };
+      const touched: Touched = { brainId: input.brainId, traceIds: traceIdsOf(input.after) };
+      const gone = await this.takeBack(store, input.undo, result, write, after === 'forgotten', touched);
+      return { status: 'rejected', reason: gone ? 'forgotten' : 'store_unavailable' };
     }
     return { status: 'written', result };
   }
@@ -609,8 +685,10 @@ export class LearnerSession implements ILearnerSession {
  * session is opened under the namespace its first turn carries, on every attempt, and every later turn is read against
  * it. A turn the open failed for is read against the first one as the opened session reads it (a tool continuation
  * carries the GMI's own user, so only its namespace is read): the first such turn of another user or another namespace
- * is remembered, and once the session opens no turn has a learner. A turn the opened session prepares, one that waited
- * on the same open included, is read by the session itself, in the order the turns came. A session that cannot take
+ * is remembered, and once the session opens no turn has a learner. The first user the session saw is read by the
+ * opened session against its own learner as it opens, so a turn of another user that came first ends its learner. A
+ * turn the opened session prepares, one that waited on the same open included, is read by the session itself, in the
+ * order the turns came. A session that cannot take
  * the loss ({@link LearnerSession.adoptLatch}, a host's own that has no `adoptLatch`) has its later turns answered with
  * no learner here: a turn it would bind renders the authored traits and files under the session's own form. Before
  * it opens it answers `scopesFor` with the session's own form and no learner, and its recorder and guard try the open
@@ -678,6 +756,15 @@ export function deferLearnerSession(args: {
         if (lost && typeof adopt === 'function') {
           adopt.call(inner, lost);
           adopted = true;
+        } else if (!lost && firstUser && typeof inner.scopesFor === 'function') {
+          // The first user the deferred session saw is read by the session against its own learner, as it would have
+          // read that turn: a turn of another user before the open (one after a tool continuation, which names no
+          // user) ends the session's learner from the next turn on. A read that throws leaves it to the turns.
+          try {
+            inner.scopesFor({ userId: firstUser.id, namespace: firstNamespace ?? '', workflowSeat: false });
+          } catch {
+            // The session reads its turns itself.
+          }
         }
         opened = inner;
         return inner;

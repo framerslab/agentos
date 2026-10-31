@@ -155,7 +155,9 @@ describe('forgetUser', () => {
 
     expect(await liveContents(brain)).toEqual(['A session note.']);
     expect(await store.chainRows(chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }, 'bo'))).toEqual([]);
-    expect(await store.chainRows(chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }))).toHaveLength(2);
+    // The note names no other user on 42's session, so it is 42's: bo's deletion leaves its rows, which 42's would take.
+    expect(await store.chainRows(chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }, '42'))).toHaveLength(2);
+    expect(await store.chainRows(chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }))).toEqual([]);
     expect(await store.traitRow('A', 'tutor', '42')).toBeDefined();
     expect(report.stores).toContainEqual({ store: 'memory tools facade of brain tools-brain', reached: true, deleted: 1 });
   });
