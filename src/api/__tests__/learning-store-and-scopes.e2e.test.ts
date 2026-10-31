@@ -6265,14 +6265,15 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
     expect(await sectionOf(session)).toBe(renderPersonalitySection(TUTOR_PERSONA));
 
     const set = await layer.operatorSet({ learner: LEARNER_42, traits: { extraversion: 0.3, openness: 0.7, honesty: 0.6, emotionality: 0.2 }, by: 'ops', note: 'quieter' });
-    // Extraversion is held within 0.2 of the persona's 0.8; honesty-humility and emotionality are the operator's, in the ledger.
+    // Extraversion is held within 0.2 of the persona's 0.8 (0.8 - 0.2 in floating point); honesty-humility and emotionality
+    // are the operator's, in the ledger.
     expect(set).toMatchObject({
       kind: 'operator_set',
       actor: 'operator:ops',
       subject: 'traits',
       reason: 'set',
       evidence: { note: 'quieter' },
-      after: { current: { extraversion: 0.6, openness: 0.7 }, operatorTraits: { honesty: 0.6, emotionality: 0.2 } },
+      after: { current: { extraversion: expect.closeTo(0.6, 10), openness: 0.7 }, operatorTraits: { honesty: 0.6, emotionality: 0.2 } },
     });
     expect(await verdictsOf(host.store, set.id)).toEqual([
       ['pending', 'set'],
@@ -6281,7 +6282,7 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
     const operated = renderPersonalitySection({ honesty: 0.6, emotionality: 0.2, extraversion: 0.6, openness: 0.7 });
     expect(await sectionOf(session)).toBe(operated);
     const stored = await traitStateOf(host.store, '42', 'A');
-    expect(stored.current).toEqual({ extraversion: 0.6, agreeableness: 0.5, conscientiousness: 0.5, openness: 0.7 });
+    expect(stored.current).toEqual({ extraversion: expect.closeTo(0.6, 10), agreeableness: 0.5, conscientiousness: 0.5, openness: 0.7 });
     expect(stored).not.toHaveProperty('operatorTraits');
     // Another process's next session reads it.
     const elsewhere = await createLearningLayer({ store: (await processOver(file)).store }).forLearner(LEARNER_42, productContext('s-2'));
@@ -6294,7 +6295,12 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
     const offLayer = createLearningLayer({ store: (await processOver(file)).store, mode: 'off' });
     expect((await layer.operatorSet({ learner: LEARNER_42, traits: { conscientiousness: 0.7 }, by: 'ops' })).reason).toBe('set');
     expect((await offLayer.operatorSet({ learner: LEARNER_42, traits: { agreeableness: 0.3 }, by: 'ops' })).reason).toBe('set');
-    expect((await traitStateOf(host.store, '42', 'A')).current).toEqual({ extraversion: 0.6, agreeableness: 0.3, conscientiousness: 0.7, openness: 0.7 });
+    expect((await traitStateOf(host.store, '42', 'A')).current).toEqual({
+      extraversion: expect.closeTo(0.6, 10),
+      agreeableness: 0.3,
+      conscientiousness: 0.7,
+      openness: 0.7,
+    });
     vi.unstubAllEnvs();
     await layer.unfreeze({ learner: LEARNER_42 });
     await layer.unsuspend({ agentKey: 'tutor' });
