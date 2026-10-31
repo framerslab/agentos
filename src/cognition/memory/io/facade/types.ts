@@ -577,10 +577,12 @@ export interface ImportOptions {
   /**
    * Whether a record is skipped as a duplicate when a trace of the same scope and scope id holds its text, or names
    * that text's SHA-256 as `import_hash` or `content_hash`; a Markdown or Obsidian note is also skipped when it is
-   * the own note of the trace its front-matter `id` names. A trace of another scope id is not a duplicate. A SQLite
-   * import merges a skipped record's tags, and the later creation time, into the trace it matches, and an Obsidian
-   * note adds the tags and links that trace lacks. With `false`, no trace record is skipped as a duplicate and nothing
-   * is merged into a trace the brain holds.
+   * the own note of the trace its front-matter `id` names. A trace of another scope id is not a duplicate, and a trace
+   * the brain forgot counts as any other. A JSON, SQLite or CSV import reads a file's live records before its forgotten
+   * ones, so a text the file holds both forgotten and live arrives live. A SQLite import merges a skipped record's
+   * tags, and the later creation time, into the trace it matches, and an Obsidian note adds the tags and links that
+   * trace lacks. With `false`, no trace record is skipped as a duplicate and nothing is merged into a trace the brain
+   * holds.
    * @default true
    */
   dedup?: boolean;
@@ -595,22 +597,24 @@ export interface ImportOptions {
  */
 export interface ImportResult {
   /**
-   * How many rows the import wrote: its traces, and, from a JSON file, its knowledge nodes and edges, documents,
-   * chunks, images, conversations and messages too; from a SQLite file, its knowledge nodes and edges too.
+   * How many traces the import wrote, and, from a JSON file, its knowledge nodes and edges, documents, chunks,
+   * images, conversations and messages too; from a SQLite file, its knowledge nodes and edges too. A JSON file's brain
+   * metadata, the knowledge nodes and edge an Obsidian note's wikilink adds, and the `conversations` row of each
+   * conversation in a ChatGPT export are written and not counted.
    */
   imported: number;
 
   /**
    * How many records the import did not write: a duplicate trace (see `ImportOptions.dedup`), a graph, document,
    * chunk, image, conversation or message row the brain holds already, a Markdown or Obsidian note whose body is
-   * blank, a CSV row whose `content` is blank, and a row that lacks a field it needs, such as an edge with no
-   * source or target.
+   * blank, a CSV row whose `content` is blank, a memory-graph node whose trace the import did not write under its id
+   * and an edge that names one, and a row that lacks a field it needs, such as an edge with no source or target.
    */
   skipped: number;
 
   /**
-   * Human-readable messages for the records that failed to import, and for a source that could not be read or
-   * parsed.
+   * Human-readable messages for the records that failed to import, for an Obsidian note's link or tag the import
+   * could not write, and for a source that could not be read or parsed.
    */
   errors: string[];
 }
