@@ -860,7 +860,8 @@ describe('a source with the record whose scope ids read the same in both forms',
     const notes = tempDir();
     await new MarkdownExporter(source).export(notes);
     await closers.pop()!();
-    const imports: Array<[string, (target: Brain) => Promise<{ errors?: string[] }>]> = [
+    // Brain.importFromSqlite throws where the others name a refusal in `errors`.
+    const imports: Array<[string, (target: Brain) => Promise<unknown>]> = [
       ['JSON', (target) => new JsonImporter(target).importFromString(exported)],
       ['Markdown', (target) => new MarkdownImporter(target).import(notes)],
       ['SQLite file', (target) => new SqliteImporter(target).import(sourcePath)],
@@ -871,7 +872,7 @@ describe('a source with the record whose scope ids read the same in both forms',
       const target = await brainAt(tempFile(), 'dst');
       await plainRow(target, 't-b', 'user', 'team/bo');
 
-      const errors = (await importInto(target)).errors ?? [];
+      const errors = ((await importInto(target)) as { errors?: string[] }).errors ?? [];
 
       // The plain user `team/bo` keeps the plain form a layer re-files when it opens the Brain.
       expect({ name, errors, ids: await scopeIdsOf(target), record: await target.getMeta(SCOPE_ID_FORM_KEY) }).toEqual({
