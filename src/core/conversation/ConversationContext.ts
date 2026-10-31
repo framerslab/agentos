@@ -97,6 +97,9 @@ function lastRoundWaitsForResults(messages: ReadonlyArray<ConversationMessage>, 
  * waits for a result stays out too, as a tail of one or more keeps it: its results are recorded later, and a summary of
  * its call would leave them without it. The runtime records nothing after a pause's call until each of its calls is
  * answered (a new turn answers them as not run before it records its input), so a round that waits is the last one.
+ * A call followed by other messages before its results, which no provider accepts and the runtime never records, is
+ * cut as any other round: a cut cannot tell a call still waiting from one never answered, which a conversation stored
+ * before pauses were answered can hold, and holding such calls out of every cut would keep them for good.
  *
  * @param messages - The messages, oldest first.
  * @param headCount - How many of the first messages to keep.
@@ -589,11 +592,13 @@ export class ConversationContext {
    * would leave the results recorded later without it. The summary takes the chunk's place, so a message recorded while
    * the summary is made stays after it. The summary of a history cleared meanwhile is dropped, and so is one whose
    * chunk a result recorded meanwhile reaches into (a result for a call in the chunk, recorded after other messages):
-   * the pass that result started keeps the round whole. A history still past its limit with too few messages left for
-   * another chunk, the ones recorded meanwhile counted in, is trimmed, and the trim keeps this summary, and the last
-   * summary after it when a conversation loaded from storage holds one. One with enough left for another chunk waits
-   * for the next pass. A pass that finds a summary being made runs once it is made, so the messages recorded
-   * meanwhile, after a clear too, get their passes; a summary started before they have all run takes the rest.
+   * the pass that result started keeps the round whole. A summary whose chunk holds a message rewritten meanwhile (an
+   * output guardrail rewrites a stored reply through `replaceMessageContent()`) is dropped too, and made again from the
+   * message as it is. A history still past its limit with too few messages left for another chunk, the ones
+   * recorded meanwhile counted in, is trimmed, and the trim keeps this summary, and the last summary after it when a
+   * conversation loaded from storage holds one. One with enough left for another chunk waits for the next pass. A pass
+   * that finds a summary being made runs once it is made, so the messages recorded meanwhile, after a clear too, get
+   * their passes; a summary started before they have all run takes the rest.
    *
    * @private
    * @async
@@ -639,6 +644,8 @@ export class ConversationContext {
           // chunk stays inside the middle section.
           const chunkEndIndex = rounds.end[middleSectionStartIndex + this.config.summarizationChunkSize - 1] + 1;
           const messagesToSummarize = messages.slice(middleSectionStartIndex, chunkEndIndex);
+          // what the summary reads of each message, to tell whether one is rewritten while it is made
+          const summarizedContents = messagesToSummarize.map((m) => m.content);
           const textToSummarize = messagesToSummarize
             .map(m => `${m.name || m.role}: ${typeof m.content === 'string' ? m.content : (m.tool_calls ? '[Tool Call Invoked]' : '[Structured Content]')}`)
             .join('\n\n');
@@ -653,6 +660,13 @@ export class ConversationContext {
           // chunk: the summary would leave the result without its call. It is dropped, and the pass the result
           // started, which found this one making the summary, runs once the lock is released.
           if (toolRoundBounds(messages).end[chunkEndIndex - 1] >= chunkEndIndex) {
+            return;
+          }
+          // A message of the chunk rewritten meanwhile (an output guardrail rewrites a stored reply) is no longer what
+          // the summary read, and a summary of what it held could keep what the rewrite removed. The summary is
+          // dropped, and a pass of its own makes it again from the message as it is once the lock is released.
+          if (messagesToSummarize.some((m, index) => m.content !== summarizedContents[index])) {
+            this.deferredHistoryPasses += 1;
             return;
           }
 
