@@ -117,10 +117,12 @@ export class LearnerSession implements ILearnerSession {
  * A learner session whose learner is named at its first turn: the full runtime's GMIs built where the turn's
  * organization is not known yet (a GMI built again for a tool-result resume), and a session whose open failed. The
  * session is opened under the namespace its first turn carries, on every attempt, and every later turn is read against
- * it. While the open fails, each turn is read against the first one as the opened session reads it: the first turn of
- * another user (a tool continuation carries the GMI's own user, so only its namespace is read) or of another namespace
- * is remembered, and once the session opens no turn has a learner. A session the layer answers with that cannot take
- * the loss ({@link LearnerSession.adoptLatch}, a host's own) has its later turns answered with no learner here.
+ * it. A turn the open failed for is read against the first one as the opened session reads it (a tool continuation
+ * carries the GMI's own user, so only its namespace is read): the first such turn of another user or another namespace
+ * is remembered, and once the session opens no turn has a learner. A turn the opened session prepares, one that waited
+ * on the same open included, is read by the session itself, in the order the turns came. A session that cannot take
+ * the loss ({@link LearnerSession.adoptLatch}, a host's own that has no `adoptLatch`) has its later turns answered with
+ * no learner here.
  *
  * @param args.open - Opens the session for the first turn's namespace. A failed open is tried again on the next turn,
  *   under the same namespace.
@@ -136,25 +138,20 @@ export function deferLearnerSession(args: {
   let firstNamespace: string | undefined;
   /** The user of the session's first turn that is not a tool continuation. */
   let firstUser: { id: string | null } | undefined;
-  /** Why no turn has a learner since a turn the session could not open for. */
+  /** The loss of the learner the first turn the open failed for, of another user or namespace, carried. */
   let lost: 'other_user' | 'other_namespace' | undefined;
   /** Whether the opened session took `lost` itself. */
   let adopted = false;
 
-  /** Reads a turn the session is not open for against the first one, in the order the opened session reads it. */
-  const note = (input: TurnInputForLearning): void => {
+  /** Why a turn has no learner by the session's rule, read against the first turn as the opened session reads it. */
+  const ruleOf = (input: TurnInputForLearning): 'other_user' | 'other_namespace' | undefined => {
     const namespace = input.namespace ?? '';
     if (firstNamespace === undefined) firstNamespace = namespace;
-    if (lost) return;
     if (!input.continuation) {
-      if (!firstUser) {
-        firstUser = { id: input.userId };
-      } else if (input.userId !== firstUser.id) {
-        lost = 'other_user';
-        return;
-      }
+      if (!firstUser) firstUser = { id: input.userId };
+      else if (input.userId !== firstUser.id) return 'other_user';
     }
-    if (namespace !== firstNamespace) lost = 'other_namespace';
+    return namespace !== firstNamespace ? 'other_namespace' : undefined;
   };
 
   const sessionFor = (): Promise<ILearnerSession> => {
@@ -163,11 +160,6 @@ export function deferLearnerSession(args: {
     const attempt = Promise.resolve()
       .then(() => args.open(firstNamespace ?? ''))
       .then((inner) => {
-        const adopt = (inner as { adoptLatch?: unknown }).adoptLatch;
-        if (lost && typeof adopt === 'function') {
-          adopt.call(inner, lost);
-          adopted = true;
-        }
         opened = inner;
         return inner;
       });
@@ -181,12 +173,26 @@ export function deferLearnerSession(args: {
 
   return {
     async prepareTurn(input: TurnInputForLearning): Promise<TurnPreparation> {
-      if (!opened) note(input);
-      // The loss in force when this turn began: a turn read before it keeps its own answer.
-      const turnLost = lost;
-      const prepared = await (await sessionFor()).prepareTurn(input);
-      if (turnLost && !adopted && prepared && prepared.learner === 'bound') {
-        return { ...prepared, learner: 'none', noLearnerReason: turnLost };
+      const rule = opened ? undefined : ruleOf(input);
+      let inner: ILearnerSession;
+      try {
+        inner = await sessionFor();
+      } catch (error) {
+        // The open failed for this turn: the session it opens takes the first such loss.
+        lost ??= rule;
+        throw error;
+      }
+      // Handed over as the session prepares a turn, so a turn it reads itself keeps its own answer.
+      if (lost && !adopted) {
+        const adopt = (inner as { adoptLatch?: unknown }).adoptLatch;
+        if (typeof adopt === 'function') {
+          adopt.call(inner, lost);
+          adopted = true;
+        }
+      }
+      const prepared = await inner.prepareTurn(input);
+      if (lost && !adopted && prepared && prepared.learner === 'bound') {
+        return { ...prepared, learner: 'none', noLearnerReason: lost };
       }
       return prepared;
     },
