@@ -557,5 +557,24 @@ describe('launch_agency is never a step', () => {
     const line = warn.mock.calls.map(([message]) => String(message)).find((message) => message.includes('"note_then_team"'));
     expect(line).toContain('step_never_chainable');
     expect(line).not.toContain('(see ');
+    // The host's own reactivation checks it again and finds the same reason.
+    expect(await loader.engine.reactivateTool('compose-note-team')).toEqual({ toolId: 'compose-note-team', name: 'note_then_team', state: 'suspended', reason: 'step_never_chainable' });
+  });
+
+  it('forge_tool refuses a composition that names it though the host lists it, before the judge', async () => {
+    const host = await makeForgeHost({ tools: [launchTool()], config: listed });
+    const request = {
+      name: 'team_up',
+      description: 'Launches a team.',
+      inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+      outputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+      implementation: { mode: 'compose', steps: [{ name: 'launch', tool: 'launch_agency', inputMapping: { goal: '$input.text' } }] },
+      testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'launched' }, stepOutputs: { launch: { text: 'launched' } } }],
+    };
+    const forged = await callTool(host.orchestrator, 'forge_tool', request);
+    expect(forged.isError).toBe(true);
+    expect(String(forged.errorDetails?.message)).toContain('step_not_chainable');
+    expect(String(forged.errorDetails?.message)).toContain('can never be a step');
+    expect(host.judge).not.toHaveBeenCalled();
   });
 });
