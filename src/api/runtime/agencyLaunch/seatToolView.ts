@@ -1,7 +1,7 @@
 /**
  * @file seatToolView.ts
- * A runtime seat's tools: a view of the runtime's shared tool orchestrator that lists and runs the seat's names alone
- * (spec D11). A call to any other name is answered `{ skipped: true, reason: 'not available in this seat' }` (code
+ * A runtime seat's tools: a view of the runtime's shared tool orchestrator that lists and runs the seat's names alone.
+ * A call to any other name is answered `{ skipped: true, reason: 'not available in this seat' }` (code
  * `TOOL_NOT_IN_SEAT`), as a gmi() seat's is, and its tool never runs. Every call the view passes on carries
  * `callerTurn` with the seat's names and the view's own `processToolCall` as `dispatch`. Every other member runs on the
  * shared orchestrator, whose own checks (the persona's capabilities, the approval of a tool with side effects) still

@@ -879,7 +879,7 @@ export class GMIManager {
    * Builds and registers the GMI of one seat of a team a GMI launched (`launch_agency` on the full runtime): the
    * registered persona a `personaId` seat names, checked as a session's persona is (strict validation, the user's
    * tier), or the definition the launch made for a temporary seat. The GMI has no cognitive memory and no retrieval
-   * augmentor (its input is a manager's or a sibling's text, spec D5), a prompt engine and a statistical utility that
+   * augmentor (its input is a manager's or a sibling's text), a prompt engine and a statistical utility that
    * make no model call, the tool view and provider manager the launch gives it, and, with the runtime's learning layer,
    * no learner (a workflow seat's source): it still renders its persona's traits, and with the layer off it sends no
    * personality section. It is registered under the seat session id, so its own tool calls resolve it; `release()`

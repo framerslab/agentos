@@ -227,7 +227,8 @@ export type LaunchStatus = 'completed' | 'timed_out' | 'budget_exhausted' | 'can
  *   or a composed tool one of whose steps its allowlist leaves out.
  * - `seat_form_unsupported`: a seat form the surface does not run (`personaId` on gmi(), `agentKey` on the full runtime).
  * - `unknown_member`: a seat names a member the surface does not have.
- * - `member_unavailable`: a member could not be seated.
+ * - `member_unavailable`: a seat could not be built: a member that cannot take a seat (on the full runtime, a persona
+ *   the user's tier or strict validation refuses), or the agent or GMI made for a temporary seat.
  * - `duplicate_member`: two seats name one member.
  * - `budget_unavailable`: the launch's token cap cannot cover one call of the seat whose calls are largest
  *   (`MIN_LAUNCH_TOKENS` for the prompt and that seat's output estimate, on the route its calls run on), or it has no
