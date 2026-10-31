@@ -348,8 +348,9 @@ export class GMI implements IGMI {
   private ownPersonalitySection: string | null = null;
 
   /**
-   * What the learning layer prepared for the turn in progress. Set once per user turn, before the tool loop;
-   * a tool continuation keeps the preparation of the turn it continues.
+   * What the learning layer prepared for the latest turn. Set once per user turn, before the tool loop; a tool
+   * continuation reuses the preparation of the turn it continues. A turn's tool calls read the turn's own preparation,
+   * not this field, which a newer turn replaces.
    */
   private turnLearning: TurnLearning | undefined;
 
@@ -943,7 +944,15 @@ export class GMI implements IGMI {
     return { sessionId, conversationId: namedConversation || sessionId, organizationId };
   }
 
-  private buildToolSessionData(turnInput: GMITurnInput, launchFrame?: AgencyLaunchFrame): Record<string, any> | undefined {
+  /**
+   * The session data each tool call of a turn carries: its session, conversation and organization, the launched team
+   * the turn sits in, and the turn's own learning, never a newer turn's.
+   *
+   * @param turnInput - The turn's input.
+   * @param learning - The turn's own learning preparation.
+   * @param launchFrame - The launched team the turn sits in, for a seat's turn.
+   */
+  private buildToolSessionData(turnInput: GMITurnInput, learning: TurnLearning | undefined, launchFrame?: AgencyLaunchFrame): Record<string, any> | undefined {
     const sessionId = typeof turnInput.sessionId === 'string' ? turnInput.sessionId.trim() : '';
     const conversationId = this.getConversationIdForTurn(turnInput);
     const organizationId = this.getOrganizationIdForTurn(turnInput);
@@ -966,8 +975,10 @@ export class GMI implements IGMI {
     }
 
     // The turn's learner and mode, on a GMI with a learner session: a self-modification tool reads them before it acts.
-    if (this.turnLearning?.tools) {
-      sessionData.learning = { ...this.turnLearning.tools };
+    // They come from the turn's own preparation, so a newer turn or a continuation that ran during this turn's tool
+    // call never changes them.
+    if (learning?.tools) {
+      sessionData.learning = { ...learning.tools };
     }
     return Object.keys(sessionData).length > 0 ? sessionData : undefined;
   }
@@ -2104,7 +2115,7 @@ export class GMI implements IGMI {
                 gmiId: this.gmiId, personaId: this.activePersona.id,
                 personaCapabilities: this.activePersona.allowedCapabilities || [],
                 userContext: this.currentUserContext, correlationId: turnId,
-                sessionData: this.buildToolSessionData(turnInput, launchFrame),
+                sessionData: this.buildToolSessionData(turnInput, turnLearning, launchFrame),
                 // The turn's stop: a call whose checks or approval finish after the turn stopped is refused before it
                 // runs (STEP_ABORTED), and the tool receives it as its context's signal; a composed tool hands it to
                 // each step, so it stops between steps. A call already running is never cut.
