@@ -55,6 +55,13 @@
  * tombstone once it committed deletes its rows. A freeze refuses a new candidate and lets an operator act; a verdict
  * follows the candidate's current one; and the load check names what an edit made outside the layer broke, from an
  * operator's reanchor on.
+ *
+ * The learning option and what a tool reads (the package's `cognition/learning/index` path). Every scope id a layer
+ * files and reads has one written form: a learner's plain or namespaced with both parts encoded, a turn with no
+ * learner's in its session's form, which no learner's form equals. `learning: null`, and a field set to null, read as
+ * unset on agent(), gmi(), the full runtime and an agency's members; the store, ledger key, clock and memory-tools
+ * fields are checked at construction. A host tool reads its turn's learner and mode from its call, and a self-change
+ * and a memory write refuse by them: a freeze stops both, mode off and a turn with no learner the self-change alone.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -69,6 +76,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
+  AgentOS,
   Brain,
   CognitiveMemoryManager,
   InMemoryVectorStore,
@@ -76,14 +84,20 @@ import {
   Memory,
   SqlKnowledgeGraph,
   agent,
+  createLearningLayer,
+  gmi,
   type CognitiveMemoryConfig,
   type ICognitiveMemoryManager,
   type IKnowledgeGraph,
+  type ILearnerSession,
+  type ILearningLayer,
+  type LearningConfig,
   type MemoryCopyFilter,
   type MemoryDeletion,
   type MemoryTrace,
   type PADState,
   type RememberOptions,
+  type ToolLearningContext,
 } from '@framers/agentos';
 import { readTraceSnapshot, type TraceSnapshot } from '@framers/agentos/cognition/memory/retrieval/store/tracePersistence';
 import {
@@ -117,6 +131,24 @@ import {
   type StoredTraitRow,
 } from '@framers/agentos/cognition/learning/store/index';
 import type { LearningKind, LedgerEntry, LedgerLearner, LedgerVerdict } from '@framers/agentos/cognition/learning/types';
+import {
+  couldBeSessionForm,
+  learnerScopeIds,
+  learnerUserScopeId,
+  memoryWriteRefusal,
+  readToolLearningContext,
+  scopeIdOf,
+  selfChangeRefusal,
+  sessionScopeIds,
+  taggedScopeId,
+  type FreezeScope,
+  type LearningLayerHandle,
+  type LearningMemoryTools,
+  type ProposalResult,
+  type ScopeIdPair,
+  type SessionSelfChange,
+  type TurnScopes,
+} from '@framers/agentos/cognition/learning/index';
 import {
   GENESIS_HASH,
   Ledger,
@@ -4542,6 +4574,354 @@ describe.skipIf(!POSTGRES_URL)('the ledger on Postgres', () => {
     } finally {
       await close();
     }
+  });
+});
+
+describe('the written form of every scope id a learning layer files and reads', () => {
+  it("writes a learner's scopes plain with no namespace and namespaced with both parts encoded with one, keeps the persona's ::, and writes a plain id as the Brain's re-file writes it", () => {
+    expect(learnerScopeIds({ namespace: '', userId: '42' }, 'tutor')).toEqual({ userScopeId: '42', personaScopeId: '42::tutor' });
+    expect(learnerScopeIds({ namespace: '', userId: 'team/ana' }, 'tutor')).toEqual({ userScopeId: 'team%2Fana', personaScopeId: 'team%2Fana::tutor' });
+    expect(learnerUserScopeId({ namespace: '', userId: 'team/ana' })).toBe(encodePlainScopeId('user', 'team/ana'));
+    expect(learnerScopeIds({ namespace: '', userId: 'team/ana' }, 'tutor').personaScopeId).toBe(encodePlainScopeId('persona', 'team/ana::tutor'));
+    expect(learnerScopeIds({ namespace: 'A', userId: '42' }, 'tutor')).toEqual({ userScopeId: 'A/42', personaScopeId: 'A/42::tutor' });
+    expect(learnerUserScopeId({ namespace: 'org one', userId: 'ana maria' })).toBe('org%20one/ana%20maria');
+    expect(learnerUserScopeId({ namespace: 'A', userId: 'b/c' })).toBe('A/b%2Fc');
+    expect(learnerUserScopeId({ namespace: 'A/B', userId: 'c' })).toBe('A%2FB/c');
+    // The composite's :: stays its separator: a colon in either part is encoded.
+    expect(learnerScopeIds({ namespace: '', userId: 'a:' }, 'x').personaScopeId).toBe('a%3A::x');
+    expect(learnerScopeIds({ namespace: '', userId: 'a' }, ':x').personaScopeId).toBe('a::%3Ax');
+    expect(learnerScopeIds({ namespace: 'A', userId: 'a:b' }, 'p::q').personaScopeId).toBe('A/a%3Ab::p%3A%3Aq');
+  });
+
+  it("writes a turn with no learner under its session's form, apart per namespace, and a turn's own thread ids in that form, and no session form is a learner's", () => {
+    expect(sessionScopeIds('s-1', '', 'tutor')).toEqual({ userScopeId: '/s-1', personaScopeId: '/s-1::tutor' });
+    expect(sessionScopeIds('s-1', 'A', 'tutor')).toEqual({ userScopeId: 'A//s-1', personaScopeId: 'A//s-1::tutor' });
+    expect(sessionScopeIds('s-1', 'B', 'tutor').userScopeId).toBe('B//s-1');
+    expect(sessionScopeIds('a/b', '', 'p').userScopeId).toBe('/a%2Fb');
+    expect(sessionScopeIds('a%2Fb', '', 'p').userScopeId).toBe('/a%252Fb');
+    expect(sessionScopeIds('s 1', 'org one', 'p').userScopeId).toBe('org%20one//s%201');
+    expect(taggedScopeId('conv-1', '')).toBe('/conv-1');
+    expect(taggedScopeId('conv-1', 'A')).toBe('A//conv-1');
+    expect(scopeIdOf('tutor')).toBe('tutor');
+    expect(scopeIdOf('a:b')).toBe('a%3Ab');
+    // A plain id with no reserved character keeps its form, a lone surrogate included; an encoded one writes it %u and hex.
+    expect(scopeIdOf('a\uD800')).toBe('a\uD800');
+    expect(scopeIdOf('a\uD800/')).toBe('a%uD800%2F');
+    for (const id of ['/s-1', 'A//s-1', 'x//y']) expect(couldBeSessionForm(id)).toBe(true);
+    for (const id of ['42', 'A/42', 'team%2Fana', 'a/b/c']) expect(couldBeSessionForm(id)).toBe(false);
+
+    const ids = ['42', 'A', 'team/ana', 'a%2Fb', '/x', 'x//y', 'a:b', ' ', 'ü', 'a\uD800'];
+    const learners = new Set<string>();
+    for (const namespace of ['', 'A', 'B/C']) for (const userId of ids) learners.add(learnerUserScopeId({ namespace, userId }));
+    for (const namespace of ['', 'A', 'B/C']) {
+      for (const sessionId of ids) {
+        const { userScopeId } = sessionScopeIds(sessionId, namespace, 'p');
+        expect(learners.has(userScopeId)).toBe(false);
+        expect(couldBeSessionForm(userScopeId)).toBe(true);
+      }
+    }
+  });
+});
+
+describe('what a tool reads about its turn', () => {
+  const scopes = { learner: 'none', mode: 'on', userScopeId: '/s-1', personaScopeId: '/s-1::tutor', namespace: '' };
+
+  it("keeps the turn's well-formed scopes, recorder, second user and freeze, and drops each malformed one", () => {
+    const recordSelfChange = async () => ({ status: 'written' as const, result: undefined });
+    const frozen = () => false;
+    expect(readToolLearningContext({ learning: { learner: 'none', mode: 'on', scopes, recordSelfChange, turnUserId: 'bo', frozen } })).toEqual({
+      learner: 'none',
+      mode: 'on',
+      scopes,
+      recordSelfChange,
+      turnUserId: 'bo',
+      frozen,
+    });
+    expect(
+      readToolLearningContext({ learning: { learner: 'bound', mode: 'sideways', scopes: { ...scopes, userScopeId: 7 }, recordSelfChange: 'no', turnUserId: '', frozen: true } }),
+    ).toEqual({ learner: 'bound', mode: 'off' });
+    expect(readToolLearningContext({ learning: { learner: 'maybe', mode: 'frozen', scopes: { ...scopes, mode: 'sideways' } } })).toEqual({ learner: 'none', mode: 'frozen' });
+    expect(readToolLearningContext({ learning: { learner: 'bound', mode: 'on', scopes: { ...scopes, learner: 'yes' } } })).toEqual({ learner: 'bound', mode: 'on' });
+    expect(readToolLearningContext({ learning: { learner: 'bound', mode: 'on', scopes: { ...scopes, namespace: undefined } } })).toEqual({ learner: 'bound', mode: 'on' });
+    expect(readToolLearningContext({ learning: 'on' })).toEqual({ learner: 'none', mode: 'off' });
+    expect(readToolLearningContext({ learning: null })).toBeUndefined();
+    expect(readToolLearningContext({})).toBeUndefined();
+    expect(readToolLearningContext(undefined)).toBeUndefined();
+  });
+
+  it('refuses a self-change frozen before off before no learner, reads a run-time freeze at the call, and refuses a memory write only on a freeze', () => {
+    let frozenNow = false;
+    const frozen = () => frozenNow;
+    const call = (learning?: Record<string, unknown>): Record<string, unknown> => (learning === undefined ? {} : { learning });
+    expect(selfChangeRefusal(call({ learner: 'bound', mode: 'on', frozen }), {})).toBeUndefined();
+    expect(memoryWriteRefusal(call({ learner: 'bound', mode: 'on', frozen }), {})).toBeUndefined();
+    expect(selfChangeRefusal(call({ learner: 'bound', mode: 'off', frozen }), {})).toBe('off');
+    expect(memoryWriteRefusal(call({ learner: 'bound', mode: 'off', frozen }), {})).toBeUndefined();
+    expect(selfChangeRefusal(call({ learner: 'none', mode: 'on' }), {})).toBe('no_learner');
+    expect(memoryWriteRefusal(call({ learner: 'none', mode: 'on' }), {})).toBeUndefined();
+
+    frozenNow = true;
+    for (const learning of [
+      { learner: 'bound', mode: 'on', frozen },
+      { learner: 'bound', mode: 'off', frozen },
+      { learner: 'none', mode: 'off', frozen },
+    ]) {
+      expect(selfChangeRefusal(call(learning), {})).toBe('frozen');
+      expect(memoryWriteRefusal(call(learning), {})).toBe('frozen');
+    }
+    expect(selfChangeRefusal(call({ learner: 'none', mode: 'frozen' }), {})).toBe('frozen');
+    expect(memoryWriteRefusal(call({ learner: 'none', mode: 'frozen' }), {})).toBe('frozen');
+
+    // The process freeze, with a layer and without one; with neither, nothing refuses.
+    const processFrozen = { AGENTOS_LEARNING_FREEZE: '1' };
+    expect(selfChangeRefusal(call(), processFrozen)).toBe('frozen');
+    expect(memoryWriteRefusal(call(), processFrozen)).toBe('frozen');
+    expect(memoryWriteRefusal(call({ learner: 'none', mode: 'off' }), processFrozen)).toBe('frozen');
+    expect(selfChangeRefusal(call(), {})).toBeUndefined();
+    expect(memoryWriteRefusal(call(), {})).toBeUndefined();
+
+    // A freeze that cannot be read makes the refusal throw, so the tool fails before it acts.
+    const unreadable = {
+      learner: 'bound',
+      mode: 'on',
+      frozen: () => {
+        throw new Error('the freeze table is not reachable');
+      },
+    };
+    expect(() => selfChangeRefusal(call(unreadable), {})).toThrow('the freeze table is not reachable');
+    expect(() => memoryWriteRefusal(call(unreadable), {})).toThrow('the freeze table is not reachable');
+  });
+});
+
+describe('the learning option and its fields, on gmi() and the full runtime', () => {
+  let keys = 0;
+  const key = () => `k-qa-learning-${++keys}`;
+  const TUTOR_TRAITS = { honesty: 0.9, extraversion: 0.8 };
+  const PERSONALITY_HEADING = '## Personality & Communication Style';
+  /** A gmi() tutor's options, its provider the stub played under `apiKey`. */
+  const tutorOptions = (apiKey: string, extra: Record<string, unknown> = {}) =>
+    ({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey,
+      fallbackProviders: [],
+      name: 'Tutor',
+      instructions: 'You teach networking.',
+      personality: TUTOR_TRAITS,
+      ...extra,
+    }) as never;
+  /** The system text of one model call. */
+  const systemOf = (call: { messages: Array<{ role: string; content: unknown }> } | undefined): string =>
+    (call?.messages ?? [])
+      .filter((message) => message.role === 'system')
+      .map((message) => (typeof message.content === 'string' ? message.content : JSON.stringify(message.content)))
+      .join('\n');
+  /** The layer logs its manifest once, at its first session. */
+  const quietManifest = () => vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  /** The full runtime over one persona, its provider the stub played under `apiKey`. */
+  const bootRuntime = (apiKey: string, extra: Record<string, unknown> = {}): Promise<AgentOS> =>
+    AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey } }] },
+      turnPlanning: { enabled: false },
+      personas: [{ id: 'tutor', name: 'Tutor', description: 'A tutor.', version: '1.0.0', baseSystemPrompt: 'You teach networking.', personalityTraits: TUTOR_TRAITS }],
+      ...extra,
+    } as never);
+
+  it('reads learning: null as unset: agent() and gmi() send the prompt they send with learning unset and build no layer', async () => {
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('Hi.'), reply.text('Hi again.'), reply.text('Hello.')] });
+    const unset = agent(tutorOptions(k));
+    const nulled = agent(tutorOptions(k, { learning: null }));
+    const viaGmi = gmi(tutorOptions(k, { learning: null }));
+    try {
+      await unset.session('s1', { userId: 'ana' }).send('Hello.');
+      await nulled.session('s1', { userId: 'ana' }).send('Hello.');
+      await viaGmi.session('s1', { userId: 'ana' }).send('Hello.');
+      expect(played.seen).toHaveLength(3);
+      expect(systemOf(played.seen[1])).toBe(systemOf(played.seen[0]));
+      expect(systemOf(played.seen[2])).toBe(systemOf(played.seen[0]));
+      expect(nulled.learning).toBeUndefined();
+      expect(viaGmi.learning).toBeUndefined();
+    } finally {
+      await unset.close();
+      await nulled.close();
+      await viaGmi.close();
+    }
+  });
+
+  it('reads a field set to null as unset: gmi() runs with the layer on and every switch at its default, an agency member whose agentKey is null names none, and a layer built with a null profile, surface and host loops takes their defaults', async () => {
+    quietManifest();
+    const k = key();
+    script('openai', k, { replies: [reply.text('1.')] });
+    const nulls = {
+      mode: null,
+      agentKey: null,
+      namespace: null,
+      anonymousUserIds: null,
+      traits: null,
+      lessons: null,
+      skills: null,
+      store: null,
+      ledgerKey: null,
+      clock: null,
+      memoryTools: null,
+    };
+    const tutor = gmi(tutorOptions(k, { learning: nulls }));
+    try {
+      await tutor.session('s1', { userId: 'ana' }).send('Hello.');
+      const manifest = await tutor.learning!.manifest();
+      expect(manifest).toMatchObject({ surface: 'gmi', profile: 'light', mode: 'on' });
+      expect(manifest.turns).toEqual({ prepared: 1, bound: 1, none: {} });
+      expect(manifest.loops.trait_changes).toEqual({ live: false, detail: 'switched off' });
+    } finally {
+      await tutor.close();
+    }
+    const coach = gmi(tutorOptions(k, { name: 'Coach', learning: { agentKey: null } }));
+    expect(() => gmi(tutorOptions(k, { agencies: { members: { helper: coach } } }))).not.toThrow();
+
+    const layer = createLearningLayer({ profile: null, surface: null, hostLoops: null, mode: null } as never);
+    try {
+      expect(await layer.manifest()).toMatchObject({ surface: 'custom', profile: 'custom', mode: 'on' });
+    } finally {
+      await layer.close();
+    }
+  });
+
+  it('refuses at construction a ledger key that is not a string or is blank, a clock that is not a function, a store that is no learning store and memory tools that are not an object, naming the field, and takes well-formed ones', async () => {
+    quietManifest();
+    const k = key();
+    script('openai', k, { replies: [reply.text('Hi.')] });
+    const refusals: Array<[Record<string, unknown>, RegExp]> = [
+      [{ ledgerKey: 7 }, /learning\.ledgerKey must be a string/],
+      [{ ledgerKey: ' ' }, /learning\.ledgerKey must not be blank/],
+      [{ ledgerKey: '' }, /learning\.ledgerKey must not be blank/],
+      [{ clock: 'now' }, /learning\.clock must be a function/],
+      [{ store: {} }, /learning\.store must be a LearningStore/],
+      [{ store: 'sql' }, /learning\.store must be a LearningStore/],
+      [{ memoryTools: 'facade' }, /learning\.memoryTools must be an object/],
+    ];
+    for (const [learning, named] of refusals) {
+      expect(() => gmi(tutorOptions(k, { learning }))).toThrow(named);
+      expect(() => createLearningLayer(learning as never)).toThrow(named);
+    }
+    const taken = gmi(
+      tutorOptions(k, {
+        learning: { store: new InMemoryLearningStore(), ledgerKey: LEDGER_KEY, clock: () => Date.parse(LEARNED_AT), memoryTools: { brainId: 'qa' } },
+      }),
+    );
+    try {
+      await taken.session('s1', { userId: 'ana' }).send('Hello.');
+      expect((await taken.learning!.manifest()).mode).toBe('on');
+    } finally {
+      await taken.close();
+    }
+  });
+
+  it('the full runtime reads learning: null as unset and a null field as unset, and refuses a blank ledger key before it starts', async () => {
+    quietManifest();
+    const k = key();
+    const played = script('openai', k, { replies: Array.from({ length: 24 }, () => reply.text('Noted.')), whole: true });
+    /** One turn of user `ana`; the system text of the turn's streamed model call. */
+    const turn = async (os: AgentOS): Promise<string> => {
+      for await (const _chunk of os.processRequest({ textInput: 'Hello.', userId: 'ana', sessionId: 's-ana', selectedPersonaId: 'tutor' } as never)) {
+        // Drained: the turn's answer is not what is read here.
+      }
+      return systemOf(played.seen.filter((call) => call.streamed).at(-1));
+    };
+
+    const unset = await bootRuntime(k);
+    let unsetSystem = '';
+    try {
+      unsetSystem = await turn(unset);
+      expect(unsetSystem).toContain('You teach networking.');
+      expect(unsetSystem).not.toContain(PERSONALITY_HEADING);
+    } finally {
+      await unset.shutdown();
+    }
+
+    const nulled = await bootRuntime(k, { learning: null });
+    try {
+      expect(await turn(nulled)).toBe(unsetSystem);
+      expect(nulled.getLearningLayer()).toBeUndefined();
+    } finally {
+      await nulled.shutdown();
+    }
+
+    const nullFields = await bootRuntime(k, { learning: { namespace: null, mode: null, agentKey: null, anonymousUserIds: null, traits: null, ledgerKey: null } });
+    try {
+      expect(await turn(nullFields)).toContain(PERSONALITY_HEADING);
+      expect(await nullFields.getLearningLayer()!.manifest()).toMatchObject({ surface: 'runtime', mode: 'on' });
+    } finally {
+      await nullFields.shutdown();
+    }
+
+    await expect(bootRuntime(k, { learning: { ledgerKey: ' ' } })).rejects.toThrow(/learning\.ledgerKey must not be blank/);
+  });
+
+  it("tells a host tool its turn's learner and mode, by which the self-change and memory-write refusals answer", async () => {
+    quietManifest();
+    const seen: Array<{ context: unknown; selfChange: unknown; memoryWrite: unknown }> = [];
+    const probeLearning = {
+      name: 'probe_learning',
+      description: 'Reads what the turn tells its tools about learning.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async (_args: Record<string, unknown>, context: { sessionData?: Record<string, unknown> }) => {
+        seen.push({
+          context: readToolLearningContext(context.sessionData),
+          selfChange: selfChangeRefusal(context.sessionData),
+          memoryWrite: memoryWriteRefusal(context.sessionData),
+        });
+        return { success: true, output: 'read' };
+      },
+    };
+    /** One turn whose model calls the probe once; what the probe read. */
+    const probed = async (learning: unknown, userId?: string) => {
+      const k = key();
+      script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'probe_learning', args: {} }]), reply.text('Done.')] });
+      const tutor = gmi(tutorOptions(k, { ...(learning === undefined ? {} : { learning }), tools: [probeLearning] }));
+      seen.length = 0;
+      try {
+        await tutor.session('s1', userId === undefined ? undefined : { userId }).send('Read it.');
+      } finally {
+        await tutor.close();
+      }
+      expect(seen).toHaveLength(1);
+      return seen[0];
+    };
+
+    expect(await probed(true, 'ana')).toEqual({ context: { learner: 'bound', mode: 'on' }, selfChange: undefined, memoryWrite: undefined });
+    expect(await probed({ mode: 'off' }, 'ana')).toEqual({ context: { learner: 'bound', mode: 'off' }, selfChange: 'off', memoryWrite: undefined });
+    expect(await probed(true)).toEqual({ context: { learner: 'none', mode: 'on' }, selfChange: 'no_learner', memoryWrite: undefined });
+    expect(await probed(undefined, 'ana')).toEqual({ context: undefined, selfChange: undefined, memoryWrite: undefined });
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    expect(await probed(true, 'ana')).toEqual({ context: { learner: 'bound', mode: 'frozen' }, selfChange: 'frozen', memoryWrite: 'frozen' });
+    expect(await probed(undefined, 'ana')).toEqual({ context: undefined, selfChange: 'frozen', memoryWrite: 'frozen' });
+  });
+
+  it('names the config fields, the turn and write types and the host calls in the types a host imports, every new member of an interface a host builds optional', () => {
+    expectTypeOf<LearningConfig['ledgerKey']>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<LearningConfig['clock']>().toEqualTypeOf<(() => number) | undefined>();
+    expectTypeOf<LearningConfig['store']>().toEqualTypeOf<LearningStore | undefined>();
+    expectTypeOf<LearningConfig['memoryTools']>().toEqualTypeOf<LearningMemoryTools | undefined>();
+    expectTypeOf<ScopeIdPair>().toEqualTypeOf<{ userScopeId: string; personaScopeId: string }>();
+    expectTypeOf<TurnScopes['learner']>().toEqualTypeOf<'bound' | 'none'>();
+    expectTypeOf<SessionSelfChange['kind']>().toEqualTypeOf<'memory_write'>();
+    expectTypeOf<ProposalResult['status']>().toEqualTypeOf<'kept' | 'written' | 'rejected'>();
+    expectTypeOf<Extract<FreezeScope, { scope: 'all' }>>().toEqualTypeOf<{ scope: 'all' }>();
+    type HostCalls = 'freeze' | 'unfreeze' | 'suspend' | 'unsuspend' | 'operatorSet' | 'revert' | 'exportLearnedState' | 'importLearnedState' | 'forgetUser';
+    expectTypeOf<{} extends Pick<ILearningLayer, HostCalls> ? true : false>().toEqualTypeOf<true>();
+    expectTypeOf<undefined extends LearningLayerHandle['forgetUser'] ? true : false>().toEqualTypeOf<false>();
+    expectTypeOf<{} extends Pick<ILearnerSession, 'scopesFor' | 'recordSelfChange' | 'guardMemoryWrite' | 'isFrozen'> ? true : false>().toEqualTypeOf<true>();
+    expectTypeOf<{} extends Pick<ToolLearningContext, 'scopes' | 'recordSelfChange' | 'turnUserId' | 'frozen'> ? true : false>().toEqualTypeOf<true>();
+    expect(couldBeSessionForm('/s')).toBe(true);
+  });
+
+  it('describe a learning option or field set to null where a host reads about learning', () => {
+    const gmiDoc = fs.readFileSync(path.join(PACKAGE_ROOT, 'docs', 'GMI.md'), 'utf8');
+    expect(gmiDoc).toContain('| unset, `false` or `null` (the default) | No layer |');
+    expect(gmiDoc).toContain('A field set to `null` reads as unset, as a config read from JSON or YAML writes one');
+    expect(gmiDoc).toContain('a member of `agencies.members` whose `learning.agentKey` is `null` names no key of its own');
   });
 });
 
