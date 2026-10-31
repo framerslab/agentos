@@ -6,12 +6,16 @@
  * their rows kept. On SQLite, the store refuses an adapter without transactions, makes no table when a product runs
  * its own migrations, and makes its tables at its next call when its first attempt failed.
  *
+ * On Postgres, two adapters that append to one chain at once, as two processes do, leave one linear chain that
+ * verifies, whether the chain had rows or both start it.
+ *
  * The Postgres cases run when `AGENTOS_TEST_POSTGRES_URL` names a database (CI's Test & Lint job sets it). Each case's
  * tables go in a schema of their own (the storage library's `segment`), dropped once the cases have run, so cases and
  * runs that share a database never reach each other's rows.
  */
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { createPostgresAdapter, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import { chainKeyOf, Ledger } from '../../ledger/Ledger.js';
 import { SqlLearningStore } from '../SqlLearningStore.js';
 import { ensureLearningSchema, LEARNING_SCHEMA_DDL, type LearningColumnAddition } from '../schema.js';
 import { runLearningStoreContract } from './learning-store.contract.js';
@@ -29,14 +33,29 @@ const DOC_TABLES = ['outcomes', 'lessons', 'skills'] as const;
 const openSqlite = (): Promise<StorageAdapter> =>
   resolveStorageAdapter({ filePath: ':memory:', priority: ['better-sqlite3', 'sqljs'], quiet: true });
 
-/** A Postgres adapter whose tables go in a new schema of this run's own. */
-async function openPostgres(): Promise<StorageAdapter> {
+/** A new schema name of this run's own, kept so the schema is dropped once the cases have run. */
+function newSegment(): string {
   const segment = `learning_store_${RUN}_${segments.length}`;
   segments.push(segment);
+  return segment;
+}
+
+/** A Postgres adapter whose tables go in `segment`: by default, a new schema of this run's own. */
+async function openPostgres(segment: string = newSegment()): Promise<StorageAdapter> {
   const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, segment, max: 5 });
   await adapter.open();
   return adapter;
 }
+
+const LEDGER_LEARNER = { namespace: 'A', agentKey: 'tutor', userId: '42' };
+const ledgerCandidate = (subject: string) => ({
+  learner: LEDGER_LEARNER,
+  kind: 'operator_set' as const,
+  actor: 'operator:ops',
+  subject,
+  before: null,
+  after: { subject },
+});
 
 /** A store over `adapter` that closes the adapter when it closes, as the contract closes every store it opens. */
 function closingItsAdapter(adapter: StorageAdapter): SqlLearningStore {
@@ -148,7 +167,65 @@ describe.skipIf(!POSTGRES_URL)('on Postgres', () => {
     }
   });
 
-  storeCases('Postgres', openPostgres);
+  storeCases('Postgres', () => openPostgres());
+
+  describe('the ledger, with two adapters on one database', () => {
+    it('leaves one linear chain that verifies when both append to one chain at once', async () => {
+      const segment = newSegment();
+      const one = await openPostgres(segment);
+      const two = await openPostgres(segment);
+      try {
+        const key = chainKeyOf(LEDGER_LEARNER);
+        const a = new Ledger({ store: new SqlLearningStore({ adapter: one }) });
+        const b = new Ledger({ store: new SqlLearningStore({ adapter: two }) });
+        await a.propose(ledgerCandidate('first'), { verdict: 'kept' });
+        // The second store finds the tables the first made before the two race.
+        expect(await b.verifyChain(key)).toEqual({ ok: true, keyed: false });
+        const results = await Promise.all(
+          Array.from({ length: 8 }, (_, i) => (i % 2 === 0 ? a : b).propose(ledgerCandidate(`s-${i}`), { verdict: 'kept' })),
+        );
+        // Eight writers on one head can make one lose four swaps in a row: it answers conflict and writes nothing.
+        expect(results.every((r) => r.status === 'kept' || r.status === 'conflict')).toBe(true);
+        expect(results.some((r) => r.status === 'kept')).toBe(true);
+        const rows = await new SqlLearningStore({ adapter: one }).chainRows(key);
+        expect(rows.map((r) => r.seq)).toEqual(rows.map((_, i) => i + 1));
+        expect(rows.length).toBe(2 + 2 * results.filter((r) => r.status === 'kept').length);
+        expect(await a.verifyChain(key)).toEqual({ ok: true, keyed: false });
+      } finally {
+        await one.close();
+        await two.close();
+      }
+    });
+
+    it('starts one chain when both append its first rows at once', async () => {
+      const segment = newSegment();
+      const one = await openPostgres(segment);
+      const two = await openPostgres(segment);
+      try {
+        const key = chainKeyOf(LEDGER_LEARNER);
+        const first = new SqlLearningStore({ adapter: one });
+        const second = new SqlLearningStore({ adapter: two });
+        // Each store makes or finds its tables before the race, one after the other.
+        expect(await first.head(key)).toBeUndefined();
+        expect(await second.head(key)).toBeUndefined();
+        const a = new Ledger({ store: first });
+        const b = new Ledger({ store: second });
+        const results = await Promise.all([a.propose(ledgerCandidate('a'), { verdict: 'kept' }), b.propose(ledgerCandidate('b'), { verdict: 'kept' })]);
+        expect(results.map((r) => r.status)).toEqual(['kept', 'kept']);
+        expect((await first.chainRows(key)).map((r) => [r.seq, r.rowType])).toEqual([
+          [1, 'candidate'],
+          [2, 'verdict'],
+          [3, 'candidate'],
+          [4, 'verdict'],
+        ]);
+        expect(await first.head(key)).toMatchObject({ seq: 4, userId: '42', forgotten: false });
+        expect(await b.verifyChain(key)).toEqual({ ok: true, keyed: false });
+      } finally {
+        await one.close();
+        await two.close();
+      }
+    });
+  });
 });
 
 describe('SqlLearningStore', () => {
