@@ -224,11 +224,16 @@ describe('with the learning flag on', () => {
       expect.objectContaining({
         learner: 'bound',
         mode: 'on',
-        scopes: expect.objectContaining({ learner: 'bound', mode: 'on', userScopeId: 'ana', namespace: '' }),
+        scopes: expect.objectContaining({ learner: 'bound', mode: 'on', userScopeId: 'ana', personaScopeId: 'ana::tutor', namespace: '' }),
         recordSelfChange: expect.any(Function),
         frozen: expect.any(Function),
       }),
-      expect.objectContaining({ learner: 'none', mode: 'on', scopes: expect.objectContaining({ learner: 'none', mode: 'on', namespace: '' }) }),
+      // A call is a session of its own: its scope ids are its call id's, in the session form.
+      expect.objectContaining({
+        learner: 'none',
+        mode: 'on',
+        scopes: expect.objectContaining({ learner: 'none', mode: 'on', userScopeId: expect.stringMatching(/^\/generate-/), namespace: '' }),
+      }),
     ]);
   });
 });

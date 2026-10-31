@@ -101,6 +101,16 @@
  * scopes, its organization and the traces filed under no scope id. Only a freeze stops a write, `memory_reflect` is
  * withdrawn where a layer runs, a forgotten user's or a down store's write files nothing, revert takes a write back, and
  * a delete or merge takes the trace's knowledge-graph copy with it.
+ *
+ * The standalone retriever and the rolling-summary sink (the package root's `createStandaloneMemory*` and the full
+ * runtime's `standaloneMemory`), where a learning layer runs. The full runtime asks the GMI's learner session for the
+ * turn's scope ids and recorder before the GMI prepares the turn (`turnLearningBeforePreparation`, the learning
+ * module's path): a learner's compaction goes under the learner's scope ids as one recorded upsert whose traces name
+ * the users it summarized, a second user's under the session's form in that user's chain, and the retriever reads it
+ * for that learner alone. A compaction that changed nothing writes nothing; one that changed replaces what the last
+ * one filed, its kept verdict naming what it wrote and forgot, which a revert takes back. A write that fails leaves
+ * nothing, a forget that fails is made at the next upsert, a freeze stops the sink, an upsert the layer cannot record
+ * files nothing, `forgetUser` takes every summary of a user's words, and with no layer both run under the plain ids.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -125,7 +135,10 @@ import {
   SqlKnowledgeGraph,
   agent,
   createLearningLayer,
+  createStandaloneMemoryLongTermRetriever,
+  createStandaloneMemoryRollingSummarySink,
   createTestAgentOSConfig,
+  DEFAULT_LONG_TERM_MEMORY_POLICY,
   gmi,
   type CognitiveMemoryConfig,
   type ICognitiveMemoryManager,
@@ -142,6 +155,8 @@ import {
   type PADState,
   readTraceSnapshot,
   type RememberOptions,
+  type ResolvedLongTermMemoryPolicy,
+  type RollingSummaryMemoryUpdate,
   type ToolLearningContext,
   type TraceSnapshot,
   type TurnInputForLearning,
@@ -173,6 +188,7 @@ import {
   couldBeSessionForm,
   deferLearnerSession,
   ensureLearningSchema,
+  explicitTurnUserOf,
   forgetTargets,
   freezeScopeKey,
   isTurnScopes,
@@ -186,6 +202,7 @@ import {
   taggedScopeId,
   tombstoneHash,
   toolLearningContextFor,
+  turnLearningBeforePreparation,
   type CandidateInput,
   type ChainCheck,
   type ChainHead,
@@ -219,6 +236,7 @@ import {
   type StoredLedgerRow,
   type StoredTraitRow,
   type TraitState,
+  type TurnLearningBeforePreparation,
   type TurnScopes,
 } from '@framers/agentos/cognition/learning/index';
 import { canonicalJson, hmacSha256Hex, sha256Hex, ulid } from '@framers/agentos/cognition/learning/ledger/index';
@@ -8636,6 +8654,642 @@ describe("the memory tools a host builds over a Memory facade, by a turn's scope
   });
 });
 
+describe("the standalone retriever and the rolling-summary sink, by a turn's scopes and through the learner's recorder, on the full runtime and a host's own sink", () => {
+  let keys = 0;
+  const key = () => `k-qa-sink-${++keys}`;
+  /** Learner 42 of tenant A, of the agent whose persona id is `tutor`. */
+  const LEARNER_A: LearnerKey = { namespace: 'A', agentKey: 'tutor', userId: '42' };
+  const TUTOR_DEF = { id: 'tutor', name: 'Tutor', description: 'A tutor.', version: '1.0.0', baseSystemPrompt: 'You teach networking.', personalityTraits: TUTOR_PERSONA };
+  /** A request's own long-term memory scopes: the user's and the persona's on, beside the conversation's, on by default. */
+  const SCOPES = { memoryControl: { longTermMemory: { scopes: { user: true, persona: true } } } };
+  /** The user scope alone, so a host's own upsert writes one summary and its facts. */
+  const USER_ONLY: ResolvedLongTermMemoryPolicy = {
+    ...DEFAULT_LONG_TERM_MEMORY_POLICY,
+    scopes: { conversation: false, user: true, persona: false, organization: false },
+  };
+
+  const quiet = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    return vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  };
+
+  /** The compactor's answer: the summary and the facts it keeps. */
+  const compaction = (summary: string, facts: string[] = []) =>
+    reply.text(JSON.stringify({ summary_markdown: summary, memory_json: { facts: facts.map((text) => ({ text })) } }));
+
+  /**
+   * The stub provider of a full runtime that compacts every turn: a call of the rolling-summary compactor (not streamed,
+   * its prompt names `summary_markdown`) takes the next of `compactions`, and with none left the compaction fails and
+   * the turn files no summary; a streamed call takes the next of `replies`, or `Noted.`.
+   */
+  function compactingProvider(apiKey: string) {
+    const played = script('openai', apiKey, { whole: true });
+    const compactions: Array<ReturnType<typeof reply.text>> = [];
+    const replies: Array<ReturnType<typeof reply.text>> = [];
+    let last: (typeof played.seen)[number] | undefined;
+    const record = played.seen.push.bind(played.seen);
+    played.seen.push = (...calls) => {
+      last = calls[calls.length - 1];
+      return record(...calls);
+    };
+    (played as { replies: unknown }).replies = {
+      shift: () => {
+        if (!last) return undefined;
+        if (last.streamed) return replies.shift() ?? reply.text('Noted.');
+        return JSON.stringify(last.messages).includes('summary_markdown') ? compactions.shift() : undefined;
+      },
+    };
+    /** The messages of the last main (streamed) model call. */
+    const lastMainCall = () => JSON.stringify(played.seen.filter((call) => call.streamed).at(-1)?.messages ?? []);
+    return { played, compactions, replies, lastMainCall };
+  }
+
+  /**
+   * The full runtime from the package root, with a standalone Memory whose long-term retriever and rolling-summary sink
+   * it builds, compacting every turn: one message is enough and none is kept back.
+   */
+  function compactingRuntime(apiKey: string, memory: Memory, learning?: Record<string, unknown>): Promise<AgentOS> {
+    return AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey } }] },
+      turnPlanning: { enabled: false },
+      personas: [TUTOR_DEF],
+      standaloneMemory: { memory, longTermRetriever: true, rollingSummarySink: true },
+      orchestratorConfig: {
+        maxToolCallIterations: 5,
+        defaultAgentTurnTimeoutMs: 120000,
+        enableConversationalPersistence: true,
+        rollingSummaryCompactionConfig: {
+          enabled: true,
+          modelId: 'gpt-4o-mini',
+          cooldownMs: 0,
+          headMessagesToKeep: 0,
+          tailMessagesToKeep: 0,
+          minMessagesToSummarize: 1,
+          maxMessagesToSummarizePerPass: 48,
+          maxOutputTokens: 900,
+        },
+      },
+      ...(learning ? { learning } : {}),
+    } as never);
+  }
+
+  /** One turn of the full runtime, with the request's user and persona scopes on; an error chunk fails it. */
+  async function turn(os: AgentOS, input: Record<string, unknown>): Promise<void> {
+    for await (const chunk of os.processRequest({ textInput: 'Hello.', selectedPersonaId: 'tutor', ...SCOPES, ...input } as never)) {
+      if ((chunk as { type?: unknown }).type === 'error') throw new Error(`the turn failed: ${JSON.stringify(chunk)}`);
+    }
+  }
+
+  /** A Memory facade on a SQLite file of its own (brain `sink-brain`), as a host passes it to the runtime. */
+  async function sinkFacade(): Promise<{ file: string; memory: Memory }> {
+    const file = brainFile();
+    const memory = await Memory.createSqlite(file, { brainId: 'sink-brain', selfImprove: false });
+    facades.push(memory);
+    return { file, memory };
+  }
+
+  interface Filed {
+    id: string;
+    scope: string;
+    scopeId: string;
+    content: string;
+    contributorIds?: string[];
+    turnUserId?: string;
+  }
+  /** The live traces of a facade's file, as a host's own reader of the file sees them. */
+  function liveIn(file: string): Filed[] {
+    const db = new Database(file);
+    try {
+      const rows = db
+        .prepare('SELECT id, scope, scope_id, content, metadata FROM memory_traces WHERE deleted = 0 ORDER BY scope, scope_id, content')
+        .all() as Array<{ id: string; scope: string; scope_id: string; content: string; metadata: string | null }>;
+      return rows.map((row) => {
+        const metadata = JSON.parse(row.metadata || '{}') as { contributorIds?: string[]; turnUserId?: string };
+        return {
+          id: row.id,
+          scope: row.scope,
+          scopeId: row.scope_id,
+          content: row.content,
+          ...(metadata.contributorIds ? { contributorIds: metadata.contributorIds } : {}),
+          ...(metadata.turnUserId ? { turnUserId: metadata.turnUserId } : {}),
+        };
+      });
+    } finally {
+      db.close();
+    }
+  }
+  /** A summary's own line, after the header the sink writes above it; a fact's whole text. */
+  const lineOf = (content: string) => content.split('\n\n')[1] ?? content;
+  /** Where each live trace holding `canary` is filed: scope, scope id, its line and its contributors. */
+  const filedWith = (file: string, canary: string) =>
+    liveIn(file)
+      .filter((trace) => trace.content.includes(canary))
+      .map((trace) => [trace.scope, trace.scopeId, lineOf(trace.content), trace.contributorIds]);
+
+  interface SinkRow {
+    id: string;
+    rowType: string;
+    verdict: string;
+    reason: string;
+    subject: string;
+    userId: string | null;
+    turnUserId: string | null;
+    after: { brainId?: string; created?: string[]; changed?: unknown[]; deleted?: string[] } | null;
+  }
+  /** The rolling-summary sink's rows of one chain, oldest first. */
+  async function sinkRows(store: LearningStore, chainKey: string): Promise<SinkRow[]> {
+    return (await store.chainRows(chainKey))
+      .map((row) => ({ row, body: JSON.parse(row.body) as { actor: string; reason: string; subject: string; after: SinkRow['after'] } }))
+      .filter(({ row, body }) => row.kind === 'memory_write' && body.actor === 'memory:rolling_summary')
+      .map(({ row, body }) => ({
+        id: row.id,
+        rowType: row.rowType,
+        verdict: row.verdict,
+        reason: body.reason,
+        subject: body.subject,
+        userId: row.userId,
+        turnUserId: row.turnUserId,
+        after: body.after,
+      }));
+  }
+  const verdicts = async (store: LearningStore, chainKey: string) => (await sinkRows(store, chainKey)).map((row) => row.verdict);
+  /** Waits for the sink, which the pipeline calls without waiting for it. */
+  const settled = (check: () => Promise<void> | void) => vi.waitFor(check, { timeout: 10_000, interval: 50 });
+
+  /** What the turn pipeline hands the sink and the retriever before the GMI prepares the turn, as a product's own loop asks it. */
+  function learningOf(session: ILearnerSession, userId: string, namespace: string, conversationId: string): TurnLearningBeforePreparation {
+    const learning = turnLearningBeforePreparation(session, { userId, namespace, workflowSeat: false, conversationId });
+    if (!learning) throw new Error('the learner session named no scope ids');
+    return learning;
+  }
+  /** A compaction's update as the pipeline builds it, with the turn's learning where there is one. */
+  function updateOf(
+    learning: TurnLearningBeforePreparation | undefined,
+    over: { userId: string; organizationId?: string; conversationId: string; summaryText: string; facts?: string[]; policy?: ResolvedLongTermMemoryPolicy; contributorIds?: string[] },
+  ): RollingSummaryMemoryUpdate {
+    return {
+      userId: over.userId,
+      ...(over.organizationId ? { organizationId: over.organizationId } : {}),
+      sessionId: over.conversationId,
+      conversationId: over.conversationId,
+      personaId: 'tutor',
+      memoryPolicy: over.policy ?? USER_ONLY,
+      summaryText: over.summaryText,
+      summaryJson: over.facts?.length ? { facts: over.facts.map((text) => ({ text })) } : null,
+      ...(learning
+        ? {
+            turnScopes: learning.scopes,
+            ...(learning.recordSelfChange ? { recordSelfChange: learning.recordSelfChange } : {}),
+            contributorIds: over.contributorIds ?? [over.userId],
+          }
+        : {}),
+    };
+  }
+
+  it("files a learner's compaction on the full runtime under the learner's scope ids as one recorded upsert that names its contributors, writes nothing for a compaction that changed nothing, replaces one that changed, and the retriever reads it in the learner's next session and for no other tenant's user of the same id", async () => {
+    quiet();
+    const { file, memory } = await sinkFacade();
+    const store = new InMemoryLearningStore();
+    const apiKey = key();
+    const { compactions, lastMainCall } = compactingProvider(apiKey);
+    const os = await compactingRuntime(apiKey, memory, { store, memoryTools: memory });
+    const ana = chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: 'ana' });
+    const kites = '- Canary STORK-4: ana flies kites.';
+    try {
+      compactions.push(compaction(kites, ['Ana flies kites.']));
+      await turn(os, { userId: 'ana', sessionId: 's-a', conversationId: 'c-a', organizationId: 'A', textInput: 'I fly kites on Sundays.' });
+      await settled(async () => expect(await verdicts(store, ana)).toEqual(['pending', 'kept']));
+
+      const first = liveIn(file).filter((trace) => trace.content.includes('STORK-4') || trace.content.includes('Ana flies kites.'));
+      expect(first.map((trace) => [trace.scope, trace.scopeId, lineOf(trace.content), trace.contributorIds])).toEqual([
+        ['persona', 'A/ana::tutor', 'Fact: Ana flies kites.', ['ana']],
+        ['persona', 'A/ana::tutor', kites, ['ana']],
+        ['thread', 'A//c-a', 'Fact: Ana flies kites.', ['ana']],
+        ['thread', 'A//c-a', kites, ['ana']],
+        ['user', 'A/ana', 'Fact: Ana flies kites.', ['ana']],
+        ['user', 'A/ana', kites, ['ana']],
+      ]);
+      const [candidate, kept] = await sinkRows(store, ana);
+      expect(candidate).toMatchObject({ rowType: 'candidate', subject: 'rolling_summary:c-a', userId: 'ana' });
+      expect([...(candidate!.after!.created ?? [])].sort()).toEqual(first.map((trace) => trace.id).sort());
+      expect(kept!.after).toEqual({ brainId: 'sink-brain', created: expect.any(Array), changed: [], deleted: [] });
+      expect([...kept!.after!.created!].sort()).toEqual(first.map((trace) => trace.id).sort());
+
+      // The next compaction says the same: nothing is written and no row. The one after it changes the summary and adds a
+      // fact: the old summaries go, the fact that did not change keeps its trace, and the kept verdict names both.
+      compactions.push(compaction(kites, ['Ana flies kites.']));
+      await turn(os, { userId: 'ana', sessionId: 's-a', conversationId: 'c-a', organizationId: 'A', textInput: 'Yes, kites.' });
+      const falcon = '- Canary STORK-4: ana flies kites and owns a falcon.';
+      compactions.push(compaction(falcon, ['Ana flies kites.', 'Ana owns a falcon.']));
+      await turn(os, { userId: 'ana', sessionId: 's-a', conversationId: 'c-a', organizationId: 'A', textInput: 'I also own a falcon.' });
+      await settled(async () => expect(await verdicts(store, ana)).toEqual(['pending', 'kept', 'pending', 'kept']));
+      const replaced = (await sinkRows(store, ana))[3]!.after!;
+      const oldSummaries = first.filter((trace) => trace.content.includes('STORK-4')).map((trace) => trace.id);
+      expect([...replaced.deleted!].sort()).toEqual([...oldSummaries].sort());
+      expect(replaced.created).toHaveLength(6);
+      expect(filedWith(file, 'Ana flies kites.').length + filedWith(file, 'falcon').length).toBe(9);
+      expect(filedWith(file, 'STORK-4')).toEqual([
+        ['persona', 'A/ana::tutor', falcon, ['ana']],
+        ['thread', 'A//c-a', falcon, ['ana']],
+        ['user', 'A/ana', falcon, ['ana']],
+      ]);
+      expect(liveIn(file).filter((trace) => trace.content === 'Fact: Ana flies kites.').map((trace) => trace.id).sort()).toEqual(
+        first.filter((trace) => trace.content === 'Fact: Ana flies kites.').map((trace) => trace.id).sort(),
+      );
+
+      // The same user id in tenant B reads none of it; the learner's next session in tenant A does.
+      await turn(os, { userId: 'ana', sessionId: 's-b', conversationId: 'c-b', organizationId: 'B', textInput: 'What about kites?' });
+      expect(lastMainCall()).not.toContain('STORK-4');
+      await turn(os, { userId: 'ana', sessionId: 's-c', conversationId: 'c-c', organizationId: 'A', textInput: 'What about kites?' });
+      expect(lastMainCall()).toContain('owns a falcon');
+      expect(await verdicts(store, ana)).toEqual(['pending', 'kept', 'pending', 'kept']);
+    } finally {
+      await os.shutdown();
+    }
+  });
+
+  it("files a second user's compaction on another user's session of the full runtime under the session's form, in that user's chain and naming every user it summarized, keeps the session's later turns without a learner, files an anonymous session under its own form, and forgetUser for the second user takes every summary of their words", async () => {
+    quiet();
+    const { file, memory } = await sinkFacade();
+    const store = new InMemoryLearningStore();
+    const apiKey = key();
+    const { compactions } = compactingProvider(apiKey);
+    const os = await compactingRuntime(apiKey, memory, { store, memoryTools: memory });
+    const shared = { sessionId: 's-shared', conversationId: 'c-shared', organizationId: 'A' };
+    const secondUser = (userId: string) => chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }, userId);
+    try {
+      compactions.push(compaction('- Canary BEES-1: ana keeps bees.'));
+      await turn(os, { userId: 'ana', ...shared, textInput: 'I keep bees.' });
+      await settled(async () => expect(await verdicts(store, chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: 'ana' }))).toEqual(['pending', 'kept']));
+
+      const goats = '- Canary BEES-1: ana keeps bees.\n- Canary GOATS-2: bob keeps goats.';
+      compactions.push(compaction(goats));
+      await turn(os, { userId: 'bob', ...shared, textInput: 'I keep goats.' });
+      await settled(async () => expect(await verdicts(store, secondUser('bob'))).toEqual(['pending', 'kept']));
+      expect((await sinkRows(store, secondUser('bob')))[0]).toMatchObject({ userId: null, turnUserId: 'bob', subject: 'rolling_summary:c-shared' });
+      expect(filedWith(file, 'GOATS-2')).toEqual([
+        ['persona', 'A//s-shared::tutor', goats, ['ana', 'bob']],
+        ['thread', 'A//c-shared', goats, ['ana', 'bob']],
+        ['user', 'A//s-shared', goats, ['ana', 'bob']],
+      ]);
+
+      // The learner's own turn after it on the session has no learner either: the session's form, in ana's own second-user chain.
+      const honey = `${goats}\n- Canary HIVE-3: ana sells honey.`;
+      compactions.push(compaction(honey));
+      await turn(os, { userId: 'ana', ...shared, textInput: 'I sell honey.' });
+      await settled(async () => expect(await verdicts(store, secondUser('ana'))).toEqual(['pending', 'kept']));
+      expect(filedWith(file, 'HIVE-3')).toEqual([
+        ['persona', 'A//s-shared::tutor', honey, ['ana', 'bob']],
+        ['thread', 'A//c-shared', honey, ['ana', 'bob']],
+        ['user', 'A//s-shared', honey, ['ana', 'bob']],
+      ]);
+      expect(filedWith(file, 'BEES-1').filter(([, scopeId]) => scopeId === 'A/ana' || scopeId === 'A/ana::tutor')).toEqual([
+        ['persona', 'A/ana::tutor', '- Canary BEES-1: ana keeps bees.', ['ana']],
+        ['user', 'A/ana', '- Canary BEES-1: ana keeps bees.', ['ana']],
+      ]);
+
+      // An anonymous session with no organization: its own form, with no contributor, on the agent's chain.
+      compactions.push(compaction('- Canary TRAIN-4: asked about trains.'));
+      await turn(os, { userId: 'anonymous_user', sessionId: 's-anon', conversationId: 'c-anon', textInput: 'Trains?' });
+      await settled(async () => expect(await verdicts(store, chainKeyOf({ namespace: '', agentKey: 'tutor', userId: null }))).toEqual(['pending', 'kept']));
+      expect(filedWith(file, 'TRAIN-4')).toEqual([
+        ['persona', '/s-anon::tutor', '- Canary TRAIN-4: asked about trains.', undefined],
+        ['thread', '/c-anon', '- Canary TRAIN-4: asked about trains.', undefined],
+        ['user', '/s-anon', '- Canary TRAIN-4: asked about trains.', undefined],
+      ]);
+
+      // bob's deletion takes every summary that holds bob's words, and leaves the learner's own and the anonymous session's.
+      const report = await os.getLearningLayer()!.forgetUser!('bob', { namespace: 'A' });
+      expect(liveIn(file).filter((trace) => trace.content.includes('GOATS-2'))).toEqual([]);
+      expect(liveIn(file).filter((trace) => trace.contributorIds?.includes('bob') || trace.turnUserId === 'bob')).toEqual([]);
+      expect(filedWith(file, 'BEES-1').map(([, scopeId]) => scopeId)).toEqual(['A/ana::tutor', 'A/ana']);
+      expect(filedWith(file, 'TRAIN-4')).toHaveLength(3);
+      expect(report.stores).toContainEqual({
+        store: "a conversation's own history",
+        reached: false,
+        reason: "the full runtime's conversation store and a gmi() session's history keep a conversation's messages until the host deletes them, and a later compaction summarizes them again",
+      });
+    } finally {
+      await os.shutdown();
+    }
+  });
+
+  it('stops the sink on the full runtime under a freeze, files with no row in mode off, files and reads under the plain ids with no learning layer, and files as with no layer, with a WARNING, where the learner session cannot name the turn\'s scope ids', async () => {
+    const warn = quiet();
+    const ana = chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: 'ana' });
+    const kiteTurn = { userId: 'ana', sessionId: 's-a', conversationId: 'c-a', organizationId: 'A', textInput: 'I fly kites.' };
+
+    // AGENTOS_LEARNING_FREEZE=1: the turn answers and the sink files nothing; the next turn, thawed, files its own.
+    {
+      const { file, memory } = await sinkFacade();
+      const store = new InMemoryLearningStore();
+      const apiKey = key();
+      const { compactions, played } = compactingProvider(apiKey);
+      const os = await compactingRuntime(apiKey, memory, { store, memoryTools: memory });
+      try {
+        vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+        compactions.push(compaction('- Canary FROST-5: frozen out.'));
+        await turn(os, kiteTurn);
+        expect(played.seen.filter((call) => call.streamed)).toHaveLength(1);
+        vi.stubEnv('AGENTOS_LEARNING_FREEZE', '0');
+        compactions.push(compaction('- Canary THAW-6: filed once thawed.'));
+        await turn(os, { ...kiteTurn, textInput: 'Still kites.' });
+        await settled(async () => expect(await verdicts(store, ana)).toEqual(['pending', 'kept']));
+        expect(liveIn(file).filter((trace) => trace.content.includes('FROST-5'))).toEqual([]);
+        expect(filedWith(file, 'THAW-6').map(([scope, scopeId]) => [scope, scopeId])).toEqual([
+          ['persona', 'A/ana::tutor'],
+          ['thread', 'A//c-a'],
+          ['user', 'A/ana'],
+        ]);
+      } finally {
+        await os.shutdown();
+      }
+    }
+
+    // Mode off: under the learner's scope ids as the host configured them, with no row.
+    {
+      const { file, memory } = await sinkFacade();
+      const store = new InMemoryLearningStore();
+      const apiKey = key();
+      const { compactions } = compactingProvider(apiKey);
+      const os = await compactingRuntime(apiKey, memory, { store, memoryTools: memory, mode: 'off' });
+      try {
+        compactions.push(compaction('- Canary MOSS-7: filed off the record.'));
+        await turn(os, kiteTurn);
+        await settled(() => expect(filedWith(file, 'MOSS-7')).toHaveLength(3));
+        expect(filedWith(file, 'MOSS-7').map(([scope, scopeId, , contributors]) => [scope, scopeId, contributors])).toEqual([
+          ['persona', 'A/ana::tutor', ['ana']],
+          ['thread', 'A//c-a', ['ana']],
+          ['user', 'A/ana', ['ana']],
+        ]);
+        expect(await sinkRows(store, ana)).toEqual([]);
+      } finally {
+        await os.shutdown();
+      }
+    }
+
+    // No learning layer: the plain ids, no contributors, and the user's next session reads it, as before the layer.
+    {
+      const { file, memory } = await sinkFacade();
+      const apiKey = key();
+      const { compactions, lastMainCall } = compactingProvider(apiKey);
+      const os = await compactingRuntime(apiKey, memory);
+      try {
+        compactions.push(compaction('- Canary PLAIN-8: ana flies kites.'));
+        await turn(os, kiteTurn);
+        await settled(() => expect(filedWith(file, 'PLAIN-8')).toHaveLength(3));
+        expect(filedWith(file, 'PLAIN-8').map(([scope, scopeId, , contributors]) => [scope, scopeId, contributors])).toEqual([
+          ['persona', 'ana::tutor', undefined],
+          ['thread', 'c-a', undefined],
+          ['user', 'ana', undefined],
+        ]);
+        await turn(os, { ...kiteTurn, sessionId: 's-c', conversationId: 'c-c', textInput: 'What about kites?' });
+        expect(lastMainCall()).toContain('PLAIN-8');
+      } finally {
+        await os.shutdown();
+      }
+    }
+
+    // A learner session whose scopesFor throws: the pipeline warns, and the sink files under the plain ids with no row.
+    {
+      const probe = await createLearningLayer({ store: new InMemoryLearningStore() }).forLearner(LEARNER_A, productContext('s-probe'));
+      const sessionClass = Object.getPrototypeOf(probe) as { scopesFor(turn: { userId: string | null; namespace: string; workflowSeat: boolean }): TurnScopes };
+      expect(Object.prototype.hasOwnProperty.call(sessionClass, 'scopesFor')).toBe(true);
+      vi.spyOn(sessionClass, 'scopesFor').mockImplementation(() => {
+        throw new Error('the scope rules are unreadable');
+      });
+      const { file, memory } = await sinkFacade();
+      const store = new InMemoryLearningStore();
+      const apiKey = key();
+      const { compactions } = compactingProvider(apiKey);
+      const os = await compactingRuntime(apiKey, memory, { store, memoryTools: memory });
+      try {
+        compactions.push(compaction('- Canary MOTH-9: ana collects moths.'));
+        await turn(os, kiteTurn);
+        await settled(() => expect(filedWith(file, 'MOTH-9')).toHaveLength(3));
+        expect(filedWith(file, 'MOTH-9').map(([scope, scopeId]) => [scope, scopeId])).toEqual([
+          ['persona', 'ana::tutor'],
+          ['thread', 'c-a'],
+          ['user', 'ana'],
+        ]);
+        expect(await sinkRows(store, ana)).toEqual([]);
+        expect(warn.mock.calls.map((call) => String(call[0]))).toContain(
+          "[agentos] learning: the learner session did not name this turn's scope ids (the scope rules are unreadable); the standalone retriever and sink read and file as with no learning layer.",
+        );
+      } finally {
+        await os.shutdown();
+      }
+    }
+  });
+
+  it("records a host's own upsert as its kept verdict says: a revert takes back what it wrote and restores what it forgot, a write that fails leaves nothing and is rejected (write_failed), a forget that fails is kept and made at the next upsert, a text forgotten since is filed again, two upserts at once keep every trace, and a host's own write's keptAfter is what its verdict records and a revert takes back", async () => {
+    const warn = quiet();
+    const { file, memory } = await sinkFacade();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: memory });
+    // The host's facade, through which a test makes the next remember or a named forget fail.
+    const faults = { rememberCountdown: 0, forgetFails: new Set<string>() };
+    const remember: Memory['remember'] = async (...args) => {
+      if (faults.rememberCountdown > 0 && --faults.rememberCountdown === 0) throw new Error('disk full');
+      return memory.remember(...args);
+    };
+    const forget: Memory['forget'] = async (traceId) => {
+      if (faults.forgetFails.delete(traceId)) throw new Error('row locked');
+      return memory.forget(traceId);
+    };
+    const facade = {
+      brainId: memory.brainId,
+      remember,
+      forget,
+      readTrace: memory.readTrace.bind(memory),
+      deleteTraces: memory.deleteTraces.bind(memory),
+      restoreTrace: memory.restoreTrace.bind(memory),
+    };
+    const sink = createStandaloneMemoryRollingSummarySink(facade);
+    /** Learner `userId` of tenant A: its upserts, the lines of its user scope, and its chain. */
+    async function learner(userId: string) {
+      const session = await layer.forLearner({ ...LEARNER_A, userId }, productContext(`s-${userId}`));
+      const upsert = (summaryText: string, facts: string[] = []) =>
+        sink.upsertRollingSummaryMemory(
+          updateOf(learningOf(session, userId, 'A', `c-${userId}`), { userId, organizationId: 'A', conversationId: `c-${userId}`, summaryText, facts }),
+        );
+      const scoped = () => liveIn(file).filter((trace) => trace.scopeId === `A/${userId}`);
+      const lines = () => scoped().map((trace) => lineOf(trace.content)).sort();
+      const summaryId = () => scoped().find((trace) => trace.content.startsWith('Rolling summary'))!.id;
+      const chain = chainKeyOf({ ...LEARNER_A, userId });
+      return { session, upsert, lines, summaryId, scoped, chain };
+    }
+
+    // A revert of a kept upsert: what it wrote goes, and the summary it forgot comes back.
+    const tea = await learner('42');
+    await tea.upsert('- Canary TEA-1: likes tea', ['Ana likes tea.']);
+    await tea.upsert('- Canary TEA-1: likes green tea', ['Ana likes tea.']);
+    expect(tea.lines()).toEqual(['- Canary TEA-1: likes green tea', 'Fact: Ana likes tea.']);
+    const greenTea = (await sinkRows(store, tea.chain)).filter((row) => row.rowType === 'candidate')[1]!;
+    await layer.revert(greenTea.id, 'ops');
+    expect(tea.lines()).toEqual(['- Canary TEA-1: likes tea', 'Fact: Ana likes tea.']);
+
+    // A second write that fails: the first is taken back, nothing changes, and the row is rejected (write_failed).
+    const rye = await learner('43');
+    await rye.upsert('- Canary RYE-2: bakes rye', ['Bo bakes rye.']);
+    faults.rememberCountdown = 2;
+    await expect(rye.upsert('- Canary RYE-2: bakes rye and spelt', ['Bo bakes rye.', 'Bo bakes spelt.'])).rejects.toThrow(
+      'rolling-summary sink: the upsert was not written (write_failed).',
+    );
+    expect(rye.lines()).toEqual(['- Canary RYE-2: bakes rye', 'Fact: Bo bakes rye.']);
+    const ryeRows = await sinkRows(store, rye.chain);
+    expect(ryeRows.map((row) => row.verdict)).toEqual(['pending', 'kept', 'pending', 'rejected']);
+    expect(ryeRows[3]!.reason).toBe('write_failed');
+
+    // A forget that fails: kept with what it did forget, a WARNING, and the next upsert forgets it.
+    const oak = await learner('44');
+    await oak.upsert('- Canary OAK-3: plants oaks', ['Cy plants oaks.']);
+    const oldOak = oak.summaryId();
+    faults.forgetFails.add(oldOak);
+    await oak.upsert('- Canary OAK-3: plants oaks and elms', ['Cy plants oaks.']);
+    const elmsKept = (await sinkRows(store, oak.chain))[3]!;
+    expect(elmsKept).toMatchObject({ verdict: 'kept', after: { deleted: [], created: [expect.any(String)] } });
+    expect(oak.lines()).toEqual(['- Canary OAK-3: plants oaks', '- Canary OAK-3: plants oaks and elms', 'Fact: Cy plants oaks.']);
+    expect(warn.mock.calls.map((call) => String(call[0]))).toContain(
+      '[agentos] memory: a rolling-summary upsert did not forget 1 older trace(s); the next upsert of their scope forgets them.',
+    );
+    await oak.upsert('- Canary OAK-3: plants oaks, elms and ash', ['Cy plants oaks.']);
+    expect(oak.lines()).toEqual(['- Canary OAK-3: plants oaks, elms and ash', 'Fact: Cy plants oaks.']);
+    expect((await sinkRows(store, oak.chain))[5]!.after!.deleted).toEqual(expect.arrayContaining([oldOak, elmsKept.after!.created![0]]));
+
+    // A fact the host forgot since is filed again by the next upsert that holds it.
+    const fig = await learner('45');
+    await fig.upsert('- Canary FIG-4: grows figs', ['Di grows figs.']);
+    await memory.forget(fig.scoped().find((trace) => trace.content === 'Fact: Di grows figs.')!.id);
+    await fig.upsert('- Canary FIG-4: grows figs, ripe', ['Di grows figs.']);
+    expect(fig.lines()).toEqual(['- Canary FIG-4: grows figs, ripe', 'Fact: Di grows figs.']);
+
+    // Two upserts at once run one after the other: the second replaces the first, and both are recorded.
+    const elm = await learner('46');
+    await Promise.all([elm.upsert('- Canary ELM-5: one'), elm.upsert('- Canary ELM-5: two')]);
+    expect(elm.lines()).toEqual(['- Canary ELM-5: two']);
+    expect(await verdicts(store, elm.chain)).toEqual(['pending', 'kept', 'pending', 'kept']);
+
+    // A host's own recorded write that resolves one of its planned traces to one its scope held: its kept verdict
+    // records what it did (keptAfter), and a revert deletes that alone.
+    const held = await memory.remember('Shared fact OWL-6.', { scope: 'user', scopeId: 'A/42' });
+    const own = await tea.session.recordSelfChange!<string[]>({
+      kind: 'memory_write',
+      actor: 'tool:host_import',
+      subject: 'import-1',
+      before: null,
+      after: { created: ['mt-qa-plan-1', 'mt-qa-plan-2'], changed: [], deleted: [] },
+      brainId: memory.brainId,
+      apply: async () => [
+        (await memory.remember('Imported OWL-7.', { id: 'mt-qa-plan-1', scope: 'user', scopeId: 'A/42' })).id,
+        (await memory.remember('Shared fact OWL-6.', { id: 'mt-qa-plan-2', scope: 'user', scopeId: 'A/42' })).id,
+      ],
+      undo: async (ids) => {
+        await memory.deleteTraces(ids.filter((id) => id.startsWith('mt-qa-plan')));
+      },
+      keptAfter: (ids) => ({ created: ids.filter((id) => id.startsWith('mt-qa-plan')), changed: [], deleted: [] }),
+    });
+    const ownId = ledgerIdOf(own);
+    expect((await ledgerOver(store).latestVerdictEntry(ownId))?.after).toEqual({ brainId: 'sink-brain', created: ['mt-qa-plan-1'], changed: [], deleted: [] });
+    await layer.revert(ownId, 'ops');
+    expect(liveIn(file).filter((trace) => trace.content.includes('OWL-')).map((trace) => trace.id)).toEqual([held.id]);
+  });
+
+  it("files nothing where a host's own upsert cannot be recorded or the layer says no, files with no row under a suspension, files an organization's shared summary under its own id for that organization's turns alone, reads a learner's summary for that learner alone, and a scope delete for one user takes the summaries that name the user", async () => {
+    quiet();
+    const { file, memory } = await sinkFacade();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: memory });
+    const sink = createStandaloneMemoryRollingSummarySink(memory);
+    const retriever = createStandaloneMemoryLongTermRetriever(memory);
+    const session = await layer.forLearner(LEARNER_A, productContext('s-a'));
+    const update = (summaryText: string) =>
+      updateOf(learningOf(session, '42', 'A', 'c-a'), { userId: '42', organizationId: 'A', conversationId: 'c-a', summaryText });
+    const canaries = (canary: string) => liveIn(file).filter((trace) => trace.content.includes(canary));
+
+    // The turn's explicit user, and a host's own session that names no scope ids.
+    expect([explicitTurnUserOf('42'), explicitTurnUserOf('anonymous_user'), explicitTurnUserOf(' '), explicitTurnUserOf(null)]).toEqual(['42', undefined, undefined, undefined]);
+    const hostOwn = { prepareTurn: async () => ({ systemPrompts: [], learner: 'none', mode: 'on' }) } as unknown as ILearnerSession;
+    expect(turnLearningBeforePreparation(hostOwn, { userId: '42', namespace: 'A', workflowSeat: false })).toBeUndefined();
+
+    // No recorder, and a facade that cannot read back, delete and restore a trace by id: nothing filed, and the upsert rejects.
+    const { recordSelfChange: _noRecorder, ...unrecordable } = update('- Canary NOPE-1: never filed');
+    await expect(sink.upsertRollingSummaryMemory(unrecordable)).rejects.toThrow(
+      "rolling-summary sink: the turn carries a learning layer's scope ids and no recorder, so nothing was filed.",
+    );
+    const bare = { remember: vi.fn(memory.remember.bind(memory)), forget: vi.fn(memory.forget.bind(memory)) };
+    await expect(createStandaloneMemoryRollingSummarySink(bare).upsertRollingSummaryMemory(update('- Canary NOPE-1: never filed'))).rejects.toThrow(
+      'rolling-summary sink: a learning layer records each upsert, and this memory cannot be read back, deleted and restored by trace id (brainId, readTrace, deleteTraces, restoreTrace), so nothing was filed.',
+    );
+    expect(bare.remember).not.toHaveBeenCalled();
+
+    // A freeze, the process switch and a run-time freeze alike: the upsert resolves, filing nothing and writing no row.
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    await sink.upsertRollingSummaryMemory(update('- Canary NOPE-1: frozen out'));
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '0');
+    await layer.freeze({ learner: LEARNER_A }, 'ops');
+    await sink.upsertRollingSummaryMemory(update('- Canary NOPE-1: frozen out'));
+    await layer.unfreeze({ learner: LEARNER_A });
+    expect(canaries('NOPE-1')).toEqual([]);
+
+    // A suspension of the agent: filed as the host configured it, with no row.
+    await layer.suspend({ agentKey: 'tutor' }, 'ops');
+    await sink.upsertRollingSummaryMemory(update('- Canary SUSP-2: filed while suspended'));
+    await layer.unsuspend({ agentKey: 'tutor' });
+    expect(canaries('SUSP-2').map((trace) => [trace.scope, trace.scopeId])).toEqual([['user', 'A/42']]);
+    expect(await sinkRows(store, chainKeyOf(LEARNER_A))).toEqual([]);
+
+    // A user forgotten before the upsert: it resolves, filing nothing.
+    const gone = await layer.forLearner({ ...LEARNER_A, userId: '43' }, productContext('s-43'));
+    await layer.forgetUser('43', { namespace: 'A' });
+    await sink.upsertRollingSummaryMemory(
+      updateOf(learningOf(gone, '43', 'A', 'c-43'), { userId: '43', organizationId: 'A', conversationId: 'c-43', summaryText: '- Canary GONE-3: never filed' }),
+    );
+    expect(canaries('GONE-3')).toEqual([]);
+
+    // A learning store that will not open: the upsert rejects naming store_unavailable, filing nothing.
+    const down = createLearningLayer({
+      openStore: async () => {
+        throw new Error('brain file locked');
+      },
+      memoryTools: memory,
+    });
+    const unopened = learningOf(await down.forLearner(LEARNER_A, productContext('s-down')), '42', 'A', 'c-down');
+    await expect(
+      sink.upsertRollingSummaryMemory(updateOf(unopened, { userId: '42', organizationId: 'A', conversationId: 'c-down', summaryText: '- Canary DOWN-4: never filed' })),
+    ).rejects.toThrow('rolling-summary sink: the upsert was not written (store_unavailable).');
+    expect(canaries('DOWN-4')).toEqual([]);
+
+    // The retriever reads a learner's summary for that learner, and not for the same id in tenant B.
+    const memberOf = async (namespace: string, userId: string, sessionId: string) =>
+      learningOf(await layer.forLearner({ namespace, agentKey: 'tutor', userId }, productContext(sessionId)), userId, namespace, `c-${sessionId}`);
+    const read = (learning: TurnLearningBeforePreparation, userId: string, organizationId: string, policy: ResolvedLongTermMemoryPolicy, queryText: string) =>
+      retriever.retrieveLongTermMemory({ mode: 'chat', personaId: 'tutor', memoryPolicy: policy, queryText, userId, organizationId, conversationId: 'c-read', turnScopes: learning.scopes });
+    expect((await read(await memberOf('A', '42', 's-a2'), '42', 'A', USER_ONLY, 'suspended'))?.contextText).toContain('SUSP-2');
+    expect(await read(await memberOf('B', '42', 's-b42'), '42', 'B', USER_ONLY, 'suspended')).toBeNull();
+
+    // An organization's shared summary, the organization named after the persona: under its own id, read on its turns alone.
+    const SHARED: ResolvedLongTermMemoryPolicy = {
+      ...DEFAULT_LONG_TERM_MEMORY_POLICY,
+      scopes: { conversation: false, user: false, persona: false, organization: true },
+      shareWithOrganization: true,
+    };
+    await sink.upsertRollingSummaryMemory(
+      updateOf(await memberOf('tutor', '42', 's-t42'), { userId: '42', organizationId: 'tutor', conversationId: 'c-s-t42', summaryText: '- Canary WREN-5: the team ships on Fridays.', policy: SHARED }),
+    );
+    expect(canaries('WREN-5').map((trace) => [trace.scope, trace.scopeId])).toEqual([['organization', 'tutor']]);
+    expect((await read(await memberOf('tutor', '7', 's-t7'), '7', 'tutor', SHARED, 'Fridays'))?.contextText).toContain('WREN-5');
+    expect(await read(await memberOf('B', '7', 's-b7'), '7', 'B', SHARED, 'Fridays')).toBeNull();
+
+    // A scope delete for one user takes the traces that name the user as their second user or among their contributors.
+    await memory.remember('Visitor note PEAR-6.', { scope: 'user', scopeId: 'A//s-1', metadata: { turnUserId: 'bo' } });
+    await memory.remember('Summary with bo PEAR-6.', { scope: 'user', scopeId: 'A//s-1', metadata: { contributorIds: ['42', 'bo'] } });
+    await memory.remember('Summary without bo PEAR-6.', { scope: 'user', scopeId: 'A//s-1', metadata: { contributorIds: ['42'] } });
+    expect(await memory.deleteScope('user', 'A//s-1', { turnUserId: 'bo' })).toEqual({ deleted: 2 });
+    expect(canaries('PEAR-6').map((trace) => trace.content)).toEqual(['Summary without bo PEAR-6.']);
+  });
+});
+
 describe("gmi(): memory.persistAccessState", () => {
   let keys = 0;
   const key = () => `k-qa-scopes-${++keys}`;
@@ -8827,5 +9481,18 @@ describe('the docs a host reads about it', () => {
     expect(doc('docs/memory/COGNITIVE_MEMORY.md')).toContain(
       "`Memory.forget()` and the memory tools' `memory_delete` and `memory_merge` delete each deleted trace's copy (`Memory.deleteGraphCopies`).",
     );
+  });
+
+  it('describe where the standalone retriever and the rolling-summary sink read and file with a learning layer, and what an upsert records', () => {
+    const gmiDoc = doc('docs/GMI.md');
+    expect(gmiDoc).toContain('the pipeline asks the GMI\'s learner session once, before the GMI prepares the turn (`turnLearningBeforePreparation(session, turn)`');
+    expect(gmiDoc).toContain('the sink files each compaction under them as one recorded memory write (actor `memory:rolling_summary`');
+    expect(gmiDoc).toContain('A failure before the forgets deletes what the upsert wrote, and its row is `rejected` (`write_failed`); a forget that fails is kept with what it did forget, and the target\'s next upsert forgets the trace.');
+    expect(gmiDoc).toContain('A summary or atomic document whose text did not change keeps its trace while that trace is live, and an upsert that changes nothing writes nothing and no row.');
+    expect(gmiDoc).toContain('Each trace it files names the compaction\'s contributors (`contributorIds`)');
+    expect(gmiDoc).toContain('A freeze stops the sink, and a forgotten user\'s upsert files nothing; mode `off` and a suspension file with no row.');
+    expect(gmiDoc).toContain('A GMI with no learner session, or with a session that names no scope ids, hands the retriever and the sink what it handed them before: they read and file under the plain ids.');
+    expect(gmiDoc).toContain("a conversation's own history (the full runtime's conversation store and a `gmi()` session's history keep its messages until the host deletes them, and a later compaction summarizes them again)");
+    expect(doc('docs/memory/RAG_MEMORY_CONFIGURATION.md')).toMatch(/back, deletes and restores a trace by id \(`brainId`, `readTrace`, `deleteTraces`,\s+`restoreTrace`\), as `Memory\.createSqlite\(\)` and `Memory\.createWithAdapter\(\)` give/);
   });
 });
