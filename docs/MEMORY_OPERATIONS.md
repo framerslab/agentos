@@ -295,6 +295,7 @@ Soft-delete a memory trace by ID.
 - Sets `deleted = 1` on the trace (soft-delete, not physical removal).
 - Soft-deleted traces are excluded from search results and retrieval.
 - The trace remains in the database for audit/provenance purposes.
+- Deletes the trace's knowledge-graph copy, the episodic record a memory manager on the same Brain writes of each trace it stores, when the tool was made by `Memory.createTools()`; `Memory.forget()` does the same.
 - Returns `{ "deleted": false }` if the trace was not found.
 
 **Example:**
@@ -331,10 +332,10 @@ Merge two or more memory traces into one surviving trace.
 
 **Behaviour:**
 - Fails when fewer than two of the IDs name active traces.
-- The trace with the highest retrieval count survives and takes the merged content; its embedding is cleared.
+- The trace with the highest retrieval count survives and takes the merged content; its embedding is cleared. On a tie the first of `traceIds` survives, and joined contents follow the order of `traceIds`.
 - Tags from all source traces are unioned onto the survivor.
 - Retrieval counts are summed, and the survivor keeps the latest access time and the highest decay stability among the sources.
-- The other traces are soft-deleted, and the brain's full-text index is rebuilt (on Postgres, the brain's own rows).
+- The other traces are soft-deleted, and the brain's full-text index is rebuilt (on Postgres, the brain's own rows). Their knowledge-graph copies go, as `memory_delete`'s do.
 
 **Example:**
 
@@ -462,6 +463,20 @@ If a consolidation cycle is already in progress (mutex), returns immediately wit
 ```
 
 
+### With a learning layer
+
+Where a learning layer runs ([GMI, Learning](./GMI.md#where-a-turns-memory-is-filed-and-read)), the GMI puts the turn's scope ids and the learner session's recorder on every tool call (`sessionData.learning`), and the memory tools file, read and write by them ([`scopeContext.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/tools/scopeContext.ts), [`learningWrite.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/tools/learningWrite.ts)):
+
+- **Filing.** `memory_add` files a `user` or `persona` trace under the turn's own scope id (the learner's, `<namespace>/<userId>` with a namespace, or the session's form on a turn with no learner) and a `thread` trace under the call's conversation, else its session, in the session's form (`<namespace>//<conversation>`, or `/<conversation>` with no namespace). It refuses an `organization` trace (`organization_scope`), and a `thread` trace on a call that names neither a conversation nor a session (`no_thread`). On a second user's turn with no learner each trace names that user (`turnUserId` in its metadata), so `forgetUser` for that user finds it.
+- **Recording.** Each write runs through the recorder: the freeze, the user's tombstone, a `pending` ledger row (`memory_write`, actor `tool:<name>`), the write, the tombstone again, the verdict. A kept write succeeds with `details: { status: 'kept', ledgerId }`; in mode `off` and under a suspension it succeeds with no row (`status: 'written'`). A write that is not kept changes nothing and fails with `details: { status: 'rejected', reason }`, the candidate's `ledgerId` beside it where one was written: `write_failed` (the error ends the message), `forgotten` (the user was forgotten; what the write made is deleted for good), `store_unavailable` (the learning store could not be read or the verdict written; the write is taken back) or `conflict`. A turn whose session gives scope ids and no recorder refuses every write (`no_recorder`). A write is taken back through the facade that made the tools, so the trace's memory-graph node, index entry and knowledge-graph copy go with its row.
+- **By id.** `memory_update`, `memory_delete` and `memory_merge` reach a live trace whose scope and scope id are one of the turn's own (`user`, `persona`, and the conversation's and the session's `thread`) and that the turn's own user filed. A trace outside those scopes reads as not found (`updated: false`, `deleted: false`, a merge's `Found only N`), so a call learns nothing about another scope; another user's trace inside them (a shared thread, a session two users spoke on) is refused (`other_user`), and a merge that names one is refused whole. A trace filed under no scope id and an `organization` trace are changed by no turn.
+- **Compare-and-set.** The three read each trace they change first and write only while it still holds the content and tags they read: a trace another writer changed in between fails the write (`conflict`, its row `rejected`) and nothing changes. A recall's access counts are left out of the comparison.
+- **Search.** `memory_search` reads the `scope_id` column: the turn's own scopes, its organization's id (the turn's `organizationId`; the user context's only when it is the namespace of the turn's scope ids, since the user context keeps an organization an earlier turn's override set) and the traces filed under no scope id (an ingested document's). A `scope` filter narrows that to the scope's own ids and its traces filed under no scope id. A learner's trace is found by the learner's later sessions, never by a user of the same id in another namespace or by a session with no learner.
+- **Freeze.** Only a freeze stops a write: `AGENTOS_LEARNING_FREEZE=1`, a turn in mode `frozen`, or a run-time freeze of the turn's scope, read at the call (`frozen`). Mode `off`, a suspension and a turn with no learner write.
+- **`memory_reflect`** refuses every call that carries `sessionData.learning` (`withdrawn`), after the freeze: consolidation merges and derives across every scope of the brain. A host that registers the tools itself where a layer runs leaves it out (`createTools({ includeReflect: false })`).
+
+With no `sessionData.learning`, each tool files, reads and reaches by id as the sections above say, and only `AGENTOS_LEARNING_FREEZE=1` stops a write. A learner session that gives no scope ids (a host's own, written against an earlier release) leaves the tools filing, reading and reaching by id the same way; its freeze still stops a write, and `memory_reflect` still refuses.
+
 ### When Agents Should Use Each Tool
 
 | Situation | Recommended Tool |
@@ -501,7 +516,8 @@ All under [`src/cognition/memory/io/tools/`](https://github.com/framerslab/agent
 | `MemoryReflectTool.ts` | `memory_reflect` implementation |
 | `RehydrateMemoryTool.ts` | `rehydrate_memory` implementation (opt-in) |
 | `index.ts` | Barrel exports for all tools |
-| `scopeContext.ts` | Scope ID resolution from execution context |
+| `scopeContext.ts` | Scope ID resolution from execution context, and the turn's own scopes where a learning layer put them on the call |
+| `learningWrite.ts` | The four writers' path through a learner session's recorder: the by-id reach, the compare-and-set, the take-back |
 
 ---
 
