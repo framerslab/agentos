@@ -37,9 +37,10 @@ test('package exports only point at shipped files', () => {
 });
 
 test('the built declarations resolve their own relative imports under NodeNext', () => {
-  // A relative import without its file's extension does not resolve under NodeNext: a consumer that checks libraries
-  // fails on it, and one that skips them reads every type behind it as any. The consumer sits inside the repository, so
-  // @framers/agentos resolves to this checkout's build through its exports, as an installed copy does.
+  // A relative import without its file's extension does not resolve under NodeNext: a consumer that checks the
+  // declarations it reads (no skipLibCheck) gets TS2834 or TS2835 for each one. The consumer sits inside the repository,
+  // so @framers/agentos resolves to this checkout's build through its exports, as an installed copy does. Other
+  // diagnostics in the declarations are not this check's.
   const work = mkdtempSync(resolve(pkgRoot, '.declarations-consumer-'));
   try {
     writeFileSync(resolve(work, 'package.json'), JSON.stringify({ name: 'declarations-consumer', private: true, type: 'module' }));
@@ -47,24 +48,27 @@ test('the built declarations resolve their own relative imports under NodeNext',
       resolve(work, 'consumer.ts'),
       [
         "import type { ToolExecutionContext } from '@framers/agentos';",
+        "import type { EmergentConfig } from '@framers/agentos/cognition/emergent';",
         'type IsAny<T> = 0 extends 1 & T ? true : false;',
-        // ToolExecutionContext comes through the root's re-export of core/tools/ITool, and its user context through
-        // ITool's import of cognition/substrate/IGMI.
-        "export const toolContextIsTyped: IsAny<ToolExecutionContext> = false;",
         "export const userContextIsTyped: IsAny<ToolExecutionContext['userContext']> = false;",
+        'export type Config = EmergentConfig;',
         '',
       ].join('\n'),
     );
+    let output = '';
     try {
-      execFileSync(
+      output = execFileSync(
         process.execPath,
         [require.resolve('typescript/bin/tsc'), '--module', 'NodeNext', '--moduleResolution', 'NodeNext', '--strict',
-          '--skipLibCheck', '--noEmit', '--types', 'node', 'consumer.ts'],
-        { cwd: work, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+          '--noEmit', '--types', 'node', 'consumer.ts'],
+        { cwd: work, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
       );
     } catch (error) {
-      assert.fail(`the consumer does not compile against the built declarations:\n${error.stdout ?? ''}${error.stderr ?? ''}`);
+      output = `${error.stdout ?? ''}${error.stderr ?? ''}`;
     }
+    const extensionless = output.split('\n').filter((line) => /error TS283[45]:/.test(line));
+    assert.deepEqual(extensionless.slice(0, 20), [], `${extensionless.length} relative imports in the built declarations name no file`);
+    assert.doesNotMatch(output, /consumer\.ts\(/, 'the consumer itself compiles');
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
