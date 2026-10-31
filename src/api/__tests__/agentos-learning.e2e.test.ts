@@ -33,8 +33,10 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
 });
 
 import { AgentOS } from '../AgentOS';
+import type { IAgentOS } from '../interfaces/IAgentOS';
 import { createAgentOSConfig } from '../../core/config/AgentOSConfig';
 import { createLearningLayer } from '../../cognition/learning/LearningLayer';
+import { GMIManager } from '../../cognition/substrate/GMIManager';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { renderPersonalitySection } from '../../cognition/substrate/personas/personalityPrompt';
 
@@ -77,7 +79,7 @@ afterEach(async () => {
 });
 
 describe('the full runtime with the learning flag off', () => {
-  it('sends no personality section, as before, and has no learning layer', async () => {
+  it('sends no personality section with learning unset, the same system text with learning false, and has no learning layer', async () => {
     booted = await boot();
     const unset = await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' });
     expect(unset).toContain('You teach networking.');
@@ -144,6 +146,9 @@ describe('the full runtime with the learning flag on', () => {
     const base = await createAgentOSConfig();
     booted = await boot({ gmiManagerConfig: { ...base.gmiManagerConfig, learningLayer: passed } });
     expect(booted.getLearningLayer()).toBe(passed);
+    // A host that holds the runtime by its interface reaches the layer too.
+    const host: IAgentOS = booted;
+    expect(host.getLearningLayer?.()).toBe(passed);
     expect(await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' })).toContain(HEADING);
     await booted.shutdown();
     booted = undefined;
@@ -151,9 +156,12 @@ describe('the full runtime with the learning flag on', () => {
   });
 
   it('refuses learning.namespace, learning beside a passed layer, and an unknown mode, before any service starts', async () => {
+    const initialize = vi.spyOn(GMIManager.prototype, 'initialize');
     await expect(boot({ learning: { namespace: 'acme' } })).rejects.toThrow(/learning\.namespace/);
     await expect(boot({ learning: true, gmiManagerConfig: { personaLoaderConfig: {}, learningLayer: createLearningLayer() } })).rejects.toThrow(/gmiManagerConfig\.learningLayer/);
     await expect(boot({ learning: { mode: 'sideways' } })).rejects.toThrow(/learning\.mode: unknown mode 'sideways'/);
+    // No GMI manager was started, nor anything the runtime starts before it.
+    expect(initialize).not.toHaveBeenCalled();
   });
 
   it('reads a null field of learning as unset: a null namespace is not refused, and a null mode is on', async () => {
@@ -173,5 +181,39 @@ describe('the full runtime with the learning flag on', () => {
     await send(booted, { userId: '42', organizationId: 'A', sessionId: 'shared', selectedPersonaId: 'tutor' });
     const manifest = await booted.getLearningLayer()!.manifest();
     expect(manifest.turns).toEqual({ prepared: 3, bound: 1, none: { other_namespace: 2 } });
+  });
+
+  it('reports the approval gate and the tool-policy switch off where the configuration leaves them nothing to do', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const base = await createAgentOSConfig();
+    const loopsOf = async (extra: Record<string, unknown>) => {
+      booted = await boot({ learning: true, ...extra });
+      const { loops } = await booted.getLearningLayer()!.manifest();
+      await booted.shutdown();
+      booted = undefined;
+      return loops;
+    };
+    // This file's boot plans no turn, so the switch has no turn plan to change.
+    expect((await loopsOf({})).tool_policy).toEqual({ live: false, detail: 'no turn planner: the switch has no turn plan to change' });
+    const planned = { turnPlanning: { enabled: true, discovery: { enabled: false } } };
+    expect((await loopsOf(planned)).tool_policy).toEqual({ live: true });
+    const noTelemetry = { ...planned, orchestratorConfig: { ...base.orchestratorConfig, taskOutcomeTelemetry: { enabled: false } } };
+    expect((await loopsOf(noTelemetry)).tool_policy).toEqual({
+      live: false,
+      detail: 'orchestratorConfig.taskOutcomeTelemetry is off: the switch reads no success rate',
+    });
+
+    const hitl = (settings: Record<string, unknown>) => ({
+      toolOrchestratorConfig: { ...base.toolOrchestratorConfig, hitl: { ...base.toolOrchestratorConfig?.hitl, enabled: true, ...settings } },
+    });
+    expect((await loopsOf(hitl({ requireApprovalForSideEffects: false }))).hitl).toEqual({
+      live: false,
+      detail: 'toolOrchestratorConfig.hitl.requireApprovalForSideEffects is off: the gate asks for no tool',
+    });
+    expect((await loopsOf(hitl({ autoApproveWhenNoManager: true }))).hitl).toEqual({
+      live: false,
+      detail: 'no hitlManager, and hitl.autoApproveWhenNoManager approves every call',
+    });
+    expect((await loopsOf(hitl({}))).hitl).toEqual({ live: true, detail: 'no hitlManager: side-effect tools are refused' });
   });
 });
