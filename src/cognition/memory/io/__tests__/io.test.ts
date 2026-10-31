@@ -958,6 +958,52 @@ describe('ChatGptImporter', () => {
     expect(second.skipped).toBeGreaterThan(0);
   });
 
+  it('a later import of one conversation adds no conversations row, and files the pairs it adds under the row', async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    fs.writeFileSync(jsonPath, JSON.stringify(buildMockConversations()), 'utf8');
+
+    const brain = await openBrain();
+    const importer = new ChatGptImporter(brain);
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+
+    // A later export of the same conversation: a question asked since, and a later update time.
+    const later = buildMockConversations() as Array<{
+      update_time: number;
+      mapping: Record<string, { children?: string[] } & Record<string, unknown>>;
+    }>;
+    later[0]!.update_time = 1711240000;
+    later[0]!.mapping['assistant-msg-1']!.children = ['user-msg-2'];
+    later[0]!.mapping['user-msg-2'] = {
+      id: 'user-msg-2',
+      message: {
+        author: { role: 'user' },
+        content: { parts: ['And generic constraints?'] },
+        create_time: 1711239000,
+      },
+      parent: 'assistant-msg-1',
+      children: [],
+    };
+    fs.writeFileSync(jsonPath, JSON.stringify(later), 'utf8');
+    expect(await importer.import(jsonPath)).toMatchObject({ imported: 1, skipped: 1, errors: [] });
+
+    const rows = await brain.all<{ id: string; title: string; updated_at: number }>(
+      'SELECT id, title, updated_at FROM conversations WHERE brain_id = ?',
+      [brain.brainId],
+    );
+    expect(rows.map((row) => row.title)).toEqual(['Discussion about TypeScript generics']);
+    expect(Number(rows[0]!.updated_at)).toBe(1711240000000);
+    const traces = await brain.all<{ metadata: string }>(
+      'SELECT metadata FROM memory_traces WHERE brain_id = ? ORDER BY created_at',
+      [brain.brainId],
+    );
+    expect(traces.map((trace) => (JSON.parse(trace.metadata) as { conversation_id: string }).conversation_id)).toEqual([
+      rows[0]!.id,
+      rows[0]!.id,
+    ]);
+  });
+
   it('handles empty conversations.json gracefully', async () => {
     const dir = tempDir();
     const jsonPath = path.join(dir, 'conversations.json');
