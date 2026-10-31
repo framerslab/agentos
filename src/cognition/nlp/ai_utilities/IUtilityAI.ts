@@ -222,7 +222,9 @@ export interface IUtilityAI {
 
   // JSON Processing
   /**
-   * Safely parses a string that is expected to be JSON, potentially using an LLM to fix common issues.
+   * Parses a string that is expected to be JSON: as it is, else from inside the Markdown code fence it is or holds,
+   * which a model asked for JSON alone often answers in. An LLM-backed class sends a text that still does not parse
+   * for repair when `attemptFixWithLLM` is set.
    * @template T - The expected type of the parsed JSON object.
    * @param {string} jsonString - The string to parse.
    * @param {ParseJsonOptions<T>} [options] - Options for parsing and fixing.

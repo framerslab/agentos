@@ -37,6 +37,7 @@ import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 import { uuidv4 } from '../../../core/utils/uuid';
 import { checkValue, type SchemaCheck } from '../../../core/utils/schemaChecks';
 import { targetSchemaChecks } from './targetSchemaChecks';
+import { parseReplyJson } from './replyJson';
 
 /**
  * A number in a reply: a number, or a string that holds one (`"0.8"`); `NaN` for anything else, `null`, a boolean,
@@ -160,8 +161,9 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
   }
 
   /**
-   * Makes a task call that answers JSON and parses the reply. A reply that does not parse is sent back once for repair
-   * to the model and provider the call ran on, so the repair never lands on a provider that does not serve the model.
+   * Makes a task call that answers JSON and parses the reply as {@link parseJsonSafe} reads it, inside a Markdown code
+   * fence too. A reply that does not parse is sent back once for repair to the model and provider the call ran on, so
+   * the repair never lands on a provider that does not serve the model.
    */
   private async callForJson<T>(
     prompt: string,
@@ -302,12 +304,15 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
   }
 
   /**
-   * `JSON.parse`, then a check against `targetSchema` with Ajv when given, as StatisticalUtilityAI checks it: the
-   * standard formats checked, a keyword or a format Ajv does not know passed over, and a value coerced to the type its
-   * schema names where it can (`targetSchemaChecks`). With `attemptFixWithLLM`, a text that fails either is sent for
-   * repair, up to `maxRepairAttempts` times (1 unless it is a whole number of 1 or more), each repair on the text the
-   * last one answered, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`) and
-   * `llmProviderIdForFix` (else `defaultProviderId`). A repair request names `targetSchema` when given, and the
+   * The JSON the text holds, read as StatisticalUtilityAI reads it (`parseReplyJson`: the text as it is, else inside
+   * the first Markdown code fence it holds, backticks inside a sentence opening none, with a language tag or none and
+   * with words before or after it, up to the first later line that starts with as many backticks as opened the fence or
+   * more), then a check against `targetSchema` with Ajv when given, as StatisticalUtilityAI checks it: the standard
+   * formats checked, a keyword or a format Ajv does not know passed over, and a value coerced to the type its schema
+   * names where it can (`targetSchemaChecks`). With `attemptFixWithLLM`, a text that fails either is sent for repair,
+   * up to `maxRepairAttempts` times (1 unless it is a whole number of 1 or more), each repair on the text the last one
+   * answered, whose answer is read the same way, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`)
+   * and `llmProviderIdForFix` (else `defaultProviderId`). A repair request names `targetSchema` when given, and the
    * schema's errors when the text parsed and failed it. Answers `null` when no repair parses and passes the schema, or
    * a repair call fails. No text can pass a `targetSchema` that Ajv cannot compile, that takes the draft-07
    * meta-schema's `$id` or that is marked `$async`: the call answers `null` at once, with a warning, and asks for no
@@ -325,7 +330,7 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
       }
     }
     try {
-      const parsed = JSON.parse(jsonString);
+      const parsed = parseReplyJson(jsonString);
       if (!validate) return parsed as T;
       const checked = checkValue(validate, parsed);
       if (!checked.valid) {
@@ -365,7 +370,7 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
           }
           let reparsed: unknown;
           try {
-            reparsed = JSON.parse(fixedJsonString);
+            reparsed = parseReplyJson(fixedJsonString);
           } catch {
             console.error(`LLMUtilityAI (${this.utilityId}): Failed to parse LLM-fixed JSON string.`, { textLength: fixedJsonString.length });
             textToFix = fixedJsonString;
