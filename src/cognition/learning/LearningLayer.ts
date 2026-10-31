@@ -29,6 +29,7 @@ import {
   freezeRowOf,
   freezeScopeKey,
   invertOperatorSet,
+  leftByCrash,
   memoryWriteHolds,
   operatorOf,
   parseMemoryBefore,
@@ -666,8 +667,10 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
 
   /**
    * In the brain the row names, through that brain's facade: a pending row, the undo (the written traces deleted,
-   * the before-state restored), then `kept`, then the original's `reverted` verdict. A user forgotten while it ran gets
-   * nothing back.
+   * the before-state restored), then `kept`, then the original's `reverted` verdict. The revert's row records every
+   * trace it touches as it stands before the undo, so a revert of the revert, or a crash's recovery of it, puts each
+   * back. A user forgotten while it ran, in this process or another, gets nothing back, and a verdict that does not land
+   * fails the call.
    */
   private async revertMemoryWrite(ready: { store: LearningStore; ledger: Ledger }, original: LedgerEntry, by: string): Promise<LedgerEntry> {
     const call = 'revert';
@@ -682,24 +685,35 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     return this.chains.run(chainKey, async () => {
       if (owner) await this.refuseForgotten(ready.store, { namespace, userId: owner }, call);
       await this.refuseUnlessKept(ready.ledger, original.id, call);
+      // What the revert's own row records, so a revert of it, or a crash's recovery of it, puts each trace back: every
+      // trace it touches by its snapshot now (a deleted one is deleted again); a trace it restores as changed, and as
+      // created where it is gone; and a trace it deletes, a created one of the original's or one the original found
+      // deleted, as deleted.
       const snapshots: TraceSnapshot[] = [];
       for (const id of change.created) {
         const snapshot = await facade.readTrace?.(id);
-        if (snapshot) snapshots.push(snapshot);
+        if (snapshot && !snapshot.deleted) snapshots.push(snapshot);
       }
+      const created: string[] = [];
+      const changed: Array<{ id: string; content: string }> = [];
+      const deleted = [...change.created];
+      for (const trace of before?.traces ?? []) {
+        const snapshot = await facade.readTrace?.(trace.id);
+        if (snapshot) snapshots.push(snapshot);
+        if (trace.deleted) deleted.push(trace.id);
+        else if (snapshot) changed.push({ id: trace.id, content: trace.content });
+        else created.push(trace.id);
+      }
+      const own: MemoryWriteChange = { brainId: change.brainId, created, changed, deleted };
+      const ownBefore = { traces: snapshots };
       const proposed = await ready.ledger.propose(
         {
           learner: original.learner,
           kind: 'memory_write',
           actor: `operator:${by}`,
           subject: original.subject,
-          before: { traces: snapshots },
-          after: {
-            brainId: change.brainId,
-            created: [],
-            changed: (before?.traces ?? []).map((trace) => ({ id: trace.id, content: trace.content })),
-            deleted: [...change.created],
-          },
+          before: ownBefore,
+          after: own,
           evidence: { note: `revert of ${original.id}` },
           ...(original.sessionId !== undefined ? { sessionId: original.sessionId } : {}),
           ...(original.turnUserId ? { turnUserId: original.turnUserId } : {}),
@@ -708,6 +722,15 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       );
       if (!('candidate' in proposed)) throw new Error(`${call}: the revert's row was not written (${proposed.status}).`);
       const id = proposed.candidate.id;
+      const restored = (before?.traces ?? []).filter((trace) => !trace.deleted).map((trace) => trace.id);
+      const forgottenNow = async (): Promise<boolean> =>
+        owner !== null && (await ready.store.isForgotten(await tombstoneHash(namespace, owner)));
+      // The user was forgotten while the revert ran: what it restored is deleted again, with the user's rows.
+      const takeBackForgotten = async (): Promise<never> => {
+        await facade.deleteTraces?.(restored);
+        if (owner) await this.purgeUserRows(namespace, owner);
+        throw new Error(`${call}: the user was forgotten while the revert ran; what it restored is deleted again.`);
+      };
       this.inFlight.add(id);
       try {
         try {
@@ -716,13 +739,20 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
           await ready.ledger.decide(id, 'rejected', 'write_failed').catch(() => undefined);
           throw error;
         }
-        if (owner && (await ready.store.isForgotten(await tombstoneHash(namespace, owner)))) {
-          await facade.deleteTraces?.((before?.traces ?? []).map((trace) => trace.id));
-          await this.purgeUserRows(namespace, owner);
-          throw new Error(`${call}: the user was forgotten while the revert ran; what it restored is deleted again.`);
+        if (await forgottenNow()) return await takeBackForgotten();
+        // A verdict is refused on a chain another process's forgetUser marked or deleted meanwhile.
+        const kept = await ready.ledger.decide(id, 'kept', 'reverted');
+        if (kept.status !== 'kept') {
+          if (kept.status === 'forgotten' || (await forgottenNow())) return await takeBackForgotten();
+          await undoMemoryWrite(facade, own, ownBefore);
+          await ready.ledger.decide(id, 'rejected', 'write_failed').catch(() => undefined);
+          throw new Error(`${call}: the revert's verdict was not written (${kept.status}); what it changed is put back; call again.`);
         }
-        await ready.ledger.decide(id, 'kept', 'reverted');
-        await ready.ledger.decide(original.id, 'reverted', `reverted by ${id}`);
+        const reverted = await ready.ledger.decide(original.id, 'reverted', `reverted by ${id}`);
+        if (reverted.status !== 'reverted') {
+          if (reverted.status === 'forgotten' || (await forgottenNow())) return await takeBackForgotten();
+          throw new Error(`${call}: candidate ${original.id} did not take its reverted verdict (${reverted.status}); the revert ${id} is kept.`);
+        }
         return proposed.candidate;
       } finally {
         this.inFlight.delete(id);
@@ -734,6 +764,12 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     const call = 'exportLearnedState';
     const learner = this.learnerOf(key, call);
     const ready = await this.requireStorage(call);
+    const exportedAt = new Date(this.clock()).toISOString();
+    // A forgotten user's document is empty: the rows a forgetUser keeps while a store it must reach fails are kept for
+    // its second call, never handed out.
+    if (await ready.store.isForgotten(await tombstoneHash(learner.namespace, learner.userId))) {
+      return { version: 1, learner, personaId: null, traitState: null, lessons: [], skills: [], ledger: [], outcomes: [], exportedAt };
+    }
     const read = await ready.store.transaction(async (tx) => ({
       row: await tx.traitRow(learner.namespace, learner.agentKey, learner.userId),
       ledger: await tx.learnerLedgerRows(learner.namespace, learner.agentKey, learner.userId),
@@ -752,7 +788,7 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       skills: read.skills.map(bodyOf),
       ledger: read.ledger.map((row) => ({ ...(JSON.parse(row.body) as LedgerEntry), hash: row.hash })),
       outcomes: read.outcomes.map(bodyOf),
-      exportedAt: new Date(this.clock()).toISOString(),
+      exportedAt,
     };
   }
 
@@ -812,7 +848,10 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
    * user's chain heads forgotten; then deletes, one transaction per store: the user's traces in every memory manager
    * still alive and every facade the layer holds (a second user's traces on another user's session by `turnUserId`,
    * and the traces its ledger rows name), the brains its session rows name that neither holds, through the host's
-   * storage adapter, and last every learning-store row of the user. Names every store it did not reach.
+   * storage adapter, and last every learning-store row of the user. Names every store it did not reach. While a store it
+   * must reach fails, the user's learning-store rows stay: they are the index of what the call deletes (the user's
+   * sessions, their forms and threads, the traces a second user's rows name), and a second call reads them to delete
+   * what the first could not.
    */
   async forgetUser(userId: string, options: { namespace?: string } = {}): Promise<ForgetReport> {
     const call = 'forgetUser';
@@ -833,6 +872,9 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     const targets = forgetTargets(namespace, userId, rows);
     const stores: ForgetReport['stores'] = [];
     const reached = new Set<string>();
+    /** The brains whose delete failed here; a failure in a store with no brain id is `failedElsewhere`. */
+    const failed = new Set<string>();
+    let failedElsewhere = false;
 
     for (const manager of this.liveManagers()) {
       const brain = brainOfManager(manager);
@@ -856,6 +898,8 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
         if (brain) reached.add(brain.brainId);
       } catch (error) {
         stores.push({ store: name, reached: false, reason: messageOf(error) });
+        if (brain) failed.add(brain.brainId);
+        else failedElsewhere = true;
       }
     }
 
@@ -874,15 +918,32 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
         if (brainId) reached.add(brainId);
       } catch (error) {
         stores.push({ store: name, reached: false, reason: messageOf(error) });
+        const brainId = facadeBrainId(facade);
+        if (brainId) failed.add(brainId);
+        else failedElsewhere = true;
       }
     }
 
-    for (const brainId of new Set([...rows.flatMap((row) => row.brainIds), ...named.keys()])) {
-      if (!reached.has(brainId)) stores.push(await this.forgetOnAdapter(brainId, targets, named.get(brainId)));
+    const failedHere = new Set(failed);
+    for (const brainId of new Set([...rows.flatMap((row) => row.brainIds), ...named.keys(), ...failedHere])) {
+      if (reached.has(brainId)) continue;
+      const { entry, failed: adapterFailed } = await this.forgetOnAdapter(brainId, targets, named.get(brainId));
+      if (entry.reached) reached.add(brainId);
+      if (adapterFailed) failed.add(brainId);
+      // A brain whose manager or facade failed above is named once, by that failure, unless the adapter reached it.
+      if (entry.reached || adapterFailed || !failedHere.has(brainId)) stores.push(entry);
     }
 
-    // The learning store last: its session rows were the index of everything above.
-    stores.push({ store: 'learning store', reached: true, deleted: await store.deleteUserRows(namespace, userId) });
+    // The learning store last: its rows are the index of everything above, so they stay while a store above failed.
+    if (failedElsewhere || [...failed].some((brainId) => !reached.has(brainId))) {
+      stores.push({
+        store: 'learning store',
+        reached: false,
+        reason: "the user's rows are the index of the stores above that failed, so they stay until a call reaches each of them: call forgetUser again",
+      });
+    } else {
+      stores.push({ store: 'learning store', reached: true, deleted: await store.deleteUserRows(namespace, userId) });
+    }
     for (const { store: unreached, reason } of this.unreachedStores()) stores.push({ store: unreached, reached: false, reason });
 
     let plainFormLeft = 0;
@@ -925,12 +986,18 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
   }
 
   /**
-   * Deletes in a brain no live manager or facade holds, through a facade over the host's storage adapter when the
+   * Deletes in a brain no live manager or facade reached, through a facade over the host's storage adapter when the
    * adapter holds that brain's traces. The facade is never closed: closing its Brain would close the host's adapter.
+   *
+   * @returns The brain's report entry, and whether the delete failed there (a second call tries it again).
    */
-  private async forgetOnAdapter(brainId: string, targets: readonly ForgetTarget[], ids: Set<string> | undefined): Promise<ForgetReport['stores'][number]> {
+  private async forgetOnAdapter(
+    brainId: string,
+    targets: readonly ForgetTarget[],
+    ids: Set<string> | undefined,
+  ): Promise<{ entry: ForgetReport['stores'][number]; failed: boolean }> {
     const adapter = this.host.storageAdapter;
-    const unreached = (reason: string) => ({ store: `brain ${brainId}`, reached: false as const, reason });
+    const unreached = (reason: string, failed = false) => ({ entry: { store: `brain ${brainId}`, reached: false as const, reason }, failed });
     if (!adapter) return unreached('no memory manager or facade of it is alive here, and the layer has no storage adapter to open it on');
     try {
       const held = await adapter.get<{ id: string }>('SELECT id FROM memory_traces WHERE brain_id = ? LIMIT 1', [brainId]);
@@ -942,9 +1009,9 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
         deleted += (await facade.deleteScope(target.scope, target.scopeId, target.turnUserId ? { turnUserId: target.turnUserId } : {})).deleted;
       }
       if (ids?.size) deleted += (await facade.deleteTraces([...ids])).deleted;
-      return { store: `brain ${brainId} on the host's storage adapter`, reached: true, deleted };
+      return { entry: { store: `brain ${brainId} on the host's storage adapter`, reached: true, deleted }, failed: false };
     } catch (error) {
-      return unreached(messageOf(error));
+      return unreached(messageOf(error), true);
     }
   }
 
@@ -978,11 +1045,13 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
   /**
    * Decides a crash's pending memory writes: a row older than 15 minutes on the layer's clock that no write of this
    * process holds is `kept` where its traces hold the change, and otherwise `rejected` (`write_failed`) and taken
-   * back; a row whose brain the layer holds no facade of stays pending. The learner's own chain is decided before the
-   * open goes on. The agent's chains with no learner in that namespace (its own, which holds every recorded write with
-   * no user, and each second user's) grow with the agent's anonymous sessions and its visitors, so their pending rows
-   * are read alone and decided off the open's path, at most once per 15 minutes per agent and namespace: an open's cost
-   * stays bounded by its learner's own history. Never throws.
+   * back as far as the write itself left its traces (`leftByCrash`: a trace a later write of its chain names, or one
+   * the write did not leave, stays); a row whose brain the layer holds no facade of stays pending. The learner's own
+   * chain is decided before the open goes on. The agent's chains with no learner in that namespace (its own, which
+   * holds every recorded write with no user, and each second user's) grow with the agent's anonymous sessions and its
+   * visitors, so their pending rows are read alone and decided off the open's path, at most once per 15 minutes per
+   * agent and namespace: an open's cost stays bounded by its learner's own history, but for a row whose traces do not
+   * hold it, whose chain is read once more for the later writes that name its traces. Never throws.
    */
   async recoverPending(key: LearnerKey): Promise<void> {
     const ready = await this.storage();
@@ -1052,12 +1121,29 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     const decided = await ledger.decide(entry.id, 'rejected', 'write_failed');
     if (decided.status !== 'rejected') return;
     try {
-      await undoMemoryWrite(facade, change, parseMemoryBefore(entry.before));
+      // Only what the write itself left is taken back: a change made after the crash stays.
+      const named = await this.namedLater(ledger, entry, change.brainId);
+      const left = await leftByCrash(change, parseMemoryBefore(entry.before), (id) => facade.readTrace!(id), named);
+      await undoMemoryWrite(facade, left.change, left.before);
     } catch (error) {
       console.warn(
         `[agentos] learning: a crash's pending memory write is rejected, and what it wrote in brain ${change.brainId} was not taken back (${messageOf(error)}).`,
       );
     }
+  }
+
+  /** The traces of one brain that the memory writes after `entry` on its chain name, but for a write rejected since. */
+  private async namedLater(ledger: Ledger, entry: LedgerEntry, brainId: string): Promise<Set<string>> {
+    const rows = await ledger.entries(chainKeyOf(entry.learner, entry.turnUserId ?? null));
+    const rejected = new Set(rows.filter((row) => row.rowType === 'verdict' && row.verdict === 'rejected').map((row) => row.candidateId));
+    const named = new Set<string>();
+    for (const row of rows) {
+      if (row.rowType !== 'candidate' || row.kind !== 'memory_write' || row.seq <= entry.seq || rejected.has(row.id)) continue;
+      const later = parseMemoryWrite(row.after);
+      if (!later || later.brainId !== brainId) continue;
+      for (const id of [...later.created, ...later.changed.map((c) => c.id), ...later.deleted]) named.add(id);
+    }
+    return named;
   }
 }
 
