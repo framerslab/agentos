@@ -24,6 +24,25 @@ export const LEARNING_OFF_ENV = 'AGENTOS_LEARNING_OFF';
 /** The user ids that never name a learner, whatever a host adds to them. */
 export const DEFAULT_ANONYMOUS_USER_IDS: readonly string[] = ['', 'anonymous_user', 'anonymous', 'system', 'guest'];
 
+/** What a ledger row records a change to. */
+export type LearningKind =
+  | 'trait'
+  | 'lesson'
+  | 'skill'
+  | 'workflow'
+  | 'tool_policy'
+  | 'setting'
+  | 'skill_toggle'
+  | 'session_tool'
+  | 'session_workflow'
+  | 'memory_write'
+  | 'memory_rewrite'
+  | 'reflection_supersede'
+  | 'operator_set';
+
+/** A candidate's state: its latest verdict row decides it. */
+export type LedgerVerdict = 'pending' | 'kept' | 'reverted' | 'rejected';
+
 /** One agent with one user, in one namespace: what learned state belongs to. */
 export interface LearnerKey {
   /** The organization the user belongs to; `''` when the host has none. */
