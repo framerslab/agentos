@@ -39,28 +39,31 @@ wired outside `agency()`.
 
 Agency is the multi-brain primitive. Each roster member is an `agent()`: a
 system prompt with its instructions and HEXACO traits, its tools and its hooks.
-A member whose config sets `runtime: 'gmi'`, or a pre-built
-`agent({ runtime: 'gmi' })`, is served by [GMIs](/architecture/gmi). The
-strategies call a member's `generate()` or `stream()`, and on the GMI path each
-call runs on a GMI built for it, on the `'light'` profile: a persona, a PAD mood
-and a reasoning trace, with no history and no cognitive memory, whatever the
-member's `cognition` and `memory` options say. In an agency whose
-`hitl.approvals.beforeTool` is set, a GMI member's tool calls wait for the
-approval handler as other members' calls do. The agency layer adds three things
-on top of those members.
+A member whose config sets `runtime: 'gmi'` (or sets no `runtime` in an agency
+that does), or a pre-built `agent({ runtime: 'gmi' })`, is served by
+[GMIs](/architecture/gmi). The strategies call a member's `generate()` or
+`stream()`, and on the GMI path each call runs on a GMI built for it, on the
+`'light'` profile: a persona, a PAD mood and a reasoning trace, with no history
+and no cognitive memory, whatever the member's `cognition` and `memory` options
+say. A member seated with `sessionSeat()` runs as itself instead, on its own
+profile, through one session of its own for the run ([GMI Seats](#gmi-seats)).
+In an agency whose `hitl.approvals.beforeTool` is set, a GMI member's tool calls
+wait for the approval handler as other members' calls do. The agency layer adds
+three things on top of those members.
 
 **1. Orchestration strategy declares how outputs flow between brains.**
 Sequential chains them, parallel fans them out and synthesises, debate has them
 argue and refine, hierarchical lets a coordinator dispatch, graph DAG declares
-explicit dependencies. The strategy is the data-flow shape. Picking the
-strategy picks how brain-to-brain context propagates; the work itself happens
-inside each brain.
+explicit dependencies, and panel has each member answer on its own model for a
+chair to synthesise. The strategy is the data-flow shape. Picking the strategy
+picks how brain-to-brain context propagates; the work itself happens inside
+each brain.
 
 **2. The strategy connects the agents.** It decides the order and what each
-agent receives: the previous output (sequential), the same prompt (parallel),
-every prior argument (debate), the manager's delegations (hierarchical) or its
-predecessors' outputs (graph); the hierarchical strategy can add specialists at
-run time through [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts).
+agent receives: the previous output (sequential), the same prompt (parallel
+and panel), every prior argument (debate), the manager's delegations
+(hierarchical) or its predecessors' outputs (graph); the hierarchical strategy
+can add specialists at run time through [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts).
 `agency()` builds no shared memory store and runs no retrieval of its own: the
 `memory` and `rag` options are accepted and deferred on this path (see the
 capability contract), and
@@ -82,7 +85,7 @@ retrieval and memory through its own config, and no surface acts on
 graph TB
     Input["Input"]
     subgraph Agency["Agency · coordination shell · HITL approvals · controls · structured output"]
-        Strategy["Orchestration strategy<br/>sequential · parallel · debate<br/>review-loop · hierarchical · graph"]
+        Strategy["Orchestration strategy<br/>sequential · parallel · debate<br/>review-loop · hierarchical · graph · panel"]
         subgraph Members["Agents (lightweight agent() members)"]
             direction LR
             A["Agent A<br/>instructions · personality<br/>tools · own session"]
@@ -162,8 +165,9 @@ own orchestrator and reach into agentos for the lower-level primitives
 16. [Observability and Callbacks](#observability-and-callbacks)
 17. [Structured Output with Zod](#structured-output-with-zod)
 18. [Nested Agencies](#nested-agencies)
-19. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
-20. [Full-Featured Example](#full-featured-example)
+19. [GMI Seats](#gmi-seats)
+20. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
+21. [Full-Featured Example](#full-featured-example)
 
 ---
 
@@ -1458,6 +1462,62 @@ outer totals; its `agentCalls` are not flattened, so it appears as one record
 whose `output` is its final text. `close()` propagates inward: the outer agency
 calls `close()` on every pre-built member of its roster, nested agencies
 included.
+
+---
+
+## GMI Seats
+
+`runtime: 'gmi'` on the agency serves every config seat with a GMI; a seat's own
+`runtime` wins:
+
+```typescript
+import { agency } from '@framers/agentos';
+
+const team = agency({
+  provider: 'openai',
+  model: 'gpt-4o',
+  runtime: 'gmi',
+  agents: {
+    researcher: { instructions: 'Find relevant papers.' },
+    writer: { runtime: 'legacy', instructions: 'Write a clear summary.' },
+  },
+});
+```
+
+`sessionSeat()` seats a persistent `gmi()` agent as itself, through a session of
+its own that runs every call of the run:
+
+```typescript
+import { agency, gmi, sessionSeat } from '@framers/agentos';
+
+const tutor = gmi({
+  provider: 'openai',
+  model: 'gpt-4o',
+  name: 'Tutor',
+  instructions: 'You are a patient maths tutor.',
+  tools: {
+    checkStep: {
+      description: 'Checks one step of a proof.',
+      parameters: { type: 'object', properties: { step: { type: 'string' } } },
+      execute: async ({ step }) => (step.includes('=') ? 'valid' : 'unclear'),
+    },
+  },
+});
+
+const team = agency({
+  provider: 'openai',
+  model: 'gpt-4o',
+  strategy: 'hierarchical',
+  agents: { tutor: sessionSeat(tutor, { tools: ['checkStep'], brief: 'Check each step.' }) },
+});
+```
+
+The seat's session has memory scoped to it and no learner; `team.close()` closes
+it and leaves `tutor` serving its own sessions. A pre-built seat may carry
+`description` and `dependsOn`, which the hierarchical and graph strategies read
+as they read a config's. [Seats served by GMIs](../AGENCIES.md#seats-served-by-gmis)
+lists the seat's options and what it refuses. A GMI can also launch a team from
+inside a turn: [Teams a GMI launches](../AGENCIES.md#teams-a-gmi-launches).
 
 ---
 
