@@ -46,6 +46,29 @@ import type { ILearnerSession, ILearningLayer, LearnerContext } from '../learnin
  */
 const LEARNER_OPEN_BUDGET_MS = 2_000;
 
+/**
+ * One open of a learner session, which lives at most `ms`: past it the open fails, so the session asks again at its
+ * next turn, and a session the layer gives after that is ended rather than kept.
+ */
+function openWithin(open: () => Promise<ILearnerSession>, ms: number): Promise<ILearnerSession> {
+  let expired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const attempt = Promise.resolve().then(open).then(asLearnerSession);
+  attempt.then(
+    (session) => {
+      if (expired) void Promise.resolve().then(() => session.endSession()).catch(() => undefined);
+    },
+    () => undefined,
+  );
+  const lifetime = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      reject(new Error(`the learning layer opened no learner session within ${ms} ms`));
+    }, ms);
+  });
+  return Promise.race([attempt, lifetime]).finally(() => clearTimeout(timer));
+}
+
 /** A layer's answer as a learner session; an answer that lacks one of a session's calls is a failed open. */
 function asLearnerSession(answer: unknown): ILearnerSession {
   const session = answer as Partial<ILearnerSession> | null | undefined;
@@ -556,10 +579,14 @@ export class GMIManager {
       authoredTraits: authored,
       ...(overlay ? { overlayTraits: overlay } : {}),
     };
+    // Each open lives at most shutdownTimeoutMs, as every wait of the manager on a GMI's session does: a layer that
+    // stalls is asked again at a later turn, and never holds a turn or a shutdown past the bound.
+    const lifetime = this.config.shutdownTimeoutMs;
     const open = (namespace: string): Promise<ILearnerSession> =>
-      Promise.resolve()
-        .then(() => layer.forLearner({ namespace, agentKey: source.registryPersona.id, userId: runtimeContext.userId }, context))
-        .then(asLearnerSession);
+      openWithin(
+        () => layer.forLearner({ namespace, agentKey: source.registryPersona.id, userId: runtimeContext.userId }, context),
+        lifetime,
+      );
     // Without the turn's organization the session opens at the GMI's first prepared turn, under that turn's.
     if (!source.workflowSeat && source.organizationId === undefined) {
       return { learning: deferLearnerSession({ traits: authored, open }), personaTraits };
@@ -567,9 +594,7 @@ export class GMIManager {
     const organizationId = (source.organizationId ?? '').trim();
     const openNow = (): Promise<ILearnerSession> =>
       source.workflowSeat
-        ? Promise.resolve()
-            .then(() => layer.forLearner(null, { ...context, noLearnerReason: 'workflow_seat' }))
-            .then(asLearnerSession)
+        ? openWithin(() => layer.forLearner(null, { ...context, noLearnerReason: 'workflow_seat' }), lifetime)
         : open(organizationId);
     // The open runs inside GMI acquisition, so it has the budget a turn's preparation has.
     let late: Promise<ILearnerSession> | undefined = openNow();
@@ -593,8 +618,8 @@ export class GMIManager {
     } finally {
       clearTimeout(timer);
     }
-    // The first attempt of the deferred session is the open still running, if any, so the layer is asked once; a
-    // GMI that ends before any turn took it ends the session it gives.
+    // The first attempt of the deferred session is the open still running, if any, so the layer is asked once while
+    // that open lives; a GMI that ends before any turn took it ends the session the open gives, when it gives one.
     const takeLate = (): Promise<ILearnerSession> | undefined => {
       const attempt = late;
       late = undefined;
@@ -607,8 +632,7 @@ export class GMIManager {
       prepareTurn: (input) => deferred.prepareTurn(input),
       currentTraits: () => deferred.currentTraits(),
       endSession: async () => {
-        const untaken = await takeLate()?.catch(() => undefined);
-        await untaken?.endSession();
+        void takeLate()?.then((session) => session.endSession()).catch(() => undefined);
         await deferred.endSession();
       },
     };
