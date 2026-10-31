@@ -44,7 +44,10 @@ export interface LaunchEntry {
   toolHooks: readonly ToolCallHook[];
   /** Each seat's tool names, by role: a nested launch's parent tool names. */
   seatTools: Map<string, ReadonlySet<string>>;
-  /** The output tokens one call of the tree's route is counted with. */
+  /**
+   * The output tokens one call of this launch's seats is counted with; a launch nested under it counts this when its
+   * host counts none of its own.
+   */
   outputEstimateTokens: number;
   /**
    * 'closing': the run outlived the grace, or its seats, or those of a launch nested under it, are not released yet;

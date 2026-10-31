@@ -175,6 +175,14 @@ export class WorkflowFacade {
   }
 
   /**
+   * The agency registry: workflow agencies, and the teams GMIs launch on this runtime (`launch_agency`) while they run.
+   * Undefined before {@link initialize} and after {@link shutdown}.
+   */
+  public getAgencyRegistry(): AgencyRegistry | undefined {
+    return this.agencyRegistry;
+  }
+
+  /**
    * Start the workflow runtime. Requires that both {@link initialize} and
    * {@link setRuntimeDependencies} have been called.
    */

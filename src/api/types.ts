@@ -1582,7 +1582,12 @@ export interface BaseAgentConfig {
   provenance?: AgencyProvenanceConfig;
   /** Observability and telemetry configuration. */
   observability?: ObservabilityConfig;
-  /** Event callbacks fired at various lifecycle points during the run. */
+  /**
+   * Event callbacks fired at various lifecycle points during the run. `agency()` fires them for its run. A gmi() agent
+   * fires them only for the teams it launches with `launch_agency` (`agencies.launch`), each named
+   * `launch:<agencyId>`, and for those launches' failures; its own turns fire none, and neither does `agent()` without
+   * `runtime: 'gmi'`.
+   */
   on?: AgencyCallbacks;
   /**
    * Resource limits (tokens, cost, time). `agency()` and the full runtime
@@ -1884,10 +1889,11 @@ export interface AgencyOptions extends BaseAgentConfig {
    */
   maxRounds?: number;
   /**
-   * The engine of every config seat that names none: `'legacy'` (the default) calls the model through
-   * generateText and streamText, `'gmi'` serves each of the seat's calls with a Generalized Mind Instance
-   * (docs/GMI.md, "GMIs from agent()"). A seat's own `runtime` wins. Pre-built seats keep the engine they were
-   * built with, and the hierarchical manager and the parallel and debate synthesizers stay on the legacy engine.
+   * The engine of every config seat that names none (a roster config, the panel's chair, a specialist the hierarchical
+   * manager spawns): `'legacy'` (the default) calls the model through generateText and streamText, `'gmi'` serves each
+   * of the seat's calls with a Generalized Mind Instance (docs/GMI.md, "GMIs from agent()"). A seat's own `runtime`
+   * wins. Pre-built seats keep the engine they were built with, and the hierarchical manager and the parallel and
+   * debate synthesizers stay on the legacy engine.
    * Any other value throws `AgencyConfigError`, here and on a seat; `null` is unset at both levels.
    * The agency itself takes no `cognition`: a strategy runs a config seat through its `generate()` or `stream()`,
    * which run the `'light'` profile; seat a persistent GMI with `sessionSeat()` to run its own profile.
