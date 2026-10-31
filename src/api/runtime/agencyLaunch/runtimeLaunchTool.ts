@@ -260,8 +260,9 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
     },
 
     // The team's entry in the runtime's AgencyRegistry while it runs (spec D14): made under the launch's agencyId with a
-    // seat per role once the team is built, a history entry per seat call (each seat's onCall), and at close the
-    // launch's status, closing time and usage merged, then the entry removed. A runtime with no registry records nothing.
+    // seat per role once the team is built, a history entry per seat call (each seat's onCall), marked closing when the
+    // launch returns while a seat still holds its GMI, and, when the launch's entry goes, the launch's status, closing
+    // time and usage merged, then the entry removed. A runtime with no registry records nothing.
     recorder: {
       start({ agencyId, conversationId, meta, seats }) {
         const registry = deps.getAgencyRegistry?.();
@@ -273,6 +274,12 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
           if (!gmiId || !personaId) continue;
           registry.registerSeat({ agencyId, roleId: role, gmiInstanceId: gmiId, personaId, metadata: { form, ...(member ? { member } : {}) } });
         }
+      },
+      closing(result) {
+        const registry = deps.getAgencyRegistry?.();
+        const entry = registry?.getAgency(result.agencyId);
+        if (!registry || !entry) return;
+        registry.upsertAgency({ agencyId: result.agencyId, workflowId: entry.workflowId, conversationId: entry.conversationId, metadata: { status: 'closing' } });
       },
       close(result) {
         // Only an entry this registry holds: a registry made after the launch started has none to close.

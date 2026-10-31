@@ -335,8 +335,14 @@ export interface LaunchRecordMetadata {
   /** The goal's first 200 characters. */
   goalPreview: string;
   startedAt: string;
+  /**
+   * 'running' while the team runs; 'closing' once the launch has returned while a seat, or a launch its seats started,
+   * still holds a GMI; the launch's own status, merged with `closedAt` and `usage` just before the entry is removed.
+   */
   status: 'running' | 'closing' | LaunchStatus;
+  /** When the launch returned its result. */
   closedAt?: string;
+  /** The seats' usage, as the launch's result reports it. */
   usage?: LaunchUsage;
 }
 

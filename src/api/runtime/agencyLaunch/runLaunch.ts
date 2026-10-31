@@ -129,9 +129,16 @@ export interface LaunchHost {
   callbacks?: AgencyCallbacks;
   /** gmi(): the parent's usage ledger, which the coordinator's calls record to under source `launch_agency`. */
   usageLedger?: AgentOSUsageLedgerOptions;
-  /** The full runtime's registry entry; no-ops on gmi(). A recorder that throws is logged and the launch goes on. */
+  /**
+   * The full runtime's registry entry; no-ops on gmi(). `start` once the team is built; `close`, with the result the
+   * launch returned, when the launch's entry goes: before the launch returns when every seat is released by then,
+   * else once every seat is released and every launch its seats started is gone, `closing` being told at the return
+   * meanwhile. So the record lasts as long as the team holds a seat. A recorder that throws is logged and the launch
+   * goes on.
+   */
   recorder: {
     start(record: { agencyId: string; conversationId: string; meta: LaunchRecordMetadata; seats: SeatHandle[] }): void;
+    closing?(result: LaunchAgencyResult): void;
     close(result: LaunchAgencyResult): void;
   };
   logError(error: unknown, where: string): void;
@@ -464,11 +471,11 @@ function reasonOf(status: LaunchStatus, launch: AdmittedLaunch, seats: LaunchSea
 }
 
 /**
- * Step 10: the result, recorded, as the tool's output.
+ * Step 10: the result, the tool's output. The team's record closes when the launch's entry goes ({@link closeRecord}).
  *
  * @param state - The launch's state when the run settled (a stop that came during the close does not change it).
  */
-function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome, state: LaunchState = launch.state): ToolExecutionResult<LaunchAgencyResult> {
+function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome, state: LaunchState = launch.state): LaunchAgencyResult {
   const seats = launch.seats.map((seat, i) => built[i]?.record() ?? notRun(seat));
   const usage = seats.reduce<LaunchUsage>((sum, record) => {
     sum.promptTokens += record.usage.promptTokens;
@@ -509,12 +516,34 @@ function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome
       },
     },
   };
-  try {
-    launch.host.recorder.close(result);
-  } catch (error) {
-    logSafely(launch.host, error, 'launch_agency record');
+  return result;
+}
+
+/**
+ * Closes the team's record with the launch's result when the launch's entry goes: at once when it is gone already
+ * (every seat released within the grace), else when it is removed (every seat released, every launch the seats
+ * started gone), the recorder told meanwhile that the launch returned and its team is closing. The record lasts as
+ * long as the team holds a seat. A recorder that throws is logged and the launch goes on.
+ */
+function closeRecord(launch: AdmittedLaunch, result: LaunchAgencyResult): void {
+  const { host, entry } = launch;
+  const close = (): void => {
+    try {
+      host.recorder.close(result);
+    } catch (error) {
+      logSafely(host, error, 'launch_agency record');
+    }
+  };
+  if (!launchRegistry.get(entry.launchId)) {
+    close();
+    return;
   }
-  return { success: true, output: result };
+  try {
+    host.recorder.closing?.(result);
+  } catch (error) {
+    logSafely(host, error, 'launch_agency record');
+  }
+  void launchRegistry.whenRemoved(entry.launchId).then(close);
 }
 
 /**
@@ -524,7 +553,7 @@ function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome
  * launch then waits one grace for the run to settle and the team to close, together, and returns; a run that resolved
  * before any abort gets the whole grace for its close. Once the run has settled the signal aborts in any case, before
  * the seats close, so no seat's call runs on past its launch. The launch's registry entry goes once every seat is
- * released and every launch its seats started is gone; until then it stays closing.
+ * released and every launch its seats started is gone; until then it stays closing. The team's record closes with it.
  */
 async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<LaunchAgencyResult>> {
   const { host, parent, entry, controller, state } = launch;
@@ -555,6 +584,8 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
   let team: Agent | undefined;
   let outcome: RunOutcome = { kind: 'not_run' };
   let settled: LaunchState | undefined;
+  /** Whether the team's record started: only then is it closed. */
+  let recorded = false;
   try {
     // 6. Seats, each racing the launch's signal (a runtime seat's GMI can take long to start).
     for (const seat of launch.seats) entry.seatTools.set(seat.role, seat.toolNames);
@@ -598,6 +629,7 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
       }
       // The record starts once the child is built, so a configuration agency() refuses leaves no record behind.
       recordStart(launch, built);
+      recorded = true;
       const run = runTeam(launch, team);
       void hold(run);
       // 8. Settle: the run, or the abort and then one grace for the run and the close together.
@@ -643,7 +675,9 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
       void Promise.all([...holding]).then(() => launchRegistry.remove(entry.launchId));
     }
   }
-  return finish(launch, built, outcome, settled ?? { ...state });
+  const result = finish(launch, built, outcome, settled ?? { ...state });
+  if (recorded) closeRecord(launch, result);
+  return { success: true, output: result };
 }
 
 /**
