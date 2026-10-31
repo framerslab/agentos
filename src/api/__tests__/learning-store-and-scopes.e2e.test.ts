@@ -8962,6 +8962,13 @@ describe("the standalone retriever and the rolling-summary sink, by a turn's sco
       const report = await os.getLearningLayer()!.forgetUser!('bob', { namespace: 'A' });
       expect(liveIn(file).filter((trace) => trace.content.includes('GOATS-2'))).toEqual([]);
       expect(liveIn(file).filter((trace) => trace.contributorIds?.includes('bob') || trace.turnUserId === 'bob')).toEqual([]);
+      // Nor does a summary an upsert replaced, which the sink forgot and the file kept: no row of the file holds bob's words.
+      const db = new Database(file);
+      try {
+        expect(db.prepare("SELECT COUNT(*) AS n FROM memory_traces WHERE content LIKE '%GOATS-2%'").get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
       expect(filedWith(file, 'BEES-1').map(([, scopeId]) => scopeId)).toEqual(['A/ana::tutor', 'A/ana']);
       expect(filedWith(file, 'TRAIN-4')).toHaveLength(3);
       expect(report.stores).toContainEqual({
