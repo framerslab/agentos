@@ -119,6 +119,41 @@ describe('a runtime with a learning layer', () => {
     expect(plainTurn.systemPrompts[0].content).toBe(renderPersonalitySection(persona.personalityTraits));
   });
 
+  it("reads a role overlay's patch written under an alias of a trait the persona sets by its canonical key", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const manager = await managerWith(createLearningLayer());
+    const seat: GMIAgencyContextOptions = {
+      agencyId: 'agency-1',
+      roleId: 'second-reader',
+      evolutionRules: [{ id: 'softer', trigger: 'always', patch: { personaTraits: { honestyHumility: 0.1, extraversion: 0.9 } } }],
+    };
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'seat-session', persona.id, undefined, undefined, undefined, undefined, seat, 'A');
+    const prepared = await gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' }));
+    // The persona's honesty stays, and the patch that names it under its SOUL.md spelling is warned about.
+    expect(prepared.systemPrompts[0].content).toBe(renderPersonalitySection({ honesty: 0.9, extraversion: 0.9 }));
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("persona 'reviewer' sets honesty"))).toBe(true);
+  });
+
+  it("opens a session whose first open failed under its first turn's organization, and keeps a hand-over made while it could not open", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const real = createLearningLayer();
+    let failures = 2;
+    const layer = recordingLayer(async (learnerKey, context) => {
+      if (failures-- > 0) throw new Error('store offline');
+      return real.forLearner(learnerKey, context);
+    });
+    const manager = await managerWith(layer);
+    // No organization from the caller: the session opens at the GMI's first prepared turn.
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id);
+    const session = gmi.getLearnerSession!()!;
+    await expect(session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow('store offline');
+    await expect(session.prepareTurn(turn({ namespace: 'B' }))).rejects.toThrow('store offline');
+    expect(stateOf(await session.prepareTurn(turn({ namespace: 'A' })))).toBe('other_namespace');
+    expect(stateOf(await session.prepareTurn(turn({ namespace: 'A' })))).toBe('other_namespace');
+    expect(vi.mocked(layer.forLearner).mock.calls.map(([learnerKey]) => learnerKey?.namespace)).toEqual(['A', 'A', 'A']);
+  });
+
   it("ends a GMI's learner session once the GMI shuts down", async () => {
     const endSession = vi.fn(async () => undefined);
     const layer = recordingLayer(async () => ({ prepareTurn: vi.fn(), endSession, currentTraits: () => ({}) }) as unknown as ILearnerSession);
