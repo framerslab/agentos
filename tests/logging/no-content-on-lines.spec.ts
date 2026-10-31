@@ -41,7 +41,7 @@ describe('no content on any output channel', () => {
   }));
   it('GMI feedback', async () => markerCapture(marker, async () => {
     const gmi = { recordUserFeedback: vi.fn(async () => {}) };
-    const manager = Object.assign(Object.create(GMIManager.prototype), { isInitialized: true, managerId: 'manager-1', gmiSessionMap: new Map([['session-1', 'gmi-1']]), activeGMIs: new Map([['gmi-1', gmi]]) });
+    const manager = Object.assign(Object.create(GMIManager.prototype), { isInitialized: true, managerId: 'manager-1', gmiSessionMap: new Map([['session-1', 'gmi-1']]), activeGMIs: new Map([['gmi-1', gmi]]), agencySeatSessions: new Map() });
     manager.ensureInitialized = () => {};
     await manager.processUserFeedback('user-1', 'session-1', 'persona-1', { text: marker, correctedContent: marker });
     expect(gmi.recordUserFeedback).toHaveBeenCalled();
