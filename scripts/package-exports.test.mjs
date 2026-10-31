@@ -32,3 +32,16 @@ test('package exports only point at shipped files', () => {
 
   assert.deepEqual(missing, []);
 });
+
+test('the learning module resolves at its own subpath, as the emergent module does', async () => {
+  assert.deepEqual(pkg.exports['./cognition/learning'], {
+    import: './dist/cognition/learning/index.js',
+    default: './dist/cognition/learning/index.js',
+    types: './dist/cognition/learning/index.d.ts',
+  });
+  // The package resolves its own name through its exports, as a host's import does.
+  const learning = await import('@framers/agentos/cognition/learning');
+  assert.equal(typeof learning.createLearningLayer, 'function');
+  assert.equal(typeof learning.deferLearnerSession, 'function');
+  assert.equal(typeof learning.selfChangeRefusal, 'function');
+});
