@@ -549,14 +549,13 @@ export class Ledger {
    * The load check: from the chain's newest `reanchor` row on (else from its first row), each row's text is read as an
    * entry, its hash is recomputed, its chain and its indexed columns are compared with its own text, each row links
    * to the one before and follows it by one, the first row of an unanchored chain starts from the genesis hash at 1,
-   * and the head names the newest row. Rows before the newest reanchor are not checked.
+   * and the head names the newest row. Rows before the newest reanchor are not checked. The rows and the head are read
+   * at one moment (`chainWithHead`), so an append another process commits during the check never reads as a break.
    */
   async verifyChain(chainKey: string): Promise<ChainCheck> {
     const keyed = this.keyed;
     const broken = (reason: string): ChainCheck => ({ ok: false, keyed, reason });
-    // One transaction: where the adapter serializes transactions (SQLite), another process's append cannot fall
-    // between the two reads.
-    const { rows, head } = await this.store.transaction(async (tx) => ({ rows: await tx.chainRows(chainKey), head: await tx.head(chainKey) }));
+    const { rows, head } = await this.store.chainWithHead(chainKey);
     if (rows.length === 0) return head ? broken('head with no rows') : { ok: true, keyed };
     // Newest first, as far as the newest reanchor: where the chain's verified part starts.
     const entries: LedgerEntry[] = [];

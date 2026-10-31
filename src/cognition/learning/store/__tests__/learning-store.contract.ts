@@ -2,7 +2,8 @@
  * @file learning-store.contract.ts
  * The contract every LearningStore keeps; each store's test file runs it (learning-store.test.ts for the in-process
  * store, learning-store.sql.test.ts for the SQL store on SQLite and Postgres). Ledger rows read back in sequence order,
- * by candidate and by learner; a chain head is advanced by compare-and-swap, moved only in its last row, hash and seq,
+ * by candidate and by learner, and a chain's rows with its head in one read; a chain head is advanced by
+ * compare-and-swap, moved only in its last row, hash and seq,
  * and refused once marked forgotten; trait rows are updated by version; freezes, sessions and tombstones are kept,
  * freezes listed in one order and a session row's start kept when it is written again; text is ordered by UTF-16 code
  * unit, whatever order the database sorts text in; a user's rows are deleted in one namespace only, and the tombstone
@@ -129,6 +130,28 @@ export function runLearningStoreContract(name: string, open: () => Promise<Learn
         await expect(store.insertLedgerRow(ledgerRow({ id: 'r-3', seq: 2 }))).rejects.toThrow();
         await expect(store.insertLedgerRow(ledgerRow({ id: 'r-1', chainKey: 'u|A|tutor|7', userId: '7' }))).rejects.toThrow();
         expect(await store.chainRows('u|A|tutor|7')).toEqual([]);
+      }));
+
+    it("reads a chain's rows in sequence order with its head, a chain with either alone, and one with neither", () =>
+      withStore(async (store) => {
+        expect(await store.chainWithHead('u|A|tutor|42')).toEqual({ rows: [], head: undefined });
+        await store.insertLedgerRow(ledgerRow({ id: 'r-2', seq: 2, rowType: 'verdict', candidateId: 'r-1', verdict: 'kept' }));
+        await store.insertLedgerRow(ledgerRow({ id: 'r-1', seq: 1, candidateId: 'r-1' }));
+        await store.insertLedgerRow(ledgerRow({ id: 'r-9', chainKey: 'u|A|tutor|7', userId: '7' }));
+        expect(await store.chainWithHead('u|A|tutor|42')).toEqual({
+          rows: [ledgerRow({ id: 'r-1', seq: 1, candidateId: 'r-1' }), ledgerRow({ id: 'r-2', seq: 2, rowType: 'verdict', candidateId: 'r-1', verdict: 'kept' })],
+          head: undefined,
+        });
+        await store.insertHead(headRow({ lastId: 'r-2', seq: 2 }));
+        await store.insertHead(headRow({ chainKey: 'a|A|tutor', userId: null, lastId: 'gone', forgotten: true }));
+        const read = await store.transaction((tx) => tx.chainWithHead('u|A|tutor|42'));
+        expect(read.rows.map((row) => row.id)).toEqual(['r-1', 'r-2']);
+        expect(read.head).toEqual(headRow({ lastId: 'r-2', seq: 2 }));
+        expect(await store.chainWithHead('a|A|tutor')).toEqual({ rows: [], head: headRow({ chainKey: 'a|A|tutor', userId: null, lastId: 'gone', forgotten: true }) });
+        read.rows[0]!.subject = 'changed';
+        if (read.head) read.head.seq = 9;
+        expect((await store.chainWithHead('u|A|tutor|42')).rows[0]).toEqual(ledgerRow({ id: 'r-1', seq: 1, candidateId: 'r-1' }));
+        expect((await store.chainWithHead('u|A|tutor|42')).head).toEqual(headRow({ lastId: 'r-2', seq: 2 }));
       }));
 
     it("reads one learner's rows chain by chain in sequence order, and no other agent's, namespace's or visitor's", () =>

@@ -121,6 +121,12 @@ export interface LearningStoreTx {
   ledgerRow(id: string): Promise<StoredLedgerRow | undefined>;
   /** A chain's rows in sequence order. */
   chainRows(chainKey: string): Promise<StoredLedgerRow[]>;
+  /**
+   * A chain's rows in sequence order and its head, read at one moment: an append that commits meanwhile is in both or
+   * in neither, also on a database that gives each statement of a transaction its own snapshot (Postgres at Read
+   * Committed), where the SQL store reads both in one statement.
+   */
+  chainWithHead(chainKey: string): Promise<{ rows: StoredLedgerRow[]; head: ChainHead | undefined }>;
   /** A candidate and its verdicts, in sequence order. */
   candidateRows(candidateId: string): Promise<StoredLedgerRow[]>;
   /** The rows keyed to one learner (by namespace, agent and `userId`), ordered by chain key and sequence. */
@@ -197,6 +203,7 @@ export abstract class TransactionalLearningStore implements LearningStore {
   insertLedgerRow(row: StoredLedgerRow) { return this.transaction((tx) => tx.insertLedgerRow(row)); }
   ledgerRow(id: string) { return this.transaction((tx) => tx.ledgerRow(id)); }
   chainRows(chainKey: string) { return this.transaction((tx) => tx.chainRows(chainKey)); }
+  chainWithHead(chainKey: string) { return this.transaction((tx) => tx.chainWithHead(chainKey)); }
   candidateRows(candidateId: string) { return this.transaction((tx) => tx.candidateRows(candidateId)); }
   learnerLedgerRows(namespace: string, agentKey: string, userId: string) { return this.transaction((tx) => tx.learnerLedgerRows(namespace, agentKey, userId)); }
   head(chainKey: string) { return this.transaction((tx) => tx.head(chainKey)); }

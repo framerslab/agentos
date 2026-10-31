@@ -12,8 +12,10 @@
  * The store orders what it reads by UTF-16 code unit, as the in-process store does, whatever order the database sorts
  * text in: a database orders TEXT by its collation, and Postgres by the database's locale, under which `agent|a` sorts
  * before `agent|C`. So the rows are sorted once read, and only a chain's rows, by their integer `seq`, are ordered by
- * the database. A transaction's handle refuses every call once its transaction has ended, where the adapter's own
- * handle would run the call outside any transaction (on Postgres, on the pool).
+ * the database. A chain's rows and its head are read in one statement (`chainWithHead`), so they are one snapshot
+ * though Postgres at Read Committed gives each statement of a transaction its own. A transaction's handle refuses
+ * every call once its transaction has ended, where the adapter's own handle would run the call outside any
+ * transaction (on Postgres, on the pool).
  */
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import {
@@ -138,6 +140,19 @@ const byChainAndSeq = (a: StoredLedgerRow, b: StoredLedgerRow): number => compar
 const LEDGER_COLUMNS =
   'id, chain_key, seq, row_type, candidate_id, namespace, agent_key, user_id, turn_user_id, session_id, kind, subject, verdict, body, prev_hash, hash, state_digest, created_at';
 
+/**
+ * A chain's rows and its head in one statement, so both are read in one snapshot: the ledger's columns under their
+ * own names, the head's under `head_`, and one row of NULL ledger columns when the chain has none.
+ */
+const CHAIN_WITH_HEAD = `SELECT ${LEDGER_COLUMNS.split(', ').map((column) => `l.${column}`).join(', ')},
+       h.chain_key AS head_chain_key, h.namespace AS head_namespace, h.agent_key AS head_agent_key,
+       h.user_id AS head_user_id, h.last_id AS head_last_id, h.last_hash AS head_last_hash, h.seq AS head_seq,
+       h.forgotten AS head_forgotten
+  FROM (SELECT CAST(? AS TEXT) AS chain_key) AS wanted
+  LEFT JOIN agentos_learning_heads h ON h.chain_key = wanted.chain_key
+  LEFT JOIN agentos_learning_ledger l ON l.chain_key = wanted.chain_key
+ ORDER BY l.seq`;
+
 const DOC_TABLES: Record<LearnerDocTable, string> = {
   outcomes: 'agentos_learning_outcomes',
   lessons: 'agentos_learning_lessons',
@@ -193,6 +208,25 @@ class SqlTx implements LearningStoreTx {
 
   async chainRows(chainKey: string): Promise<StoredLedgerRow[]> {
     return (await this.db.all<Row>(`SELECT ${LEDGER_COLUMNS} FROM agentos_learning_ledger WHERE chain_key = ? ORDER BY seq`, [chainKey])).map(toLedger);
+  }
+
+  async chainWithHead(chainKey: string): Promise<{ rows: StoredLedgerRow[]; head: ChainHead | undefined }> {
+    const found = await this.db.all<Row>(CHAIN_WITH_HEAD, [chainKey]);
+    const first: Row | undefined = found[0];
+    const head =
+      first !== undefined && first.head_chain_key !== null && first.head_chain_key !== undefined
+        ? toHead({
+            chain_key: first.head_chain_key,
+            namespace: first.head_namespace,
+            agent_key: first.head_agent_key,
+            user_id: first.head_user_id,
+            last_id: first.head_last_id,
+            last_hash: first.head_last_hash,
+            seq: first.head_seq,
+            forgotten: first.head_forgotten,
+          })
+        : undefined;
+    return { rows: found.filter((row) => row.id !== null && row.id !== undefined).map(toLedger), head };
   }
 
   async candidateRows(candidateId: string): Promise<StoredLedgerRow[]> {

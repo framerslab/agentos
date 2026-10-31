@@ -144,6 +144,12 @@ class MemoryTx implements LearningStoreTx {
     return sortedCopies(this.open().chains.get(chainKey)?.values());
   }
 
+  async chainWithHead(chainKey: string): Promise<{ rows: StoredLedgerRow[]; head: ChainHead | undefined }> {
+    const t = this.open();
+    const head = t.heads.get(chainKey);
+    return { rows: sortedCopies(t.chains.get(chainKey)?.values()), head: head ? { ...head } : undefined };
+  }
+
   async candidateRows(candidateId: string): Promise<StoredLedgerRow[]> {
     return sortedCopies(this.open().candidates.get(candidateId)?.values());
   }
