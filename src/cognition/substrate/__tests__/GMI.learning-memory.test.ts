@@ -7,17 +7,21 @@
  * recall list holding the turn's own scopes, and neither the GMI id, the memory owner id among the users nor an
  * organization an earlier turn left in the user context; every
  * filing guarded by the user's tombstone, before the write and once it has committed; and what each tool call is
- * told: the turn's scopes, a recorder bound to the turn, its second user and the freeze. With no learner session the
- * GMI files and reads as it did before the layer existed.
+ * told: the turn's scopes, a recorder bound to the turn, its second user and the freeze. A turn's memory tools, run on
+ * a facade, file a second user's writes with that user's id, which forgetUser for that user deletes with the GMI's
+ * filing of the turn. With no learner session the GMI files and reads as it did before the layer existed.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import type { ChatMessage } from '../../../core/llm/providers/IProvider';
+import type { ToolExecutionRequestDetails } from '../../../core/tools/ToolExecutor';
 import type { CognitiveMemoryManager } from '../../memory/CognitiveMemoryManager';
+import type { Memory } from '../../memory/io/facade/Memory';
 import { Brain } from '../../memory/retrieval/store/Brain';
-import { closeMemory, liveContents, managerOnBrain, managerOver, tempFile } from '../../learning/__tests__/helpers/memoryFixtures';
+import { closeMemory, facadeAt, liveContents, managerOnBrain, managerOver, tempFile } from '../../learning/__tests__/helpers/memoryFixtures';
 import { createLearningLayer, InMemoryLearningStore, SqlLearningStore, type LearnerContext, type LearningStore, type SessionSelfChange } from '../../learning/index';
 import { chainKeyOf } from '../../learning/ledger/Ledger';
+import type { ToolCallResult } from '../IGMI';
 import { createScriptedGmi, runTurn, scriptedProvider, textReply, textTurn, toolCallReply } from './helpers/scriptedGmi';
 
 const PERSONA_ID = 'scripted-persona';
@@ -384,5 +388,68 @@ describe('what a tool call is told', () => {
     expect(await subjects(chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }, 'user-2'))).toEqual(['t-2']);
     const visits = await store.sessionRowsOf('A', 'user-2');
     expect(visits).toEqual([expect.objectContaining({ kind: 'visitor', sessionId: 'session-1', conversationIds: ['session-1'] })]);
+  });
+});
+
+describe("the memory tools on a GMI's turn", () => {
+  /** Runs the GMI's tool calls on a facade's memory tools, each with the call's own context, as the tool orchestrator does. */
+  function runOnMemoryTools(
+    processToolCall: { mockImplementation(fn: (details: ToolExecutionRequestDetails) => Promise<ToolCallResult>): unknown },
+    memory: Memory,
+  ): void {
+    const tools = new Map(memory.createTools().map((tool) => [tool.name, tool]));
+    processToolCall.mockImplementation(async ({ toolCallRequest, gmiId, personaId, userContext, sessionData }) => {
+      const tool = tools.get(toolCallRequest.name);
+      if (!tool) throw new Error(`no memory tool named ${toolCallRequest.name}`);
+      const result = await tool.execute(toolCallRequest.arguments, { gmiId, personaId, userContext, ...(sessionData ? { sessionData } : {}) });
+      return {
+        toolCallId: toolCallRequest.id,
+        toolName: toolCallRequest.name,
+        output: result.output ?? null,
+        isError: !result.success,
+        ...(result.success ? {} : { errorDetails: { message: result.error, details: result.details } }),
+      };
+    });
+  }
+
+  it("deletes a second user's memory_add, its row and the GMI's filing of that user's turn with forgetUser for that user, and leaves the session's others", async () => {
+    const { manager, brain } = await managerOver(tempFile(), 'brain-1');
+    const { memory, brain: toolsBrain } = await facadeAt(tempFile(), 'tools-brain');
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: memory });
+    const session = await layer.forLearner(KEY_A, context(manager));
+    const add = (id: string, content: string) => toolCallReply([{ id, name: 'memory_add', args: { content } }]);
+    const { provider } = scriptedProvider([
+      add('call_1', 'User one keeps bees.'),
+      textReply('Noted, user one.'),
+      add('call_2', 'The visitor keeps goats.'),
+      textReply('Noted, visitor.'),
+    ]);
+    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning: session, cognitiveMemory: manager } });
+    runOnMemoryTools(processToolCall, memory);
+
+    await runTurn(gmi, textTurn('t1', 'Remember my bees.', { organizationId: 'A' }));
+    await runTurn(gmi, { ...textTurn('t2', 'Remember my goats.', { organizationId: 'A' }), userId: 'user-2' });
+
+    const tools = await filed(toolsBrain);
+    expect(tools).toHaveLength(2);
+    expect(tools).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'A/user-1', content: 'User one keeps bees.' },
+        { scope: 'user', scopeId: 'A//session-1', content: 'The visitor keeps goats.', turnUserId: 'user-2' },
+      ]),
+    );
+    const visitorChain = chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }, 'user-2');
+    expect((await store.chainRows(visitorChain)).map((row) => [row.rowType, row.verdict])).toEqual([
+      ['candidate', 'pending'],
+      ['verdict', 'kept'],
+    ]);
+
+    await layer.forgetUser('user-2', { namespace: 'A' });
+
+    expect(await liveContents(toolsBrain)).toEqual(['User one keeps bees.']);
+    expect(await liveContents(brain)).toEqual(['Noted, user one.', 'Remember my bees.']);
+    expect(await store.chainRows(visitorChain)).toEqual([]);
+    expect(await store.sessionRowsOf('A', 'user-2')).toEqual([]);
   });
 });
