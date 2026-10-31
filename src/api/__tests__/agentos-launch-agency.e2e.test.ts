@@ -16,6 +16,8 @@ const provider = vi.hoisted(() => ({
   whole: [] as string[],
   /** The API key of every provider instance that initialized. */
   keys: [] as string[],
+  /** The API key and base URL of every provider instance that initialized. */
+  starts: [] as Array<{ apiKey: string; baseURL?: string }>,
   /** Called after each streamed call is recorded, before it is answered; a test may hold the answer. */
   beforeAnswer: undefined as undefined | ((messages: Array<{ role: string; content: unknown }>) => Promise<void> | void),
 }));
@@ -34,8 +36,11 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
   class OpenAIProvider {
     readonly providerId = 'openai';
     isInitialized = false;
-    async initialize(config: { apiKey?: string }) {
+    async initialize(config: { apiKey?: string; baseURL?: string }) {
+      // A key the provider refuses, as OpenAI's own provider refuses one its model listing rejects.
+      if (config?.apiKey === 'refused-at-start') throw new Error('the provider refused the key');
       provider.keys.push(String(config?.apiKey));
+      provider.starts.push({ apiKey: String(config?.apiKey), ...(config?.baseURL !== undefined ? { baseURL: config.baseURL } : {}) });
       this.isInitialized = true;
     }
     async generateCompletion(_modelId: string, messages: Array<{ role: string; content: unknown }>) {
@@ -172,6 +177,7 @@ afterEach(async () => {
   provider.seen.length = 0;
   provider.whole.length = 0;
   provider.keys.length = 0;
+  provider.starts.length = 0;
   provider.beforeAnswer = undefined;
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -805,6 +811,43 @@ describe('launch_agency on the full runtime', () => {
     // The manager's calls are the coordinator's: charged to its sub-budget, which the launch's budget counts.
     expect(result.coordinatorUsage.totalTokens).toBeGreaterThan(0);
     expect(result.provenance.budget.tokensUsed).toBeGreaterThanOrEqual(result.coordinatorUsage.totalTokens);
+  });
+
+  it("the coordinator sends the runtime's key where the runtime's provider sends it, not to a base URL the environment names", async () => {
+    // The runtime's entry names a key and no base URL, so the runtime's provider sends it to OpenAI's own endpoint; the
+    // environment names another endpoint for OpenAI calls, and no key.
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://elsewhere.example/v1');
+    booted = await boot({ modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'runtime-key-endpoint' } }] } });
+    provider.starts.length = 0;
+    provider.replies.push(toolStep(['launch_agency', { goal: 'Decide.', strategy: 'hierarchical', seats: [{ role: 'checker', personaId: 'checker' }] }]), textStep('Done.'));
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // The manager answered (the precondition), on a provider that started with the runtime's key and OpenAI's endpoint.
+    expect(provider.whole.some((prompt) => prompt.includes('You are a manager agent'))).toBe(true);
+    expect(provider.starts.filter((start) => start.apiKey === 'runtime-key-endpoint').map((start) => start.baseURL)).toEqual(['https://api.openai.com/v1']);
+    expect(toolMessages(provider.seen[1].messages)[0]).toContain('"status":"completed"');
+  });
+
+  it('the coordinator takes the key of the entry the runtime serves its provider from', async () => {
+    // Two enabled entries for OpenAI: the runtime serves it from the first, since the second's provider refuses its key
+    // at start.
+    vi.stubEnv('OPENAI_API_KEY', '');
+    booted = await boot({
+      modelProviderManagerConfig: {
+        providers: [
+          { providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'runtime-key-served' } },
+          { providerId: 'openai', enabled: true, config: { apiKey: 'refused-at-start' } },
+        ],
+      },
+    });
+    provider.keys.length = 0;
+    provider.replies.push(toolStep(['launch_agency', { goal: 'Decide.', strategy: 'hierarchical', seats: [{ role: 'checker', personaId: 'checker' }] }]), textStep('Done.'));
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // The lead ran on the served entry (the precondition); the manager's provider started with that entry's key, and
+    // its answer completed the launch.
+    expect(provider.seen).toHaveLength(2);
+    expect(provider.keys).toEqual(['runtime-key-served']);
+    expect(toolMessages(provider.seen[1].messages)[0]).toContain('"status":"completed"');
   });
 });
 
