@@ -223,6 +223,18 @@ describe('the loop manifest', () => {
     await expect(layer.forLearner(key(), context())).rejects.toThrow('The learning layer is closed.');
     expect(() => createLearningLayer({ mode: 'sideways' as never })).toThrow(/learning\.mode/);
   });
+
+  it('reads an option set to null as unset, as one read from JSON or YAML writes it, so each default stands', async () => {
+    quiet();
+    const nulls = { profile: null, surface: null, hostLoops: null, mode: null, agentKey: null, namespace: null, anonymousUserIds: null };
+    const layer = createLearningLayer(nulls as never);
+    const session = await layer.forLearner(key(), context());
+    expect(stateOf(await session.prepareTurn(turn()))).toBe('bound');
+    const manifest = await layer.manifest();
+    expect(manifest).toMatchObject({ surface: 'custom', profile: 'custom', mode: 'on', modeSetBy: 'config' });
+    expect(manifest.loops.rag).toEqual({ live: false, detail: 'not reported by the host' });
+    expect(manifest.loops.trait_changes).toEqual({ live: false, detail: 'switched off' });
+  });
 });
 
 describe('a learner session named at its first turn', () => {
