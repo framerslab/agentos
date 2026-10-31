@@ -160,8 +160,9 @@ export interface ToolExecutionContext {
   signal?: AbortSignal;
   /**
    * Live objects of the turn that made the call: its approval gate, its budget, its explicit user, a seat's tool names
-   * and hooks, and the `processToolCall` of the view the call came through (`dispatch`). Set by gmi()'s tool hook and by
-   * a runtime seat's view; the step gate runs each step of a composed tool through `dispatch`.
+   * and hooks, the `processToolCall` of the view the call came through (`dispatch`) and the output guardrails' tool-call
+   * gate the turn asks (`toolCallGate`). Set by gmi()'s tool hook, by a runtime seat's view, and by a GMI whose turn
+   * asks such a gate; the step gate runs each step of a composed tool through `dispatch`.
    */
   callerTurn?: CallerTurnContext;
 }

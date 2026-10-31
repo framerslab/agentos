@@ -795,7 +795,8 @@ export interface AgentOSConfig {
    * and calls it (with `toolPermissionManagerConfig.strictCapabilityChecking`, on by default). Each call builds a
    * temporary `agency()` team whose seats are GMIs of this runtime (a registered persona by `personaId`, or one made
    * from the caller's for the seat's instructions), runs the goal once and returns one tool result, bounded by depth,
-   * seats, launches in flight, one wall deadline and the caller's tools. The bounds are checked at initialization
+   * seats, launches in flight, one wall deadline and the caller's tools; the output guardrails that judge the caller's
+   * tool calls judge the seats' calls too. The bounds are checked at initialization
    * whenever this is set; with `launch: true`, a config tool named `launch_agency` fails initialization too.
    * @default undefined (no tool)
    */

@@ -13,6 +13,7 @@ import {
   GMIInteractionType,
   GMIOutputChunkType,
   type GMIOutput,
+  type GMIToolCallGate,
   type IGMI,
   type StepFinishedChunkPayload,
   type ToolCallRequest,
@@ -44,6 +45,11 @@ export interface RuntimeSeatOptions {
   gmi: IGMI;
   /** The persona the seat's GMI runs. */
   personaId: string;
+  /**
+   * The output guardrails' tool-call gate the launching turn asks before each of its calls: each of the seat's turns
+   * asks it before each call of its own tool round, so a call the guardrails block never runs.
+   */
+  toolCallGate?: GMIToolCallGate;
   /** Shuts the seat's GMI down and takes it out of the manager. */
   release(): Promise<void>;
   /**
@@ -191,6 +197,7 @@ export function runtimeSeat(options: RuntimeSeatOptions): RuntimeSeatHandle {
           agencyId: options.frame.launchId,
           roleId: options.role,
           ...(options.organizationId ? { organizationId: options.organizationId } : {}),
+          ...(options.toolCallGate ? { toolCallGate: options.toolCallGate } : {}),
         },
       });
       for (;;) {

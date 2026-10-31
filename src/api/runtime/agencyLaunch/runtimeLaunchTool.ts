@@ -164,6 +164,8 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
         // The session's GMI keeps its turns' launch pool: the pool lasts as long as the GMI that runs the turn.
         poolOwner: gmi,
         toolHooks: [],
+        // The output guardrails' tool-call gate the turn asks before each of its calls: the seats' turns ask it too.
+        ...(ctx.callerTurn?.toolCallGate ? { toolCallGate: ctx.callerTurn.toolCallGate } : {}),
         outputEstimateTokens: estimateOf(persona),
       };
     },
@@ -224,6 +226,7 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
           gmi: built.gmi,
           personaId: built.personaId,
           release: built.release,
+          ...(parent.toolCallGate ? { toolCallGate: parent.toolCallGate } : {}),
           cutWhen,
           logError,
           // Each call the seat ran, in the team's registry entry: its outcome, and the start of its answer when it answered.
