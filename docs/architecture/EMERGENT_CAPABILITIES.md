@@ -502,7 +502,7 @@ Every forged tool undergoes review by the [`EmergentJudge`](/api/classes/Emergen
 | Review stage | When | What it checks |
 |---|---|---|
 | **Creation review** | First forge | Code safety, test correctness, schema compliance, determinism |
-| **Reuse validation** | Each invocation | Output matches declared outputSchema |
+| **Reuse validation** | Each invocation | Output matches declared outputSchema; a tool forged with none (`forge_tool` does not ask for one) is checked against none, and a stored row with no output schema loads as `{}`, so a reload checks it against none too |
 | **Promotion panel** | Tier upgrade request | Two independent reviewers: safety + correctness |
 
 If no LLM callback is configured for the judge, **creation review fails closed** — all forge requests are rejected. This is the safe default.
