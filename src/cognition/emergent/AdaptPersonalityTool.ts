@@ -65,8 +65,28 @@ export type HEXACOTrait = (typeof VALID_TRAITS)[number];
 /** On a host with a learning layer: the largest step one call may take. A larger delta is refused, not clamped. */
 export const MAX_STEP_WITH_LEARNING = 0.02;
 
-/** On a host with a learning layer: how many calls of one session the tool accepts. */
+/**
+ * On a host with a learning layer: how many calls of one session the tool accepts, counted per learner of the session
+ * (its organization, persona and user), so two tenants or two users that share a session id count apart.
+ */
 export const MAX_CALLS_PER_SESSION_WITH_LEARNING = 3;
+
+/** A non-blank string, trimmed; anything else reads as `''`. */
+function plainId(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * The key a call's accepted count is kept under on a host with a learning layer: the turn's organization, persona and
+ * user beside its session, each part encoded so no two of them run together.
+ */
+function callCountKey(context: ToolExecutionContext): string {
+  const organizationId = plainId(context.sessionData?.organizationId);
+  const userId = plainId((context.userContext as { userId?: unknown } | undefined)?.userId);
+  return [organizationId, plainId(context.personaId), userId, resolveSelfImprovementSessionKey(context)]
+    .map(encodeURIComponent)
+    .join('|');
+}
 
 /**
  * Why the tool refused a call before it changed anything: `frozen`, `off` and `no_learner` as every
@@ -251,7 +271,10 @@ export class AdaptPersonalityTool
   /** Per-session accumulated |delta| per trait. */
   private readonly sessionDeltas: Map<string, Map<string, number>> = new Map();
 
-  /** Per-session count of the calls accepted on a host with a learning layer. */
+  /**
+   * Per-session count of the calls accepted on a host with a learning layer, keyed by the turn's organization, persona
+   * and user beside its session. Kept in process memory for the life of the tool.
+   */
   private readonly sessionCalls: Map<string, number> = new Map();
 
   /** Injected dependencies. */
@@ -318,12 +341,12 @@ export class AdaptPersonalityTool
 
     // The learning layer retains its existing step and call limits.
     const learning = readToolLearningContext(context.sessionData);
-    const sessionKey = resolveSelfImprovementSessionKey(context);
+    const countKey = callCountKey(context);
     if (learning) {
       if (Math.abs(delta) > MAX_STEP_WITH_LEARNING + 1e-9) {
         return refusedSelfChange(this.name, 'step_bound', `one call moves a trait by at most ${MAX_STEP_WITH_LEARNING}`);
       }
-      if ((this.sessionCalls.get(sessionKey) ?? 0) >= MAX_CALLS_PER_SESSION_WITH_LEARNING) {
+      if ((this.sessionCalls.get(countKey) ?? 0) >= MAX_CALLS_PER_SESSION_WITH_LEARNING) {
         return refusedSelfChange(this.name, 'call_limit', `a session accepts ${MAX_CALLS_PER_SESSION_WITH_LEARNING} calls`);
       }
     }
@@ -381,7 +404,7 @@ export class AdaptPersonalityTool
     const newSessionTotal = currentSessionTotal + Math.abs(effectiveDelta);
     sessionDeltas.set(trait, newSessionTotal);
     if (learning) {
-      this.sessionCalls.set(sessionKey, (this.sessionCalls.get(sessionKey) ?? 0) + 1);
+      this.sessionCalls.set(countKey, (this.sessionCalls.get(countKey) ?? 0) + 1);
     }
 
     // Decay-on-adapt (spec batch-1 C6): before recording the new mutation, age
