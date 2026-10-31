@@ -977,4 +977,17 @@ export const HTML_CASES: readonly HtmlCase[] = [
     images: 0,
     cut: false,
   },
+  {
+    name: "a form whose table puts a header cell beside a cell of words in each row, with no header row, as an order's details above its button are, is read as the blocks it holds",
+    html: lines(
+      '<title>Checkout</title>',
+      '<h2>Your order</h2>',
+      '<form method="post" action="/order"><table><tr><th>Delivery</th><td>Saturday</td></tr><tr><th>Payment</th><td>On delivery</td></tr></table>',
+      '<p><input type="submit" value="Place order"></p></form>',
+    ),
+    title: 'Checkout',
+    markdown: lines('## Your order', '', '| Delivery | Saturday    |', '| -------- | ----------- |', '| Payment  | On delivery |'),
+    images: 0,
+    cut: false,
+  },
 ];
