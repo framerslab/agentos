@@ -5159,6 +5159,18 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
     expect(four.manifest.loops.ledger).toEqual({ live: true, detail: 'sql store the host passed; unkeyed' });
   });
 
+  it("stamps the trait row and its ledger rows with the layer's clock, and keeps a learnable trait inside [0.05, 0.95] whatever the persona sets", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const store = new InMemoryLearningStore();
+    await oneTurn({ honesty: 0.9, extraversion: 0.99, openness: 0.01 }, { store, clock: () => Date.parse(LEARNED_AT) });
+    expect(await store.traitRow('', 'tutor', 'ana')).toMatchObject({ updatedAt: LEARNED_AT });
+    const state = await traitStateOf(store);
+    expect(state.day).toBe(LEARNED_AT.slice(0, 10));
+    expect(state.baseline).toMatchObject({ extraversion: 0.99, openness: 0.01 });
+    expect(state.current).toMatchObject({ extraversion: 0.95, openness: 0.05 });
+    expect((await store.chainRows(ANA_CHAIN)).map((row) => row.createdAt)).toEqual([LEARNED_AT, LEARNED_AT]);
+  });
+
   it('writes the trait row at a first session in mode frozen and under the process freeze, and none in mode off, where the session row is still written', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const frozen = new InMemoryLearningStore();
@@ -5391,6 +5403,32 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
       ]);
       expect(JSON.parse(failedRows[1].body).reason).toBe('write_failed');
       expect(failing.undone).toEqual([]);
+
+      // Two writes of one user started at once run one after another: the second waits for the first's verdict.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const slow = watchedWrite('mt-s1', async () => {
+        await gate;
+        return 'mt-s1';
+      });
+      const quickApply = vi.fn(async () => 'mt-s2');
+      const slowResult = session.recordSelfChange!(slow.input, { learner: 'bound', namespace: 'A' });
+      const quickResult = session.recordSelfChange!(watchedWrite('mt-s2', quickApply).input, { learner: 'bound', namespace: 'A' });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(quickApply).not.toHaveBeenCalled();
+      release();
+      expect(await slowResult).toMatchObject({ status: 'kept' });
+      expect(await quickResult).toMatchObject({ status: 'kept' });
+      expect(
+        (await store.chainRows(chain)).filter((row) => row.subject.startsWith('mt-s')).map((row) => [row.subject, row.rowType]),
+      ).toEqual([
+        ['mt-s1', 'candidate'],
+        ['mt-s1', 'verdict'],
+        ['mt-s2', 'candidate'],
+        ['mt-s2', 'verdict'],
+      ]);
       expect(await new Ledger({ store }).verifyChain(chain)).toEqual({ ok: true, keyed: false });
 
       // A second user's turn on 42's session has no learner; its write chains under the agent with that user's id.
@@ -5435,6 +5473,102 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
         reason: 'forgotten',
       });
       expect(late).not.toHaveBeenCalled();
+    } finally {
+      await layer.close();
+    }
+  });
+
+  it("takes a write back as unrecorded when the tombstone cannot be read again, leaving its candidate pending, and names a forgotten user's tombstone, never the user, when a write cannot be taken back", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    /** A store whose tombstones cannot be read while `unreadable` is set, as a store whose connection dropped. */
+    class FlakyTombstones extends InMemoryLearningStore {
+      unreadable = false;
+      async isForgotten(hash: string): Promise<boolean> {
+        if (this.unreadable) throw new Error('tombstones unreadable');
+        return super.isForgotten(hash);
+      }
+    }
+    const store = new FlakyTombstones();
+    const layer = createLearningLayer({ store });
+    try {
+      const session = await layer.forLearner(LEARNER_42, productContext('s-1'));
+      await session.prepareTurn(productTurn());
+      const unread = watchedWrite('mt-u', async () => {
+        store.unreadable = true;
+        return 'mt-u';
+      });
+      const result = await session.recordSelfChange!(unread.input);
+      store.unreadable = false;
+      expect(result).toMatchObject({ status: 'rejected', reason: 'store_unavailable' });
+      expect(unread.undone).toEqual([['mt-u', 'unrecorded']]);
+      const pending = (await store.chainRows(chainKeyOf(LEARNER_42))).filter((row) => row.subject === 'mt-u');
+      expect(pending.map((row) => [row.rowType, row.verdict])).toEqual([['candidate', 'pending']]);
+      expect(result.status === 'rejected' ? result.ledgerId : undefined).toBe(pending[0].id);
+
+      // A forgotten user's write whose undo fails: the warning names the tombstone's first 16 hex digits, never the user.
+      const zed: LearnerKey = { namespace: 'A', agentKey: 'tutor', userId: 'zed-private' };
+      const zedSession = await layer.forLearner(zed, productContext('s-2'));
+      await zedSession.prepareTurn(productTurn({ userId: 'zed-private' }));
+      const hash = await tombstoneHash('A', 'zed-private');
+      const stuck: SessionSelfChange<string> = {
+        ...watchedWrite('mt-z').input,
+        apply: async () => {
+          await store.insertForgotten(hash, LEARNED_AT);
+          return 'mt-z';
+        },
+        undo: async () => {
+          throw new Error('the trace is locked');
+        },
+      };
+      expect(await zedSession.recordSelfChange!(stuck)).toEqual({ status: 'rejected', reason: 'forgotten' });
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines.some((line) => line.includes(`(tombstone ${hash.slice(0, 16)}) was not taken back (the trace is locked)`))).toBe(true);
+      expect(lines.some((line) => line.includes('zed-private'))).toBe(false);
+      expect(await store.traitRow('A', 'tutor', 'zed-private')).toBeUndefined();
+      expect(await store.chainRows(chainKeyOf(zed))).toEqual([]);
+    } finally {
+      await layer.close();
+    }
+  });
+
+  it("files a session with no learner under the session's own form, records its writes under the agent, and a named user's turn on it under that user", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { adapter } = await processOver(learningFile());
+    const layer = createLearningLayer({ storageAdapter: adapter });
+    const store = new SqlLearningStore({ adapter });
+    try {
+      const placeholder = await layer.forLearner({ namespace: '', agentKey: 'tutor', userId: 'anonymous' }, productContext('s-9'));
+      const placeholderTurn = await placeholder.prepareTurn(productTurn({ userId: 'anonymous', namespace: '' }));
+      expect(placeholderTurn).toMatchObject({
+        learner: 'none',
+        noLearnerReason: 'placeholder_user',
+        scopes: { learner: 'none', userScopeId: '/s-9', personaScopeId: '/s-9::tutor', namespace: '' },
+      });
+      expect(placeholderTurn.turnUserId).toBeUndefined();
+      expect(placeholderTurn.systemPrompts[0]?.content).toBe(renderPersonalitySection(TUTOR_PERSONA));
+      expect(await store.traitRow('', 'tutor', 'anonymous')).toBeUndefined();
+      expect(await placeholder.recordSelfChange!(watchedWrite('mt-p1').input, { learner: 'none', namespace: '' })).toMatchObject({ status: 'kept' });
+      expect(
+        (await store.chainRows(chainKeyOf({ namespace: '', agentKey: 'tutor', userId: null }))).map((row) => [row.userId, row.turnUserId, row.sessionId, row.verdict]),
+      ).toEqual([
+        [null, null, 's-9', 'pending'],
+        [null, null, 's-9', 'kept'],
+      ]);
+      // A named user's turn on it records that user.
+      expect((await placeholder.prepareTurn(productTurn({ userId: 'ana', namespace: '' }))).turnUserId).toBe('ana');
+      expect(await placeholder.recordSelfChange!(watchedWrite('mt-p2').input, { learner: 'none', namespace: '', turnUserId: 'ana' })).toMatchObject({ status: 'kept' });
+      expect((await store.chainRows(chainKeyOf({ namespace: '', agentKey: 'tutor', userId: null }, 'ana'))).map((row) => row.turnUserId)).toEqual(['ana', 'ana']);
+      expect(await store.sessionRowsOf('', 'ana')).toMatchObject([{ sessionId: 's-9', kind: 'visitor' }]);
+      expect(placeholder.scopesFor!({ userId: 'ana', namespace: '', workflowSeat: false })).toMatchObject({ learner: 'none', userScopeId: '/s-9' });
+      // A session opened with no key at all is the same.
+      const keyless = await layer.forLearner(null, productContext('s-10'));
+      expect(await keyless.prepareTurn(productTurn({ userId: null, namespace: '' }))).toMatchObject({
+        learner: 'none',
+        noLearnerReason: 'no_user_id',
+        scopes: { learner: 'none', userScopeId: '/s-10', personaScopeId: '/s-10::tutor' },
+      });
+      expect((await layer.manifest()).turns).toEqual({ prepared: 3, bound: 0, none: { placeholder_user: 2, no_user_id: 1 } });
     } finally {
       await layer.close();
     }
