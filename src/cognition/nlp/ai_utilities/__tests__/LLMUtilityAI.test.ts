@@ -114,6 +114,9 @@ describe('LLMUtilityAI', () => {
     ['a fenced value whose string holds backticks', '```json\n{"note": "use ``` here"}\n```', { note: 'use ``` here' }],
     ['a fence with words around it whose string holds backticks', 'Here is the result:\n```json\n{"note": "use ``` here"}\n```\nDone.', { note: 'use ``` here' }],
     ['a fence closed on a line with words after it', 'Here it is:\n```json\n{"ok": true}\n``` Hope this helps.', { ok: true }],
+    ['a fence closed on a line with words after it, whose string holds backticks', 'Here:\n```json\n{"note": "use ``` here"}\n``` Done.', { note: 'use ``` here' }],
+    ['a fence closed right after its JSON, with words after it', 'Here it is:\n```json\n{"ok": true}``` Hope this helps.', { ok: true }],
+    ['a fence of four backticks', '````json\n{"ok": true}\n````', { ok: true }],
     ['the first of two fences', '```json\n{"ok": true}\n```\nor\n```json\n{"ok": false}\n```', { ok: true }],
     ['a fence whose JSON starts on its opening line', '```{"ok": true}\n```', { ok: true }],
   ])('parseJsonSafe reads %s with no repair call', async (_name, reply, expected) => {
