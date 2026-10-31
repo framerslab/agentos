@@ -7,7 +7,9 @@
  * and for no other tenant's user of the same id; a text that did not change is kept with no row, and one that changed
  * is replaced, the kept verdict naming what the upsert wrote and forgot; a text it kept whose trace was deleted since is
  * filed again; a turn with no learner files under its
- * session's form; a second user's summary goes with forgetUser for that user; an upsert whose second write fails
+ * session's form; a second user's summary goes with forgetUser for that user, as does a summary of their words a
+ * compaction on the session filed, in the session's scopes and the learner's own, though they wrote nothing there; an
+ * upsert whose second write fails
  * takes back the first; a forget that fails is kept and made at the next upsert; a compaction that finishes after
  * forgetUser writes nothing back, with the facade on a file of its own and on the learning store's adapter; a freeze
  * stops the sink and mode off writes with no row; revert takes an upsert back; a crash's pending upsert is decided at
@@ -331,6 +333,66 @@ describe('a turn with no learner', () => {
     expect((await filed(brain)).map((trace) => trace.scopeId)).toEqual(['A/42']);
     expect(await store.chainRows(visitorChain)).toEqual([]);
     expect(await store.sessionRowsOf('A', 'bo')).toEqual([]);
+  });
+});
+
+describe("a second user a compaction names among its contributors", () => {
+  it('is found by forgetUser through the session the compaction filed on, though that user wrote nothing there', async () => {
+    quiet();
+    const { store, brain, memory, layer, sink } = await setUp();
+    const session = await layer.forLearner(LEARNER_A, contextOf('s-1'));
+    // The learner's own trace, filed once the layer holds the brain; it names no second user.
+    await memory.remember('42 keeps bees.', { scope: 'user', scopeId: 'A/42' });
+    turnOf(session, { userId: '42', namespace: 'A', conversationId: 'c-1' });
+    // Bo speaks on the learner's session and writes nothing there; the session has no learner from that turn on.
+    turnOf(session, { userId: 'bo', namespace: 'A', conversationId: 'c-1' });
+    const owner = turnOf(session, { userId: '42', namespace: 'A', conversationId: 'c-1' });
+    expect(owner.scopes).toMatchObject({ learner: 'none', userScopeId: 'A//s-1' });
+
+    await sink.upsertRollingSummaryMemory(
+      updateOf(owner, { userId: '42', organizationId: 'A', conversationId: 'c-1', summaryText: '- bo keeps goats', contributorIds: ['42', 'bo'] }),
+    );
+    expect((await filed(brain)).map((trace) => [trace.scope, trace.scopeId, trace.contributorIds])).toEqual([
+      ['persona', 'A//s-1::tutor', ['42', 'bo']],
+      ['thread', 'A//c-1', ['42', 'bo']],
+      ['user', 'A//s-1', ['42', 'bo']],
+      ['user', 'A/42', undefined],
+    ]);
+    expect((await store.sessionRowsOf('A', 'bo')).map((row) => [row.sessionId, row.kind, row.conversationIds, row.brainIds])).toEqual([
+      ['s-1', 'visitor', ['c-1'], ['sink-brain']],
+    ]);
+
+    await layer.forgetUser('bo', { namespace: 'A' });
+
+    expect(await liveContents(brain)).toEqual(['42 keeps bees.']);
+    expect(await store.sessionRowsOf('A', 'bo')).toEqual([]);
+  });
+
+  it("is found in the learner's own scopes by forgetUser, for a summary filed once the session opened again with its learner", async () => {
+    quiet();
+    const { brain, memory, layer, sink } = await setUp();
+    const first = await layer.forLearner(LEARNER_A, contextOf('s-1'));
+    await memory.remember('42 keeps bees.', { scope: 'user', scopeId: 'A/42' });
+    turnOf(first, { userId: '42', namespace: 'A', conversationId: 'c-1' });
+    turnOf(first, { userId: 'bo', namespace: 'A', conversationId: 'c-1' });
+    // The session opens again (its GMI built anew): the learner's turn has its learner, and the conversation's
+    // compaction still carries what bo said.
+    const again = turnOf(await layer.forLearner(LEARNER_A, contextOf('s-1')), { userId: '42', namespace: 'A', conversationId: 'c-1' });
+    expect(again.scopes).toMatchObject({ learner: 'bound', userScopeId: 'A/42' });
+
+    await sink.upsertRollingSummaryMemory(
+      updateOf(again, { userId: '42', organizationId: 'A', conversationId: 'c-1', summaryText: '- bo keeps goats', contributorIds: ['42', 'bo'] }),
+    );
+    expect((await filed(brain)).map((trace) => [trace.scope, trace.scopeId, trace.contributorIds])).toEqual([
+      ['persona', 'A/42::tutor', ['42', 'bo']],
+      ['thread', 'A//c-1', ['42', 'bo']],
+      ['user', 'A/42', undefined],
+      ['user', 'A/42', ['42', 'bo']],
+    ]);
+
+    await layer.forgetUser('bo', { namespace: 'A' });
+
+    expect(await liveContents(brain)).toEqual(['42 keeps bees.']);
   });
 });
 
