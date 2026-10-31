@@ -38,9 +38,21 @@ describe('the tag grammar (U1)', () => {
     expect(normalizeTag('\u039F\u03A3-\u0391')).toBe('\u03BF\u03C2-\u03B1');
   });
 
+  it('writes a sigma by its place in its run, so the separator typed never changes a letter of the tag', () => {
+    for (const typed of ['\u039F\u03A3-\u0391', '\u039F\u03A3.\u0391', '\u039F\u03A3:\u0391', '\u039F\u03A3\u0027\u0391', '\u039F\u03A3\u00B7\u0391']) expect(normalizeTag(typed), typed).toBe('\u03BF\u03C2-\u03B1');
+    for (const typed of ['\u039B\u039F\u0393\u039F\u03A3', '\u03BB\u03BF\u03B3\u03BF\u03C2', '\u03BB\u03BF\u03B3\u03BF\u03C3']) expect(normalizeTag(typed), typed).toBe('\u03BB\u03BF\u03B3\u03BF\u03C2');
+  });
+
   it('reads a tag as stored or typed', () => {
     for (const tag of ['budget', 'q3-planning', 'q3planning', 'caf\u00e9', 'किताब'.normalize('NFC'), 'r', '\u{20000}']) expect(isTag(tag), tag).toBe(true);
     for (const text of ['', 'Budget', 'q3--planning', '-budget', 'budget-', 'cafe\u0301', '\u0301a', 'a b', 'a'.repeat(41), 'c++', 'budget\n']) expect(isTag(text), text).toBe(false);
+  });
+
+  it('refuses a text with no key, so every tag has one', () => {
+    for (const text of ['\uFE70', '\uFB03'.repeat(20)]) {
+      expect(canonicalTag(text), text).toBeNull();
+      expect(isTag(text), text).toBe(false);
+    }
   });
 
   it('classifies a stored label without losing it: an alias only by case, normalization and separators', () => {
@@ -57,6 +69,21 @@ describe('the tag grammar (U1)', () => {
     expect(classifyLegacyTag('!!!')).toEqual({ state: 'unresolved', key: null });
     expect(classifyLegacyTag('x'.repeat(41))).toEqual({ state: 'unresolved', key: null });
     expect(classifyLegacyTag('')).toEqual({ state: 'unresolved', key: null });
+  });
+
+  it('takes separators at either end of a stored label as separators, so the label stays an alias of its key', () => {
+    for (const label of ['budget_', '-budget', '_budget', ' budget\u2013', '__Budget__']) expect(classifyLegacyTag(label), label).toEqual({ state: 'alias', key: 'budget' });
+    expect(classifyLegacyTag('-q3 planning_')).toEqual({ state: 'alias', key: 'q3planning' });
+    expect(classifyLegacyTag('_')).toEqual({ state: 'unresolved', key: null });
+    expect(classifyLegacyTag('-C++')).toEqual({ state: 'unresolved', key: 'c' });
+    expect(tagKeysOf({ tags: ['budget_', '-Budget', 'budget.'] })).toEqual(['budget']);
+  });
+
+  it('reads a stored label with a long run of separators inside it in one pass, not one pass for each separator', () => {
+    const label = `a${'-'.repeat(100_000)}b`;
+    const started = performance.now();
+    expect(classifyLegacyTag(label)).toEqual({ state: 'alias', key: 'ab' });
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 
   it('orders by code point, not by UTF-16 unit', () => {
