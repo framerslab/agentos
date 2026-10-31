@@ -27,7 +27,10 @@
  * it. An imported row stores the hash in `metadata.import_hash`. A trace a
  * release older than `memory_traces.scope_id` wrote holds `''` in that column
  * whatever scope id its metadata names; the import files such traces under
- * that scope id before its first duplicate check (`fillScopeIds`).
+ * that scope id before its first duplicate check (`fillScopeIds`). The import
+ * reads the rows whose `deleted` cell is blank or zero before the others
+ * (`liveRecordsFirst`), so a text the file holds both forgotten and live
+ * arrives live.
  *
  * A CSV file's scope ids are plain. A Brain a learning layer serves holds its
  * plain `user` and `persona` scope ids in the encoded form (`scopeIdForm.ts`):
@@ -43,7 +46,13 @@ import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
-import { duplicateTraceCondition, duplicateTraceParams, importedScopeId, importedTurnUserId } from './importScope.js';
+import {
+  duplicateTraceCondition,
+  duplicateTraceParams,
+  importedScopeId,
+  importedTurnUserId,
+  liveRecordsFirst,
+} from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { encodePlainScopeId, importScopeIdFormDecision } from '../retrieval/store/scopeIdForm.js';
 
@@ -128,6 +137,10 @@ export class CsvImporter {
     const metadataIndex = indexOf('metadata');
     const scopeIdIndex = indexOf('scope_id');
 
+    // A row's `deleted` cell as the trace stores it: blank or not a number is 0, a live trace.
+    const deletedOf = (row: string[]): number =>
+      this._toInteger(deletedIndex >= 0 ? row[deletedIndex] ?? '' : '') ?? 0;
+
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id
        FROM memory_traces
@@ -145,7 +158,8 @@ export class CsvImporter {
       const encodePlainIds = (await importScopeIdFormDecision(trx, this.brain, { encoded: false })).action === 'encode';
       // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
       if (options?.dedup ?? true) await fillScopeIds(trx, brainId);
-      for (const row of dataRows) {
+      // The live rows first, so of two rows of one text, the forgotten one is the duplicate of the live one, never the reverse.
+      for (const row of liveRecordsFirst(dataRows, (candidate) => deletedOf(candidate) !== 0)) {
         try {
           const content = (row[contentIndex] ?? '').trim();
           if (!content) {
@@ -197,7 +211,6 @@ export class CsvImporter {
           const rawLastAccessed = lastAccessedIndex >= 0 ? row[lastAccessedIndex] ?? '' : '';
           const rawRetrievalCount = retrievalCountIndex >= 0 ? row[retrievalCountIndex] ?? '' : '';
           const rawStrength = strengthIndex >= 0 ? row[strengthIndex] ?? '' : '';
-          const rawDeleted = deletedIndex >= 0 ? row[deletedIndex] ?? '' : '';
 
           const preferredId = this._readCell(row, idIndex) || `mt_${uuidv4()}`;
           const traceId = await this._resolveTraceId(trx, preferredId);
@@ -214,7 +227,7 @@ export class CsvImporter {
             this._toInteger(rawRetrievalCount) ?? 0,
             JSON.stringify(this._parseTags(tagsIndex >= 0 ? row[tagsIndex] ?? '' : '')),
             JSON.stringify(metadata),
-            this._toInteger(rawDeleted) ?? 0,
+            deletedOf(row),
             scopeId,
           ]);
 
