@@ -4,7 +4,7 @@
  * so a host names the tool, sets either `agencies` option, reads the tool's arguments and result, the limits of a launch
  * tree, the frame a seat's turns carry, the turn a tool call came from and a launched team's registry record, types a
  * tool hook and builds seats from the package's entry points. Neither barrel exports the launch registry, the engine or
- * the tool factory. The type checks run in `tsc --noEmit`.
+ * either surface's tool factory. The type checks run in `tsc --noEmit`.
  */
 import { describe, expect, it } from 'vitest';
 import * as root from '../../../../index.js';
@@ -39,9 +39,9 @@ describe('the launch surface', () => {
     }
   });
 
-  it('keeps the launch registry, the engine and the tool factory internal', () => {
+  it("keeps the launch registry, the engine and both surfaces' tool factories internal", () => {
     for (const barrel of [root, api]) {
-      for (const name of ['launchRegistry', 'runLaunch', 'createGmiLaunchTool', 'buildSessionSeat']) {
+      for (const name of ['launchRegistry', 'runLaunch', 'createGmiLaunchTool', 'createRuntimeLaunchTool', 'buildSessionSeat']) {
         expect(name in barrel).toBe(false);
       }
     }
