@@ -109,9 +109,29 @@ export function wrapForgeTool(options: WrapForgeToolOptions): ITool {
   return {
     ...(raw as unknown as ITool),
     // A spread copies the tool's fields, not its methods: the forge's refusal before the approval gate is the raw
-    // tool's, read with the caller's session data, which the wrapper forwards unchanged.
+    // tool's, read with the caller's session data, which the wrapper forwards unchanged. The call then ends without
+    // `execute`, so the attempt is recorded here, once.
     refusalBeforeApproval(args: Record<string, any>, ctx: ToolExecutionContext) {
-      return typeof raw.refusalBeforeApproval === 'function' ? raw.refusalBeforeApproval(args, ctx) : undefined;
+      const refusal = typeof raw.refusalBeforeApproval === 'function' ? raw.refusalBeforeApproval(args, ctx) : undefined;
+      if (refusal) {
+        const toolName = String(args?.name ?? 'unnamed');
+        const reason = String(refusal.error ?? 'refused').slice(0, 240);
+        log?.({ kind: 'rejected', scope, toolName, reason });
+        capture({
+          name: toolName,
+          description: String(args?.description ?? toolName),
+          mode: String(args?.implementation?.mode ?? '?'),
+          inputSchema: args?.inputSchema,
+          outputSchema: args?.outputSchema,
+          approved: false,
+          confidence: 0,
+          output: null,
+          errorReason: reason,
+          scope,
+          timestamp: Date.now(),
+        });
+      }
+      return refusal;
     },
     async execute(args: Record<string, unknown>, ctx: unknown) {
       const fixed = { ...args } as Record<string, unknown>;
