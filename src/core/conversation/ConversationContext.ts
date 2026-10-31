@@ -57,7 +57,23 @@ function cutsKeepingToolRounds(
 }
 
 /**
- * Configuration for the ConversationContext, defining its behavior and limits.
+ * A history setting read as a number of messages: the whole part of the number it reads as, never below 0, and
+ * `fallback` when it reads as none (given as undefined, or NaN).
+ *
+ * @param value - The setting.
+ * @param fallback - The setting's default.
+ * @returns The number of messages.
+ */
+function messageCount(value: unknown, fallback: number): number {
+  const count = Number(value);
+  return Number.isNaN(count) ? fallback : Math.max(0, Math.floor(count));
+}
+
+/**
+ * Configuration for the ConversationContext, defining its behavior and limits. Each of the four counts of messages
+ * (`maxHistoryLengthMessages`, `messagesToKeepVerbatimTail`, `messagesToKeepVerbatimHead`, `summarizationChunkSize`)
+ * counts the whole part of the number it reads as, and one that reads as none (given as undefined, or NaN) keeps its
+ * default.
  * @interface ConversationContextConfig
  * @property {number} [maxHistoryLengthMessages=100] - The number of messages the history keeps: past it, the oldest messages after the first `messagesToKeepVerbatimHead` are dropped, or summarized with `enableAutomaticSummarization`, and a summary right after those first messages is kept with them. A tool round the kept messages reach into is kept whole, past this number when it has to be.
  * @property {boolean} [enableAutomaticSummarization=false] - If true, attempts to summarize older parts of the conversation when history exceeds limits. Requires `utilityAI`.
@@ -187,6 +203,12 @@ export class ConversationContext {
             ...(config.summarizationOptions || {}),
         },
     } as Required<ConversationContextConfig>;
+    // The history's cuts index the messages with these settings, so each is read as a whole number of messages, and a
+    // setting given as undefined, which the spread above puts in place of its default, keeps the default.
+    this.config.maxHistoryLengthMessages = messageCount(this.config.maxHistoryLengthMessages, DEFAULT_MAX_HISTORY_MESSAGES);
+    this.config.messagesToKeepVerbatimTail = messageCount(this.config.messagesToKeepVerbatimTail, DEFAULT_VERBATIM_TAIL_COUNT);
+    this.config.messagesToKeepVerbatimHead = messageCount(this.config.messagesToKeepVerbatimHead, DEFAULT_VERBATIM_HEAD_COUNT);
+    this.config.summarizationChunkSize = messageCount(this.config.summarizationChunkSize, DEFAULT_SUMMARIZATION_CHUNK_SIZE);
 
     this.utilityAI = this.config.utilityAI; // Use the one from the fully merged config
     this.sessionMetadata = { ...initialMetadata };
