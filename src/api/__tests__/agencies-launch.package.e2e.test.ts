@@ -3186,4 +3186,120 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
       { name: 'note', args: { q: 'z' } },
     ]);
   });
+
+  it("an agencies.hitl approval on the full runtime is for the tool it was asked about: a tool the host registers under the name while the approval waits never runs under it, nor does the one it replaced", async () => {
+    const k = key();
+    const ran: Ran = [];
+    const asked: Asked[] = [];
+    let os!: AgentOS;
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(askedOf(request));
+      // While the approval is pending, the host registers another send_email through the runtime's tool orchestrator.
+      await os.getToolOrchestrator().registerTool({
+        ...hostTool('send_email', async (args) => {
+          ran.push({ name: 'send_email (replacement)', args });
+          return { success: true, output: 'sent by the replacement' };
+        }),
+        id: 'host-send_email-replacement',
+        inputSchema: { type: 'object', properties: { to: { type: 'string' } } },
+        hasSideEffects: true,
+      });
+      return { approved: true };
+    };
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          launchStep({ goal: 'Email the team.', seats: [{ role: 'mailer', instructions: 'Send the mail.', tools: ['send_email'] }] }, 'l1'),
+          reply.tools([{ id: 'e1', name: 'send_email', args: { to: 'team' } }]),
+          reply.text('Mail held.'),
+          reply.text('Done.'),
+        ],
+      }),
+      'ok',
+    );
+    os = await startRuntime(k, {
+      tools: { search: recording('search', ran), send_email: recording('send_email', ran, { hasSideEffects: true }) },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['send_email'] }, handler } },
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-replaced' });
+    // The lead, the mailer's two steps, the lead: the mailer called send_email and the handler approved it (the
+    // precondition).
+    expect(s.seen).toHaveLength(4);
+    const out = launchedIn(s.seen[3], 'l1');
+    expect(out).toMatchObject({ status: 'completed', text: 'Mail held.' });
+    expect(asked).toEqual([{ type: 'tool', agent: `launch:${out.agencyId}`, action: 'send_email', args: { to: 'team' }, callId: 'e1' }]);
+    // The name then held another tool, which the approval was not asked about: neither tool ran, and the mailer read why.
+    expect(ran).toEqual([]);
+    expect(toolText(s.seen[2], 'e1')).toContain('step_replaced');
+  });
+
+  it("an agencies.hitl handler that fails on a level-2 seat's call fails the root team's call, whose gate it is: the level-2 team reports how it ran, every later call under that gate is refused unasked, and the root launch fails, named by the error's name and code alone", async () => {
+    const k = key();
+    const canary = 'sk-CANARY-4141';
+    const thrown = Object.assign(new Error(`the approver at https://ops:${canary}@hooks.example refused`), { name: 'WebhookError', code: 'E_HOOK' });
+    const ran: Ran = [];
+    let asks = 0;
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          launchStep({ goal: 'Plan the search.', seats: [{ role: 'planner', instructions: 'Plan the search.', tools: ['search', LAUNCH_AGENCY_TOOL_NAME] }] }, 'l1'),
+          launchStep({ goal: 'Search.', seats: [{ role: 'finder', instructions: 'FINDER: find it.', tools: ['search'] }] }, 'n1'),
+          // The finder's search: the handler fails.
+          reply.tools([{ id: 's1', name: 'search', args: { q: 'x' } }]),
+          reply.text('No search.'),
+          // The planner's own search, a later call under the same gate.
+          reply.tools([{ id: 's2', name: 'search', args: { q: 'y' } }]),
+          reply.text('Planned.'),
+          reply.text('Handled.'),
+        ],
+      }),
+      'ok',
+    );
+    const warnings: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const logger: ILogger = {
+      info: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+      warn: (message: string, meta?: Record<string, unknown>) => {
+        warnings.push({ message, meta });
+      },
+    };
+    const os = await startRuntime(
+      k,
+      {
+        tools: { search: recording('search', ran) },
+        agencies: {
+          launch: true,
+          hitl: {
+            approvals: { beforeTool: ['search'] },
+            handler: async (): Promise<ApprovalDecision> => {
+              asks += 1;
+              throw thrown;
+            },
+          },
+        },
+      },
+      logger,
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-nested-fails' });
+    // The lead, the planner, the finder's two steps, the planner's two steps, the lead: the finder and then the planner
+    // called search (the precondition).
+    expect(s.seen).toHaveLength(7);
+    expect(systemText(s.seen[2])).toContain('FINDER: find it.');
+    // The handler was asked once, for the finder's call, and failed: the finder was told only that it failed.
+    expect(asks).toBe(1);
+    expect(ran).toEqual([]);
+    expect(toolText(s.seen[3], 's1')).toContain('the approval handler failed');
+    // The level-2 team reported how its own team ran.
+    expect(launchedIn(s.seen[4], 'n1')).toMatchObject({ status: 'completed', text: 'No search.' });
+    // The planner's later call under the root team's gate was refused, the handler not asked again.
+    expect(toolText(s.seen[5], 's2')).toContain('an earlier tool approval failed');
+    // The root team's call rejected with the handler's error: the root launch failed, named by its name and code alone.
+    const root = launchedIn(s.seen[6], 'l1');
+    expect(root).toMatchObject({ status: 'failed', reason: 'the team failed: WebhookError (E_HOOK)' });
+    expectNoWordOf(canary, [JSON.stringify(s.seen), JSON.stringify(root)]);
+    const launchWarnings = warnings.filter(({ message }) => message.startsWith('[AgentOS] launch_agency'));
+    expect(launchWarnings.map(({ message }) => message)).toEqual(['[AgentOS] launch_agency run failed']);
+    expect(launchWarnings[0].meta).toEqual({ error: expect.objectContaining({ name: 'WebhookError', message: expect.stringContaining(canary) }) });
+  });
 });
