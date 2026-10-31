@@ -607,8 +607,8 @@ export interface ImportResult {
   /**
    * How many records the import did not write: a duplicate trace (see `ImportOptions.dedup`), a graph, document,
    * chunk, image, conversation or message row the brain holds already, a Markdown or Obsidian note whose body is
-   * blank, a CSV row whose `content` is blank, and a row that lacks a field it needs, such as an edge with no
-   * source or target.
+   * blank, a CSV row whose `content` is blank, a memory-graph node whose trace the import did not write under its id
+   * and an edge that names one, and a row that lacks a field it needs, such as an edge with no source or target.
    */
   skipped: number;
 
