@@ -230,12 +230,13 @@ export class GMIManager {
    */
   private readonly deactivations = new Map<string, Promise<boolean>>();
   /**
-   * The session of each seat createAgencySeat() registered, until the seat is released. A seat's GMI serves its team
-   * alone: an acquisition that names one is refused and feedback that names one is not recorded, so a request can
-   * neither run a turn on a seat's GMI (its tools, budget and working memory are the team's) nor shut a running seat
-   * down by asking for another persona.
+   * The session of each seat createAgencySeat() registered, mapped to the seat's GMI instance id, until the seat is
+   * released. A seat's GMI serves its team alone: an acquisition that names one is refused and feedback that names one
+   * is not recorded, so a request can neither run a turn on a seat's GMI (its tools, budget and working memory are the
+   * team's) nor shut a running seat down by asking for another persona; the idle cleanup passes it by, since its launch
+   * releases it.
    */
-  private readonly agencySeatSessions = new Set<string>();
+  private readonly agencySeatSessions = new Map<string, string>();
 
   constructor(
     config: GMIManagerConfig,
@@ -792,6 +793,17 @@ export class GMIManager {
     agencyOptions?: GMIAgencyContextOptions,
     turnOrganizationId?: string,
   ): Promise<{ gmi: IGMI; conversationContext: ConversationContext }> {
+    // A seat's session serves its team alone, whatever persona the request names: reusing its GMI would run the
+    // request on the team's tools, budget and working memory, and a persona refresh would shut the seat down mid-run.
+    // It is checked first, and again after each wait in which a seat could take the session.
+    const seatSessionRefused = (): GMIManagerError =>
+      new GMIManagerError(
+        `Session '${sessionId}' is a seat of a team a GMI launched; no request runs in it.`,
+        GMIErrorCode.PERMISSION_DENIED,
+        { sessionId },
+      );
+    if (this.agencySeatSessions.has(sessionId)) throw seatSessionRefused();
+
     const personaDefinition = this.getPersonaDefinition(requestedPersonaId);
     if (!personaDefinition) {
       throw new GMIManagerError(`Persona '${requestedPersonaId}' not found.`, GMIErrorCode.PERSONA_NOT_FOUND, { requestedPersonaId });
@@ -832,15 +844,7 @@ export class GMIManager {
       deactivation = this.deactivations.get(sessionId);
     }
 
-    // A seat's session serves its team alone, whatever persona the request names: reusing its GMI would run the
-    // request on the team's tools, budget and working memory, and a persona refresh would shut the seat down mid-run.
-    if (this.agencySeatSessions.has(sessionId)) {
-      throw new GMIManagerError(
-        `Session '${sessionId}' is a seat of a team a GMI launched; no request runs in it.`,
-        GMIErrorCode.PERMISSION_DENIED,
-        { sessionId },
-      );
-    }
+    if (this.agencySeatSessions.has(sessionId)) throw seatSessionRefused();
 
     let gmiInstanceId = this.gmiSessionMap.get(sessionId);
     let gmi: IGMI | undefined = gmiInstanceId ? this.activeGMIs.get(gmiInstanceId) : undefined;
@@ -903,6 +907,11 @@ export class GMIManager {
           GMIErrorCode.NOT_INITIALIZED,
           { sessionId, gmiInstanceId: newGmiInstanceId },
         );
+      }
+      if (this.agencySeatSessions.has(sessionId)) {
+        // A seat took the session while this GMI was built: it is shut down and never registered.
+        await this.shutDownGMI(newGMI, newGmiInstanceId, sessionId);
+        throw seatSessionRefused();
       }
       gmi = newGMI;
 
@@ -998,10 +1007,12 @@ export class GMIManager {
    * make no model call, the tool view and provider manager the launch gives it, and, with the runtime's learning layer,
    * no learner (a workflow seat's source): it still renders its persona's traits, and with the layer off it sends no
    * personality section. It is registered under the seat session id, so its own tool calls resolve it; `release()`
-   * shuts it down and takes it out of the manager. Until then the session is the seat's: `getOrCreateGMIForSession()`
-   * refuses it with `PERMISSION_DENIED`, whatever persona the request names, and `processUserFeedback()` records
-   * nothing for it. `shutdown()` waits for a seat being built, as it waits for a session's GMI, and the build then
-   * fails with its GMI shut down.
+   * shuts it down and takes it out of the manager, and a handle released after the manager shut down leaves alone
+   * whatever holds the session since. Until then the session is the seat's:
+   * `getOrCreateGMIForSession()` refuses it with `PERMISSION_DENIED`, whatever persona the request names (a request
+   * whose GMI was being built when the seat took the session included, that GMI shut down unregistered),
+   * `processUserFeedback()` records nothing for it and `cleanupInactiveGMIs()` passes it by. `shutdown()` waits for a
+   * seat being built, as it waits for a session's GMI, and the build then fails with its GMI shut down.
    *
    * @throws {GMIManagerError} `PERSONA_NOT_FOUND` for an unknown persona; `PERMISSION_DENIED` for one the user's tier or
    *   strict validation refuses; `INVALID_STATE` for a session that already has a GMI; `CONFIGURATION_ERROR` without
@@ -1074,18 +1085,35 @@ export class GMIManager {
     }
     this.activeGMIs.set(gmiInstanceId, gmi);
     this.gmiSessionMap.set(spec.seatSessionId, gmiInstanceId);
-    this.agencySeatSessions.add(spec.seatSessionId);
+    this.agencySeatSessions.set(spec.seatSessionId, gmiInstanceId);
     let released: Promise<void> | undefined;
     return {
       gmi,
       personaId: persona.id,
       // Once: a second call waits for the first. It skips the initialization check, so a seat closed while the manager
       // shuts down is still released. The session is the seat's until its GMI is gone.
-      release: () =>
-        (released ??= this.deactivateSession(spec.seatSessionId)
-          .then(() => undefined)
-          .finally(() => this.agencySeatSessions.delete(spec.seatSessionId))),
+      release: () => (released ??= this.releaseAgencySeat(spec.seatSessionId, gmiInstanceId, gmi)),
     };
+  }
+
+  /**
+   * Releases one seat's GMI and then its hold on the session. Only the seat's own GMI and hold go: once the manager has
+   * shut down, the session may hold a GMI or a seat that came after it, which stays.
+   */
+  private async releaseAgencySeat(sessionId: string, gmiInstanceId: string, gmi: IGMI): Promise<void> {
+    try {
+      if (this.gmiSessionMap.get(sessionId) === gmiInstanceId) {
+        await this.deactivateSession(sessionId);
+      } else if (this.activeGMIs.get(gmiInstanceId) === gmi) {
+        try {
+          await this.shutDownGMI(gmi, gmiInstanceId, sessionId);
+        } finally {
+          this.activeGMIs.delete(gmiInstanceId);
+        }
+      }
+    } finally {
+      if (this.agencySeatSessions.get(sessionId) === gmiInstanceId) this.agencySeatSessions.delete(sessionId);
+    }
   }
 
   /**
@@ -1198,6 +1226,8 @@ export class GMIManager {
     const sessionIdsSnapshot = Array.from(this.gmiSessionMap.keys());
 
     for (const sessionId of sessionIdsSnapshot) {
+      // A seat's GMI lives as long as its launch, which releases it; its turns leave no conversation context here.
+      if (this.agencySeatSessions.has(sessionId)) continue;
       const gmiInstanceId = this.gmiSessionMap.get(sessionId);
       if (!gmiInstanceId) continue;
 
