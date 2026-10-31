@@ -336,8 +336,8 @@ export interface AgentOptions extends BaseAgentConfig {
    */
   cognition?: CognitionProfile | CognitionConfig;
   /**
-   * The learning layer when `runtime` is `'gmi'` (docs/GMI.md, "Learning"). Unset or `false`: off, and the agent
-   * runs as it did before the layer existed. `true` or a {@link LearningConfig}: the agent's GMIs send the
+   * The learning layer when `runtime` is `'gmi'` (docs/GMI.md, "Learning"). Unset, `false` or `null`: off, and the
+   * agent runs as it did before the layer existed. `true` or a {@link LearningConfig}: the agent's GMIs send the
    * personality section as a system prompt of its own on every turn, and each session opened with a user id is
    * bound to a learner. The legacy runtime ignores it.
    */

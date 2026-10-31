@@ -107,9 +107,12 @@ class LearningLayer implements ILearningLayer, LearnerSessionHost {
  * that builds its own memory manager and runs its own turn loop calls this itself: `forLearner()` for each session,
  * `prepareTurn()` before each turn, and the personality section it returns goes into the system prompt.
  *
+ * An option set to `null` reads as unset, as one read from JSON or YAML writes it, and takes its default.
+ *
  * @throws {Error} Naming the field, when the config is not valid ({@link resolveLearningConfig}).
  */
 export function createLearningLayer(options: LearningLayerOptions = {}): ILearningLayer {
-  const { profile = 'custom', surface = 'custom', hostLoops, ...config } = options;
-  return new LearningLayer(config, resolveLearningConfig(config, profile), surface, profile, hostLoops);
+  const { profile: givenProfile, surface: givenSurface, hostLoops, ...config } = options;
+  const profile = givenProfile ?? 'custom';
+  return new LearningLayer(config, resolveLearningConfig(config, profile), givenSurface ?? 'custom', profile, hostLoops ?? undefined);
 }

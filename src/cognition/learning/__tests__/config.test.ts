@@ -2,11 +2,12 @@
  * @file config.test.ts
  * The learning option resolved into switches, the mode a turn runs in once the process switches apply, and what a
  * self-modification tool reads about its turn: the learner and the mode a GMI puts on the call, and the refusal it
- * gives, in the order the freeze, the mode, the learner.
+ * gives, in the order the freeze, the mode, the learner. A `null` option or field reads as unset; a memory tool that
+ * writes refuses only on a freeze, the run-time freeze it reads at the call included.
  */
 import { describe, expect, it } from 'vitest';
 import { processIsFrozen, resolveLearning, resolveLearningConfig, resolveTurnMode } from '../config';
-import { readToolLearningContext, refusedSelfChange, selfChangeRefusal } from '../toolContext';
+import { memoryWriteRefusal, readToolLearningContext, refusedSelfChange, selfChangeRefusal } from '../toolContext';
 
 describe('the learning option', () => {
   it('is off unless set, takes the profile for true, and lets a config override each switch', () => {
@@ -77,5 +78,55 @@ describe('what a tool reads about its turn', () => {
     expect(refusedSelfChange('adapt_personality', 'step_bound', 'one call moves a trait by at most 0.02').error).toBe(
       'adapt_personality refused (step_bound): one call moves a trait by at most 0.02; nothing was changed.',
     );
+  });
+});
+
+describe('null reads as unset', () => {
+  it('turns learning off for learning: null, and leaves a null field to its default', () => {
+    expect(resolveLearning(null as never, 'full')).toBeUndefined();
+    expect(
+      resolveLearningConfig({ mode: null, traits: null, agentKey: null, namespace: null, anonymousUserIds: null } as never, 'full'),
+    ).toEqual({ mode: 'on', traits: true, lessons: true, skills: true });
+    const nulls = { lessons: null, skills: null, store: null, ledgerKey: null, clock: null, memoryTools: null };
+    expect(resolveLearningConfig(nulls as never, 'light')).toEqual({ mode: 'on', traits: false, lessons: false, skills: false });
+  });
+
+  it('names the store, ledger key, clock and memory-tools fields of a config that is not valid', () => {
+    expect(() => resolveLearningConfig({ ledgerKey: 7 as never }, 'light')).toThrow(/learning\.ledgerKey must be a string/);
+    expect(() => resolveLearningConfig({ ledgerKey: ' ' }, 'light')).toThrow(/learning\.ledgerKey must not be blank/);
+    expect(() => resolveLearningConfig({ clock: 'now' as never }, 'light')).toThrow(/learning\.clock must be a function/);
+    expect(() => resolveLearningConfig({ store: {} as never }, 'light')).toThrow(/learning\.store must be a LearningStore/);
+    expect(() => resolveLearningConfig({ memoryTools: 'facade' as never }, 'light')).toThrow(/learning\.memoryTools must be an object/);
+  });
+});
+
+describe('the freeze a tool reads at the call', () => {
+  it('refuses frozen before off, and the memory tools only on a freeze', () => {
+    let frozen = false;
+    const learning = { learner: 'bound', mode: 'off', frozen: () => frozen };
+    expect(selfChangeRefusal({ learning }, {})).toBe('off');
+    expect(memoryWriteRefusal({ learning }, {})).toBeUndefined();
+    frozen = true;
+    expect(selfChangeRefusal({ learning }, {})).toBe('frozen');
+    expect(memoryWriteRefusal({ learning }, {})).toBe('frozen');
+    expect(memoryWriteRefusal(undefined, { AGENTOS_LEARNING_FREEZE: '1' })).toBe('frozen');
+    expect(memoryWriteRefusal({ learning: { learner: 'none', mode: 'off' } }, {})).toBeUndefined();
+    expect(memoryWriteRefusal({ learning: { learner: 'bound', mode: 'frozen' } }, {})).toBe('frozen');
+  });
+
+  it("reads a turn's scopes, its recorder and its second user, and drops a malformed one", () => {
+    const scopes = { learner: 'none', mode: 'on', userScopeId: '/s-1', personaScopeId: '/s-1::tutor', namespace: '' };
+    const recordSelfChange = async () => ({ status: 'written' as const, result: undefined });
+    expect(readToolLearningContext({ learning: { learner: 'none', mode: 'on', scopes, recordSelfChange, turnUserId: 'bo' } })).toEqual({
+      learner: 'none',
+      mode: 'on',
+      scopes,
+      recordSelfChange,
+      turnUserId: 'bo',
+    });
+    expect(readToolLearningContext({ learning: { learner: 'none', mode: 'on', scopes: { userScopeId: 7 }, turnUserId: '' } })).toEqual({
+      learner: 'none',
+      mode: 'on',
+    });
   });
 });
