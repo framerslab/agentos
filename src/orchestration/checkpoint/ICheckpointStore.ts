@@ -89,8 +89,12 @@ export interface Checkpoint {
     durationMs: number;
     /**
      * The target the node picked itself, as a router, a guardrail that reroutes or
-     * the exit of a voice node does. A resume that marks the node complete with
-     * this result goes there rather than evaluating the node's edges.
+     * the exit of a voice node does. A resume that marks the node complete with this
+     * result, as it does a `write`, `external` or `human` node such as a voice node,
+     * goes there rather than evaluating the node's edges. `routerNode()` and
+     * `guardrailNode()` build `pure` nodes, which a resume never marks complete from
+     * a recorded result: one the checkpoint does not list as completed runs again and
+     * picks its target anew.
      */
     routeTarget?: string;
   }>;
