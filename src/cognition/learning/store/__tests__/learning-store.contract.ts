@@ -5,8 +5,8 @@
  * by candidate and by learner, and a chain's rows with its head in one read; an agent's candidates with no verdict on
  * its chains with no learner read back up to a time; a chain head is advanced by compare-and-swap, moved only in its
  * last row, hash and seq, and refused once marked forgotten; trait rows are updated by version; freezes, sessions and
- * tombstones are kept, freezes listed in one order, a session row's start kept when it is written again and a session
- * row written at the version its writer read; text is ordered by UTF-16 code unit, whatever order the database sorts
+ * tombstones are kept, freezes listed in one order, one session's rows read back for every user, a session row's start
+ * kept when it is written again and a session row written at the version its writer read; text is ordered by UTF-16 code unit, whatever order the database sorts
  * text in; a user's rows are deleted in one namespace only, and the tombstone stays; a transaction that throws takes
  * back every write it made, a deletion included, and no read sees one of them; a transaction's handle refuses every
  * call once its transaction has ended; every row a store is given or hands out is a copy; and a store writes no text
@@ -271,6 +271,20 @@ export function runLearningStoreContract(name: string, open: () => Promise<Learn
         await store.insertForgotten('hash-1', NOW);
         await store.insertForgotten('hash-1', LATER);
         expect(await store.isForgotten('hash-1')).toBe(true);
+      }));
+
+    it("reads one session's rows of every user and kind, and no other session's, agent's or namespace's", () =>
+      withStore(async (store) => {
+        await store.putSessionRow(sessionRow({ userId: 'bo', kind: 'visitor' }));
+        await store.putSessionRow(sessionRow());
+        await store.putSessionRow(sessionRow({ sessionId: 's-2' }));
+        await store.putSessionRow(sessionRow({ agentKey: 'coach' }));
+        await store.putSessionRow(sessionRow({ namespace: 'B' }));
+        expect((await store.sessionRowsIn!('A', 'tutor', 's-1')).map((row) => [row.userId, row.kind])).toEqual([
+          ['42', 'learner'],
+          ['bo', 'visitor'],
+        ]);
+        expect(await store.transaction((tx) => tx.sessionRowsIn!('A', 'tutor', 's-3'))).toEqual([]);
       }));
 
     it('lists freezes by scope key and mode', () =>
