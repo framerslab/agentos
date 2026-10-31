@@ -38,6 +38,16 @@ const origins = {
   'src/api/runtime/agencyLaunch/gmiLaunchTool.ts': 'gmi_launch_tool',
 } as const;
 
+/** Modules that write events through a handle: its component, then the fixed origin it reports while the mode is on. */
+const handles = {
+  'src/api/generateText.ts': ['fallback', 'generate_text'],
+  'src/api/streamText.ts': ['fallback', 'stream_text'],
+  'src/core/llm/providers/AIModelProviderManager.ts': ['llm.manager', 'provider_manager'],
+  'src/core/llm/providers/implementations/OpenAIProvider.ts': ['llm', 'openai_provider'],
+  'src/core/llm/providers/implementations/OpenRouterProvider.ts': ['llm', 'openrouter_provider'],
+  'src/api/server/AgentOSServer.ts': ['http', 'agentos_server'],
+} as const;
+
 it('binds a fixed component at every covered source module', async () => {
   const module = await import('../../src/core/logging/contentSafeTelemetry.js');
   const components: unknown = Reflect.get(module, 'CONTENT_SAFE_COMPONENTS');
@@ -49,6 +59,17 @@ it('binds a fixed component at every covered source module', async () => {
     expect(source.includes(`const console = createContentSafeConsole('${component}');`), path).toBe(true);
     expect(components).toContain(component);
   }
-  expect(components).toHaveLength(Object.keys(origins).length + 4);
+  const owners = new Set<string>([...Object.values(origins), ...Object.values(handles).map(([, origin]) => origin)]);
+  expect(components).toHaveLength(owners.size + 4);
   expect(new Set(components).size).toBe(components.length);
+});
+
+it('binds a fixed origin at every module that writes through an event handle', async () => {
+  const { CONTENT_SAFE_COMPONENTS } = await import('../../src/core/logging/contentSafeTelemetry.js');
+  for (const [path, [component, origin]] of Object.entries(handles)) {
+    const source = readFileSync(path, 'utf8');
+    expect(source.includes(`moduleLogger('${component}', '${origin}')`), path).toBe(true);
+    expect(source.includes('lazyLogger('), `${path} writes through a handle with no origin`).toBe(false);
+    expect(CONTENT_SAFE_COMPONENTS).toContain(origin);
+  }
 });
