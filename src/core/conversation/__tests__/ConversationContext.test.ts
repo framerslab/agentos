@@ -12,13 +12,15 @@ const CALLS = [
 
 /**
  * The message named `name`: `call` is an assistant message that names both calls, `read` and `write` are their
- * results, a name that starts with `q` is the user's and any other name is a reply.
+ * results, `summary` is a summary of earlier messages, a name that starts with `q` is the user's and any other name is
+ * a reply.
  */
 function fields(name: string): Omit<ConversationMessage, 'id' | 'timestamp'> {
   if (name === 'call') return { role: MessageRole.ASSISTANT, content: null, tool_calls: CALLS };
   if (name === 'read' || name === 'write') {
     return { role: MessageRole.TOOL, content: `${name} done`, tool_call_id: `call-${name}`, name: `${name}_file` };
   }
+  if (name === 'summary') return { role: MessageRole.SUMMARY, content: 'The user asked about the notes.' };
   return { role: name.startsWith('q') ? MessageRole.USER : MessageRole.ASSISTANT, content: name };
 }
 
@@ -93,14 +95,29 @@ describe('ConversationContext history cuts', () => {
 
       expect(names(context.getHistory())).toEqual(['q1', 'call', 'read', 'write', 'done', 'q2']);
     });
+
+    it('with no limit keeps a summary that follows the first messages', () => {
+      // A summary right after the first two messages stands for the messages it replaced. A limit of six keeps the
+      // first two, the summary and the newest three.
+      const context = contextWith(['q1', 'r1', 'summary', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4'], {
+        maxHistoryLengthMessages: 6,
+      });
+
+      expect(names(context.getHistory())).toEqual(['q1', 'r1', 'summary', 'r3', 'q4', 'r4']);
+    });
   });
 
   describe('with automatic summarization', () => {
     /**
      * A conversation over the messages named `messageNames` whose summaries `summarize` writes: past ten messages it
-     * keeps the first two and the newest two and summarizes four of the messages between them.
+     * keeps the first two and the newest two and summarizes four of the messages between them, unless `config` says
+     * otherwise.
      */
-    function summarizingContext(messageNames: string[], summarize: IUtilityAI['summarize']): ConversationContext {
+    function summarizingContext(
+      messageNames: string[],
+      summarize: IUtilityAI['summarize'],
+      config: Partial<ConversationContextConfig> = {},
+    ): ConversationContext {
       return contextWith(messageNames, {
         maxHistoryLengthMessages: 10,
         enableAutomaticSummarization: true,
@@ -108,6 +125,7 @@ describe('ConversationContext history cuts', () => {
         messagesToKeepVerbatimHead: 2,
         messagesToKeepVerbatimTail: 2,
         summarizationChunkSize: 4,
+        ...config,
       });
     }
 
@@ -162,6 +180,60 @@ describe('ConversationContext history cuts', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(names(context.getAllMessages())).toEqual([]);
+    });
+
+    it('keeps the summary when the history is still past its limit with too few messages left for another chunk, and at the next trim', async () => {
+      // A history loaded past its limit of ten, summarized eight messages at a time. The chunk reaches into the round,
+      // so it is summarized through the round's end, ten messages. Twelve are left, and the seven between the summary
+      // and the newest two are too few for another chunk, so the oldest after the summary are dropped instead.
+      const summarize = vi.fn(async () => 'The user asked about the notes.');
+      const context = summarizingContext(
+        ['q1', 'r1', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4', 'q5', 'call', 'read', 'write', 'done', 'q6', 'r6', 'q7', 'r7', 'q8', 'r8', 'q9'],
+        summarize,
+        { summarizationChunkSize: 8 },
+      );
+
+      context.addMessage(fields('r9'));
+
+      await vi.waitFor(() =>
+        expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'r6', 'q7', 'r7', 'q8', 'r8', 'q9', 'r9']),
+      );
+      const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
+      expect(summary?.metadata?.summarizedMessageIds).toEqual(
+        ['q2', 'r2', 'q3', 'r3', 'q4', 'r4', 'q5', 'call', 'read', 'write'].map((name) => `msg-${name}`),
+      );
+
+      // the next message leaves too few for a chunk again: the oldest after the summary go, and the summary stays
+      context.addMessage(fields('q10'));
+
+      await vi.waitFor(() =>
+        expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'q7', 'r7', 'q8', 'r8', 'q9', 'r9', 'q10']),
+      );
+      expect(summarize).toHaveBeenCalledTimes(1);
+    });
+
+    it('manages the messages recorded after a history is cleared while a summary is made', async () => {
+      let finish: (summary: string) => void = () => {};
+      const summarize = vi
+        .fn(async () => 'The user asked about the weather.')
+        .mockImplementationOnce(() => new Promise<string>((resolve) => { finish = resolve; }));
+      const context = summarizingContext(['q1', 'r1', 'q2', 'r2', 'q3', 'call', 'read', 'write', 'done', 'q4'], summarize);
+
+      context.addMessage(fields('r4'));
+      expect(summarize).toHaveBeenCalledTimes(1);
+      context.clearHistory();
+      // eleven messages, past the limit of ten, recorded while the cleared history's summary is made
+      for (const name of ['q5', 'r5', 'q6', 'r6', 'q7', 'r7', 'q8', 'r8', 'q9', 'r9', 'q10']) {
+        context.addMessage(fields(name));
+      }
+      expect(summarize).toHaveBeenCalledTimes(1);
+      finish('The user asked about the notes.');
+
+      await vi.waitFor(() =>
+        expect(names(context.getAllMessages())).toEqual(['q5', 'r5', 'summary', 'q8', 'r8', 'q9', 'r9', 'q10']),
+      );
+      const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
+      expect(summary?.content).toBe('The user asked about the weather.');
     });
   });
 });
