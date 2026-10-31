@@ -300,5 +300,68 @@ describe('ConversationContext history cuts', () => {
       const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
       expect(summary?.metadata?.summarizedMessageIds).toEqual(['q2', 'r2', 'q3', 'r3'].map((name) => `msg-${name}`));
     });
+
+    it('leaves a call that waits for its results out of a summary that keeps no newest messages', async () => {
+      // A limit of six that keeps no first and no newest messages, summarized seven at a time. The call passes the
+      // limit with its results still to come, and a summary of it would leave them without it, so the call stays out of
+      // the summary until both results are recorded. The summary then takes the round whole.
+      let finish: (summary: string) => void = () => {};
+      const summarize = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
+      const context = summarizingContext(['q1', 'r1', 'q2', 'r2', 'q3', 'r3'], summarize, {
+        maxHistoryLengthMessages: 6,
+        messagesToKeepVerbatimHead: 0,
+        messagesToKeepVerbatimTail: 0,
+        summarizationChunkSize: 7,
+      });
+
+      const round = ['call', 'read', 'write'].map((name) => context.addMessage(fields(name)));
+      finish('The user asked about the notes.');
+
+      await vi.waitFor(() => expect(names(context.getAllMessages())).toEqual(['summary']));
+      const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
+      expect(summary?.metadata?.summarizedMessageIds).toEqual([
+        ...['q2', 'r2', 'q3', 'r3'].map((name) => `msg-${name}`),
+        ...round.map((message) => message.id),
+      ]);
+      expect(summarize).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops a summary when a result for a call in its chunk is recorded while it is made', async () => {
+      // Other messages were recorded between the call's two results, so the call and its first result are in the chunk
+      // of the summary the fifth question starts, and the second result is recorded while that summary is made. The
+      // summary would leave that result without its call, so it is dropped. The round now runs from the call to the
+      // newest message, and the pass the result started keeps it whole.
+      let finish: (summary: string) => void = () => {};
+      const summarize = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
+      const context = summarizingContext(['q1', 'r1', 'call', 'read', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4'], summarize);
+
+      context.addMessage(fields('q5'));
+      expect(summarize).toHaveBeenCalledTimes(1);
+      context.addMessage(fields('write'));
+      finish('The user asked about the notes.');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(names(context.getAllMessages())).toEqual(
+        ['q1', 'r1', 'call', 'read', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4', 'q5', 'write'],
+      );
+      expect(summarize).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([-3, 0, 1])('summarizes two messages at a time with a chunk size of %s', async (chunkSize) => {
+      // A summary takes the place of the messages it summarizes, so a chunk of fewer than two would leave the history
+      // as long as it was, or make it longer.
+      const summarize = vi.fn(async () => 'The user asked about the notes.');
+      const context = summarizingContext(['q1', 'r1', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4', 'q5', 'r5'], summarize, {
+        summarizationChunkSize: chunkSize,
+      });
+
+      context.addMessage(fields('q6'));
+
+      await vi.waitFor(() =>
+        expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'q3', 'r3', 'q4', 'r4', 'q5', 'r5', 'q6']),
+      );
+      const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
+      expect(summary?.metadata?.summarizedMessageIds).toEqual(['q2', 'r2'].map((name) => `msg-${name}`));
+    });
   });
 });
