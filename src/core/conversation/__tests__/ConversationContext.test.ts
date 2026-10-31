@@ -363,5 +363,41 @@ describe('ConversationContext history cuts', () => {
       const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
       expect(summary?.metadata?.summarizedMessageIds).toEqual(['q2', 'r2'].map((name) => `msg-${name}`));
     });
+
+    it('leaves the waiting passes to a summary a new message starts between them', async () => {
+      // Two messages are recorded while the first summary is made, so two passes wait for it. Once it is made the first
+      // of them finds the history within its limit, and before the second runs a new message starts a summary of its
+      // own, which waits on a timer as a summarizer waits on its reply. The second pass would find that summary being
+      // made and count itself again, over and over, so it is left to the pass making the summary. Each pass is counted,
+      // and the hundred-and-first throws, so a loop that never ends fails the test instead of holding the event loop.
+      let finish: (summary: string) => void = () => {};
+      const summarize = vi
+        .fn(() => new Promise<string>((resolve) => setTimeout(() => resolve('The user asked about the weather.'), 0)))
+        .mockImplementationOnce(() => new Promise<string>((resolve) => { finish = resolve; }));
+      const context = summarizingContext(['q1', 'r1', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4', 'q5', 'r5'], summarize);
+      let passes = 0;
+      const manageHistoryLength = (context as any).manageHistoryLength.bind(context);
+      vi.spyOn(context as any, 'manageHistoryLength').mockImplementation(() => {
+        passes += 1;
+        if (passes > 100) throw new Error('the history passes do not end');
+        return manageHistoryLength();
+      });
+
+      context.addMessage(fields('q6'));
+      expect(summarize).toHaveBeenCalledTimes(1);
+      context.addMessage(fields('r6'));
+      context.addMessage(fields('q7'));
+      finish('The user asked about the notes.');
+      // the first summary is made and the first waiting pass has run
+      await Promise.resolve();
+      context.addMessage(fields('r7'));
+      expect(summarize).toHaveBeenCalledTimes(2);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(passes).toBeLessThan(20);
+      expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'r5', 'q6', 'r6', 'q7', 'r7']);
+      const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
+      expect(summary?.content).toBe('The user asked about the weather.');
+    });
   });
 });
