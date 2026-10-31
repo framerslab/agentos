@@ -41,9 +41,8 @@ test('package exports only point at shipped files', () => {
  * declarations, which this package cannot change: each names the file it sits in and its error code.
  */
 const DEPENDENCY_DECLARATION_ERRORS = [
-  // @framers/sql-storage-adapter's declarations import sql.js, which ships no types, and the adapter does not depend
-  // on @types/sql.js.
-  { file: /node_modules\/@framers\/sql-storage-adapter\/dist\/adapters\/sqlJsAdapter\.d\.ts\(/, code: 'TS7016' },
+  // None. An entry reads
+  // { file: /node_modules\/<package>\/<path>\.d\.ts\(/, code: 'TS<n>' }.
 ];
 
 test('the built declarations resolve their own relative imports under NodeNext', () => {
