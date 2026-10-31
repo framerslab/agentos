@@ -781,7 +781,8 @@ export interface AgentOSConfig {
    * as a system prompt of its own on every turn, and each session is bound to a learner: its persona with the user
    * and the resolved organization of its first turn. `namespace` is refused here, because the runtime takes the
    * organization from each turn. A host that built a layer itself passes it in `gmiManagerConfig.learningLayer`
-   * instead. {@link AgentOS.getLearningLayer} returns the layer.
+   * instead: a layer passed there turns learning on whatever this option says, and `true` or a config beside one is
+   * refused. {@link AgentOS.getLearningLayer} returns the layer.
    * @default false
    */
   learning?: boolean | LearningConfig;

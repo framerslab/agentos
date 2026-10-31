@@ -17,8 +17,9 @@ export type PersonalityRegister = 'conversation' | 'writing';
 export const PERSONALITY_SECTION_HEADING = '## Personality & Communication Style';
 
 /**
- * The priority a GMI gives the section among its system prompts: right after the persona's base prompt, which has
- * priority 1 (the prompt engine sorts ascending and keeps order among equals).
+ * The priority a GMI gives the section among its system prompts: after the persona's base prompt when it is a string
+ * or a template, which has priority 1 (the prompt engine sorts ascending and keeps order among equals). The entries of
+ * a base prompt given as a list keep their own priorities, so an entry above 2 comes after the section.
  */
 export const PERSONALITY_PROMPT_PRIORITY = 2;
 
