@@ -5,8 +5,9 @@
  * source with no reserved id is copied and the target keeps its record; and a source from before `scope_id`
  * existed is copied into a target table that has the column with the column filled from each row's metadata. A
  * persona id is read part by part, so the `::` between its user id and its persona id is no reserved character, and a
- * target that holds a knowledge-graph copy keeps its record. Where AGENTOS_TEST_POSTGRES_URL is set, the same refusal
- * and the same fill into a Postgres Brain.
+ * target that holds a knowledge-graph copy keeps its record. A source with the record whose user and persona scope ids
+ * read the same in both forms is copied as a plain one, so a target without the record keeps its plain form. Where
+ * AGENTOS_TEST_POSTGRES_URL is set, the same refusal and the same fill into a Postgres Brain.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -149,6 +150,19 @@ describe('MigrationEngine scope-id form handshake', () => {
 
     expect(result.errors).toEqual([]);
     expect(rowsOf(to)).toEqual({ traces: [{ id: 't-a', scope_id: 'ana' }], record: 'encoded' });
+  });
+
+  it('copies a source with the record whose scope ids read the same in both forms as a plain one, into a plain target that holds a reserved id', async () => {
+    const from = tempPath('source.sqlite');
+    const to = tempPath('target.sqlite');
+    await brainFile(from, [['t-a', 'user', 'bo']], true);
+    await brainFile(to, [['t-t', 'user', 'team/bo']], false);
+
+    const result = await MigrationEngine.migrate({ from: { type: 'sqlite', path: from }, to: { type: 'sqlite', path: to } });
+
+    expect(result.errors).toEqual([]);
+    // The target keeps its plain form: a layer that opens it later re-files its plain user `team/bo`.
+    expect(rowsOf(to)).toEqual({ traces: [{ id: 't-a', scope_id: 'bo' }, { id: 't-t', scope_id: 'team/bo' }], record: undefined });
   });
 
   it("fills scope_id from the metadata of a source row that has none, where the target's table has the column", async () => {
