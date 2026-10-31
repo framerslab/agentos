@@ -409,4 +409,86 @@ describe('launch_agency on the full runtime', () => {
     await vi.waitFor(() => expect(booted!.listAgencies()).toEqual([]), { timeout: 10_000 });
     expect([...booted.getGMIManager().gmiSessionMap.keys()].filter((id) => id.startsWith('seat:'))).toEqual([]);
   }, 40_000);
+
+  it("a team's nested launches share one launch in flight", async () => {
+    // A parallel team needs a coordinator route; its synthesizer's whole call answers "ok".
+    booted = await boot({ agencies: { launch: true, coordinator: { provider: 'openai', model: 'stub-model', apiKey: 'test' } } });
+    const nestedStep = (role: string) => toolStep(['launch_agency', { goal: `Answer ${role}.`, seats: [{ role, instructions: 'NESTED-SEAT: answer.' }] }]);
+    const isNestedSeat = (messages: Array<{ role: string; content: unknown }>) =>
+      messages.some((m) => m.role === 'system' && String(m.content).includes('NESTED-SEAT'));
+    // The admitted nested launch's seat answers only once both sibling launches were refused, so all three launch at once.
+    let refusals = 0;
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    provider.beforeAnswer = async (messages) => {
+      if (toolMessages(messages).some((content) => content.includes('concurrency_exceeded')) && ++refusals >= 2) openGate();
+      if (isNestedSeat(messages)) await gate;
+    };
+    const trio = ['a', 'b', 'c'].map((role) => ({ role, instructions: `Seat ${role}: launch one helper.`, tools: ['launch_agency'] }));
+    // The root's step, then each trio seat's identical first step; every later call takes the stub's default answer.
+    provider.replies.push(toolStep(['launch_agency', { goal: 'Three at once.', strategy: 'parallel', seats: trio }]), nestedStep('n1'), nestedStep('n2'), nestedStep('n3'));
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-1' });
+    const results = provider.seen.flatMap((call) => toolMessages(call.messages));
+    // One nested launch was admitted; the other two got concurrency_exceeded.
+    expect(results.filter((content) => content.includes('concurrency_exceeded'))).toHaveLength(2);
+    expect(provider.seen.filter((call) => isNestedSeat(call.messages))).toHaveLength(1);
+
+    // A later launch from a team is admitted once the earlier one has settled.
+    provider.beforeAnswer = undefined;
+    provider.seen.length = 0;
+    const duo = ['first', 'second'].map((role) => ({ role, instructions: `Seat ${role}: launch one helper.`, tools: ['launch_agency'] }));
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'One after the other.', seats: duo }]),
+      nestedStep('m1'),
+      textStep('m1 done.'),
+      textStep('first done.'),
+      nestedStep('m2'),
+      textStep('m2 done.'),
+      textStep('second done.'),
+      textStep('All done.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-2' });
+    const later = provider.seen.flatMap((call) => toolMessages(call.messages));
+    // Both seats' nested launches ran their seat (the precondition), and neither was refused.
+    expect(provider.seen.filter((call) => isNestedSeat(call.messages))).toHaveLength(2);
+    expect(later.filter((content) => content.includes('concurrency_exceeded'))).toEqual([]);
+  });
+
+  it("a personaId member's launch from its seat is floored on the member's own route, which its team's seats run on", async () => {
+    // The lead's route counts 500 output tokens a call, the planner's 3,000 and the editor's 100. A team a member launches
+    // from its seat has its temporary seats built on the member's route: its floor is 2,000 for the prompt plus the
+    // member's estimate, never the lead's.
+    const lead = persona('lead', { allowedCapabilities: ['agency:launch'], defaultModelCompletionOptions: { maxTokens: 500 } });
+    const planner = persona('planner', { allowedCapabilities: ['agency:launch'], baseSystemPrompt: 'You plan trips.', defaultModelCompletionOptions: { maxTokens: 3_000 } });
+    const editor = persona('editor', { allowedCapabilities: ['agency:launch'], baseSystemPrompt: 'You edit plans.', defaultModelCompletionOptions: { maxTokens: 100 } });
+    booted = await boot({ personas: [lead, planner, editor] });
+    // The lead seats the member, which may launch from its seat; the member's seat turn launches a team of one.
+    const memberLaunch = (personaId: string, maxTokens: number) => [
+      toolStep(['launch_agency', { goal: 'Plan the trip.', seats: [{ role: personaId, personaId, tools: ['launch_agency'] }] }]),
+      toolStep(['launch_agency', { goal: 'Draft the plan.', maxTokens, seats: [{ role: 'drafter', instructions: 'DRAFTER: draft the plan.' }] }]),
+    ];
+
+    // 4,000 covers one call of the lead's route (2,500) and not one of the planner's (5,000): refused before a seat is built.
+    provider.replies.push(...memberLaunch('planner', 4_000), textStep('No team.'), textStep('Planned.'));
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-1' });
+    // The planner's seat turn ran as its persona (the precondition), and its launch was refused on the planner's route.
+    expect(systemTextOf(provider.seen[1].messages)).toContain('You plan trips.');
+    const refusal = toolMessages(provider.seen[2].messages)[0];
+    expect(refusal).toContain('budget_unavailable');
+    expect(refusal).toContain('(5000: 2000 for the prompt and 3000 for the output)');
+    // The lead, the planner's two steps, the lead: no drafter call.
+    expect(provider.seen).toHaveLength(4);
+
+    // 2,200 covers one call of the editor's route (2,100) and not one of the lead's (2,500): admitted, and the drafter runs.
+    provider.seen.length = 0;
+    provider.replies.push(...memberLaunch('editor', 2_200), textStep('Drafted.'), textStep('Edited.'), textStep('Done.'));
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-2' });
+    expect(systemTextOf(provider.seen[1].messages)).toContain('You edit plans.');
+    expect(systemTextOf(provider.seen[2].messages)).toContain('DRAFTER: draft the plan.');
+    expect(toolMessages(provider.seen[3].messages)[0]).toContain('"status":"completed"');
+    // The lead, the editor's first step, the drafter, the editor's second step, the lead.
+    expect(provider.seen).toHaveLength(5);
+  });
 });
