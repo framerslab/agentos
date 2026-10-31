@@ -84,6 +84,15 @@
  * the four learnable traits alone; forgetUser deletes a user's memory in every manager and facade the layer holds and
  * through the host's storage adapter, and the user's rows, and names what it did not reach; a crash's pending memory
  * write is decided at the learner's next session; and a store that does not open fails every call naming it.
+ *
+ * A turn's memory, on gmi(), on the full runtime over a host's memory manager and on a GMI a host builds. A learner's
+ * words and the replies to them are filed under the learner's scope ids and read in the learner's later sessions, never
+ * for the same id under another organization; a turn with no learner files under its session's form, a second user's id
+ * on each trace, and `forgetUser` takes that user's traces; a recall lists the turn's own scopes alone. Every filing runs
+ * through the user's tombstone before the write and once it has committed, with no time budget, and a turn whose
+ * preparation failed keeps its scope ids. Each tool call carries its own turn's scopes, recorder, second user and freeze
+ * read, and `toolLearningContextFor` builds the same for a product's own turn loop. Feedback is filed with the last
+ * prepared turn's scope ids. A GMI with no learner session, or a host's that names no scopes, files as with no layer.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -104,9 +113,11 @@ import {
   InMemoryVectorStore,
   KnowledgeGraph,
   Memory,
+  ReasoningEntryType,
   SqlKnowledgeGraph,
   agent,
   createLearningLayer,
+  createTestAgentOSConfig,
   gmi,
   type CognitiveMemoryConfig,
   type ICognitiveMemoryManager,
@@ -156,6 +167,7 @@ import {
   ensureLearningSchema,
   forgetTargets,
   freezeScopeKey,
+  isTurnScopes,
   learnerScopeIds,
   learnerUserScopeId,
   memoryWriteRefusal,
@@ -165,6 +177,7 @@ import {
   sessionScopeIds,
   taggedScopeId,
   tombstoneHash,
+  toolLearningContextFor,
   type CandidateInput,
   type ChainCheck,
   type ChainHead,
@@ -201,11 +214,12 @@ import {
   type TurnScopes,
 } from '@framers/agentos/cognition/learning/index';
 import { canonicalJson, hmacSha256Hex, sha256Hex, ulid } from '@framers/agentos/cognition/learning/ledger/index';
-import { OPERATOR_ONLY_TRAITS, renderPersonalitySection } from '@framers/agentos/cognition/substrate';
+import { OPERATOR_ONLY_TRAITS, renderPersonalitySection, type GMI } from '@framers/agentos/cognition/substrate';
 import { traitOverlayPatch } from '@framers/agentos/cognition/substrate/personas/personalityPrompt';
 import { HEXACO_TRAIT_ALIASES } from '@framers/agentos/cognition/substrate/personas/hexaco';
 import { createPostgresAdapter, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import Database from 'better-sqlite3';
+import { createScriptedGmi, runTurn, scriptedProvider, textReply, textTurn, toolCallReply } from '../../cognition/substrate/__tests__/helpers/scriptedGmi';
 import { reply, script } from './helpers/stubProviders';
 
 /** The embedding size of a common hosted model. Every text embeds as one direction, so a recall finds every trace of its scope. */
@@ -7134,6 +7148,990 @@ describe.skipIf(!POSTGRES_URL)("an operator's calls on Postgres", () => {
   });
 });
 
+describe("a turn's memory, filed and read by its scopes, on gmi(), the full runtime and a host's own GMI", () => {
+  let keys = 0;
+  const key = () => `k-qa-filing-${++keys}`;
+  const PERSONA_ID = 'scripted-persona';
+  const LEARNER: LearnerKey = { namespace: 'acme', agentKey: 'tutor', userId: 'user-1' };
+  const ACME = { organizationId: 'acme' };
+  /** The memory manager's owner id on the managers of this file. */
+  const OWNER = 'qa-agent';
+
+  const quiet = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  };
+
+  /** The live traces of a Brain: scope, scope id, text, and the second user a trace names. */
+  async function filed(brain: Brain): Promise<Array<{ scope: string; scopeId: string; content: string; turnUserId?: string }>> {
+    const rows = await brain.all<{ scope: string; scope_id: string; content: string; metadata: string | null }>(
+      'SELECT scope, scope_id, content, metadata FROM memory_traces WHERE brain_id = ? AND deleted = 0',
+      [brain.brainId],
+    );
+    return rows.map((row) => {
+      const turnUserId = (JSON.parse(row.metadata || '{}') as { turnUserId?: string }).turnUserId;
+      return { scope: row.scope, scopeId: row.scope_id, content: row.content, ...(turnUserId ? { turnUserId } : {}) };
+    });
+  }
+
+  const contentsOf = async (brain: Brain): Promise<string[]> => (await filed(brain)).map((row) => row.content).sort();
+
+  /** A memory manager a host built over a Brain file of its own, owner id `qa-agent`, brain id `qa`. */
+  async function memoryOnFile(config: Partial<CognitiveMemoryConfig> = {}): Promise<{ brain: Brain; memory: CognitiveMemoryManager }> {
+    const brain = await openBrain(brainFile());
+    return { brain, memory: await manager({ brain, config }) };
+  }
+
+  /** The Brain and the learning store, in the two layouts a host has, and what closes them. */
+  async function layoutOf(layout: 'own' | 'shared'): Promise<{ brain: Brain; memory: CognitiveMemoryManager; store: LearningStore; done: () => Promise<void> }> {
+    if (layout === 'own') return { ...(await memoryOnFile()), store: new InMemoryLearningStore(), done: async () => undefined };
+    const adapter = await openSqliteAt(learningFile());
+    // Closing this Brain would close the adapter the store shares; `done` closes the adapter.
+    const brain = await Brain.openWithAdapter(adapter, { brainId: 'qa' });
+    const memory = await manager({ brain });
+    return {
+      brain,
+      memory,
+      store: new SqlLearningStore({ adapter }),
+      done: async () => {
+        await stop(memory);
+        await adapter.close();
+      },
+    };
+  }
+
+  const hostContext = (memory: LearnerContext['memory'], sessionId = 'session-1'): LearnerContext => ({
+    sessionId,
+    personaId: PERSONA_ID,
+    authoredTraits: {},
+    memory,
+  });
+
+  /** A layer over `store`, the learner's session on it, and a GMI a host builds with them and its memory manager. */
+  async function learnerGmi(memory: CognitiveMemoryManager, replies: Parameters<typeof scriptedProvider>[0], store: LearningStore = new InMemoryLearningStore()) {
+    const layer = createLearningLayer({ store });
+    const session = await layer.forLearner(LEARNER, hostContext(memory));
+    const { provider, received } = scriptedProvider(replies);
+    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning: session, cognitiveMemory: memory } });
+    return { gmi, layer, session, store, processToolCall, received };
+  }
+
+  const lookupStep = () => toolCallReply([{ id: 'call_a', name: 'lookup', args: { q: 'a' } }]);
+  /** The scope list one recall asked the memory manager for. */
+  const recallScopes = (spy: { mock: { calls: unknown[][] } }, call = 0) =>
+    (spy.mock.calls[call]?.[3] as { scopes?: Array<{ scope: string; scopeId: string }> } | undefined)?.scopes ?? [];
+  const organizationsOf = (scopes: Array<{ scope: string; scopeId: string }>) => scopes.filter((entry) => entry.scope === 'organization').map((entry) => entry.scopeId);
+  /** What a GMI's reasoning trace says of the filings it did not make: each entry's type, role and reason. */
+  const refusedFilings = (gmi: GMI) =>
+    gmi
+      .getReasoningTrace()
+      .entries.filter((entry) => entry.message.includes('did not file'))
+      .map((entry) => ({ type: entry.type, ...(entry.details as { role: string; reason: string }) }));
+  const traceText = (gmi: GMI) => JSON.stringify(gmi.getReasoningTrace().entries.filter((entry) => entry.message.includes('did not file')));
+
+  /** A memory write a tool would record, which writes nothing. */
+  const memoryWrite = (subject: string): SessionSelfChange<string> => ({
+    kind: 'memory_write',
+    actor: 'tool:memory_add',
+    subject,
+    before: null,
+    after: { created: [subject], changed: [], deleted: [] },
+    brainId: 'qa',
+    apply: async () => 'applied',
+    undo: async () => undefined,
+  });
+  const subjectsOn = async (store: LearningStore, chainKey: string): Promise<string[]> =>
+    (await store.chainRows(chainKey)).filter((row) => row.rowType === 'candidate' && row.kind === 'memory_write').map((row) => row.subject);
+
+  /** gmi() with cognitive memory, named `Tutor` (persona id `tutor`), its model played by the stub under a key of its own. */
+  function memoryTutor(extra: Record<string, unknown>, replies: unknown[]) {
+    const embeddingKey = key();
+    script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    const k = key();
+    const played = script('openai', k, { replies: replies as never });
+    const tutor = gmi({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: k,
+      fallbackProviders: [],
+      name: 'Tutor',
+      instructions: 'You teach networking.',
+      personality: TUTOR_PERSONA,
+      cognition: 'full',
+      memory: { embedding: { provider: 'openai', model: 'text-embedding-3-small' } },
+      ...extra,
+    } as never);
+    return { tutor, played };
+  }
+
+  /** A host tool that keeps what each of its calls is told about its turn. */
+  function learningProbe() {
+    const told: Array<ToolLearningContext | undefined> = [];
+    const tool = {
+      name: 'probe_learning',
+      description: 'Reads what the turn tells its tools about learning.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async (_args: Record<string, unknown>, context: { sessionData?: Record<string, unknown> }) => {
+        told.push(readToolLearningContext(context.sessionData));
+        return { success: true, output: 'read' };
+      },
+    };
+    return { tool, told };
+  }
+
+  /** The full runtime over persona `tutor`, each GMI's cognitive memory the host's manager, as a host's factory hands it. */
+  async function runtimeOn(memory: CognitiveMemoryManager, apiKey: string, learning: unknown): Promise<AgentOS> {
+    const base = await createTestAgentOSConfig();
+    return AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey } }] },
+      turnPlanning: { enabled: false },
+      personas: [{ id: 'tutor', name: 'Tutor', description: 'A tutor.', version: '1.0.0', baseSystemPrompt: 'You teach networking.', personalityTraits: TUTOR_PERSONA }],
+      learning,
+      gmiManagerConfig: { ...base.gmiManagerConfig, cognitiveMemoryFactory: () => memory.forSession() },
+    } as never);
+  }
+
+  /** One turn on the full runtime: all the text the turn's last streamed model call was sent. */
+  async function said(
+    os: AgentOS,
+    played: ReturnType<typeof script>,
+    turn: { text: string; userId: string; sessionId: string; organizationId?: string; conversationId?: string },
+  ): Promise<string> {
+    const { text, ...input } = turn;
+    for await (const chunk of os.processRequest({ textInput: text, selectedPersonaId: 'tutor', ...input } as never)) {
+      if ((chunk as { type?: unknown }).type === 'error') throw new Error(`the turn failed: ${JSON.stringify(chunk)}`);
+    }
+    return JSON.stringify(played.seen.filter((call) => call.streamed).at(-1)?.messages ?? []);
+  }
+
+  const noted = (count: number) => Array.from({ length: count }, () => reply.text('Noted.'));
+
+  it("files a learner's words on gmi() where the learner's next session reads them, never for another user, and a session opened with no user id keeps its own", async () => {
+    quiet();
+    const { tutor, played } = memoryTutor({ learning: true }, noted(6));
+    const asked = () => JSON.stringify(played.seen.at(-1)?.messages ?? []);
+    try {
+      await tutor.session('s1', { userId: 'ana' }).send('My canary is LARK-7.');
+      await tutor.session('s2', { userId: 'ana' }).send('What is my canary?');
+      expect(asked()).toContain('LARK-7');
+      await tutor.session('s3', { userId: 'bo' }).send('What is my canary?');
+      expect(asked()).not.toContain('LARK-7');
+
+      await tutor.session('s4').send('My canary is OWL-3.');
+      await tutor.session('s5').send('What is my canary?');
+      expect(asked()).not.toContain('OWL-3');
+      expect(asked()).not.toContain('LARK-7');
+      await tutor.session('s6', { userId: 'ana' }).send('What is my canary?');
+      expect(asked()).toContain('LARK-7');
+      expect(asked()).not.toContain('OWL-3');
+    } finally {
+      await tutor.close();
+    }
+  });
+
+  it("tells a tool on gmi() its turn's scope ids in the agent's namespace and a recorder bound to the turn, whose rows sit in the learner's chain", async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const { tool, told } = learningProbe();
+    const { tutor } = memoryTutor({ learning: { store, namespace: 'acme' }, tools: [tool] }, [reply.tools([{ id: 'c1', name: 'probe_learning', args: {} }]), reply.text('Done.')]);
+    try {
+      await tutor.session('s1', { userId: 'ana' }).send('Read it.');
+      expect(told).toHaveLength(1);
+      expect(told[0]).toMatchObject({
+        learner: 'bound',
+        mode: 'on',
+        scopes: { learner: 'bound', mode: 'on', userScopeId: 'acme/ana', personaScopeId: 'acme/ana::tutor', namespace: 'acme' },
+      });
+      expect(told[0]!.turnUserId).toBeUndefined();
+      expect(told[0]!.frozen!()).toBe(false);
+      expect(await told[0]!.recordSelfChange!(memoryWrite('t-1'))).toMatchObject({ status: 'kept', result: 'applied' });
+      expect(await subjectsOn(store, chainKeyOf({ namespace: 'acme', agentKey: 'tutor', userId: 'ana' }))).toEqual(['t-1']);
+    } finally {
+      await tutor.close();
+    }
+  });
+
+  it("names no user on a gmi() session opened with no user id, nor on generate(): their calls carry no second user, and their rows name none", async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const { tool, told } = learningProbe();
+    const call = (id: string) => reply.tools([{ id, name: 'probe_learning', args: {} }]);
+    const { tutor } = memoryTutor({ learning: { store, agentKey: 'tutor' }, tools: [tool] }, [call('c1'), reply.text('Done.'), call('c2'), reply.text('Done.')]);
+    try {
+      await tutor.session('s1').send('Read it.');
+      expect(told[0]).toMatchObject({ learner: 'none', scopes: { learner: 'none', userScopeId: '/s1', personaScopeId: '/s1::tutor', namespace: '' } });
+      expect(told[0]!.turnUserId).toBeUndefined();
+      expect(await store.sessionRowsOf('', 's1')).toEqual([]);
+      expect(await told[0]!.recordSelfChange!(memoryWrite('t-1'))).toMatchObject({ status: 'kept' });
+      const rows = (await store.chainRows(chainKeyOf({ namespace: '', agentKey: 'tutor', userId: null }))).filter((row) => row.kind === 'memory_write');
+      expect(rows.map((row) => [row.rowType, row.userId, row.turnUserId])).toEqual([
+        ['candidate', null, null],
+        ['verdict', null, null],
+      ]);
+
+      await tutor.generate('Read it.');
+      expect(told).toHaveLength(2);
+      expect(told[1]).toMatchObject({ learner: 'none' });
+      expect(told[1]!.turnUserId).toBeUndefined();
+    } finally {
+      await tutor.close();
+    }
+  });
+
+  it("files a learner's words and the reply under the learner's scope in the turn's organization on the full runtime, recalls them in the learner's next session, and never for that id in another organization", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const k = key();
+    const played = script('openai', k, { replies: noted(8), whole: true });
+    const os = await runtimeOn(memory, k, { store: new InMemoryLearningStore() });
+    try {
+      await said(os, played, { text: 'My canary is LARK-7.', userId: 'user-42', sessionId: 's-1', organizationId: 'acme' });
+      expect(await filed(brain)).toEqual(
+        expect.arrayContaining([
+          { scope: 'user', scopeId: 'acme/user-42', content: 'My canary is LARK-7.' },
+          { scope: 'user', scopeId: 'acme/user-42', content: 'Noted.' },
+        ]),
+      );
+      expect(await said(os, played, { text: 'What is my canary?', userId: 'user-42', sessionId: 's-2', organizationId: 'acme' })).toContain('LARK-7');
+      expect(await said(os, played, { text: 'What is my canary?', userId: 'user-42', sessionId: 's-3', organizationId: 'globex' })).not.toContain('LARK-7');
+      expect([...new Set((await filed(brain)).map((row) => row.scopeId))].sort()).toEqual(['acme/user-42', 'globex/user-42']);
+    } finally {
+      await os.shutdown();
+    }
+  });
+
+  it("files a learner with no namespace under the plain id and each anonymous session of the full runtime under its own form, never pooled under the placeholder id", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const k = key();
+    const played = script('openai', k, { replies: noted(8), whole: true });
+    const os = await runtimeOn(memory, k, { store: new InMemoryLearningStore() });
+    try {
+      await said(os, played, { text: 'Learner canary OWL-3.', userId: '42', sessionId: 's-learner' });
+      await said(os, played, { text: 'Session canary FOX-9.', userId: 'anonymous_user', sessionId: '42' });
+      const other = await said(os, played, { text: 'What do you know?', userId: 'anonymous_user', sessionId: 's-b' });
+      expect(other).not.toContain('OWL-3');
+      expect(other).not.toContain('FOX-9');
+      const learner = await said(os, played, { text: 'What do you know?', userId: '42', sessionId: 's-learner-2' });
+      expect(learner).toContain('OWL-3');
+      expect(learner).not.toContain('FOX-9');
+
+      const rows = await filed(brain);
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          { scope: 'user', scopeId: '42', content: 'Learner canary OWL-3.' },
+          { scope: 'user', scopeId: '/42', content: 'Session canary FOX-9.' },
+          { scope: 'user', scopeId: '/s-b', content: 'What do you know?' },
+        ]),
+      );
+      expect(rows.filter((row) => row.scopeId === 'anonymous_user' || row.turnUserId !== undefined)).toEqual([]);
+    } finally {
+      await os.shutdown();
+    }
+  });
+
+  it("files a second user's words on another user's session of the full runtime under the session's form with that user's id", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const k = key();
+    const played = script('openai', k, { replies: noted(6), whole: true });
+    const os = await runtimeOn(memory, k, { store: new InMemoryLearningStore() });
+    try {
+      await said(os, played, { text: 'I am user one.', userId: 'user-1', sessionId: 's-1', organizationId: 'acme' });
+      await said(os, played, { text: 'I am the visitor.', userId: 'user-2', sessionId: 's-1', organizationId: 'acme' });
+      expect(await filed(brain)).toEqual(
+        expect.arrayContaining([
+          { scope: 'user', scopeId: 'acme/user-1', content: 'I am user one.' },
+          { scope: 'user', scopeId: 'acme//s-1', content: 'I am the visitor.', turnUserId: 'user-2' },
+          { scope: 'user', scopeId: 'acme//s-1', content: 'Noted.', turnUserId: 'user-2' },
+        ]),
+      );
+    } finally {
+      await os.shutdown();
+    }
+  });
+
+  it("recalls only the turn's own scopes on the full runtime: a host's traces under them reach the model, and those under every neighbouring id do not", async () => {
+    quiet();
+    const { memory } = await memoryOnFile();
+    const fileUnder = (scope: 'user' | 'thread' | 'persona' | 'organization', scopeId: string, word: string) =>
+      memory.encode(`Probe ${word}.`, NEUTRAL, 'neutral', { scope, scopeId });
+    await fileUnder('user', 'acme/user-1', 'LEARNER-USER');
+    await fileUnder('thread', 'acme//conv-1', 'OWN-CONVERSATION');
+    await fileUnder('thread', 'acme//s-1', 'OWN-SESSION');
+    await fileUnder('thread', OWNER, 'OWNER-THREAD');
+    await fileUnder('persona', 'acme/user-1::tutor', 'LEARNER-PERSONA');
+    await fileUnder('persona', 'tutor', 'PERSONA-ITSELF');
+    await fileUnder('persona', OWNER, 'OWNER-PERSONA');
+    await fileUnder('organization', 'acme', 'OWN-ORGANIZATION');
+
+    await fileUnder('user', 'user-1', 'PLAIN-USER');
+    await fileUnder('user', 's-1', 'PLAIN-SESSION');
+    await fileUnder('user', OWNER, 'OWNER-USER');
+    await fileUnder('user', 'globex/user-1', 'OTHER-TENANT-USER');
+    await fileUnder('thread', 'conv-1', 'PLAIN-CONVERSATION');
+    await fileUnder('thread', 's-1', 'PLAIN-THREAD');
+    await fileUnder('thread', 'globex//s-1', 'OTHER-TENANT-THREAD');
+    await fileUnder('persona', 'user-1::tutor', 'PLAIN-RELATIONSHIP');
+    await fileUnder('organization', 'globex', 'OTHER-ORGANIZATION');
+    await fileUnder('organization', OWNER, 'OWNER-ORGANIZATION');
+
+    const k = key();
+    const played = script('openai', k, { replies: noted(4), whole: true });
+    const os = await runtimeOn(memory, k, { store: new InMemoryLearningStore() });
+    try {
+      const prompt = await said(os, played, { text: 'What do you know?', userId: 'user-1', sessionId: 's-1', organizationId: 'acme', conversationId: 'conv-1' });
+      for (const word of ['LEARNER-USER', 'OWN-CONVERSATION', 'OWN-SESSION', 'OWNER-THREAD', 'LEARNER-PERSONA', 'PERSONA-ITSELF', 'OWNER-PERSONA', 'OWN-ORGANIZATION']) {
+        expect(prompt).toContain(word);
+      }
+      for (const word of ['PLAIN-USER', 'PLAIN-SESSION', 'OWNER-USER', 'OTHER-TENANT-USER', 'PLAIN-CONVERSATION', 'PLAIN-THREAD', 'OTHER-TENANT-THREAD', 'PLAIN-RELATIONSHIP', 'OTHER-ORGANIZATION', 'OWNER-ORGANIZATION']) {
+        expect(prompt).not.toContain(word);
+      }
+    } finally {
+      await os.shutdown();
+    }
+  });
+
+  it("files feedback on the full runtime with the last turn's scope ids, and only for that turn's user", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const k = key();
+    const played = script('openai', k, { replies: noted(4), whole: true });
+    const os = await runtimeOn(memory, k, { store: new InMemoryLearningStore() });
+    try {
+      await said(os, played, { text: 'Hello.', userId: 'user-1', sessionId: 's-1', organizationId: 'acme' });
+      await os.receiveFeedback('user-1', 's-1', 'tutor', { rating: 'negative', text: 'Too long.', correctedContent: 'The short answer.' });
+      await os.receiveFeedback('user-9', 's-1', 'tutor', { rating: 'positive', text: 'Lovely, says another user.' });
+      const rows = await filed(brain);
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          { scope: 'user', scopeId: 'acme/user-1', content: 'User feedback (negative): Too long.' },
+          { scope: 'user', scopeId: 'acme/user-1', content: 'User correction: The short answer.' },
+        ]),
+      );
+      expect(rows.filter((row) => row.content.includes('another user'))).toEqual([]);
+    } finally {
+      await os.shutdown();
+    }
+  });
+
+  it("asks a host's memory manager for the turn's own scopes alone: the user list holds neither the GMI id nor the owner id, an owner id in a session's form stays out of the threads, and the owner's organization is read only on a turn of it", async () => {
+    quiet();
+    const plain = await memoryOnFile();
+    const first = await learnerGmi(plain.memory, [textReply('Noted.')]);
+    const assemble = vi.spyOn(plain.memory, 'assembleForPrompt');
+    await runTurn(first.gmi, textTurn('t1', 'Hello.', { ...ACME, conversationId: 'conv-1' }));
+    expect(recallScopes(assemble)).toEqual([
+      { scope: 'user', scopeId: 'acme/user-1' },
+      { scope: 'thread', scopeId: 'acme//conv-1' },
+      { scope: 'thread', scopeId: 'acme//session-1' },
+      { scope: 'thread', scopeId: OWNER },
+      { scope: 'persona', scopeId: `acme/user-1::${PERSONA_ID}` },
+      { scope: 'persona', scopeId: PERSONA_ID },
+      { scope: 'persona', scopeId: OWNER },
+      { scope: 'organization', scopeId: 'acme' },
+    ]);
+
+    const slashed = await memoryOnFile({ agentId: 'team//tutor' });
+    const second = await learnerGmi(slashed.memory, [textReply('Noted.')]);
+    const assembleSlashed = vi.spyOn(slashed.memory, 'assembleForPrompt');
+    await runTurn(second.gmi, textTurn('t1', 'Hello.', ACME));
+    expect(recallScopes(assembleSlashed).filter((entry) => entry.scope === 'thread')).toEqual([{ scope: 'thread', scopeId: 'acme//session-1' }]);
+    expect(recallScopes(assembleSlashed)).toContainEqual({ scope: 'persona', scopeId: 'team%2F%2Ftutor' });
+
+    const owned = await memoryOnFile();
+    const layer = createLearningLayer({ store: new InMemoryLearningStore() });
+    const session = await layer.forLearner({ ...LEARNER, namespace: OWNER }, hostContext(owned.memory));
+    const { gmi } = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: session, cognitiveMemory: owned.memory } });
+    const assembleOwned = vi.spyOn(owned.memory, 'assembleForPrompt');
+    await runTurn(gmi, textTurn('t1', 'Hello.', { organizationId: OWNER }));
+    expect(organizationsOf(recallScopes(assembleOwned))).toEqual([OWNER]);
+  });
+
+  it("files a second user, a placeholder and the learner back on the session under the session's form, and forgetUser takes each user's words with the session's own", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const { gmi, layer } = await learnerGmi(memory, [textReply('Hello, user one.'), textReply('Hello, visitor.'), textReply('Hello, stranger.'), textReply('Welcome back.')]);
+
+    await runTurn(gmi, textTurn('t1', 'I am user one.', ACME));
+    await runTurn(gmi, { ...textTurn('t2', 'I am the visitor.', ACME), userId: 'user-2' });
+    await runTurn(gmi, { ...textTurn('t3', 'I am nobody.', ACME), userId: 'anonymous_user' });
+    await runTurn(gmi, textTurn('t4', 'I am back.', ACME));
+
+    expect(await filed(brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'acme/user-1', content: 'I am user one.' },
+        { scope: 'user', scopeId: 'acme/user-1', content: 'Hello, user one.' },
+        { scope: 'user', scopeId: 'acme//session-1', content: 'I am the visitor.', turnUserId: 'user-2' },
+        { scope: 'user', scopeId: 'acme//session-1', content: 'Hello, visitor.', turnUserId: 'user-2' },
+        { scope: 'user', scopeId: 'acme//session-1', content: 'I am nobody.' },
+        { scope: 'user', scopeId: 'acme//session-1', content: 'I am back.' },
+      ]),
+    );
+
+    const report = await layer.forgetUser('user-2', { namespace: 'acme' });
+    expect(report.stores).toContainEqual(expect.objectContaining({ store: 'memory manager of brain qa', reached: true }));
+    expect(await contentsOf(brain)).toEqual(['Hello, stranger.', 'Hello, user one.', 'I am back.', 'I am nobody.', 'I am user one.', 'Welcome back.']);
+
+    await layer.forgetUser('user-1', { namespace: 'acme' });
+    expect(await filed(brain)).toEqual([]);
+  });
+
+  it("gives the learner's id under another organization no learner on the session: its words go under that organization's form with its id, its recall lists none of the first's scopes, and its deletion stays in its namespace", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const { gmi, layer } = await learnerGmi(memory, [textReply('Noted.'), textReply('Hello.')]);
+    const assemble = vi.spyOn(memory, 'assembleForPrompt');
+
+    await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
+    await runTurn(gmi, textTurn('t2', 'My canary is FOX-9.', { organizationId: 'globex' }));
+
+    expect(recallScopes(assemble, 1).filter((entry) => entry.scopeId.startsWith('acme'))).toEqual([]);
+    expect(recallScopes(assemble, 1)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'globex//session-1' },
+        { scope: 'thread', scopeId: 'globex//session-1' },
+        { scope: 'organization', scopeId: 'globex' },
+      ]),
+    );
+    expect(await filed(brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'acme/user-1', content: 'My canary is LARK-7.' },
+        { scope: 'user', scopeId: 'globex//session-1', content: 'My canary is FOX-9.', turnUserId: 'user-1' },
+      ]),
+    );
+
+    await layer.forgetUser('user-1', { namespace: 'globex' });
+    const left = await contentsOf(brain);
+    expect(left).toContain('My canary is LARK-7.');
+    expect(left).not.toContain('My canary is FOX-9.');
+  });
+
+  it("files nothing, and feeds no observer, for a second user forgotten before the turn, and the trace names the reason, never the words", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const { gmi, layer } = await learnerGmi(memory, [textReply('Noted.'), textReply('Hello, visitor.')]);
+    await runTurn(gmi, textTurn('t1', 'I am user one.', ACME));
+    await layer.forgetUser('user-2', { namespace: 'acme' });
+    const observe = vi.spyOn(memory, 'observe');
+
+    await runTurn(gmi, { ...textTurn('t2', 'My canary is FOX-9.', ACME), userId: 'user-2' });
+
+    expect(await contentsOf(brain)).toEqual(['I am user one.', 'Noted.']);
+    expect(observe).not.toHaveBeenCalled();
+    expect(refusedFilings(gmi)).toEqual([
+      { type: ReasoningEntryType.DEBUG, role: 'user', reason: 'forgotten' },
+      { type: ReasoningEntryType.DEBUG, role: 'assistant', reason: 'forgotten' },
+    ]);
+    expect(traceText(gmi)).not.toContain('FOX-9');
+  });
+
+  it.each([
+    ['on a SQLite file of its own', 'own'],
+    ["on the learning store's adapter", 'shared'],
+  ] as const)("takes back a second user's filing that commits after another process forgot that user, with the GMI's Brain %s", async (_name, layout) => {
+    quiet();
+    const { brain, memory, store, done } = await layoutOf(layout);
+    try {
+      const { gmi } = await learnerGmi(memory, [textReply('Noted.'), textReply('Hello, visitor.')], store);
+      // A second layer over the same store stands for another process: its write chains do not order this one's.
+      const otherProcess = createLearningLayer({ store });
+      await runTurn(gmi, textTurn('t1', 'I am user one.', ACME));
+
+      const encode = memory.encode.bind(memory);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const atEncode = new Promise<void>((resolve) => (reached = resolve));
+      vi.spyOn(memory, 'encode').mockImplementationOnce(async (...args: Parameters<typeof memory.encode>) => {
+        reached();
+        await held;
+        return encode(...args);
+      });
+      const turn = runTurn(gmi, { ...textTurn('t2', 'My canary is FOX-9.', ACME), userId: 'user-2' });
+      await atEncode; // the filing was admitted: the tombstone was clear
+      await otherProcess.forgetUser('user-2', { namespace: 'acme' });
+      release();
+      await turn;
+
+      expect(await contentsOf(brain)).toEqual(['I am user one.', 'Noted.']);
+      expect(await store.sessionRowsOf('acme', 'user-2')).toEqual([]);
+    } finally {
+      await done();
+    }
+  });
+
+  it("answers the turn and files nothing while the learning store cannot be read, with a WARNING that names the reason and never the words", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const store = new InMemoryLearningStore();
+    const { gmi } = await learnerGmi(memory, [textReply('Noted.')], store);
+    const refusing = vi.spyOn(store, 'transaction').mockRejectedValue(new Error('the store is down'));
+
+    const { output } = await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
+    refusing.mockRestore();
+
+    expect(output.responseText).toBe('Noted.');
+    expect(await filed(brain)).toEqual([]);
+    expect(refusedFilings(gmi)).toEqual([
+      { type: ReasoningEntryType.WARNING, role: 'user', reason: 'store_unavailable' },
+      { type: ReasoningEntryType.WARNING, role: 'assistant', reason: 'store_unavailable' },
+    ]);
+    expect(traceText(gmi)).not.toContain('LARK-7');
+  });
+
+  it.each(['off', 'frozen'] as const)("keeps where memory lives in mode %s: a learner's turn files under the learner's scope, its tools are told so, and a forgotten user's turn files nothing", async (mode) => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const layer = createLearningLayer({ store: new InMemoryLearningStore(), mode });
+    const session = await layer.forLearner(LEARNER, hostContext(memory));
+    const { provider } = scriptedProvider([lookupStep(), textReply('Found.'), textReply('Hello.')]);
+    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning: session, cognitiveMemory: memory } });
+
+    await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
+    expect(await filed(brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'acme/user-1', content: 'My canary is LARK-7.' },
+        { scope: 'user', scopeId: 'acme/user-1', content: 'Found.' },
+      ]),
+    );
+    expect(processToolCall.mock.calls[0]![0].sessionData?.learning).toMatchObject({
+      learner: 'bound',
+      mode,
+      scopes: { learner: 'bound', mode, userScopeId: 'acme/user-1', namespace: 'acme' },
+    });
+
+    await layer.forgetUser('user-1', { namespace: 'acme' });
+    expect(await filed(brain)).toEqual([]);
+    await runTurn(gmi, textTurn('t2', 'My canary is FOX-9.', ACME));
+    expect(await filed(brain)).toEqual([]);
+  });
+
+  it("tells each tool call its own turn's scopes, recorder, second user and the freeze read at the call, and the session rows name the turn's conversation, so forgetUser deletes its threads", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const { gmi, layer, store, processToolCall } = await learnerGmi(memory, [lookupStep(), textReply('Found.'), lookupStep(), textReply('Found too.')]);
+
+    await runTurn(gmi, textTurn('t1', 'Look it up.', { ...ACME, conversationId: 'conv-1' }));
+    await runTurn(gmi, { ...textTurn('t2', 'Look it up for me.', { ...ACME, conversationId: 'conv-2' }), userId: 'user-2' });
+
+    const learner = readToolLearningContext(processToolCall.mock.calls[0]![0].sessionData)!;
+    expect(learner).toMatchObject({
+      learner: 'bound',
+      mode: 'on',
+      scopes: { learner: 'bound', mode: 'on', userScopeId: 'acme/user-1', personaScopeId: `acme/user-1::${PERSONA_ID}`, namespace: 'acme' },
+    });
+    expect(learner.turnUserId).toBeUndefined();
+    expect(learner.frozen!()).toBe(false);
+    await layer.freeze({ learner: LEARNER });
+    expect(learner.frozen!()).toBe(true);
+    await layer.unfreeze({ learner: LEARNER });
+    expect(learner.frozen!()).toBe(false);
+    expect(await learner.recordSelfChange!(memoryWrite('t-1'))).toMatchObject({ status: 'kept', result: 'applied' });
+
+    const visitor = readToolLearningContext(processToolCall.mock.calls[1]![0].sessionData)!;
+    expect(visitor).toMatchObject({
+      learner: 'none',
+      turnUserId: 'user-2',
+      scopes: { learner: 'none', userScopeId: 'acme//session-1', personaScopeId: `acme//session-1::${PERSONA_ID}`, namespace: 'acme' },
+    });
+    expect(await visitor.recordSelfChange!(memoryWrite('t-2'))).toMatchObject({ status: 'kept' });
+
+    expect(await subjectsOn(store, chainKeyOf(LEARNER))).toEqual(['t-1']);
+    expect(await subjectsOn(store, chainKeyOf({ namespace: 'acme', agentKey: 'tutor', userId: null }, 'user-2'))).toEqual(['t-2']);
+    expect(await store.sessionRowsOf('acme', 'user-1')).toEqual([
+      expect.objectContaining({ kind: 'learner', sessionId: 'session-1', conversationIds: ['conv-1'], brainIds: ['qa'] }),
+    ]);
+    expect(await store.sessionRowsOf('acme', 'user-2')).toEqual([
+      expect.objectContaining({ kind: 'visitor', sessionId: 'session-1', conversationIds: ['conv-2'], brainIds: ['qa'] }),
+    ]);
+
+    await memory.encode('A note on the conversation.', NEUTRAL, 'neutral', { scope: 'thread', scopeId: 'acme//conv-1' });
+    await memory.encode('A note on the session.', NEUTRAL, 'neutral', { scope: 'thread', scopeId: 'acme//session-1' });
+    await layer.forgetUser('user-1', { namespace: 'acme' });
+    const left = await contentsOf(brain);
+    expect(left).not.toContain('A note on the conversation.');
+    expect(left).not.toContain('A note on the session.');
+  });
+
+  it("keeps a tool call's learning to its own turn while a newer turn of another user waits for its preparation", async () => {
+    quiet();
+    const { memory } = await memoryOnFile();
+    const layer = createLearningLayer({ store: new InMemoryLearningStore() });
+    const session = await layer.forLearner(LEARNER, hostContext(memory));
+    let openPreparation!: () => void;
+    const preparationOpen = new Promise<void>((resolve) => (openPreparation = resolve));
+    const gated = Object.create(session, {
+      prepareTurn: {
+        value: async (input: TurnInputForLearning) => {
+          if (input.userId === 'user-2') await preparationOpen;
+          return session.prepareTurn(input);
+        },
+      },
+    }) as ILearnerSession;
+    const steps = [lookupStep(), toolCallReply([{ id: 'call_b', name: 'lookup', args: { q: 'b' } }]), textReply('First done.'), textReply('Second done.')];
+    const { gmi, processToolCall } = await createScriptedGmi({ provider: scriptedProvider(steps).provider, config: { learning: gated, cognitiveMemory: memory } });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const atCall = new Promise<void>((resolve) => (reached = resolve));
+    processToolCall.mockImplementationOnce(async ({ toolCallRequest }) => {
+      reached();
+      await held;
+      return { toolCallId: toolCallRequest.id, toolName: toolCallRequest.name, output: { ok: true } };
+    });
+
+    const first = runTurn(gmi, textTurn('u', 'First.', ACME));
+    await atCall;
+    const second = runTurn(gmi, { ...textTurn('v', 'Second.', ACME), userId: 'user-2' });
+    release();
+    await vi.waitFor(() => expect(processToolCall).toHaveBeenCalledTimes(2));
+
+    expect(readToolLearningContext(processToolCall.mock.calls[1]![0].sessionData)).toMatchObject({
+      learner: 'bound',
+      scopes: { learner: 'bound', userScopeId: 'acme/user-1' },
+    });
+    openPreparation();
+    await first;
+    await second;
+  });
+
+  it("files a tool result's continuation under the turn it continues, and nothing of the system turn that carries it", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const { gmi } = await learnerGmi(memory, [textReply('Noted.'), textReply('Continued.')]);
+    await runTurn(gmi, textTurn('t1', 'Hello.', ACME));
+
+    await gmi.handleToolResults([{ toolCallId: 'call_x', toolName: 'lookup', output: { ok: true } }], 'user-1');
+
+    const rows = await filed(brain);
+    expect(rows).toContainEqual({ scope: 'user', scopeId: 'acme/user-1', content: 'Continued.' });
+    expect(rows.filter((row) => row.scopeId !== 'acme/user-1' || row.content.startsWith('Internally'))).toEqual([]);
+  });
+
+  it("keeps a turn's scope ids when its preparation fails: the learner's turn files under the learner's scope through the guard, its tools are told it has no learner, and a second user is named on what its turn files", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const layer = createLearningLayer({ store: new InMemoryLearningStore() });
+    const session = await layer.forLearner(LEARNER, hostContext(memory));
+    const failing = Object.create(session, {
+      prepareTurn: {
+        value: async () => {
+          throw new Error('the store did not answer');
+        },
+      },
+    }) as ILearnerSession;
+    const steps = [lookupStep(), textReply('Found.'), lookupStep(), textReply('Found too.'), textReply('Hello.')];
+    const { gmi, processToolCall } = await createScriptedGmi({ provider: scriptedProvider(steps).provider, config: { learning: failing, cognitiveMemory: memory } });
+
+    await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
+    expect(await filed(brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'acme/user-1', content: 'My canary is LARK-7.' },
+        { scope: 'user', scopeId: 'acme/user-1', content: 'Found.' },
+      ]),
+    );
+    const learner = readToolLearningContext(processToolCall.mock.calls[0]![0].sessionData)!;
+    expect(learner).toMatchObject({ learner: 'none', mode: 'on', scopes: { learner: 'bound', userScopeId: 'acme/user-1' } });
+    expect(learner.turnUserId).toBeUndefined();
+    expect(learner.recordSelfChange).toEqual(expect.any(Function));
+    expect(gmi.getReasoningTrace().entries.filter((entry) => entry.details?.degraded === true)).toHaveLength(1);
+
+    await runTurn(gmi, { ...textTurn('t2', 'I am the visitor.', ACME), userId: 'user-2' });
+    expect(await filed(brain)).toContainEqual({ scope: 'user', scopeId: 'acme//session-1', content: 'I am the visitor.', turnUserId: 'user-2' });
+    expect(readToolLearningContext(processToolCall.mock.calls[1]![0].sessionData)).toMatchObject({
+      learner: 'none',
+      turnUserId: 'user-2',
+      scopes: { learner: 'none', userScopeId: 'acme//session-1' },
+    });
+
+    await runTurn(gmi, { ...textTurn('t3', 'I am nobody.', ACME), userId: 'anonymous_user' });
+    expect(await filed(brain)).toContainEqual({ scope: 'user', scopeId: 'acme//session-1', content: 'I am nobody.' });
+
+    await layer.forgetUser('user-2', { namespace: 'acme' });
+    expect(await contentsOf(brain)).not.toContain('I am the visitor.');
+  });
+
+  it("keeps a learner's scope ids when a preparation runs out of its 2,000 ms, and files through the guard", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const layer = createLearningLayer({ store: new InMemoryLearningStore() });
+    const session = await layer.forLearner(LEARNER, hostContext(memory));
+    const late = Object.create(session, { prepareTurn: { value: () => new Promise(() => undefined) } }) as ILearnerSession;
+    const { gmi } = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: late, cognitiveMemory: memory } });
+
+    await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
+
+    expect(await filed(brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'acme/user-1', content: 'My canary is LARK-7.' },
+        { scope: 'user', scopeId: 'acme/user-1', content: 'Noted.' },
+      ]),
+    );
+    expect(gmi.getReasoningTrace().entries.filter((entry) => entry.details?.degraded === true)).toHaveLength(1);
+  });
+
+  it("files feedback with the last prepared turn's scope ids: none before a turn, none from another user, a nameless note with the turn's user, a second user's under the session's form, and none once its user is forgotten", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const { gmi, layer } = await learnerGmi(memory, [textReply('Noted.'), textReply('Hello, visitor.')]);
+    const notFiled = () => gmi.getReasoningTrace().entries.filter((entry) => entry.message.includes('Feedback was not filed in memory'));
+
+    await gmi.recordUserFeedback({ polarity: 'positive', text: 'Too early.', userId: 'user-1' });
+    expect(await filed(brain)).toEqual([]);
+    expect(notFiled()).toHaveLength(1);
+    expect(notFiled()[0]).toMatchObject({ type: ReasoningEntryType.DEBUG });
+    expect(JSON.stringify(notFiled())).not.toContain('Too early.');
+
+    await runTurn(gmi, textTurn('t1', 'Hello.', ACME));
+    await gmi.recordUserFeedback({ polarity: 'negative', text: 'Too long.', correctedContent: 'The short answer.', userId: 'user-1' });
+    await gmi.recordUserFeedback({ polarity: 'positive', text: 'From someone else.', userId: 'user-9' });
+    await gmi.recordUserFeedback({ polarity: 'positive', text: 'No name on it.', userId: '  ' });
+    expect(await filed(brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'acme/user-1', content: 'User feedback (negative): Too long.' },
+        { scope: 'user', scopeId: 'acme/user-1', content: 'User correction: The short answer.' },
+        { scope: 'user', scopeId: 'acme/user-1', content: 'User feedback (positive): No name on it.' },
+      ]),
+    );
+    expect(await contentsOf(brain)).not.toContain('User feedback (positive): From someone else.');
+    expect(notFiled()).toHaveLength(2);
+
+    await runTurn(gmi, { ...textTurn('t2', 'I am the visitor.', ACME), userId: 'user-2' });
+    await gmi.recordUserFeedback({ polarity: 'positive', text: 'From the visitor.', userId: 'user-2' });
+    expect(await filed(brain)).toContainEqual({ scope: 'user', scopeId: 'acme//session-1', content: 'User feedback (positive): From the visitor.', turnUserId: 'user-2' });
+
+    await layer.forgetUser('user-2', { namespace: 'acme' });
+    await gmi.recordUserFeedback({ polarity: 'positive', text: 'After the forget.', userId: 'user-2' });
+    expect(await contentsOf(brain)).not.toContain('User feedback (positive): After the forget.');
+  });
+
+  it('gives the guarded filing no time budget: the turn waits for a tombstone read that takes longer than a preparation may, and files what it was told', async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const store = new InMemoryLearningStore();
+    const { gmi } = await learnerGmi(memory, [textReply('Noted.')], store);
+    const read = store.isForgotten.bind(store);
+    let slowRead = false;
+    vi.spyOn(store, 'isForgotten').mockImplementation(async (hash) => {
+      if (slowRead) {
+        slowRead = false;
+        await new Promise((resolve) => setTimeout(resolve, 2_100));
+      }
+      return read(hash);
+    });
+    const encode = memory.encode.bind(memory);
+    vi.spyOn(memory, 'encode').mockImplementation(async (...args: Parameters<typeof memory.encode>) => {
+      const trace = await encode(...args);
+      slowRead = true; // the read made once the write has committed
+      return trace;
+    });
+
+    const started = Date.now();
+    await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4_000);
+    expect(await filed(brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'acme/user-1', content: 'My canary is LARK-7.' },
+        { scope: 'user', scopeId: 'acme/user-1', content: 'Noted.' },
+      ]),
+    );
+    expect(refusedFilings(gmi)).toEqual([]);
+  });
+
+  /** The session of a host written against the first release: a preparation, an end and the traits, and what it adds. */
+  const hostSession = (over: Record<string, unknown> = {}): ILearnerSession =>
+    ({
+      prepareTurn: async () => ({ systemPrompts: [], learner: 'bound', mode: 'on' }),
+      endSession: async () => undefined,
+      currentTraits: () => ({}),
+      ...over,
+    }) as unknown as ILearnerSession;
+
+  /** The lists a GMI with no learning layer files and reads for user `user-1` on `session-1`. */
+  const LISTS_WITH_NO_LAYER = [
+    { scope: 'user', scopeId: 'user-1' },
+    { scope: 'user', scopeId: 'session-1' },
+    { scope: 'user', scopeId: 'gmi-scripted' },
+    { scope: 'thread', scopeId: 'session-1' },
+    { scope: 'persona', scopeId: PERSONA_ID },
+    { scope: 'persona', scopeId: `user-1::${PERSONA_ID}` },
+    { scope: 'user', scopeId: OWNER },
+    { scope: 'thread', scopeId: OWNER },
+    { scope: 'persona', scopeId: OWNER },
+    { scope: 'organization', scopeId: OWNER },
+  ];
+
+  it.each([
+    ['no learner session', undefined],
+    ["a host's session that names no scopes", hostSession()],
+  ] as const)('files and reads as it did before the layer with %s: the input under the user id, the reply under the session id, feedback under its own user', async (_name, learning) => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const { provider } = scriptedProvider([textReply('Noted.')]);
+    const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: memory, ...(learning ? { learning } : {}) } });
+    const assemble = vi.spyOn(memory, 'assembleForPrompt');
+
+    await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.'));
+    await gmi.recordUserFeedback({ polarity: 'positive', text: 'Good.', userId: 'user-9' });
+
+    expect(await filed(brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'user-1', content: 'My canary is LARK-7.' },
+        { scope: 'user', scopeId: 'session-1', content: 'Noted.' },
+        { scope: 'user', scopeId: 'user-9', content: 'User feedback (positive): Good.' },
+      ]),
+    );
+    expect(recallScopes(assemble)).toEqual(LISTS_WITH_NO_LAYER);
+  });
+
+  it("files by the scopes a host's own session names, unguarded where it has no guard, and tells its tools only what the session gives", async () => {
+    quiet();
+    const { brain, memory } = await memoryOnFile();
+    const scopes: TurnScopes = { learner: 'bound', mode: 'on', userScopeId: 'hq/ana', personaScopeId: `hq/ana::${PERSONA_ID}`, namespace: 'hq' };
+    const learning = hostSession({ prepareTurn: async () => ({ systemPrompts: [], learner: 'bound', mode: 'on', scopes }) });
+    const { provider } = scriptedProvider([lookupStep(), textReply('Found.')]);
+    const { gmi, processToolCall } = await createScriptedGmi({ provider, config: { learning, cognitiveMemory: memory } });
+
+    await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.'));
+    await gmi.recordUserFeedback({ polarity: 'positive', text: 'Good.', userId: 'user-1' });
+
+    expect(await filed(brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'hq/ana', content: 'My canary is LARK-7.' },
+        { scope: 'user', scopeId: 'hq/ana', content: 'Found.' },
+        { scope: 'user', scopeId: 'hq/ana', content: 'User feedback (positive): Good.' },
+      ]),
+    );
+    expect(processToolCall.mock.calls[0]![0].sessionData?.learning).toEqual({ learner: 'bound', mode: 'on', scopes });
+  });
+
+  it("reads scopesFor where a preparation's scopes are not a turn's scopes, and files as with no layer, with a WARNING, where scopesFor throws", async () => {
+    quiet();
+    const named = await memoryOnFile();
+    const scopes: TurnScopes = { learner: 'none', mode: 'on', userScopeId: '/session-1', personaScopeId: `/session-1::${PERSONA_ID}`, namespace: '' };
+    const asked = hostSession({
+      prepareTurn: async () => ({ systemPrompts: [], learner: 'none', mode: 'on', scopes: { userScopeId: '' } }),
+      scopesFor: () => scopes,
+    });
+    const first = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: asked, cognitiveMemory: named.memory } });
+    await runTurn(first.gmi, textTurn('t1', 'My canary is LARK-7.'));
+    expect(await filed(named.brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: '/session-1', content: 'My canary is LARK-7.' },
+        { scope: 'user', scopeId: '/session-1', content: 'Noted.' },
+      ]),
+    );
+
+    const thrown = await memoryOnFile();
+    const throwing = hostSession({
+      scopesFor: () => {
+        throw new Error('no ids here');
+      },
+    });
+    const second = await createScriptedGmi({ provider: scriptedProvider([textReply('Noted.')]).provider, config: { learning: throwing, cognitiveMemory: thrown.memory } });
+    await runTurn(second.gmi, textTurn('t1', 'My canary is LARK-7.'));
+    expect(await filed(thrown.brain)).toEqual(
+      expect.arrayContaining([
+        { scope: 'user', scopeId: 'user-1', content: 'My canary is LARK-7.' },
+        { scope: 'user', scopeId: 'session-1', content: 'Noted.' },
+      ]),
+    );
+    expect(second.gmi.getReasoningTrace().entries.filter((entry) => entry.type === ReasoningEntryType.WARNING && entry.message.includes("did not name the turn's scope ids (no ids here)"))).toHaveLength(1);
+  });
+
+  it("reads a user-context override's organization only on a turn of that organization, or, on a turn that names none, when it is the namespace of the turn's scope ids", async () => {
+    quiet();
+    const { memory } = await memoryOnFile();
+    const { gmi } = await learnerGmi(memory, [textReply('One.'), textReply('Two.')]);
+    const assemble = vi.spyOn(memory, 'assembleForPrompt');
+    await runTurn(gmi, { ...textTurn('t1', 'Hello.', ACME), userContextOverride: { organizationId: 'acme' } });
+    await runTurn(gmi, textTurn('t2', 'Hello.', { organizationId: 'globex' }));
+    expect(organizationsOf(recallScopes(assemble, 0))).toEqual(['acme']);
+    expect(organizationsOf(recallScopes(assemble, 1))).toEqual(['globex']);
+
+    const named = await memoryOnFile();
+    const layer = createLearningLayer({ store: new InMemoryLearningStore(), namespace: 'acme' });
+    const session = await layer.forLearner({ ...LEARNER, namespace: '' }, hostContext(named.memory));
+    const scripted = await createScriptedGmi({ provider: scriptedProvider([textReply('One.'), textReply('Two.')]).provider, config: { learning: session, cognitiveMemory: named.memory } });
+    const assembleNamed = vi.spyOn(named.memory, 'assembleForPrompt');
+    await runTurn(scripted.gmi, { ...textTurn('t1', 'Hello.'), userContextOverride: { organizationId: 'acme' } });
+    await runTurn(scripted.gmi, { ...textTurn('t2', 'Hello.'), userContextOverride: { organizationId: 'hq' } });
+    expect(organizationsOf(recallScopes(assembleNamed, 0))).toEqual(['acme']);
+    expect(organizationsOf(recallScopes(assembleNamed, 1))).toEqual([]);
+  });
+
+  it("builds a turn's tool context for a product's own turn loop with toolLearningContextFor, from what its session prepared and gives", async () => {
+    quiet();
+    const { memory } = await memoryOnFile();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store });
+    const session = await layer.forLearner(LEARNER, hostContext(memory));
+    const prepared = await session.prepareTurn(productTurn({ userId: 'user-1', namespace: 'acme' }));
+    expect(isTurnScopes(prepared.scopes)).toBe(true);
+    expect(isTurnScopes({ ...prepared.scopes, mode: 'sometimes' })).toBe(false);
+    expect(isTurnScopes({ ...prepared.scopes, userScopeId: '' })).toBe(false);
+    expect(isTurnScopes(null)).toBe(false);
+
+    const { tools, writeTurn } = toolLearningContextFor(session, { learner: 'bound', mode: prepared.mode, scopes: prepared.scopes!, conversationId: 'conv-1' });
+    expect(writeTurn).toEqual({ learner: 'bound', namespace: 'acme', conversationId: 'conv-1' });
+    expect(readToolLearningContext({ learning: tools })).toMatchObject({ learner: 'bound', mode: 'on', scopes: prepared.scopes });
+    expect(await tools.recordSelfChange!(memoryWrite('t-1'))).toMatchObject({ status: 'kept', result: 'applied' });
+    expect(await store.sessionRowsOf('acme', 'user-1')).toEqual([expect.objectContaining({ conversationIds: ['conv-1'] })]);
+    expect(tools.frozen!()).toBe(false);
+    await layer.freeze({ learner: LEARNER });
+    expect(tools.frozen!()).toBe(true);
+
+    const visitor = toolLearningContextFor(session, {
+      learner: 'none',
+      mode: 'on',
+      scopes: { learner: 'none', mode: 'on', userScopeId: 'acme//session-1', personaScopeId: `acme//session-1::${PERSONA_ID}`, namespace: 'acme' },
+      turnUserId: 'user-2',
+    });
+    expect(visitor.writeTurn).toEqual({ learner: 'none', namespace: 'acme', turnUserId: 'user-2' });
+    expect(visitor.tools.turnUserId).toBe('user-2');
+
+    // A session that gives none of them, and a turn with no scope ids.
+    expect(toolLearningContextFor(hostSession(), { learner: 'none', mode: 'on' })).toEqual({ tools: { learner: 'none', mode: 'on' }, writeTurn: undefined });
+  });
+
+  it.skipIf(!POSTGRES_URL)("files a learner's turn on a Brain on the learning store's Postgres adapter, and a user another process forgot files nothing", async () => {
+    quiet();
+    const segment = `qa_filing_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, segment, max: 5 });
+    await adapter.open();
+    const brain = await Brain.openWithAdapter(adapter, { brainId: `qa-${segment}` });
+    const memory = await manager({ brain });
+    try {
+      const store = new SqlLearningStore({ adapter });
+      const { gmi } = await learnerGmi(memory, [textReply('Noted.'), textReply('Hello.')], store);
+      const otherProcess = createLearningLayer({ store: new SqlLearningStore({ adapter }) });
+
+      await runTurn(gmi, textTurn('t1', 'My canary is LARK-7.', ACME));
+      expect(await filed(brain)).toEqual(
+        expect.arrayContaining([
+          { scope: 'user', scopeId: 'acme/user-1', content: 'My canary is LARK-7.' },
+          { scope: 'user', scopeId: 'acme/user-1', content: 'Noted.' },
+        ]),
+      );
+      expect(await store.sessionRowsOf('acme', 'user-1')).toEqual([expect.objectContaining({ kind: 'learner', conversationIds: ['session-1'] })]);
+
+      await otherProcess.forgetUser('user-1', { namespace: 'acme' });
+      const before = await contentsOf(brain);
+      await runTurn(gmi, textTurn('t2', 'My canary is FOX-9.', ACME));
+      expect(await contentsOf(brain)).toEqual(before);
+      expect(await store.sessionRowsOf('acme', 'user-1')).toEqual([]);
+    } finally {
+      await stop(memory);
+      await adapter.exec(`DROP SCHEMA IF EXISTS "${segment}" CASCADE`).catch(() => undefined);
+      await adapter.close();
+    }
+  });
+});
+
 describe("gmi(): memory.persistAccessState", () => {
   let keys = 0;
   const key = () => `k-qa-scopes-${++keys}`;
@@ -7286,5 +8284,26 @@ describe('the docs a host reads about it', () => {
     expect(gmiDoc).toContain("A recorded memory write that a crash left `pending` (its verdict never written) is decided at the learner's next session");
     expect(gmiDoc).toContain('(reason `floor_raised`)');
     expect(gmiDoc).toContain('- `forgetUnreached`: the stores `forgetUser` does not reach, each with why.');
+  });
+
+  it("describe where a turn's memory is filed and read, what stops a filing, and what each tool call is told", () => {
+    const gmiDoc = doc('docs/GMI.md');
+    expect(gmiDoc).toContain("### Where a turn's memory is filed and read");
+    expect(gmiDoc).toContain("| A learner's, in namespace `acme` | `acme/user-42` |");
+    expect(gmiDoc).toContain("| A learner's, with no namespace | `user-42` |");
+    expect(gmiDoc).toContain('| One with no learner, in namespace `acme` | `acme//<session id>`, the session\'s form |');
+    expect(gmiDoc).toContain('| One with no learner, with no namespace | `/<session id>` |');
+    expect(gmiDoc).toContain("A recall reads `user` under the turn's own scope id alone, never the GMI id or the memory manager's owner id");
+    expect(gmiDoc).toContain("`forgetUser` for that user deletes those traces and leaves the session's other traces.");
+    expect(gmiDoc).toContain("A filing that is not made adds a reasoning-trace entry naming the message's role and the reason (`forgotten` as `DEBUG`, `store_unavailable` as `WARNING`), never its words, and feeds no memory observer.");
+    expect(gmiDoc).toContain('The guard has no time budget of its own: the turn waits for it as it waits for the write.');
+    expect(gmiDoc).toContain('A turn whose preparation fails or runs out of its 2,000 ms keeps the scope ids `scopesFor()` names');
+    expect(gmiDoc).toContain("`toolLearningContextFor(session, turn)` builds the same context for a product's own turn loop");
+    expect(gmiDoc).toContain("A GMI with no learner session, or with a host's session that has no `scopesFor()` and whose preparation names no scopes, files and reads as it does with no layer");
+    expect(gmiDoc).toContain("[Where a turn's memory is filed and read](#where-a-turns-memory-is-filed-and-read)");
+    // Nothing in the package hands a metaprompt's imprint to cognitive memory: its imprints go to working memory.
+    expect(gmiDoc).not.toContain("a metaprompt's imprint between turns");
+    expect(gmiDoc).toContain("Feedback (`recordUserFeedback()`) between turns is filed with the scope ids of the last turn the GMI prepared");
+    expect(doc('docs/memory/COGNITIVE_MEMORY.md')).toContain("the user's message and the reply both go under the turn's own user scope id");
   });
 });
