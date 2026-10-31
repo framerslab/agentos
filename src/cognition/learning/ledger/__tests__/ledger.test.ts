@@ -6,11 +6,13 @@
  * tombstone after it committed runs the user's deletion again, and an error in that second read or deletion never
  * turns a committed append into a failed one; a freeze, the host's or the process's, refuses a new candidate and lets
  * an operator act; a verdict follows only a candidate it can decide, and a revert's verdict only a kept candidate of
- * its own chain; rows with no learner chain per agent and per visitor, and a row with a learner names no visitor. The
- * canonical text orders every key by UTF-16 code unit and refuses a value that contains itself. On SQLite, edits made
- * outside the layer: a row's text, an indexed column, a row moved to another chain or to a later place, the first, a
- * middle or the newest row deleted, a row whose text is no ledger entry, and a chain recomputed without the key; and
- * an operator's reanchor, from which a broken chain verifies again.
+ * its own chain; rows with no learner chain per agent and per visitor, and a row with a learner names no visitor; an
+ * operator's reanchor is written on a chain whose head was moved back to an earlier row; and no row whose text holds a
+ * lone surrogate is written. The canonical text orders every key by UTF-16 code unit and refuses a value that
+ * contains itself, and `ulid` refuses a time a ULID cannot hold. On SQLite, edits made outside the layer: a row's
+ * text, an indexed column, a row moved to another chain or to a later place, the first, a middle or the newest row
+ * deleted, a row whose text is no ledger entry, and a chain recomputed without the key; and an operator's reanchor,
+ * from which a broken chain verifies again.
  * (The cases of two adapters appending to one chain on Postgres run in learning-store.sql.test.ts.)
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -54,6 +56,19 @@ describe('ids and canonical JSON', () => {
     const ids = [ulid(1_000), ulid(1_000), ulid(1_001), ulid(999)];
     expect(ids.every((id) => /^[0-9A-HJKMNP-TV-Z]{26}$/.test(id))).toBe(true);
     expect([...ids].sort()).toEqual(ids);
+  });
+
+  it('refuses a time a ULID cannot hold, and gives the next ids in order as before', async () => {
+    // A module of its own, so the ids the other cases make are not ordered after this case's.
+    vi.resetModules();
+    const { ulid: fresh } = await import('../ids.js');
+    const before = fresh(5_000);
+    for (const time of [Number.POSITIVE_INFINITY, Number.NaN, 2 ** 48]) expect(() => fresh(time)).toThrow(RangeError);
+    const after = [fresh(5_000), fresh(5_001)];
+    expect(after.every((id) => /^[0-9A-HJKMNP-TV-Z]{26}$/.test(id))).toBe(true);
+    // 5,000 and 5,001 milliseconds in Crockford's base 32.
+    expect(after.map((id) => id.slice(0, 10))).toEqual(['00000004W8', '00000004W9']);
+    expect([before, ...after].sort()).toEqual([before, ...after]);
   });
 
   it('sorts keys at every depth and drops undefined', () => {
@@ -438,6 +453,39 @@ describe.each([
     await store.deleteUserRows('A', 'bo');
     expect((await store.chainRows(chainKeyOf(LEARNER))).map((r) => r.turnUserId)).toEqual([null, null]);
     expect(await ledger.verifyChain(chainKeyOf(LEARNER))).toEqual({ ok: true, keyed: false });
+  });
+
+  it("writes an operator's reanchor on a chain whose head was moved back to an earlier row, and the chain verifies from it", async () => {
+    const store = await open();
+    const ledger = new Ledger({ store });
+    const key = chainKeyOf(LEARNER);
+    await ledger.propose(candidate('one'), { verdict: 'kept' });
+    await ledger.propose(candidate('two'), { verdict: 'kept' });
+    const rows = await store.chainRows(key);
+    // An edit made outside the layer moves the head back to the second row; the rows after it stand.
+    expect(await store.advanceHead(key, 4, { lastId: rows[1]!.id, lastHash: rows[1]!.hash, seq: 2 })).toBe(true);
+    expect(await ledger.verifyChain(key)).toEqual({ ok: false, keyed: false, reason: 'head' });
+
+    const reanchored = await ledger.propose(candidate('traits'), { verdict: 'kept', reason: 'reanchor', operator: true });
+    expect(reanchored.status).toBe('kept');
+    const after = await store.chainRows(key);
+    expect(after.map((r) => r.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(after[4]!.prevHash).toBe(after[3]!.hash);
+    expect(await store.head(key)).toMatchObject({ lastId: after[5]!.id, seq: 6 });
+    expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+  });
+
+  it('writes no row whose text holds a lone surrogate, which a SQL text column cannot hold, and the chain stays whole', async () => {
+    const store = await open();
+    const ledger = new Ledger({ store });
+    const key = chainKeyOf(LEARNER);
+    await ledger.propose(candidate('one'), { verdict: 'kept' });
+    await expect(ledger.propose({ ...candidate('two'), sessionId: 's-\uD800' }, { verdict: 'kept' })).rejects.toThrow(/lone surrogate/);
+    const loneUser = { ...LEARNER, userId: '42\uDC00' };
+    await expect(ledger.propose({ ...candidate('three'), learner: loneUser }, { verdict: 'kept' })).rejects.toThrow(/lone surrogate/);
+    expect(await store.head(chainKeyOf(loneUser))).toBeUndefined();
+    expect((await store.chainRows(key)).map((r) => r.seq)).toEqual([1, 2]);
+    expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
   });
 });
 
