@@ -21,6 +21,7 @@ const DEFAULT_MAX_HISTORY_MESSAGES = 100;
 const DEFAULT_VERBATIM_TAIL_COUNT = 10;
 const DEFAULT_VERBATIM_HEAD_COUNT = 2;
 const DEFAULT_SUMMARIZATION_CHUNK_SIZE = 20; // Messages to group for one summary
+const MIN_SUMMARIZATION_CHUNK_SIZE = 2; // A summary of fewer messages could not shorten the history
 const MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT = 5; // Don't try to summarize too few messages
 const DEFAULT_SUMMARIZATION_OPTIONS: SummarizationOptions = { desiredLength: 'medium', method: 'abstractive_llm' };
 
@@ -54,6 +55,67 @@ function cutsKeepingToolRounds(
   const headEnd = head > 0 ? bounds.end[head - 1] + 1 : 0;
   const tailStart = tail > 0 ? bounds.start[messages.length - tail] : messages.length;
   return { headEnd, tailStart: Math.max(headEnd, tailStart) };
+}
+
+/**
+ * Whether the tool round that ends `messages` waits for a result: an assistant message in it names a call that no tool
+ * message after it answers. A tool message answers the nearest assistant message before it that names its call id, as
+ * `toolRoundBounds` reads them.
+ *
+ * @param messages - The messages, oldest first.
+ * @param rounds - The tool rounds of `messages`.
+ * @returns True when a call of the last round has no result yet.
+ */
+function lastRoundWaitsForResults(messages: ReadonlyArray<ConversationMessage>, rounds: ToolRoundBounds): boolean {
+  const last = messages.length - 1;
+  if (last < 0) return false;
+  // each call id of the round by the nearest assistant message that names it, and the calls no result answers yet
+  const callerOf = new Map<string, number>();
+  const unanswered = new Set<string>();
+  for (let index = rounds.start[last]; index <= last; index += 1) {
+    const message = messages[index];
+    const calls = message.role === MessageRole.ASSISTANT ? message.tool_calls : undefined;
+    if (Array.isArray(calls) && calls.length > 0) {
+      for (const call of calls) {
+        const callId = call?.id;
+        if (typeof callId === 'string' && callId) {
+          callerOf.set(callId, index);
+          unanswered.add(`${index} ${callId}`);
+        }
+      }
+    } else if (message.role === MessageRole.TOOL && typeof message.tool_call_id === 'string') {
+      const caller = callerOf.get(message.tool_call_id);
+      if (caller !== undefined) unanswered.delete(`${caller} ${message.tool_call_id}`);
+    }
+  }
+  return unanswered.size > 0;
+}
+
+/**
+ * The messages a summary can take its chunk from: those after the first `headCount` and before the last `tailCount`,
+ * each cut moved to keep a tool round whole, as `cutsKeepingToolRounds` moves it. A round that ends `messages` and
+ * waits for a result stays out too, as a tail of one or more keeps it: its results are recorded later, and a summary of
+ * its call would leave them without it. The runtime records nothing after a pause's call until each of its calls is
+ * answered (a new turn answers them as not run before it records its input), so a round that waits is the last one.
+ *
+ * @param messages - The messages, oldest first.
+ * @param headCount - How many of the first messages to keep.
+ * @param tailCount - How many of the last messages to keep.
+ * @param rounds - The tool rounds of `messages`, when the caller has them.
+ * @returns `start`, the index of the first message a summary can take, and `end`, the index after the last. None when
+ * `end` is not after `start`.
+ */
+function summaryMiddle(
+  messages: ReadonlyArray<ConversationMessage>,
+  headCount: number,
+  tailCount: number,
+  rounds: ToolRoundBounds = toolRoundBounds(messages),
+): { start: number; end: number } {
+  const { headEnd, tailStart } = cutsKeepingToolRounds(messages, headCount, tailCount, rounds);
+  const end = lastRoundWaitsForResults(messages, rounds)
+    ? Math.min(tailStart, rounds.start[messages.length - 1])
+    : tailStart;
+  return { start: headEnd, end };
 }
 
 /**
@@ -97,14 +159,14 @@ function messageCount(value: unknown, fallback: number): number {
 /**
  * Configuration for the ConversationContext, defining its behavior and limits. Each of the four counts of messages
  * (`maxHistoryLengthMessages`, `messagesToKeepVerbatimTail`, `messagesToKeepVerbatimHead`, `summarizationChunkSize`)
- * counts the whole part of the number it reads as, and one that reads as none (given as undefined, or NaN) keeps its
- * default.
+ * counts the whole part of the number it reads as, never below 0 (2 for `summarizationChunkSize`), and one that reads
+ * as none (given as undefined, or NaN) keeps its default.
  * @interface ConversationContextConfig
  * @property {number} [maxHistoryLengthMessages=100] - The number of messages the history keeps: past it, the oldest messages after the first `messagesToKeepVerbatimHead` are dropped, or summarized with `enableAutomaticSummarization`, and the last summary after those first messages is kept with them. A tool round the kept messages reach into is kept whole, past this number when it has to be.
  * @property {boolean} [enableAutomaticSummarization=false] - If true, attempts to summarize older parts of the conversation when history exceeds limits. Requires `utilityAI`.
- * @property {number} [messagesToKeepVerbatimTail=10] - Number of most recent messages to always keep verbatim (not summarized), more when the oldest of them is part of a tool round.
+ * @property {number} [messagesToKeepVerbatimTail=10] - Number of most recent messages to always keep verbatim (not summarized), more when the oldest of them is part of a tool round. A tool round that ends the history and waits for a result is not summarized either, with a tail of 0 too.
  * @property {number} [messagesToKeepVerbatimHead=2] - Number of earliest messages (e.g., system prompts, initial user query) to always keep verbatim, more when the last of them is part of a tool round.
- * @property {number} [summarizationChunkSize=20] - Number of messages to group for a single summarization pass, more when the last of them is part of a tool round: the round is summarized whole.
+ * @property {number} [summarizationChunkSize=20] - Number of messages to group for a single summarization pass, at least 2 (a summary takes the place of the messages it summarizes, so fewer could not shorten the history), more when the last of them is part of a tool round: the round is summarized whole.
  * @property {SummarizationOptions} [summarizationOptions] - Default options for the summarization process.
  * @property {IUtilityAI} [utilityAI] - Optional. An instance of `IUtilityAI` used for summarization and other NLP tasks.
  * @property {string} [defaultLanguage='en-US'] - Default language (BCP-47) for context-sensitive operations if not otherwise specified.
@@ -237,11 +299,16 @@ export class ConversationContext {
         },
     } as Required<ConversationContextConfig>;
     // The history's cuts index the messages with these settings, so each is read as a whole number of messages, and a
-    // setting given as undefined, which the spread above puts in place of its default, keeps the default.
+    // setting given as undefined, which the spread above puts in place of its default, keeps the default. A summary
+    // takes the place of the messages it summarizes, so its chunk is two messages or more: a summary of fewer would
+    // leave the history as long as it was, or make it longer.
     this.config.maxHistoryLengthMessages = messageCount(this.config.maxHistoryLengthMessages, DEFAULT_MAX_HISTORY_MESSAGES);
     this.config.messagesToKeepVerbatimTail = messageCount(this.config.messagesToKeepVerbatimTail, DEFAULT_VERBATIM_TAIL_COUNT);
     this.config.messagesToKeepVerbatimHead = messageCount(this.config.messagesToKeepVerbatimHead, DEFAULT_VERBATIM_HEAD_COUNT);
-    this.config.summarizationChunkSize = messageCount(this.config.summarizationChunkSize, DEFAULT_SUMMARIZATION_CHUNK_SIZE);
+    this.config.summarizationChunkSize = Math.max(
+      MIN_SUMMARIZATION_CHUNK_SIZE,
+      messageCount(this.config.summarizationChunkSize, DEFAULT_SUMMARIZATION_CHUNK_SIZE),
+    );
 
     this.utilityAI = this.config.utilityAI; // Use the one from the fully merged config
     this.sessionMetadata = { ...initialMetadata };
@@ -486,13 +553,16 @@ export class ConversationContext {
    *
    * A summary replaces a chunk of the messages between the first `messagesToKeepVerbatimHead` and the newest
    * `messagesToKeepVerbatimTail`. None of the three ends inside a tool round: a round the head or the tail reaches into
-   * stays whole there, and a round the chunk reaches into is summarized whole, past `summarizationChunkSize`. The
-   * summary takes the chunk's place, so a message recorded while the summary is made stays after it, and the summary
-   * of a history cleared meanwhile is dropped. A history still past its limit with too few messages left for another
-   * chunk, the ones recorded meanwhile counted in, is trimmed, and the trim keeps the last summary after the head: this
-   * one, unless a conversation loaded from storage holds a later one. One with enough left for another chunk waits for
-   * the next pass. A pass that finds a summary being made runs once it is made, so the messages recorded meanwhile,
-   * after a clear too, get their passes.
+   * stays whole there, and a round the chunk reaches into is summarized whole, past `summarizationChunkSize`. A round
+   * that ends the history and waits for a result stays out of the chunk, with a tail of 0 too: a summary of its call
+   * would leave the results recorded later without it. The summary takes the chunk's place, so a message recorded while
+   * the summary is made stays after it. The summary of a history cleared meanwhile is dropped, and so is one whose
+   * chunk a result recorded meanwhile reaches into (a result for a call in the chunk, recorded after other messages):
+   * the pass that result started keeps the round whole. A history still past its limit with too few messages left for
+   * another chunk, the ones recorded meanwhile counted in, is trimmed, and the trim keeps the last summary after the
+   * head: this one, unless a conversation loaded from storage holds a later one. One with enough left for another chunk
+   * waits for the next pass. A pass that finds a summary being made runs once it is made, so the messages recorded
+   * meanwhile, after a clear too, get their passes.
    *
    * @private
    * @async
@@ -521,10 +591,10 @@ export class ConversationContext {
         }
         
         // Ensure there's a middle section to process. It starts after the kept head and ends before the kept tail, each
-        // moved to keep a tool round whole.
+        // moved to keep a tool round whole, and before a round that ends the history and waits for a result.
         const messages = this.messages;
         const rounds = toolRoundBounds(messages);
-        const { headEnd: middleSectionStartIndex, tailStart: middleSectionEndIndex } = cutsKeepingToolRounds(messages, headCount, tailCount, rounds);
+        const { start: middleSectionStartIndex, end: middleSectionEndIndex } = summaryMiddle(messages, headCount, tailCount, rounds);
         if (middleSectionStartIndex >= middleSectionEndIndex) {
              this.truncateHistorySimple(this.config.maxHistoryLengthMessages); // Not enough messages for a middle section
              return;
@@ -535,8 +605,7 @@ export class ConversationContext {
         if (middleSectionLength >= this.config.summarizationChunkSize && middleSectionLength >= MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT) {
           // The chunk ends where its last message's tool round ends. No round crosses the middle section's end, so the
           // chunk stays inside the middle section.
-          let chunkEndIndex = middleSectionStartIndex + Math.max(0, this.config.summarizationChunkSize);
-          if (chunkEndIndex > middleSectionStartIndex) chunkEndIndex = rounds.end[chunkEndIndex - 1] + 1;
+          const chunkEndIndex = rounds.end[middleSectionStartIndex + this.config.summarizationChunkSize - 1] + 1;
           const messagesToSummarize = messages.slice(middleSectionStartIndex, chunkEndIndex);
           const textToSummarize = messagesToSummarize
             .map(m => `${m.name || m.role}: ${typeof m.content === 'string' ? m.content : (m.tool_calls ? '[Tool Call Invoked]' : '[Structured Content]')}`)
@@ -546,6 +615,12 @@ export class ConversationContext {
 
           // A history cleared while the summary was made no longer holds the messages it summarizes.
           if (this.messages !== messages) {
+            return;
+          }
+          // A result recorded meanwhile for a call in the chunk, after other messages, ends the call's round past the
+          // chunk: the summary would leave the result without its call. It is dropped, and the pass the result
+          // started, which found this one making the summary, runs once the lock is released.
+          if (toolRoundBounds(messages).end[chunkEndIndex - 1] >= chunkEndIndex) {
             return;
           }
 
@@ -574,7 +649,7 @@ export class ConversationContext {
             // another chunk are trimmed, and the trim keeps the last summary after the head. Enough for one wait for
             // the next pass: the one the next message starts, or one that found this pass making the summary.
             const remainingMiddleLength =
-              cutsKeepingToolRounds(this.messages, headCount, tailCount).tailStart - (middleSectionStartIndex + 1);
+              summaryMiddle(this.messages, headCount, tailCount).end - (middleSectionStartIndex + 1);
             if (remainingMiddleLength < MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT || remainingMiddleLength < this.config.summarizationChunkSize) {
               this.truncateHistorySimple(this.config.maxHistoryLengthMessages);
             }
