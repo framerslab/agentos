@@ -12,11 +12,12 @@ const CALLS = [
 
 /**
  * The message named `name`: `call` is an assistant message that names both calls, `read` and `write` are their
- * results, `summary` is a summary of earlier messages, a name that starts with `q` is the user's and any other name is
- * a reply.
+ * results, `summary` is a summary of earlier messages, `thought` is a thought, a name that starts with `q` is the
+ * user's and any other name is a reply.
  */
 function fields(name: string): Omit<ConversationMessage, 'id' | 'timestamp'> {
   if (name === 'call') return { role: MessageRole.ASSISTANT, content: null, tool_calls: CALLS };
+  if (name === 'thought') return { role: MessageRole.THOUGHT, content: 'thought' };
   if (name === 'read' || name === 'write') {
     return { role: MessageRole.TOOL, content: `${name} done`, tool_call_id: `call-${name}`, name: `${name}_file` };
   }
@@ -72,17 +73,29 @@ describe('ConversationContext history cuts', () => {
       expect(names(context.getAllMessages())).toEqual(['q1', 'call', 'read', 'write', 'q2', 'r2']);
     });
 
-    it.each([undefined, Number.NaN])('with a head setting of %s keeps the first two messages, as the default does', (head) => {
+    it.each([undefined, Number.NaN, null, ''])('with a head setting of %s keeps the first two messages, as the default does', (head) => {
       // A head setting that is not a number keeps the default head of two: a limit of four keeps the first two
       // messages and the newest two, and getHistory() returns them.
       const context = contextWith(['q1', 'r1', 'q2', 'r2', 'q3'], {
         maxHistoryLengthMessages: 4,
-        messagesToKeepVerbatimHead: head,
+        messagesToKeepVerbatimHead: head as number | undefined,
       });
 
       expect(names(context.getHistory())).toEqual(['q1', 'r1', 'r2', 'q3']);
       context.addMessage(fields('r3'));
       expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'q3', 'r3']);
+    });
+
+    it('with a limit of null keeps the default of a hundred messages', () => {
+      // A setting left null, as a config file leaves one it does not set, keeps its default: a limit of none would let
+      // the history grow without end.
+      const loaded = Array.from({ length: 100 }, (_, index) => (index % 2 === 0 ? `q${index}` : `r${index}`));
+      const context = contextWith(loaded, { maxHistoryLengthMessages: null as unknown as number });
+
+      context.addMessage(fields('q100'));
+
+      expect(context.getAllMessages()).toHaveLength(100);
+      expect(names(context.getAllMessages()).slice(0, 3)).toEqual(['q0', 'r1', 'r3']);
     });
 
     it.each([0, -3])('with a limit of %s keeps every message, as getHistory() returns them', (limit) => {
@@ -96,6 +109,21 @@ describe('ConversationContext history cuts', () => {
   });
 
   describe('getHistory', () => {
+    it('with roles left out that hold a call or its results leaves out the rest of the round', () => {
+      // A limit of four keeps the first two messages and the newest two. Leaving out the tool messages leaves out the
+      // call's results, so the call is left out with them, and leaving out the assistant's messages leaves out the
+      // call, so its results are left out with it: a provider refuses a call without its results and a result without
+      // its call. A thought left out of a round leaves its call and results together.
+      const context = contextWith(['q1', 'call', 'read', 'write', 'q2', 'q3', 'q4', 'q5'], { maxHistoryLengthMessages: 4 });
+
+      expect(names(context.getHistory(undefined, [MessageRole.TOOL]))).toEqual(['q1', 'q2', 'q4', 'q5']);
+      expect(names(context.getHistory(undefined, [MessageRole.ASSISTANT]))).toEqual(['q1', 'q2', 'q4', 'q5']);
+      expect(names(context.getHistory(5, [MessageRole.TOOL]))).toEqual(['q1', 'q2', 'q3', 'q4', 'q5']);
+
+      const thinking = contextWith(['q1', 'r1', 'call', 'thought', 'read', 'write', 'done']);
+      expect(names(thinking.getHistory(undefined, [MessageRole.THOUGHT]))).toEqual(['q1', 'r1', 'call', 'read', 'write', 'done']);
+    });
+
     it('with a limit that ends inside a tool round returns the round whole', () => {
       const context = contextWith(['q1', 'r1', 'q2', 'call', 'read', 'write', 'done']);
 
