@@ -1080,6 +1080,41 @@ describe('ChatGptImporter', () => {
     ]);
   });
 
+  it("stores a message pair once when another import stores it between this import's check for it and its write", async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    fs.writeFileSync(jsonPath, JSON.stringify(buildMockConversations()), 'utf8');
+
+    // Another import of the file runs to its end just before this import writes the pair it found no duplicate of.
+    const brain = await openBrain();
+    let other: ReturnType<ChatGptImporter['import']> | undefined;
+    const meanwhile = new Proxy(brain, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target) as unknown;
+        if (property === 'run') {
+          return async (...args: Parameters<Brain['run']>) => {
+            if (!other && /^\s*INSERT\b[\s\S]*\bmemory_traces\b/i.test(args[0])) {
+              other = new ChatGptImporter(brain).import(jsonPath);
+              await other;
+            }
+            return target.run(...args);
+          };
+        }
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+
+    expect(await new ChatGptImporter(meanwhile).import(jsonPath)).toMatchObject({ imported: 0, skipped: 1, errors: [] });
+    expect(await other).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    const traces = await brain.all<{ content: string }>('SELECT content FROM memory_traces WHERE brain_id = ?', [
+      brain.brainId,
+    ]);
+    expect(traces.map((trace) => trace.content)).toEqual([
+      '[user]: How do TypeScript generics work?\n[assistant]: TypeScript generics allow you to write reusable, type-safe code...',
+    ]);
+    expect(await brain.all('SELECT id FROM conversations WHERE brain_id = ?', [brain.brainId])).toHaveLength(1);
+  });
+
   it('takes no row it did not name: two conversations of one title and creation time keep apart, and the rows of that title and time stay as they were', async () => {
     const dir = tempDir();
     const jsonPath = path.join(dir, 'conversations.json');
