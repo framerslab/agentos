@@ -33,6 +33,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
 });
 
 import { AgentOS } from '../AgentOS';
+import type { IAgentOS } from '../interfaces/IAgentOS';
 import { createAgentOSConfig } from '../../core/config/AgentOSConfig';
 import { createLearningLayer } from '../../cognition/learning/LearningLayer';
 import { GMIManager } from '../../cognition/substrate/GMIManager';
@@ -125,6 +126,9 @@ describe('the full runtime with the learning flag on', () => {
     const base = await createAgentOSConfig();
     booted = await boot({ gmiManagerConfig: { ...base.gmiManagerConfig, learningLayer: passed } });
     expect(booted.getLearningLayer()).toBe(passed);
+    // A host that holds the runtime by its interface reaches the layer too.
+    const host: IAgentOS = booted;
+    expect(host.getLearningLayer?.()).toBe(passed);
     expect(await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' })).toContain(HEADING);
     await booted.shutdown();
     booted = undefined;
