@@ -123,3 +123,20 @@ describe('a role overlay and the operator-only traits', () => {
     expect(droppedTraitPatchWarning('reviewer', ['honesty', 'emotionality'])).toContain('honesty and emotionality');
   });
 });
+
+describe('what a caller passes the renderer at run time', () => {
+  it('reads only the three band names, and only an own property, from bands', () => {
+    // A JavaScript caller, or a band read back from a stored row, reaches the renderer unchecked by the compiler.
+    expect(renderPersonalitySection({}, { bands: { openness: 'HIGH' as never } })).toBeNull();
+    expect(renderPersonalitySection({}, { bands: { openness: 'toString' as never } })).toBeNull();
+    expect(renderPersonalitySection({}, { bands: { openness: 'HIGH' as never }, register: 'writing' })).toBeNull();
+    const inherited = Object.create({ openness: 'high' }) as Partial<Record<HexacoTraitKey, TraitBand>>;
+    expect(renderPersonalitySection({}, { bands: inherited })).toBeNull();
+    // A band that is not one of the three gives way to the band of the trait's value.
+    expect(renderPersonalitySection({ openness: 0.9 }, { bands: { openness: 'nonsense' as never } })).toBe(
+      renderPersonalitySection({ openness: 0.9 }),
+    );
+    expect(renderPersonalitySection({}, { bands: { openness: 'high' } })).toContain('Explore creative angles');
+  });
+
+});
