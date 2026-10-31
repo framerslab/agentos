@@ -145,22 +145,39 @@ function keptByTrim<T>(messages: ReadonlyArray<T>, cuts: TrimCuts): T[] {
 
 /**
  * A history setting read as a number of messages: the whole part of the number it reads as, never below 0, and
- * `fallback` when it reads as none (given as undefined, or NaN).
+ * `fallback` when it reads as none. A number, or a string that holds one, reads as that number; anything else (given
+ * as undefined, null, a blank string, NaN, or a value of another type) reads as none, since `Number()` would read null,
+ * a blank string and false as 0.
  *
  * @param value - The setting.
  * @param fallback - The setting's default.
  * @returns The number of messages.
  */
 function messageCount(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) return fallback;
   const count = Number(value);
   return Number.isNaN(count) ? fallback : Math.max(0, Math.floor(count));
+}
+
+/**
+ * Whether `message` is a tool call (an assistant message that names calls) or a tool result.
+ *
+ * @param message - The message.
+ * @returns True for a call or a result.
+ */
+function isCallOrResult(message: ConversationMessage): boolean {
+  return (
+    message.role === MessageRole.TOOL ||
+    (message.role === MessageRole.ASSISTANT && Array.isArray(message.tool_calls) && message.tool_calls.length > 0)
+  );
 }
 
 /**
  * Configuration for the ConversationContext, defining its behavior and limits. Each of the four counts of messages
  * (`maxHistoryLengthMessages`, `messagesToKeepVerbatimTail`, `messagesToKeepVerbatimHead`, `summarizationChunkSize`)
  * counts the whole part of the number it reads as, never below 0 (2 for `summarizationChunkSize`), and one that reads
- * as none (given as undefined, or NaN) keeps its default.
+ * as none (given as undefined, null, a blank string, NaN, or a value that is neither a number nor a string) keeps its
+ * default.
  * @interface ConversationContextConfig
  * @property {number} [maxHistoryLengthMessages=100] - The number of messages the history keeps: past it, the oldest messages after the first `messagesToKeepVerbatimHead` are dropped, or summarized with `enableAutomaticSummarization`, and the summary right after those first messages and the last summary after them are kept with them. A tool round the kept messages reach into is kept whole, past this number when it has to be. 0 sets no limit: the history keeps every message.
  * @property {boolean} [enableAutomaticSummarization=false] - If true, attempts to summarize older parts of the conversation when history exceeds limits. Requires `utilityAI`.
@@ -370,7 +387,7 @@ export class ConversationContext {
    *
    * @public
    * @param {number} [limit] - Optional. The number of recent messages to return, more when the oldest of them is part of a tool round. Without it, the messages a trim to `config.maxHistoryLengthMessages` keeps.
-   * @param {MessageRole[]} [excludeRoles] - Optional. An array of message roles to exclude from the returned history. The other messages are the ones counted.
+   * @param {MessageRole[]} [excludeRoles] - Optional. An array of message roles to exclude from the returned history. A tool round that loses a call or a result to them loses its other calls and results too, since a provider refuses a call without its results and a result without its call. The other messages are the ones counted.
    * @returns {ReadonlyArray<Readonly<ConversationMessage>>} A readonly array of readonly message objects.
    */
   public getHistory(limit?: number, excludeRoles?: MessageRole[]): ReadonlyArray<Readonly<ConversationMessage>> {
@@ -378,7 +395,19 @@ export class ConversationContext {
     let effectiveMessages = this.messages;
     if (excludeRoles && excludeRoles.length > 0) {
       const rolesToExclude = new Set(excludeRoles);
-      effectiveMessages = effectiveMessages.filter(msg => !rolesToExclude.has(msg.role));
+      // A call left out would leave its results without it and a result left out its call, so a tool round that loses
+      // a call or a result loses its other calls and results too. A message of another role leaves the round whole.
+      const rounds = toolRoundBounds(this.messages);
+      const brokenRounds = new Set<number>();
+      this.messages.forEach((message, index) => {
+        if (rolesToExclude.has(message.role) && isCallOrResult(message) && rounds.start[index] < rounds.end[index]) {
+          brokenRounds.add(rounds.start[index]);
+        }
+      });
+      effectiveMessages = this.messages.filter(
+        (message, index) =>
+          !rolesToExclude.has(message.role) && !(isCallOrResult(message) && brokenRounds.has(rounds.start[index])),
+      );
     }
     let returned = effectiveMessages;
     if (limit !== undefined && limit > 0) {
