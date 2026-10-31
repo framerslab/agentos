@@ -8959,7 +8959,7 @@ describe("the standalone retriever and the rolling-summary sink, by a turn's sco
       ]);
 
       // bob's deletion takes every summary that holds bob's words, and leaves the learner's own and the anonymous session's.
-      const report = await os.getLearningLayer()!.forgetUser('bob', { namespace: 'A' });
+      const report = await os.getLearningLayer()!.forgetUser!('bob', { namespace: 'A' });
       expect(liveIn(file).filter((trace) => trace.content.includes('GOATS-2'))).toEqual([]);
       expect(liveIn(file).filter((trace) => trace.contributorIds?.includes('bob') || trace.turnUserId === 'bob')).toEqual([]);
       expect(filedWith(file, 'BEES-1').map(([, scopeId]) => scopeId)).toEqual(['A/ana::tutor', 'A/ana']);
