@@ -950,25 +950,13 @@ export function createExtensionPack(context: ExtensionPackContext): ExtensionPac
 }
 ```
 
-### 7. Register in pnpm-workspace.yaml and registry.json
+### 7. Give the pack its role
 
-Add your new package to `pnpm-workspace.yaml`:
-
-```yaml
-packages:
-  - 'packages/*'
-  - 'packages/agentos-extensions/registry/curated/safety/my-guardrail'
-```
-
-And add an entry to `packages/agentos-extensions/registry.json`:
+agentos-extensions' `pnpm-workspace.yaml` takes in every package under `registry/curated/*` and `registry/curated/*/*`, so `registry/curated/safety/my-guardrail` needs no workspace entry. The build generates `registry.json` from the packs on disk; git does not track it, and the root package `@framers/agentos-extensions` ships it, so the pack needs no registry entry either. What the pack does need is a role under `roles` in `scripts/package-roles.json`; a package without one fails the pack guard ([CONTRIBUTING.md](https://github.com/framerslab/agentos-extensions/blob/master/CONTRIBUTING.md)):
 
 ```json
-{
-  "my-guardrail": {
-    "path": "registry/curated/safety/my-guardrail",
-    "category": "safety",
-    "description": "My custom guardrail"
-  }
+"roles": {
+  "registry/curated/safety/my-guardrail": "pack"
 }
 ```
 
