@@ -73,6 +73,42 @@ function addThrough(
   };
 }
 
+/** A memory_update as the tool makes it: the trace's before-state read first, its new content set through the recorder. */
+async function changeThrough(memory: Memory, traceId: string, content: string): Promise<SessionSelfChange<string>> {
+  const before = (await memory.readTrace(traceId))!;
+  return {
+    kind: 'memory_write',
+    actor: 'tool:memory_update',
+    subject: traceId,
+    before: { traces: [before] },
+    after: { created: [], changed: [{ id: traceId, content }], deleted: [] },
+    brainId: memory.brainId,
+    apply: async () => {
+      await memory.restoreTrace(traceId, { ...before, content });
+      return traceId;
+    },
+    undo: async () => memory.restoreTrace(traceId, before),
+  };
+}
+
+/** A memory_delete as the tool makes it: the trace's before-state read first, the trace forgotten through the recorder. */
+async function deleteThrough(memory: Memory, traceId: string): Promise<SessionSelfChange<string>> {
+  const before = (await memory.readTrace(traceId))!;
+  return {
+    kind: 'memory_write',
+    actor: 'tool:memory_delete',
+    subject: traceId,
+    before: { traces: [before] },
+    after: { created: [], changed: [], deleted: [traceId] },
+    brainId: memory.brainId,
+    apply: async () => {
+      await memory.forget(traceId);
+      return traceId;
+    },
+    undo: async () => memory.restoreTrace(traceId, before),
+  };
+}
+
 const ledgerIdOf = (result: ProposalResult): string => {
   if (result.status !== 'kept') throw new Error(`the write was ${result.status}`);
   return result.ledgerId;
@@ -224,6 +260,50 @@ describe('forgetUser', () => {
     expect(session.currentTraits()).toMatchObject({ extraversion: 0.8 });
   });
 
+  it("keeps the user's learning rows while a memory store fails, so a second call deletes what the first could not", async () => {
+    quiet();
+    const { memory: tools, brain } = await facadeAt(tempFile(), 'tools-brain');
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: tools });
+    const session = await layer.forLearner(KEY, context());
+    // The learner's own words on a turn with no learner (a workflow turn) are filed under the session's form, which
+    // only the learner's session row names.
+    await session.recordSelfChange!(addThrough(tools, 'A42 said this on a workflow turn.', 'user', taggedScopeId('s-1', 'A')), {
+      learner: 'none',
+      namespace: 'A',
+    });
+    await session.recordSelfChange!(addThrough(tools, 'A42 likes tea.', 'user', learnerScopeIds(KEY, 'tutor').userScopeId), {
+      learner: 'bound',
+      namespace: 'A',
+    });
+    vi.spyOn(tools, 'deleteScope').mockRejectedValueOnce(new Error('database is locked'));
+
+    const first = await layer.forgetUser('42', { namespace: 'A' });
+
+    expect(first.stores).toEqual(
+      expect.arrayContaining([
+        { store: 'memory tools facade of brain tools-brain', reached: false, reason: 'database is locked' },
+        expect.objectContaining({ store: 'learning store', reached: false }),
+      ]),
+    );
+    expect(first.stores.filter((entry) => entry.store.includes('tools-brain'))).toHaveLength(1);
+    expect(await store.sessionRowsOf('A', '42')).not.toEqual([]);
+    // What stays of a forgotten user is never handed out again.
+    await expect(layer.exportLearnedState(KEY)).rejects.toThrow(/forgotten/);
+
+    const second = await layer.forgetUser('42', { namespace: 'A' });
+
+    expect(await liveContents(brain)).toEqual([]);
+    expect(await store.sessionRowsOf('A', '42')).toEqual([]);
+    expect(await store.traitRow('A', 'tutor', '42')).toBeUndefined();
+    expect(second.stores).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ store: 'memory tools facade of brain tools-brain', reached: true }),
+        expect.objectContaining({ store: 'learning store', reached: true }),
+      ]),
+    );
+  });
+
   it('refuses a blank user id', async () => {
     await expect(createLearningLayer().forgetUser(' ')).rejects.toThrow(TypeError);
   });
@@ -267,6 +347,46 @@ describe('a memory write, taken back', () => {
     await expect(layer.revert(added, 'ops')).rejects.toThrow(/is reverted/);
   });
 
+  it('by revert of its revert: the change comes back, for a trace it changed and for one it deleted', async () => {
+    quiet();
+    const { memory: tools, brain } = await facadeAt(tempFile(), 'tools-brain');
+    const layer = createLearningLayer({ store: new InMemoryLearningStore(), memoryTools: tools });
+    const session = await layer.forLearner(KEY, context());
+    const color = await tools.remember('Ana likes red.', { scope: 'user', scopeId: 'A/42' });
+    const bees = await tools.remember('Ana keeps bees.', { scope: 'user', scopeId: 'A/42' });
+    const changed = ledgerIdOf(await session.recordSelfChange!(await changeThrough(tools, color.id, 'Ana likes blue.')));
+    const deleted = ledgerIdOf(await session.recordSelfChange!(await deleteThrough(tools, bees.id)));
+    const undoChange = await layer.revert(changed, 'ops');
+    const undoDelete = await layer.revert(deleted, 'ops');
+    expect(await liveContents(brain)).toEqual(['Ana keeps bees.', 'Ana likes red.']);
+
+    await layer.revert(undoChange.id, 'ops');
+    await layer.revert(undoDelete.id, 'ops');
+
+    expect(await liveContents(brain)).toEqual(['Ana likes blue.']);
+  });
+
+  it('by revert: a user another process forgets before the revert records its verdict gets nothing back', async () => {
+    quiet();
+    const { memory: tools, brain } = await facadeAt(tempFile(), 'tools-brain');
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: tools });
+    // Another process over the same store, which holds none of this process's memory.
+    const other = createLearningLayer({ store });
+    const session = await layer.forLearner(KEY, context());
+    const bees = await tools.remember('Ana keeps bees.', { scope: 'user', scopeId: 'A/42' });
+    const deleted = ledgerIdOf(await session.recordSelfChange!(await deleteThrough(tools, bees.id)));
+    const decide = Ledger.prototype.decide;
+    vi.spyOn(Ledger.prototype, 'decide').mockImplementation(async function (this: Ledger, ...args: Parameters<Ledger['decide']>) {
+      // The other process's forgetUser commits after the revert last read the tombstone, before its verdict.
+      if (args[1] === 'kept' && args[2] === 'reverted') await other.forgetUser('42', { namespace: 'A' });
+      return decide.apply(this, args);
+    });
+
+    await expect(layer.revert(deleted, 'ops')).rejects.toThrow(/forgotten/);
+    expect(await liveContents(brain)).toEqual([]);
+  });
+
   it("by a learner's next session when a crash left it pending: kept where its traces hold it, else taken back", async () => {
     quiet();
     let now = Date.UTC(2026, 9, 12, 12);
@@ -305,6 +425,68 @@ describe('a memory write, taken back', () => {
     expect(await verdict(elsewhere)).toBe('pending');
     expect(await verdict(young)).toBe('rejected');
     expect(await verdict(late)).toBe('pending');
+  });
+
+  it("by a learner's next session leaves a trace a later write changed as that write left it", async () => {
+    quiet();
+    let now = Date.UTC(2026, 9, 12, 12);
+    const { memory: tools, brain } = await facadeAt(tempFile(), 'tools-brain');
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: tools, clock: () => now });
+    const session = await layer.forLearner(KEY, context());
+    const color = await tools.remember('Ana likes red.', { scope: 'user', scopeId: 'A/42' });
+    // Another process's update that stopped after its pending row, before it wrote.
+    const crashed = new Ledger({ store, clock: () => now });
+    const update = await changeThrough(tools, color.id, 'Ana likes blue.');
+    const proposed = await crashed.propose({
+      learner: KEY,
+      kind: 'memory_write',
+      actor: update.actor,
+      subject: update.subject,
+      before: update.before,
+      after: { brainId: 'tools-brain', ...update.after },
+      sessionId: 's-0',
+    });
+    if (!('candidate' in proposed)) throw new Error(proposed.status);
+    // The learner changes the same trace again, and that change is kept.
+    ledgerIdOf(await session.recordSelfChange!(await changeThrough(tools, color.id, 'Ana likes green.')));
+    now += 16 * 60_000;
+
+    await layer.forLearner(KEY, context({ sessionId: 's-2' }));
+
+    expect(await crashed.latestVerdict(proposed.candidate.id)).toBe('rejected');
+    expect(await liveContents(brain)).toEqual(['Ana likes green.']);
+  });
+
+  it("by a learner's next session leaves a trace a later write deleted, deleted", async () => {
+    quiet();
+    let now = Date.UTC(2026, 9, 12, 12);
+    const { memory: tools, brain } = await facadeAt(tempFile(), 'tools-brain');
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: tools, clock: () => now });
+    const session = await layer.forLearner(KEY, context());
+    const bees = await tools.remember('Ana keeps bees.', { scope: 'user', scopeId: 'A/42' });
+    const hives = await tools.remember('Ana keeps hives.', { scope: 'user', scopeId: 'A/42' });
+    // Another process's merge of the two into a new trace that stopped after its pending row, before it wrote.
+    const crashed = new Ledger({ store, clock: () => now });
+    const proposed = await crashed.propose({
+      learner: KEY,
+      kind: 'memory_write',
+      actor: 'tool:memory_merge',
+      subject: 'mt-merged',
+      before: { traces: [(await tools.readTrace(bees.id))!, (await tools.readTrace(hives.id))!] },
+      after: { brainId: 'tools-brain', created: ['mt-merged'], changed: [], deleted: [bees.id, hives.id] },
+      sessionId: 's-0',
+    });
+    if (!('candidate' in proposed)) throw new Error(proposed.status);
+    // The learner deletes one of them, and that delete is kept.
+    ledgerIdOf(await session.recordSelfChange!(await deleteThrough(tools, bees.id)));
+    now += 16 * 60_000;
+
+    await layer.forLearner(KEY, context({ sessionId: 's-2' }));
+
+    expect(await crashed.latestVerdict(proposed.candidate.id)).toBe('rejected');
+    expect(await liveContents(brain)).toEqual(['Ana keeps hives.']);
   });
 
   it("decides a crash's pending write of a second user's turn and of a turn with no user, off the open's path", async () => {

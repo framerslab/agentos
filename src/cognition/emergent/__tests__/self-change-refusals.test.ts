@@ -158,8 +158,17 @@ describe('the other four self-modification tools through the tool orchestrator',
 
   it("are not refused on a learner's turn in mode on, nor without a layer", async () => {
     const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
-    expect(reasonOf(await call(host, 'create_workflow', CREATE, bound))).toBeUndefined();
-    expect(reasonOf(await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 }))).toBeUndefined();
+    // A refusal and any other failure both leave `details` unset, so each call is read for its success.
+    const created = await call(host, 'create_workflow', CREATE, bound);
+    expect(created.isError, JSON.stringify(created.errorDetails)).toBe(false);
+    const forged = await call(host, 'forge_tool', FORGE, bound);
+    expect(forged.isError, JSON.stringify(forged.errorDetails)).toBe(false);
+    expect(host.judge).toHaveBeenCalled();
+    const enabled = await call(host, 'manage_skills', { action: 'enable', skillId: 'web-search' }, bound);
+    expect(enabled.isError, JSON.stringify(enabled.errorDetails)).toBe(false);
+    expect(enabled.output).toMatchObject({ status: 'enabled' });
+    const adjusted = await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 });
+    expect(adjusted.isError, JSON.stringify(adjusted.errorDetails)).toBe(false);
     expect((await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 }, bound)).isError).toBe(false);
   });
 });

@@ -133,5 +133,7 @@ describe('the self-modification tools on the full runtime', () => {
     }));
     await send(booted, { userId: 'ana', sessionId: 's-1' });
     expect(toolMessages(provider.seenMessages[1])[0]).toContain('forge_tool refused (off)');
+    // The refusal is the mode's, on a turn that had a learner.
+    expect((await booted.getLearningLayer()!.manifest()).turns.bound).toBe(1);
   });
 });
