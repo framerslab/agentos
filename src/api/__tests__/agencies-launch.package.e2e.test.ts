@@ -1,9 +1,10 @@
 /**
  * `agencies` and `launch_agency` as a host uses the package. Every agent, tool and type comes from the package's root
  * index, the module `@framers/agentos` resolves to, and a composition or a workflow a host builds from the module the
- * package's `./emergent` entry serves; only the provider classes are stubbed (helpers/stubProviders.ts), at their module
- * boundary, so the real gmi(), agent(), agency(), launch engine, provider manager, completion gateway, GMI and tool
- * orchestrator run, with no network and no key. Each case reads only what a host can observe: the tools a model call is
+ * package's `./emergent` entry serves (the launch types also from the one its `./api` entry serves); only the provider
+ * classes are stubbed (helpers/stubProviders.ts), at their module boundary, so the real gmi(), agent(), agency(),
+ * launch engine, provider manager, completion gateway, GMI and tool orchestrator run, with no network and no key. Each
+ * case reads only what a host can observe: the types the package names for it, the tools a model call is
  * offered, the requests the provider receives, a send's tool calls and their results, the context a host's own tool is
  * handed, a session's kept messages, the events an agent's callbacks receive, the approvals a host's handler is asked,
  * budgets, warnings and construction errors. On the full runtime (`AgentOS.create()` with `agencies`) the cases read the
@@ -55,6 +56,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (import
 import { AgencyConfigError, AgentOS, AgentOSResponseChunkType, AgentOSServiceError, GuardrailAction, LAUNCH_AGENCY_TOOL_NAME, SpendBudget, agency, agent, gmi } from '../../index';
 import type {
   AgencyCallbacks,
+  AgencyLaunchFrame,
   AgencyLaunchOptions,
   AgencySession,
   AgentOSInput,
@@ -63,6 +65,7 @@ import type {
   AgentSession,
   ApprovalDecision,
   ApprovalRequest,
+  CallerTurnContext,
   GenerateTextResult,
   GuardrailOutputPayload,
   IGuardrailService,
@@ -71,9 +74,15 @@ import type {
   IRetrievalAugmentor,
   ITool,
   LaunchAgencyResult,
+  LaunchLimits,
+  LaunchRecordMetadata,
   RagRetrievedChunk,
+  RuntimeAgencyLaunchOptions,
+  ToolCallHook,
   ToolExecutionContext,
 } from '../../index';
+// The module the package's './api' entry serves, which names the launch types as the root does.
+import type * as ApiEntry from '../index';
 // The module the package's './emergent' entry serves: the parts a host builds a composition or a workflow from.
 import { ComposableToolBuilder, CreateWorkflowTool, checkChainable, createStepGate } from '../../cognition/emergent/index';
 import type { StepGate } from '../../cognition/emergent/index';
@@ -3433,5 +3442,96 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("the package root and its ./api entry name the types of the runtime's agencies option, a launch tree's limits, a seat's frame, the turn that made a tool call, a tool hook and a launched team's registry record, and each fits what the package hands a host", async () => {
+    // A host's bounds for its launch trees, typed by the package's LaunchLimits, given to the runtime as its agencies
+    // option, which both entries name.
+    const limits: LaunchLimits = { maxDepth: 2, maxSeats: 3, maxConcurrent: 1, budgetShare: 0.5, maxLaunchTokens: 100_000, defaultDeadlineMs: 60_000, maxDeadlineMs: 120_000 };
+    const limitsViaApi: ApiEntry.LaunchLimits = limits;
+    const agencies: RuntimeAgencyLaunchOptions = { launch: true, ...limitsViaApi };
+    const agenciesViaApi: ApiEntry.RuntimeAgencyLaunchOptions = agencies;
+    // On the full runtime a seat's tool reads its frame, the turn that made the call and its team's registry record by
+    // the package's types.
+    const reads: Array<{ frame?: ApiEntry.AgencyLaunchFrame; names?: string[]; record?: ApiEntry.LaunchRecordMetadata }> = [];
+    let os!: AgentOS;
+    const look = configTool('look', async (context) => {
+      const frame: AgencyLaunchFrame | undefined = context.sessionData?.agencyLaunch;
+      const turn: CallerTurnContext | undefined = context.callerTurn;
+      // A listed session's metadata is a record of unknowns; a launched team's is the package's LaunchRecordMetadata.
+      const record = os.listAgencies()[0]?.metadata as unknown as LaunchRecordMetadata | undefined;
+      reads.push({ frame, names: turn?.toolNames ? [...turn.toolNames] : undefined, record });
+      return 'looked';
+    });
+    const k = key();
+    const s = answerWhole(
+      script('openai', k, {
+        replies: [
+          launchStep({ goal: 'Look around.', strategy: 'sequential', seats: [{ role: 'eye', instructions: 'Look around.', tools: ['look'] }] }, 'l1'),
+          reply.tools([{ id: 'x1', name: 'look', args: {} }]),
+          reply.text('Seen.'),
+          reply.text('Done.'),
+        ],
+      }),
+      'ok',
+    );
+    os = await startRuntime(k, { tools: { search: configTool('search', async () => 'found'), look }, agencies: agenciesViaApi });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-types' });
+    // The lead, the eye's two steps, the lead (the precondition).
+    expect(s.seen).toHaveLength(4);
+    const out = launchedIn(s.seen[3], 'l1');
+    expect(out).toMatchObject({ status: 'completed', text: 'Seen.' });
+    expect(reads).toEqual([
+      {
+        frame: { launchId: out.agencyId, role: 'eye', depth: 1 },
+        names: ['look'],
+        record: expect.objectContaining({
+          kind: 'launched',
+          parentPersonaId: 'lead',
+          launchingSessionId: 'r-types',
+          depth: 1,
+          strategy: 'sequential',
+          status: 'running',
+          goalPreview: 'Look around.',
+        }),
+      },
+    ]);
+
+    // On gmi() a host types its tool hook by the package's ToolCallHook: a seat's call runs under it, and the turn that
+    // made the call names it among the hooks its calls run under.
+    const hooked: string[] = [];
+    const hook: ToolCallHook = async (info) => {
+      hooked.push(info.name);
+      return info;
+    };
+    const hookViaApi: ApiEntry.ToolCallHook = hook;
+    const turns: Array<ApiEntry.CallerTurnContext | undefined> = [];
+    const k2 = key();
+    script('openai', k2, {
+      replies: [
+        launchStep({ goal: 'Peek.', seats: [{ role: 'peeker', instructions: 'Peek.', tools: ['peek'] }] }, 'g1'),
+        reply.tools([{ id: 'p1', name: 'peek', args: {} }]),
+        reply.text('Peeked.'),
+        reply.text('Done.'),
+      ],
+    });
+    const lead = gmi({
+      ...route(k2),
+      instructions: 'Lead.',
+      tools: {
+        peek: hostTool('peek', async (_args, context) => {
+          turns.push(context.callerTurn);
+          return { success: true, output: 'peeked' };
+        }),
+      },
+      onBeforeToolExecution: hookViaApi,
+      agencies: { launch: true },
+    });
+    const result = await lead.session('g-types').send('Go.');
+    expect(launchOf(result)).toMatchObject({ status: 'completed', text: 'Peeked.' });
+    expect(hooked).toEqual([LAUNCH_AGENCY_TOOL_NAME, 'peek']);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.toolHooks).toEqual([hook]);
+    expect([...(turns[0]?.toolNames ?? [])]).toEqual(['peek']);
   });
 });
