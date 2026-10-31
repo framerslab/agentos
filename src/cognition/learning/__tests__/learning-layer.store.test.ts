@@ -8,7 +8,10 @@
  * and the deletion index; a run-time freeze or suspension in the store sets the turn's mode. A memory write is
  * recorded pending, written, then kept, or rejected with write_failed, with no row in mode off; a forgotten user's
  * writes are refused, and one that finds the tombstone after it committed is undone; a turn with no learner records
- * under the agent with a second user's id; a store that will not open degrades the layer.
+ * under the agent with a second user's id; a store that will not open degrades the layer. A write into a learner's own
+ * session on a turn with no learner is the learner's to delete; a write whose verdict does not land because its user
+ * was forgotten meanwhile is taken back for good; a suspension another process set holds from a session's open; and
+ * two processes that note one session row at once both stay in it.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
@@ -19,6 +22,8 @@ import {
   SqlLearningStore,
   type LearnerContext,
   type LearnerKey,
+  type LearningStore,
+  type LearningStoreTx,
   type SessionSelfChange,
   type TurnInputForLearning,
   type TurnPreparation,
@@ -348,9 +353,15 @@ describe('a turn with no learner', () => {
     expect(prepared).toMatchObject({ learner: 'none', noLearnerReason: 'placeholder_user', scopes: { userScopeId: '/s-1', personaScopeId: '/s-1::tutor', namespace: '' } });
     expect(prepared.turnUserId).toBeUndefined();
     expect((await session.prepareTurn(turn({ userId: 'ana', namespace: '' }))).turnUserId).toBe('ana');
-    const { input } = memoryWrite();
-    expect(await session.recordSelfChange!(input, { learner: 'none', namespace: '' })).toMatchObject({ status: 'kept' });
+    // The placeholder's own write records under the agent; the explicit user's under her id, with her visitor row.
+    expect(await session.recordSelfChange!(memoryWrite().input, { learner: 'none', namespace: '' })).toMatchObject({ status: 'kept' });
     expect((await store.chainRows(chainKeyOf({ namespace: '', agentKey: 'tutor', userId: null }))).map((r) => r.verdict)).toEqual(['pending', 'kept']);
+    expect(await session.recordSelfChange!(memoryWrite().input, { learner: 'none', namespace: '', turnUserId: 'ana' })).toMatchObject({ status: 'kept' });
+    expect((await store.chainRows(chainKeyOf({ namespace: '', agentKey: 'tutor', userId: null }, 'ana'))).map((r) => [r.turnUserId, r.verdict])).toEqual([
+      ['ana', 'pending'],
+      ['ana', 'kept'],
+    ]);
+    expect(await store.sessionRowsOf('', 'ana')).toMatchObject([{ sessionId: 's-1', kind: 'visitor', brainIds: ['brain-1'] }]);
     expect(session.scopesFor!({ userId: 'ana', namespace: '', workflowSeat: false })).toMatchObject({ learner: 'none', userScopeId: '/s-1' });
   });
 });
@@ -390,5 +401,318 @@ describe('where the store lives', () => {
     expect(manifest.loops.ledger).toEqual({ live: false, detail: 'store unavailable: brain file locked' });
     expect(manifest.loops.personality_rendering).toEqual({ live: true, detail: 'traits: degraded (brain file locked)' });
     expect(opens).toBeGreaterThan(1);
+  });
+});
+
+/**
+ * The store as processes that share it on Postgres at Read Committed meet it: each call a transaction makes commits on
+ * its own, so two transactions' reads and writes interleave. `holdNextSessionWrite` stops the next session-row write
+ * until `release`; `forgetAfterNextTombstoneRead` commits a user's tombstone and deletes the user's rows right after the
+ * next read of a tombstone, as another process's `forgetUser` would.
+ */
+function readCommitted(base: InMemoryLearningStore) {
+  let hold = false;
+  let release: () => void = () => undefined;
+  let reached: () => void = () => undefined;
+  let forget: { namespace: string; userId: string } | undefined;
+  const store: LearningStore = new Proxy(base, {
+    get(target, prop) {
+      if (prop === 'transaction') return <T>(fn: (tx: LearningStoreTx) => Promise<T>): Promise<T> => fn(store);
+      if (prop === 'putSessionRow') {
+        return async (...args: unknown[]): Promise<void> => {
+          if (hold) {
+            hold = false;
+            await new Promise<void>((resolve) => {
+              release = resolve;
+              reached();
+            });
+          }
+          return (target.putSessionRow as (...rest: unknown[]) => Promise<void>).apply(target, args);
+        };
+      }
+      if (prop === 'isForgotten') {
+        return async (hash: string): Promise<boolean> => {
+          const found = await target.isForgotten(hash);
+          if (forget) {
+            const { namespace, userId } = forget;
+            forget = undefined;
+            await target.insertForgotten(hash, NOW);
+            await target.deleteUserRows(namespace, userId);
+          }
+          return found;
+        };
+      }
+      const value = Reflect.get(target, prop, target) as unknown;
+      return typeof value === 'function' ? (value as (...rest: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  return {
+    store,
+    holdNextSessionWrite: (): Promise<void> => {
+      hold = true;
+      return new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+    },
+    release: () => release(),
+    forgetAfterNextTombstoneRead: (namespace: string, userId: string) => {
+      forget = { namespace, userId };
+    },
+  };
+}
+
+/** A memory update the test watches: each reason its undo was given. */
+function memoryUpdate(apply: () => Promise<void>, onUndo?: (reason: string) => Promise<void>) {
+  const reasons: string[] = [];
+  const input: SessionSelfChange<string> = {
+    kind: 'memory_write',
+    actor: 'tool:memory_update',
+    subject: 'mt-1',
+    before: { traces: [] },
+    after: { created: [], changed: [{ id: 'mt-1', content: 'the new words' }], deleted: [] },
+    brainId: 'brain-1',
+    apply: async () => {
+      await apply();
+      return 'mt-1';
+    },
+    undo: async (_id, reason) => {
+      reasons.push(reason);
+      await onUndo?.(reason);
+    },
+  };
+  return { input, reasons };
+}
+
+describe("a write of a learner's own session on a turn with no learner", () => {
+  const own = { learner: 'none' as const, namespace: 'A' };
+  const learnerTurns = chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }, '42');
+
+  it("is recorded under the learner's id, so that user's deletion takes its row, and its session row collects it", async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const session = await createLearningLayer({ store }).forLearner(KEY, context());
+    // A workflow turn of the learner has no learner and files under the session's own form, which the learner's
+    // deletion takes with the learner's sessions.
+    expect(await session.prepareTurn(turn({ workflowSeat: true }))).toMatchObject({
+      learner: 'none',
+      noLearnerReason: 'workflow_seat',
+      scopes: { learner: 'none', userScopeId: 'A//s-1' },
+    });
+    expect(await session.recordSelfChange!(memoryWrite().input, { ...own, conversationId: 'conv-w' })).toMatchObject({ status: 'kept' });
+    expect((await store.chainRows(learnerTurns)).map((r) => [r.userId, r.turnUserId, r.sessionId, r.verdict])).toEqual([
+      [null, '42', 's-1', 'pending'],
+      [null, '42', 's-1', 'kept'],
+    ]);
+    expect((await store.sessionRowsOf('A', '42')).map((r) => [r.kind, r.conversationIds, r.brainIds])).toEqual([
+      ['learner', ['conv-w'], ['brain-1']],
+    ]);
+    await store.deleteUserRows('A', '42');
+    expect(await store.chainRows(learnerTurns)).toEqual([]);
+    expect(await store.chainRows(chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }))).toEqual([]);
+  });
+
+  it("is filed by the bridge between two reads of the learner's tombstone, and taken back when it lands", async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const session = await createLearningLayer({ store }).forLearner(KEY, context());
+    await session.prepareTurn(turn({ workflowSeat: true }));
+    const hash = await tombstoneHash('A', '42');
+    const undone: string[] = [];
+    const filed = await session.guardMemoryWrite!(
+      {
+        apply: async () => {
+          await store.insertForgotten(hash, NOW);
+          return 'trace-w';
+        },
+        undo: async (id) => {
+          undone.push(id);
+        },
+      },
+      own,
+    );
+    expect(filed).toEqual({ status: 'rejected', reason: 'forgotten' });
+    expect(undone).toEqual(['trace-w']);
+  });
+
+  it("is refused once the learner is forgotten, also on the learner's turn after another user's", async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const session = await createLearningLayer({ store }).forLearner(KEY, context());
+    await session.prepareTurn(turn());
+    await session.prepareTurn(turn({ userId: 'bo' }));
+    expect(await session.prepareTurn(turn())).toMatchObject({ learner: 'none', noLearnerReason: 'other_user' });
+    await store.insertForgotten(await tombstoneHash('A', '42'), NOW);
+    const late = memoryWrite();
+    expect(await session.recordSelfChange!(late.input, own)).toEqual({ status: 'rejected', reason: 'forgotten' });
+    expect(late.applied).toEqual([]);
+  });
+});
+
+describe('a recorded memory write whose verdict does not land', () => {
+  const bound = { learner: 'bound' as const, namespace: 'A' };
+
+  it('is taken back for good when another process forgot its user after its tombstone read, never to its before-state', async () => {
+    quiet();
+    /** A store on which another process's forgetUser commits right after the write's second read of the tombstone. */
+    class ForgottenAfterRead extends InMemoryLearningStore {
+      armed = false;
+      override async isForgotten(hash: string): Promise<boolean> {
+        const found = await super.isForgotten(hash);
+        if (this.armed) {
+          this.armed = false;
+          await this.insertForgotten(hash, NOW);
+          await this.deleteUserRows('A', '42');
+        }
+        return found;
+      }
+    }
+    const store = new ForgottenAfterRead();
+    const session = await createLearningLayer({ store }).forLearner(KEY, context());
+    const update = memoryUpdate(async () => {
+      store.armed = true;
+    });
+    // The deletion took the candidate's rows, so its verdict finds no candidate to decide.
+    expect(await session.recordSelfChange!(update.input, bound)).toEqual({ status: 'rejected', reason: 'forgotten' });
+    expect(update.reasons).toEqual(['forgotten']);
+  });
+
+  it('is taken back for good when its user is forgotten while its before-state is restored', async () => {
+    quiet();
+    /** A store whose read of the candidate, the verdict's first read, fails once. */
+    class VerdictFails extends InMemoryLearningStore {
+      armed = false;
+      override async ledgerRow(id: string) {
+        if (this.armed) {
+          this.armed = false;
+          throw new Error('connection reset');
+        }
+        return super.ledgerRow(id);
+      }
+    }
+    const store = new VerdictFails();
+    const session = await createLearningLayer({ store }).forLearner(KEY, context());
+    const hash = await tombstoneHash('A', '42');
+    const update = memoryUpdate(
+      async () => {
+        store.armed = true;
+      },
+      async (reason) => {
+        // Another process's forgetUser commits while the restore runs.
+        if (reason === 'unrecorded') await store.insertForgotten(hash, NOW);
+      },
+    );
+    expect(await session.recordSelfChange!(update.input, bound)).toEqual({ status: 'rejected', reason: 'forgotten' });
+    expect(update.reasons).toEqual(['unrecorded', 'forgotten']);
+    expect(await store.sessionRowsOf('A', '42')).toEqual([]);
+  });
+
+  it("names what a forgotten user's write that could not be taken back left, and where, and promises no second call", async () => {
+    const warn = quiet();
+    const store = new InMemoryLearningStore();
+    const session = await createLearningLayer({ store }).forLearner(KEY, context());
+    const hash = await tombstoneHash('A', '42');
+    const update = memoryUpdate(
+      () => store.insertForgotten(hash, NOW),
+      async () => {
+        throw new Error('brain file locked');
+      },
+    );
+    expect(await session.recordSelfChange!(update.input, bound)).toEqual({ status: 'rejected', reason: 'forgotten' });
+    const lines = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('was not taken back'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('brain brain-1');
+    expect(lines[0]).toContain('mt-1');
+    expect(lines[0]).not.toContain('42');
+    expect(lines[0]).not.toContain('second forgetUser');
+  });
+});
+
+describe("a forgetUser of another process that commits while a write notes the user's session", () => {
+  it("leaves no row of the user's: the write is refused and the row it noted is deleted again", async () => {
+    quiet();
+    const base = new InMemoryLearningStore();
+    const shared = readCommitted(base);
+    const session = await createLearningLayer({ store: shared.store }).forLearner(KEY, context());
+    shared.forgetAfterNextTombstoneRead('A', '42');
+    const { input, applied } = memoryWrite();
+    expect(await session.recordSelfChange!(input, { learner: 'bound', namespace: 'A', conversationId: 'conv-1' })).toEqual({
+      status: 'rejected',
+      reason: 'forgotten',
+    });
+    expect(applied).toEqual([]);
+    expect(await base.sessionRowsOf('A', '42')).toEqual([]);
+  });
+});
+
+describe('a suspension another process set before a session opens', () => {
+  it('holds from the open: the session reads and writes no learned state', async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store });
+    // The layer's store is open, and it has read the freezes once.
+    await layer.forLearner(KEY, context());
+    await store.insertFreeze({
+      scopeKey: 'learner|A|tutor|7',
+      mode: 'off',
+      namespace: 'A',
+      agentKey: 'tutor',
+      userId: '7',
+      setBy: 'operator:ops',
+      createdAt: NOW,
+    });
+    const session = await layer.forLearner({ ...KEY, userId: '7' }, context({ sessionId: 's-7' }));
+    expect(await store.traitRow('A', 'tutor', '7')).toBeUndefined();
+    expect(await store.chainRows(chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: '7' }))).toEqual([]);
+    expect((await session.prepareTurn(turn({ userId: '7' }))).mode).toBe('off');
+  });
+});
+
+describe('a learner whose record does not verify', () => {
+  it('stays counted in the manifest while a later read of its record fails', async () => {
+    quiet();
+    /** A store whose read of a chain, the load check's first read, fails once. */
+    class ReadFails extends InMemoryLearningStore {
+      armed = false;
+      override async chainWithHead(chainKey: string) {
+        if (this.armed) {
+          this.armed = false;
+          throw new Error('connection reset');
+        }
+        return super.chainWithHead(chainKey);
+      }
+    }
+    const store = new ReadFails();
+    const layer = createLearningLayer({ store });
+    await layer.forLearner(KEY, context());
+    const row = (await store.traitRow('A', 'tutor', '42'))!;
+    const edited = JSON.parse(row.state);
+    edited.current.extraversion = 0.6;
+    await store.updateTraitRow({ ...row, state: JSON.stringify(edited), version: row.version + 1 }, row.version);
+    await layer.forLearner(KEY, context({ sessionId: 's-2' }));
+    expect((await layer.manifest()).loops.ledger.detail).toBe(`${IN_PROCESS}; unkeyed; chain broken for 1 learner`);
+    store.armed = true;
+    await layer.forLearner(KEY, context({ sessionId: 's-3' }));
+    expect((await layer.manifest()).loops.ledger.detail).toBe(`${IN_PROCESS}; unkeyed; chain broken for 1 learner`);
+  });
+});
+
+describe('two processes that note one session row at once', () => {
+  it("keeps both writes' brains in the learner's row, which the learner's deletion reads", async () => {
+    quiet();
+    const base = new InMemoryLearningStore();
+    const shared = readCommitted(base);
+    const first = await createLearningLayer({ store: shared.store }).forLearner(KEY, context());
+    const second = await createLearningLayer({ store: shared.store }).forLearner(KEY, context());
+    const writeTo = (brainId: string): SessionSelfChange<string> => ({ ...memoryWrite().input, brainId });
+    const bound = { learner: 'bound' as const, namespace: 'A' };
+    // The second process reads the row, and its write of the row waits while the first process notes the row whole.
+    const held = shared.holdNextSessionWrite();
+    const late = second.recordSelfChange!(writeTo('brain-2'), bound);
+    await held;
+    expect(await first.recordSelfChange!(writeTo('brain-1'), bound)).toMatchObject({ status: 'kept' });
+    shared.release();
+    expect(await late).toMatchObject({ status: 'kept' });
+    const [row] = await base.sessionRowsOf('A', '42');
+    expect([...row!.brainIds].sort()).toEqual(['brain-1', 'brain-2']);
   });
 });

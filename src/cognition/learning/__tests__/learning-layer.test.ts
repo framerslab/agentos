@@ -372,6 +372,16 @@ describe('a learner session named at its first turn', () => {
     expect(stateOf(await owner)).toBe('bound');
     expect(stateOf(await other)).toBe('other_user');
   });
+
+  it("reads the first user an outage saw after a tool continuation against the learner of the session it opens", async () => {
+    // A GMI built again for a tool-result resume: its first turn continues a tool call, and carries the GMI's user.
+    const { session } = failingOpens(2);
+    const continuation = turn({ userId: 'uninitialized-user', text: null, continuation: true });
+    await expect(session.prepareTurn(continuation)).rejects.toThrow('store offline');
+    await expect(session.prepareTurn(turn({ userId: 'bob' }))).rejects.toThrow('store offline');
+    // The session opens for ana, on whose session bob spoke while it could not open.
+    expect(stateOf(await session.prepareTurn(turn()))).toBe('other_user');
+  });
 });
 
 describe('a learner session named at its first turn, before it opens', () => {

@@ -97,6 +97,7 @@ describe('null reads as unset', () => {
     expect(() => resolveLearningConfig({ clock: 'now' as never }, 'light')).toThrow(/learning\.clock must be a function/);
     expect(() => resolveLearningConfig({ store: {} as never }, 'light')).toThrow(/learning\.store must be a LearningStore/);
     expect(() => resolveLearningConfig({ memoryTools: 'facade' as never }, 'light')).toThrow(/learning\.memoryTools must be an object/);
+    expect(() => resolveLearningConfig({ memoryTools: [] as never }, 'light')).toThrow(/learning\.memoryTools must be an object/);
   });
 });
 
