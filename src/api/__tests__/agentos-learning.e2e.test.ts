@@ -88,6 +88,16 @@ describe('the full runtime with the learning flag off', () => {
     expect(await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' })).toBe(unset);
     expect(booted.getLearningLayer()).toBeUndefined();
   });
+
+  it('reads learning: null as unset, as a config read from JSON or YAML writes it', async () => {
+    booted = await boot();
+    const unset = await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' });
+    await booted.shutdown();
+    booted = undefined;
+    booted = await boot({ learning: null });
+    expect(await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' })).toBe(unset);
+    expect(booted.getLearningLayer()).toBeUndefined();
+  });
 });
 
 describe('the full runtime with the learning flag on', () => {
@@ -134,6 +144,15 @@ describe('the full runtime with the learning flag on', () => {
     await expect(boot({ learning: { namespace: 'acme' } })).rejects.toThrow(/learning\.namespace/);
     await expect(boot({ learning: true, gmiManagerConfig: { personaLoaderConfig: {}, learningLayer: createLearningLayer() } })).rejects.toThrow(/gmiManagerConfig\.learningLayer/);
     await expect(boot({ learning: { mode: 'sideways' } })).rejects.toThrow(/learning\.mode: unknown mode 'sideways'/);
+  });
+
+  it('reads a null field of learning as unset: a null namespace is not refused, and a null mode is on', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    booted = await boot({ learning: { namespace: null, mode: null, agentKey: null, anonymousUserIds: null, traits: null } });
+    expect(await send(booted, { userId: 'ana', sessionId: 's-1', selectedPersonaId: 'tutor' })).toContain(`You teach networking.\n\n${renderPersonalitySection(TRAITS)}`);
+    const manifest = await booted.getLearningLayer()!.manifest();
+    expect(manifest).toMatchObject({ surface: 'runtime', profile: 'custom', mode: 'on' });
+    expect(manifest.turns).toEqual({ prepared: 1, bound: 1, none: {} });
   });
 
   it("has no learner on a turn of tenant B's user 42 on the session tenant A's user 42 opened, nor on the turns after it", async () => {
