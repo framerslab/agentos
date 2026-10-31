@@ -266,7 +266,7 @@ The learning layer binds each session to a learner (one agent with one user, in 
 
 | `learning` | Effect |
 |---|---|
-| unset or `false` (the default) | No layer |
+| unset, `false` or `null` (the default) | No layer |
 | `true` | A layer in mode `on`, with the switches of the agent's cognition profile (the full runtime's is `custom`) |
 | a `LearningConfig` | A layer with each field it sets, and the others as `true` gives them |
 
@@ -278,7 +278,7 @@ The learning layer binds each session to a learner (one agent with one user, in 
 | `anonymousUserIds` | User ids that name no learner, added to `''`, `anonymous_user`, `anonymous`, `system` and `guest` |
 | `traits`, `lessons`, `skills` | Ask for trait changes, lessons and the skill library. `true` on a `gmi()` agent with `cognition: 'full'` asks for all three; `'light'`, a `CognitionConfig` and the full runtime ask for none. The manifest lists each as off and says whether it was asked for |
 
-A value of the wrong type, a blank `agentKey` or an unknown `mode` throws naming the field: at construction on `gmi()`, and from `AgentOS.initialize()` with `CONFIGURATION_ERROR` before any service starts. `initialize()` also refuses `learning` set together with `gmiManagerConfig.learningLayer`, a layer the host built itself with `createLearningLayer()`: the runtime uses a passed layer and leaves it open at shutdown, and closes the layer it built from `learning`. `AgentOS.getLearningLayer()` returns the runtime's layer, or `undefined` with learning off; `agent.learning` is set on a `gmi()` agent with learning on; `resolveCognition()` returns the resolved switches as `learning`.
+A field set to `null` reads as unset, as a config read from JSON or YAML writes one; a member of `agencies.members` whose `learning.agentKey` is `null` names no key of its own. A value of the wrong type, a blank `agentKey` or an unknown `mode` throws naming the field: at construction on `gmi()`, and from `AgentOS.initialize()` with `CONFIGURATION_ERROR` before any service starts. `initialize()` also refuses `learning` set together with `gmiManagerConfig.learningLayer`, a layer the host built itself with `createLearningLayer()`: the runtime uses a passed layer and leaves it open at shutdown, and closes the layer it built from `learning`. `AgentOS.getLearningLayer()` returns the runtime's layer, or `undefined` with learning off; `agent.learning` is set on a `gmi()` agent with learning on; `resolveCognition()` returns the resolved switches as `learning`.
 
 ### The personality section
 
