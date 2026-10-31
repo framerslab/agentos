@@ -35,20 +35,23 @@ function answer(id: string, timestamp: number, callId: string): ConversationMess
 
 /**
  * Runs one compaction pass over `messages`, after an earlier pass that left its boundary at `previousBoundary` when
- * one is given, and returns the ids of the messages it summarized, the turns it sent the compaction model and the
- * boundary it stored.
+ * one is given, and returns the ids of the messages it summarized, the turns it sent the compaction model, the
+ * boundary it stored and the summary state it wrote. `previousState`, when given, is the summary state the pass
+ * starts from instead, as an earlier pass wrote it.
  */
 async function compact(
   messages: ConversationMessage[],
   config: Partial<RollingSummaryCompactionConfig>,
   previousBoundary?: number,
+  previousState?: Record<string, unknown>,
 ) {
   const summarized: string[][] = [];
   const sent: Array<Array<{ id: string; role: string; content: string }>> = [];
   const result = await maybeCompactConversationMessages({
     messages,
-    sessionMetadata:
-      previousBoundary === undefined
+    sessionMetadata: previousState
+      ? { rollingSummaryState: previousState }
+      : previousBoundary === undefined
         ? {}
         : {
             rollingSummaryState: {
@@ -68,7 +71,12 @@ async function compact(
       return JSON.stringify({ summary_markdown: '- The user reads notes.', memory_json: { facts: [] } });
     },
   });
-  return { summarized, sent, boundary: result.summaryUptoTimestamp };
+  return {
+    summarized,
+    sent,
+    boundary: result.summaryUptoTimestamp,
+    state: result.updatedSessionMetadata?.rollingSummaryState,
+  };
 }
 
 describe('maybeCompactConversationMessages', () => {
@@ -230,5 +238,36 @@ describe('maybeCompactConversationMessages', () => {
     expect(summarized).toEqual([['call', 'empty']]);
     expect(sent[0]?.[1]).toMatchObject({ id: 'empty', role: 'tool', content: '[empty result]' });
     expect(boundary).toBe(4);
+  });
+
+  it('keeps the head the summary state records, whatever head its settings give, and records the head on a state that records none', async () => {
+    // An earlier release summarized s1 and s2 and recorded no head. The first pass keeps the two messages its settings
+    // give and records two. The second pass runs with settings that keep six, as a turn under another compaction
+    // profile does, and still keeps two, the head the next turn sends: with six it would keep m2 back from the summary
+    // as part of a head that holds s1, s2 and m1, which the summary already covers.
+    const messages = [
+      message('h1', 1),
+      message('h2', 2, { role: MessageRole.ASSISTANT }),
+      message('s1', 3),
+      message('s2', 4, { role: MessageRole.ASSISTANT }),
+      message('m1', 5),
+      message('m2', 6, { role: MessageRole.ASSISTANT }),
+      message('m3', 7),
+      message('m4', 8, { role: MessageRole.ASSISTANT }),
+      message('m5', 9),
+      message('m6', 10, { role: MessageRole.ASSISTANT }),
+      message('t1', 11),
+      message('t2', 12, { role: MessageRole.ASSISTANT }),
+    ];
+
+    const first = await compact(messages, { headMessagesToKeep: 2, maxMessagesToSummarizePerPass: 1 }, 4);
+
+    expect(first.summarized).toEqual([['m1']]);
+    expect(first.state).toMatchObject({ summaryUptoTimestamp: 5, headMessagesToKeep: 2 });
+
+    const second = await compact(messages, { headMessagesToKeep: 6 }, undefined, first.state);
+
+    expect(second.summarized).toEqual([['m2', 'm3', 'm4', 'm5', 'm6']]);
+    expect(second.state).toMatchObject({ summaryUptoTimestamp: 10, headMessagesToKeep: 2 });
   });
 });
