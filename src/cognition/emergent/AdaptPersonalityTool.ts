@@ -295,6 +295,24 @@ export class AdaptPersonalityTool
   // --------------------------------------------------------------------------
 
   /**
+   * The refusals a call meets whatever a human would answer, before the approval gate: the learning layer's (the
+   * freeze, the turn's mode, its learner), and `operator_only` for honesty and emotionality on every host. The bounds
+   * of a layer (`step_bound`, `call_limit`) are read when the call runs.
+   *
+   * @param args - The call's arguments.
+   * @param context - The call's context.
+   */
+  refusalBeforeApproval(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<AdaptPersonalityOutput> | undefined {
+    const refusal = selfChangeRefusal(context.sessionData);
+    if (refusal) return refusedSelfChange(this.name, refusal);
+    const trait = args?.trait;
+    if (typeof trait === 'string' && OPERATOR_ONLY_TRAITS.includes(trait as HEXACOTrait)) {
+      return refusedSelfChange(this.name, 'operator_only', `only the persona definition sets ${trait}`);
+    }
+    return undefined;
+  }
+
+  /**
    * Apply a personality trait mutation within session budget constraints.
    *
    * @param args - The trait, delta, and reasoning for the mutation.
