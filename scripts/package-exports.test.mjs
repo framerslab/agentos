@@ -39,8 +39,9 @@ test('package exports only point at shipped files', () => {
 test('the built declarations resolve their own relative imports under NodeNext', () => {
   // A relative import without its file's extension does not resolve under NodeNext: a consumer that checks the
   // declarations it reads (no skipLibCheck) gets TS2834 or TS2835 for each one. The consumer sits inside the repository,
-  // so @framers/agentos resolves to this checkout's build through its exports, as an installed copy does. Other
-  // diagnostics in the declarations are not this check's.
+  // so @framers/agentos resolves to this checkout's build through its exports, as an installed copy does. The check
+  // passes only when tsc exits clean: a compiler that cannot run, a missing type library or any other error in the
+  // declarations fails it too.
   const work = mkdtempSync(resolve(pkgRoot, '.declarations-consumer-'));
   try {
     writeFileSync(resolve(work, 'package.json'), JSON.stringify({ name: 'declarations-consumer', private: true, type: 'module' }));
@@ -56,6 +57,7 @@ test('the built declarations resolve their own relative imports under NodeNext',
       ].join('\n'),
     );
     let output = '';
+    let exitCode = 0;
     try {
       output = execFileSync(
         process.execPath,
@@ -64,11 +66,14 @@ test('the built declarations resolve their own relative imports under NodeNext',
         { cwd: work, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
       );
     } catch (error) {
-      output = `${error.stdout ?? ''}${error.stderr ?? ''}`;
+      exitCode = typeof error.status === 'number' ? error.status : 1;
+      output = `${error.stdout ?? ''}${error.stderr ?? ''}${error.status == null ? String(error.message ?? error) : ''}`;
     }
     const extensionless = output.split('\n').filter((line) => /error TS283[45]:/.test(line));
     assert.deepEqual(extensionless.slice(0, 20), [], `${extensionless.length} relative imports in the built declarations name no file`);
     assert.doesNotMatch(output, /consumer\.ts\(/, 'the consumer itself compiles');
+    const errors = output.split('\n').filter((line) => /error TS\d+:/.test(line));
+    assert.equal(exitCode, 0, `tsc exits with ${exitCode} and ${errors.length} errors:\n${(errors.length ? errors : [output]).slice(0, 20).join('\n')}`);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
