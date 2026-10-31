@@ -146,9 +146,12 @@ export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'm
    * The route of a launched team's manager and synthesizers (they call generateText). Default: the provider and model
    * of the persona of the GMI that launched the team, else the GMIs' defaults
    * (`gmiManagerConfig.defaultGMIBaseConfigDefaults`). A route that names neither `apiKey` nor `baseUrl` takes the key
-   * and base URL of the runtime's enabled entry for its provider (`modelProviderManagerConfig.providers`), where the
-   * runtime's own providers take theirs; what that entry leaves unset is what generateText resolves for the provider,
-   * as for any call that names none. A route that names either keeps what it names and takes nothing of the entry.
+   * of the entry in `modelProviderManagerConfig.providers` the runtime serves its provider from (the last enabled one
+   * whose provider started), and sends it where the runtime's provider sends it: to that entry's base URL, else to the
+   * provider's own endpoint, never to a base URL a global default or an environment variable names. An entry with a
+   * base URL and no key gives its base URL alone to an Ollama route only. What the route takes nothing for,
+   * generateText resolves for the provider, key and base URL together, as for any call that names neither. A route
+   * that names either keeps what it names and takes nothing of the entry.
    */
   coordinator?: { provider: string; model: string; apiKey?: string; baseUrl?: string };
 }
