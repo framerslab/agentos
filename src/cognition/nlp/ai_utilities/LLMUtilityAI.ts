@@ -305,12 +305,12 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
 
   /**
    * The JSON the text holds, read as StatisticalUtilityAI reads it (`parseReplyJson`: the text as it is, else inside
-   * the first Markdown code fence it holds, with a language tag or none and with words before or after it, up to the
-   * first later line that starts with as many backticks as opened the fence or more), then a check against
-   * `targetSchema` with Ajv when given, as StatisticalUtilityAI checks it: the standard formats checked, a keyword or a
-   * format Ajv does not know passed over, and a value coerced to the type its schema names where it can
-   * (`targetSchemaChecks`). With `attemptFixWithLLM`, a text that fails either is sent for repair, up to
-   * `maxRepairAttempts` times (1 unless it is a whole number of 1 or more), each repair on the text the last one
+   * the first Markdown code fence it holds, backticks inside a sentence opening none, with a language tag or none and
+   * with words before or after it, up to the first later line that starts with as many backticks as opened the fence or
+   * more), then a check against `targetSchema` with Ajv when given, as StatisticalUtilityAI checks it: the standard
+   * formats checked, a keyword or a format Ajv does not know passed over, and a value coerced to the type its schema
+   * names where it can (`targetSchemaChecks`). With `attemptFixWithLLM`, a text that fails either is sent for repair,
+   * up to `maxRepairAttempts` times (1 unless it is a whole number of 1 or more), each repair on the text the last one
    * answered, whose answer is read the same way, on `llmModelIdForFix` (else `jsonFixerModelId`, else `defaultModelId`)
    * and `llmProviderIdForFix` (else `defaultProviderId`). A repair request names `targetSchema` when given, and the
    * schema's errors when the text parsed and failed it. Answers `null` when no repair parses and passes the schema, or
