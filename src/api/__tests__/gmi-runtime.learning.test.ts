@@ -12,6 +12,8 @@ import { agent, buildSystemPrompt, type AgentOptions } from '../agent';
 import { gmi } from '../gmi';
 import { buildSessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 import { renderPersonalitySection } from '../../cognition/substrate/personas/personalityPrompt';
+import { LearnerSession } from '../../cognition/learning/LearnerSession';
+import type { ToolExecutionContext } from '../../core/tools/ITool';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
@@ -137,5 +139,60 @@ describe('with the learning flag on', () => {
     expect(systemOf(s.seen[0])).toContain(renderPersonalitySection(TRAITS)!);
     expect(systemOf(s.seen[0]).split(HEADING)).toHaveLength(2);
     expect(legacy.learning).toBeUndefined();
+  });
+
+  it('reports metaprompts off for an empty preset list, which runs none', async () => {
+    quietManifest();
+    const tutor = gmi(options(key(), { cognition: { sentiment: true, metaprompts: [] }, learning: true }));
+    expect((await tutor.learning!.manifest()).loops.metaprompts).toEqual({ live: false, detail: 'no metaprompt preset' });
+    const all = gmi(options(key(), { cognition: { sentiment: true, metaprompts: 'all' }, learning: true }));
+    expect((await all.learning!.manifest()).loops.metaprompts).toEqual({ live: true });
+  });
+
+  it("ends a session's learner session at session.close() and a call's when the call ends, and serves sessions after agent.close()", async () => {
+    quietManifest();
+    const k = key();
+    script('openai', k, { replies: [reply.text('1.'), reply.text('2.'), reply.text('3.')] });
+    const ended = vi.spyOn(LearnerSession.prototype, 'endSession');
+    const tutor = gmi(options(k, { learning: true }));
+    const session = tutor.session('s1', { userId: 'ana' });
+    await session.send('Hello.');
+    expect(ended).not.toHaveBeenCalled();
+    await session.close();
+    expect(ended).toHaveBeenCalledTimes(1);
+    // A call's GMI is released once the call has returned.
+    await tutor.generate('Hello.');
+    await vi.waitFor(() => expect(ended).toHaveBeenCalledTimes(2));
+    await tutor.close();
+    await tutor.session('s2', { userId: 'ana' }).send('Hello again.');
+    expect((await tutor.learning!.manifest()).turns).toEqual({ prepared: 3, bound: 2, none: { no_user_id: 1 } });
+  });
+
+  it("tells each tool call its own turn's learner and mode: a session's with a user, a call's with none", async () => {
+    quietManifest();
+    const k = key();
+    script('openai', k, {
+      replies: [reply.tools([{ id: 'p1', name: 'probe', args: {} }]), reply.text('Done.'), reply.tools([{ id: 'p2', name: 'probe', args: {} }]), reply.text('Done.')],
+    });
+    const seen: unknown[] = [];
+    const probe = {
+      id: 'probe-v1',
+      name: 'probe',
+      displayName: 'Probe',
+      description: 'Records the learning its call carries.',
+      inputSchema: { type: 'object', properties: {} },
+      hasSideEffects: false,
+      async execute(_args: unknown, context: ToolExecutionContext) {
+        seen.push(context.sessionData?.learning);
+        return { success: true, output: 'ok' };
+      },
+    };
+    const tutor = gmi(options(k, { learning: true, tools: { probe } }));
+    await tutor.session('s1', { userId: 'ana' }).send('Probe.');
+    await tutor.generate('Probe.');
+    expect(seen).toEqual([
+      { learner: 'bound', mode: 'on' },
+      { learner: 'none', mode: 'on' },
+    ]);
   });
 });
