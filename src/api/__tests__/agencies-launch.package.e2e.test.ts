@@ -12,6 +12,9 @@
  * given, the approvals its own HITL manager is asked and the errors it starts with, and the key and base URL each
  * provider it starts was given.
  */
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // The provider class alone is replaced: the package root reads the module's other exports (its default base URL). It is
 // the repository's stub, and a script that sets `answerWhole` answers each unstreamed call with that text and spends no
@@ -53,7 +56,20 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (import
     OpenAIProvider,
   };
 });
-import { AgencyConfigError, AgentOS, AgentOSResponseChunkType, AgentOSServiceError, GuardrailAction, LAUNCH_AGENCY_TOOL_NAME, SpendBudget, agency, agent, gmi } from '../../index';
+import {
+  AgencyConfigError,
+  AgentOS,
+  AgentOSResponseChunkType,
+  AgentOSServiceError,
+  GMIManagerError,
+  GuardrailAction,
+  LAUNCH_AGENCY_TOOL_NAME,
+  SpendBudget,
+  agency,
+  agent,
+  gmi,
+  readRecordedAgentOSUsageEvents,
+} from '../../index';
 import type {
   AgencyCallbacks,
   AgencyLaunchFrame,
@@ -80,6 +96,7 @@ import type {
   RuntimeAgencyLaunchOptions,
   ToolCallHook,
   ToolExecutionContext,
+  UserFeedbackPayload,
 } from '../../index';
 // The module the package's './api' entry serves, which names the launch types as the root does.
 import type * as ApiEntry from '../index';
@@ -1931,6 +1948,134 @@ describe('agencies and launch_agency, as a host uses the package', () => {
     expect(handed('launch_agency seat checker')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
     expect(handed('launch_agency seat verifier')).toEqual([expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) })]);
   });
+
+  it("a launch's arguments hold as the docs' table writes them: the table offers the six strategies but panel, an argument outside its rule is refused invalid_arguments naming it before any seat runs, a call the table's types refuse never starts, and a launch that names no strategy runs its seats in the order listed, whatever their dependsOn", async () => {
+    const k = key();
+    const launch = (id: string, args: Record<string, unknown>) => ({ id, name: LAUNCH_AGENCY_TOOL_NAME, args });
+    const one = [{ role: 'solo', instructions: 'Answer.' }];
+    const two = [
+      { role: 'a', instructions: 'A.' },
+      { role: 'b', instructions: 'B.' },
+    ];
+    // Each call breaks one rule of the table, and the reason the launch gives.
+    const invalid: Array<[string, Record<string, unknown>, string]> = [
+      ['u1', { goal: 'Go.', seats: one, colour: 'red' }, "unknown argument 'colour'"],
+      ['u2', { goal: 'Go.', seats: [{ role: 'solo', instructions: 'Answer.', model: 'big' }] }, "seat 1: unknown key 'model'"],
+      ['g1', { goal: '   ', seats: one }, 'goal must be 1 to 8,000 characters'],
+      ['g2', { goal: 'x'.repeat(8_001), seats: one }, 'goal must be 1 to 8,000 characters'],
+      ['r1', { goal: 'Go.', strategy: 'review-loop', seats: [...two, { role: 'c', instructions: 'C.' }] }, 'review-loop takes exactly 2 seats'],
+      ['r2', { goal: 'Go.', strategy: 'parallel', seats: one }, 'parallel takes at least 2 seats'],
+      ['r3', { goal: 'Go.', strategy: 'debate', seats: one }, 'debate takes at least 2 seats'],
+      ['i1', { goal: 'Go.', seats: [{ role: 'solo', instructions: 'x'.repeat(8_193) }] }, "seat 'solo': instructions are at most 8,192 characters"],
+      ['n1', { goal: 'Go.', seats: [{ role: '1st', instructions: 'A.' }] }, "seat 1: a role starts with a letter and holds only letters, digits, '_' and '-'"],
+      ['n2', { goal: 'Go.', seats: [{ role: `a${'b'.repeat(52)}`, instructions: 'A.' }] }, 'a role is at most 52 characters'],
+      ['n3', { goal: 'Go.', seats: [{ role: 'plan', instructions: 'A.' }] }, "seat 'plan': the role is a name the hierarchical strategy uses"],
+      ['n4', { goal: 'Go.', seats: [{ role: 'delegate_to_x', instructions: 'A.' }] }, "seat 'delegate_to_x': the role is a name the hierarchical strategy uses"],
+      ['n5', { goal: 'Go.', seats: [{ role: 'a', instructions: 'A.' }, { role: 'a', instructions: 'B.' }] }, "seat 'a': roles must be unique"],
+      ['d1', { goal: 'Go.', strategy: 'graph', seats: [{ role: 'a', instructions: 'A.', dependsOn: ['b'] }, { role: 'b', instructions: 'B.', dependsOn: ['a'] }] }, 'dependsOn makes a cycle through'],
+      ['d2', { goal: 'Go.', seats: [{ role: 'a', instructions: 'A.', dependsOn: ['ghost'] }] }, "seat 'a': dependsOn names 'ghost', which is not another seat"],
+      ['c1', { goal: 'Go.', seats: one, budgetUsd: 0 }, 'budgetUsd must be above 0'],
+      ['c2', { goal: 'Go.', seats: one, maxTokens: -5 }, 'maxTokens must be above 0'],
+      ['t1', { goal: 'Go.', seats: one, deadlineMs: 999 }, 'deadlineMs must be at least 1,000'],
+      ['m1', { goal: 'Go.', strategy: 'debate', seats: two, maxRounds: 4 }, 'maxRounds must be 1, 2 or 3'],
+    ];
+    // Calls the tool's input schema refuses: a strategy the table does not offer, a round count that is no integer.
+    const untyped: Array<[string, Record<string, unknown>]> = [
+      ['p1', { goal: 'Go.', strategy: 'panel', seats: two }],
+      ['p2', { goal: 'Go.', strategy: 'debate', seats: two, maxRounds: 2.5 }],
+    ];
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([
+          ...invalid.map(([id, args]) => launch(id, args)),
+          ...untyped.map(([id, args]) => launch(id, args)),
+          // No strategy: the seats run in the order listed, though the first names the second in its dependsOn.
+          launch('ok', { goal: 'Answer in order.', seats: [{ role: 'first', instructions: 'You go first.', dependsOn: ['second'] }, { role: 'second', instructions: 'You go second.' }] }),
+        ]),
+        reply.text('First answer.'),
+        reply.text('Second answer.'),
+        reply.text('Done.'),
+      ],
+    });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', agencies: { launch: true } });
+    const result = await parent.session('p-args').send('Launch.');
+    expect(result.text).toBe('Done.');
+
+    // The table offers the six strategies but panel.
+    const strategy = (launchTool(s.seen[0]).parameters as { properties: { strategy: { enum: string[] } } }).properties.strategy;
+    expect(strategy.enum).toEqual(['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph']);
+    // Each argument outside its rule is refused invalid_arguments, the reason naming it.
+    invalid.forEach(([id, , reason], i) => {
+      const refusal = refusalOf(result, i);
+      expect(codeOf(refusal), id).toBe('invalid_arguments');
+      expect(refusal, id).toContain(reason);
+    });
+    // A call the schema refuses never reaches the launch: the tool's own check names the tool.
+    untyped.forEach(([id], i) => {
+      expect(refusalOf(result, invalid.length + i), id).toContain("Invalid arguments for tool 'launch_agency'");
+    });
+    // The parent's two steps and the two seats of the one launch that started: no refused call ran a seat.
+    expect(s.seen).toHaveLength(4);
+    const ran = launchOf(result, invalid.length + untyped.length);
+    expect(ran).toMatchObject({ status: 'completed', text: 'Second answer.', provenance: { strategy: 'sequential' } });
+    expect(ran.seats.map((seat) => [seat.role, seat.status, seat.summary])).toEqual([
+      ['first', 'completed', 'First answer.'],
+      ['second', 'completed', 'Second answer.'],
+    ]);
+    // The first seat ran first, on the goal; the second took its output.
+    expect(systemText(s.seen[1])).toContain('You go first.');
+    expect(lastUserText(s.seen[1])).toContain('Answer in order.');
+    expect(systemText(s.seen[2])).toContain('You go second.');
+    expect(lastUserText(s.seen[2])).toContain('First answer.');
+  });
+
+  it("the agent's usage ledger records a temporary seat's calls and the team's manager's under the source launch_agency, beside the agent's own, and a member's seat records its calls to the member's own ledger; the manager is offered no spawn_specialist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agentos-launch-ledger-'));
+    const parentLedger = join(dir, 'parent.jsonl');
+    const memberLedger = join(dir, 'member.jsonl');
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Check the claim.', strategy: 'hierarchical', seats: [{ role: 'checker', instructions: 'Check claims.' }, { role: 'tutor', agentKey: 'tutor' }] }),
+        // The manager, on agent()'s path, which asks for whole responses, delegates to each seat in turn.
+        reply.tools([{ id: 'd1', name: 'delegate_to_checker', args: { task: 'Check it.' } }]),
+        reply.text('Checked.'),
+        reply.tools([{ id: 'd2', name: 'delegate_to_tutor', args: { task: 'Explain it.' } }]),
+        reply.text('Explained.'),
+        reply.text('The claim holds.'),
+        reply.text('Reported.'),
+      ],
+      whole: true,
+    });
+    const tutor = gmi({ ...route(k), name: 'Tutor', instructions: 'You teach.', usageLedger: { enabled: true, path: memberLedger } });
+    const parent = gmi({ ...route(k), instructions: 'Coordinate.', usageLedger: { enabled: true, path: parentLedger }, agencies: { launch: true, members: { tutor } } });
+    const result = await parent.session('p-ledger').send('Check it.');
+    expect(result.text).toBe('Reported.');
+    // Root, the manager, the checker, the manager, the tutor, the manager, root (the precondition).
+    expect(s.seen.map((call) => call.streamed)).toEqual([true, false, true, false, true, false, true]);
+    const out = launchOf(result);
+    expect(out).toMatchObject({ status: 'completed', text: 'The claim holds.' });
+    // The manager's three calls: 14, 14 and 15 tokens.
+    expect(out.coordinatorUsage.totalTokens).toBe(43);
+    // The team's manager is offered its delegations and no spawn_specialist.
+    expect(offered(s.seen[1]).sort()).toEqual(['delegate_to_checker', 'delegate_to_tutor']);
+    const total = (rows: Array<{ totalTokens: number }>) => rows.reduce((sum, row) => sum + row.totalTokens, 0);
+    await vi.waitFor(async () => {
+      const rows = await readRecordedAgentOSUsageEvents({ path: parentLedger });
+      const launched = rows.filter((row) => row.source === LAUNCH_AGENCY_TOOL_NAME);
+      const own = rows.filter((row) => row.source !== LAUNCH_AGENCY_TOOL_NAME);
+      // Under launch_agency: the manager's three calls (43) and the checker's one (15), and nothing of the tutor's.
+      expect(launched.length).toBeGreaterThan(0);
+      expect(total(launched)).toBe(43 + 15);
+      // The agent's own two steps (14 and 15) under its session's source.
+      expect(own.length).toBeGreaterThan(0);
+      expect(own.map((row) => row.source)).toEqual(own.map(() => 'agent.session.send'));
+      expect(total(own)).toBe(29);
+      // The member's ledger holds its seat's one call (15).
+      const memberRows = await readRecordedAgentOSUsageEvents({ path: memberLedger });
+      expect(total(memberRows)).toBe(15);
+    });
+  });
 });
 
 describe('launch_agency on the full runtime, as a host uses the package', () => {
@@ -3534,4 +3679,106 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
     expect(turns[0]?.toolHooks).toEqual([hook]);
     expect([...(turns[0]?.toolNames ?? [])]).toEqual(['peek']);
   });
+
+  it("a seat's session is its team's until the seat is released: a request that names it is refused before any model call, under the seat's persona or another, and the seats run on as themselves; feedback that names it reaches no seat; once the seat is released, the session serves a request", async () => {
+    const k = key();
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    const hang = configTool('hang', async () => {
+      held = true;
+      await hanging;
+      return 'done';
+    });
+    const s = script('openai', k, {
+      replies: [
+        launchStep(
+          { goal: 'Check, then wait.', deadlineMs: 30_000, seats: [{ role: 'first', personaId: 'checker' }, { role: 'second', instructions: 'Call hang.', tools: ['hang'] }] },
+          'l1',
+        ),
+        reply.text('Checked.'),
+        // The second seat's tool holds its turn while the requests and the feedback name the seats' sessions.
+        reply.tools([{ id: 'h1', name: 'hang', args: {} }]),
+        reply.text('Waited.'),
+        reply.text('Done.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, { tools: { search: configTool('search', async () => 'found'), hang } });
+    /** A request of another user's, as a host passes it on: every chunk the runtime streams. */
+    const outside = async (input: { sessionId: string; selectedPersonaId: string; textInput: string }): Promise<AgentOSResponse[]> => {
+      const chunks: AgentOSResponse[] = [];
+      for await (const chunk of os.processRequest({ userId: 'eve', ...input } as AgentOSInput)) chunks.push(chunk);
+      return chunks;
+    };
+    const feedback = (text: string): UserFeedbackPayload => ({ rating: 'negative', text });
+    try {
+      const parent = runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-seats' });
+      await vi.waitFor(() => expect(held).toBe(true), { timeout: 10_000 });
+      const [team] = os.listAgencies();
+      const firstSession = `seat:${team.agencyId}:first`;
+      const secondSession = `seat:${team.agencyId}:second`;
+      // Both seats hold a GMI: the first answered and is idle, the second waits in its tool (the precondition).
+      const manager = os.getGMIManager();
+      const gmiOf = (sessionId: string) => manager.activeGMIs.get(manager.gmiSessionMap.get(sessionId) ?? '');
+      expect(gmiOf(firstSession)?.getPersona().id).toBe('checker');
+      expect(gmiOf(secondSession)).toBeDefined();
+      const firstGmi = gmiOf(firstSession)!;
+      const secondGmiId = gmiOf(secondSession)!.getGMIId();
+      const seen = s.seen.length;
+
+      // A request naming the idle seat's session under the seat's own persona, and one naming the running seat's
+      // session under another persona: each turn ends with the manager's refusal, and no model call receives either.
+      const [own, other] = await Promise.all([
+        outside({ sessionId: firstSession, selectedPersonaId: 'checker', textInput: 'First outside request.' }),
+        outside({ sessionId: secondSession, selectedPersonaId: 'helper', textInput: 'Second outside request.' }),
+      ]);
+      for (const chunks of [own, other]) {
+        const error = chunks.find((chunk) => chunk.type === AgentOSResponseChunkType.ERROR) as { message?: string } | undefined;
+        expect(error?.message).toContain('is a seat of a team a GMI launched; no request runs in it.');
+        expect(chunks.some((chunk) => chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE)).toBe(false);
+      }
+      expect(s.seen).toHaveLength(seen);
+      // The manager refuses the session itself with its permission code, whatever persona the caller names.
+      const acquired = await manager.getOrCreateGMIForSession('eve', firstSession, 'helper').then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(acquired).toBeInstanceOf(GMIManagerError);
+      expect(acquired).toMatchObject({ code: 'AUTH_PERMISSION_DENIED' });
+      // The running seat kept its GMI: the other persona's request shut nothing down.
+      expect(manager.gmiSessionMap.get(secondSession)).toBe(secondGmiId);
+
+      // Feedback naming the idle seat's session is not recorded; feedback on the launching session is (the control).
+      await os.receiveFeedback('eve', firstSession, 'checker', feedback('Feedback from outside the team.'));
+      await os.receiveFeedback('ana', 'r-seats', 'lead', feedback('Feedback on the lead.'));
+      expect(JSON.stringify(firstGmi.getReasoningTrace().entries)).not.toContain('Feedback from outside the team.');
+      expect(JSON.stringify(gmiOf('r-seats')?.getReasoningTrace().entries)).toContain('Feedback on the lead.');
+
+      // The second seat's tool returns: both seats answered as themselves, and the launch completed.
+      release();
+      await parent;
+      const out = launchedIn(s.seen[4], 'l1');
+      expect(out.status).toBe('completed');
+      expect(out.seats.map((seat) => [seat.role, seat.status, seat.summary])).toEqual([
+        ['first', 'completed', 'Checked.'],
+        ['second', 'completed', 'Waited.'],
+      ]);
+      expect(JSON.stringify(s.seen)).not.toContain('outside request');
+
+      // Once the seats are released, the session no team holds serves a request again, on a GMI of its own.
+      await vi.waitFor(() => expect(os.listAgencies()).toEqual([]), { timeout: 10_000 });
+      expect(manager.gmiSessionMap.has(firstSession)).toBe(false);
+      s.replies.push(reply.text('Served after the team.'));
+      const later = await outside({ sessionId: firstSession, selectedPersonaId: 'helper', textInput: 'A later request.' });
+      expect(later.some((chunk) => chunk.type === AgentOSResponseChunkType.ERROR)).toBe(false);
+      expect(s.seen).toHaveLength(6);
+      expect(lastUserText(s.seen[5])).toContain('A later request.');
+      expect(systemText(s.seen[5])).toContain('You are the helper.');
+    } finally {
+      release();
+    }
+  }, 40_000);
 });
