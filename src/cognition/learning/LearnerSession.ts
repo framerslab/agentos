@@ -750,6 +750,15 @@ export function deferLearnerSession(args: {
         if (lost && typeof adopt === 'function') {
           adopt.call(inner, lost);
           adopted = true;
+        } else if (!lost && firstUser && typeof inner.scopesFor === 'function') {
+          // The first user the deferred session saw is read by the session against its own learner, as it would have
+          // read that turn: a turn of another user before the open (one after a tool continuation, which names no
+          // user) ends the session's learner from the next turn on. A read that throws leaves it to the turns.
+          try {
+            inner.scopesFor({ userId: firstUser.id, namespace: firstNamespace ?? '', workflowSeat: false });
+          } catch {
+            // The session reads its turns itself.
+          }
         }
         opened = inner;
         return inner;
