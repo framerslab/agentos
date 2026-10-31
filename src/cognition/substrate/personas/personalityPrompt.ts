@@ -5,7 +5,13 @@
  * low band, under a fixed heading. `agent()` builds its system prompt with it, and a GMI whose host turned learning on
  * sends it as a system prompt of its own on every turn (docs/GMI.md, "Learning").
  */
-import { HEXACO_TRAIT_KEYS, normalizeHexacoTraits, type HexacoTraitKey, type HexacoTraitValues } from './hexaco.js';
+import {
+  HEXACO_TRAIT_ALIASES,
+  HEXACO_TRAIT_KEYS,
+  normalizeHexacoTraits,
+  type HexacoTraitKey,
+  type HexacoTraitValues,
+} from './hexaco.js';
 
 /** Where a trait value sits: `high` above 0.65, `low` below 0.35, `moderate` between them. */
 export type TraitBand = 'low' | 'moderate' | 'high';
@@ -166,10 +172,13 @@ export function renderPersonalitySection(
   return `${PERSONALITY_SECTION_HEADING}\n\n${lines.join('\n')}`;
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object';
+
 /**
  * The patch a role overlay makes to a persona's traits: each trait whose value in the overlay-resolved persona
  * differs from the registry persona's. (`PersonaOverlayManager.resolvePersona` stores the whole merged trait map, so
- * the patch is read back as the difference.)
+ * the patch is read back as the difference.) A trait the overlay writes under an alias (`honestyHumility`,
+ * `honesty_humility`, `opennessToExperience`) beside the persona's canonical key is read as a patch of that key.
  *
  * @param authored - The registry persona's `personalityTraits`.
  * @param resolved - The overlay-resolved persona's `personalityTraits`.
@@ -182,6 +191,17 @@ export function traitOverlayPatch(authored: unknown, resolved: unknown): HexacoT
   for (const key of HEXACO_TRAIT_KEYS) {
     const value = next[key];
     if (value !== undefined && value !== base[key]) patch[key] = value;
+  }
+  // The merged map keeps the persona's canonical key beside an alias the overlay wrote, and the normalizer reads the
+  // canonical one, so an alias whose value the persona did not write is read here. A canonical key the overlay
+  // changed keeps its value.
+  const authoredMap = isRecord(authored) ? authored : {};
+  const resolvedMap = isRecord(resolved) ? resolved : {};
+  for (const [alias, canonical] of HEXACO_TRAIT_ALIASES) {
+    const value = resolvedMap[alias];
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    if (value === authoredMap[alias] || patch[canonical] !== undefined || value === base[canonical]) continue;
+    patch[canonical] = value;
   }
   return Object.keys(patch).length > 0 ? patch : undefined;
 }
