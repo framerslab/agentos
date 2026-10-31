@@ -119,6 +119,22 @@ describe('a runtime with a learning layer', () => {
     expect(plainTurn.systemPrompts[0].content).toBe(renderPersonalitySection(persona.personalityTraits));
   });
 
+  it("reads a role overlay's patch written under an alias of a trait the persona sets by its canonical key", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const manager = await managerWith(createLearningLayer());
+    const seat: GMIAgencyContextOptions = {
+      agencyId: 'agency-1',
+      roleId: 'second-reader',
+      evolutionRules: [{ id: 'softer', trigger: 'always', patch: { personaTraits: { honestyHumility: 0.1, extraversion: 0.9 } } }],
+    };
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'seat-session', persona.id, undefined, undefined, undefined, undefined, seat, 'A');
+    const prepared = await gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' }));
+    // The persona's honesty stays, and the patch that names it under its SOUL.md spelling is warned about.
+    expect(prepared.systemPrompts[0].content).toBe(renderPersonalitySection({ honesty: 0.9, extraversion: 0.9 }));
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("persona 'reviewer' sets honesty"))).toBe(true);
+  });
+
   it("ends a GMI's learner session once the GMI shuts down", async () => {
     const endSession = vi.fn(async () => undefined);
     const layer = recordingLayer(async () => ({ prepareTurn: vi.fn(), endSession, currentTraits: () => ({}) }) as unknown as ILearnerSession);

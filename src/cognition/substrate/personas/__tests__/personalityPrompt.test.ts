@@ -139,4 +139,14 @@ describe('what a caller passes the renderer at run time', () => {
     expect(renderPersonalitySection({}, { bands: { openness: 'high' } })).toContain('Explore creative angles');
   });
 
+  it("reads an overlay's patch written under an alias beside the persona's canonical key", () => {
+    expect(traitOverlayPatch({ honesty: 0.8 }, { honesty: 0.8, honestyHumility: 0.1 })).toEqual({ honesty: 0.1 });
+    expect(traitOverlayPatch({ openness: 0.4 }, { openness: 0.4, opennessToExperience: 0.9 })).toEqual({ openness: 0.9 });
+    expect(traitOverlayPatch({ honesty: 0.8 }, { honesty: 0.8, honesty_humility: 0.3 })).toEqual({ honesty: 0.3 });
+    // An alias the persona itself wrote, unchanged by the overlay, is no patch.
+    expect(traitOverlayPatch({ honestyHumility: 0.7 }, { honestyHumility: 0.7 })).toBeUndefined();
+    expect(traitOverlayPatch({ openness: 0.4, opennessToExperience: 0.4 }, { openness: 0.4, opennessToExperience: 0.4 })).toBeUndefined();
+    // A canonical key the overlay wrote keeps its value beside an alias it also wrote.
+    expect(traitOverlayPatch({ openness: 0.4 }, { openness: 0.2, opennessToExperience: 0.9 })).toEqual({ openness: 0.2 });
+  });
 });
