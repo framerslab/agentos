@@ -21,6 +21,7 @@ import type { ToolEffectRecord } from '../../core/tools/ITool';
 import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 import type { HexacoTraitValues } from './personas/hexaco';
 import type { ILearnerSession } from '../learning/types.js';
+import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
@@ -341,6 +342,12 @@ export interface GMITurnInput {
      * uses the turn's ids.
      */
     memoryScope?: { userId?: string; sessionId?: string } | null;
+    /**
+     * The launched team this turn's GMI sits in (`launch_agency`): the launch, the seat's role and the team's level.
+     * The GMI hands each tool call of the turn a frozen copy in `sessionData.agencyLaunch`, where a launch from that
+     * call reads its parent; a tool continuation that names none keeps the frame of the turn it continues.
+     */
+    agencyLaunch?: AgencyLaunchFrame;
     /**
      * Asked before each call of this turn's tool round runs (see {@link GMIToolCallGate}). A tool continuation that names
      * none asks the gate of the turn it continues.

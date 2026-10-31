@@ -681,6 +681,41 @@ describe('runLaunch: the grace and the closing entry', () => {
     await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
   }, 10_000);
 
+  it("the team's record closes when the launch's entry goes: before the result when nothing holds a seat, else marked closing until the seats are released", async () => {
+    const heard: string[] = [];
+    // A recorder that also hears of a launch that returns closing, given as a value of its own.
+    const recorder = {
+      start: () => {
+        heard.push('start');
+      },
+      closing: (result: LaunchAgencyResult) => {
+        heard.push(`closing ${result.status}`);
+      },
+      close: (result: LaunchAgencyResult) => {
+        heard.push(`close ${result.status}`);
+      },
+    };
+    // Seats released within the grace: the record is closed by the time the launch returns.
+    await runLaunch(fakeHost({ recorder }), args(), ctxFor());
+    expect(heard).toEqual(['start', 'close completed']);
+
+    heard.length = 0;
+    let releaseClose!: () => void;
+    const hangingClose = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const host = fakeHost({ seat: (s) => fakeSeat(s.role, async () => 'Done.', () => hangingClose), recorder });
+    const out = (await runLaunch(host, args(), ctxFor())).output as LaunchAgencyResult;
+    // The launch returned while its seat's close still runs (the precondition): its entry stays, closing.
+    expect(out.status).toBe('completed');
+    expect(launchRegistry.get(out.agencyId)?.state).toBe('closing');
+    // The record stays as long as the seat is held, marked closing, and closes with the result once the entry goes.
+    expect(heard).toEqual(['start', 'closing completed']);
+    releaseClose();
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+    await vi.waitFor(() => expect(heard).toEqual(['start', 'closing completed', 'close completed']));
+  }, 10_000);
+
   it("a team a seat launched keeps the launch it came from closing while that team's seat outlives the grace, so the session's next launch waits for it", async () => {
     let releaseWaiter!: () => void;
     const waited = new Promise<string>((resolve) => {
