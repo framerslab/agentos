@@ -23,6 +23,12 @@ export interface RollingSummaryCompactionConfig {
    * Preserve the first N messages verbatim (usually system + initial user): the conversation's first N messages,
    * thoughts and errors not counted, which the next turn sends after every pass and no pass summarizes. A tool round the
    * first N messages reach into is kept whole with them.
+   *
+   * N is fixed for a conversation by the pass that first writes its summary state: the state records it, and every
+   * later pass and turn keeps that head, whatever N their own settings give. Compaction profiles that set different
+   * heads share the conversation's one state, so a profile with a shorter head would otherwise leave the messages
+   * between the two heads out of both the summary and the history, and one with a longer head would send summarized
+   * messages again. A state an earlier release stored records no head: the next pass that writes it records this N.
    */
   headMessagesToKeep: number;
   /** Preserve the last N messages verbatim (fresh context). */
@@ -50,6 +56,12 @@ export interface RollingSummaryCompactionResult {
   summaryJson: any | null;
   summaryUptoTimestamp: number | null;
   summaryUpdatedAt: number | null;
+  /**
+   * The conversation's head: the `headMessagesToKeep` its summary state records, else the setting the pass ran with.
+   * The next turn sends the conversation's first that many messages and the messages newer than
+   * `summaryUptoTimestamp`.
+   */
+  headMessagesToKeep?: number;
   compactedMessageCount?: number;
   reason?: string;
 }
@@ -107,7 +119,17 @@ type RollingSummaryState = {
   summaryText?: string | null;
   summaryJson?: any | null;
   summaryUptoTimestamp?: number | null;
+  /** The head the summary was built with: the `headMessagesToKeep` of the first pass that recorded one. */
+  headMessagesToKeep?: number | null;
 };
+
+/**
+ * The head `state` was built with, or `undefined` for a state that records none, as an earlier release stored it.
+ */
+function recordedHead(state: RollingSummaryState): number | undefined {
+  const head = state.headMessagesToKeep;
+  return typeof head === 'number' && Number.isFinite(head) && head >= 0 ? head : undefined;
+}
 
 type ParsedCompactorOutput = {
   summary_markdown?: unknown;
@@ -244,6 +266,13 @@ function resolveStateKey(stateKey?: string): string {
  * to the newest message it summarized. The next turn sends the conversation's first `headMessagesToKeep` messages and
  * the messages newer than the boundary, so the next pass starts where this one ended.
  *
+ * The head is the one the summary state records: the pass that first writes the state records its
+ * `headMessagesToKeep`, and every later pass keeps that head, whatever its own settings give, and reports it in the
+ * result's `headMessagesToKeep` for the next turn. A pass over a state that records no head, as an earlier release
+ * stored it, keeps the head its settings give, and records it when it writes the state. Messages the earlier
+ * release's passes kept back with a longer head then stay out of both the summary and the history, since the stored
+ * boundary does not show which messages those passes left to the head.
+ *
  * A tool round (an assistant message that names tool calls, the tool messages that answer them and anything between)
  * stays on one side of the boundary, since providers refuse a call without its result and a result without its call:
  * the kept head takes the rest of a round it reaches into, and the summary ends where a round ends and where the next
@@ -272,23 +301,25 @@ export async function maybeCompactConversationMessages(params: {
   const { config } = params;
   const now = typeof params.now === 'number' ? params.now : Date.now();
   const stateKey = resolveStateKey(params.stateKey);
+  const priorState = (params.sessionMetadata?.[stateKey] as RollingSummaryState | undefined) ?? {};
+  const lastUpdatedAt = typeof priorState.updatedAt === 'number' ? priorState.updatedAt : null;
+  const summaryUptoTimestamp = typeof priorState.summaryUptoTimestamp === 'number' ? priorState.summaryUptoTimestamp : null;
+  // The head the summary was built with stays the conversation's head; a state that records none takes this pass's.
+  const headCount = recordedHead(priorState) ?? Math.max(0, config.headMessagesToKeep);
 
   if (!config.enabled) {
-    const state = params.sessionMetadata?.[stateKey] as RollingSummaryState | undefined;
     return {
       enabled: false,
       didCompact: false,
-      summaryText: state?.summaryText ?? null,
-      summaryJson: state?.summaryJson ?? null,
-      summaryUptoTimestamp: typeof state?.summaryUptoTimestamp === 'number' ? state.summaryUptoTimestamp : null,
-      summaryUpdatedAt: state?.updatedAt ?? null,
+      summaryText: priorState.summaryText ?? null,
+      summaryJson: priorState.summaryJson ?? null,
+      summaryUptoTimestamp,
+      summaryUpdatedAt: priorState.updatedAt ?? null,
+      headMessagesToKeep: headCount,
       reason: 'disabled',
     };
   }
 
-  const priorState = (params.sessionMetadata?.[stateKey] as RollingSummaryState | undefined) ?? {};
-  const lastUpdatedAt = typeof priorState.updatedAt === 'number' ? priorState.updatedAt : null;
-  const summaryUptoTimestamp = typeof priorState.summaryUptoTimestamp === 'number' ? priorState.summaryUptoTimestamp : null;
   if (lastUpdatedAt && now - lastUpdatedAt < Math.max(0, config.cooldownMs)) {
     return {
       enabled: true,
@@ -297,6 +328,7 @@ export async function maybeCompactConversationMessages(params: {
       summaryJson: priorState.summaryJson ?? null,
       summaryUptoTimestamp,
       summaryUpdatedAt: lastUpdatedAt,
+      headMessagesToKeep: headCount,
       reason: 'cooldown',
     };
   }
@@ -310,11 +342,11 @@ export async function maybeCompactConversationMessages(params: {
       summaryJson: priorState.summaryJson ?? null,
       summaryUptoTimestamp,
       summaryUpdatedAt: lastUpdatedAt,
+      headMessagesToKeep: headCount,
       reason: 'no_messages',
     };
   }
 
-  const headCount = Math.max(0, config.headMessagesToKeep);
   const tailCount = Math.max(0, config.tailMessagesToKeep);
   const afterTimestamp = typeof summaryUptoTimestamp === 'number' ? summaryUptoTimestamp : undefined;
 
@@ -386,6 +418,7 @@ export async function maybeCompactConversationMessages(params: {
       summaryJson: priorState.summaryJson ?? null,
       summaryUptoTimestamp,
       summaryUpdatedAt: lastUpdatedAt,
+      headMessagesToKeep: headCount,
       reason: 'below_threshold',
     };
   }
@@ -436,6 +469,7 @@ export async function maybeCompactConversationMessages(params: {
       summaryJson: priorState.summaryJson ?? null,
       summaryUptoTimestamp,
       summaryUpdatedAt: lastUpdatedAt,
+      headMessagesToKeep: headCount,
       reason: 'empty_summary',
     };
   }
@@ -448,6 +482,7 @@ export async function maybeCompactConversationMessages(params: {
       summaryText,
       summaryJson,
       summaryUptoTimestamp: typeof nextSummaryUptoTimestamp === 'number' ? nextSummaryUptoTimestamp : null,
+      headMessagesToKeep: headCount,
     } satisfies RollingSummaryState,
   };
 
@@ -458,6 +493,7 @@ export async function maybeCompactConversationMessages(params: {
     summaryJson,
     summaryUptoTimestamp: typeof nextSummaryUptoTimestamp === 'number' ? nextSummaryUptoTimestamp : null,
     summaryUpdatedAt: now,
+    headMessagesToKeep: headCount,
     compactedMessageCount: limitedCandidates.length,
     updatedSessionMetadata,
   };
