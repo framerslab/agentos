@@ -250,7 +250,8 @@ export class ConversationContext {
 
   /**
    * The passes of `manageHistoryLength()` that found a summary being made. Each runs once it is made, so the messages
-   * recorded meanwhile get the passes they started.
+   * recorded meanwhile get the passes they started: the pass that made the summary runs them, and leaves the rest to
+   * one that starts another summary before they have all run.
    * @private
    * @type {number}
    */
@@ -562,7 +563,7 @@ export class ConversationContext {
    * another chunk, the ones recorded meanwhile counted in, is trimmed, and the trim keeps the last summary after the
    * head: this one, unless a conversation loaded from storage holds a later one. One with enough left for another chunk
    * waits for the next pass. A pass that finds a summary being made runs once it is made, so the messages recorded
-   * meanwhile, after a clear too, get their passes.
+   * meanwhile, after a clear too, get their passes; a summary started before they have all run takes the rest.
    *
    * @private
    * @async
@@ -663,8 +664,11 @@ export class ConversationContext {
       } finally {
         this.isSummarizing = false;
         // The passes that found this one making its summary run now, one after another, on the history as it is: the
-        // messages recorded meanwhile, after a clear too, get the passes they started.
-        while (this.deferredHistoryPasses > 0) {
+        // messages recorded meanwhile, after a clear too, get the passes they started. A message recorded between two
+        // of them can start a summary of its own, and each pass left would find it being made, count itself again
+        // and return at once, round after round on microtasks alone, so its reply could never arrive. They are left
+        // to the pass making that summary, which runs them once it is made.
+        while (this.deferredHistoryPasses > 0 && !this.isSummarizing) {
           this.deferredHistoryPasses -= 1;
           await this.manageHistoryLength();
         }
