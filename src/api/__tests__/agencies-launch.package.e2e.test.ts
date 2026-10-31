@@ -5,9 +5,10 @@
  * boundary, so the real gmi(), agent(), agency(), launch engine, provider manager, completion gateway, GMI and tool
  * orchestrator run, with no network and no key. Each case reads only what a host can observe: the tools a model call is
  * offered, the requests the provider receives, a send's tool calls and their results, the context a host's own tool is
- * handed, a session's kept messages, the events an agent's callbacks receive, budgets, warnings and construction errors.
- * On the full runtime (`AgentOS.create()` with `agencies`) the cases read the same, and what the runtime itself shows a
- * host: the agencies it lists, the GMIs its snapshot names, the logger it was given and the errors it starts with.
+ * handed, a session's kept messages, the events an agent's callbacks receive, the approvals a host's handler is asked,
+ * budgets, warnings and construction errors. On the full runtime (`AgentOS.create()` with `agencies`) the cases read the
+ * same, and what the runtime itself shows a host: the agencies it lists, the GMIs its snapshot names, the logger it was
+ * given, the approvals its own HITL manager is asked and the errors it starts with.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // The provider class alone is replaced: the package root reads the module's other exports (its default base URL). It is
@@ -1968,6 +1969,26 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
   };
   /** The ids of the GMIs the runtime's snapshot names. */
   const activeGmis = async (os: AgentOS): Promise<string[]> => (await os.getRuntimeSnapshot()).gmis.items.map((item) => item.gmiId);
+  /** What ran: each call of a host's tool, by its name and the arguments it ran with. */
+  type Ran = Array<{ name: string; args: unknown }>;
+  /** A config tool of the host's that records each call that ran in `ran`, after `takesMs`, and answers `<name> done`. */
+  const recording = (name: string, ran: Ran, options: { hasSideEffects?: boolean; takesMs?: number } = {}): ITool => ({
+    ...hostTool(name, async (args) => {
+      ran.push({ name, args });
+      if (options.takesMs) await sleep(options.takesMs);
+      return { success: true, output: `${name} done` };
+    }),
+    inputSchema: { type: 'object', properties: { to: { type: 'string' }, q: { type: 'string' } } },
+    hasSideEffects: options.hasSideEffects ?? false,
+  });
+  /** What a host's agencies.hitl handler was asked: the request's kind, agent and action, and a tool call's arguments and id. */
+  type Asked = { type: string; agent: string; action: string; args?: unknown; callId?: unknown };
+  const askedOf = (request: ApprovalRequest): Asked => ({
+    type: request.type,
+    agent: request.agent,
+    action: request.action,
+    ...(request.type === 'tool' ? { args: request.details.args, callId: request.details.callId } : {}),
+  });
 
   it("agencies registers launch_agency only with launch: true, its bounds and a host's tool of that name are checked when the runtime starts, and only a persona granted agency:launch lists and calls the tool, whose seats run on the caller's route or as a registered persona", async () => {
     // Without agencies, and with agencies that leave launch unset, the lead, granted agency:launch, is offered its
@@ -2697,5 +2718,344 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
     expect(judged.filter((name) => name.startsWith('danger'))).toHaveLength(2);
     expect(dangers).toBe(0);
     expect(toolText(s.seen[7], 'x2')).toContain('No danger.');
+  });
+
+  it("agencies.hitl asks about each call of a runtime seat it covers, after the seat's names: a refusal, or any answer but a plain approval, skips the tool and the seat reads why, an approval runs it once with the call's arguments, a tool it does not cover runs unasked, and a personaId seat is asked as a temporary seat is", async () => {
+    const k = key();
+    const ran: Ran = [];
+    const asked: Asked[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(askedOf(request));
+      const to = (request.details.args as { to?: string } | undefined)?.to;
+      if (to === 'team') return { approved: false, reason: 'mail is paused' };
+      // An approval that names other arguments is not a plain approval.
+      if (to === 'all') return { approved: true, modifications: { toolArgs: { to: 'nobody' } } };
+      return { approved: true };
+    };
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Mail them.', seats: [{ role: 'mailer', instructions: 'MAILER: send the mail.', tools: ['send_email', 'note'] }] }, 'l1'),
+        // The mailer's step: a call the handler refuses, one it approves, one whose approval names other arguments, a
+        // tool the policy does not cover, and a name outside the seat's allowlist that the policy covers.
+        reply.tools([
+          { id: 'e1', name: 'send_email', args: { to: 'team' } },
+          { id: 'e2', name: 'send_email', args: { to: 'boss' } },
+          { id: 'e3', name: 'send_email', args: { to: 'all' } },
+          { id: 'n1', name: 'note', args: {} },
+          { id: 'x1', name: 'search', args: { q: 'x' } },
+        ]),
+        reply.text('Mail sent to the boss.'),
+        reply.text('Done.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, {
+      personas: [persona('lead', { allowedCapabilities: ['agency:launch'] }), persona('clerk')],
+      tools: { search: recording('search', ran), send_email: recording('send_email', ran, { hasSideEffects: true }), note: recording('note', ran) },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['send_email', 'search'] }, handler } },
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-hitl-mail' });
+    // The lead, the mailer's two steps, the lead: the mailer was offered its two tools and made the five calls (the
+    // precondition).
+    expect(s.seen).toHaveLength(4);
+    expect(systemText(s.seen[1])).toContain('MAILER: send the mail.');
+    expect(offered(s.seen[1]).sort()).toEqual(['note', 'send_email']);
+    const out = launchedIn(s.seen[3], 'l1');
+    expect(out).toMatchObject({ status: 'completed', text: 'Mail sent to the boss.' });
+    const team = `launch:${out.agencyId}`;
+    // The handler was asked once for each send_email call, by the team's gate, with the call's arguments and id; never
+    // for note, which the policy does not cover, nor for search, which the seat's names refused first.
+    expect(asked).toEqual([
+      { type: 'tool', agent: team, action: 'send_email', args: { to: 'team' }, callId: 'e1' },
+      { type: 'tool', agent: team, action: 'send_email', args: { to: 'boss' }, callId: 'e2' },
+      { type: 'tool', agent: team, action: 'send_email', args: { to: 'all' }, callId: 'e3' },
+    ]);
+    // Only the approved call and the uncovered tool ran, once each, with their arguments.
+    expect(ran).toEqual([
+      { name: 'send_email', args: { to: 'boss' } },
+      { name: 'note', args: {} },
+    ]);
+    // The mailer's next step read each outcome: the refusal's reason, the approved call's answer, why the approval that
+    // named other arguments was refused, note's answer, and the seat's own refusal.
+    const next = s.seen[2];
+    expect(toolText(next, 'e1')).toContain('mail is paused');
+    expect(toolText(next, 'e2')).toContain('send_email done');
+    expect(toolText(next, 'e3')).toContain('modifications.toolArgs');
+    expect(toolText(next, 'n1')).toContain('note done');
+    expect(toolText(next, 'x1')).toContain('not available in this seat');
+
+    // A personaId seat's call is asked as a temporary seat's is.
+    s.replies.push(
+      launchStep({ goal: 'Mail the team.', seats: [{ role: 'clerk', personaId: 'clerk', tools: ['send_email'] }] }, 'l2'),
+      reply.tools([{ id: 'e4', name: 'send_email', args: { to: 'team' } }]),
+      reply.text('Held.'),
+      reply.text('Done.'),
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-hitl-clerk' });
+    // The lead, the clerk's two steps as its persona, the lead.
+    expect(s.seen).toHaveLength(8);
+    expect(systemText(s.seen[5])).toContain('You are the clerk.');
+    const clerkOut = launchedIn(s.seen[7], 'l2');
+    expect(clerkOut).toMatchObject({ status: 'completed', text: 'Held.' });
+    expect(clerkOut.seats).toEqual([expect.objectContaining({ role: 'clerk', form: 'persistent', member: 'clerk' })]);
+    expect(asked.slice(3)).toEqual([{ type: 'tool', agent: `launch:${clerkOut.agencyId}`, action: 'send_email', args: { to: 'team' }, callId: 'e4' }]);
+    expect(toolText(s.seen[6], 'e4')).toContain('mail is paused');
+    expect(ran).toHaveLength(2);
+  });
+
+  it("agencies.hitl covers a runtime seat's own launch_agency call, which refused launches no team, and asks once about a level-2 seat's call, by the gate of the team the root launch built; the lead's own launch and a call a seat reaches after its launch's deadline ask no one", async () => {
+    const k = key();
+    const ran: Ran = [];
+    const asked: Asked[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(askedOf(request));
+      const goal = (request.details.args as { goal?: string } | undefined)?.goal;
+      return goal === 'Not today.' ? { approved: false, reason: 'no teams today' } : { approved: true };
+    };
+    const isFinder = (call: SeenCall): boolean => systemText(call).includes('FINDER');
+    const s = script('openai', k, {
+      replies: [
+        // The lead's team's planner launches a team the policy refuses.
+        launchStep({ goal: 'Plan it.', seats: [{ role: 'planner', instructions: 'Plan it.', tools: [LAUNCH_AGENCY_TOOL_NAME] }] }, 'l1'),
+        launchStep({ goal: 'Not today.', seats: [{ role: 'finder', instructions: 'FINDER: find it.' }] }, 'n1'),
+        reply.text('No team.'),
+        reply.text('Done.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, {
+      tools: { search: recording('search', ran), slow_write: recording('slow_write', ran, { takesMs: 1_500 }), note: recording('note', ran) },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: [LAUNCH_AGENCY_TOOL_NAME, 'search', 'slow_write', 'note'] }, handler } },
+    });
+
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-gate-refused' });
+    // The lead, the planner's two steps, the lead: the planner was offered launch_agency and called it (the precondition).
+    expect(s.seen).toHaveLength(4);
+    expect(offered(s.seen[1])).toEqual([LAUNCH_AGENCY_TOOL_NAME]);
+    const refusedRoot = launchedIn(s.seen[3], 'l1');
+    expect(refusedRoot).toMatchObject({ status: 'completed', text: 'No team.' });
+    // The planner's launch was asked once, by the lead's team's gate, and refused: no team ran, and the planner read why.
+    // The lead's own launch asked no one.
+    expect(asked).toEqual([
+      { type: 'tool', agent: `launch:${refusedRoot.agencyId}`, action: LAUNCH_AGENCY_TOOL_NAME, args: expect.objectContaining({ goal: 'Not today.' }), callId: 'n1' },
+    ]);
+    expect(s.seen.filter(isFinder)).toEqual([]);
+    expect(toolText(s.seen[2], 'n1')).toContain('no teams today');
+
+    // Approved, the planner's launch makes a level-2 team, whose finder's search is asked once by the same gate, the
+    // lead's team's, which the planner's team passed on; each ran once.
+    s.replies.push(
+      launchStep({ goal: 'Plan the search.', seats: [{ role: 'planner', instructions: 'Plan the search.', tools: ['search', LAUNCH_AGENCY_TOOL_NAME] }] }, 'l2'),
+      launchStep({ goal: 'Search.', seats: [{ role: 'finder', instructions: 'FINDER: find it.', tools: ['search'] }] }, 'n2'),
+      reply.tools([{ id: 's1', name: 'search', args: { q: 'x' } }]),
+      reply.text('Found.'),
+      reply.text('Planned.'),
+      reply.text('All done.'),
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-gate-nested' });
+    // The lead, the planner, the finder's two steps, the planner, the lead: the finder was offered search and called it
+    // (the precondition).
+    expect(s.seen).toHaveLength(10);
+    expect(isFinder(s.seen[6])).toBe(true);
+    expect(offered(s.seen[6])).toEqual(['search']);
+    expect(launchedIn(s.seen[8], 'n2')).toMatchObject({ status: 'completed', text: 'Found.', provenance: { depth: 2 } });
+    const root = launchedIn(s.seen[9], 'l2');
+    expect(root).toMatchObject({ status: 'completed', text: 'Planned.' });
+    const outer = `launch:${root.agencyId}`;
+    expect(asked.slice(1)).toEqual([
+      { type: 'tool', agent: outer, action: LAUNCH_AGENCY_TOOL_NAME, args: expect.objectContaining({ goal: 'Search.' }), callId: 'n2' },
+      { type: 'tool', agent: outer, action: 'search', args: { q: 'x' }, callId: 's1' },
+    ]);
+    expect(ran).toEqual([{ name: 'search', args: { q: 'x' } }]);
+
+    // A call the writer reaches after its launch's deadline asks no one and never runs; the call before it was asked and ran.
+    s.replies.push(
+      launchStep({ goal: 'Write, then note.', deadlineMs: 1_000, seats: [{ role: 'writer', instructions: 'Write, then note.', tools: ['slow_write', 'note'] }] }, 'l3'),
+      // slow_write runs past the 1,000 ms deadline; note comes after it in the same step.
+      reply.tools([
+        { id: 'w1', name: 'slow_write', args: {} },
+        { id: 'w2', name: 'note', args: {} },
+      ]),
+      reply.text('Done.'),
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-gate-deadline' });
+    await sleep(200);
+    // The lead, the writer's step, the lead: nothing more was sent for the writer.
+    expect(s.seen).toHaveLength(13);
+    const late = launchedIn(s.seen[12], 'l3');
+    expect(late.status).toBe('timed_out');
+    expect(asked.slice(3)).toEqual([{ type: 'tool', agent: `launch:${late.agencyId}`, action: 'slow_write', args: {}, callId: 'w1' }]);
+    expect(ran.slice(1)).toEqual([{ name: 'slow_write', args: {} }]);
+  }, 30_000);
+
+  it("a runtime seat's call whose agencies.hitl handler fails never runs, its model is told only that the handler failed, and the launch fails, named by the error's name and code alone, while the logger the host gave the runtime gets the handler's error", async () => {
+    const k = key();
+    const canary = 'sk-CANARY-3939';
+    const thrown = Object.assign(new Error(`the approver at https://ops:${canary}@hooks.example refused`), { name: 'WebhookError', code: 'E_HOOK' });
+    const ran: Ran = [];
+    let asks = 0;
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Look it up.', seats: [{ role: 'finder', instructions: 'Find it.', tools: ['search'] }] }, 'l1'),
+        reply.tools([{ id: 's1', name: 'search', args: { q: 'x' } }]),
+        reply.text('No search.'),
+        reply.text('Handled.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const warnings: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const logger: ILogger = {
+      info: () => undefined,
+      error: () => undefined,
+      debug: () => undefined,
+      warn: (message: string, meta?: Record<string, unknown>) => {
+        warnings.push({ message, meta });
+      },
+    };
+    const os = await startRuntime(
+      k,
+      {
+        tools: { search: recording('search', ran) },
+        agencies: {
+          launch: true,
+          hitl: {
+            approvals: { beforeTool: ['search'] },
+            handler: async (): Promise<ApprovalDecision> => {
+              asks += 1;
+              throw thrown;
+            },
+          },
+        },
+      },
+      logger,
+    );
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-hitl-fails' });
+    // The lead, the finder's two steps, the lead: the finder called search and the handler was asked once (the
+    // precondition).
+    expect(s.seen).toHaveLength(4);
+    expect(asks).toBe(1);
+    expect(ran).toEqual([]);
+    expect(toolText(s.seen[2], 's1')).toContain('the approval handler failed');
+    // The parent's turn went on past the failed team, which the result names by the error's name and code alone.
+    const out = launchedIn(s.seen[3], 'l1');
+    expect(out).toMatchObject({ status: 'failed', reason: 'the team failed: WebhookError (E_HOOK)' });
+    expectNoWordOf(canary, [JSON.stringify(s.seen), JSON.stringify(out)]);
+    // The logger the host gave the runtime got the handler's own error once, under the launch's run.
+    const launchWarnings = warnings.filter(({ message }) => message.startsWith('[AgentOS] launch_agency'));
+    expect(launchWarnings.map(({ message }) => message)).toEqual(['[AgentOS] launch_agency run failed']);
+    expect(launchWarnings[0].meta).toEqual({ error: expect.objectContaining({ name: 'WebhookError', message: expect.stringContaining(canary) }) });
+  });
+
+  it("a runtime seat's call meets agencies.hitl first and then the runtime's own approval of a tool with side effects, which the lead's calls meet too: a refusal by agencies.hitl is final, and the runtime's approver is never asked about that call", async () => {
+    const k = key();
+    const ran: Ran = [];
+    const order: string[] = [];
+    const s = script('openai', k, {
+      replies: [
+        launchStep({ goal: 'Mail them.', seats: [{ role: 'mailer', instructions: 'Send the mail.', tools: ['send_email'] }] }, 'l1'),
+        reply.tools([
+          { id: 'e1', name: 'send_email', args: { to: 'team' } },
+          { id: 'e2', name: 'send_email', args: { to: 'boss' } },
+        ]),
+        reply.text('Sent to the boss.'),
+        reply.text('Done.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    // The runtime's own approver of tools with side effects, which its tool orchestrator asks once its HITL is on.
+    const hitlManager = {
+      requestApproval: async (pending: { actionId: string; context: { toolName: string } }) => {
+        order.push(`runtime ${pending.context.toolName}`);
+        return { actionId: pending.actionId, approved: true, decidedBy: 'host', decidedAt: new Date() };
+      },
+    };
+    const os = await startRuntime(k, {
+      tools: { search: recording('search', ran), send_email: recording('send_email', ran, { hasSideEffects: true }) },
+      toolOrchestratorConfig: {
+        orchestratorId: 'host-tools',
+        defaultToolCallTimeoutMs: 30_000,
+        maxConcurrentToolCalls: 10,
+        logToolCalls: false,
+        globalDisabledTools: [],
+        toolRegistrySettings: { allowDynamicRegistration: true, persistRegistry: false },
+        hitl: { enabled: true },
+      },
+      hitlManager,
+      agencies: {
+        launch: true,
+        hitl: {
+          approvals: { beforeTool: ['send_email'] },
+          handler: async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+            const to = (request.details.args as { to?: string } | undefined)?.to;
+            order.push(`agencies ${request.action} ${to}`);
+            return to === 'team' ? { approved: false, reason: 'mail is paused' } : { approved: true };
+          },
+        },
+      },
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-two-approvers' });
+    // The lead, the mailer's two steps, the lead.
+    expect(s.seen).toHaveLength(4);
+    expect(launchedIn(s.seen[3], 'l1')).toMatchObject({ status: 'completed', text: 'Sent to the boss.' });
+    // The runtime's approver was asked about the lead's own launch (a tool with side effects), and about the mailer's call
+    // after agencies.hitl approved it; never about the call agencies.hitl refused.
+    expect(order).toEqual(['runtime launch_agency', 'agencies send_email team', 'agencies send_email boss', 'runtime send_email']);
+    expect(ran).toEqual([{ name: 'send_email', args: { to: 'boss' } }]);
+    expect(toolText(s.seen[2], 'e1')).toContain('mail is paused');
+    expect(toolText(s.seen[2], 'e2')).toContain('send_email done');
+  });
+
+  it("agencies.hitl's beforeAgent and beforeReturn are asked in the root team alone, on the full runtime as on gmi(): a team a seat launches runs its seats and returns its answer unasked", async () => {
+    const asked: Asked[] = [];
+    const hitl = {
+      approvals: { beforeAgent: ['planner', 'finder'], beforeReturn: true },
+      handler: async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+        asked.push(askedOf(request));
+        return { approved: true };
+      },
+    };
+    const replies = () => [
+      launchStep({ goal: 'Plan the search.', seats: [{ role: 'planner', instructions: 'Plan the search.', tools: [LAUNCH_AGENCY_TOOL_NAME] }] }, 'l1'),
+      launchStep({ goal: 'Search.', seats: [{ role: 'finder', instructions: 'FINDER: find it.' }] }, 'n1'),
+      reply.text('Found.'),
+      reply.text('Planned.'),
+      reply.text('All done.'),
+    ];
+
+    // The full runtime.
+    const k = key();
+    const s = answerWhole(script('openai', k, { replies: replies() }), 'ok');
+    const os = await startRuntime(k, { agencies: { launch: true, hitl } });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-root-asks' });
+    // The lead, the planner, the finder, the planner, the lead: the planner launched the finder's team, which answered
+    // (the precondition).
+    expect(s.seen).toHaveLength(5);
+    expect(systemText(s.seen[2])).toContain('FINDER: find it.');
+    expect(launchedIn(s.seen[3], 'n1')).toMatchObject({ status: 'completed', text: 'Found.', provenance: { depth: 2 } });
+    const root = launchedIn(s.seen[4], 'l1');
+    expect(root).toMatchObject({ status: 'completed', text: 'Planned.' });
+    // The root team asked before its planner ran and before its answer left; the finder's team asked nothing, though
+    // beforeAgent names the finder.
+    expect(asked).toEqual([
+      { type: 'agent', agent: 'planner', action: 'execute' },
+      { type: 'output', agent: `launch:${root.agencyId}`, action: 'return' },
+    ]);
+
+    // gmi().
+    asked.length = 0;
+    const kg = key();
+    const sg = script('openai', kg, { replies: replies() });
+    const parent = gmi({ ...route(kg), instructions: 'Coordinate.', agencies: { launch: true, hitl } });
+    const result = await parent.session('p1').send('Plan the search.');
+    expect(result.text).toBe('All done.');
+    expect(sg.seen).toHaveLength(5);
+    expect(systemText(sg.seen[2])).toContain('FINDER: find it.');
+    expect(JSON.parse(toolText(sg.seen[3], 'n1'))).toMatchObject({ status: 'completed', text: 'Found.', provenance: { depth: 2 } });
+    const gmiRoot = launchOf(result);
+    expect(gmiRoot).toMatchObject({ status: 'completed', text: 'Planned.' });
+    expect(asked).toEqual([
+      { type: 'agent', agent: 'planner', action: 'execute' },
+      { type: 'output', agent: `launch:${gmiRoot.agencyId}`, action: 'return' },
+    ]);
   });
 });
