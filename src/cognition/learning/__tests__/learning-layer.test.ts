@@ -338,4 +338,25 @@ describe('a learner session named at its first turn', () => {
     await expect(session.prepareTurn(turn({ namespace: 'A', userId: 'bob' }))).rejects.toThrow('store offline');
     expect(stateOf(await session.prepareTurn(turn({ namespace: 'B' })))).toBe('other_user');
   });
+
+  it('reads two turns that wait on one open in the order they came, so the earlier keeps its learner', async () => {
+    quiet();
+    const layer = createLearningLayer();
+    let release!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const session = deferLearnerSession({
+      traits: AUTHORED,
+      open: async (namespace) => {
+        await opened;
+        return layer.forLearner(key({ namespace }), context());
+      },
+    });
+    const owner = session.prepareTurn(turn());
+    const other = session.prepareTurn(turn({ userId: 'bob' }));
+    release();
+    expect(stateOf(await owner)).toBe('bound');
+    expect(stateOf(await other)).toBe('other_user');
+  });
 });
