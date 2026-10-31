@@ -17,16 +17,19 @@
  *
  * The script reads the failed run's output and deletes the tag only when
  * - TLOG_CREATE_ENTRY_ERROR comes after the one "Created tag v<version>" line in it,
- * - the tag on GitHub points at the checked-out commit,
+ * - the tag on origin points at the checked-out commit,
  * - npm has no such version of the package in ./package.json, and
  * - GitHub has no release for the tag.
- * It deletes the tag on GitHub through the API (the release checkout keeps no credentials) and in the checkout, where
- * semantic-release's git fetch --tags would keep it.
+ * It deletes the tag on origin with git push --force-with-lease against the checked-out commit, so a tag another push
+ * moved after the check stays, and then in the checkout, where semantic-release's git fetch --tags would keep it. The
+ * release checkout keeps no credentials, so git gets the job's token in its environment, as the Authorization header
+ * actions/checkout sends. No GitHub API makes the release lookup and the delete one step; release.yml's concurrency
+ * group keeps every other release run out of the moment between them.
  *
  * Usage: node .github/scripts/drop-unpublished-release-tag.mjs <file holding semantic-release's output>
- * GITHUB_REPOSITORY names the repository as owner/name; gh reads its token from GH_TOKEN or GITHUB_TOKEN. Exit status:
- * 0 when it deleted the tag (run semantic-release again), 1 when it left the tags as they were, 2 on a usage or read
- * error.
+ * GITHUB_REPOSITORY names the repository as owner/name; git and gh read the token from GITHUB_TOKEN or GH_TOKEN. Exit
+ * status: 0 when it deleted the tag (run semantic-release again), 1 when it left the tags as they were, 2 on a usage or
+ * read error.
  */
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -60,14 +63,31 @@ export function conflictTag(output) {
  * Runs a command and returns how it ended; its output is returned, not printed.
  * @param {string} command
  * @param {string[]} args
+ * @param {NodeJS.ProcessEnv} [env]
  */
-function run(command, args) {
-  const result = spawnSync(command, args, { encoding: 'utf8' });
+function run(command, args, env = process.env) {
+  const result = spawnSync(command, args, { encoding: 'utf8', env });
   return {
     ok: result.status === 0,
     stdout: result.stdout ?? '',
     stderr: `${result.stderr ?? ''}${result.error ? String(result.error) : ''}`.trim(),
   };
+}
+
+/**
+ * The environment git runs in: never a password prompt, and with a token, the Authorization header actions/checkout
+ * gives git for github.com, set through GIT_CONFIG_COUNT so that the token stays out of the command line.
+ */
+function gitEnvironment() {
+  /** @type {NodeJS.ProcessEnv} */
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  if (!token) return env;
+  const index = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? '0', 10) || 0;
+  env.GIT_CONFIG_COUNT = String(index + 1);
+  env[`GIT_CONFIG_KEY_${index}`] = 'http.https://github.com/.extraheader';
+  env[`GIT_CONFIG_VALUE_${index}`] = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+  return env;
 }
 
 /** @param {string} text */
@@ -80,19 +100,25 @@ function json(text) {
 }
 
 /**
- * Deletes the tag on GitHub and in the checkout when the version it names reached neither npm nor GitHub.
+ * Deletes the tag on origin and in the checkout when the version it names reached neither npm nor GitHub.
  * @param {string} repository owner/name
  * @param {{ tag: string, version: string }} release
  * @returns {string | undefined} why the tag stays; undefined once it is deleted
  */
 function drop(repository, { tag, version }) {
+  const git = gitEnvironment();
+  const ref = `refs/tags/${tag}`;
   const head = run('git', ['rev-parse', 'HEAD']);
   if (!head.ok) return `git rev-parse HEAD failed: ${head.stderr}`;
   const commit = head.stdout.trim();
-  const ref = run('gh', ['api', `repos/${repository}/git/ref/tags/${tag}`]);
-  if (!ref.ok) return `GitHub did not return the tag: ${ref.stderr}`;
-  const tagged = json(ref.stdout)?.object?.sha;
-  if (tagged !== commit) return `on GitHub it points at ${tagged}, not at the checked-out commit ${commit}`;
+  const remote = run('git', ['ls-remote', 'origin', ref], git);
+  if (!remote.ok) return `git ls-remote origin failed: ${remote.stderr}`;
+  const tagged = remote.stdout
+    .split('\n')
+    .map((line) => line.split('\t'))
+    .find(([, name]) => name === ref)?.[0];
+  if (tagged === undefined) return 'origin has no such tag';
+  if (tagged !== commit) return `on origin it points at ${tagged}, not at the checked-out commit ${commit}`;
 
   /** @type {unknown} */
   let name;
@@ -113,10 +139,11 @@ function drop(repository, { tag, version }) {
   // gh api prints "gh: Not Found (HTTP 404)", or "gh: HTTP 404" for a body with no message.
   if (!/\bHTTP 404\b/.test(release.stderr)) return `GitHub did not say whether it has a release: ${release.stderr}`;
 
-  const deleted = run('gh', ['api', '--method', 'DELETE', `repos/${repository}/git/refs/tags/${tag}`]);
-  if (!deleted.ok) return `GitHub did not delete it: ${deleted.stderr}`;
+  // The lease makes the push delete the tag only while origin still has it at the commit checked above.
+  const deleted = run('git', ['push', '--quiet', `--force-with-lease=${ref}:${commit}`, 'origin', `:${ref}`], git);
+  if (!deleted.ok) return `git push did not delete it on origin: ${deleted.stderr}`;
   const local = run('git', ['tag', '--delete', tag]);
-  if (!local.ok) return `it is deleted on GitHub, but git tag --delete failed: ${local.stderr}`;
+  if (!local.ok) return `it is deleted on origin, but git tag --delete failed: ${local.stderr}`;
   return undefined;
 }
 

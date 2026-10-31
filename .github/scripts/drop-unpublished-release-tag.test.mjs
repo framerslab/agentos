@@ -45,10 +45,12 @@ const AUTH_RUN = run([
 ]);
 
 // gh and npm as the script calls them. Each records its arguments in STUB_CALLS and answers as the test sets:
-// STUB_TAG_SHA is the commit the tag points at on GitHub; STUB_NPM_VERSIONS is what npm view prints ('' fails the way
-// an unreachable registry does); STUB_RELEASE is 'none' (GitHub answers 404), 'published' or 'unreachable' (502).
+// STUB_NPM_VERSIONS is what npm view prints ('' fails the way an unreachable registry does); STUB_RELEASE is 'none'
+// (GitHub answers 404), 'published' or 'unreachable' (502). With STUB_MOVE_TAG set, npm view also moves v0.15.53 on
+// the remote (STUB_REMOTE) to that commit, as another push between the script's look at the tag and its delete would.
 const STUB = String.raw`'use strict';
 const { appendFileSync } = require('node:fs');
+const { execFileSync } = require('node:child_process');
 const [name, ...args] = process.argv.slice(2);
 appendFileSync(process.env.STUB_CALLS, [name, ...args].join(' ') + '\n');
 function fail(message) {
@@ -57,13 +59,11 @@ function fail(message) {
 }
 const path = args[args.length - 1];
 if (name === 'npm') {
+  if (process.env.STUB_MOVE_TAG) {
+    execFileSync('git', ['--git-dir', process.env.STUB_REMOTE, 'update-ref', 'refs/tags/v0.15.53', process.env.STUB_MOVE_TAG]);
+  }
   if (!process.env.STUB_NPM_VERSIONS) fail('npm error code ECONNRESET');
   process.stdout.write(process.env.STUB_NPM_VERSIONS + '\n');
-} else if (args.includes('DELETE')) {
-  // GitHub answers 204, with no body.
-} else if (path.includes('/git/ref/tags/')) {
-  const tag = path.split('/').pop();
-  process.stdout.write(JSON.stringify({ ref: 'refs/tags/' + tag, object: { sha: process.env.STUB_TAG_SHA, type: 'commit' } }) + '\n');
 } else if (path.includes('/releases/tags/')) {
   if (process.env.STUB_RELEASE === 'published') {
     process.stdout.write(JSON.stringify({ tag_name: path.split('/').pop() }) + '\n');
@@ -90,14 +90,18 @@ after(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 
+/** @param {string} text */
+const lines = (text) => text.split('\n').filter(Boolean);
+
 /**
- * A git repository where semantic-release has tagged HEAD v0.15.53, one commit after v0.15.52, and a directory with the
- * gh and npm stand-ins.
+ * A checkout where semantic-release has tagged HEAD v0.15.53, one commit after v0.15.52, and pushed both tags to origin,
+ * a bare repository beside it; and a directory with the gh and npm stand-ins.
  */
 function checkout() {
   const dir = mkdtempSync(join(tmpdir(), 'drop-release-tag-'));
   made.push(dir);
   const repo = join(dir, 'repo');
+  const remote = join(dir, 'remote.git');
   const bin = join(dir, 'bin');
   mkdirSync(repo);
   mkdirSync(bin);
@@ -107,6 +111,7 @@ function checkout() {
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim();
   };
+  git('init', '--quiet', '--bare', remote);
   git('init', '--quiet');
   writeFileSync(join(repo, 'package.json'), `${JSON.stringify({ name: '@framers/agentos', version: '0.0.0-development' })}\n`);
   git('add', 'package.json');
@@ -114,13 +119,26 @@ function checkout() {
   git('tag', 'v0.15.52');
   git('commit', '--quiet', '--allow-empty', '--message', 'fix: a fix');
   git('tag', 'v0.15.53');
+  git('remote', 'add', 'origin', remote);
+  git('push', '--quiet', 'origin', 'refs/tags/v0.15.52', 'refs/tags/v0.15.53');
   writeFileSync(join(bin, 'stub.cjs'), STUB);
   for (const name of ['gh', 'npm']) {
     const path = join(bin, name);
     writeFileSync(path, `#!/bin/sh\nexec '${process.execPath}' '${join(bin, 'stub.cjs')}' ${name} "$@"\n`);
     chmodSync(path, 0o755);
   }
-  return { dir, repo, bin, head: git('rev-parse', 'HEAD'), tags: () => git('tag', '--list').split('\n').filter(Boolean) };
+  return {
+    dir,
+    repo,
+    remote,
+    bin,
+    head: git('rev-parse', 'HEAD'),
+    first: git('rev-parse', 'v0.15.52'),
+    git,
+    tags: () => lines(git('tag', '--list')),
+    /** Each tag on origin with the commit it points at. */
+    remoteTags: () => lines(git('--git-dir', remote, 'for-each-ref', '--format=%(refname:strip=2) %(objectname)', 'refs/tags')),
+  };
 }
 
 /**
@@ -142,7 +160,7 @@ function drop(at, output, stubs = {}) {
       PATH: `${at.bin}${delimiter}${process.env.PATH}`,
       GITHUB_REPOSITORY: 'framerslab/agentos',
       STUB_CALLS: calls,
-      STUB_TAG_SHA: at.head,
+      STUB_REMOTE: at.remote,
       STUB_NPM_VERSIONS: JSON.stringify(['0.15.51', '0.15.52']),
       STUB_RELEASE: 'none',
       ...stubs,
@@ -151,19 +169,15 @@ function drop(at, output, stubs = {}) {
   return { status: result.status, out: `${result.stdout}${result.stderr}`, calls: readFileSync(calls, 'utf8').split('\n').filter(Boolean) };
 }
 
-const LOOKUPS = [
-  'gh api repos/framerslab/agentos/git/ref/tags/v0.15.53',
-  'npm view @framers/agentos versions --json --prefer-online',
-  'gh api repos/framerslab/agentos/releases/tags/v0.15.53',
-];
-const BOTH_TAGS = ['v0.15.52', 'v0.15.53'];
+const LOOKUPS = ['npm view @framers/agentos versions --json --prefer-online', 'gh api repos/framerslab/agentos/releases/tags/v0.15.53'];
 
 describe('drop-unpublished-release-tag.mjs', () => {
-  test('deletes the tag a transparency-log conflict left, on GitHub and in the checkout (run 41126134054)', () => {
+  test('deletes the tag a transparency-log conflict left, on origin and in the checkout (run 41126134054)', () => {
     const at = checkout();
     const result = drop(at, CONFLICT_RUN);
     assert.equal(result.status, 0, result.out);
-    assert.deepEqual(result.calls, [...LOOKUPS, 'gh api --method DELETE repos/framerslab/agentos/git/refs/tags/v0.15.53']);
+    assert.deepEqual(result.calls, LOOKUPS);
+    assert.deepEqual(at.remoteTags(), [`v0.15.52 ${at.first}`]);
     assert.deepEqual(at.tags(), ['v0.15.52']);
   });
 
@@ -172,15 +186,27 @@ describe('drop-unpublished-release-tag.mjs', () => {
     const result = drop(at, AUTH_RUN);
     assert.equal(result.status, 1, result.out);
     assert.deepEqual(result.calls, []);
-    assert.deepEqual(at.tags(), BOTH_TAGS);
+    assert.deepEqual(at.remoteTags(), [`v0.15.52 ${at.first}`, `v0.15.53 ${at.head}`]);
+    assert.deepEqual(at.tags(), ['v0.15.52', 'v0.15.53']);
   });
 
-  test('leaves a tag that points at another commit on GitHub', () => {
+  test('leaves a tag that points at another commit on origin', () => {
     const at = checkout();
-    const result = drop(at, CONFLICT_RUN, { STUB_TAG_SHA: '0'.repeat(40) });
+    at.git('--git-dir', at.remote, 'update-ref', 'refs/tags/v0.15.53', at.first);
+    const result = drop(at, CONFLICT_RUN);
     assert.equal(result.status, 1, result.out);
-    assert.deepEqual(result.calls, LOOKUPS.slice(0, 1));
-    assert.deepEqual(at.tags(), BOTH_TAGS);
+    assert.deepEqual(result.calls, []);
+    assert.deepEqual(at.remoteTags(), [`v0.15.52 ${at.first}`, `v0.15.53 ${at.first}`]);
+    assert.deepEqual(at.tags(), ['v0.15.52', 'v0.15.53']);
+  });
+
+  test('leaves a tag another push moves after the script looked at it', () => {
+    const at = checkout();
+    const result = drop(at, CONFLICT_RUN, { STUB_MOVE_TAG: at.first });
+    assert.equal(result.status, 1, result.out);
+    assert.deepEqual(result.calls, LOOKUPS);
+    assert.deepEqual(at.remoteTags(), [`v0.15.52 ${at.first}`, `v0.15.53 ${at.first}`]);
+    assert.deepEqual(at.tags(), ['v0.15.52', 'v0.15.53']);
   });
 
   test('leaves a tag whose version npm has', () => {
@@ -188,8 +214,9 @@ describe('drop-unpublished-release-tag.mjs', () => {
     const result = drop(at, CONFLICT_RUN, { STUB_NPM_VERSIONS: JSON.stringify(['0.15.52', '0.15.53']) });
     assert.equal(result.status, 1, result.out);
     assert.match(result.out, /npm has @framers\/agentos@0\.15\.53/);
-    assert.deepEqual(result.calls, LOOKUPS.slice(0, 2));
-    assert.deepEqual(at.tags(), BOTH_TAGS);
+    assert.deepEqual(result.calls, LOOKUPS.slice(0, 1));
+    assert.deepEqual(at.remoteTags(), [`v0.15.52 ${at.first}`, `v0.15.53 ${at.head}`]);
+    assert.deepEqual(at.tags(), ['v0.15.52', 'v0.15.53']);
   });
 
   test('leaves a tag GitHub has a release for', () => {
@@ -197,19 +224,21 @@ describe('drop-unpublished-release-tag.mjs', () => {
     const result = drop(at, CONFLICT_RUN, { STUB_RELEASE: 'published' });
     assert.equal(result.status, 1, result.out);
     assert.deepEqual(result.calls, LOOKUPS);
-    assert.deepEqual(at.tags(), BOTH_TAGS);
+    assert.deepEqual(at.remoteTags(), [`v0.15.52 ${at.first}`, `v0.15.53 ${at.head}`]);
+    assert.deepEqual(at.tags(), ['v0.15.52', 'v0.15.53']);
   });
 
   test('leaves the tags when npm or GitHub cannot be read', () => {
     for (const [stubs, calls] of /** @type {const} */ ([
-      [{ STUB_NPM_VERSIONS: '' }, LOOKUPS.slice(0, 2)],
+      [{ STUB_NPM_VERSIONS: '' }, LOOKUPS.slice(0, 1)],
       [{ STUB_RELEASE: 'unreachable' }, LOOKUPS],
     ])) {
       const at = checkout();
       const result = drop(at, CONFLICT_RUN, stubs);
       assert.equal(result.status, 1, result.out);
       assert.deepEqual(result.calls, calls);
-      assert.deepEqual(at.tags(), BOTH_TAGS);
+      assert.deepEqual(at.remoteTags(), [`v0.15.52 ${at.first}`, `v0.15.53 ${at.head}`]);
+      assert.deepEqual(at.tags(), ['v0.15.52', 'v0.15.53']);
     }
   });
 
