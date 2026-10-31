@@ -145,4 +145,38 @@ describe('the full runtime with the learning flag on', () => {
     const manifest = await booted.getLearningLayer()!.manifest();
     expect(manifest.turns).toEqual({ prepared: 3, bound: 1, none: { other_namespace: 2 } });
   });
+
+  it('reports the approval gate and the tool-policy switch off where the configuration leaves them nothing to do', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const base = await createAgentOSConfig();
+    const loopsOf = async (extra: Record<string, unknown>) => {
+      booted = await boot({ learning: true, ...extra });
+      const { loops } = await booted.getLearningLayer()!.manifest();
+      await booted.shutdown();
+      booted = undefined;
+      return loops;
+    };
+    // This file's boot plans no turn, so the switch has no turn plan to change.
+    expect((await loopsOf({})).tool_policy).toEqual({ live: false, detail: 'no turn planner: the switch has no turn plan to change' });
+    const planned = { turnPlanning: { enabled: true, discovery: { enabled: false } } };
+    expect((await loopsOf(planned)).tool_policy).toEqual({ live: true });
+    const noTelemetry = { ...planned, orchestratorConfig: { ...base.orchestratorConfig, taskOutcomeTelemetry: { enabled: false } } };
+    expect((await loopsOf(noTelemetry)).tool_policy).toEqual({
+      live: false,
+      detail: 'orchestratorConfig.taskOutcomeTelemetry is off: the switch reads no success rate',
+    });
+
+    const hitl = (settings: Record<string, unknown>) => ({
+      toolOrchestratorConfig: { ...base.toolOrchestratorConfig, hitl: { ...base.toolOrchestratorConfig?.hitl, enabled: true, ...settings } },
+    });
+    expect((await loopsOf(hitl({ requireApprovalForSideEffects: false }))).hitl).toEqual({
+      live: false,
+      detail: 'toolOrchestratorConfig.hitl.requireApprovalForSideEffects is off: the gate asks for no tool',
+    });
+    expect((await loopsOf(hitl({ autoApproveWhenNoManager: true }))).hitl).toEqual({
+      live: false,
+      detail: 'no hitlManager, and hitl.autoApproveWhenNoManager approves every call',
+    });
+    expect((await loopsOf(hitl({}))).hitl).toEqual({ live: true, detail: 'no hitlManager: side-effect tools are refused' });
+  });
 });
