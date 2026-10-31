@@ -138,4 +138,12 @@ describe('with the learning flag on', () => {
     expect(systemOf(s.seen[0]).split(HEADING)).toHaveLength(2);
     expect(legacy.learning).toBeUndefined();
   });
+
+  it('reports metaprompts off for an empty preset list, which runs none', async () => {
+    quietManifest();
+    const tutor = gmi(options(key(), { cognition: { sentiment: true, metaprompts: [] }, learning: true }));
+    expect((await tutor.learning!.manifest()).loops.metaprompts).toEqual({ live: false, detail: 'no metaprompt preset' });
+    const all = gmi(options(key(), { cognition: { sentiment: true, metaprompts: 'all' }, learning: true }));
+    expect((await all.learning!.manifest()).loops.metaprompts).toEqual({ live: true });
+  });
 });
