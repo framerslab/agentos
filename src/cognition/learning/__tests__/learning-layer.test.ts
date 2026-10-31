@@ -267,4 +267,63 @@ describe('a learner session named at its first turn', () => {
     await session.endSession();
     expect(ended).toHaveBeenCalledTimes(1);
   });
+
+  /** A deferred session over the layer whose first `failures` opens reject; `wrap` stands for a host's own session. */
+  const failingOpens = (failures: number, wrap?: (inner: ILearnerSession) => ILearnerSession) => {
+    quiet();
+    const layer = createLearningLayer();
+    const opened: string[] = [];
+    let left = failures;
+    const session = deferLearnerSession({
+      traits: AUTHORED,
+      open: async (namespace) => {
+        opened.push(namespace);
+        if (left-- > 0) throw new Error('store offline');
+        const inner = await layer.forLearner(key({ namespace }), context());
+        return wrap ? wrap(inner) : inner;
+      },
+    });
+    return { session, opened };
+  };
+
+  it("opens under the first turn's namespace on every attempt", async () => {
+    const { session, opened } = failingOpens(1);
+    await expect(session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow('store offline');
+    expect(stateOf(await session.prepareTurn(turn({ namespace: 'B' })))).toBe('other_namespace');
+    expect(opened).toEqual(['A', 'A']);
+  });
+
+  it('keeps a hand-over to another user or another organization made while it could not open', async () => {
+    const byUser = failingOpens(2);
+    await expect(byUser.session.prepareTurn(turn())).rejects.toThrow('store offline');
+    await expect(byUser.session.prepareTurn(turn({ userId: 'bob' }))).rejects.toThrow('store offline');
+    expect(stateOf(await byUser.session.prepareTurn(turn()))).toBe('other_user');
+    expect(stateOf(await byUser.session.prepareTurn(turn()))).toBe('other_user');
+
+    const byNamespace = failingOpens(2);
+    await expect(byNamespace.session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow('store offline');
+    await expect(byNamespace.session.prepareTurn(turn({ namespace: 'B' }))).rejects.toThrow('store offline');
+    expect(stateOf(await byNamespace.session.prepareTurn(turn({ namespace: 'A' })))).toBe('other_namespace');
+  });
+
+  it("keeps the hand-over for a host's own session, and reads no tool continuation as another user", async () => {
+    // A host's layer answers with a session of its own, which nothing tells what happened before it opened.
+    const hostSession = (inner: ILearnerSession): ILearnerSession => ({
+      prepareTurn: (input) => inner.prepareTurn(input),
+      currentTraits: () => inner.currentTraits(),
+      endSession: () => inner.endSession(),
+    });
+    const { session } = failingOpens(2, hostSession);
+    await expect(session.prepareTurn(turn())).rejects.toThrow('store offline');
+    await expect(session.prepareTurn(turn({ userId: 'bob' }))).rejects.toThrow('store offline');
+    const after = await session.prepareTurn(turn());
+    expect(after).toMatchObject({ learner: 'none', noLearnerReason: 'other_user', mode: 'on' });
+    expect(after.systemPrompts[0].content).toBe(renderPersonalitySection(AUTHORED));
+
+    const continued = failingOpens(1);
+    await expect(continued.session.prepareTurn(turn())).rejects.toThrow('store offline');
+    const continuation = turn({ userId: 'uninitialized-user', text: null, continuation: true });
+    expect(stateOf(await continued.session.prepareTurn(continuation))).toBe('bound');
+    expect(stateOf(await continued.session.prepareTurn(turn()))).toBe('bound');
+  });
 });
