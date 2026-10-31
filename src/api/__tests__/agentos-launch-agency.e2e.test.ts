@@ -72,6 +72,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
 });
 
 import { AgentOS } from '../AgentOS';
+import type { AgencySession } from '../../agents/agency/AgencyTypes';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import type { IRetrievalAugmentor } from '../../cognition/rag/IRetrievalAugmentor';
 import type { ITool, ToolExecutionContext } from '../../core/tools/ITool';
@@ -347,4 +348,65 @@ describe('launch_agency on the full runtime', () => {
     expect(launchWarnings[0].meta).toEqual({ error: expect.objectContaining({ name: 'GMIError', message: expect.stringContaining(canary) }) });
     expect(launchWarnings[1].meta).toEqual({ error: expect.objectContaining({ name: 'GMIError', message: 'GMIError (GMI_PROCESSING_ERROR)' }) });
   });
+
+  it('a persona with agency:launch launches a team; listAgencies shows it only while it runs', async () => {
+    let running: AgencySession[] = [];
+    const peek = hostTool('peek', async () => {
+      running = booted!.listAgencies();
+      return running.length;
+    });
+    booted = await boot({ tools: { search: search(), peek } });
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Peek.', seats: [{ role: 'second', instructions: 'Answer.' }, { role: 'peeker', personaId: 'checker', tools: ['peek'] }] }]),
+      textStep('Answered.'),
+      toolStep(['peek', {}]),
+      textStep('Peeked.'),
+      textStep('Done.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // Read from a seat's tool while the team ran: one launched entry, its two seats, the first seat's call in its history.
+    const launched = running.filter((session) => session.metadata?.kind === 'launched');
+    expect(launched).toHaveLength(1);
+    expect(Object.keys(launched[0].seats).sort()).toEqual(['peeker', 'second']);
+    expect(launched[0]).toMatchObject({
+      workflowId: `launch:${launched[0].agencyId}`,
+      conversationId: expect.any(String),
+      metadata: expect.objectContaining({ kind: 'launched', parentPersonaId: 'lead', depth: 1, strategy: 'sequential', status: 'running', goalPreview: 'Peek.' }),
+    });
+    expect(launched[0].seats.second.history).toEqual([expect.objectContaining({ status: 'completed', outputPreview: 'Answered.' })]);
+    // Afterwards the list is empty, and no seat's GMI is active.
+    expect(booted.listAgencies()).toEqual([]);
+    expect([...booted.getGMIManager().gmiSessionMap.keys()].filter((id) => id.startsWith('seat:'))).toEqual([]);
+  });
+
+  it("a launch that returns while a seat's tool still runs stays listed, closing, until the seat is released", async () => {
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const hang = hostTool('hang', async () => {
+      await hanging;
+      return 'done';
+    });
+    booted = await boot({ tools: { search: search(), hang } });
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Wait.', deadlineMs: 1_000, seats: [{ role: 'waiter', instructions: 'Call hang.', tools: ['hang'] }] }]),
+      // The waiter's tool runs past the deadline and the grace.
+      toolStep(['hang', {}]),
+      textStep('Waited.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // The launch returned timed_out while the waiter's tool still runs, and its seat's GMI is still active (the precondition).
+    expect(toolMessages(provider.seen[2].messages)[0]).toContain('"status":"timed_out"');
+    const listed = booted.listAgencies();
+    expect(listed).toHaveLength(1);
+    expect(booted.getGMIManager().gmiSessionMap.has(`seat:${listed[0].agencyId}:waiter`)).toBe(true);
+    // The team stays listed while its seat holds a GMI, marked closing.
+    expect(listed[0].metadata).toMatchObject({ kind: 'launched', status: 'closing' });
+    expect(Object.keys(listed[0].seats)).toEqual(['waiter']);
+    // Once the tool returns and the seat is released, the team leaves the list.
+    release();
+    await vi.waitFor(() => expect(booted!.listAgencies()).toEqual([]), { timeout: 10_000 });
+    expect([...booted.getGMIManager().gmiSessionMap.keys()].filter((id) => id.startsWith('seat:'))).toEqual([]);
+  }, 40_000);
 });
