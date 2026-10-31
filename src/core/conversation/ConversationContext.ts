@@ -187,6 +187,14 @@ export class ConversationContext {
   private isSummarizing: boolean = false;
 
   /**
+   * The passes of `manageHistoryLength()` that found a summary being made. Each runs once it is made, so the messages
+   * recorded meanwhile get the passes they started.
+   * @private
+   * @type {number}
+   */
+  private deferredHistoryPasses: number = 0;
+
+  /**
    * Creates an instance of ConversationContext.
    *
    * @constructor
@@ -479,25 +487,29 @@ export class ConversationContext {
    * A summary replaces a chunk of the messages between the first `messagesToKeepVerbatimHead` and the newest
    * `messagesToKeepVerbatimTail`. None of the three ends inside a tool round: a round the head or the tail reaches into
    * stays whole there, and a round the chunk reaches into is summarized whole, past `summarizationChunkSize`. The
-   * summary takes the chunk's place, so a message recorded while the summary is made stays after it. A history still
-   * past its limit with too few messages left for another chunk is trimmed, and the trim keeps the last summary after
-   * the head: this one, unless a conversation loaded from storage holds a later one. The summary of a history cleared
-   * meanwhile is dropped, and the messages recorded since the clear, whose own passes found this one holding the lock,
-   * get a pass once it ends.
+   * summary takes the chunk's place, so a message recorded while the summary is made stays after it, and the summary
+   * of a history cleared meanwhile is dropped. A history still past its limit with too few messages left for another
+   * chunk, the ones recorded meanwhile counted in, is trimmed, and the trim keeps the last summary after the head: this
+   * one, unless a conversation loaded from storage holds a later one. One with enough left for another chunk waits for
+   * the next pass. A pass that finds a summary being made runs once it is made, so the messages recorded meanwhile,
+   * after a clear too, get their passes.
    *
    * @private
    * @async
    * @returns {Promise<void>}
    */
   private async manageHistoryLength(): Promise<void> {
-    if (this.isSummarizing || this.messages.length <= this.config.maxHistoryLengthMessages) {
-      return; // Already within limits or summarization in progress
+    if (this.messages.length <= this.config.maxHistoryLengthMessages) {
+      return; // Already within limits
+    }
+    if (this.isSummarizing) {
+      // A summary is being made: this pass runs once it is made.
+      this.deferredHistoryPasses += 1;
+      return;
     }
 
     if (this.config.enableAutomaticSummarization && this.utilityAI) {
       this.isSummarizing = true;
-      // set when a clear replaces the history while the summary is made
-      let historyReplaced = false;
       try {
         const headCount = Math.max(0, this.config.messagesToKeepVerbatimHead);
         const tailCount = Math.max(0, this.config.messagesToKeepVerbatimTail);
@@ -534,7 +546,6 @@ export class ConversationContext {
 
           // A history cleared while the summary was made no longer holds the messages it summarizes.
           if (this.messages !== messages) {
-            historyReplaced = true;
             return;
           }
 
@@ -559,13 +570,13 @@ export class ConversationContext {
           console.log(`ConversationContext (ID: ${this.sessionId}): History summarized. New length: ${this.messages.length}.`);
 
           if (this.messages.length > this.config.maxHistoryLengthMessages) {
-            const remainingMiddleLength = middleSectionEndIndex - chunkEndIndex;
-            // If still too long, recursively call or truncate if no more summarization is effective
-            if(remainingMiddleLength >= MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT && remainingMiddleLength >= this.config.summarizationChunkSize) {
-                 await this.manageHistoryLength(); // Recursive call with safeguard
-            } else {
-                 // the trim keeps the last summary after the head
-                 this.truncateHistorySimple(this.config.maxHistoryLengthMessages);
+            // The messages between the summary and the kept tail, the ones recorded meanwhile counted in. Too few for
+            // another chunk are trimmed, and the trim keeps the last summary after the head. Enough for one wait for
+            // the next pass: the one the next message starts, or one that found this pass making the summary.
+            const remainingMiddleLength =
+              cutsKeepingToolRounds(this.messages, headCount, tailCount).tailStart - (middleSectionStartIndex + 1);
+            if (remainingMiddleLength < MIN_MESSAGES_FOR_SUMMARIZATION_ATTEMPT || remainingMiddleLength < this.config.summarizationChunkSize) {
+              this.truncateHistorySimple(this.config.maxHistoryLengthMessages);
             }
           }
         } else {
@@ -576,8 +587,10 @@ export class ConversationContext {
         this.truncateHistorySimple(this.config.maxHistoryLengthMessages);
       } finally {
         this.isSummarizing = false;
-        // The messages recorded since the clear found this pass holding the lock, so their history gets a pass now.
-        if (historyReplaced) {
+        // The passes that found this one making its summary run now, one after another, on the history as it is: the
+        // messages recorded meanwhile, after a clear too, get the passes they started.
+        while (this.deferredHistoryPasses > 0) {
+          this.deferredHistoryPasses -= 1;
           await this.manageHistoryLength();
         }
       }
