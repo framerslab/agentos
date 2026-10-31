@@ -71,6 +71,19 @@ describe('ConversationContext history cuts', () => {
 
       expect(names(context.getAllMessages())).toEqual(['q1', 'call', 'read', 'write', 'q2', 'r2']);
     });
+
+    it('with a head setting given as undefined keeps the newest messages, and getHistory() returns them', () => {
+      // A setting given as undefined takes the place of its default, so the trim keeps no first messages: a limit of
+      // four keeps the newest four.
+      const context = contextWith(['q1', 'r1', 'q2', 'r2', 'q3'], {
+        maxHistoryLengthMessages: 4,
+        messagesToKeepVerbatimHead: undefined,
+      });
+
+      expect(names(context.getHistory())).toEqual(['r1', 'q2', 'r2', 'q3']);
+      context.addMessage(fields('r3'));
+      expect(names(context.getAllMessages())).toEqual(['q2', 'r2', 'q3', 'r3']);
+    });
   });
 
   describe('getHistory', () => {
@@ -234,6 +247,21 @@ describe('ConversationContext history cuts', () => {
       );
       const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
       expect(summary?.content).toBe('The user asked about the weather.');
+    });
+
+    it('summarizes the whole part of a chunk size that is not a whole number', async () => {
+      const summarize = vi.fn(async () => 'The user asked about the notes.');
+      const context = summarizingContext(['q1', 'r1', 'q2', 'r2', 'q3', 'r3', 'q4', 'r4', 'q5', 'r5'], summarize, {
+        summarizationChunkSize: 4.5,
+      });
+
+      context.addMessage(fields('q6'));
+
+      await vi.waitFor(() =>
+        expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'q4', 'r4', 'q5', 'r5', 'q6']),
+      );
+      const summary = context.getAllMessages().find((message) => message.role === MessageRole.SUMMARY);
+      expect(summary?.metadata?.summarizedMessageIds).toEqual(['q2', 'r2', 'q3', 'r3'].map((name) => `msg-${name}`));
     });
   });
 });
