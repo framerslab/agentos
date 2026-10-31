@@ -11,9 +11,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdaptPersonalityTool, type AdaptPersonalityDeps } from '../AdaptPersonalityTool';
 import { SelfEvaluateTool, type SelfEvaluateDeps, type SelfEvaluateInput } from '../SelfEvaluateTool';
+import type { ForgeToolMetaTool } from '../ForgeToolMetaTool';
+import { wrapForgeTool, type CapturedForge, type ForgeLogEvent } from '../wrapForgeTool';
 import type { ToolExecutionContext } from '../../../core/tools/ITool';
 import type { ToolCallResult, UserContext } from '../../substrate/IGMI';
-import { echoTool, makeForgeHost, type ForgeHost } from './helpers/forge-host';
+import { approvingHitl, echoTool, makeForgeHost, type ForgeHost } from './helpers/forge-host';
 
 type TurnLearning = { learner: 'bound' | 'none'; mode: 'on' | 'frozen' | 'off' };
 
@@ -35,6 +37,22 @@ function call(host: ForgeHost, name: string, args: Record<string, unknown>, lear
 const reasonOf = (result: ToolCallResult): string | undefined =>
   (result.errorDetails as { details?: { reason?: string } } | undefined)?.details?.reason;
 const TRAIT_CALL = { trait: 'openness', delta: 0.02, reasoning: 'The user asked for unconventional ideas.' };
+const FORGE = {
+  name: 'echo_twice',
+  description: 'Echoes the text twice.',
+  inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+  implementation: { mode: 'compose', steps: [{ name: 'first', tool: 'echo', inputMapping: { text: '$input.text' } }] },
+  testCases: [{ input: { text: 'a' } }],
+};
+const CREATE = { action: 'create', name: 'twice', description: 'Echo twice.', steps: [{ tool: 'echo', args: { text: 'a' } }] };
+const SELF_CHANGES: Array<[string, Record<string, unknown>]> = [
+  ['forge_tool', FORGE],
+  ['create_workflow', CREATE],
+  ['manage_skills', { action: 'enable', skillId: 'web-search' }],
+  ['manage_skills', { action: 'disable', skillId: 'web-search' }],
+  ['self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2, reasoning: 'Less variance.' }],
+];
+const bound: TurnLearning = { learner: 'bound', mode: 'on' };
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -107,6 +125,59 @@ describe("adapt_personality's bounds where a learning layer exists", () => {
     expect((await tool.execute({ trait: 'extraversion', delta: 0.01, reasoning: 'Adjust.' }, learnerTurn('s-2'))).success).toBe(true);
   });
 
+  it("counts a session's accepted calls per organization and user, and counts no refused call", async () => {
+    const { tool } = make();
+    const turnOf = (organizationId: string, userId: string): ToolExecutionContext =>
+      ({
+        gmiId: 'g',
+        personaId: 'p',
+        userContext: { userId },
+        correlationId: 's-1',
+        sessionData: { sessionId: 's-1', organizationId, learning: { learner: 'bound', mode: 'on' } },
+      }) as ToolExecutionContext;
+    const adjust = (context: ToolExecutionContext, delta = 0.01) => tool.execute({ trait: 'openness', delta, reasoning: 'Adjust.' }, context);
+    // A refused call changes nothing, and counts for none.
+    expect((await adjust(turnOf('A', '42'), 0.05)).details?.reason).toBe('step_bound');
+    expect((await tool.execute({ trait: 'honesty', delta: 0.01, reasoning: 'Plainer.' }, turnOf('A', '42'))).details?.reason).toBe('operator_only');
+    for (let accepted = 0; accepted < 3; accepted += 1) {
+      expect((await adjust(turnOf('A', '42'))).success).toBe(true);
+    }
+    expect((await adjust(turnOf('A', '42'))).details?.reason).toBe('call_limit');
+    // Tenant B's user 42 and tenant A's user 7 made no call on this session id.
+    expect((await adjust(turnOf('B', '42'))).success).toBe(true);
+    expect((await adjust(turnOf('A', '7'))).success).toBe(true);
+  });
+
+  it('keeps the budget per learner too, and reads a user id and a session id as given', async () => {
+    const traits: Record<string, number> = authored();
+    const tool = new AdaptPersonalityTool({
+      config: { maxDeltaPerSession: 0.02 },
+      getPersonality: () => traits,
+      setPersonality: (trait, value) => {
+        traits[trait] = value;
+      },
+    });
+    const turnOf = (organizationId: string, userId: string, sessionId = 's-1'): ToolExecutionContext =>
+      ({
+        gmiId: 'g',
+        personaId: 'p',
+        userContext: { userId },
+        correlationId: sessionId,
+        sessionData: { sessionId, organizationId, learning: { learner: 'bound', mode: 'on' } },
+      }) as ToolExecutionContext;
+    const adjust = (context: ToolExecutionContext) => tool.execute({ trait: 'openness', delta: 0.02, reasoning: 'Adjust.' }, context);
+    // Tenant A's user spends the session's budget for openness; tenant B's user on the same session id has a budget of its own.
+    expect((await adjust(turnOf('A', '42'))).output?.delta).toBeCloseTo(0.02);
+    expect((await adjust(turnOf('B', '42'))).output?.delta).toBeCloseTo(0.02);
+    // A user id with spaces around it is a learner of its own, as the learning layer keeps it.
+    for (let accepted = 0; accepted < 3; accepted += 1) {
+      expect((await adjust(turnOf('C', 'alice', 's-2'))).success).toBe(true);
+    }
+    expect((await adjust(turnOf('C', ' alice ', 's-2'))).success).toBe(true);
+    // A session id that holds a lone surrogate counts as any other does.
+    expect((await adjust(turnOf('A', '42', 's-\uD800'))).success).toBe(true);
+  });
+
   it('keeps its rules without a layer: a step of 0.5 succeeds, and honesty stays operator-only', async () => {
     const { tool, traits } = make();
     expect((await tool.execute({ trait: 'honesty', delta: 0.1, reasoning: 'State uncertainty plainly.' }, noLayer())).details?.reason).toBe('operator_only');
@@ -116,23 +187,6 @@ describe("adapt_personality's bounds where a learning layer exists", () => {
 });
 
 describe('the other four self-modification tools through the tool orchestrator', () => {
-  const FORGE = {
-    name: 'echo_twice',
-    description: 'Echoes the text twice.',
-    inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
-    implementation: { mode: 'compose', steps: [{ name: 'first', tool: 'echo', inputMapping: { text: '$input.text' } }] },
-    testCases: [{ input: { text: 'a' } }],
-  };
-  const CREATE = { action: 'create', name: 'twice', description: 'Echo twice.', steps: [{ tool: 'echo', args: { text: 'a' } }] };
-  const SELF_CHANGES: Array<[string, Record<string, unknown>]> = [
-    ['forge_tool', FORGE],
-    ['create_workflow', CREATE],
-    ['manage_skills', { action: 'enable', skillId: 'web-search' }],
-    ['manage_skills', { action: 'disable', skillId: 'web-search' }],
-    ['self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2, reasoning: 'Less variance.' }],
-  ];
-  const bound: TurnLearning = { learner: 'bound', mode: 'on' };
-
   it('refuse with no_learner on a turn with no learner, off in mode off and frozen in mode frozen, with a layer, and change nothing', async () => {
     const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
     for (const [name, args] of SELF_CHANGES) {
@@ -156,20 +210,15 @@ describe('the other four self-modification tools through the tool orchestrator',
     expect((await call(host, 'manage_skills', { action: 'list' })).isError).toBe(false);
   });
 
-  it("are not refused on a learner's turn in mode on, nor without a layer", async () => {
+  it("act on a learner's turn in mode on, and without a layer", async () => {
     const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
-    // A refusal and any other failure both leave `details` unset, so each call is read for its success.
-    const created = await call(host, 'create_workflow', CREATE, bound);
-    expect(created.isError, JSON.stringify(created.errorDetails)).toBe(false);
-    const forged = await call(host, 'forge_tool', FORGE, bound);
-    expect(forged.isError, JSON.stringify(forged.errorDetails)).toBe(false);
-    expect(host.judge).toHaveBeenCalled();
-    const enabled = await call(host, 'manage_skills', { action: 'enable', skillId: 'web-search' }, bound);
-    expect(enabled.isError, JSON.stringify(enabled.errorDetails)).toBe(false);
-    expect(enabled.output).toMatchObject({ status: 'enabled' });
-    const adjusted = await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 });
-    expect(adjusted.isError, JSON.stringify(adjusted.errorDetails)).toBe(false);
+    // Each call succeeds: a failure for any other reason has no refusal reason either, so the reason alone proves nothing.
+    expect((await call(host, 'create_workflow', CREATE, bound)).isError).toBe(false);
+    expect((await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 })).isError).toBe(false);
     expect((await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 }, bound)).isError).toBe(false);
+    expect((await call(host, 'manage_skills', { action: 'enable', skillId: 'web-search' }, bound)).isError).toBe(false);
+    expect((await call(host, 'forge_tool', FORGE, bound)).isError).toBe(false);
+    expect(host.judge).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -213,5 +262,81 @@ describe("self_evaluate's evaluate on a turn the layer refuses", () => {
     expect(result.output).not.toHaveProperty('selfChangeRefused');
     expect(storeMemory).toHaveBeenCalledTimes(1);
     expect(setSessionParam).toHaveBeenCalledWith('temperature', 0.2, expect.anything());
+  });
+});
+
+describe('the self-modification tools behind the approval gate', () => {
+  it('answer a call the learning layer refuses with its refusal, and ask for no approval', async () => {
+    const { manager, requestApproval } = approvingHitl();
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()], hitlManager: manager, orchestratorConfig: { hitl: { enabled: true } } });
+    for (const [name, args] of SELF_CHANGES) {
+      expect(reasonOf(await call(host, name, args, { learner: 'bound', mode: 'off' })), name).toBe('off');
+    }
+    expect(reasonOf(await call(host, 'adapt_personality', TRAIT_CALL, { learner: 'none', mode: 'on' }))).toBe('no_learner');
+    expect(reasonOf(await call(host, 'adapt_personality', { ...TRAIT_CALL, trait: 'honesty' }, bound))).toBe('operator_only');
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(host.judge).not.toHaveBeenCalled();
+    // A call the layer lets act is asked about, as before.
+    expect((await call(host, 'create_workflow', { action: 'list' }, { learner: 'bound', mode: 'off' })).isError).toBe(false);
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('keep the refusal through wrapForgeTool, which a host wraps forge_tool with', async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    const raw = (await host.orchestrator.getTool('forge_tool')) as unknown as ForgeToolMetaTool;
+    const wrapped = wrapForgeTool({ raw, agentId: 'agent-1', sessionId: 'session-test', capture: () => undefined });
+    const contextOf = (learning: TurnLearning): ToolExecutionContext =>
+      ({ gmiId: 'g', personaId: 'p', userContext: { userId: 'u' }, sessionData: { sessionId: 'session-test', learning } }) as ToolExecutionContext;
+    expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf({ learner: 'bound', mode: 'off' }))?.details).toEqual({ status: 'rejected', reason: 'off' });
+    expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf(bound))).toBeUndefined();
+  });
+
+  it("record a forge the wrapper refuses before the approval gate in the wrapper's capture, once", async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    const raw = (await host.orchestrator.getTool('forge_tool')) as unknown as ForgeToolMetaTool;
+    const captured: CapturedForge[] = [];
+    const events: ForgeLogEvent[] = [];
+    const wrapped = wrapForgeTool({ raw, agentId: 'agent-1', sessionId: 'session-test', capture: (record) => captured.push(record), log: (event) => events.push(event) });
+    const contextOf = (learning: TurnLearning): ToolExecutionContext =>
+      ({ gmiId: 'g', personaId: 'p', userContext: { userId: 'u' }, sessionData: { sessionId: 'session-test', learning } }) as ToolExecutionContext;
+    expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf({ learner: 'bound', mode: 'off' }))?.details).toEqual({ status: 'rejected', reason: 'off' });
+    expect(captured).toEqual([
+      expect.objectContaining({ name: 'echo_twice', approved: false, confidence: 0, errorReason: expect.stringContaining('forge_tool refused (off)') }),
+    ]);
+    expect(events).toEqual([expect.objectContaining({ kind: 'rejected', toolName: 'echo_twice' })]);
+    // A forge the layer lets act names no refusal here, and its own run records it.
+    expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf(bound))).toBeUndefined();
+    expect(captured).toHaveLength(1);
+  });
+
+  it('name the learning refusal, not a missing approval manager, with the gate on and no manager', async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()], orchestratorConfig: { hitl: { enabled: true } } });
+    expect(reasonOf(await call(host, 'forge_tool', FORGE, { learner: 'bound', mode: 'off' }))).toBe('off');
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    expect(reasonOf(await call(host, 'manage_skills', { action: 'enable', skillId: 'web-search' }))).toBe('frozen');
+  });
+});
+
+describe("a forged tool's use on a turn the learning layer refuses", () => {
+  it('runs and checks no promotion, as a use on a learner turn in mode on, or on a host with no layer, does', async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    expect((await call(host, 'forge_tool', FORGE, bound)).isError).toBe(false);
+    const promotion = vi.spyOn(host.engine, 'checkPromotion');
+    const refused: TurnLearning[] = [
+      { learner: 'bound', mode: 'frozen' },
+      { learner: 'bound', mode: 'off' },
+      { learner: 'none', mode: 'on' },
+    ];
+    for (const learning of refused) {
+      expect((await call(host, 'echo_twice', { text: 'a' }, learning)).output, JSON.stringify(learning)).toEqual({ text: 'a' });
+    }
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    expect((await call(host, 'echo_twice', { text: 'a' })).output).toEqual({ text: 'a' });
+    vi.unstubAllEnvs();
+    expect(promotion).not.toHaveBeenCalled();
+
+    await call(host, 'echo_twice', { text: 'a' }, bound);
+    await call(host, 'echo_twice', { text: 'a' });
+    expect(promotion).toHaveBeenCalledTimes(2);
   });
 });
