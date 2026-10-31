@@ -542,6 +542,8 @@ describe('AgentOSOrchestrator (API layer)', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       expect(mockGMIManager.getOrCreateGMIForSession).toHaveBeenCalledTimes(1);
+      // A refused organization binds no learner at acquisition: the GMI's learner session opens at its first prepared turn.
+      expect((mockGMIManager.getOrCreateGMIForSession as any).mock.calls[0][8]).toBeUndefined();
       const types = (mockStreamingManager.pushChunk as any).mock.calls.map((call: any[]) => call[1]?.type);
       const progress = types.indexOf(AgentOSResponseChunkType.SYSTEM_PROGRESS);
       expect(progress).toBeGreaterThanOrEqual(0);
