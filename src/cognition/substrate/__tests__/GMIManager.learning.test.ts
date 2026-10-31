@@ -219,6 +219,30 @@ describe('a runtime with a learning layer', () => {
     expect(layer.forLearner).toHaveBeenCalledTimes(1);
   }, 10_000);
 
+  it("asks the layer again at the GMI's first turn when the open its build left running fails before that turn", async () => {
+    // A failed open is no answer for a turn that comes after it: the turn asks the layer again.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const real = createLearningLayer();
+    let fail: ((error: Error) => void) | undefined;
+    let opens = 0;
+    const layer = recordingLayer((learnerKey, context) => {
+      opens += 1;
+      if (opens > 1) return real.forLearner(learnerKey, context);
+      return new Promise<ILearnerSession>((_resolve, reject) => {
+        fail = reject;
+      });
+    });
+    // Long enough that the open is still the session's when it fails, past the acquisition's budget.
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 5_000 });
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    // The open fails after the GMI was built and before its first turn.
+    fail!(new Error('layer down'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stateOf(await gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' })))).toBe('bound');
+    expect(layer.forLearner).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
   it('ends the learner session of a GMI that fails to initialize within shutdownTimeoutMs, when the session does not end', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const endSession = vi.fn(() => new Promise<void>(() => undefined));

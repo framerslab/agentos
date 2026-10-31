@@ -598,8 +598,13 @@ export class GMIManager {
         ? openWithin(() => layer.forLearner(null, { ...context, noLearnerReason: 'workflow_seat' }), lifetime)
         : open(organizationId);
     // The open runs inside GMI acquisition, so it has the budget a turn's preparation has.
-    let late: Promise<ILearnerSession> | undefined = openNow();
-    late.catch(() => undefined);
+    const first = openNow();
+    let late: Promise<ILearnerSession> | undefined = first;
+    // An open that fails (it rejects, or outlives its lifetime) is no answer for a turn that comes after it: it is
+    // dropped once it fails, so the GMI's next turn asks the layer again.
+    first.catch(() => {
+      if (late === first) late = undefined;
+    });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const budget = new Promise<'late'>((resolve) => {
       timer = setTimeout(() => resolve('late'), LEARNER_OPEN_BUDGET_MS);
