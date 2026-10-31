@@ -7,6 +7,7 @@
  */
 
 import type { ResolvedLongTermMemoryPolicy } from './LongTermMemoryPolicy';
+import type { ProposalResult, SessionSelfChange, TurnScopes } from '../../cognition/learning/types.js';
 
 export interface RollingSummaryMemoryUpdate {
   userId: string;
@@ -33,6 +34,22 @@ export interface RollingSummaryMemoryUpdate {
   summaryUptoTimestamp?: number | null;
   /** When this summary snapshot was updated. */
   summaryUpdatedAt?: number | null;
+  /**
+   * With a learning layer: the turn's scope ids, from the GMI's learner session. The sink files the user, persona and
+   * conversation targets under them and records the upsert through {@link recordSelfChange}; without them it files
+   * under the plain ids and records nothing, as with no layer.
+   */
+  turnScopes?: TurnScopes;
+  /**
+   * With `turnScopes`: the learner session's recorder, bound to the turn. A sink that files under the turn's scope ids
+   * records each upsert through it as one memory write, or files nothing.
+   */
+  recordSelfChange?: <T>(input: SessionSelfChange<T>) => Promise<ProposalResult<T>>;
+  /**
+   * With `turnScopes`: the explicit user ids whose messages this compaction and the conversation's earlier ones
+   * summarized. Each trace the sink files records them, so `forgetUser` for any of them finds it.
+   */
+  contributorIds?: string[];
 }
 
 /**
@@ -41,6 +58,8 @@ export interface RollingSummaryMemoryUpdate {
  * Implementations should be:
  * - idempotent (same update may be retried)
  * - best-effort (failures should not break the core chat loop)
+ * - strict where a learning layer records its writes (an update with `turnScopes`): an upsert it cannot record writes
+ *   nothing and rejects
  */
 export interface IRollingSummaryMemorySink {
   upsertRollingSummaryMemory(update: RollingSummaryMemoryUpdate): Promise<void>;

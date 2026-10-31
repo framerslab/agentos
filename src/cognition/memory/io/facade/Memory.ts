@@ -74,6 +74,7 @@ import {
   deleteTraceRows,
   holdsEncodedScopeIdForm,
   readTraceSnapshot,
+  traceNamesUser,
   type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
 import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
@@ -879,8 +880,9 @@ export class Memory {
 
   /**
    * Deletes every trace of one scope for good: the rows, their memory-graph nodes and knowledge-graph copies, and
-   * the full-text index entries. With `turnUserId`, only the scope's traces whose metadata names that user, as a
-   * memory write on another user's session records a second user. Account deletion calls it.
+   * the full-text index entries. With `turnUserId`, only the scope's traces whose metadata names that user, as the
+   * second user a memory write on another user's session records, or among the contributors of a summary the
+   * rolling-summary sink filed. Account deletion calls it.
    *
    * It reads the rows by their `scope_id` column, after filing the brain's rows that hold `''` there while their
    * metadata names a scope id: a release older than the column writes those, to a Brain this facade holds open too.
@@ -903,7 +905,7 @@ export class Memory {
       [this._brain.brainId, scope, scopeId],
     );
     const ids = rows
-      .filter((row) => only === undefined || parseTraceMetadata(row.metadata).turnUserId === only)
+      .filter((row) => only === undefined || traceNamesUser(row.metadata, only))
       .map((row) => row.id);
     const result = await this.deleteTraces(ids);
     if (only === undefined) {

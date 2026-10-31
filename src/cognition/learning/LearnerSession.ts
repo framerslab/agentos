@@ -662,7 +662,9 @@ export class LearnerSession implements ILearnerSession {
       }
       let decided: DecideResult;
       try {
-        decided = await ledger.decide(ledgerId, 'kept', 'written');
+        // A write whose outcome can differ from its plan says what it did, and the kept verdict records that.
+        const did = input.keptAfter?.(result);
+        decided = await ledger.decide(ledgerId, 'kept', 'written', did ? { after: { brainId: input.brainId, ...did } } : {});
       } catch (error) {
         // A change with no record does not happen: the write is taken back and its pending row stays to be decided.
         const gone = await this.takeBack(store, input.undo, result, write, false, touched);

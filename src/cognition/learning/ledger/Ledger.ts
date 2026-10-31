@@ -322,6 +322,8 @@ export class Ledger {
    * verdict decides a `pending` candidate, and `reverted` follows a `kept` one; any other is `refused`, read in the
    * same transaction as the write.
    *
+   * @param options.after - On a kept verdict of a write whose outcome can differ from its candidate's plan: what the
+   *   write did. The verdict row's text holds it, so its hash covers it.
    * @throws {Error} When the store fails or `change` throws, with nothing written; when the candidate's text is not a
    *   ledger entry's.
    * @throws {RangeError} When the clock gives a time a ULID cannot hold, with nothing written.
@@ -330,7 +332,7 @@ export class Ledger {
     candidateId: string,
     verdict: LedgerVerdict,
     reason: string,
-    options: { evidence?: LedgerEvidence; stateDigest?: string; change?: ProposeOptions['change'] } = {},
+    options: { evidence?: LedgerEvidence; stateDigest?: string; change?: ProposeOptions['change']; after?: unknown } = {},
   ): Promise<DecideResult> {
     const stored = await this.store.ledgerRow(candidateId);
     if (!stored || stored.rowType !== 'candidate') return { status: 'unknown_candidate' };
@@ -344,7 +346,7 @@ export class Ledger {
       actor: candidate.actor,
       subject: candidate.subject,
       before: null,
-      after: null,
+      after: options.after ?? null,
       evidence: options.evidence ?? {},
       verdict,
       reason,
@@ -515,6 +517,16 @@ export class Ledger {
   /** A candidate's current verdict: its latest verdict row's, or `pending`; `undefined` for an unknown id. */
   async latestVerdict(candidateId: string): Promise<LedgerVerdict | undefined> {
     return currentVerdictOf(await this.store.candidateRows(candidateId));
+  }
+
+  /**
+   * A candidate's latest verdict row, or `undefined` while it has none.
+   * @throws {Error} When that row's text is not a ledger entry's.
+   */
+  async latestVerdictEntry(candidateId: string): Promise<LedgerEntry | undefined> {
+    const verdicts = (await this.store.candidateRows(candidateId)).filter((row) => row.rowType === 'verdict');
+    const latest = verdicts[verdicts.length - 1];
+    return latest ? entryOf(latest) : undefined;
   }
 
   /**

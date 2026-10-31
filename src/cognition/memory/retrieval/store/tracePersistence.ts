@@ -409,3 +409,15 @@ export async function writeTraceSnapshot(
     snapshot.metadata, snapshot.scopeId,
   ]);
 }
+
+/**
+ * Whether a trace's stored metadata names a user: as the second user a turn with no learner filed it for
+ * (`turnUserId`), or among the users whose words a derivation summarizes (`contributorIds`). A scope delete for one
+ * user takes the traces that name that user.
+ */
+export function traceNamesUser(raw: string | null | undefined, userId: string): boolean {
+  const metadata = parseTraceMetadata(raw);
+  if (metadata.turnUserId === userId) return true;
+  const contributors = metadata.contributorIds;
+  return Array.isArray(contributors) && contributors.includes(userId);
+}

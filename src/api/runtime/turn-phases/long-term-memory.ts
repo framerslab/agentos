@@ -12,6 +12,7 @@ import {
 import { MessageRole } from '../../../core/conversation/ConversationMessage';
 import { GMIInteractionType, type GMITurnInput } from '../../../cognition/substrate/IGMI';
 import { turnContentText } from '../../../cognition/substrate/turnContent';
+import type { TurnScopes } from '../../../cognition/learning/types';
 
 type LongTermMemoryRetrievalState = {
   lastReviewedUserTurn: number;
@@ -36,6 +37,8 @@ export interface LongTermMemoryPhaseInput {
     topKByScope: Record<'user' | 'persona' | 'organization', number>;
   };
   didCompact: boolean;
+  /** With a learning layer: the turn's scope ids, from the GMI's learner session; the retriever reads under them. */
+  turnScopes?: TurnScopes;
 }
 
 export interface LongTermMemoryPhaseResult {
@@ -123,6 +126,7 @@ export async function executeLongTermMemoryPhase(
         retrievalPolicy: longTermMemoryPolicy?.retrieval ?? undefined,
         maxContextChars: input.recallConfig.maxContextChars,
         topKByScope: input.recallConfig.topKByScope,
+        ...(input.turnScopes ? { turnScopes: input.turnScopes } : {}),
       });
 
       if (retrievalResult?.contextText?.trim()) {

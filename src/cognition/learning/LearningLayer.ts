@@ -85,6 +85,11 @@ const LOAD_REASONS: readonly string[] = ['created', 'persona_changed', 'floor_ra
 /** The stores `forgetUser` does not reach, with why. */
 const UNREACHED_STORES: ReadonlyArray<{ store: string; reason: string }> = [
   { store: 'the memory archive', reason: 'an archived original carries no scope id to find it by' },
+  {
+    store: "a conversation's own history",
+    reason:
+      "the full runtime's conversation store and a gmi() session's history keep a conversation's messages until the host deletes them, and a later compaction summarizes them again",
+  },
   { store: "memory's observer and reflector buffers and prospective reminders", reason: 'they carry no user id' },
   { store: "a session's forged tools", reason: 'they carry no user id' },
   { store: "an organization scope a host's policy shares", reason: "it is the organization's, which the host's shareWithOrganization policy files into" },
@@ -670,15 +675,21 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
    * the before-state restored), then `kept`, then the original's `reverted` verdict. The revert's row records every
    * trace it touches as it stands before the undo, so a revert of the revert, or a crash's recovery of it, puts each
    * back. A user forgotten while it ran, in this process or another, gets nothing back, and a verdict that does not land
-   * fails the call.
+   * fails the call. A write of several traces is taken back as its kept verdict records it: what it inserted goes, and
+   * only the traces it changed or forgot come back.
    */
   private async revertMemoryWrite(ready: { store: LearningStore; ledger: Ledger }, original: LedgerEntry, by: string): Promise<LedgerEntry> {
     const call = 'revert';
-    const change = parseMemoryWrite(original.after);
+    // What the write did: its kept verdict's record where it has one (a write of several traces), else its plan.
+    const kept = await ready.ledger.latestVerdictEntry(original.id);
+    const change = parseMemoryWrite(kept?.after) ?? parseMemoryWrite(original.after);
     if (!change) throw new Error(`${call}: candidate ${original.id} records no memory write the layer can read.`);
     const facade = this.facades.get(change.brainId);
     if (!facade) throw new Error(`${call}: the layer holds no memory tools facade of brain ${change.brainId}.`);
-    const before = parseMemoryBefore(original.before);
+    // Only the traces the write changed or deleted come back: one it meant to forget and did not is left as it is.
+    const touched = new Set([...change.deleted, ...change.changed.map((trace) => trace.id)]);
+    const recorded = parseMemoryBefore(original.before);
+    const before = recorded ? { traces: recorded.traces.filter((trace) => touched.has(trace.id)) } : null;
     const namespace = original.learner.namespace;
     const owner = original.learner.userId ?? original.turnUserId ?? null;
     const chainKey = owner ? userChainKey(namespace, owner) : sessionChainKey(original.sessionId ?? '');

@@ -225,6 +225,13 @@ export interface SessionSelfChange<T = unknown> {
    * the traces it created are deleted and the ones it changed or deleted come back to their before-state.
    */
   undo(result: T, reason: 'forgotten' | 'unrecorded'): Promise<void>;
+  /**
+   * What the write did once it committed, where that can differ from what it named before it ran: a write of several
+   * traces that resolved some of them to traces their scope already held, or forgot fewer than it meant to. Its kept
+   * verdict records this, and a revert takes back this, not the plan; without it the candidate's `after` stands for
+   * both.
+   */
+  keptAfter?(result: T): Omit<MemoryWriteChange, 'brainId'>;
 }
 
 /**

@@ -34,13 +34,16 @@ export {
   type ScopeIdPair,
 } from './scopes.js';
 export {
+  explicitTurnUserOf,
   isTurnScopes,
   memoryWriteRefusal,
   readToolLearningContext,
   refusedSelfChange,
   selfChangeRefusal,
   toolLearningContextFor,
+  turnLearningBeforePreparation,
   type SelfChangeRefusal,
+  type TurnLearningBeforePreparation,
 } from './toolContext.js';
 export {
   DEFAULT_ANONYMOUS_USER_IDS,

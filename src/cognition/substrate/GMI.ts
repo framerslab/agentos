@@ -48,8 +48,7 @@ import {
 import { hardLimitsBlock, HARD_LIMITS_PRIORITY } from './personas/hardLimits';
 import { applyTraitOverlay, droppedTraitPatchWarning, PERSONALITY_PROMPT_PRIORITY, renderPersonalitySection } from './personas/personalityPrompt';
 import type { GuardedMemoryWrite, ILearnerSession, ToolLearningContext, TurnScopes } from '../learning/types.js';
-import { DEFAULT_ANONYMOUS_USER_IDS } from '../learning/types.js';
-import { isTurnScopes, toolLearningContextFor } from '../learning/toolContext.js';
+import { explicitTurnUserOf, isTurnScopes, toolLearningContextFor } from '../learning/toolContext.js';
 import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
@@ -198,11 +197,6 @@ function memoryScopeOf(turnInput: GMITurnInput): TurnMemoryScope | undefined {
   const sessionId = visible(named.sessionId);
   if (!userId && !sessionId) return undefined;
   return { ...(userId ? { userId } : {}), ...(sessionId ? { sessionId } : {}) };
-}
-
-/** A turn's explicit user id when it is not one of the default anonymous ids. */
-function explicitUserOf(userId: string | null): string | undefined {
-  return userId !== null && userId.trim() !== '' && !DEFAULT_ANONYMOUS_USER_IDS.includes(userId) ? userId : undefined;
 }
 
 /** The tool-call gate a turn names in `metadata.toolCallGate`; undefined when it names none. */
@@ -803,7 +797,7 @@ export class GMI implements IGMI {
       );
       // The turn keeps the scope ids the session names without its store; its tools are told it has no learner.
       const scopes = this.scopesOfSession(session, { userId, namespace, workflowSeat });
-      const turnUserId = scopes?.learner === 'none' && !continuation ? explicitUserOf(userId) : undefined;
+      const turnUserId = scopes?.learner === 'none' && !continuation ? explicitTurnUserOf(userId) : undefined;
       return this.turnLearningOf(session, {
         systemPrompts: own,
         learner: 'none',

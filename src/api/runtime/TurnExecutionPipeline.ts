@@ -62,6 +62,34 @@ import type {
   AgentOSTenantRoutingConfig,
 } from '../types/OrchestratorConfig';
 import { turnContentText } from '../../cognition/substrate/turnContent';
+import {
+  explicitTurnUserOf,
+  turnLearningBeforePreparation,
+  type TurnLearningBeforePreparation,
+} from '../../cognition/learning/toolContext.js';
+
+/** The conversation metadata key that keeps the explicit users a conversation's compactions summarized. */
+const ROLLING_SUMMARY_CONTRIBUTORS_KEY = 'rollingSummaryContributors';
+
+/**
+ * The explicit user ids whose messages a conversation's compactions have summarized: those of its user messages up to
+ * the latest compaction's last message, added to the ones its metadata kept from earlier compactions, whose messages
+ * can have left the context. Writes the union back to the metadata.
+ */
+function rollingSummaryContributors(context: ConversationContext, uptoTimestamp: number | null | undefined): string[] {
+  const kept = context.getMetadata(ROLLING_SUMMARY_CONTRIBUTORS_KEY);
+  const ids = new Set<string>(Array.isArray(kept) ? kept.filter((id): id is string => typeof id === 'string') : []);
+  if (typeof uptoTimestamp === 'number') {
+    for (const message of context.getAllMessages()) {
+      if (message.role !== MessageRole.USER || message.timestamp > uptoTimestamp) continue;
+      const id = explicitTurnUserOf(message.name);
+      if (id) ids.add(id);
+    }
+  }
+  const contributors = [...ids].sort();
+  context.setMetadata(ROLLING_SUMMARY_CONTRIBUTORS_KEY, contributors);
+  return contributors;
+}
 
 /**
  * Minimal stream context shape, matching the ActiveStreamContext used by
@@ -173,9 +201,10 @@ export interface TurnPipelineConfig {
  * 8. The end of a pause the conversation holds, then inbound message persistence
  * 9. Rolling summary compaction
  * 10. Prompt profile routing
- * 11. Long-term memory retrieval
- * 12. Conversation history assembly, metadata persistence, memory sink,
- *     and metadata chunk emission
+ * 11. Long-term memory retrieval (with a learning layer, under the turn's scope ids from the GMI's learner session,
+ *     asked before the GMI prepares the turn)
+ * 12. Conversation history assembly, metadata persistence, memory sink (with a learning layer, one recorded write
+ *     under the same scope ids), and metadata chunk emission
  *
  * The orchestrator calls `prepareTurn()` and then uses the returned context
  * to drive the GMI streaming loop.
@@ -536,6 +565,12 @@ export class TurnExecutionPipeline {
         }
       : null;
 
+    // The turn's scope ids and recorder for the standalone retriever and the rolling-summary sink, from the GMI's
+    // learner session, asked once and before the GMI prepares the turn, by the session's own rule, so a turn of another
+    // user or organization reads the same here and in the GMI. Undefined on a GMI with no learner session, or one that
+    // names no scope ids: the retriever and the sink then read and file under the plain ids, as with no learning layer.
+    const turnLearning = this.turnLearningOf(gmi, input, gmiInput, organizationIdForMemory, streamContext.conversationId);
+
     // -------------------------------------------------------------------
     // Phase 11: Long-term memory retrieval
     // -------------------------------------------------------------------
@@ -552,6 +587,7 @@ export class TurnExecutionPipeline {
       modeForRouting,
       recallConfig: this.config.longTermMemoryRecall,
       didCompact: Boolean(rollingSummaryResult?.didCompact),
+      turnScopes: turnLearning?.scopes,
     });
     const longTermMemoryContextText = longTermMemoryPhase.contextText;
     const longTermMemoryRetrievalDiagnostics = longTermMemoryPhase.diagnostics;
@@ -580,6 +616,17 @@ export class TurnExecutionPipeline {
     // -------------------------------------------------------------------
     // Phase 12: Metadata persistence, memory sink, metadata chunk emission
     // -------------------------------------------------------------------
+
+    // With a learning layer, a compaction's contributors: the explicit users whose messages it summarized, with those
+    // of the conversation's earlier compactions, kept in its metadata so the save below persists them.
+    const compactionContributors =
+      turnLearning &&
+      this.dependencies.rollingSummaryMemorySink &&
+      rollingSummaryEnabled &&
+      rollingSummaryResult?.didCompact &&
+      conversationContext
+        ? rollingSummaryContributors(conversationContext, rollingSummaryResult.summaryUptoTimestamp)
+        : undefined;
 
     // Persist compaction/router metadata updates prior to the main LLM call.
     if (this.config.enableConversationalPersistence && conversationContext) {
@@ -620,6 +667,13 @@ export class TurnExecutionPipeline {
         summaryJson: rollingSummaryResult.summaryJson ?? null,
         summaryUptoTimestamp: rollingSummaryResult.summaryUptoTimestamp ?? null,
         summaryUpdatedAt: rollingSummaryResult.summaryUpdatedAt ?? null,
+        ...(turnLearning
+          ? {
+              turnScopes: turnLearning.scopes,
+              ...(turnLearning.recordSelfChange ? { recordSelfChange: turnLearning.recordSelfChange } : {}),
+              contributorIds: compactionContributors ?? [],
+            }
+          : {}),
       };
       void this.dependencies.rollingSummaryMemorySink
         .upsertRollingSummaryMemory(update)
@@ -715,5 +769,36 @@ export class TurnExecutionPipeline {
           ? ((longTermMemoryRetrievalDiagnostics as any).queryText as string)
           : turnContentText(gmiInput.content),
     };
+  }
+
+  /**
+   * The turn's learning for the standalone retriever and the rolling-summary sink: undefined on a GMI with no learner
+   * session, or one whose session names no scope ids. A session that throws is traced, and the turn reads and files as
+   * with no learning layer, as the GMI's own filing does then.
+   */
+  private turnLearningOf(
+    gmi: IGMI,
+    input: AgentOSInput,
+    gmiInput: GMITurnInput,
+    organizationId: string | undefined,
+    conversationId: string,
+  ): TurnLearningBeforePreparation | undefined {
+    const session = gmi.getLearnerSession?.();
+    if (!session) return undefined;
+    try {
+      return turnLearningBeforePreparation(session, {
+        userId: typeof input.userId === 'string' && input.userId !== '' ? input.userId : null,
+        // The GMI reads the turn's organization trimmed (`metadata.organizationId`), and so does its session's open.
+        namespace: (organizationId ?? '').trim(),
+        workflowSeat: Boolean((gmiInput.metadata as { workflowId?: unknown } | undefined)?.workflowId),
+        conversationId,
+      });
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[agentos] learning: the learner session did not name this turn's scope ids (${why}); the standalone retriever and sink read and file as with no learning layer.`,
+      );
+      return undefined;
+    }
   }
 }

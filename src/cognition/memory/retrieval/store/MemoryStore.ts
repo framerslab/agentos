@@ -51,6 +51,7 @@ import {
   deleteTraceRows,
   parseTraceMetadata,
   readPersistedDecayFields,
+  traceNamesUser,
   withPersistedDecayState,
   type PersistedDecayState,
 } from './tracePersistence.js';
@@ -3186,8 +3187,10 @@ export class MemoryStore {
    * this store holds under another scope is removed from the collection and its trace kept. Last, every
    * knowledge-graph copy filed under the scope whose trace was already gone.
    *
-   * @param options.turnUserId - Deletes only the scope's traces that this user filed as a second user on another
-   *   user's session ({@link MemoryTrace.turnUserId}); the scope's other traces and copies stay.
+   * @param options.turnUserId - Deletes only the scope's traces that name this user: a trace a second user filed on
+   *   another user's session ({@link MemoryTrace.turnUserId}), or a summary of their words, whose Brain row names them
+   *   among its contributors (`traceNamesUser`); the scope's other traces and copies stay. A trace this store holds
+   *   with no Brain row is read by its `turnUserId`, since a cached trace carries no contributors.
    * @param options.beforeDelete - Runs with the ids of each batch's traces before the batch is deleted (`deleteTraces`
    *   runs it). The memory manager removes what it keeps of each trace there, so a call that fails part way finds the
    *   same traces again.
@@ -3240,7 +3243,7 @@ export class MemoryStore {
   /**
    * The ids of every trace of one scope this store holds, and of every Brain row filed under the scope
    * (`memory_traces.scope_id`), soft-deleted rows and another process's included; with `turnUserId`, only those
-   * that user filed as a second user. The rows of the brain that hold `scope_id` `''` while their metadata names a
+   * that name that user (`traceNamesUser` on a Brain row, `turnUserId` on a trace this store holds). The rows of the brain that hold `scope_id` `''` while their metadata names a
    * scope id are filed first (`fillScopeIds`): a release older than the column writes them to a brain this process
    * holds open, and the read by `scope_id` would miss them.
    *
@@ -3284,7 +3287,7 @@ export class MemoryStore {
         }
       }
       for (const row of rows) {
-        if (turnUserId === undefined || parseTraceMetadata(row.metadata).turnUserId === turnUserId) ids.add(row.id);
+        if (turnUserId === undefined || traceNamesUser(row.metadata, turnUserId)) ids.add(row.id);
       }
     }
     return [...ids];

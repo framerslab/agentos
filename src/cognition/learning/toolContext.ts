@@ -10,9 +10,11 @@
 import type { ToolExecutionResult } from '../../core/tools/ITool.js';
 import { processIsFrozen } from './config.js';
 import {
+  DEFAULT_ANONYMOUS_USER_IDS,
   LEARNING_MODES,
   type ILearnerSession,
   type LearningMode,
+  type ProposalResult,
   type SelfChangeTurn,
   type SessionSelfChange,
   type ToolLearningContext,
@@ -163,4 +165,59 @@ export function toolLearningContextFor(
     ...(typeof session.isFrozen === 'function' ? { frozen: () => session.isFrozen!(writeTurn) } : {}),
   };
   return { tools, writeTurn };
+}
+
+/**
+ * A turn's explicit user id: a non-blank id outside the default anonymous ids. A learner session drops the ids a host
+ * adds to `learning.anonymousUserIds` when it keys a write to a turn's user (`SelfChangeTurn.turnUserId`).
+ */
+export function explicitTurnUserOf(userId: string | null | undefined): string | undefined {
+  return typeof userId === 'string' && userId.trim() !== '' && !DEFAULT_ANONYMOUS_USER_IDS.includes(userId) ? userId : undefined;
+}
+
+/** A turn's learning for the memory paths that run before its GMI prepares it. */
+export interface TurnLearningBeforePreparation {
+  /** The turn's scope ids, by the session's own rule. */
+  scopes: TurnScopes;
+  /** On a turn with no learner: the turn's explicit user, whom its writes record. */
+  turnUserId?: string;
+  /** The session's recorder, bound to the turn; absent when the session has none. */
+  recordSelfChange?: <T>(input: SessionSelfChange<T>) => Promise<ProposalResult<T>>;
+}
+
+/**
+ * The learning of a turn for what reads and files its memory before the GMI prepares it: the full runtime's standalone
+ * retriever and rolling-summary sink, which run in the turn pipeline before the GMI's turn. The session's `scopesFor`
+ * gives the turn's scope ids by the session's rule, counting no turn and ending the session's learner on a turn of
+ * another user or namespace as `prepareTurn` does; a turn with no learner records its explicit user; and the
+ * session's recorder is bound to the turn, with the conversation its thread is filed under. A session that has not
+ * opened yet answers its session's form with no learner, as the GMI's degraded turn does.
+ *
+ * @param session - The GMI's learner session.
+ * @param turn - The turn's user (`null` for none), its namespace (the turn's organization, `''` for none), whether it
+ *   is a workflow turn, and its conversation id.
+ * @returns `undefined` when the session names no scope ids (a host's own session with no `scopesFor`): the caller
+ *   then reads and files under the plain ids, as with no learning layer.
+ * @throws What the session's `scopesFor` throws.
+ */
+export function turnLearningBeforePreparation(
+  session: ILearnerSession,
+  turn: { userId: string | null; namespace: string; workflowSeat: boolean; conversationId?: string },
+): TurnLearningBeforePreparation | undefined {
+  if (typeof session.scopesFor !== 'function') return undefined;
+  const scopes = session.scopesFor({ userId: turn.userId, namespace: turn.namespace, workflowSeat: turn.workflowSeat });
+  if (!isTurnScopes(scopes)) return undefined;
+  const turnUserId = scopes.learner === 'none' ? explicitTurnUserOf(turn.userId) : undefined;
+  const { tools } = toolLearningContextFor(session, {
+    learner: scopes.learner,
+    mode: scopes.mode,
+    scopes,
+    ...(turnUserId ? { turnUserId } : {}),
+    ...(turn.conversationId ? { conversationId: turn.conversationId } : {}),
+  });
+  return {
+    scopes,
+    ...(turnUserId ? { turnUserId } : {}),
+    ...(tools.recordSelfChange ? { recordSelfChange: tools.recordSelfChange } : {}),
+  };
 }
