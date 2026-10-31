@@ -69,6 +69,12 @@ jobs:
       - name: The bump's lockfile integrity check
         run: node --test .github/scripts/check-lockfile-integrity.test.mjs
 
+      # release.yml runs semantic-release a second time when npm publish failed on a transparency-log 409 after the tag
+      # was pushed; this script decides whether that tag goes. Its tests run it on run 41126134054's output in a git
+      # repository of their own, with stand-ins for gh and npm.
+      - name: The release's tag cleanup after a transparency-log conflict
+        run: node --test .github/scripts/drop-unpublished-release-tag.test.mjs
+
       - name: Install PNPM
         uses: pnpm/action-setup@v6
         with:
