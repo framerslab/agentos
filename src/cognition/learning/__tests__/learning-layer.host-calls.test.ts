@@ -7,8 +7,9 @@
  * load that raises honesty-humility's floor again after an operator lowered it says so (floor_raised); revert takes an
  * operator's change back, keeps a later change to another trait, takes an import that created the trait row back to the
  * persona, and refuses a load's row and a change that is not kept; export and import carry a learner into a fresh
- * store, never honesty-humility, and refuse what this release cannot admit; and a store that does not open fails every
- * host call naming it, forgetUser included, so an account deletion is never reported done without its tombstone.
+ * store, never honesty-humility, and refuse what this release cannot admit; the manifest names each store forgetUser
+ * does not reach; and a store that does not open fails every host call naming it, forgetUser included, so an account
+ * deletion is never reported done without its tombstone.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderPersonalitySection } from '../../substrate/personas/personalityPrompt';
@@ -299,6 +300,22 @@ describe('export and import', () => {
     await expect(layer.importLearnedState(doc)).rejects.toThrow(/name the target/);
     expect((await layer.importLearnedState(doc, { ...KEY, agentKey: 'coach' })).target).toEqual({ ...KEY, agentKey: 'coach' });
     await expect(layer.importLearnedState({ version: 2 } as never)).rejects.toThrow(TypeError);
+  });
+});
+
+describe("the manifest's forgetUnreached", () => {
+  it('names each store forgetUser does not reach, a memory tools facade the layer was not handed among them', async () => {
+    const without = (await createLearningLayer().manifest()).forgetUnreached ?? [];
+    expect(without).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^the memory archive: /),
+        expect.stringMatching(/^a memory tools facade the layer was not handed: .*learning\.memoryTools/),
+      ]),
+    );
+    const facade = { brainId: 'tools-brain', deleteTraces: async () => ({ deleted: 0 }) };
+    const handed = (await createLearningLayer({ memoryTools: facade }).manifest()).forgetUnreached ?? [];
+    expect(handed).toContain('memory tools facade of brain tools-brain: it has no deleteScope');
+    expect(handed.some((line) => line.startsWith('a memory tools facade the layer was not handed'))).toBe(false);
   });
 });
 

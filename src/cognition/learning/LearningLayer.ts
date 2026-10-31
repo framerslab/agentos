@@ -79,7 +79,7 @@ const IN_PROCESS = 'in process: the ledger and the state it records end with the
 const PENDING_AGE_MS = 15 * 60_000;
 
 /** The rows a load or a re-anchor writes, which `revert` refuses: an operator sets the learner instead. */
-const LOAD_REASONS: readonly string[] = ['created', 'persona_changed', 'reanchor'];
+const LOAD_REASONS: readonly string[] = ['created', 'persona_changed', 'floor_raised', 'reanchor'];
 
 /** The stores `forgetUser` does not reach, with why. */
 const UNREACHED_STORES: ReadonlyArray<{ store: string; reason: string }> = [
@@ -106,6 +106,16 @@ function brainOfManager(manager: ICognitiveMemoryManager): { brainId: string; ge
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The candidate whose row carries the newest digest of the trait row: the row a change's verdict carries the digest
+ * on names its candidate, whose `after` holds the state.
+ */
+function recordedTraitState(entries: readonly LedgerEntry[]): LedgerEntry | undefined {
+  const newest = latestTraitStateRow(entries);
+  if (!newest || newest.rowType === 'candidate') return newest;
+  return entries.find((entry) => entry.rowType === 'candidate' && entry.id === newest.candidateId);
 }
 
 /** The JSON a stored row holds, or `undefined` when it does not parse. */
@@ -531,8 +541,17 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     assertFreezeScope(scope, call);
     const ready = await this.requireStorage(call);
     const row = freezeRowOf(scope, mode, by, this.clock());
-    await ready.store.insertFreeze(row);
-    if (!this.freezes.some((r) => r.scopeKey === row.scopeKey && r.mode === mode)) this.freezes = [...this.freezes, row];
+    const write = async (): Promise<void> => {
+      await ready.store.insertFreeze(row);
+      if (!this.freezes.some((r) => r.scopeKey === row.scopeKey && r.mode === mode)) this.freezes = [...this.freezes, row];
+    };
+    if (!('learner' in scope)) return write();
+    // A learner's row names its user: inside the user's write chain, a forgotten user gets none.
+    const { namespace, userId } = scope.learner;
+    return this.chains.run(userChainKey(namespace, userId), async () => {
+      await this.refuseForgotten(ready.store, { namespace, userId }, call);
+      await write();
+    });
   }
 
   private async clearFreeze(scope: FreezeScope, mode: FreezeRow['mode'], call: string): Promise<void> {
@@ -557,9 +576,10 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const record = await readLearnerRecord(ready.store, ready.ledger, key);
         // A record that does not verify is re-anchored from what is still trustworthy: where the chain verifies and the
-        // row does not match it, the row was edited outside the layer, so the state the ledger recorded last; where the
-        // chain itself does not verify, the row as stored. A learner with neither has no row to set.
-        const recorded = stateOfRecord(latestTraitStateRow(record.entries)?.after);
+        // row does not match it, the row was edited outside the layer, so the state the ledger recorded last (the
+        // `after` of the candidate whose verdict carries the newest digest); where the chain itself does not verify, the
+        // row as stored. A learner with neither has no row to set.
+        const recorded = stateOfRecord(recordedTraitState(record.entries)?.after);
         const base = !record.verified && record.chainOk && recorded ? recorded : (record.state ?? recorded);
         if (!base) {
           throw new Error(`${call}: learner '${key.userId}' of agent '${key.agentKey}' has no trait row; it is written at the learner's first session.`);
@@ -870,8 +890,10 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       const plain = await this.countPlainForm(userId, rows);
       plainFormLeft = plain.left;
       if (plain.left > 0) {
+        // A line about a forgotten user names the tombstone, never the user: the caller holds the id it deleted.
+        const hash = (await tombstoneHash(namespace, userId)).slice(0, 16);
         console.warn(
-          `[agentos] learning: forgetUser left ${plain.left} trace(s) filed before the namespace, under ${plain.scopes.join(', ')}; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
+          `[agentos] learning: forgetUser (tombstone ${hash}) left ${plain.left} trace(s) filed before the namespace, under the user's plain id in its ${plain.scopes.join(' and ')}; re-file them in the namespaced form with MemoryStore.refileScope, then call forgetUser again.`,
         );
       }
     }
@@ -941,43 +963,55 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     for (const manager of this.liveManagers()) {
       const brain = brainOfManager(manager);
       if (!brain) continue;
-      for (const { scope, scopeId } of scopes) await tally(countOn(brain, brain.brainId, scope, scopeId), `${scope}:${scopeId}`);
+      for (const { scope, scopeId, label } of scopes) await tally(countOn(brain, brain.brainId, scope, scopeId), label);
     }
     for (const facade of this.facadeList) {
       if (typeof facade.countScope !== 'function') continue;
-      for (const { scope, scopeId } of scopes) await tally(facade.countScope(scope, scopeId), `${scope}:${scopeId}`);
+      for (const { scope, scopeId, label } of scopes) await tally(facade.countScope(scope, scopeId), label);
     }
     return { left, scopes: [...holding] };
   }
 
-  /** When this layer last began deciding each agent chain's pending memory writes, by chain key, on its clock. */
+  /** When this layer last began deciding the pending memory writes of each agent's chains with no learner, on its clock. */
   private readonly agentChainReads = new Map<string, number>();
 
   /**
    * Decides a crash's pending memory writes: a row older than 15 minutes on the layer's clock that no write of this
-   * process holds is `kept` where its traces hold the change, and otherwise taken back and `rejected`
-   * (`write_failed`); a row whose brain the layer holds no facade of stays pending. The learner's own chain is decided
-   * before the open goes on. The agent's chain in that namespace holds every recorded write with no user and grows
-   * with the agent's anonymous sessions, so it is decided off the open's path, at most once per 15 minutes per chain:
-   * an open's cost stays bounded by its learner's own history. Never throws.
+   * process holds is `kept` where its traces hold the change, and otherwise `rejected` (`write_failed`) and taken
+   * back; a row whose brain the layer holds no facade of stays pending. The learner's own chain is decided before the
+   * open goes on. The agent's chains with no learner in that namespace (its own, which holds every recorded write with
+   * no user, and each second user's) grow with the agent's anonymous sessions and its visitors, so their pending rows
+   * are read alone and decided off the open's path, at most once per 15 minutes per agent and namespace: an open's cost
+   * stays bounded by its learner's own history. Never throws.
    */
   async recoverPending(key: LearnerKey): Promise<void> {
     const ready = await this.storage();
     if (!ready) return;
-    const agentChain = chainKeyOf({ namespace: key.namespace, agentKey: key.agentKey, userId: null });
-    const lastRead = this.agentChainReads.get(agentChain);
+    const agentChains = chainKeyOf({ namespace: key.namespace, agentKey: key.agentKey, userId: null });
+    const lastRead = this.agentChainReads.get(agentChains);
     if (lastRead === undefined || this.clock() - lastRead >= PENDING_AGE_MS) {
-      this.agentChainReads.set(agentChain, this.clock());
-      void this.decidePendingOf(ready.ledger, agentChain).catch((error) => {
+      this.agentChainReads.set(agentChains, this.clock());
+      void this.decideAgentPending(ready.ledger, key).catch((error) => {
         console.warn(`[agentos] learning: the agent's pending memory writes were not decided (${messageOf(error)}); a later session tries again.`);
       });
     }
     await this.decidePendingOf(ready.ledger, chainKeyOf(key));
   }
 
+  /** Decides the pending memory writes of the agent's chains with no learner in the learner's namespace. Never throws. */
+  private async decideAgentPending(ledger: Ledger, key: LearnerKey): Promise<void> {
+    let pending: LedgerEntry[];
+    try {
+      pending = await ledger.agentPending(key.namespace, key.agentKey, new Date(this.clock() - PENDING_AGE_MS).toISOString());
+    } catch (error) {
+      console.warn(`[agentos] learning: the agent's pending memory writes were not read (${messageOf(error)}); a later session reads them again.`);
+      return;
+    }
+    await this.decideEach(ledger, pending);
+  }
+
   /** Decides the pending memory writes of one chain. Never throws. */
   private async decidePendingOf(ledger: Ledger, chainKey: string): Promise<void> {
-    const cutoff = this.clock() - PENDING_AGE_MS;
     let pending: LedgerEntry[];
     try {
       pending = await ledger.pendingCandidates(chainKey);
@@ -985,6 +1019,12 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       console.warn(`[agentos] learning: the pending memory writes were not read (${messageOf(error)}); a later session reads them again.`);
       return;
     }
+    await this.decideEach(ledger, pending);
+  }
+
+  /** Decides each pending memory write old enough, in its owner's write chain. Never throws. */
+  private async decideEach(ledger: Ledger, pending: readonly LedgerEntry[]): Promise<void> {
+    const cutoff = this.clock() - PENDING_AGE_MS;
     for (const entry of pending) {
       if (entry.kind !== 'memory_write' || this.inFlight.has(entry.id) || Date.parse(entry.createdAt) > cutoff) continue;
       const change = parseMemoryWrite(entry.after);
@@ -1007,8 +1047,17 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       await ledger.decide(entry.id, 'kept', 'recovered');
       return;
     }
-    await undoMemoryWrite(facade, change, parseMemoryBefore(entry.before));
-    await ledger.decide(entry.id, 'rejected', 'write_failed');
+    // The verdict before the undo: a writer in another process that decides its write first keeps it, and the write
+    // stays; one that decides after finds this verdict and takes its write back itself.
+    const decided = await ledger.decide(entry.id, 'rejected', 'write_failed');
+    if (decided.status !== 'rejected') return;
+    try {
+      await undoMemoryWrite(facade, change, parseMemoryBefore(entry.before));
+    } catch (error) {
+      console.warn(
+        `[agentos] learning: a crash's pending memory write is rejected, and what it wrote in brain ${change.brainId} was not taken back (${messageOf(error)}).`,
+      );
+    }
   }
 }
 

@@ -167,17 +167,23 @@ export function admitImport(doc: LearnedStateDocument, target: TraitState | unde
   return { ...(next ? { next } : {}), taken, refused };
 }
 
+/** The four learnable traits' values a ledger row's record holds under `field`. */
+function learnableIn(value: unknown, field: 'current' | 'baseline'): Partial<Record<string, number>> {
+  const v = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  const raw = v[field] && typeof v[field] === 'object' ? (v[field] as Record<string, unknown>) : {};
+  const values: Partial<Record<string, number>> = {};
+  for (const key of LEARNABLE_TRAITS) {
+    const n = raw[key];
+    if (typeof n === 'number' && Number.isFinite(n)) values[key] = n;
+  }
+  return values;
+}
+
 /** The four learnable traits' kept values and the operator's map a ledger row records. */
 function recordOf(value: unknown): { current: Partial<Record<string, number>>; operator: OperatorTraits; honestyAtLastLoad?: number } {
   const v = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
-  const raw = v.current && typeof v.current === 'object' ? (v.current as Record<string, unknown>) : {};
-  const current: Partial<Record<string, number>> = {};
-  for (const key of LEARNABLE_TRAITS) {
-    const n = raw[key];
-    if (typeof n === 'number' && Number.isFinite(n)) current[key] = n;
-  }
   return {
-    current,
+    current: learnableIn(value, 'current'),
     operator: operatorTraitsOf(value),
     ...(typeof v.honestyAtLastLoad === 'number' ? { honestyAtLastLoad: v.honestyAtLastLoad } : {}),
   };
@@ -186,10 +192,13 @@ function recordOf(value: unknown): { current: Partial<Record<string, number>>; o
 /**
  * The state a revert of an operator's change writes: each learnable trait the change moved goes back by the step
  * it made, applied to the value it holds now and clamped into its band, and each operator trait it changed goes back
- * to what it was, with the floor under honesty-humility; changes to other traits since then stay.
+ * to what it was, with the floor under honesty-humility; changes to other traits since then stay. A change that
+ * created the trait row (an import into a learner with none) records no state before it: its steps are read from the
+ * row's own baseline, the values the learner's first session would have written.
  */
 export function invertOperatorSet(original: LedgerEntry, current: TraitState, operator: OperatorTraits): { state: TraitState; operator: OperatorTraits } {
-  const before = recordOf(original.before);
+  const created = original.before === null || original.before === undefined;
+  const before: ReturnType<typeof recordOf> = created ? { current: learnableIn(original.after, 'baseline'), operator: {} } : recordOf(original.before);
   const after = recordOf(original.after);
   const kept = { ...current.current };
   for (const key of LEARNABLE_TRAITS) {
@@ -309,12 +318,19 @@ export function forgetTargets(namespace: string, userId: string, rows: readonly 
   return [...targets.values()];
 }
 
-/** The plain-form scopes of a user id, as filed before a namespace existed: a namespaced `forgetUser` leaves them. */
-export function plainScopesOf(userId: string, rows: readonly SessionRow[]): Array<{ scope: 'user' | 'persona'; scopeId: string }> {
+/**
+ * The plain-form scopes of a user id, as filed before a namespace existed: a namespaced `forgetUser` leaves them. Each
+ * comes with a label that names its scope and persona, never the user id.
+ */
+export function plainScopesOf(userId: string, rows: readonly SessionRow[]): Array<{ scope: 'user' | 'persona'; scopeId: string; label: string }> {
   const plain = scopeIdOf(userId);
   const personas = [...new Set(rows.filter((row) => row.kind === 'learner').map((row) => row.personaId))];
   return [
-    { scope: 'user', scopeId: plain },
-    ...personas.map((personaId) => ({ scope: 'persona' as const, scopeId: `${plain}::${scopeIdOf(personaId)}` })),
+    { scope: 'user', scopeId: plain, label: 'user scope' },
+    ...personas.map((personaId) => ({
+      scope: 'persona' as const,
+      scopeId: `${plain}::${scopeIdOf(personaId)}`,
+      label: `persona scope of '${personaId}'`,
+    })),
   ];
 }

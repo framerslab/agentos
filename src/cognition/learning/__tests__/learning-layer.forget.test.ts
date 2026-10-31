@@ -378,18 +378,15 @@ describe('a memory write, taken back', () => {
     expect(await liveContents(brain)).toEqual(['Written late.']);
   });
 
-  it("reads the agent's chain off the open's path, at most once per fifteen minutes", async () => {
+  it("reads the agent's chains off the open's path, at most once per fifteen minutes", async () => {
     quiet();
     let now = Date.UTC(2026, 9, 12, 12);
     const { memory: tools } = await facadeAt(tempFile(), 'tools-brain');
     const layer = createLearningLayer({ store: new InMemoryLearningStore(), memoryTools: tools, clock: () => now });
-    const agentChain = chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null });
-    const read = Ledger.prototype.pendingCandidates;
     let agentReads = 0;
-    vi.spyOn(Ledger.prototype, 'pendingCandidates').mockImplementation(function (this: Ledger, chainKey: string) {
-      if (chainKey !== agentChain) return read.call(this, chainKey);
+    vi.spyOn(Ledger.prototype, 'agentPending').mockImplementation(() => {
       agentReads += 1;
-      // The agent's chain of a long-lived deployment: a read that has not finished when the learner's session opens.
+      // The agent's chains of a long-lived deployment: a read that has not finished when the learner's session opens.
       return new Promise<never>(() => undefined);
     });
 

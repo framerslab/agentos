@@ -234,6 +234,8 @@ export class LearnerSession implements ILearnerSession {
     let traits = this.authoredTraits;
     if (bound && mode !== 'off') {
       if (this.traitsStale()) await this.loadTraits();
+      // A forgetUser another process ran: from this turn on, the learner's loaded state renders no more.
+      if (this.traits?.status === 'ok' && (await this.learnerForgotten())) this.traits = { status: 'forgotten' };
       if (this.traits?.status === 'ok') ({ section, traits } = this.learnerRender(this.traits));
     }
     this.lastTraits = traits;
@@ -400,6 +402,22 @@ export class LearnerSession implements ILearnerSession {
     const bands: Partial<Record<HexacoTraitKey, TraitBand>> = { ...loaded.state.bands };
     for (const key of Object.keys(this.overlay) as HexacoTraitKey[]) delete bands[key];
     return { section: renderPersonalitySection(traits, { bands }), traits };
+  }
+
+  /**
+   * Whether the learner's tombstone stands, read at each of the learner's turns while its trait row is loaded, as the
+   * freezes are: a `forgetUser` of this process also tells the session at once, and one of another process reaches it
+   * here. A store that cannot be read answers no, and the next turn reads it again.
+   */
+  private async learnerForgotten(): Promise<boolean> {
+    const key = this.key!;
+    const storage = await this.host.storage();
+    if (!storage) return false;
+    try {
+      return await storage.store.isForgotten(await tombstoneHash(key.namespace, key.userId));
+    } catch {
+      return false;
+    }
   }
 
   private traitsStale(): boolean {

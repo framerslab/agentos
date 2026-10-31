@@ -5,12 +5,14 @@
  * verifies when the chain does and the row matches the digest of the newest ledger row that changed it; a chain that
  * does not verify, a row that does not match, a row with no ledger row and a ledger row with no trait row do not, and
  * the caller renders the persona's authored traits. A learner's first load writes the row from the registry persona's
- * authored traits with its `operator_set` row (reason `created`), and a load that finds the persona moved writes the
- * new baseline with one (reason `persona_changed`); every change of the row is written with its rows in one store
- * transaction, at the version it read. Honesty-humility and emotionality are read from the newest kept `operator_set`
- * row that carries the operator's map, never from the row.
+ * authored traits with its `operator_set` row (reason `created`); a load that finds the persona moved writes the new
+ * baseline with one (reason `persona_changed`), and one that finds the persona's honesty-humility above the row's
+ * floor, the persona unchanged (an operator lowered it, or an import started the row with none), raises the floor with
+ * one (reason `floor_raised`). Every change of the row is written with its rows in one store transaction, at the
+ * version it read. Honesty-humility and emotionality are read from the newest kept `operator_set` row that carries the
+ * operator's map, never from the row.
  */
-import type { HexacoTraitValues } from '../substrate/personas/hexaco.js';
+import { HEXACO_TRAIT_KEYS, type HexacoTraitValues } from '../substrate/personas/hexaco.js';
 import { chainKeyOf, type Ledger, type ProposeOptions } from './ledger/Ledger.js';
 import type { LearningStore, StoredTraitRow } from './store/LearningStore.js';
 import {
@@ -242,13 +244,15 @@ export async function loadLearnerTraits(args: TraitLoadArgs): Promise<TraitLoad>
     }
     const next = withPersona(record.state, args.authored, operator);
     if (!next) return { status: 'ok', state: record.state, operator, row: record.row };
+    const stored = record.state;
+    const personaMoved = HEXACO_TRAIT_KEYS.some((trait) => next.baseline[trait] !== stored.baseline[trait]);
     const moved = await writeTraitRow({
       ...common,
       current: { row: record.row, state: record.state },
       before: { state: record.state, operator },
       next,
       operator,
-      reason: 'persona_changed',
+      reason: personaMoved ? 'persona_changed' : 'floor_raised',
     });
     if (moved === 'moved') continue;
     if (moved === 'forgotten') return { status: 'forgotten' };
