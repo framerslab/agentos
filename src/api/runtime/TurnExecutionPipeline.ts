@@ -163,12 +163,13 @@ export interface TurnPipelineConfig {
  *
  * **Phase sequence:**
  * 1. Validate input (selectedPersonaId required)
- * 2. GMI acquisition via `getOrCreateGMIForSession`
+ * 2. Organization resolution, then GMI acquisition via `getOrCreateGMIForSession` under that organization (the
+ *    resolver runs once per turn, before the GMI is acquired; an organization it refuses is raised at step 5)
  * 3. Stream context registration
  * 4. GMI input construction (delegates to {@link GMIChunkTransformer})
  * 5. Turn planning via ITurnPlanner
  * 6. Adaptive execution policy application
- * 7. Organization context and long-term memory policy resolution
+ * 7. Long-term memory policy resolution, with the organization resolved at step 2
  * 8. The end of a pause the conversation holds, then inbound message persistence
  * 9. Rolling summary compaction
  * 10. Prompt profile routing
