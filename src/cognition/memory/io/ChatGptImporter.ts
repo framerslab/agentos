@@ -280,11 +280,13 @@ export class ChatGptImporter {
    * Insert a single episodic memory trace derived from a message pair.
    *
    * Deduplication works inside the `user` scope and the scope id `''` these
-   * traces file under: a trace there that holds the combined `content` string,
-   * or names its SHA-256 as `import_hash` or `content_hash`, makes the pair a
-   * duplicate, whichever writer stored it. `import` first files the traces an
-   * older release wrote with `scope_id` `''` under the scope id their metadata
-   * names (`fillScopeIds`), so another scope id's trace is not taken for a
+   * traces file under, among the traces of the session's owner (a trace whose
+   * metadata names a `turnUserId`, a second user's, is not the owner's): a
+   * trace there that holds the combined `content` string, or names its SHA-256
+   * as `import_hash` or `content_hash`, makes the pair a duplicate, whichever
+   * writer stored it. `import` first files the traces an older release wrote
+   * with `scope_id` `''` under the scope id their metadata names
+   * (`fillScopeIds`), so another scope id's trace is not taken for a
    * duplicate.
    *
    * @param content        - The `[user]:...\n[assistant]:...` content string.
@@ -308,7 +310,7 @@ export class ChatGptImporter {
           WHERE brain_id = ? AND scope = 'user' AND scope_id = ''
             AND ${duplicateTraceCondition(this.brain)}
           LIMIT 1`,
-        [this.brain.brainId, ...duplicateTraceParams(hash, content)],
+        [this.brain.brainId, ...duplicateTraceParams(hash, content, '')],
       );
 
       if (existing) {

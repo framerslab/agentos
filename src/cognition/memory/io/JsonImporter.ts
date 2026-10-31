@@ -42,7 +42,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { base64ToBytes } from './base64.js';
-import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from './importScope.js';
+import { duplicateTraceCondition, duplicateTraceParams, importedScopeId, importedTurnUserId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
@@ -381,9 +381,9 @@ export class JsonImporter {
    * Import memory trace records into `memory_traces`.
    *
    * Each trace is filed under its scope and scope id (see `importedScopeId`)
-   * and deduplicated inside them (see `duplicateTraceCondition`): if a trace of
-   * the same scope and scope id holds the record's text, or names its hash, the
-   * record is skipped and its id maps to that trace's.
+   * and deduplicated inside them and its user (see `duplicateTraceCondition`):
+   * if a trace of the same scope, scope id and user holds the record's text, or
+   * names its hash, the record is skipped and its id maps to that trace's.
    *
    * @param trx    - Transactional storage adapter.
    * @param traces - Array of serialised trace objects from the export.
@@ -424,7 +424,7 @@ export class JsonImporter {
 
         if (context.dedup) {
           const existing = await trx.get<{ id: string }>(checkSql, [
-            brainId, scope, scopeId, ...duplicateTraceParams(hash, t.content),
+            brainId, scope, scopeId, ...duplicateTraceParams(hash, t.content, importedTurnUserId(meta)),
           ]);
           if (existing) {
             if (sourceId) context.traceIds.set(sourceId, existing.id);

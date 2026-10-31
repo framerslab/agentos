@@ -10,13 +10,17 @@
  * the trace is filed under, in `memory_traces.scope_id` and in its metadata;
  * a file that names none files under `''`. `MarkdownExporter` writes it for a
  * trace filed under a scope id, so an export carries each trace's scope id
- * out and back in.
+ * out and back in. A front-matter `turnUserId` that is a non-empty string
+ * names the second user who filed the trace on another user's session, and is
+ * written into its metadata, as `MarkdownExporter` writes it for such a trace.
  *
- * Deduplication works inside the file's scope and scope id: a file whose body
- * a trace there holds, or whose body's SHA-256 a trace there names as
- * `metadata.import_hash` or `metadata.content_hash`, is skipped, whichever
- * writer stored that trace. So is a file whose front-matter `id` names a trace
- * there whose text, without its leading and trailing whitespace, is the body:
+ * Deduplication works inside the file's scope and scope id, among the traces
+ * of the file's user (its `turnUserId`, or none for the session owner's): a
+ * file whose body such a trace holds, or whose body's SHA-256 such a trace
+ * names as `metadata.import_hash` or `metadata.content_hash`, is skipped,
+ * whichever writer stored that trace. So is a file whose front-matter `id`
+ * names a trace of its scope and scope id, whichever user filed it, whose
+ * text, without its leading and trailing whitespace, is the body:
  * that trace's own note, as `MarkdownExporter` writes it; `ObsidianImporter`
  * adds to that trace the tags and links its note holds that the trace lacks. A
  * trace the brain forgot counts as any other, so deduplication never brings it
@@ -104,6 +108,8 @@ interface TraceFrontmatter {
   scopeId?: string;
   /** `encoded` on a note an encoded Brain's export wrote: its scope id is in the encoded form already. */
   scopeIdForm?: string;
+  /** The second user who filed the trace on another user's session; a value that is not a string is ignored. */
+  turnUserId?: string;
   [key: string]: unknown;
 }
 
@@ -298,6 +304,8 @@ export class MarkdownImporter {
     const scope = typeof fm.scope === 'string' ? fm.scope : 'user';
     // The front matter names the scope id; a file that names none, or names one that is not a string, files under ''.
     const namedScopeId = typeof fm.scopeId === 'string' ? fm.scopeId : '';
+    // A second user's note names that user; every other note is the session owner's.
+    const turnUserId = typeof fm.turnUserId === 'string' ? fm.turnUserId : '';
     const tags: string[] = Array.isArray(fm.tags) ? (fm.tags as string[]) : [];
 
     // The note is written in a transaction of its own, which reads the Brain's scope-id form first.
@@ -316,14 +324,14 @@ export class MarkdownImporter {
         }
         const scopeId = decision.action === 'encode' ? encodePlainScopeId(scope, namedScopeId) : namedScopeId;
 
-        // Dedup check, inside the file's scope and scope id.
+        // Dedup check, inside the file's scope and scope id, among its user's traces.
         if (options?.dedup ?? true) {
           const existing = await trx.get<{ id: string }>(
             `SELECT id FROM memory_traces
               WHERE brain_id = ? AND scope = ? AND scope_id = ?
                 AND ${duplicateTraceCondition(this.brain)}
               LIMIT 1`,
-            [this.brain.brainId, scope, scopeId, ...duplicateTraceParams(hash, body)],
+            [this.brain.brainId, scope, scopeId, ...duplicateTraceParams(hash, body, turnUserId)],
           );
           if (existing) return 'skipped' as const;
           const held = await this._heldTraceOfNote(trx, fm, scope, scopeId, body);
@@ -335,6 +343,7 @@ export class MarkdownImporter {
         const meta: Record<string, unknown> = { import_hash: hash, source_file: filePath };
         // A trace loaded from the Brain reads its scope id in its metadata, so the metadata names it as the column does.
         if (scopeId !== '') meta.scopeId = scopeId;
+        if (turnUserId !== '') meta.turnUserId = turnUserId;
         await trx.run(
           `INSERT INTO memory_traces
                (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,

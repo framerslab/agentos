@@ -43,7 +43,7 @@ import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
-import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from './importScope.js';
+import { duplicateTraceCondition, duplicateTraceParams, importedScopeId, importedTurnUserId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { encodePlainScopeId, importScopeIdFormDecision } from '../retrieval/store/scopeIdForm.js';
 
@@ -183,7 +183,7 @@ export class CsvImporter {
 
           if (options?.dedup ?? true) {
             const existing = await trx.get<{ id: string }>(checkSql, [
-              brainId, scope, scopeId, ...duplicateTraceParams(hash, content),
+              brainId, scope, scopeId, ...duplicateTraceParams(hash, content, importedTurnUserId(metadata)),
             ]);
             if (existing) {
               result.skipped++;

@@ -582,9 +582,11 @@ export interface ImportOptions {
   format?: 'auto' | 'sqlite' | 'json' | 'markdown' | 'obsidian' | 'chatgpt' | 'csv';
 
   /**
-   * Whether a record is skipped as a duplicate when a trace of the same scope and scope id holds its text, or names
-   * that text's SHA-256 as `import_hash` or `content_hash`; a Markdown or Obsidian note is also skipped when it is
-   * the own note of the trace its front-matter `id` names. A trace of another scope id is not a duplicate. A SQLite
+   * Whether a record is skipped as a duplicate when a trace of the same scope, scope id and user holds its text, or
+   * names that text's SHA-256 as `import_hash` or `content_hash`; a Markdown or Obsidian note is also skipped when it
+   * is the own note of the trace its front-matter `id` names. A trace of another scope id is not a duplicate, nor is
+   * one another user filed: a record's user is its metadata's `turnUserId` (a note's front-matter `turnUserId`), or
+   * the session owner's when it names none. A SQLite
    * import merges a skipped record's tags, and the later creation time, into the trace it matches, and an Obsidian
    * note adds the tags and links that trace lacks. With `false`, no trace record is skipped as a duplicate and nothing
    * is merged into a trace the brain holds.

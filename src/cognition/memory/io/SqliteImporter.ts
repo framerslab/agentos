@@ -72,7 +72,7 @@ import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
-import { duplicateTraceCondition, duplicateTraceParams, importedScopeId } from './importScope.js';
+import { duplicateTraceCondition, duplicateTraceParams, importedScopeId, importedTurnUserId } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
@@ -348,7 +348,7 @@ export class SqliteImporter {
 
         if (options?.dedup ?? true) {
           const existing = await trx.get<{ id: string; created_at: number; tags: string }>(
-            checkSql, [brainId, scope, scopeId, ...duplicateTraceParams(hash, row.content)],
+            checkSql, [brainId, scope, scopeId, ...duplicateTraceParams(hash, row.content, importedTurnUserId(meta))],
           );
 
           if (existing) {

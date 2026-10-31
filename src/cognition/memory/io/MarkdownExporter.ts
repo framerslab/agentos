@@ -5,7 +5,8 @@
  * brain, never another brain's in the same database — organised into a
  * `{output}/{scope}/{type}/` folder hierarchy.  Each file contains
  * YAML front-matter (id, type, scope, scopeId when the trace is filed under
- * one, strength, tags, createdAt) followed by the plain-text trace content.
+ * one, turnUserId when a second user filed it on another user's session,
+ * strength, tags, createdAt) followed by the plain-text trace content.
  * A Brain a learning layer serves holds its plain `user` and `persona` scope
  * ids in the encoded form (`scopeIdForm.ts`); each note it exports says so
  * (`scopeIdForm: encoded`), so an import takes the note's scope id as it is
@@ -59,7 +60,7 @@ import {
   ENCODED_SCOPE_ID_FORM,
   readInOneScopeIdForm,
 } from '../retrieval/store/scopeIdForm.js';
-import { importedScopeId } from './importScope.js';
+import { importedScopeId, importedTurnUserId } from './importScope.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -81,6 +82,8 @@ interface TraceRow {
   scope_id: string;
   /** `encoded` for a trace of a Brain that holds the encoded scope-id form, whose note says so. */
   scopeIdForm?: string;
+  /** The second user who filed the trace on another user's session (its metadata's `turnUserId`), when one did. */
+  turnUserId?: string;
 }
 
 /** The trace fields a file's path is built from. */
@@ -160,13 +163,18 @@ export class MarkdownExporter {
           [this.brain.brainId],
         ),
     );
-    // The metadata is read for the scope id alone: a row a release older than the column wrote after this brain
-    // opened holds '' there and names its scope id in the metadata, where reads find it.
-    const traces: TraceRow[] = rows.map(({ metadata, ...trace }) => ({
-      ...trace,
-      scope_id: importedScopeId(parseTraceMetadata(metadata), trace.scope_id),
-      ...(encoded ? { scopeIdForm: ENCODED_SCOPE_ID_FORM } : {}),
-    }));
+    // The metadata is read for the scope id and a second user's id alone: a row a release older than the column wrote
+    // after this brain opened holds '' there and names its scope id in the metadata, where reads find it.
+    const traces: TraceRow[] = rows.map(({ metadata, ...trace }) => {
+      const meta = parseTraceMetadata(metadata);
+      const turnUserId = importedTurnUserId(meta);
+      return {
+        ...trace,
+        scope_id: importedScopeId(meta, trace.scope_id),
+        ...(encoded ? { scopeIdForm: ENCODED_SCOPE_ID_FORM } : {}),
+        ...(turnUserId !== '' ? { turnUserId } : {}),
+      };
+    });
 
     // Every trace is placed before any folder is made or file written.
     const refused: RefusedExportTrace[] = [];
@@ -295,7 +303,10 @@ export class MarkdownExporter {
    * id as `scopeId` when the trace is filed under one. A trace filed under
    * `''` writes no `scopeId`, and its import files it under `''`. A trace of a
    * Brain that holds the encoded scope-id form writes `scopeIdForm: encoded`,
-   * so an import takes its scope id as it is written.
+   * so an import takes its scope id as it is written. A trace a second user
+   * filed on another user's session writes that user's id as `turnUserId`, so
+   * its import files it as that user's trace, which a delete of the user's
+   * traces finds.
    *
    * @param trace - The trace row.
    * @param tags  - The trace's tags, parsed.
@@ -307,6 +318,7 @@ export class MarkdownExporter {
       scope: trace.scope,
       ...(trace.scope_id ? { scopeId: trace.scope_id } : {}),
       ...(trace.scopeIdForm ? { scopeIdForm: trace.scopeIdForm } : {}),
+      ...(trace.turnUserId ? { turnUserId: trace.turnUserId } : {}),
       strength: trace.strength,
       tags,
       createdAt: trace.created_at,
