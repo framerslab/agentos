@@ -433,7 +433,8 @@ export class LearnerSession implements ILearnerSession {
       console.warn(`[agentos] learning: a learner's trait row could not be read (${this.traits.reason}); the persona's authored traits render, and the next turn reads it again.`);
     }
     this.traitsEpoch = epoch;
-    this.host.noteChain(key, this.traits.status === 'broken');
+    // A read that failed says nothing of the record: a learner counted as broken stays counted until a read verifies it.
+    if (this.traits.status !== 'unavailable') this.host.noteChain(key, this.traits.status === 'broken');
     if (this.traits.status === 'broken') {
       console.warn(
         `[agentos] learning: the learning record of learner '${key.userId}' of agent '${key.agentKey}' in namespace '${key.namespace}' does not verify (${this.traits.reason}); the persona's authored traits render until an operator calls operatorSet.`,
