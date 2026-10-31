@@ -85,6 +85,7 @@ import { callTool, makeForgeHost } from '../../cognition/emergent/__tests__/help
 import { createSqliteAdapter } from '../../cognition/emergent/__tests__/helpers/sqlite-adapter';
 import { seedToolRow } from '../../cognition/emergent/__tests__/helpers/seed-rows';
 import { launchRegistry } from '../runtime/agencyLaunch/launchRegistry';
+import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
 
 let callIds = 0;
 /** A model step that calls tools, each `[name, args]`. */
@@ -782,6 +783,28 @@ describe('launch_agency on the full runtime', () => {
     expect(first).toEqual([]);
     expect(toolMessages(provider.seen[2].messages)[0]).toContain('step_replaced');
     expect(toolMessages(provider.seen[3].messages)[0]).toContain('"status":"completed"');
+  });
+
+  it("the coordinator takes the runtime's provider key", async () => {
+    // The key is only in the runtime's config, none in the environment; a key of its own keeps generateText's provider
+    // cache apart.
+    vi.stubEnv('OPENAI_API_KEY', '');
+    booted = await boot({ modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'runtime-key-45' } }] } });
+    provider.keys.length = 0;
+    provider.replies.push(toolStep(['launch_agency', { goal: 'Decide.', strategy: 'hierarchical', seats: [{ role: 'checker', personaId: 'checker' }] }]), textStep('Done.'));
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // The manager's provider started with the runtime's key, and its answer completed the launch.
+    expect(provider.keys).toContain('runtime-key-45');
+    expect(provider.whole.some((prompt) => prompt.includes('You are a manager agent'))).toBe(true);
+    // The lead's two calls: the manager answered without delegating, and the lead read the launch's result.
+    expect(provider.seen).toHaveLength(2);
+    const launched = toolMessages(provider.seen[1].messages)[0];
+    expect(launched).toContain('"status":"completed"');
+    const result = JSON.parse(launched) as LaunchAgencyResult;
+    expect(result.text).toBe('ok');
+    // The manager's calls are the coordinator's: charged to its sub-budget, which the launch's budget counts.
+    expect(result.coordinatorUsage.totalTokens).toBeGreaterThan(0);
+    expect(result.provenance.budget.tokensUsed).toBeGreaterThanOrEqual(result.coordinatorUsage.totalTokens);
   });
 });
 
