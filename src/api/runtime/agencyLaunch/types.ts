@@ -135,8 +135,10 @@ export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'm
    * result; the error itself goes to the runtime's logger (the one `AgentOS.create` takes, else its own), at warn,
    * under `launch_agency seat <role>`, as do the launch's other failures (a failed run under `launch_agency run`). A
    * logger that throws fails no launch. The output guardrails that judge the launching turn's tool calls
-   * (`config.evaluateToolCalls`) judge each call of every seat, a nested team's included, before it runs, and a call
-   * they block is refused as the launching turn's would be.
+   * (`config.evaluateToolCalls`) judge each call of every seat, a nested team's included, before it runs, beside the
+   * sources the launching turn retrieved, and a call they block is refused as the launching turn's would be. The usage
+   * the runtime's spend meter (`spendMeter`) records for the launching turn is that turn's own model calls: a team's
+   * calls are its seats' GMIs' and its coordinator's, which the launch's result reports (`usage`, `coordinatorUsage`).
    */
   launch?: boolean;
   /**
@@ -186,8 +188,9 @@ export interface CallerTurnContext {
   dispatch?: IToolOrchestrator['processToolCall'];
   /**
    * The full runtime: the gate the turn's output guardrails that judge tool calls (`config.evaluateToolCalls`) ask
-   * before each call of the turn's own tool round. A GMI whose turn has one passes it with every call it makes, and a
-   * team a call launches gives it to each of its seats' turns, so a seat's calls are judged as the launching turn's are.
+   * before each call of the turn's own tool round. A GMI whose turn has one passes it with every call it makes, asked
+   * beside the sources the turn retrieved, and a team a call launches gives it to each of its seats' turns, so a seat's
+   * calls are judged as the launching turn's are, beside what that turn read.
    */
   toolCallGate?: GMIToolCallGate;
 }

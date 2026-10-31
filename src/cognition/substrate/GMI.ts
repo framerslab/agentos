@@ -198,6 +198,22 @@ function toolCallGateOf(turnInput: GMITurnInput): GMIToolCallGate | undefined {
 }
 
 /**
+ * `gate`, asked beside `sources` as well as the sources of the call it is asked about: the gate a turn's tool call
+ * carries (`callerTurn.toolCallGate`), so a team the call launches has its seats' calls judged beside what the
+ * launching turn retrieved, though their own turns retrieve nothing. `gate` itself when the turn retrieved nothing.
+ */
+function withTurnSources(
+  gate: GMIToolCallGate,
+  sources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined,
+): GMIToolCallGate {
+  if (!sources || sources.length === 0) return gate;
+  return (call, context) => {
+    const own = context?.ragSources ?? [];
+    return gate(call, { ...context, ragSources: [...own, ...sources.filter((source) => !own.includes(source))] });
+  };
+}
+
+/**
  * The launched team a turn names in `metadata.agencyLaunch`, copied; undefined when it names none, or one without a
  * string launch id, a string role and a numeric depth.
  */
@@ -2093,8 +2109,9 @@ export class GMI implements IGMI {
                 // runs (STEP_ABORTED), and the tool receives it as its context's signal; a composed tool hands it to
                 // each step, so it stops between steps. A call already running is never cut.
                 signal: stop.signal,
-                // The gate the turn asks before each call: a team the call launches has its seats' calls asked it too.
-                ...(toolCallGate ? { callerTurn: { toolCallGate } } : {}),
+                // The gate the turn asks before each call, beside the turn's sources: a team the call launches has its
+                // seats' calls asked it too.
+                ...(toolCallGate ? { callerTurn: { toolCallGate: withTurnSources(toolCallGate, lastRagSources ?? continuedTurnSources) } } : {}),
               };
               this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
               callInFlight = toolCallReq;
