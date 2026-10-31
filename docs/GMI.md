@@ -107,7 +107,7 @@ Every profile keeps the reasoning trace. Sentiment tracking scores each user tur
 | Persona field | From |
 |---|---|
 | `id`, `name`, `description` | A slug of `name` (an id of its own for an agent with no name); `name`, or `Agent`; the first line of `instructions`, or the name |
-| `baseSystemPrompt` | The system prompt `agent()` sends ([`buildSystemPrompt()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts): the soul file's body and style, `instructions`, the name line, the personality description, `skills`), or the joined `systemBlocks`; with `learning` on, without the personality description, which the GMI sends as a system prompt of its own ([Learning](#learning)) |
+| `baseSystemPrompt` | The system prompt `agent()` sends ([`buildSystemPrompt()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts): the soul file's body and style, `instructions`, the name line, the personality description, `skills`), or the joined `systemBlocks`; with `learning` on, without the personality description, which a GMI given a learner session or the persona's traits (`GMIBaseConfig.learning`, `GMIBaseConfig.personaTraits`) sends as a system prompt of its own, as `gmi()` gives its GMIs both; a GMI a host builds from this persona with neither sends no personality section ([Learning](#learning)) |
 | `personalityTraits` | `personality`, as HEXACO traits |
 | `defaultProviderId`, `defaultModelId` | `provider` and `model`, resolved as `generateText()` resolves them |
 | `defaultModelCompletionOptions` | `maxTokens` (or `controls.maxTotalTokens`), `controls.maxDurationMs` as `requestTimeout`, `thinking`, `effort`, `customModelParams`, `cache`; nothing else, so the provider's default temperature applies ([Completion options](#completion-options)) |
@@ -140,7 +140,7 @@ A soul file's front matter is not applied, and the persona carries no `hardLimit
 
 **Hooks.**
 
-- `onBeforeGeneration` runs before every model attempt, a fallback hop's included, with the attempt's `messages` (system messages included), `system` (the persona's base prompt), `tools`, `model`, `provider`, `step` and `prompt`. Messages it returns replace that attempt's prompt and do not enter the history. On a structured send, on each hop whose payload carries no schema (a fallback hop's included), the schema instructions are among the `messages`, as on `agent()`, so a hook that removes them removes them.
+- `onBeforeGeneration` runs before every model attempt, a fallback hop's included, with the attempt's `messages` (system messages included), `system` (the persona's base prompt; with `learning` on it holds no personality section, which the system text in `messages` holds after the base prompt), `tools`, `model`, `provider`, `step` and `prompt`. Messages it returns replace that attempt's prompt and do not enter the history. On a structured send, on each hop whose payload carries no schema (a fallback hop's included), the schema instructions are among the `messages`, as on `agent()`, so a hook that removes them removes them.
 - `onAfterGeneration` runs after each model step. A `text` it returns replaces the step's text in the result and in the store. The exception is a schema answer the provider returns as a schema tool call, which stays the JSON the schema validated; a schema answer returned as text (a JSON response format, or the schema's instructions in the prompt) is replaced like any text, and a structured send parses and validates the replacement. Changes to `toolCalls` are not applied: the GMI has already run the step's tool calls.
 - `onBeforeToolExecution` runs before each tool call. Returning `null` skips the call, and the model receives an error result; returned `args` replace the call's arguments.
 
@@ -290,7 +290,7 @@ The section renders the persona's authored traits in every mode. `GMI.setPersona
 | | `gmi()` and `agent({ runtime: 'gmi' })` | Full runtime |
 |---|---|---|
 | Layer | One per agent | One per `AgentOS` |
-| Learner session | One per `agent.session()` entry, built with its first turn; one per `generate()` or `stream()` call | One per GMI, built with the GMI |
+| Learner session | One per `agent.session()` entry, built with its first turn; one per `generate()` or `stream()` call | One per GMI, built with the GMI. The open has 2,000 ms, the budget a turn's preparation has: one that has not answered by then is taken by the GMI's first turn when it answers, and an answer that is not a learner session is a failed open |
 | User | The `userId` passed to `session()`. A session opened without one, a seat's session (`sessionSeat()`, `launch_agency`) whatever user it runs as, `generate()` and `stream()` have no learner | The user the GMI is created for |
 | Agent | `learning.agentKey`, else the persona id of an agent with a `name`; an agent with neither has no learner | `learning.agentKey`, else the persona id |
 | Namespace | `learning.namespace`, else none (`''`) | The turn's resolved organization (`organizationId`, or the single-tenant default), else none. The turn pipeline resolves it before it acquires the GMI; a GMI built again to resume a stored turn is bound at the first turn it prepares, under that turn's organization; a GMI built to continue a paused turn on its stream is bound under that turn's organization, as the GMI the turn paused on was |

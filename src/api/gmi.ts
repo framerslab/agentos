@@ -664,6 +664,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
           try {
             const modified = await opts.onBeforeGeneration({
               messages: messages as unknown as Message[],
+              // With learning on, the base prompt holds no personality section: the system text in `messages` holds
+              // the turn's section after it.
               system: typeof persona.baseSystemPrompt === 'string' ? persona.baseSystemPrompt : undefined,
               tools: offered,
               model: ctx.modelId,
