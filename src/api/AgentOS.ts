@@ -781,7 +781,8 @@ export interface AgentOSConfig {
    * as a system prompt of its own on every turn, and each session is bound to a learner: its persona with the user
    * and the resolved organization of its first turn. `namespace` is refused here, because the runtime takes the
    * organization from each turn. A host that built a layer itself passes it in `gmiManagerConfig.learningLayer`
-   * instead. {@link AgentOS.getLearningLayer} returns the layer.
+   * instead: a layer passed there turns learning on whatever this option says, and `true` or a config beside one is
+   * refused. {@link AgentOS.getLearningLayer} returns the layer.
    * @default false
    */
   learning?: boolean | LearningConfig;
@@ -1834,19 +1835,48 @@ export class AgentOS implements IAgentOS {
           : off('emergentConfig.selfImprovement is off'),
       forged_code_executor:
         emergent && this.config.emergentConfig?.allowSandboxTools === true ? { live: true } : off('sandbox forging is off'),
-      // The tool orchestrator's approval gate runs only with toolOrchestratorConfig.hitl.enabled.
-      hitl:
-        this.config.toolOrchestratorConfig?.hitl?.enabled === true
-          ? this.config.hitlManager
-            ? { live: true }
-            : { live: true, detail: 'no hitlManager: side-effect tools are refused unless hitl.autoApproveWhenNoManager is set' }
-          : off('toolOrchestratorConfig.hitl.enabled is off'),
-      tool_policy:
-        this.config.orchestratorConfig.adaptiveExecution?.enabled === false
-          ? off('orchestratorConfig.adaptiveExecution is off')
-          : { live: true },
+      hitl: this.hitlLoop(),
+      tool_policy: this.toolPolicyLoop(),
       rag: this.ragMemoryInitializer?.retrievalAugmentor ? { live: true } : off('no retrieval augmentor'),
     };
+  }
+
+  /**
+   * The tool orchestrator's approval gate, for the manifest: it asks only with `hitl.enabled`, only for a tool that
+   * has side effects unless `requireApprovalForSideEffects` is false (then for none), and with no manager it refuses
+   * such a tool unless `autoApproveWhenNoManager` approves every one.
+   */
+  private hitlLoop(): LoopState {
+    const hitl = this.config.toolOrchestratorConfig?.hitl;
+    if (hitl?.enabled !== true) return { live: false, detail: 'toolOrchestratorConfig.hitl.enabled is off' };
+    if (hitl.requireApprovalForSideEffects === false) {
+      return { live: false, detail: 'toolOrchestratorConfig.hitl.requireApprovalForSideEffects is off: the gate asks for no tool' };
+    }
+    if (!this.config.hitlManager) {
+      return hitl.autoApproveWhenNoManager === true
+        ? { live: false, detail: 'no hitlManager, and hitl.autoApproveWhenNoManager approves every call' }
+        : { live: true, detail: 'no hitlManager: side-effect tools are refused' };
+    }
+    return { live: true };
+  }
+
+  /**
+   * The adaptive tool-policy switch, for the manifest: it changes a turn plan's tool policy from task-outcome
+   * telemetry, so it needs adaptive execution, the telemetry and a turn planner. The planner is built before the
+   * learning layer, so it is read set or not.
+   */
+  private toolPolicyLoop(): LoopState {
+    const orchestratorConfig = this.config.orchestratorConfig;
+    if (orchestratorConfig.adaptiveExecution?.enabled === false) {
+      return { live: false, detail: 'orchestratorConfig.adaptiveExecution is off' };
+    }
+    if (orchestratorConfig.taskOutcomeTelemetry?.enabled === false) {
+      return { live: false, detail: 'orchestratorConfig.taskOutcomeTelemetry is off: the switch reads no success rate' };
+    }
+    if (!this.discoveryInitializer?.turnPlanner) {
+      return { live: false, detail: 'no turn planner: the switch has no turn plan to change' };
+    }
+    return { live: true };
   }
 
   public getExtensionManager(): ExtensionManager {
