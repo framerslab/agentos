@@ -270,6 +270,11 @@
       "default": "./dist/cognition/emergent/index.js",
       "types": "./dist/cognition/emergent/index.d.ts"
     },
+    "./cognition/learning": {
+      "import": "./dist/cognition/learning/index.js",
+      "default": "./dist/cognition/learning/index.js",
+      "types": "./dist/cognition/learning/index.d.ts"
+    },
     "./cognition/substrate": {
       "import": "./dist/cognition/substrate/index.js",
       "default": "./dist/cognition/substrate/index.js",
