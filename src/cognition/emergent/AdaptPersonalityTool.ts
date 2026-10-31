@@ -77,7 +77,7 @@ function idOf(value: unknown): string {
 }
 
 /**
- * The key a learner's accepted calls are kept under on a host with a learning layer: the turn's
+ * The key a learner's accepted calls and per-trait budget are kept under on a host with a learning layer: the turn's
  * organization, persona and user beside its session, each as given (the learning layer keeps a user id as it comes),
  * serialized whole, so no two parts run together and no id fails to encode.
  */
@@ -270,7 +270,10 @@ export class AdaptPersonalityTool
     required: ['trait', 'delta', 'reasoning'],
   };
 
-  /** Per-session accumulated |delta| per trait. */
+  /**
+   * Per-session accumulated |delta| per trait: per learner of the session with a learning layer, as the call count
+   * is, and per session without one.
+   */
   private readonly sessionDeltas: Map<string, Map<string, number>> = new Map();
 
   /**
@@ -482,7 +485,7 @@ export class AdaptPersonalityTool
 
   /** Returns the calling session's per-trait delta totals, creating the map on first use. */
   private getSessionDeltas(context: ToolExecutionContext): Map<string, number> {
-    const sessionKey = resolveSelfImprovementSessionKey(context);
+    const sessionKey = readToolLearningContext(context.sessionData) ? learnerKeyOf(context) : resolveSelfImprovementSessionKey(context);
     const existing = this.sessionDeltas.get(sessionKey);
     if (existing) {
       return existing;
