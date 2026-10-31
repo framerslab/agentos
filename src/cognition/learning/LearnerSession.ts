@@ -7,7 +7,9 @@
  * no learner, a turn in mode `off`, a learner whose record does not verify and a store that cannot be read render the
  * persona's authored traits. Every turn gets the scope ids it files and reads its memory under (`scopes.ts`), and
  * a turn with no learner whose user is explicit gets that user's id (`turnUserId`), so `forgetUser` for that user finds
- * what the turn wrote. The session records the memory writes of the memory tools and the rolling-summary sink
+ * what the turn wrote. A write into a learner's own session that names no other user (a workflow turn of the learner,
+ * the learner's turn after another user's) is the learner's: the learner's deletion takes the session's own form. The
+ * session records the memory writes of the memory tools and the rolling-summary sink
  * (`recordSelfChange`: a `pending` row, the write, the tombstone read again, the verdict) and guards the bridge's own
  * filing (`guardMemoryWrite`), each inside its user's write chain, so `forgetUser`, which takes the same chain,
  * deletes only after every write this process admitted before it has reached its verdict.
@@ -93,7 +95,10 @@ export type SessionBinding = { key: LearnerKey; openedUnder: string } | { reason
 interface WriteTarget {
   /** The ledger row's learner: the session's learner on a learner's turn, else the agent with no user. */
   learner: LedgerLearner;
-  /** On a turn with no learner: the explicit id of the user whose turn it is. */
+  /**
+   * On a turn with no learner: the user whose turn it is (an explicit second user's id), or, for a write into the
+   * session's own form of a learner's session, the session's learner, whose deletion takes that form.
+   */
   turnUserId?: string;
   /** The user whose tombstone the write reads and whose session row it notes; none for a write that names no user. */
   user?: { namespace: string; userId: string; kind: 'learner' | 'visitor' };
@@ -344,10 +349,17 @@ export class LearnerSession implements ILearnerSession {
       };
     }
     const namespace = this.namespaceOf(turn ? turn.namespace : this.lastNamespace);
-    const turnUserId = turn?.turnUserId && !this.host.isAnonymous(turn.turnUserId) ? turn.turnUserId : undefined;
+    const visitor = turn?.turnUserId && !this.host.isAnonymous(turn.turnUserId) ? turn.turnUserId : undefined;
+    // A write that names no other user, into the session's own form of a learner's session in the learner's namespace
+    // (a workflow turn of the learner, the learner's turn after another user's), is the learner's: forgetUser deletes
+    // that form with the learner's sessions, so the write reads the learner's tombstone inside the learner's write chain
+    // and its row names the learner, which the learner's deletion takes with the learner's other rows.
+    const owner = visitor === undefined && this.key && namespace === this.key.namespace ? this.key.userId : undefined;
+    const turnUserId = visitor ?? owner;
+    const kind = this.key && turnUserId === this.key.userId && namespace === this.key.namespace ? 'learner' : 'visitor';
     return {
       learner: { namespace, agentKey: this.agentKey, userId: null },
-      ...(turnUserId ? { turnUserId, user: { namespace, userId: turnUserId, kind: 'visitor' as const } } : {}),
+      ...(turnUserId ? { turnUserId, user: { namespace, userId: turnUserId, kind } } : {}),
       chainKey: turnUserId ? userChainKey(namespace, turnUserId) : sessionChainKey(this.context.sessionId),
       ...conversation,
       target: this.targetFor(false),
