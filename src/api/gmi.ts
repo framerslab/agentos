@@ -162,9 +162,11 @@ function skippedCall(req: ToolCallRequest, reason: string): ToolCallResult {
  * was built with, is then asked about a tool the orchestrator has, with the arguments the hooks left; anything but the
  * exact approval skips the tool, and the model is told why. Every call passed on carries `callerTurn`: the gate, the
  * budget, the explicit user, the names, the hooks (the carried ones, then the agent's) and this view's own
- * `processToolCall`, through which the step gate runs each step of a composed tool. It carries the turn's stop too, so
- * a call whose turn stopped while its hooks or its approval ran is refused (`STEP_ABORTED`) and nothing runs, and a
- * seat's call carries the seat's frame (`sessionData.agencyLaunch`), which a launch from it nests under.
+ * `processToolCall`, through which the step gate runs each step of a composed tool. It carries the turn's stop too: once
+ * the turn has stopped, a call runs no further hook and asks no gate, so no one is asked about a call that cannot run,
+ * and the orchestrator refuses it (`STEP_ABORTED`), as it refuses a call whose turn stopped while its approval was
+ * pending; nothing runs either way. A seat's call keeps the session data the GMI gave it, the frozen copy of the seat's
+ * frame (`sessionData.agencyLaunch`) among it, which a launch from that call nests under.
  */
 function hookTools(
   base: IToolOrchestrator,
@@ -181,9 +183,14 @@ function hookTools(
     const turn = turnOf();
     const req = details.toolCallRequest;
     if (turn.toolNames && !turn.toolNames.has(req.name)) return skippedCall(req, 'not available in this seat');
+    // The turn's stop, with the one the call carries: the GMI's own turn stop, or a composed tool's step's.
+    const stop = turn.abortSignal;
+    const signal = stop && details.signal ? AbortSignal.any([details.signal, stop]) : (stop ?? details.signal);
     const hooks: ToolCallHook[] = [...(turn.toolHooks ?? []), ...(hook ? [hook] : [])];
     let args = (req.arguments ?? {}) as Record<string, unknown>;
     for (const run of hooks) {
+      // Once the turn has stopped, no hook runs: the orchestrator refuses the call.
+      if (signal?.aborted) break;
       try {
         const hookResult = await run({ name: req.name, args, id: req.id, step: step.index });
         if (hookResult === null) {
@@ -195,8 +202,9 @@ function hookTools(
       }
     }
     const gate = turn.approvalGate ?? buildGate;
-    // A tool the orchestrator does not have is reported by it without asking anyone.
-    if (gate && (await base.getTool(req.name))) {
+    // A tool the orchestrator does not have is reported by it without asking anyone, and so is a call whose turn has
+    // stopped: the orchestrator refuses it (STEP_ABORTED).
+    if (gate && (await base.getTool(req.name)) && !signal?.aborted) {
       const verdict = await askApprovalGate(gate, { name: req.name, args: args ?? {}, id: req.id, step: step.index });
       if (verdict !== APPROVAL_GRANTED) return skippedCall(req, verdict.reason);
     }
@@ -208,14 +216,10 @@ function hookTools(
       toolHooks: hooks,
       dispatch: processToolCall,
     };
-    // The turn's stop, with the call's own when it has one (a composed tool's step).
-    const stop = turn.abortSignal;
-    const signal = stop && details.signal ? AbortSignal.any([details.signal, stop]) : (stop ?? details.signal);
     return base.processToolCall({
       ...details,
       toolCallRequest: { ...req, arguments: args },
       ...(signal ? { signal } : {}),
-      ...(turn.launchFrame ? { sessionData: { ...(details.sessionData ?? {}), agencyLaunch: turn.launchFrame } } : {}),
       callerTurn,
     });
   };
@@ -460,6 +464,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
   // `agencies`: every bound is checked here, `launch` on or off.
   const launchLimits = opts.agencies ? resolveLaunchLimits(opts.agencies) : undefined;
   const tools: ITool[] = adaptTools(opts.tools);
+  /**
+   * The provider and model the agent's persona resolved in the shared build: those its options name, else the pair its
+   * first call resolved from the environment. Its own launches route their coordinator and temporary seats on it, and a
+   * launch that seats this agent as a member counts a call of that seat on it (`__route` on the handle).
+   */
+  const resolvedRoute = async (): Promise<{ provider?: string; model?: string }> => {
+    const { persona } = await shared.get();
+    return { provider: persona.defaultProviderId, model: persona.defaultModelId };
+  };
   // With `agencies.launch`, launch_agency is one of the agent's tools: its persona lists it and its orchestrator runs it.
   if (launchLimits && opts.agencies?.launch === true) {
     if (tools.some((tool) => tool.name === LAUNCH_AGENCY_TOOL_NAME)) {
@@ -480,11 +493,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         tools: () => tools,
         ledger,
         createAgent: gmi,
-        // The pair the agent's persona resolved in the shared build, which every turn that can launch has built.
-        route: async () => {
-          const { persona } = await shared.get();
-          return { provider: persona.defaultProviderId, model: persona.defaultModelId };
-        },
+        // Every turn that can launch has built the shared build this pair comes from.
+        route: resolvedRoute,
       }),
     );
   }
@@ -1055,6 +1065,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
   Object.defineProperty(handle, '__config', { value: opts, enumerable: false, configurable: true });
   // The mark sessionSeat() and agencies.members read: this handle is a gmi() agent.
   Object.defineProperty(handle, '__gmiHandle', { value: true, enumerable: false, configurable: true });
+  // The pair its persona resolved, which a launch seating this agent as a member counts its seat's calls on.
+  Object.defineProperty(handle, '__route', { value: resolvedRoute, enumerable: false, configurable: true });
   return handle;
 }
 

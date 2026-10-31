@@ -46,18 +46,24 @@ export interface ToolExecutionRequestDetails {
   correlationId?: string;
   sessionData?: Record<string, any>;
   /**
-   * The tool instance the caller already resolved and checked (a composed
-   * step). `ToolOrchestrator.processToolCall` runs its checks against it and
-   * refuses the call (`STEP_REPLACED`) when the name resolves to another
-   * instance by the time the call is delegated. A call without it is bound
-   * the same way to the instance resolved when the call began
-   * (`TOOL_REPLACED`).
+   * The tool instance the caller already resolved and checked: a composed
+   * step's, or the one a launched seat's approval gate approved, which the
+   * seat's tool view hands on. `ToolOrchestrator.processToolCall` runs its
+   * checks against it and refuses the call (`STEP_REPLACED`) when the name
+   * resolves to another instance by the time the call is delegated. A call
+   * without it is bound the same way to the instance resolved when the call
+   * began (`TOOL_REPLACED`).
    */
   tool?: ITool;
   /**
-   * An expiry signal (a workflow step's timer). When it is aborted after the
-   * checks and the approval, the call is refused (`STEP_ABORTED`) and nothing
-   * runs.
+   * The call's stop: on a call a GMI makes, its turn's stop (a session's
+   * close(), the caller's abort signal, the GMI's shutdown()); on a step, the
+   * one its composed call passes on, or a workflow step's timer joined with
+   * the workflow call's own. A call whose stop has come by the time its checks
+   * pass is refused (`STEP_ABORTED`) before its approval is asked, so no one is
+   * asked about a call that cannot run; one whose stop comes while its approval
+   * is pending is refused after it. Nothing runs either way, and a call already
+   * running is not cut.
    */
   signal?: AbortSignal;
   /** The calling turn's live objects; copied into the tool's context (see ToolExecutionContext.callerTurn). */

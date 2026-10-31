@@ -119,12 +119,18 @@ export interface SelfImprovementConfig {
     maxSteps: number;
 
     /**
-     * Tool names or patterns the agent may compose into workflows.
+     * Tool names the agent may compose into workflows. `'*'` is the one
+     * pattern: a name is matched exactly otherwise.
      *
      * - `['*']` — All registered tools are allowed (default).
      * - `['toolName']` — Only the listed tools may appear as workflow steps.
      *
-     * The `create_workflow` tool is always excluded to prevent recursion.
+     * The `create_workflow` tool is always excluded to prevent recursion. The
+     * engine's chaining rule applies to every step as well (see
+     * `EmergentConfig.compose`): a tool with side effects the host has not
+     * listed there, a tool that declares no `hasSideEffects`, and
+     * `launch_agency`, listed or not, are refused when the workflow is created,
+     * and each step is checked again just before it runs.
      * @default ['*']
      */
     allowedTools: string[];

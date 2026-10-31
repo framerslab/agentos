@@ -178,6 +178,9 @@ import {
   resolveGMIForToolContext,
 } from './runtime/SelfImprovementSessionManager';
 import { RagMemoryInitializer } from './runtime/RagMemoryInitializer';
+import type { AgencySession } from '../agents/agency/AgencyTypes';
+import { createRuntimeLaunchTool } from './runtime/agencyLaunch/runtimeLaunchTool';
+import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type LaunchLimits, type RuntimeAgencyLaunchOptions } from './runtime/agencyLaunch/types';
 import type { TurnPlannerConfig } from '../orchestration/turn-planner/TurnPlanner';
 import type {
   CapabilityDescriptor,
@@ -786,6 +789,19 @@ export interface AgentOSConfig {
    * @default false
    */
   learning?: boolean | LearningConfig;
+
+  /**
+   * Teams a persona's GMI may launch from a turn (`launch_agency`). With `launch: true` the runtime registers the
+   * tool, which requires the `agency:launch` capability, so only a persona whose `allowedCapabilities` names it lists
+   * and calls it (with `toolPermissionManagerConfig.strictCapabilityChecking`, on by default). Each call builds a
+   * temporary `agency()` team whose seats are GMIs of this runtime (a registered persona by `personaId`, or one made
+   * from the caller's for the seat's instructions), runs the goal once and returns one tool result, bounded by depth,
+   * seats, launches in flight, one wall deadline and the caller's tools; the output guardrails that judge the caller's
+   * tool calls judge the seats' calls too. The bounds are checked at initialization
+   * whenever this is set; with `launch: true`, a config tool named `launch_agency` fails initialization too.
+   * @default undefined (no tool)
+   */
+  agencies?: RuntimeAgencyLaunchOptions;
 }
 
 export interface AgentOSActiveConversationSnapshot {
@@ -968,8 +984,25 @@ export class AgentOS implements IAgentOS {
 
     this.validateConfiguration(config);
     this.assertLearningConfig(config);
+    // `agencies`: its bounds are checked whenever it is set; the tool is registered only with `launch: true`.
+    let launchLimits: LaunchLimits | undefined;
+    try {
+      launchLimits = config.agencies ? resolveLaunchLimits(config.agencies) : undefined;
+    } catch (error) {
+      throw AgentOSServiceError.wrap(error, GMIErrorCode.CONFIGURATION_ERROR, 'The agencies option is not valid', 'AgentOS.initialize');
+    }
     const resolvedConfig = RagMemoryInitializer.resolveConfig(config);
     const normalizedConfigTools = adaptToolsToMap(resolvedConfig.tools);
+    // With `launch`, launch_agency joins the config tools after the host's own, and a tool of that name would be
+    // replaced without a word: the configuration is refused, as gmi() refuses it at construction.
+    if (launchLimits && config.agencies?.launch === true && normalizedConfigTools[LAUNCH_AGENCY_TOOL_NAME]) {
+      throw new AgentOSServiceError(
+        `The agencies option is not valid: agencies.launch registers '${LAUNCH_AGENCY_TOOL_NAME}', and the runtime's tools already hold a tool of that name.`,
+        GMIErrorCode.CONFIGURATION_ERROR,
+        { toolName: LAUNCH_AGENCY_TOOL_NAME },
+        'AgentOS.initialize',
+      );
+    }
     const normalizedExternalTools = normalizeExternalToolRegistry(resolvedConfig.externalTools);
     const {
       externalTools: _externalTools,
@@ -1202,6 +1235,22 @@ export class AgentOS implements IAgentOS {
           }
         : undefined;
       const initialConfigTools = adaptTools(this.config.tools);
+      const agencies = this.config.agencies;
+      if (launchLimits && agencies?.launch === true) {
+        initialConfigTools.push(
+          createRuntimeLaunchTool({
+            getGmiManager: () => this.gmiManager,
+            getToolOrchestrator: () => this.toolOrchestrator,
+            getAgencyRegistry: () => this.workflowFacade?.getAgencyRegistry(),
+            options: agencies,
+            limits: launchLimits,
+            gmiDefaults: this.config.gmiManagerConfig.defaultGMIBaseConfigDefaults,
+            providerEntry: (providerId: string) => this.modelProviderManager.getProviderEntry(providerId),
+            providerForModel: (modelId: string) => this.modelProviderManager.getProviderForModel(modelId)?.providerId,
+            logger: this.logger,
+          }),
+        );
+      }
 
       await this.toolOrchestrator.initialize(
         this.config.toolOrchestratorConfig,
@@ -1260,6 +1309,10 @@ export class AgentOS implements IAgentOS {
           ...this.config.gmiManagerConfig,
           personaLoaderConfig: personaSource.personaLoaderConfig,
           ...(this.learningLayer ? { learningLayer: this.learningLayer } : {}),
+          // The seats of launched teams get a prompt engine of their own, which makes no model call.
+          ...(this.config.agencies && !this.config.gmiManagerConfig.agencySeatPromptEngineConfig
+            ? { agencySeatPromptEngineConfig: this.config.promptEngineConfig }
+            : {}),
         },
         this.subscriptionService,
         this.authService,
@@ -2463,6 +2516,17 @@ export class AgentOS implements IAgentOS {
   public async listWorkflows(options?: WorkflowQueryOptions): Promise<WorkflowInstance[]> {
     this.ensureInitialized();
     return this.workflowFacade!.listWorkflows(options);
+  }
+
+  /**
+   * Copies of the agencies running now: a workflow's, and every team a persona's GMI launched with `launch_agency`
+   * (`agencies.launch`), whose entry has `metadata.kind: 'launched'` and lasts while its team runs.
+   *
+   * @returns The running agencies; empty on a runtime with no agency registry.
+   */
+  public listAgencies(): AgencySession[] {
+    this.ensureInitialized();
+    return this.workflowFacade?.getAgencyRegistry()?.listAgencies() ?? [];
   }
 
   public async getWorkflowProgress(

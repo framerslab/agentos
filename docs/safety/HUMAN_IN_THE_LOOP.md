@@ -65,6 +65,8 @@ const guarded = agency({
 | `beforeReturn: boolean` | The final answer leaves the agency | Customer-facing channels where the last response gets a human or judge review. |
 | `beforeStrategyOverride: boolean` | Nothing: no strategy makes a `strategy-override` request. Like every trigger, setting it makes `agency()` require a `handler` | Reserved; set it and nothing pauses. |
 
+A team a GMI launches with `launch_agency` runs under `agencies.hitl` (a `gmi()` agent's, or `AgentOSConfig.agencies` on the full runtime) at a root launch, after the gate the launching turn carries: its `beforeTool` list covers every tool call of every seat, a nested team's seats included, each call asked once, and a call whose turn has already stopped is refused without asking anyone. On the full runtime a seat's call to a composition the runtime's emergent engine holds is asked by the composition's name, and each step the composition reaches by the step tool's name, before the step runs. An approval is for the tool it was asked about: on the full runtime, a tool registered under the name while the approval was pending does not run under it, and the seat's call is refused (`STEP_REPLACED`) with nothing run. A handler that fails on a call of a nested team's seat fails the call of the root team, whose gate it is: the nested launch reports how its own team ran, every later tool call under that gate is refused, and the root team's call rejects with the handler's error once its strategy settles, as it does when the handler fails on a call of one of its own seats. Its `beforeAgent` and `beforeReturn` are asked in the root team alone.
+
 Source: [`HitlConfig.approvals` in `src/api/types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts).
 
 ## Six handler factories
@@ -236,7 +238,7 @@ After an approval that no human gave (auto-accept, the judge, or `onTimeout: 'ac
 
 Source: [`src/orchestration/hitl/HumanInteractionManager.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts) + interface [`IHumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/IHumanInteractionManager.ts).
 
-This is the richer surface of the full runtime: pass one as `hitlManager` in the `AgentOS` config and, with `toolOrchestratorConfig.hitl.enabled`, its `ToolOrchestrator` asks `requestApproval()` before a tool with `hasSideEffects: true` runs; the emergent step gate asks it before a composed tool's side-effecting step. Custom orchestrators can call it too. It speaks four interaction modes plus checkpoints and feedback ingestion:
+This is the richer surface of the full runtime: pass one as `hitlManager` in the `AgentOS` config and, with `toolOrchestratorConfig.hitl.enabled`, its `ToolOrchestrator` asks `requestApproval()` before a tool with `hasSideEffects: true` runs; the emergent step gate asks it before a composed tool's side-effecting step. A call or a step whose stop has already come (its turn stopped, its time ran out) is refused (`STEP_ABORTED`) without asking. A pending approval is not withdrawn when the stop comes: the call waits for its answer, or for the request's timeout (`approvalTimeoutMs`, else the manager's `defaultTimeoutMs`), and is then refused, so nothing runs. Custom orchestrators can call it too. It speaks four interaction modes plus checkpoints and feedback ingestion:
 
 ```typescript
 interface IHumanInteractionManager {
