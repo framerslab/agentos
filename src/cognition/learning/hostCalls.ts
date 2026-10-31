@@ -271,20 +271,66 @@ export async function memoryWriteHolds(change: MemoryWriteChange, read: (traceId
 
 /**
  * Takes a memory write back through the facade of its brain: the traces it created are deleted, and the traces it
- * changed or deleted are brought back to the before-state its row holds.
+ * changed or deleted are brought back to the before-state its row holds. A before-state that is itself deleted (a
+ * revert that brought a deleted trace back records it so) is deleted again.
  *
  * @throws {Error} When the facade cannot do what the write needs.
  */
 export async function undoMemoryWrite(facade: LearningMemoryTools, change: MemoryWriteChange, before: MemoryWriteBefore | null): Promise<void> {
-  if (change.created.length > 0) {
-    if (facade.deleteTraces) await facade.deleteTraces(change.created);
-    else if (facade.forget) for (const id of change.created) await facade.forget(id);
+  const remove = async (ids: string[]): Promise<void> => {
+    if (ids.length === 0) return;
+    if (facade.deleteTraces) await facade.deleteTraces(ids);
+    else if (facade.forget) for (const id of ids) await facade.forget(id);
     else throw new Error('the memory tools facade can neither delete nor forget a trace');
-  }
+  };
+  await remove(change.created);
   for (const snapshot of before?.traces ?? []) {
+    if (snapshot.deleted) {
+      if (facade.forget) await facade.forget(snapshot.id);
+      else await remove([snapshot.id]);
+      continue;
+    }
     if (!facade.restoreTrace) throw new Error('the memory tools facade cannot restore a trace');
     await facade.restoreTrace(snapshot.id, snapshot);
   }
+}
+
+/**
+ * What a crash's undo takes back of a pending memory write whose traces do not hold it: only what the write itself
+ * left. A trace it created that is live goes, and a trace it changed that still holds the content it set, or one it
+ * deleted that is deleted or gone, comes back to its before-state. A trace a later write names (`namedLater`) stays as
+ * that write left it, and so does every trace the write did not leave, so a change made after the crash is never
+ * written over.
+ *
+ * @param change - The pending row's change.
+ * @param before - The pending row's before-state.
+ * @param read - Reads one trace of the write's brain.
+ * @param namedLater - The traces a later memory write of the same chain names.
+ */
+export async function leftByCrash(
+  change: MemoryWriteChange,
+  before: MemoryWriteBefore | null,
+  read: (traceId: string) => Promise<TraceSnapshot | undefined>,
+  namedLater: ReadonlySet<string>,
+): Promise<{ change: MemoryWriteChange; before: MemoryWriteBefore }> {
+  const created: string[] = [];
+  for (const id of change.created) {
+    if (namedLater.has(id)) continue;
+    const trace = await read(id);
+    if (trace && !trace.deleted) created.push(id);
+  }
+  const contentSet = new Map(change.changed.map(({ id, content }) => [id, content]));
+  const deleted = new Set(change.deleted);
+  const traces: TraceSnapshot[] = [];
+  for (const snapshot of before?.traces ?? []) {
+    if (namedLater.has(snapshot.id)) continue;
+    const trace = await read(snapshot.id);
+    const set = contentSet.get(snapshot.id);
+    const left =
+      set !== undefined ? !!trace && !trace.deleted && trace.content === set : deleted.has(snapshot.id) && (!trace || trace.deleted === 1);
+    if (left) traces.push(snapshot);
+  }
+  return { change: { ...change, created }, before: { traces } };
 }
 
 /** A scope `forgetUser` deletes; with `turnUserId`, only that user's traces of it. */

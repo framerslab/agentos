@@ -5,9 +5,11 @@
  * user's session by turnUserId), then the user's learning rows, and names the stores it did not reach; another tenant's
  * user of the same id keeps everything; a write in flight reaches its verdict first and is deleted with the rest; with
  * a namespace, the user's plain-form traces are counted and named in one WARNING that names the tombstone, never the
- * user; a session another process holds stops rendering the forgotten learner's kept traits at its next turn. A memory
- * write's revert deletes what it created and restores what it deleted; a crash's pending write is decided at the
- * learner's next session by whether its traces hold it, and stays pending where the layer holds no facade of its brain;
+ * user; a session another process holds stops rendering the forgotten learner's kept traits at its next turn; while a
+ * memory store fails, the user's learning rows stay as the index a second call deletes the rest by. A memory write's
+ * revert deletes what it created and restores what it deleted, can itself be reverted, and gives a user another process
+ * forgets meanwhile nothing back; a crash's pending write is decided at the learner's next session by whether its traces
+ * hold it, its undo leaving what a later write changed, and stays pending where the layer holds no facade of its brain;
  * the agent's chains with no learner, a second user's included, are read off the open's path, at most once per fifteen
  * minutes; and a write whose writer decides it while the recovery reads its traces stays as its writer decided it.
  */
@@ -289,7 +291,7 @@ describe('forgetUser', () => {
     expect(first.stores.filter((entry) => entry.store.includes('tools-brain'))).toHaveLength(1);
     expect(await store.sessionRowsOf('A', '42')).not.toEqual([]);
     // What stays of a forgotten user is never handed out again.
-    await expect(layer.exportLearnedState(KEY)).rejects.toThrow(/forgotten/);
+    expect(await layer.exportLearnedState(KEY)).toMatchObject({ personaId: null, traitState: null, ledger: [] });
 
     const second = await layer.forgetUser('42', { namespace: 'A' });
 
