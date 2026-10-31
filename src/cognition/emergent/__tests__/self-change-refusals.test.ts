@@ -148,6 +148,36 @@ describe("adapt_personality's bounds where a learning layer exists", () => {
     expect((await adjust(turnOf('A', '7'))).success).toBe(true);
   });
 
+  it('keeps the budget per learner too, and reads a user id and a session id as given', async () => {
+    const traits: Record<string, number> = authored();
+    const tool = new AdaptPersonalityTool({
+      config: { maxDeltaPerSession: 0.02 },
+      getPersonality: () => traits,
+      setPersonality: (trait, value) => {
+        traits[trait] = value;
+      },
+    });
+    const turnOf = (organizationId: string, userId: string, sessionId = 's-1'): ToolExecutionContext =>
+      ({
+        gmiId: 'g',
+        personaId: 'p',
+        userContext: { userId },
+        correlationId: sessionId,
+        sessionData: { sessionId, organizationId, learning: { learner: 'bound', mode: 'on' } },
+      }) as ToolExecutionContext;
+    const adjust = (context: ToolExecutionContext) => tool.execute({ trait: 'openness', delta: 0.02, reasoning: 'Adjust.' }, context);
+    // Tenant A's user spends the session's budget for openness; tenant B's user on the same session id has a budget of its own.
+    expect((await adjust(turnOf('A', '42'))).output?.delta).toBeCloseTo(0.02);
+    expect((await adjust(turnOf('B', '42'))).output?.delta).toBeCloseTo(0.02);
+    // A user id with spaces around it is a learner of its own, as the learning layer keeps it.
+    for (let accepted = 0; accepted < 3; accepted += 1) {
+      expect((await adjust(turnOf('C', 'alice', 's-2'))).success).toBe(true);
+    }
+    expect((await adjust(turnOf('C', ' alice ', 's-2'))).success).toBe(true);
+    // A session id that holds a lone surrogate counts as any other does.
+    expect((await adjust(turnOf('A', '42', 's-\uD800'))).success).toBe(true);
+  });
+
   it('keeps its rules without a layer: a step of 0.5 succeeds, and honesty stays operator-only', async () => {
     const { tool, traits } = make();
     expect((await tool.execute({ trait: 'honesty', delta: 0.1, reasoning: 'State uncertainty plainly.' }, noLayer())).details?.reason).toBe('operator_only');
