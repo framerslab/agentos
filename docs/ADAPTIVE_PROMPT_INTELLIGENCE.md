@@ -43,7 +43,7 @@ const support = agent({
 });
 ```
 
-`agent()` without `runtime: 'gmi'` creates no GMI ([GMIs](./GMI.md)), so none of this runs on its sessions. Under `agency()`, a roster member is a GMI only when its config sets `runtime: 'gmi'` or the roster holds an agent built that way, and the strategies call its `generate()` or `stream()`, which run the `'light'` profile: no sentiment tracking and no metaprompts ([Multi-agent work](./GMI.md#multi-agent-work)).
+`agent()` without `runtime: 'gmi'` creates no GMI ([GMIs](./GMI.md)), so none of this runs on its sessions. Under `agency()`, a roster member is a GMI when its config sets `runtime: 'gmi'`, when the agency sets `runtime: 'gmi'` and the config sets no `runtime` of its own, or when the roster holds an agent built that way, and the strategies call its `generate()` or `stream()`, which run the `'light'` profile: no sentiment tracking and no metaprompts ([Multi-agent work](./GMI.md#multi-agent-work)). A member seated with `sessionSeat()` runs as itself, on its own profile, through a session of its own ([Seats served by GMIs](./AGENCIES.md#seats-served-by-gmis)), and so does a member a team launched with `launch_agency` seats by `agentKey` or `personaId`; the team's temporary seats run the `'light'` profile on `gmi()`, and on the full runtime a persona with no metaprompts and no sentiment tracking ([Teams a GMI launches](./AGENCIES.md#teams-a-gmi-launches)).
 
 ## What's actually adaptive
 

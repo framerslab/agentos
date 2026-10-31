@@ -423,9 +423,10 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    */
   abortSignal?: AbortSignal;
   /**
-   * A spend budget for this send in place of the agent's: every provider call of the send is checked against it
-   * before it is made and recorded after it (settings make a new {@link SpendBudget} for the send). With
-   * `runtime: 'gmi'`, every completion call of the turn, metaprompts included.
+   * A spend budget for this send in place of the agent's; on a seat session (`sessionSeat()`, or a member a launched
+   * team seats) held beside it, each call checked against both and charged to both. Every provider call of the send
+   * is checked against it before it is made and recorded after it (settings make a new {@link SpendBudget} for the
+   * send). With `runtime: 'gmi'`, every completion call of the turn, metaprompts included.
    */
   budget?: SpendBudget | SpendBudgetOptions;
 }

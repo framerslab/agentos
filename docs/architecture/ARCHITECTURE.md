@@ -742,7 +742,7 @@ For configuration details, see [RAG Memory Configuration](../memory/RAG_MEMORY_C
 
 ### Agency System
 
-The agency system enables multi-agent coordination across six strategies (defined in [`AgencyStrategy`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) in [`src/api/types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts)):
+The agency system enables multi-agent coordination across seven strategies (defined in [`AgencyStrategy`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) in [`src/api/types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts)):
 
 | Strategy | Behavior |
 |---|---|
@@ -752,10 +752,11 @@ The agency system enables multi-agent coordination across six strategies (define
 | `review-loop` | One agent produces, another reviews; loop continues until reviewer accepts or `maxRounds` |
 | `hierarchical` | A coordinator agent delegates to sub-agents and synthesizes their results |
 | `graph` | Explicit DAG via `dependsOn` on each sub-agent; runs roots first, then dependents |
+| `panel` | Every agent answers the same input on its own model; the agents that returned text are counted against a quorum, and a chair synthesizes their answers (`chair: false` returns them labelled) |
 
 `agency()` keeps its coordination state in the call itself. Three classes under [`src/agents/agency/`](https://github.com/framerslab/agentos/tree/master/src/agents/agency) serve the full runtime and hosts; `agency()` uses none of them:
 
-- [`AgencyRegistry`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyRegistry.ts) — tracks agencies and the GMIs they contain, for the workflow runtime ([`WorkflowRuntime`](https://github.com/framerslab/agentos/blob/master/src/orchestration/workflows/runtime/WorkflowRuntime.ts))
+- [`AgencyRegistry`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyRegistry.ts) — tracks agencies and the GMIs they contain, for the workflow runtime ([`WorkflowRuntime`](https://github.com/framerslab/agentos/blob/master/src/orchestration/workflows/runtime/WorkflowRuntime.ts)) and for the teams the runtime's GMIs launch with `launch_agency` ([Teams a GMI launches](../AGENCIES.md#teams-a-gmi-launches))
 - [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts) — shared memory across an agency's GMIs (separate from each GMI's private cognitive memory)
 - [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) — an in-process message channel a host wires between its agents ([Agent Communication](./AGENT_COMMUNICATION.md))
 
