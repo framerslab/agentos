@@ -880,6 +880,8 @@ await cognitiveMemory.encode(assistantResponse, mood, gmiMood, {
 });
 ```
 
+With a learning layer the GMI reads and files under the scope ids its learner session gives the turn: the user's message and the reply both go under the turn's own user scope id (the learner's, or the session's form on a turn with no learner), each encode runs inside the user's write chain with the tombstone read before it and once it has committed, and the recall lists only the turn's own scopes ([Where a turn's memory is filed and read](../GMI.md#where-a-turns-memory-is-filed-and-read)).
+
 ---
 
 ## What the layer adds to a vector store
