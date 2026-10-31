@@ -527,7 +527,8 @@ export class GMIManager {
     const layer = this.config.learningLayer;
     if (!layer || !source) return {};
     const authored = normalizeHexacoTraits(source.registryPersona.personalityTraits);
-    const overlay = traitOverlayPatch(authored, effectivePersona.personalityTraits);
+    // The registry traits as written: an alias the persona writes itself beside its canonical key is no patch.
+    const overlay = traitOverlayPatch(source.registryPersona.personalityTraits, effectivePersona.personalityTraits);
     const personaTraits = { authored, ...(overlay ? { overlay } : {}) };
     const context: LearnerContext = {
       sessionId: runtimeContext.sessionId,
