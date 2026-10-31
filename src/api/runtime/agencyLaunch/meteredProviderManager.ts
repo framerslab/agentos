@@ -95,7 +95,7 @@ export function meteredProvider(provider: IProvider, budget: SpendBudget, what: 
  * A view of a provider manager whose providers check `budget` before each completion request and charge each answer
  * ({@link meteredProvider}, the calls recorded as `launch.seat`); every other member runs on `base`. A runtime seat's
  * GMI makes every completion call through it, its steps, metaprompts and self-reflection alike, so each is refused
- * before its request once the launch's budget is spent, and a call whose turn has already stopped is not sent.
+ * before its request once the launch's budget is spent, and a step whose turn has already stopped is not sent.
  * Embeddings are not counted.
  *
  * @param base - The runtime's provider manager.
