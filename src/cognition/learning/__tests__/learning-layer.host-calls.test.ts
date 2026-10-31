@@ -2,12 +2,13 @@
  * @file learning-layer.host-calls.test.ts
  * The layer's host calls over a real store: a run-time freeze and a suspension persist, hold for a new layer over the
  * same store and are lifted; operatorSet sets a learner's traits inside their bands and honesty-humility through the
- * ledger, runs under a freeze, re-anchors a record that does not verify and refuses a learner it holds no row for, and
- * the load that raises honesty-humility's floor again after an operator lowered it says so (floor_raised); revert takes
- * an operator's change back, keeps a later change to another trait, takes an import that created the trait row back to
- * the persona, and refuses a load's row and a change that is not kept; export and import carry a learner into a fresh
- * store, never honesty-humility, and refuse what this release cannot admit; and a store that does not open fails every
- * host call naming it, forgetUser included, so an account deletion is never reported done without its tombstone.
+ * ledger, runs under a freeze, re-anchors a record that does not verify (from the state the ledger recorded last, where
+ * only the row was edited) and refuses a learner it holds no row for, and the load that raises honesty-humility's floor
+ * again after an operator lowered it says so (floor_raised); revert takes an operator's change back, keeps a later
+ * change to another trait, takes an import that created the trait row back to the persona, and refuses a load's row and
+ * a change that is not kept; export and import carry a learner into a fresh store, never honesty-humility, and refuse
+ * what this release cannot admit; and a store that does not open fails every host call naming it, forgetUser included,
+ * so an account deletion is never reported done without its tombstone.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderPersonalitySection } from '../../substrate/personas/personalityPrompt';
@@ -138,6 +139,24 @@ describe('operatorSet', () => {
     expect(section(await again.prepareTurn(turn()))).toBe(renderPersonalitySection({ ...PERSONA, openness: 0.7 }));
     expect((await layer.manifest()).loops.ledger.detail).not.toMatch(/chain broken/);
     expect(warn.mock.calls.filter((call) => String(call[0]).includes('does not verify'))).toHaveLength(1);
+  });
+
+  it('re-anchors a row edited outside the layer from the state the ledger recorded last, so the edit does not stay', async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store });
+    await layer.forLearner(KEY, context());
+    const row = (await store.traitRow('A', 'tutor', '42'))!;
+    const edited = JSON.parse(row.state);
+    // Inside its band, so only the row's digest shows the edit.
+    edited.current.extraversion = 0.6;
+    await store.updateTraitRow({ ...row, state: JSON.stringify(edited), version: row.version + 1 }, row.version);
+
+    expect(await layer.operatorSet({ learner: KEY, traits: { openness: 0.7 }, by: 'ops' })).toMatchObject({ reason: 'reanchor' });
+
+    const session = await layer.forLearner(KEY, context({ sessionId: 's-2' }));
+    expect(section(await session.prepareTurn(turn()))).toBe(renderPersonalitySection({ ...PERSONA, openness: 0.7 }));
+    expect(JSON.parse((await store.traitRow('A', 'tutor', '42'))!.state).current).toMatchObject({ extraversion: 0.8, openness: 0.7 });
   });
 
   it("records the load that raises honesty-humility's floor after an operator lowered it as floor_raised, which revert refuses", async () => {
