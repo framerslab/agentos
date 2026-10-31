@@ -118,6 +118,19 @@ describe('ConversationContext history cuts', () => {
 
       expect(names(context.getHistory())).toEqual(['q1', 'r1', 'summary', 'r3', 'q4', 'r4']);
     });
+
+    it('with no limit keeps the last summary after the first messages, where it sorts after the messages it replaced', () => {
+      // A conversation loaded from storage holds the messages a summary replaced, and the summary sorts by its own
+      // time, after them. A limit of six keeps the first two messages, the summary and the newest three, and so does
+      // the trim at the next message.
+      const context = contextWith(['q1', 'r1', 'q2', 'r2', 'q3', 'r3', 'summary', 'q4', 'r4', 'q5', 'r5'], {
+        maxHistoryLengthMessages: 6,
+      });
+
+      expect(names(context.getHistory())).toEqual(['q1', 'r1', 'summary', 'r4', 'q5', 'r5']);
+      context.addMessage(fields('q6'));
+      expect(names(context.getAllMessages())).toEqual(['q1', 'r1', 'summary', 'q5', 'r5', 'q6']);
+    });
   });
 
   describe('with automatic summarization', () => {
