@@ -58,9 +58,11 @@ describe('ids and canonical JSON', () => {
     expect(canonicalJson({ b: 1, a: { d: [3, { f: 1, e: 2 }], c: undefined } })).toBe('{"a":{"d":[3,{"e":2,"f":1}]},"b":1}');
   });
 
-  it('writes a value with toJSON as what toJSON returns, its keys sorted too', () => {
+  it('writes a value with toJSON as what toJSON returns, its keys sorted too, and leaves out what JSON leaves out', () => {
     const value = { at: new Date(0), amount: { toJSON: () => ({ z: 1, a: [undefined, 2] }) } };
     expect(canonicalJson(value)).toBe('{"amount":{"a":[null,2],"z":1},"at":"1970-01-01T00:00:00.000Z"}');
+    const itself = { b: 2, a: 1, toJSON() { return this; } };
+    expect(canonicalJson({ itself, f: () => 1, list: [() => 1, Symbol('s')] })).toBe('{"itself":{"a":1,"b":2},"list":[null,null]}');
   });
 });
 
@@ -378,11 +380,11 @@ describe.each([
     expect((await store.chainRows('t|A|tutor|bo')).length).toBe(2);
     expect((await store.head('t|A|tutor|bo'))?.userId).toBe('bo');
 
-    // A blank visitor id names no visitor: the row goes on the agent's chain, whose head names no user.
-    await ledger.propose({ ...candidate(), learner: { ...LEARNER, userId: null }, turnUserId: '' }, { verdict: 'kept' });
-    expect((await store.chainRows('a|A|tutor')).map((r) => r.turnUserId)).toEqual([null, null, null, null]);
-    expect((await store.head('a|A|tutor'))?.userId).toBeNull();
-    expect(await ledger.verifyChain('a|A|tutor')).toEqual({ ok: true, keyed: false });
+    // A blank visitor id names no visitor: the row starts the agent's chain, whose head names no user.
+    await ledger.propose({ ...candidate(), learner: { ...LEARNER, agentKey: 'coach', userId: null }, turnUserId: '' }, { verdict: 'kept' });
+    expect((await store.chainRows('a|A|coach')).map((r) => r.turnUserId)).toEqual([null, null]);
+    expect((await store.head('a|A|coach'))?.userId).toBeNull();
+    expect(await ledger.verifyChain('a|A|coach')).toEqual({ ok: true, keyed: false });
   });
 });
 
