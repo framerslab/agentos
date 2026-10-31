@@ -175,7 +175,10 @@ export interface GMIAgencyContextOptions {
  * builds. The launch passes the views the seat runs through, so the manager imports nothing of the launch.
  */
 export interface AgencySeatSpec {
-  /** `seat:<agencyId>:<role>`; refused when a GMI already serves it. */
+  /**
+   * `seat:<agencyId>:<role>`; refused when a GMI already serves it. Until the seat is released no request acquires
+   * a GMI in it and no feedback reaches its GMI.
+   */
   seatSessionId: string;
   /** The parent turn's user: the seat's tools and the tier check see it. */
   userId: string;
@@ -226,6 +229,13 @@ export class GMIManager {
    * waits for it and never hands out a GMI that is shutting down.
    */
   private readonly deactivations = new Map<string, Promise<boolean>>();
+  /**
+   * The session of each seat createAgencySeat() registered, until the seat is released. A seat's GMI serves its team
+   * alone: an acquisition that names one is refused and feedback that names one is not recorded, so a request can
+   * neither run a turn on a seat's GMI (its tools, budget and working memory are the team's) nor shut a running seat
+   * down by asking for another persona.
+   */
+  private readonly agencySeatSessions = new Set<string>();
 
   constructor(
     config: GMIManagerConfig,
@@ -721,7 +731,8 @@ export class GMIManager {
   }
 
   /**
-   * The GMI of a session: the one the session has, or a new one built for it.
+   * The GMI of a session: the one the session has, or a new one built for it. A session that a seat of a team a GMI
+   * launched holds (createAgencySeat()) is refused with `PERMISSION_DENIED` until the seat is released.
    *
    * @param turnOrganizationId - The resolved organization of the turn the GMI is acquired for (`''` for none).
    *   With a learning layer a new GMI's learner session is bound under it; a caller that cannot resolve it before
@@ -819,6 +830,16 @@ export class GMIManager {
       await deactivation.catch(() => false);
       this.ensureInitialized();
       deactivation = this.deactivations.get(sessionId);
+    }
+
+    // A seat's session serves its team alone, whatever persona the request names: reusing its GMI would run the
+    // request on the team's tools, budget and working memory, and a persona refresh would shut the seat down mid-run.
+    if (this.agencySeatSessions.has(sessionId)) {
+      throw new GMIManagerError(
+        `Session '${sessionId}' is a seat of a team a GMI launched; no request runs in it.`,
+        GMIErrorCode.PERMISSION_DENIED,
+        { sessionId },
+      );
     }
 
     let gmiInstanceId = this.gmiSessionMap.get(sessionId);
@@ -977,8 +998,10 @@ export class GMIManager {
    * make no model call, the tool view and provider manager the launch gives it, and, with the runtime's learning layer,
    * no learner (a workflow seat's source): it still renders its persona's traits, and with the layer off it sends no
    * personality section. It is registered under the seat session id, so its own tool calls resolve it; `release()`
-   * shuts it down and takes it out of the manager. `shutdown()` waits for a seat being built, as it waits for a
-   * session's GMI, and the build then fails with its GMI shut down.
+   * shuts it down and takes it out of the manager. Until then the session is the seat's: `getOrCreateGMIForSession()`
+   * refuses it with `PERMISSION_DENIED`, whatever persona the request names, and `processUserFeedback()` records
+   * nothing for it. `shutdown()` waits for a seat being built, as it waits for a session's GMI, and the build then
+   * fails with its GMI shut down.
    *
    * @throws {GMIManagerError} `PERSONA_NOT_FOUND` for an unknown persona; `PERMISSION_DENIED` for one the user's tier or
    *   strict validation refuses; `INVALID_STATE` for a session that already has a GMI; `CONFIGURATION_ERROR` without
@@ -1051,13 +1074,17 @@ export class GMIManager {
     }
     this.activeGMIs.set(gmiInstanceId, gmi);
     this.gmiSessionMap.set(spec.seatSessionId, gmiInstanceId);
+    this.agencySeatSessions.add(spec.seatSessionId);
     let released: Promise<void> | undefined;
     return {
       gmi,
       personaId: persona.id,
       // Once: a second call waits for the first. It skips the initialization check, so a seat closed while the manager
-      // shuts down is still released.
-      release: () => (released ??= this.deactivateSession(spec.seatSessionId).then(() => undefined)),
+      // shuts down is still released. The session is the seat's until its GMI is gone.
+      release: () =>
+        (released ??= this.deactivateSession(spec.seatSessionId)
+          .then(() => undefined)
+          .finally(() => this.agencySeatSessions.delete(spec.seatSessionId))),
     };
   }
 
@@ -1241,13 +1268,16 @@ export class GMIManager {
 
     this.activeGMIs.clear();
     this.gmiSessionMap.clear();
+    this.agencySeatSessions.clear();
     this.allPersonaDefinitions.clear();
     console.log(`GMIManager (ID: ${this.managerId}): Shutdown complete.`);
   }
 
   /**
-   * Routes user feedback to the GMI that serves the session. The payload is
-   * normalized first (see {@link normalizeUserFeedback}): a `rating` label
+   * Routes user feedback to the GMI that serves the session; feedback that
+   * names the session of a seat of a launched team (createAgencySeat()) is not
+   * recorded. The payload is normalized first (see
+   * {@link normalizeUserFeedback}): a `rating` label
    * decides the polarity, otherwise a numeric rating is read on the 1 to 5
    * scale. The GMI then records a trace entry and, when cognitive memory is
    * configured, stores the feedback and any correction as memories of the user.
@@ -1263,6 +1293,10 @@ export class GMIManager {
       fields: feedbackData && typeof feedbackData === 'object' ? Object.keys(feedbackData) : [],
       textLength: typeof feedbackData?.text === 'string' ? feedbackData.text.length : 0,
     });
+
+    // A seat's GMI serves its team alone: feedback that names its session reaches neither the GMI nor its trace, which
+    // the GMI's self-reflection reads.
+    if (this.agencySeatSessions.has(sessionId)) return;
 
     const gmiInstanceId = this.gmiSessionMap.get(sessionId);
     const gmi = gmiInstanceId ? this.activeGMIs.get(gmiInstanceId) : undefined;
