@@ -21,7 +21,7 @@ import type {
 } from '../../../../core/tools/ITool.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
 import { bindingsFor, buildNaturalLanguageFtsQuery } from '../../retrieval/store/tracePersistence.js';
-import { resolveMemoryToolScopeId } from './scopeContext.js';
+import { memoryToolTurnOf, resolveMemoryToolScopeId } from './scopeContext.js';
 
 /**
  * Whether a full-text query failed as SQLite rejected it: better-sqlite3 marks the error with the
@@ -186,6 +186,7 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
    *   AND mt.deleted = 0
    *   [AND mt.type = ?]    -- when type filter provided
    *   [AND mt.scope = ?]   -- when scope filter provided
+   *   [AND ((mt.scope = ? AND mt.scope_id = ?) OR ... OR mt.scope_id = '')]  -- with the turn's scope ids
    * ORDER BY memory_traces_fts.rank  -- FTS5 BM25 relevance (lower = more relevant);
    *                                  -- FTS4 orders by length(offsets(memory_traces_fts)) DESC
    * LIMIT ?
@@ -193,6 +194,10 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
    *
    * Tags are stored as JSON arrays; they are parsed and returned as string[].
    * Malformed tag JSON returns an empty array rather than throwing.
+   *
+   * Where a learning layer put the turn's scope ids on the call, the search reads the indexed `scope_id` column: the
+   * turn's own `user`, `persona` and `thread` scope ids, its organization's id, and the traces filed under no scope
+   * id (an ingested document's); a `scope` filter narrows that list to the scope's own ids and its unscoped traces.
    *
    * @param args    - Search input (query, optional type/scope/limit).
    * @param context - Tool execution context used to resolve scoped searches.
@@ -221,7 +226,23 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
         extraParams.push(args.type);
       }
 
-      if (args.scope !== undefined) {
+      // With the turn's scope ids on the call the search reads the turn's own scopes, its organization's id and the
+      // traces filed under no scope id (an ingested document's), by the indexed column; a `scope` narrows that list
+      // to the scope's own ids and its unscoped traces. Without them, as before.
+      const turn = memoryToolTurnOf(context);
+      if (turn) {
+        const pairs = turn.readable.filter((pair) => args.scope === undefined || pair.scope === args.scope);
+        const anyOf = pairs.map(() => '(mt.scope = ? AND mt.scope_id = ?)');
+        const anyParams: unknown[] = pairs.flatMap((pair) => [pair.scope, pair.scopeId]);
+        if (args.scope === undefined) {
+          anyOf.push("mt.scope_id = ''");
+        } else {
+          anyOf.push("(mt.scope = ? AND mt.scope_id = '')");
+          anyParams.push(args.scope);
+        }
+        extraClauses.push(`(${anyOf.join(' OR ')})`);
+        extraParams.push(...anyParams);
+      } else if (args.scope !== undefined) {
         extraClauses.push('mt.scope = ?');
         extraParams.push(args.scope);
 

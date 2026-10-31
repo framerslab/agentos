@@ -13,7 +13,19 @@
  */
 
 import type { ITool, ToolExecutionResult, ToolExecutionContext, JSONSchemaObject } from '../../../../core/tools/ITool.js';
+import { memoryWriteRefusal } from '../../../learning/toolContext.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
+import {
+  dropGraphCopies,
+  reachTraces,
+  recordToolWrite,
+  refusedMemoryWrite,
+  stillAsRead,
+  TraceMovedError,
+  undoToolWrite,
+  type MemoryToolWriteBack,
+} from './learningWrite.js';
+import { memoryToolTurnOf, type MemoryToolTurn } from './scopeContext.js';
 
 // ---------------------------------------------------------------------------
 // Input / Output types
@@ -99,8 +111,14 @@ export class MemoryDeleteTool implements ITool<MemoryDeleteInput, MemoryDeleteOu
 
   /**
    * @param brain - The agent's shared SQLite brain database connection.
+   * @param writeBack - The facade that made the tool (`Memory.createTools()`): a deleted trace's knowledge-graph copy
+   *   is deleted through it, and a delete a learning layer does not keep is taken back through it. Without it the tool
+   *   restores the row itself.
    */
-  constructor(private readonly brain: Brain) {}
+  constructor(
+    private readonly brain: Brain,
+    private readonly writeBack?: MemoryToolWriteBack,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // execute
@@ -113,19 +131,34 @@ export class MemoryDeleteTool implements ITool<MemoryDeleteInput, MemoryDeleteOu
    * delete an already-deleted trace returns `{ deleted: false }` rather
    * than silently succeeding — this gives callers accurate feedback.
    *
-   * @param args     - Delete input (traceId, optional reason).
-   * @param _context - Tool execution context (not used by this tool).
+   * The trace's knowledge-graph copy (the episodic record a memory manager on the same Brain writes of each trace it
+   * stores) is deleted with it, through the facade that made the tool.
+   *
+   * @param args    - Delete input (traceId, optional reason).
+   * @param context - Tool execution context; where it carries the turn's scope ids, the call reaches only a live trace
+   *   of the turn's own scopes that the turn's own user filed (another scope's reads as not found, another user's is
+   *   refused, `other_user`), and the delete runs through the learner session's recorder, deleting only while the
+   *   trace holds what was read (`conflict` otherwise). Only a freeze stops a delete, with a layer or without one
+   *   (`frozen`).
    * @returns `{ deleted }` status, or an error result.
    */
   async execute(
     args: MemoryDeleteInput,
-    _context: ToolExecutionContext,
+    context: ToolExecutionContext,
   ): Promise<ToolExecutionResult<MemoryDeleteOutput>> {
     try {
+      // Only a freeze stops a memory write, and it is read before anything else.
+      const refusal = memoryWriteRefusal(context.sessionData);
+      if (refusal) return refusedMemoryWrite(this.name, refusal);
+
+      const turn = memoryToolTurnOf(context);
+      if (turn) return await this.deleteForTurn(turn, args.traceId);
+
       const info = await this.brain.run(
         `UPDATE memory_traces SET deleted = 1 WHERE brain_id = ? AND id = ? AND deleted = 0`,
         [this.brain.brainId, args.traceId],
       );
+      if (info.changes > 0) await dropGraphCopies(this.writeBack, [args.traceId]);
 
       return { success: true, output: { deleted: info.changes > 0 } };
     } catch (err) {
@@ -134,5 +167,43 @@ export class MemoryDeleteTool implements ITool<MemoryDeleteInput, MemoryDeleteOu
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  /**
+   * The delete where the turn's scope ids are on the call: a live trace of the turn's own scopes that its own user
+   * filed, through the learner session's recorder, deleted only while it holds the content and tags it was read with.
+   */
+  private async deleteForTurn(turn: MemoryToolTurn, traceId: string): Promise<ToolExecutionResult<MemoryDeleteOutput>> {
+    if (!turn.record) return refusedMemoryWrite(this.name, 'no_recorder');
+    const { snapshots, otherUser } = await reachTraces(this.brain, [traceId], turn);
+    const before = snapshots[0];
+    if (!before) {
+      return otherUser ? refusedMemoryWrite(this.name, 'other_user') : { success: true, output: { deleted: false } };
+    }
+    const unchanged = stillAsRead(before);
+    const brainId = this.brain.brainId;
+
+    return recordToolWrite(
+      this.name,
+      turn.record,
+      {
+        kind: 'memory_write',
+        actor: `tool:${this.name}`,
+        subject: traceId,
+        before: { traces: [before] },
+        after: { created: [], changed: [], deleted: [traceId] },
+        brainId,
+        apply: async () => {
+          const info = await this.brain.run(
+            `UPDATE memory_traces SET deleted = 1 WHERE brain_id = ? AND id = ?${unchanged.sql}`,
+            [brainId, traceId, ...unchanged.params],
+          );
+          if (info.changes === 0) throw new TraceMovedError(traceId);
+          await dropGraphCopies(this.writeBack, [traceId]);
+        },
+        undo: (_done, reason) => undoToolWrite(this.brain, this.writeBack, { created: [], before: [before] }, reason),
+      },
+      () => ({ deleted: true }),
+    );
   }
 }

@@ -19,11 +19,13 @@ import type {
   ToolExecutionContext,
   JSONSchemaObject,
 } from '../../../../core/tools/ITool.js';
+import { memoryWriteRefusal } from '../../../learning/toolContext.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
 import type { MemoryScope, MemoryType } from '../../core/types.js';
 import { uuid } from '../../core/util/crossPlatformCrypto.js';
 import { buildInitialTraceMetadata, sha256Hex } from '../../retrieval/store/tracePersistence.js';
-import { resolveMemoryToolScopeId } from './scopeContext.js';
+import { memoryToolTurnOf, resolveMemoryToolScopeId } from './scopeContext.js';
+import { recordToolWrite, refusedMemoryWrite, undoToolWrite, type MemoryToolWriteBack } from './learningWrite.js';
 
 /** The memory types the tool stores, as its input schema lists them. */
 const MEMORY_TYPES: readonly MemoryType[] = ['episodic', 'semantic', 'procedural', 'prospective', 'relational'];
@@ -135,8 +137,13 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
 
   /**
    * @param brain - The agent's shared SQLite brain database connection.
+   * @param writeBack - The facade that made the tool (`Memory.createTools()`), through which a write a learning layer
+   *   does not keep is taken back. Without it the tool deletes the row itself.
    */
-  constructor(private readonly brain: Brain) {}
+  constructor(
+    private readonly brain: Brain,
+    private readonly writeBack?: MemoryToolWriteBack,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // execute
@@ -158,6 +165,11 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
    * error result and nothing is stored. A caller that runs the tool without
    * checking its arguments against the schema gets the same answer.
    *
+   * Where a learning layer put the turn's scope ids on the call, the trace goes under the turn's own `user`,
+   * `persona` or `thread` scope id, names the turn's second user (`turnUserId`), and the write runs through the
+   * learner session's recorder; an `organization` trace is refused (`organization_scope`). Only a freeze stops a
+   * write, with a layer or without one (`frozen`).
+   *
    * @param args    - Memory add input (content, optional type/scope/tags).
    * @param context - Tool execution context used to resolve the scope ID.
    * @returns `{ traceId }` on success, or an error result.
@@ -167,6 +179,10 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
     context: ToolExecutionContext
   ): Promise<ToolExecutionResult<MemoryAddOutput>> {
     try {
+      // Only a freeze stops a memory write, and it is read before anything else.
+      const refusal = memoryWriteRefusal(context.sessionData);
+      if (refusal) return refusedMemoryWrite(this.name, refusal);
+
       const type = args.type ?? 'episodic';
       const scope = args.scope ?? 'user';
       if (!(MEMORY_TYPES as readonly string[]).includes(type)) {
@@ -176,36 +192,64 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
         return { success: false, error: `scope must be one of: ${MEMORY_SCOPES.join(', ')}` };
       }
 
-      const now = Date.now();
-      const traceId = `mt_${uuid()}`;
+      // With the turn's scope ids on the call, the trace goes under the turn's own scope and the write through the
+      // session's recorder; without them, under the context's ids, as before.
+      const turn = memoryToolTurnOf(context);
+      if (turn && scope === 'organization') return refusedMemoryWrite(this.name, 'organization_scope');
       const scopeId = resolveMemoryToolScopeId(scope, context);
+      if (turn && !scopeId) return refusedMemoryWrite(this.name, 'no_thread');
+      if (turn && !turn.record) return refusedMemoryWrite(this.name, 'no_recorder');
+
+      const now = Date.now();
+      // The id is made before the write, so a recorded write's pending row names the trace it creates.
+      const traceId = `mt_${uuid()}`;
       const tags = JSON.stringify(args.tags ?? []);
       const metadata = JSON.stringify(
         buildInitialTraceMetadata(
-          {},
+          turn?.turnUserId ? { turnUserId: turn.turnUserId } : {},
           {
             contentHash: await sha256Hex(args.content),
             ...(scopeId ? { scopeId } : {}),
           }
         )
       );
+      const insert = async (): Promise<string> => {
+        await this.brain.transaction(async (trx) => {
+          await trx.run(
+            `INSERT INTO memory_traces
+               (brain_id, id, type, scope, content, embedding, strength, created_at,
+                last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
+             VALUES (?, ?, ?, ?, ?, NULL, 1.0, ?, NULL, 0, ?, '{}', ?, 0, ?)`,
+            [this.brain.brainId, traceId, type, scope, args.content, now, tags, metadata, scopeId ?? ''],
+          );
 
-      await this.brain.transaction(async (trx) => {
-        await trx.run(
-          `INSERT INTO memory_traces
-             (brain_id, id, type, scope, content, embedding, strength, created_at,
-              last_accessed, retrieval_count, tags, emotions, metadata, deleted, scope_id)
-           VALUES (?, ?, ?, ?, ?, NULL, 1.0, ?, NULL, 0, ?, '{}', ?, 0, ?)`,
-          [this.brain.brainId, traceId, type, scope, args.content, now, tags, metadata, scopeId ?? ''],
-        );
+          await trx.run(
+            this.brain.features.fts.syncInsert('memory_traces_fts', '(SELECT rowid FROM memory_traces WHERE id = ?)', ['content', 'tags']),
+            [traceId, args.content, tags],
+          );
+        });
+        return traceId;
+      };
 
-        await trx.run(
-          this.brain.features.fts.syncInsert('memory_traces_fts', '(SELECT rowid FROM memory_traces WHERE id = ?)', ['content', 'tags']),
-          [traceId, args.content, tags],
-        );
-      });
-
-      return { success: true, output: { traceId } };
+      if (!turn?.record) {
+        await insert();
+        return { success: true, output: { traceId } };
+      }
+      return await recordToolWrite(
+        this.name,
+        turn.record,
+        {
+          kind: 'memory_write',
+          actor: `tool:${this.name}`,
+          subject: traceId,
+          before: null,
+          after: { created: [traceId], changed: [], deleted: [] },
+          brainId: this.brain.brainId,
+          apply: insert,
+          undo: (_written, reason) => undoToolWrite(this.brain, this.writeBack, { created: [traceId], before: [] }, reason),
+        },
+        (written) => ({ traceId: written }),
+      );
     } catch (err) {
       return {
         success: false,

@@ -11,8 +11,19 @@
  */
 
 import type { ITool, ToolExecutionResult, ToolExecutionContext, JSONSchemaObject } from '../../../../core/tools/ITool.js';
+import { memoryWriteRefusal } from '../../../learning/toolContext.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
 import { parseTraceMetadata, sha256Hex } from '../../retrieval/store/tracePersistence.js';
+import {
+  reachTraces,
+  recordToolWrite,
+  refusedMemoryWrite,
+  stillAsRead,
+  TraceMovedError,
+  undoToolWrite,
+  type MemoryToolWriteBack,
+} from './learningWrite.js';
+import { memoryToolTurnOf, type MemoryToolTurn } from './scopeContext.js';
 
 // ---------------------------------------------------------------------------
 // Input / Output types
@@ -106,8 +117,13 @@ export class MemoryUpdateTool implements ITool<MemoryUpdateInput, MemoryUpdateOu
 
   /**
    * @param brain - The agent's shared SQLite brain database connection.
+   * @param writeBack - The facade that made the tool (`Memory.createTools()`), through which a write a learning layer
+   *   does not keep is taken back. Without it the tool restores the row itself.
    */
-  constructor(private readonly brain: Brain) {}
+  constructor(
+    private readonly brain: Brain,
+    private readonly writeBack?: MemoryToolWriteBack,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // execute
@@ -127,21 +143,31 @@ export class MemoryUpdateTool implements ITool<MemoryUpdateInput, MemoryUpdateOu
    *
    * A trace that does not exist or has `deleted = 1` returns `{ updated: false }`.
    *
-   * @param args     - Update input (traceId, optional content/tags).
-   * @param _context - Tool execution context (not used by this tool).
+   * @param args    - Update input (traceId, optional content/tags).
+   * @param context - Tool execution context; where it carries the turn's scope ids, the call reaches only a live trace
+   *   of the turn's own scopes that the turn's own user filed (another scope's reads as not found, another user's is
+   *   refused, `other_user`), and the write runs through the learner session's recorder, writing only while the trace
+   *   holds what was read (`conflict` otherwise). Only a freeze stops a write, with a layer or without one (`frozen`).
    * @returns `{ updated }` status, or an error result.
    */
   async execute(
     args: MemoryUpdateInput,
-    _context: ToolExecutionContext,
+    context: ToolExecutionContext,
   ): Promise<ToolExecutionResult<MemoryUpdateOutput>> {
     try {
+      // Only a freeze stops a memory write, and it is read before anything else.
+      const refusal = memoryWriteRefusal(context.sessionData);
+      if (refusal) return refusedMemoryWrite(this.name, refusal);
+
       const { traceId, content, tags } = args;
 
       // Nothing to update — return false without any DB work.
       if (content === undefined && tags === undefined) {
         return { success: true, output: { updated: false } };
       }
+
+      const turn = memoryToolTurnOf(context);
+      if (turn) return await this.updateForTurn(turn, traceId, content, tags);
 
       const brainId = this.brain.brainId;
       const current = await this.brain.get<{ content: string; tags: string; metadata: string }>(
@@ -191,5 +217,58 @@ export class MemoryUpdateTool implements ITool<MemoryUpdateInput, MemoryUpdateOu
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  /**
+   * The update where the turn's scope ids are on the call: a live trace of the turn's own scopes that its own user
+   * filed, through the learner session's recorder, written only while it holds the content and tags it was read with.
+   */
+  private async updateForTurn(
+    turn: MemoryToolTurn,
+    traceId: string,
+    content: string | undefined,
+    tags: string[] | undefined,
+  ): Promise<ToolExecutionResult<MemoryUpdateOutput>> {
+    if (!turn.record) return refusedMemoryWrite(this.name, 'no_recorder');
+    const { snapshots, otherUser } = await reachTraces(this.brain, [traceId], turn);
+    const before = snapshots[0];
+    if (!before) {
+      return otherUser ? refusedMemoryWrite(this.name, 'other_user') : { success: true, output: { updated: false } };
+    }
+
+    const nextContent = content ?? before.content;
+    const nextTags = tags !== undefined ? JSON.stringify(tags) : before.tags;
+    const nextMetadata = parseTraceMetadata(before.metadata);
+    if (content !== undefined) {
+      nextMetadata.content_hash = await sha256Hex(nextContent);
+      delete nextMetadata.import_hash;
+    }
+    const unchanged = stillAsRead(before);
+    const sql = `UPDATE memory_traces
+         SET content = ?, tags = ?, metadata = ?${content !== undefined ? ', embedding = NULL' : ''}
+         WHERE brain_id = ? AND id = ?${unchanged.sql}`;
+    const brainId = this.brain.brainId;
+
+    return recordToolWrite(
+      this.name,
+      turn.record,
+      {
+        kind: 'memory_write',
+        actor: `tool:${this.name}`,
+        subject: traceId,
+        before: { traces: [before] },
+        after: { created: [], changed: [{ id: traceId, content: nextContent }], deleted: [] },
+        brainId,
+        apply: () =>
+          this.brain.transaction(async (trx) => {
+            const info = await trx.run(sql, [nextContent, nextTags, JSON.stringify(nextMetadata), brainId, traceId, ...unchanged.params]);
+            if (info.changes === 0) throw new TraceMovedError(traceId);
+            const rebuild = this.brain.fullTextRebuild();
+            await trx.run(rebuild.sql, rebuild.params);
+          }),
+        undo: (_done, reason) => undoToolWrite(this.brain, this.writeBack, { created: [], before: [before] }, reason),
+      },
+      () => ({ updated: true }),
+    );
   }
 }

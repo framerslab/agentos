@@ -836,7 +836,9 @@ export class Memory {
    * Soft-delete a memory trace by setting `deleted = 1`.
    *
    * The trace remains in the database for audit/recovery purposes but is
-   * excluded from all recall queries and health reports.
+   * excluded from all recall queries and health reports. Its knowledge-graph
+   * copy goes ({@link deleteGraphCopies}), so its words do not stay in the
+   * graph.
    *
    * @param traceId - The ID of the trace to forget.
    */
@@ -847,6 +849,27 @@ export class Memory {
       'UPDATE memory_traces SET deleted = 1 WHERE brain_id = ? AND id = ?',
       [this._brain.brainId, traceId],
     );
+    await this.deleteGraphCopies([traceId]);
+  }
+
+  /**
+   * Deletes the knowledge-graph copies of the given traces and leaves the traces: the episodic record a memory
+   * manager on this facade's Brain writes of each trace it stores (`SqlKnowledgeGraph.recordMemory`). A soft delete
+   * calls it ({@link forget}, and the memory tools' `memory_delete` and `memory_merge`), so a deleted trace's words do
+   * not stay in the graph; a trace a revert brings back needs no copy, since no recall reads one. Best-effort: a graph
+   * that cannot be reached leaves its copies, which a later delete by trace id or by scope finds.
+   *
+   * @returns How many copies it deleted.
+   */
+  async deleteGraphCopies(traceIds: readonly string[]): Promise<number> {
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    if (ids.length === 0) return 0;
+    try {
+      return await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+    } catch {
+      return 0;
+    }
   }
 
   /** The id of the brain this facade reads and writes; a ledger row names it for the writes it records. */
@@ -1649,15 +1672,23 @@ export class Memory {
    * }
    * ```
    *
+   * Where a learning layer puts a turn's scope ids on a call, the tools file
+   * and read under them and record each write in the layer's ledger, and
+   * `memory_reflect` refuses (`withdrawn`); a host that registers the tools
+   * itself leaves `memory_reflect` out (`includeReflect: false`).
+   *
    * When self-improvement is disabled, `memory_reflect` is omitted because
    * there is no backing {@link ConsolidationLoop} instance.
    */
   createTools(options?: { includeReflect?: boolean }): ITool[] {
+    // The four tools that write delete a trace's knowledge-graph copy with it, and take back a write a learning layer
+    // does not keep, through this facade, so a trace's memory-graph node, index entry and knowledge-graph copy go with
+    // its row.
     const tools: ITool[] = [
-      new MemoryAddTool(this._brain),
-      new MemoryUpdateTool(this._brain),
-      new MemoryDeleteTool(this._brain),
-      new MemoryMergeTool(this._brain),
+      new MemoryAddTool(this._brain, this),
+      new MemoryUpdateTool(this._brain, this),
+      new MemoryDeleteTool(this._brain, this),
+      new MemoryMergeTool(this._brain, this),
       new MemorySearchTool(this._brain),
     ];
 

@@ -18,9 +18,11 @@
  */
 
 import type { ITool, ToolExecutionResult, ToolExecutionContext, JSONSchemaObject } from '../../../../core/tools/ITool.js';
+import { memoryWriteRefusal, readToolLearningContext } from '../../../learning/toolContext.js';
 import type { ConsolidationLoop } from '../../pipeline/consolidation/ConsolidationLoop.js';
 import type { ConsolidationResult } from '../facade/types.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
+import { refusedMemoryWrite } from './learningWrite.js';
 
 // ---------------------------------------------------------------------------
 // Input type
@@ -114,14 +116,19 @@ export class MemoryReflectTool implements ITool<MemoryReflectInput, Consolidatio
    * {@link ConsolidationLoop}), `run()` returns immediately with zero counts —
    * this is surfaced as a successful result with all-zero statistics.
    *
-   * @param _args    - Reflect input (optional topic hint, currently unused).
-   * @param _context - Tool execution context (not used by this tool).
+   * @param _args   - Reflect input (optional topic hint, currently unused).
+   * @param context - Tool execution context: a freeze refuses the call (`frozen`), and so does a call that carries
+   *   `sessionData.learning` (`withdrawn`), since consolidation merges and derives across every scope of the brain.
    * @returns {@link ConsolidationResult} on success, or an error result.
    */
   async execute(
     _args: MemoryReflectInput,
-    _context: ToolExecutionContext,
+    context: ToolExecutionContext,
   ): Promise<ToolExecutionResult<ConsolidationResult>> {
+    // Only a freeze stops a memory write; consolidation then does not run where a learning layer exists at all.
+    const refusal = memoryWriteRefusal(context.sessionData);
+    if (refusal) return refusedMemoryWrite(this.name, refusal);
+    if (readToolLearningContext(context.sessionData)) return refusedMemoryWrite(this.name, 'withdrawn');
     try {
       const result = await this.consolidation.run();
       return { success: true, output: result };
