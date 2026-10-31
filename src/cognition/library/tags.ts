@@ -36,8 +36,22 @@ const TAG_INPUT = /^(?:[\p{L}\p{Nd}]\p{M}*)+(?:-(?:[\p{L}\p{Nd}]\p{M}*)+)*$/u;
 /** A stored label that is an alias: runs separated by white space, underscores or dash punctuation alone. */
 const ALIAS_LABEL = /^(?:[\p{L}\p{Nd}]\p{M}*)+(?:[\s_\p{Pd}]+(?:[\p{L}\p{Nd}]\p{M}*)+)*$/u;
 
-/** White space, underscores and dash punctuation at either end of a label: separators there too. */
-const LABEL_ENDS = /^[\s_\p{Pd}]+|[\s_\p{Pd}]+$/gu;
+/** One separator of a stored label: white space, the underscore or dash punctuation. */
+const SEPARATOR = /^[\s_\p{Pd}]$/u;
+
+/**
+ * A label without the separators at either end, which are separators there too: scanned by code point once from each
+ * end, so a long run of separators inside the label is passed over once. An alternative anchored at the end of the
+ * text is tried again from each separator of such a run, and grows with the square of its length.
+ */
+function withoutEnds(label: string): string {
+  const points = Array.from(label);
+  let start = 0;
+  let end = points.length;
+  while (start < end && SEPARATOR.test(points[start] ?? '')) start += 1;
+  while (end > start && SEPARATOR.test(points[end - 1] ?? '')) end -= 1;
+  return points.slice(start, end).join('');
+}
 
 /** A text's length in code points. */
 function codePoints(text: string): number {
@@ -119,7 +133,7 @@ export interface LegacyTagClass {
  */
 export function classifyLegacyTag(label: string): LegacyTagClass {
   const key = tagKey(label);
-  return { state: key !== null && ALIAS_LABEL.test(folded(label).replace(LABEL_ENDS, '')) ? 'alias' : 'unresolved', key };
+  return { state: key !== null && ALIAS_LABEL.test(withoutEnds(folded(label))) ? 'alias' : 'unresolved', key };
 }
 
 /** Compares two texts code point by code point, the order every tie falls back to. */
