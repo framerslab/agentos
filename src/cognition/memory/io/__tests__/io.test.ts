@@ -1115,6 +1115,18 @@ describe('ChatGptImporter', () => {
     expect(await brain.all('SELECT id FROM conversations WHERE brain_id = ?', [brain.brainId])).toHaveLength(1);
   });
 
+  it('stores each pair again at each import with deduplication off', async () => {
+    const dir = tempDir();
+    const jsonPath = path.join(dir, 'conversations.json');
+    fs.writeFileSync(jsonPath, JSON.stringify(buildMockConversations()), 'utf8');
+    const brain = await openBrain();
+    const importer = new ChatGptImporter(brain);
+    expect(await importer.import(jsonPath, { dedup: false })).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    expect(await importer.import(jsonPath, { dedup: false })).toMatchObject({ imported: 1, skipped: 0, errors: [] });
+    expect(await brain.all('SELECT id FROM memory_traces WHERE brain_id = ?', [brain.brainId])).toHaveLength(2);
+    expect(await brain.all('SELECT id FROM conversations WHERE brain_id = ?', [brain.brainId])).toHaveLength(1);
+  });
+
   it('takes no row it did not name: two conversations of one title and creation time keep apart, and the rows of that title and time stay as they were', async () => {
     const dir = tempDir();
     const jsonPath = path.join(dir, 'conversations.json');

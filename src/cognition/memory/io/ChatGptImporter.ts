@@ -7,17 +7,19 @@
  * ## Import strategy
  *
  * For each conversation object in `conversations.json`:
- * 1. The conversation has one row in the `conversations` table, which a later
- *    import of it finds again. A conversation the export names by an id
- *    (`conversation_id`, else `id`) is found by that id, which its row's
- *    metadata records as `chatgpt_id`, through a rename and without a
- *    `create_time`. A conversation the export names by no id, and a row an
- *    earlier release wrote, are found by the title and creation time. When
- *    the export's update time is later than the row's, the row takes it and
- *    the conversation's title.
+ * 1. The conversation has one row in the `conversations` table, named after
+ *    it: `cv_chatgpt_` and the SHA-256 of the export's id for it
+ *    (`conversation_id`, else `id`), else of its title and creation time. A
+ *    later import of the conversation finds the row by that name, through a
+ *    rename and without a `create_time` when the export names it by an id; a
+ *    conversation the export names by neither gets a row of its own at each
+ *    import. When the export's update time is later than the row's, the row
+ *    takes it and the conversation's title.
  * 2. Every user/assistant message pair is encoded as an **episodic memory trace**
  *    whose content is `"[user]: {user_text}\n[assistant]: {assistant_text}"`.
  *    This preserves conversational context in a single retrievable unit.
+ *    With deduplication on (the default), the trace is named after the brain
+ *    and its text, `mt_chatgpt_` and their SHA-256.
  * 3. System messages and tool messages are skipped (they are not episodic memories).
  *
  * ## ChatGPT export format
@@ -48,7 +50,6 @@ import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
 import { duplicateTraceCondition, duplicateTraceParams } from './importScope.js';
-import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
 
 // ---------------------------------------------------------------------------
 // ChatGPT export format types
@@ -100,9 +101,27 @@ function exportedConversationId(convo: ChatGptConversation): string | undefined 
   return undefined;
 }
 
-/** `text` with the `LIKE` wildcards and the escape character escaped by a backslash. */
-function escapeLike(text: string): string {
-  return text.replace(/[\\%_]/g, (character) => `\\${character}`);
+/**
+ * The name of a conversation's `conversations` row: `cv_chatgpt_` and the SHA-256 of what names the
+ * conversation, the export's id for it, else its title and creation time. Undefined for a conversation the
+ * export names by neither, an id or a creation time.
+ */
+async function conversationRowName(
+  exportId: string | undefined,
+  title: string,
+  exportedCreatedAt: number | undefined,
+): Promise<string | undefined> {
+  if (exportId !== undefined) return `cv_chatgpt_${await sha256(JSON.stringify(['id', exportId]))}`;
+  if (exportedCreatedAt === undefined) return undefined;
+  return `cv_chatgpt_${await sha256(JSON.stringify(['title', title, exportedCreatedAt]))}`;
+}
+
+/**
+ * An insert of one row into `table` that does nothing when the brain holds a row of its primary key
+ * `(brain_id, id)`, on SQLite and PostgreSQL; any other failure, such as a missing value, still fails it.
+ */
+function insertUnlessHeld(table: string, columns: string[], values: string[]): string {
+  return `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${values.join(', ')}) ON CONFLICT (brain_id, id) DO NOTHING`;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,10 +202,10 @@ export class ChatGptImporter {
   /**
    * Import a single ChatGPT conversation object.
    *
-   * Finds the conversation's `conversations` row (see `_conversationRow`), or
-   * creates it, and then iterates through the message mapping in tree order
-   * (BFS), pairing adjacent user/assistant messages into episodic memory
-   * traces whose metadata names that row.
+   * Writes the conversation's `conversations` row, or finds the one it has
+   * (see `_conversationRow`), and then iterates through the message mapping in
+   * tree order (BFS), pairing adjacent user/assistant messages into episodic
+   * memory traces whose metadata names that row.
    *
    * @param convo  - Raw ChatGPT conversation object.
    * @param result - Mutable result accumulator.
@@ -202,7 +221,13 @@ export class ChatGptImporter {
 
     let conversationId: string;
     try {
-      conversationId = await this._conversationRow(exportedConversationId(convo), title, createdAt, updatedAt);
+      conversationId = await this._conversationRow(
+        exportedConversationId(convo),
+        title,
+        convo.create_time ? createdAt : undefined,
+        createdAt,
+        updatedAt,
+      );
     } catch (err) {
       result.errors.push(`Conversation row error for "${title}": ${String(err)}`);
       return;
@@ -286,76 +311,38 @@ export class ChatGptImporter {
   }
 
   /**
-   * The id of a conversation's `conversations` row, the one an earlier import
-   * of it wrote, else a new one. A conversation the export names by an id is
-   * found by that id, which its row's metadata records as `chatgpt_id`, so a
-   * rename between two exports, or an export that gives no `create_time`,
-   * keeps the row. Otherwise the row is found by the title and creation time:
-   * a conversation the export names by no id, and a row an earlier release
-   * wrote with no `chatgpt_id`, which records the export's id once an import
-   * of a conversation the export names by one finds it. A row that records
-   * another id is another conversation's. The row a later import finds takes
-   * the export's update time and the conversation's title when that update
-   * time is later than the row's. The metadata is read here, never in SQL, so
-   * a row whose metadata is not JSON (a JSON import writes the file's text) is
-   * read as one that records no id.
+   * The id of a conversation's `conversations` row. A conversation the export
+   * names by an id, or by no id but with a `create_time`, has a row named after
+   * it (`conversationRowName`), which a later import of it finds by that name:
+   * through a rename and without a `create_time` when the export names it by
+   * an id. The row is written with an insert that does nothing when the brain
+   * holds a row of that name, so two imports that write one conversation's row
+   * at the same time, in one process or in two, write one row and both file
+   * under it. A row of any other name is never taken. A conversation the export
+   * names by neither has nothing to find it by: each import writes it a row of
+   * its own. The row then takes the conversation's title and the export's
+   * update time when that update time is later than the row's. The row's
+   * metadata records the export's id as `chatgpt_id`.
    *
-   * @param exportId  - The export's id for the conversation, when it names one.
-   * @param title     - The conversation's title.
-   * @param createdAt - Its creation time, in ms.
-   * @param updatedAt - Its update time, in ms.
+   * @param exportId          - The export's id for the conversation, when it names one.
+   * @param title             - The conversation's title.
+   * @param exportedCreatedAt - Its creation time in ms, when the export gives one.
+   * @param createdAt         - The creation time a new row takes, in ms.
+   * @param updatedAt         - Its update time, in ms.
    * @returns The row's id.
    */
   private async _conversationRow(
     exportId: string | undefined,
     title: string,
+    exportedCreatedAt: number | undefined,
     createdAt: number,
     updatedAt: number,
   ): Promise<string> {
     const brainId = this.brain.brainId;
-    type Row = { id: string; metadata: Record<string, unknown> };
-    const read = (rows: Array<{ id: string; metadata: string | null }>): Row[] =>
-      rows.map((row) => ({ id: row.id, metadata: parseTraceMetadata(row.metadata) }));
-
-    let found: Row | undefined;
-    if (exportId !== undefined) {
-      // The pattern finds the rows whose metadata text holds the id as the import writes it; the parse decides.
-      const recorded = `"chatgpt_id":${JSON.stringify(exportId)}`;
-      const rows = await this.brain.all<{ id: string; metadata: string | null }>(
-        "SELECT id, metadata FROM conversations WHERE brain_id = ? AND metadata LIKE ? ESCAPE '\\' ORDER BY id",
-        [brainId, `%${escapeLike(recorded)}%`],
-      );
-      found = read(rows).find((row) => row.metadata.chatgpt_id === exportId);
-    }
-    if (!found) {
-      const rows = await this.brain.all<{ id: string; metadata: string | null }>(
-        'SELECT id, metadata FROM conversations WHERE brain_id = ? AND title = ? AND created_at = ? ORDER BY id',
-        [brainId, title, createdAt],
-      );
-      found = read(rows).find(
-        (row) => exportId === undefined || row.metadata.chatgpt_id === undefined || row.metadata.chatgpt_id === exportId,
-      );
-      if (found && exportId !== undefined && found.metadata.chatgpt_id === undefined) {
-        await this.brain.run('UPDATE conversations SET metadata = ? WHERE brain_id = ? AND id = ?', [
-          JSON.stringify({ ...found.metadata, chatgpt_id: exportId }),
-          brainId,
-          found.id,
-        ]);
-      }
-    }
-
-    if (found) {
-      await this.brain.run(
-        'UPDATE conversations SET updated_at = ?, title = ? WHERE brain_id = ? AND id = ? AND updated_at < ?',
-        [updatedAt, title, brainId, found.id, updatedAt],
-      );
-      return found.id;
-    }
-
-    const conversationId = `cv_${uuidv4()}`;
-    const { dialect } = this.brain.features;
+    const named = await conversationRowName(exportId, title, exportedCreatedAt);
+    const conversationId = named ?? `cv_${uuidv4()}`;
     await this.brain.run(
-      dialect.insertOrIgnore(
+      insertUnlessHeld(
         'conversations',
         ['brain_id', 'id', 'title', 'created_at', 'updated_at', 'metadata'],
         ['?', '?', '?', '?', '?', '?'],
@@ -369,6 +356,12 @@ export class ChatGptImporter {
         JSON.stringify(exportId === undefined ? { source: 'chatgpt_export' } : { source: 'chatgpt_export', chatgpt_id: exportId }),
       ],
     );
+    if (named !== undefined) {
+      await this.brain.run(
+        'UPDATE conversations SET updated_at = ?, title = ? WHERE brain_id = ? AND id = ? AND updated_at < ?',
+        [updatedAt, title, brainId, conversationId, updatedAt],
+      );
+    }
     return conversationId;
   }
 
@@ -381,7 +374,12 @@ export class ChatGptImporter {
    * duplicate, whichever writer stored it. `import` first files the traces an
    * older release wrote with `scope_id` `''` under the scope id their metadata
    * names (`fillScopeIds`), so another scope id's trace is not taken for a
-   * duplicate.
+   * duplicate. With deduplication on, the trace is named after the brain and
+   * the pair's text, and written with an insert that does nothing when the
+   * brain holds a trace of that name, so two imports that store one pair at the
+   * same time, each after finding no duplicate of it, store one trace: the
+   * import whose insert wrote nothing counts the pair as a duplicate. With it
+   * off, each import stores the pair again, under a random id.
    *
    * @param content        - The `[user]:...\n[assistant]:...` content string.
    * @param createdAt      - Unix timestamp (ms) of the user message.
@@ -396,9 +394,10 @@ export class ChatGptImporter {
     options?: Pick<ImportOptions, 'dedup'>,
   ): Promise<void> {
     const hash = await sha256(content);
+    const dedup = options?.dedup ?? true;
 
     // Dedup check.
-    if (options?.dedup ?? true) {
+    if (dedup) {
       const existing = await this.brain.get<{ id: string }>(
         `SELECT id FROM memory_traces
           WHERE brain_id = ? AND scope = 'user' AND scope_id = ''
@@ -414,14 +413,18 @@ export class ChatGptImporter {
     }
 
     try {
-      await this.brain.run(
-        `INSERT INTO memory_traces
-             (brain_id, id, type, scope, content, embedding, strength, created_at, last_accessed,
-              retrieval_count, tags, emotions, metadata, deleted, scope_id)
-           VALUES (?, ?, 'episodic', 'user', ?, NULL, 1.0, ?, NULL, 0, '[]', '{}', ?, 0, '')`,
+      const written = await this.brain.run(
+        insertUnlessHeld(
+          'memory_traces',
+          [
+            'brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed',
+            'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted', 'scope_id',
+          ],
+          ['?', '?', "'episodic'", "'user'", '?', 'NULL', '1.0', '?', 'NULL', '0', "'[]'", "'{}'", '?', '0', "''"],
+        ),
         [
           this.brain.brainId,
-          `mt_${uuidv4()}`,
+          dedup ? `mt_chatgpt_${await sha256(JSON.stringify([this.brain.brainId, content]))}` : `mt_${uuidv4()}`,
           content,
           createdAt,
           JSON.stringify({
@@ -432,7 +435,8 @@ export class ChatGptImporter {
         ],
       );
 
-      result.imported++;
+      if (written.changes > 0) result.imported++;
+      else result.skipped++;
     } catch (err) {
       result.errors.push(`Trace insert error: ${String(err)}`);
     }
