@@ -37,8 +37,16 @@
  * a plain id the record would read as another, naming the record, and on Postgres waits for a re-file under way. The
  * RAG `MigrationEngine` (the package's `cognition/rag` path) runs the same handshake per brain before it copies any
  * table, and fills `scope_id` from each row's metadata for a source from before the column.
+ *
+ * The learning store (the package's `cognition/learning/store/index` path): the in-process store and the SQL store over
+ * a host's storage adapter (a SQLite file, and a schema of its own on CI's Postgres) keep one contract a host sees the
+ * same on each. A learner's ledger rows read back in order, a chain's head moves only by compare-and-swap, a trait row
+ * only from the version it read, a transaction that throws takes back every write and no read sees one, and a user's
+ * rows in one namespace go with their tombstone kept. The SQL store makes its ten tables at its first call, keeps them
+ * across a restart, leaves the host's adapter open, orders text by code unit on any collation, and takes a column a
+ * later release adds into the tables an earlier one made.
  */
-import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -81,7 +89,25 @@ import {
 } from '@framers/agentos/cognition/memory/retrieval/store/scopeIdForm';
 import { JsonExporter, MarkdownExporter, ObsidianImporter } from '@framers/agentos/cognition/memory';
 import { MigrationEngine } from '@framers/agentos/cognition/rag';
-import { createPostgresAdapter } from '@framers/sql-storage-adapter';
+import {
+  InMemoryLearningStore,
+  LEARNING_SCHEMA_DDL,
+  LEARNING_TABLES,
+  SqlLearningStore,
+  ensureLearningSchema,
+  type ChainHead,
+  type FreezeRow,
+  type LearningColumnAddition,
+  type LearningStore,
+  type LearningStoreTx,
+  type LearningTable,
+  type SessionRow,
+  type SqlLearningStoreOptions,
+  type StoredLedgerRow,
+  type StoredTraitRow,
+} from '@framers/agentos/cognition/learning/store/index';
+import type { LearningKind, LedgerVerdict } from '@framers/agentos/cognition/learning/types';
+import { createPostgresAdapter, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import Database from 'better-sqlite3';
 import { reply, script } from './helpers/stubProviders';
 
@@ -2852,6 +2878,622 @@ describe.skipIf(!POSTGRES_URL)("an import or a migration keeps a Postgres Brain'
       expect(await new ObsidianImporter(brain).import(vault)).toEqual({ imported: 0, skipped: 1, errors: [] });
     } finally {
       await cleanUp(brainId);
+    }
+  });
+});
+
+/** When the learning store's rows in these cases were written. */
+const LEARNED_AT = '2026-10-31T08:00:00.000Z';
+const LATER = '2026-10-31T09:00:00.000Z';
+const LEARNER_DOC_TABLES = ['outcomes', 'lessons', 'skills'] as const;
+
+/** A ledger row as the ledger writes one: by default a pending candidate of learner `42` of tenant `A` on agent `tutor`. */
+function ledgerRow(over: Partial<StoredLedgerRow> & Pick<StoredLedgerRow, 'id' | 'chainKey' | 'seq'>): StoredLedgerRow {
+  return {
+    rowType: 'candidate',
+    candidateId: over.id,
+    namespace: 'A',
+    agentKey: 'tutor',
+    userId: '42',
+    turnUserId: null,
+    sessionId: 's-1',
+    kind: 'memory_write',
+    subject: 't-1',
+    verdict: 'pending',
+    body: JSON.stringify({ id: over.id }),
+    prevHash: '0'.repeat(64),
+    hash: `hash-${over.id}`,
+    stateDigest: null,
+    createdAt: LEARNED_AT,
+    ...over,
+  };
+}
+
+/** A chain's head at one of its rows. */
+const headAt = (row: StoredLedgerRow): ChainHead => ({
+  chainKey: row.chainKey,
+  namespace: row.namespace,
+  agentKey: row.agentKey,
+  userId: row.userId,
+  lastId: row.id,
+  lastHash: row.hash,
+  seq: row.seq,
+  forgotten: false,
+});
+
+const traitRowOf = (version: number, state: string, userId = '42', namespace = 'A'): StoredTraitRow => ({
+  namespace,
+  agentKey: 'tutor',
+  userId,
+  personaId: 'tutor',
+  state,
+  version,
+  updatedAt: LEARNED_AT,
+});
+
+const freezeOf = (scopeKey: string, mode: FreezeRow['mode'], setBy = 'operator:ops', userId: string | null = null): FreezeRow => ({
+  scopeKey,
+  mode,
+  namespace: 'A',
+  agentKey: userId === null ? null : 'tutor',
+  userId,
+  setBy,
+  createdAt: LEARNED_AT,
+});
+
+const sessionOf = (over: Partial<SessionRow> & Pick<SessionRow, 'sessionId'>): SessionRow => ({
+  namespace: 'A',
+  agentKey: 'tutor',
+  userId: '42',
+  kind: 'learner',
+  personaId: 'tutor',
+  conversationIds: ['c-1'],
+  brainIds: ['qa'],
+  startedAt: LEARNED_AT,
+  version: 1,
+  ...over,
+});
+
+/** A learning store as a case opens it, with what writes the learner documents a host's tables hold, where the store has tables. */
+interface OpenedLearningStore {
+  store: LearningStore;
+  addDoc?: (table: (typeof LEARNER_DOC_TABLES)[number], id: string, userId: string, namespace: string, createdAt?: string) => Promise<void>;
+  close: () => Promise<void>;
+}
+
+/** A learner document row written straight into a SQL store's table, as a later release's writer files one. */
+const docWriter =
+  (adapter: StorageAdapter): NonNullable<OpenedLearningStore['addDoc']> =>
+  async (table, id, userId, namespace, createdAt = LEARNED_AT) => {
+    await adapter.run(
+      `INSERT INTO agentos_learning_${table} (id, namespace, agent_key, user_id, body, version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, namespace, 'tutor', userId, JSON.stringify({ id }), 1, createdAt, createdAt],
+    );
+  };
+
+/** A SQLite database file of its own, removed after the test. */
+function learningFile(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-learning-'));
+  dirs.push(dir);
+  return path.join(dir, 'learning.sqlite');
+}
+
+/** The host's SQLite database, opened through the storage library a host uses. */
+const openSqliteAt = (file: string): Promise<StorageAdapter> => resolveStorageAdapter({ filePath: file, priority: ['better-sqlite3'], quiet: true });
+
+/** What every learning store does, as a host calls it, over the stores `open` makes. */
+function learningStoreCases(name: string, open: () => Promise<OpenedLearningStore>): void {
+  describe(name, () => {
+    const opened: OpenedLearningStore[] = [];
+    const fresh = async (): Promise<OpenedLearningStore> => {
+      const made = await open();
+      opened.push(made);
+      return made;
+    };
+    afterEach(async () => {
+      for (const made of opened.splice(0)) await made.close();
+    });
+
+    it("keeps a learner's chain: its rows read back in order, its head moved only from the place it is at, and a row at a taken id or place refused without naming the chain", async () => {
+      const { store } = await fresh();
+      const chain = 'u|A|tutor|42';
+      const candidate = ledgerRow({ id: 'c-1', chainKey: chain, seq: 1 });
+      const verdict = ledgerRow({ id: 'v-1', chainKey: chain, seq: 2, rowType: 'verdict', candidateId: 'c-1', verdict: 'kept', prevHash: 'hash-c-1' });
+      // The learner's row on another of its chains, and the rows of others: another learner of the agent, the agent's
+      // own chain (a visitor's turn), the same user id in another tenant.
+      const persona = ledgerRow({ id: 'p-1', chainKey: 'p|A|tutor|42', seq: 1, kind: 'trait' });
+      const others = [
+        ledgerRow({ id: 'o-1', chainKey: 'u|A|tutor|7', seq: 1, userId: '7' }),
+        ledgerRow({ id: 'a-1', chainKey: 'a|A|tutor', seq: 1, userId: null, turnUserId: '42' }),
+        ledgerRow({ id: 'b-1', chainKey: 'u|B|tutor|42', seq: 1, namespace: 'B' }),
+      ];
+
+      await store.transaction(async (tx) => {
+        await tx.insertLedgerRow(candidate);
+        expect(await tx.insertHead(headAt(candidate))).toBe(true);
+      });
+      const moved = await store.transaction(async (tx) => {
+        await tx.insertLedgerRow(verdict);
+        return tx.advanceHead(chain, 1, { lastId: verdict.id, lastHash: verdict.hash, seq: 2 });
+      });
+      expect(moved).toBe(true);
+      for (const row of [persona, ...others]) await store.insertLedgerRow(row);
+
+      expect(await store.ledgerRow('c-1')).toEqual(candidate);
+      expect(await store.ledgerRow('no-such-row')).toBeUndefined();
+      expect(await store.chainRows(chain)).toEqual([candidate, verdict]);
+      expect(await store.candidateRows('c-1')).toEqual([candidate, verdict]);
+      expect((await store.learnerLedgerRows('A', 'tutor', '42')).map((row) => row.id)).toEqual(['p-1', 'c-1', 'v-1']);
+      expect(await store.head(chain)).toEqual(headAt(verdict));
+
+      expect(await store.advanceHead(chain, 1, { lastId: 'stale', lastHash: 'stale', seq: 2 })).toBe(false);
+      expect(await store.advanceHead('u|A|tutor|none', 0, { lastId: 'none', lastHash: 'none', seq: 1 })).toBe(false);
+      expect(await store.insertHead(headAt(candidate))).toBe(false);
+      expect(await store.head(chain)).toEqual(headAt(verdict));
+
+      for (const taken of [ledgerRow({ id: 'c-1', chainKey: chain, seq: 3 }), ledgerRow({ id: 'c-9', chainKey: chain, seq: 2 })]) {
+        const refusal = await store.insertLedgerRow(taken).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(refusal).toBeInstanceOf(Error);
+        expect((refusal as Error).message).not.toContain(chain);
+      }
+      expect(await store.chainRows(chain)).toEqual([candidate, verdict]);
+    });
+
+    it("updates a learner's trait row only from the version it read, and keeps the first of each freeze, ordered by scope and mode", async () => {
+      const { store } = await fresh();
+      expect(await store.insertTraitRow(traitRowOf(1, '{"current":{"openness":0.5}}'))).toBe(true);
+      expect(await store.insertTraitRow(traitRowOf(1, '{"current":{"openness":0.9}}'))).toBe(false);
+      expect(await store.updateTraitRow(traitRowOf(2, '{"current":{"openness":0.6}}'), 1)).toBe(true);
+      // A writer that read version 1 lost the race; a learner with no row has nothing to update.
+      expect(await store.updateTraitRow(traitRowOf(2, '{"current":{"openness":0.1}}'), 1)).toBe(false);
+      expect(await store.updateTraitRow(traitRowOf(1, '{}', '7'), 0)).toBe(false);
+      expect(await store.traitRow('A', 'tutor', '42')).toEqual(traitRowOf(2, '{"current":{"openness":0.6}}'));
+      expect(await store.traitRow('A', 'tutor', '7')).toBeUndefined();
+
+      await store.insertFreeze(freezeOf('learner|A|tutor|42', 'frozen', 'operator:ana', '42'));
+      await store.insertFreeze(freezeOf('learner|A|tutor|42', 'frozen', 'operator:bo', '42'));
+      await store.insertFreeze(freezeOf('all', 'off'));
+      await store.insertFreeze(freezeOf('all', 'frozen'));
+      await store.insertFreeze(freezeOf('agent|tutor', 'frozen'));
+      expect((await store.freezeRows()).map((row) => [row.scopeKey, row.mode, row.setBy])).toEqual([
+        ['agent|tutor', 'frozen', 'operator:ops'],
+        ['all', 'frozen', 'operator:ops'],
+        ['all', 'off', 'operator:ops'],
+        ['learner|A|tutor|42', 'frozen', 'operator:ana'],
+      ]);
+      expect(await store.deleteFreeze('all', 'off')).toBe(true);
+      expect(await store.deleteFreeze('all', 'off')).toBe(false);
+      expect((await store.freezeRows()).map((row) => `${row.scopeKey} ${row.mode}`)).toEqual([
+        'agent|tutor frozen',
+        'all frozen',
+        'learner|A|tutor|42 frozen',
+      ]);
+    });
+
+    it("keeps a session row's start when it is written again, and lists one user's sessions of both kinds, every agent's, in one namespace", async () => {
+      const { store } = await fresh();
+      await store.putSessionRow(sessionOf({ sessionId: 's-1' }));
+      await store.putSessionRow(sessionOf({ sessionId: 's-1', startedAt: LATER, conversationIds: ['c-1', 'c-2'], brainIds: ['qa', 'tools'], version: 2 }));
+      expect(await store.sessionRow('A', 'tutor', 's-1', '42', 'learner')).toEqual(
+        sessionOf({ sessionId: 's-1', conversationIds: ['c-1', 'c-2'], brainIds: ['qa', 'tools'], version: 2 }),
+      );
+      await store.putSessionRow(sessionOf({ sessionId: 's-1', kind: 'visitor', agentKey: 'coach' }));
+      await store.putSessionRow(sessionOf({ sessionId: 's-0' }));
+      await store.putSessionRow(sessionOf({ sessionId: 's-1', userId: '7' }));
+      await store.putSessionRow(sessionOf({ sessionId: 's-1', namespace: 'B' }));
+
+      expect((await store.sessionRowsOf('A', '42')).map((row) => [row.sessionId, row.kind, row.agentKey])).toEqual([
+        ['s-0', 'learner', 'tutor'],
+        ['s-1', 'learner', 'tutor'],
+        ['s-1', 'visitor', 'coach'],
+      ]);
+      expect(await store.sessionRow('A', 'tutor', 's-1', '42', 'visitor')).toBeUndefined();
+    });
+
+    it("forgets a user in one namespace: marks the user's heads, deletes every row of theirs and counts them, and keeps the tombstone and every other user's and tenant's rows", async () => {
+      const made = await fresh();
+      const { store } = made;
+      const chain = 'u|A|tutor|42';
+      const first = ledgerRow({ id: 'c-1', chainKey: chain, seq: 1 });
+      const second = ledgerRow({ id: 'v-1', chainKey: chain, seq: 2, rowType: 'verdict', candidateId: 'c-1', verdict: 'kept' });
+      // The user's turn on another learner's session, on the agent's chain: its row names the user as turnUserId.
+      const visit = ledgerRow({ id: 'a-1', chainKey: 'a|A|tutor', seq: 1, userId: null, turnUserId: '42' });
+      const otherUser = ledgerRow({ id: 'o-1', chainKey: 'u|A|tutor|7', seq: 1, userId: '7' });
+      const otherTenant = ledgerRow({ id: 'b-1', chainKey: 'u|B|tutor|42', seq: 1, namespace: 'B' });
+      for (const row of [first, second, visit, otherUser, otherTenant]) await store.insertLedgerRow(row);
+      for (const row of [second, visit, otherUser, otherTenant]) await store.insertHead(headAt(row));
+      await store.insertTraitRow(traitRowOf(1, '{}'));
+      await store.insertTraitRow(traitRowOf(1, '{}', '7'));
+      await store.insertTraitRow(traitRowOf(1, '{}', '42', 'B'));
+      await store.insertFreeze(freezeOf('learner|A|tutor|42', 'frozen', 'operator:ops', '42'));
+      await store.insertFreeze(freezeOf('learner|A|tutor|7', 'frozen', 'operator:ops', '7'));
+      await store.insertFreeze(freezeOf('all', 'frozen'));
+      await store.putSessionRow(sessionOf({ sessionId: 's-1' }));
+      await store.putSessionRow(sessionOf({ sessionId: 's-2', kind: 'visitor' }));
+      await store.putSessionRow(sessionOf({ sessionId: 's-1', userId: '7' }));
+      for (const table of LEARNER_DOC_TABLES) {
+        await made.addDoc?.(table, `${table}-42`, '42', 'A');
+        await made.addDoc?.(table, `${table}-7`, '7', 'A');
+        await made.addDoc?.(table, `${table}-42-b`, '42', 'B');
+      }
+      const docs = made.addDoc ? 1 : 0;
+
+      expect(await store.markHeadsForgotten('A', '42')).toBe(1);
+      expect(await store.head(chain)).toEqual({ ...headAt(second), forgotten: true });
+      expect(await store.advanceHead(chain, 2, { lastId: 'late', lastHash: 'late', seq: 3 })).toBe(false);
+      expect(await store.head('u|B|tutor|42')).toEqual(headAt(otherTenant));
+      await store.insertForgotten('tombstone-42', LATER);
+      await store.insertForgotten('tombstone-42', LATER);
+      expect(await store.isForgotten('tombstone-42')).toBe(true);
+      expect(await store.isForgotten('tombstone-7')).toBe(false);
+
+      expect(await store.deleteUserRows('A', '42')).toEqual({
+        ledger: 3,
+        heads: 1,
+        traits: 1,
+        outcomes: docs,
+        lessons: docs,
+        skills: docs,
+        sessions: 2,
+        freezes: 1,
+      });
+
+      expect(await store.learnerLedgerRows('A', 'tutor', '42')).toEqual([]);
+      expect(await store.ledgerRow('a-1')).toBeUndefined();
+      expect(await store.head(chain)).toBeUndefined();
+      expect(await store.traitRow('A', 'tutor', '42')).toBeUndefined();
+      expect(await store.sessionRowsOf('A', '42')).toEqual([]);
+      expect((await store.freezeRows()).map((row) => row.scopeKey)).toEqual(['all', 'learner|A|tutor|7']);
+      expect(await store.isForgotten('tombstone-42')).toBe(true);
+      expect((await store.learnerLedgerRows('A', 'tutor', '7')).map((row) => row.id)).toEqual(['o-1']);
+      expect((await store.learnerLedgerRows('B', 'tutor', '42')).map((row) => row.id)).toEqual(['b-1']);
+      expect(await store.head('a|A|tutor')).toEqual(headAt(visit));
+      expect(await store.traitRow('A', 'tutor', '7')).toEqual(traitRowOf(1, '{}', '7'));
+      expect(await store.traitRow('B', 'tutor', '42')).toEqual(traitRowOf(1, '{}', '42', 'B'));
+      expect((await store.sessionRowsOf('A', '7')).map((row) => row.sessionId)).toEqual(['s-1']);
+      for (const table of LEARNER_DOC_TABLES) {
+        expect(await store.learnerDocs(table, 'A', 'tutor', '42')).toEqual([]);
+        expect((await store.learnerDocs(table, 'A', 'tutor', '7')).map((doc) => doc.id)).toEqual(made.addDoc ? [`${table}-7`] : []);
+        expect((await store.learnerDocs(table, 'B', 'tutor', '42')).map((doc) => doc.id)).toEqual(made.addDoc ? [`${table}-42-b`] : []);
+      }
+      expect(await store.deleteUserRows('A', '42')).toEqual({ ledger: 0, heads: 0, traits: 0, outcomes: 0, lessons: 0, skills: 0, sessions: 0, freezes: 0 });
+    });
+
+    it('takes back every write of a transaction whose function throws, a deletion included, and a read made meanwhile sees none of them', async () => {
+      const { store } = await fresh();
+      const kept = ledgerRow({ id: 'k-1', chainKey: 'u|A|tutor|7', seq: 1, userId: '7' });
+      await store.insertLedgerRow(kept);
+      await store.insertTraitRow(traitRowOf(1, '{"kept":true}', '7'));
+      const candidate = ledgerRow({ id: 'c-1', chainKey: 'u|A|tutor|42', seq: 1 });
+      let wrote!: () => void;
+      const written = new Promise<void>((resolve) => (wrote = resolve));
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+
+      const failing = store.transaction(async (tx) => {
+        try {
+          await tx.insertLedgerRow(candidate);
+          await tx.insertHead(headAt(candidate));
+          await tx.insertTraitRow(traitRowOf(1, '{}'));
+          expect(await tx.updateTraitRow(traitRowOf(2, '{"kept":false}', '7'), 1)).toBe(true);
+          await tx.insertFreeze(freezeOf('all', 'frozen'));
+          await tx.putSessionRow(sessionOf({ sessionId: 's-1' }));
+          await tx.insertForgotten('tombstone-7', LATER);
+          expect(await tx.deleteUserRows('A', '7')).toMatchObject({ ledger: 1, traits: 1 });
+          // The function reads its own writes.
+          expect(await tx.ledgerRow('c-1')).toEqual(candidate);
+        } finally {
+          wrote();
+        }
+        await released;
+        throw new Error('the change failed its check');
+      });
+      await written;
+      const readMeanwhile = store.ledgerRow('c-1');
+      release();
+
+      await expect(failing).rejects.toThrow('the change failed its check');
+      expect(await readMeanwhile).toBeUndefined();
+      expect(await store.ledgerRow('c-1')).toBeUndefined();
+      expect(await store.head('u|A|tutor|42')).toBeUndefined();
+      expect(await store.traitRow('A', 'tutor', '42')).toBeUndefined();
+      expect(await store.freezeRows()).toEqual([]);
+      expect(await store.sessionRowsOf('A', '42')).toEqual([]);
+      expect(await store.isForgotten('tombstone-7')).toBe(false);
+      expect(await store.ledgerRow('k-1')).toEqual(kept);
+      expect(await store.traitRow('A', 'tutor', '7')).toEqual(traitRowOf(1, '{"kept":true}', '7'));
+
+      // A function's result is the transaction's, and a handle kept past its transaction refuses every call.
+      const leaked: { tx?: LearningStoreTx } = {};
+      const result = await store.transaction(async (tx) => {
+        leaked.tx = tx;
+        await tx.insertForgotten('in-time', LATER);
+        return 'committed';
+      });
+      expect(result).toBe('committed');
+      await expect(leaked.tx!.insertForgotten('too-late', LATER)).rejects.toThrow(/after it ended/);
+      expect(await store.isForgotten('in-time')).toBe(true);
+      expect(await store.isForgotten('too-late')).toBe(false);
+    });
+
+    it('keeps copies of the rows it is given, and hands out copies', async () => {
+      const { store } = await fresh();
+      const row = ledgerRow({ id: 'c-1', chainKey: 'u|A|tutor|42', seq: 1 });
+      await store.insertLedgerRow(row);
+      row.subject = 'changed after the write';
+      const read = (await store.ledgerRow('c-1'))!;
+      expect(read.subject).toBe('t-1');
+      read.subject = 'changed after the read';
+      expect((await store.ledgerRow('c-1'))!.subject).toBe('t-1');
+
+      const session = sessionOf({ sessionId: 's-1' });
+      await store.putSessionRow(session);
+      session.conversationIds.push('c-9');
+      (await store.sessionRowsOf('A', '42'))[0]!.brainIds.push('elsewhere');
+      expect(await store.sessionRow('A', 'tutor', 's-1', '42', 'learner')).toEqual(sessionOf({ sessionId: 's-1' }));
+    });
+  });
+}
+
+/** What a column a later release adds does to the tables of a store an earlier release made, on the database `adapter` reaches. */
+async function laterColumnReachesEarlierTables(adapter: StorageAdapter): Promise<void> {
+  const earlier = new SqlLearningStore({ adapter });
+  expect(await earlier.learnerDocs('outcomes', 'A', 'tutor', '42')).toEqual([]);
+  await docWriter(adapter)('outcomes', 'o-1', '42', 'A');
+  const later: LearningColumnAddition[] = [{ table: 'agentos_learning_outcomes', column: 'team_source', definition: 'TEXT' }];
+
+  await ensureLearningSchema(adapter, later);
+  await ensureLearningSchema(adapter, later);
+
+  expect(await adapter.get('SELECT id, team_source FROM agentos_learning_outcomes')).toEqual({ id: 'o-1', team_source: null });
+  expect((await earlier.learnerDocs('outcomes', 'A', 'tutor', '42')).map((doc) => doc.id)).toEqual(['o-1']);
+  await expect(
+    ensureLearningSchema(adapter, [{ table: 'agentos_learning_outcomes', column: 'team source', definition: 'TEXT' }]),
+  ).rejects.toThrow();
+}
+
+describe('the learning store', () => {
+  learningStoreCases('in the process', async () => ({ store: new InMemoryLearningStore(), close: async () => undefined }));
+
+  learningStoreCases('over a SQLite file', async () => {
+    const adapter = await openSqliteAt(learningFile());
+    const store = new SqlLearningStore({ adapter });
+    return {
+      store,
+      addDoc: docWriter(adapter),
+      close: async () => {
+        await store.close();
+        await adapter.close();
+      },
+    };
+  });
+
+  it('over a SQLite file makes its ten tables at its first call, and a store over the same file after a restart reads what the first wrote', async () => {
+    const file = learningFile();
+    const adapter = await openSqliteAt(file);
+    const store = new SqlLearningStore({ adapter });
+    const candidate = ledgerRow({ id: 'c-1', chainKey: 'u|A|tutor|42', seq: 1 });
+    expect(store.kind).toBe('sql');
+    try {
+      expect(await store.isForgotten('tombstone-7')).toBe(false);
+      const tables = await adapter.all<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'agentos_learning%' ORDER BY name",
+      );
+      expect(LEARNING_TABLES).toHaveLength(10);
+      expect(tables.map((table) => table.name)).toEqual([...LEARNING_TABLES].sort());
+
+      await store.transaction(async (tx) => {
+        await tx.insertLedgerRow(candidate);
+        await tx.insertHead(headAt(candidate));
+        await tx.insertTraitRow(traitRowOf(1, '{"current":{"openness":0.5}}'));
+        await tx.insertFreeze(freezeOf('all', 'frozen'));
+        await tx.putSessionRow(sessionOf({ sessionId: 's-1' }));
+        await tx.insertForgotten('tombstone-7', LATER);
+      });
+    } finally {
+      await store.close();
+      await adapter.close();
+    }
+
+    const reopened = await openSqliteAt(file);
+    try {
+      const again = new SqlLearningStore({ adapter: reopened });
+      expect(await again.chainRows('u|A|tutor|42')).toEqual([candidate]);
+      expect(await again.head('u|A|tutor|42')).toEqual(headAt(candidate));
+      expect(await again.traitRow('A', 'tutor', '42')).toEqual(traitRowOf(1, '{"current":{"openness":0.5}}'));
+      expect(await again.freezeRows()).toEqual([freezeOf('all', 'frozen')]);
+      expect(await again.sessionRowsOf('A', '42')).toEqual([sessionOf({ sessionId: 's-1' })]);
+      expect(await again.isForgotten('tombstone-7')).toBe(true);
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it("leaves the host's adapter open when it closes, refuses an adapter without transactions by its kind, and makes no table when the product runs the DDL itself", async () => {
+    const adapter = await openSqliteAt(learningFile());
+    try {
+      const store = new SqlLearningStore({ adapter });
+      await store.insertForgotten('tombstone-42', LEARNED_AT);
+      await store.close();
+      expect(await adapter.get('SELECT hash, forgotten_at FROM agentos_learning_forgotten')).toEqual({ hash: 'tombstone-42', forgotten_at: LEARNED_AT });
+
+      const without = Object.assign(Object.create(adapter) as StorageAdapter, { capabilities: new Set() });
+      expect(() => new SqlLearningStore({ adapter: without })).toThrow(/transactions/);
+      expect(() => new SqlLearningStore({ adapter: without })).toThrow(adapter.kind);
+    } finally {
+      await adapter.close();
+    }
+
+    const migrated = await openSqliteAt(learningFile());
+    try {
+      const store = new SqlLearningStore({ adapter: migrated, ensureSchema: false });
+      await expect(store.isForgotten('tombstone-42')).rejects.toThrow(/no such table/);
+      await migrated.exec(LEARNING_SCHEMA_DDL);
+      expect(await store.isForgotten('tombstone-42')).toBe(false);
+    } finally {
+      await migrated.close();
+    }
+  });
+
+  it('makes its tables at its next call when its first attempt failed', async () => {
+    const adapter = await openSqliteAt(learningFile());
+    try {
+      let failures = 1;
+      const unreachableOnce = new Proxy(adapter, {
+        get(target, property) {
+          if (property === 'exec' && failures > 0) {
+            return async () => {
+              failures -= 1;
+              throw new Error('the database is not reachable');
+            };
+          }
+          const value: unknown = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const store = new SqlLearningStore({ adapter: unreachableOnce });
+      await expect(store.isForgotten('tombstone-42')).rejects.toThrow('the database is not reachable');
+      await store.insertForgotten('tombstone-42', LEARNED_AT);
+      expect(await store.isForgotten('tombstone-42')).toBe(true);
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it('over a SQLite file takes a column a later release adds into the tables an earlier release made, with their rows, and refuses a column name that is not a plain identifier', async () => {
+    const adapter = await openSqliteAt(learningFile());
+    try {
+      await laterColumnReachesEarlierTables(adapter);
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it('names the store, its rows and what a ledger row records in the types a host imports', () => {
+    const inProcess: LearningStore = new InMemoryLearningStore();
+    expect(inProcess.kind).toBe('memory');
+    expectTypeOf<LearningStore['kind']>().toEqualTypeOf<'sql' | 'memory'>();
+    expectTypeOf<StoredLedgerRow['kind']>().toEqualTypeOf<LearningKind>();
+    expectTypeOf<StoredLedgerRow['verdict']>().toEqualTypeOf<LedgerVerdict>();
+    expectTypeOf<LedgerVerdict>().toEqualTypeOf<'pending' | 'kept' | 'reverted' | 'rejected'>();
+    expectTypeOf<Extract<LearningKind, 'memory_write' | 'operator_set' | 'trait'>>().toEqualTypeOf<'memory_write' | 'operator_set' | 'trait'>();
+    expectTypeOf<SqlLearningStoreOptions['ensureSchema']>().toEqualTypeOf<boolean | undefined>();
+    expectTypeOf<Awaited<ReturnType<LearningStore['deleteUserRows']>>>().toEqualTypeOf<Record<string, number>>();
+    expectTypeOf<(typeof LEARNING_TABLES)[number]>().toEqualTypeOf<LearningTable>();
+  });
+});
+
+describe.skipIf(!POSTGRES_URL)('the learning store on Postgres', () => {
+  /** This run's own mark, in the names of the schemas its cases make and drop. */
+  const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const segments: string[] = [];
+
+  /** A new schema of this run's own, dropped once the cases have run. */
+  function newSegment(): string {
+    const segment = `qa_learning_${run}_${segments.length}`;
+    segments.push(segment);
+    return segment;
+  }
+
+  /** The host's Postgres adapter, its tables in `segment`: by default a new schema of this run's own. */
+  async function openPostgresAdapter(segment: string = newSegment()): Promise<StorageAdapter> {
+    const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, segment, max: 5 });
+    await adapter.open();
+    return adapter;
+  }
+
+  afterAll(async () => {
+    if (segments.length === 0) return;
+    const admin = createPostgresAdapter({ connectionString: POSTGRES_URL! });
+    await admin.open();
+    try {
+      for (const segment of segments) await admin.exec(`DROP SCHEMA IF EXISTS "${segment}" CASCADE`);
+    } finally {
+      await admin.close();
+    }
+  });
+
+  learningStoreCases('over a schema of its own', async () => {
+    const adapter = await openPostgresAdapter();
+    const store = new SqlLearningStore({ adapter });
+    return {
+      store,
+      addDoc: docWriter(adapter),
+      close: async () => {
+        await store.close();
+        await adapter.close();
+      },
+    };
+  });
+
+  it("orders what it reads by code unit, whatever order the database's collation gives text", async () => {
+    const adapter = await openPostgresAdapter();
+    const store = new SqlLearningStore({ adapter });
+    try {
+      for (const scopeKey of ['agent|b', 'agent|C', 'agent|a']) await store.insertFreeze(freezeOf(scopeKey, 'frozen'));
+      expect((await store.freezeRows()).map((row) => row.scopeKey)).toEqual(['agent|C', 'agent|a', 'agent|b']);
+      for (const sessionId of ['s-b', 's-C', 's-a']) await store.putSessionRow(sessionOf({ sessionId }));
+      expect((await store.sessionRowsOf('A', '42')).map((row) => row.sessionId)).toEqual(['s-C', 's-a', 's-b']);
+      for (const [at, chainKey] of ['u|A|tutor|42|b', 'u|A|tutor|42|C', 'u|A|tutor|42|a'].entries()) {
+        await store.insertLedgerRow(ledgerRow({ id: `r-${at}`, chainKey, seq: 1 }));
+      }
+      expect((await store.learnerLedgerRows('A', 'tutor', '42')).map((row) => row.chainKey)).toEqual([
+        'u|A|tutor|42|C',
+        'u|A|tutor|42|a',
+        'u|A|tutor|42|b',
+      ]);
+      for (const id of ['b', 'C', 'a']) await docWriter(adapter)('lessons', id, '42', 'A');
+      expect((await store.learnerDocs('lessons', 'A', 'tutor', '42')).map((doc) => doc.id)).toEqual(['C', 'a', 'b']);
+    } finally {
+      await store.close();
+      await adapter.close();
+    }
+  });
+
+  it("lets one of two stores over one database, as two processes hold them, move a chain's head, and refuses the other's swap from the place it read and its row at the taken place", async () => {
+    const segment = newSegment();
+    const one = await openPostgresAdapter(segment);
+    const two = await openPostgresAdapter(segment);
+    const first = new SqlLearningStore({ adapter: one });
+    const second = new SqlLearningStore({ adapter: two });
+    try {
+      const chain = 'u|A|tutor|42';
+      const started = ledgerRow({ id: 'c-1', chainKey: chain, seq: 1 });
+      await first.transaction(async (tx) => {
+        await tx.insertLedgerRow(started);
+        await tx.insertHead(headAt(started));
+      });
+      // The second process reads the head at seq 1.
+      expect(await second.head(chain)).toEqual(headAt(started));
+      const fromFirst = ledgerRow({ id: 'c-2', chainKey: chain, seq: 2 });
+      expect(
+        await first.transaction(async (tx) => {
+          await tx.insertLedgerRow(fromFirst);
+          return tx.advanceHead(chain, 1, { lastId: fromFirst.id, lastHash: fromFirst.hash, seq: 2 });
+        }),
+      ).toBe(true);
+
+      expect(await second.advanceHead(chain, 1, { lastId: 'c-3', lastHash: 'hash-c-3', seq: 2 })).toBe(false);
+      await expect(second.insertLedgerRow(ledgerRow({ id: 'c-3', chainKey: chain, seq: 2 }))).rejects.toThrow();
+      expect(await second.chainRows(chain)).toEqual([started, fromFirst]);
+      expect(await second.head(chain)).toEqual(headAt(fromFirst));
+      expect(await first.ledgerRow('c-3')).toBeUndefined();
+    } finally {
+      await one.close();
+      await two.close();
+    }
+  });
+
+  it('takes a column a later release adds into the tables an earlier release made, with their rows, and refuses a column name that is not a plain identifier', async () => {
+    const adapter = await openPostgresAdapter();
+    try {
+      await laterColumnReachesEarlierTables(adapter);
+    } finally {
+      await adapter.close();
     }
   });
 });
