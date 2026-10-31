@@ -1,14 +1,14 @@
 /**
  * @file learning-layer.host-calls.test.ts
  * The layer's host calls over a real store: a run-time freeze and a suspension persist, hold for a new layer over the
- * same store and are lifted; operatorSet sets a learner's traits inside their bands and honesty-humility through the
- * ledger, runs under a freeze, re-anchors a record that does not verify (from the state the ledger recorded last, where
- * only the row was edited) and refuses a learner it holds no row for, and the load that raises honesty-humility's floor
- * again after an operator lowered it says so (floor_raised); revert takes an operator's change back, keeps a later
- * change to another trait, takes an import that created the trait row back to the persona, and refuses a load's row and
- * a change that is not kept; export and import carry a learner into a fresh store, never honesty-humility, and refuse
- * what this release cannot admit; and a store that does not open fails every host call naming it, forgetUser included,
- * so an account deletion is never reported done without its tombstone.
+ * same store and are lifted, and refuse a forgotten user's learner; operatorSet sets a learner's traits inside their
+ * bands and honesty-humility through the ledger, runs under a freeze, re-anchors a record that does not verify (from
+ * the state the ledger recorded last, where only the row was edited) and refuses a learner it holds no row for, and the
+ * load that raises honesty-humility's floor again after an operator lowered it says so (floor_raised); revert takes an
+ * operator's change back, keeps a later change to another trait, takes an import that created the trait row back to the
+ * persona, and refuses a load's row and a change that is not kept; export and import carry a learner into a fresh
+ * store, never honesty-humility, and refuse what this release cannot admit; and a store that does not open fails every
+ * host call naming it, forgetUser included, so an account deletion is never reported done without its tombstone.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderPersonalitySection } from '../../substrate/personas/personalityPrompt';
@@ -67,6 +67,22 @@ describe('a run-time freeze and a suspension', () => {
     await layer.unsuspend({ agentKey: 'tutor' });
     expect((await session.prepareTurn(turn())).mode).toBe('on');
     expect(await store.freezeRows()).toEqual([]);
+  });
+
+  it('refuse a learner scope of a user forgotten in its namespace, so no row names them again', async () => {
+    quiet();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store });
+    await layer.forLearner(KEY, context());
+    await layer.forgetUser('42', { namespace: 'A' });
+
+    await expect(layer.freeze({ learner: KEY }, 'ops')).rejects.toThrow(/forgotten/);
+    await expect(layer.suspend({ learner: KEY }, 'ops')).rejects.toThrow(/forgotten/);
+
+    expect(await store.freezeRows()).toEqual([]);
+    // The same user id in another namespace is another user.
+    await layer.freeze({ learner: { ...KEY, namespace: 'B' } }, 'ops');
+    expect(await store.freezeRows()).toMatchObject([{ scopeKey: 'learner|B|tutor|42', mode: 'frozen' }]);
   });
 
   it('refuse a scope that names nothing', async () => {
