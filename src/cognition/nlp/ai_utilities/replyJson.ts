@@ -10,12 +10,32 @@ const FENCE = '```';
 /** A language tag alone on a fence's opening line, such as `json` or `JSON`, or nothing. */
 const LANGUAGE_TAG = /^[\w+.-]*$/;
 
+/** A line that closes a fence, once trimmed: three backticks or more, and nothing else. */
+const CLOSING_LINE = /^`{3,}$/;
+
 /**
- * The texts a reply holds inside a code fence, trimmed and each once: inside the fence the whole reply is, up to its
- * last backticks, so a value that holds backticks of its own stays whole; then inside the first fence the reply
- * holds, with words before or after it. A language tag alone on the opening line is left out; any other text there
- * is read as the start of the JSON. Found with `indexOf`, so the time a reply takes grows with its length alone, also
- * for a reply that opens a fence and never closes it.
+ * Where the backticks begin on the first line from `from` on that holds backticks alone, or -1. CommonMark closes a
+ * fence on such a line, and no line of JSON is one, since a JSON string holds no line break, so backticks inside a
+ * string never close the fence. Each line is read once.
+ */
+function closingLineAt(reply: string, from: number): number {
+  let lineStart = from;
+  while (lineStart <= reply.length) {
+    const newline = reply.indexOf('\n', lineStart);
+    const lineEnd = newline === -1 ? reply.length : newline;
+    const line = reply.slice(lineStart, lineEnd);
+    if (CLOSING_LINE.test(line.trim())) return lineStart + line.indexOf(FENCE);
+    lineStart = lineEnd + 1;
+  }
+  return -1;
+}
+
+/**
+ * The texts a reply holds inside its first code fence, trimmed and each once, ending where the fence closes, in the
+ * order tried: at a line that holds backticks alone; at the last backticks, when the whole reply is one fence; at the
+ * first backticks after the opening, for a reply that closes the fence on a line with other text. A language tag
+ * alone on the opening line is left out; any other text there is read as the start of the JSON. Found with `indexOf`,
+ * so the time a reply takes grows with its length alone, also for a reply that opens a fence and never closes it.
  */
 function fencedTexts(text: string): string[] {
   const reply = text.trim();
@@ -24,22 +44,23 @@ function fencedTexts(text: string): string[] {
   let start = open + FENCE.length;
   const lineEnd = reply.indexOf('\n', start);
   if (lineEnd !== -1 && LANGUAGE_TAG.test(reply.slice(start, lineEnd).trim())) start = lineEnd + 1;
+  const ends = [closingLineAt(reply, start)];
+  if (open === 0 && reply.endsWith(FENCE)) ends.push(reply.length - FENCE.length);
+  ends.push(reply.indexOf(FENCE, start));
   const texts: string[] = [];
-  const last = reply.length - FENCE.length;
-  if (open === 0 && last >= start && reply.endsWith(FENCE)) texts.push(reply.slice(start, last).trim());
-  const close = reply.indexOf(FENCE, start);
-  if (close !== -1) {
-    const inside = reply.slice(start, close).trim();
+  for (const end of ends) {
+    if (end < start) continue;
+    const inside = reply.slice(start, end).trim();
     if (!texts.includes(inside)) texts.push(inside);
   }
   return texts;
 }
 
 /**
- * `JSON.parse` of a model's reply: the reply as it is, else the text inside the Markdown code fence the whole reply
- * is, else inside the first code fence the reply holds, with a language tag such as `json` or none and with words
- * before or after it, trimmed. A reply that parses as it is reads as `JSON.parse` reads it, so a fence inside one of
- * its strings stays in that string.
+ * `JSON.parse` of a model's reply: the reply as it is, else the text inside the first Markdown code fence the reply
+ * holds, with a language tag such as `json` or none and with words before or after it, trimmed. The fence ends at a
+ * line that holds backticks alone, so backticks inside one of its JSON strings stay in that string. A reply that
+ * parses as it is reads as `JSON.parse` reads it, so a fence inside one of its strings stays there too.
  *
  * @param text - The reply.
  * @returns The value the reply holds.

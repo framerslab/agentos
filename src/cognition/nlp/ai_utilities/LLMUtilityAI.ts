@@ -305,8 +305,8 @@ export class LLMUtilityAI implements IUtilityAI, IPromptEngineUtilityAI {
 
   /**
    * The JSON the text holds, read as StatisticalUtilityAI reads it (`parseReplyJson`: the text as it is, else inside
-   * the Markdown code fence the whole text is, else inside the first code fence it holds, with a language tag or none
-   * and with words before or after it), then a check against `targetSchema` with Ajv when given, as
+   * the first Markdown code fence it holds, with a language tag or none and with words before or after it, up to a
+   * line that holds backticks alone), then a check against `targetSchema` with Ajv when given, as
    * StatisticalUtilityAI checks it: the standard formats checked, a keyword or a format Ajv does not know passed over,
    * and a value coerced to the type its schema names where it can (`targetSchemaChecks`). With `attemptFixWithLLM`, a
    * text that fails either is sent for repair, up to `maxRepairAttempts` times (1 unless it is a whole number of 1 or

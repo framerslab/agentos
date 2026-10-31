@@ -1189,9 +1189,9 @@ export class StatisticalUtilityAI implements IUtilityAI {
   }
 
   /**
-   * The JSON the text holds, read as LLMUtilityAI reads it (`parseReplyJson`: the text as it is, else inside the
-   * Markdown code fence the whole text is, else inside the first code fence it holds, with a language tag or none and
-   * with words before or after it), then a check against `targetSchema` with Ajv when given, as LLMUtilityAI checks
+   * The JSON the text holds, read as LLMUtilityAI reads it (`parseReplyJson`: the text as it is, else inside the first
+   * Markdown code fence it holds, with a language tag or none and with words before or after it, up to a line that
+   * holds backticks alone), then a check against `targetSchema` with Ajv when given, as LLMUtilityAI checks
    * it: the standard formats checked, a keyword or a format Ajv does not know passed over, and a value coerced to the
    * type its schema names where it can (`targetSchemaChecks`). Answers `null` when the text is empty or neither it nor
    * a text inside a fence parses, when the value fails the schema, and when Ajv cannot compile the schema, the schema
