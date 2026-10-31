@@ -19,7 +19,8 @@
  * - a git push with no refspec that git sends there by its settings, given with git -c or set by an earlier git
  *   config in the job: push.default=matching (every branch both sides have), push.default=upstream (the branch the
  *   checked-out one tracks, which this check does not follow, so it is reported whatever it is) and a refspec set
- *   in remote.<name>.push. git config sets them in the checkout it runs in, or with --global or --system in the
+ *   in remote.<name>.push for the remote the push names (any remote's when it names none, or one held in a variable
+ *   or an expression). git config sets them in the checkout it runs in, or with --global or --system in the
  *   global or the system settings, which every checkout reads beneath its own; --unset (git config unset) removes
  *   the one value of the key it names that its pattern matches (remote.origin.push and remote.backup.push are two
  *   keys) and none where more than one does, and --unset-all (unset --all) every value of that key it matches, as
@@ -1102,7 +1103,7 @@ function pushOption(word) {
  * Reports a git push (its arguments after push) that reaches the default branch.
  * @param {string[]} args
  * @param {Step} step
- * @param {{ pushDefault?: string, pushRefspecs?: string[] }} [given] the settings given with git -c on this command
+ * @param {{ pushDefault?: string, pushRefspecs?: Refspec[] }} [given] the settings given with git -c on this command
  */
 function checkPush(args, { state, ctx, report }, given = {}) {
   const command = `git push ${args.map(unhold).join(' ')}`.trim();
@@ -1164,7 +1165,15 @@ function checkPush(args, { state, ctx, report }, given = {}) {
   let via = '';
   if (refspecs.length === 0) {
     if (tags) return;
-    const configured = [...state.system.pushRefspecs, ...state.global.pushRefspecs, ...state.pushRefspecs].map((r) => r.value).concat(given.pushRefspecs ?? []);
+    // git reads remote.<name>.push for the remote it pushes to alone (remote.c keeps the refspecs per remote): the
+    // first operand, else one its settings choose (branch.<name>.pushRemote, remote.pushDefault, branch.<name>.remote,
+    // origin), which this check does not follow. With no operand, or one held in a variable or an expression, the
+    // remote may be any of them.
+    const named = positional[0];
+    const told = named !== undefined && unhold(named) === named && !named.includes('$') && !named.includes('`');
+    const configured = [...state.system.pushRefspecs, ...state.global.pushRefspecs, ...state.pushRefspecs, ...(given.pushRefspecs ?? [])]
+      .filter((r) => !told || r.remote === named)
+      .map((r) => r.value);
     // The checkout's own push.default overrides the global one, which overrides the system one; git -c all three.
     const mode = given.pushDefault ?? pushMode(state, state);
     if (configured.length > 0) {
@@ -1997,7 +2006,7 @@ function checkCommand(words, step, depth) {
     state.cwd = null;
   } else if (name === 'git') {
     let k = 0;
-    /** @type {{ pushDefault?: string, pushRefspecs: string[] }} */
+    /** @type {{ pushDefault?: string, pushRefspecs: Refspec[] }} */
     const given = { pushRefspecs: [] };
     // git -C <path> runs as if started there, each from where the one before it left (-C '' stays); --git-dir, or
     // the GIT_DIR it runs with, names the repository from the directory every -C leaves, whatever their order.
@@ -2007,10 +2016,11 @@ function checkCommand(words, step, depth) {
       if (args[k] === '-c' && k + 1 < args.length) {
         const pair = args[k + 1];
         const eq = pair.indexOf('=');
-        const setting = pushSetting(eq < 0 ? pair : pair.slice(0, eq));
+        const key = eq < 0 ? pair : pair.slice(0, eq);
+        const setting = pushSetting(key);
         const value = eq < 0 ? '' : pair.slice(eq + 1);
         if (setting === 'default') given.pushDefault = value.toLowerCase();
-        else if (setting === 'refspec' && value !== '') given.pushRefspecs.push(value);
+        else if (setting === 'refspec' && value !== '') given.pushRefspecs.push({ remote: key.slice(key.indexOf('.') + 1, key.lastIndexOf('.')), value });
       } else if (args[k] === '-C' && k + 1 < args.length) {
         at = within(at, unhold(args[k + 1]));
       } else if (args[k] === '--git-dir' || args[k].startsWith('--git-dir=')) {
