@@ -92,6 +92,8 @@ import { createSqliteAdapter } from '../../cognition/emergent/__tests__/helpers/
 import { seedToolRow } from '../../cognition/emergent/__tests__/helpers/seed-rows';
 import { launchRegistry } from '../runtime/agencyLaunch/launchRegistry';
 import type { LaunchAgencyResult } from '../runtime/agencyLaunch/types';
+import { AgentOSResponseChunkType } from '../types/AgentOSResponse';
+import { GMIErrorCode } from '../../core/utils/errors';
 
 let callIds = 0;
 /** A model step that calls tools, each `[name, args]`. */
@@ -168,6 +170,12 @@ async function send(os: AgentOS, input: Record<string, unknown>): Promise<void> 
   for await (const _chunk of os.processRequest({ textInput: 'Go.', userId: 'ana', ...input } as any)) {
     /* drain */
   }
+}
+/** The chunks of one request. */
+async function collect(os: AgentOS, input: Record<string, unknown>): Promise<any[]> {
+  const chunks: any[] = [];
+  for await (const chunk of os.processRequest({ textInput: 'Go.', userId: 'ana', ...input } as any)) chunks.push(chunk);
+  return chunks;
 }
 
 let booted: AgentOS | undefined;
@@ -424,6 +432,79 @@ describe('launch_agency on the full runtime', () => {
     release();
     await vi.waitFor(() => expect(booted!.listAgencies()).toEqual([]), { timeout: 10_000 });
     expect([...booted.getGMIManager().gmiSessionMap.keys()].filter((id) => id.startsWith('seat:'))).toEqual([]);
+  }, 40_000);
+
+  it("a request or feedback that names a running seat's session reaches no seat: the request is refused, and the seats answer as themselves", async () => {
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    const hang = hostTool('hang', async () => {
+      held = true;
+      await hanging;
+      return 'done';
+    });
+    booted = await boot({ tools: { search: search(), hang } });
+    provider.replies.push(
+      toolStep(['launch_agency', { goal: 'Check, then wait.', deadlineMs: 30_000, seats: [{ role: 'first', personaId: 'checker' }, { role: 'second', instructions: 'Call hang.', tools: ['hang'] }] }]),
+      textStep('Checked.'),
+      // The second seat's tool holds its turn while requests name the seats' sessions.
+      toolStep(['hang', {}]),
+      textStep('Waited.'),
+      textStep('Done.'),
+    );
+    const parent = send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    await vi.waitFor(() => expect(held).toBe(true), { timeout: 10_000 });
+    const manager = booted.getGMIManager();
+    const [team] = booted.listAgencies();
+    const firstSession = `seat:${team.agencyId}:first`;
+    const secondSession = `seat:${team.agencyId}:second`;
+    // Both seats hold a GMI: the first has answered and is idle, the second's turn is running (the precondition).
+    expect(manager.gmiSessionMap.has(firstSession)).toBe(true);
+    expect(manager.gmiSessionMap.has(secondSession)).toBe(true);
+    const firstGmi = manager.activeGMIs.get(manager.gmiSessionMap.get(firstSession)!)!;
+    const leadGmi = manager.activeGMIs.get(manager.gmiSessionMap.get('s-lead')!)!;
+    // Requests that name the seats' sessions: one with the idle seat's own persona, one with another persona.
+    const outside = Promise.all([
+      collect(booted, { userId: 'eve', sessionId: firstSession, selectedPersonaId: 'checker', textInput: 'First outside request.' }),
+      collect(booted, { userId: 'eve', sessionId: secondSession, selectedPersonaId: 'helper', textInput: 'Second outside request.' }),
+    ]);
+    const acquired = manager.getOrCreateGMIForSession('eve', firstSession, 'checker').then(
+      () => 'acquired',
+      (error: unknown) => error,
+    );
+    // Feedback that names a seat's session, and feedback on the launching session, which its GMI records (the control).
+    await booted.receiveFeedback('eve', firstSession, 'checker', { rating: 'negative', text: 'Feedback from outside the team.' });
+    await booted.receiveFeedback('ana', 's-lead', 'lead', { rating: 'negative', text: 'Feedback on the lead.' });
+    const firstTrace = JSON.stringify(firstGmi.getReasoningTrace().entries);
+    const leadTrace = JSON.stringify(leadGmi.getReasoningTrace().entries);
+    // The second seat's tool returns before anything is asserted, so every turn ends whatever the assertions find.
+    release();
+    const [firstChunks, secondChunks] = await outside;
+    await parent;
+    // Each request is refused before it reaches a GMI: its turn ends with the manager's refusal.
+    for (const chunks of [firstChunks, secondChunks]) {
+      expect(chunks.find((chunk) => chunk.type === AgentOSResponseChunkType.ERROR)).toMatchObject({
+        code: GMIErrorCode.GMI_PROCESSING_ERROR,
+        message: expect.stringContaining('is a seat of a team a GMI launched'),
+      });
+    }
+    expect(await acquired).toMatchObject({ code: GMIErrorCode.PERMISSION_DENIED });
+    // The launching session's GMI recorded its feedback; the seat's recorded none.
+    expect(leadTrace).toContain('Feedback on the lead.');
+    expect(firstTrace).not.toContain('Feedback from outside the team.');
+    // No model call received either request, and both seats answered as themselves.
+    expect(provider.seen.some((call) => JSON.stringify(call.messages).includes('outside request'))).toBe(false);
+    const result = JSON.parse(toolMessages(provider.seen.at(-1)!.messages)[0]) as LaunchAgencyResult;
+    expect(result.status).toBe('completed');
+    expect(result.seats.map((seat) => [seat.role, seat.status, seat.summary])).toEqual([
+      ['first', 'completed', 'Checked.'],
+      ['second', 'completed', 'Waited.'],
+    ]);
+    // The seats are released, and no GMI was built for the requests.
+    await vi.waitFor(() => expect(booted!.listAgencies()).toEqual([]), { timeout: 10_000 });
+    expect([...manager.gmiSessionMap.keys()]).toEqual(['s-lead']);
   }, 40_000);
 
   it("a team's nested launches share one launch in flight", async () => {
