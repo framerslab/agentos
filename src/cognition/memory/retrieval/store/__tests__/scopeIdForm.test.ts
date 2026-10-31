@@ -15,13 +15,16 @@
  * in a trace or in a graph copy (a persona id read part by part, so the `::` between its two ids is not one). An import
  * reads the target's form inside the transaction it writes in, so two imports into one Brain at once, and, on
  * Postgres, an import and another process's re-file, follow one another. An export, and an import of a SQLite file,
- * read a record and the rows it describes in one form, whenever a re-file commits.
+ * read a record and the rows it describes in one form, whenever a re-file commits. A source with the record whose
+ * `user` and `persona` scope ids all read the same in both forms is taken as a plain one, so a Brain without the record
+ * keeps its plain form, which a later re-file still files; and an Obsidian note's check of the trace it names reads
+ * the graph in the note's own transaction, so a Postgres pool of one connection is enough.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BetterSqliteAdapter, type StorageParameters } from '@framers/sql-storage-adapter';
+import { BetterSqliteAdapter, createPostgresAdapter, type StorageParameters } from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
 import {
   encodePlainScopeId,
@@ -36,6 +39,7 @@ import { JsonImporter } from '../../../io/JsonImporter.js';
 import { SqliteImporter } from '../../../io/SqliteImporter.js';
 import { MarkdownExporter } from '../../../io/MarkdownExporter.js';
 import { MarkdownImporter } from '../../../io/MarkdownImporter.js';
+import { ObsidianImporter } from '../../../io/ObsidianImporter.js';
 import { CsvImporter } from '../../../io/CsvImporter.js';
 import type { ImportResult } from '../../../io/facade/types.js';
 import { readFrontMatter } from '../../../../../core/utils/frontMatter.js';
@@ -831,6 +835,55 @@ describe('an encoded export into a plain Brain', () => {
   });
 });
 
+describe('a source with the record whose scope ids read the same in both forms', () => {
+  it('JSON: goes into a Brain without the record as a plain source, so a later re-file still files the plain ids written after it', async () => {
+    const source = await encodedBrain(tempFile(), 'src');
+    await plainRow(source, 't-a', 'user', 'bo');
+    await plainRow(source, 't-p', 'persona', 'bo::tutor');
+    const target = await brainAt(tempFile(), 'dst');
+
+    const result = await new JsonImporter(target).importFromString(await new JsonExporter(source).exportToString());
+
+    expect(result.errors).toEqual([]);
+    expect(await target.getMeta(SCOPE_ID_FORM_KEY)).toBeUndefined();
+    // A host with no learning layer goes on filing its plain ids; the layer that opens the Brain later re-files them.
+    await plainRow(target, 't-x', 'user', 'org:42');
+    await refileBrainScopeIds(target);
+    expect(await scopeIdsOf(target)).toEqual(['persona:bo::tutor', 'user:bo', 'user:org%3A42']);
+  });
+
+  it('JSON, Markdown, a SQLite file and Brain.importFromSqlite: go into a plain Brain that holds a reserved id, which stays plain', async () => {
+    const sourcePath = tempFile();
+    const source = await encodedBrain(sourcePath, 'src');
+    await plainRow(source, 't-a', 'user', 'bo');
+    const exported = await new JsonExporter(source).exportToString();
+    const notes = tempDir();
+    await new MarkdownExporter(source).export(notes);
+    await closers.pop()!();
+    const imports: Array<[string, (target: Brain) => Promise<{ errors?: string[] }>]> = [
+      ['JSON', (target) => new JsonImporter(target).importFromString(exported)],
+      ['Markdown', (target) => new MarkdownImporter(target).import(notes)],
+      ['SQLite file', (target) => new SqliteImporter(target).import(sourcePath)],
+      ['Brain.importFromSqlite', (target) => target.importFromSqlite(sourcePath)],
+    ];
+
+    for (const [name, importInto] of imports) {
+      const target = await brainAt(tempFile(), 'dst');
+      await plainRow(target, 't-b', 'user', 'team/bo');
+
+      const errors = (await importInto(target)).errors ?? [];
+
+      // The plain user `team/bo` keeps the plain form a layer re-files when it opens the Brain.
+      expect({ name, errors, ids: await scopeIdsOf(target), record: await target.getMeta(SCOPE_ID_FORM_KEY) }).toEqual({
+        name,
+        errors: [],
+        ids: ['user:bo', 'user:team/bo'],
+        record: undefined,
+      });
+    }
+  });
+});
+
 type ReadAll = Brain['all'];
 
 /**
@@ -1033,5 +1086,51 @@ describeIfPostgres('imports on Postgres', () => {
       ).map((row) => `${row.scope}:${row.scope_id}`);
       expect({ name, ids }).toEqual({ name, ids: ['user:team%2Fbo'] });
     }
+  });
+
+  it("read the graph through an Obsidian note's own transaction, so a pool of one connection is enough", async () => {
+    const brainId = `test-import-pool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // One connection, which a note's transaction holds: a read outside it would wait for it, and fails after 5 seconds.
+    const adapter = createPostgresAdapter({
+      connectionString: POSTGRES_URL!,
+      max: 1,
+      connectionTimeoutMillis: 5_000,
+      typeParsers: { int8: 'number' },
+    });
+    await adapter.open();
+    const target = await Brain.openWithAdapter(adapter, { brainId });
+    closers.push(async () => {
+      for (const table of ['knowledge_edges', 'knowledge_nodes', 'memory_traces', 'brain_meta']) {
+        await target.run(`DELETE FROM ${table} WHERE brain_id = ?`, [brainId]);
+      }
+      await target.close();
+    });
+    // A trace linked to a label that holds a line break, as an import of an Obsidian note links one.
+    const label = 'the hive\nby the roof';
+    await target.run(
+      `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, scope_id)
+       VALUES (?, 'mt-held', 'episodic', 'user', 'Ana keeps bees.', 1, '{}', '')`,
+      [brainId],
+    );
+    await target.run(
+      `INSERT INTO knowledge_nodes (brain_id, id, type, label, properties, created_at) VALUES (?, 'kn-trace', 'trace', 'trace:mt-held', ?, 1)`,
+      [brainId, JSON.stringify({ trace_id: 'mt-held' })],
+    );
+    await target.run(
+      `INSERT INTO knowledge_nodes (brain_id, id, type, label, properties, created_at) VALUES (?, 'kn-label', 'concept', ?, '{}', 1)`,
+      [brainId, label],
+    );
+    await target.run(
+      `INSERT INTO knowledge_edges (brain_id, id, source_id, target_id, type, weight, bidirectional, metadata, created_at)
+       VALUES (?, 'ke-held', 'kn-trace', 'kn-label', 'related_to', 1.0, 0, '{}', 1)`,
+      [brainId],
+    );
+    // The trace's own note, as the export writes it: its link runs over the label's line break.
+    const vault = tempDir();
+    fs.writeFileSync(path.join(vault, 'mt-held.md'), `---\nid: mt-held\nscope: user\n---\nAna keeps bees.\n\n**Related:**\n- [[${label}]]\n`);
+
+    const result = await new ObsidianImporter(target).import(vault);
+
+    expect(result).toEqual({ imported: 0, skipped: 1, errors: [] });
   });
 });
