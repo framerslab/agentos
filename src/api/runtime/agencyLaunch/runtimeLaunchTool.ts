@@ -64,6 +64,11 @@ export interface RuntimeLaunchToolDeps {
    * undefined when it serves none: a launched team's coordinator takes its key and base URL.
    */
   providerEntry(providerId: string): ProviderConfigEntry | undefined;
+  /**
+   * The provider the runtime's provider manager serves a model from when nothing names one
+   * (`AIModelProviderManager.getProviderForModel`): where a GMI whose persona and defaults name no provider runs.
+   */
+  providerForModel(modelId: string): string | undefined;
   /** Where a launch's failures go: a seat's failed call's original error among them. */
   logger: ILogger;
 }
@@ -158,7 +163,8 @@ function entryCredentials(entry: ProviderConfigEntry | undefined, providerId: st
  * base URL takes the key of the entry the runtime serves its provider from, with the base URL the runtime's provider
  * sends it to (see entryCredentials); what it takes nothing for is what generateText resolves for the provider, key and
  * base URL together, as for any call that names neither. A coordinator that names a key or a base URL keeps what it
- * names and takes nothing of the entry, so a key never goes to a base URL that was not named with it.
+ * names and takes nothing of the entry: the entry's base URL never gets a key the coordinator names, nor the entry's
+ * key a base URL it names, and generateText resolves what it leaves out, as for any call.
  *
  * @param coordinator - `agencies.coordinator`, when the host sets it.
  * @param persona - The provider and model of the launching GMI's persona, else the GMIs' defaults.
@@ -355,14 +361,15 @@ export function createRuntimeLaunchTool(deps: RuntimeLaunchToolDeps): ITool<Laun
     },
 
     async agencyRoute(parent: LaunchParent) {
-      // The manager and synthesizers call generateText: on the host's coordinator, else on the launching persona's
-      // provider and model. A route that names no key and no base URL takes the key of the entry the runtime serves
-      // its provider from, sent where the runtime sends it.
+      // The manager and synthesizers call generateText: on the host's coordinator, else on the launching GMI's provider
+      // and model. A route that names no key and no base URL takes the key of the entry the runtime serves its
+      // provider from, sent where the runtime sends it.
       const entryOf = (providerId: string): ProviderConfigEntry | undefined => deps.providerEntry(providerId);
       if (deps.options.coordinator) return coordinatorRoute(deps.options.coordinator, {}, entryOf);
       const persona = personaOf(parent);
-      const provider = persona?.defaultProviderId || deps.gmiDefaults?.defaultLlmProviderId;
       const model = persona?.defaultModelId || deps.gmiDefaults?.defaultLlmModelId;
+      // A GMI whose persona and defaults name no provider runs on the one the runtime serves its model from.
+      const provider = persona?.defaultProviderId || deps.gmiDefaults?.defaultLlmProviderId || (model ? deps.providerForModel(model) : undefined);
       return coordinatorRoute(undefined, { provider, model }, entryOf);
     },
 

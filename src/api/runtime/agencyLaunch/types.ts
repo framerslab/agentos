@@ -143,15 +143,16 @@ export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'm
    */
   launch?: boolean;
   /**
-   * The route of a launched team's manager and synthesizers (they call generateText). Default: the provider and model
-   * of the persona of the GMI that launched the team, else the GMIs' defaults
-   * (`gmiManagerConfig.defaultGMIBaseConfigDefaults`). A route that names neither `apiKey` nor `baseUrl` takes the key
-   * of the entry in `modelProviderManagerConfig.providers` the runtime serves its provider from (the last enabled one
+   * The route of a launched team's manager and synthesizers (they call generateText). Default: the provider and model of
+   * the persona of the GMI that launched the team, else the GMIs' defaults
+   * (`gmiManagerConfig.defaultGMIBaseConfigDefaults`); when neither names a provider, the one the runtime's provider
+   * manager serves that model from, as for the GMI itself. A route that names neither `apiKey` nor `baseUrl` takes the
+   * key of the entry in `modelProviderManagerConfig.providers` the runtime serves its provider from (the last enabled one
    * whose provider started), and sends it where the runtime's provider sends it: to that entry's base URL, else to the
-   * provider's own endpoint, never to a base URL a global default or an environment variable names. An entry with a
-   * base URL and no key gives its base URL alone to an Ollama route only. What the route takes nothing for,
-   * generateText resolves for the provider, key and base URL together, as for any call that names neither. A route
-   * that names either keeps what it names and takes nothing of the entry.
+   * provider's own endpoint, never to a base URL a global default or an environment variable names. An entry with a base
+   * URL and no key gives its base URL alone to an Ollama route only. What the route takes nothing for, generateText
+   * resolves for the provider, key and base URL together, as for any call that names neither. A route that names either
+   * keeps what it names and takes nothing of the entry.
    */
   coordinator?: { provider: string; model: string; apiKey?: string; baseUrl?: string };
 }
