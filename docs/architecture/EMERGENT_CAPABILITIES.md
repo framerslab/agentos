@@ -50,7 +50,7 @@ const agentos = await AgentOS.create({
 
 ### Compose Mode -- Chain Existing Tools
 
-Compose mode uses the [`ComposableToolBuilder`](/api/classes/ComposableToolBuilder) to chain registered tools into a pipeline. No agent-written code runs: each step is a call to a registered tool, made through a step gate. In an AgentOS runtime the gate is `ToolOrchestrator.processToolCall`, so every step meets the disabled list, the permission check with the caller's capabilities, the approval for a tool with side effects, and argument validation, as a direct call does. A host that builds the engine itself passes a gate from `createStepGate` (see "Building the engine yourself" below); an engine without one forges code and refuses to compose (`compose_needs_gate`).
+Compose mode uses the [`ComposableToolBuilder`](/api/classes/ComposableToolBuilder) to chain registered tools into a pipeline. No agent-written code runs: each step is a call to a registered tool, made through a step gate. In an AgentOS runtime the gate is `ToolOrchestrator.processToolCall`, so every step meets the disabled list, the permission check with the caller's capabilities, the approval for a tool with side effects, and argument validation, as a direct call does. A composed call made through a view of the orchestrator, as a `launch_agency` seat's calls are, runs each step through that view first, so the step also meets the seat's tool names and the approval gate the seat's calls are asked. A host that builds the engine itself passes a gate from `createStepGate` (see "Building the engine yourself" below); an engine without one forges code and refuses to compose (`compose_needs_gate`).
 
 Which tools a step may name is one rule, checked when the composition is forged, at every load, before a promotion, and at every run:
 
@@ -742,6 +742,8 @@ await engine.onHostToolRegistered('send_email');
 ```
 
 The gate can be passed to the builder, as here, or as `stepGate` in the engine's deps. A builder given a bare `(name, args, context)` callback keeps constructing, so existing construction does not throw, but it composes nothing.
+
+A gate from `createStepGate` runs each step itself. A composition built over it and called through a view of a `ToolOrchestrator` (a `launch_agency` seat's) runs its steps outside that view, so the seat's tool names and approval gate are met by the composed call alone; only the runtime's own gate runs a step through the view the composed call came from.
 
 A host that registers forged executables itself through `onToolForged` and `onToolRemoved` also passes `onToolRestored(tool)`, which registers one of the host's tools again: a forge whose composition reaches itself only once its executable is registered takes that executable out and hands the name back to the tool it took it from. Without it the name is left empty in that case.
 

@@ -7,8 +7,10 @@
  * root launch) about a tool the orchestrator has, as gmi()'s view asks: anything but the exact approval skips the
  * tool, and the model is told why; a call whose stop has come asks no one, and the orchestrator refuses it
  * (`STEP_ABORTED`). Every call the view passes on carries `callerTurn` with the seat's names, that gate and the view's
- * own `processToolCall` as `dispatch`. Every other member runs on the shared orchestrator, whose own checks (the
- * persona's capabilities, the approval of a tool with side effects) still apply to each call.
+ * own `processToolCall` as `dispatch`, through which the shared orchestrator's step gate runs each step of a
+ * composition the seat calls: a step meets the seat's names and that gate as the seat's direct calls do, and a step
+ * whose tool is outside the names never runs. Every other member runs on the shared orchestrator, whose own checks
+ * (the persona's capabilities, the approval of a tool with side effects) still apply to each call.
  * @internal
  */
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator.js';
