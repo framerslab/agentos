@@ -93,6 +93,14 @@
  * preparation failed keeps its scope ids. Each tool call carries its own turn's scopes, recorder, second user and freeze
  * read, and `toolLearningContextFor` builds the same for a product's own turn loop. Feedback is filed with the last
  * prepared turn's scope ids. A GMI with no learner session, or a host's that names no scopes, files as with no layer.
+ *
+ * The memory tools a host builds over a `Memory` facade (`createTools()`), on gmi() and in a product's own turn loop.
+ * Each write files under the turn's own scope ids and runs through the learner session's recorder: a `pending` row and
+ * its verdict, or no row in mode off and under a suspension. A call reaches by id only a live trace of the turn's own
+ * scopes that its own user filed, and changes it only while it holds what the call read. A search reads the turn's own
+ * scopes, its organization and the traces filed under no scope id. Only a freeze stops a write, `memory_reflect` is
+ * withdrawn where a layer runs, a forgotten user's or a down store's write files nothing, revert takes a write back, and
+ * a delete or merge takes the trace's knowledge-graph copy with it.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -8138,6 +8146,454 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
   });
 });
 
+describe("the memory tools a host builds over a Memory facade, by a turn's scopes and through the learner's recorder, on gmi() and a product's own turn loop", () => {
+  let keys = 0;
+  const key = () => `k-qa-tools-${++keys}`;
+  /** Learner 42 of tenant A, of the agent whose persona id is `tutor`. */
+  const LEARNER_A: LearnerKey = { namespace: 'A', agentKey: 'tutor', userId: '42' };
+
+  const quiet = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  };
+
+  /** What a memory tool answers, as a host reads it. */
+  interface ToolAnswer {
+    success: boolean;
+    output?: {
+      traceId?: string;
+      updated?: boolean;
+      deleted?: boolean;
+      survivorId?: string;
+      deletedIds?: string[];
+      results?: Array<{ id: string; content: string }>;
+    };
+    error?: string;
+    details?: { status?: string; reason?: string; ledgerId?: string };
+  }
+
+  /** A `Memory` facade on a SQLite file of its own (brain `tools-brain`), and a call of one of the tools it builds. */
+  async function toolsOn(selfImprove = false) {
+    const file = brainFile();
+    const memory = await Memory.createSqlite(file, { brainId: 'tools-brain', selfImprove });
+    facades.push(memory);
+    const tools = memory.createTools();
+    const call = (name: string, args: Record<string, unknown>, context: unknown): Promise<ToolAnswer> => {
+      const tool = tools.find((candidate) => candidate.name === name);
+      if (!tool) throw new Error(`the facade built no ${name}`);
+      return tool.execute(args as never, context as never) as unknown as Promise<ToolAnswer>;
+    };
+    return { memory, file, call };
+  }
+
+  /** Every trace row of a facade's file: id, scope, scope id, text, the second user it names, and whether it is deleted. */
+  function tracesIn(file: string): Array<{ id: string; scope: string; scopeId: string; content: string; deleted: number; turnUserId?: string }> {
+    const db = new Database(file);
+    try {
+      const rows = db.prepare('SELECT id, scope, scope_id, content, metadata, deleted FROM memory_traces').all() as Array<{
+        id: string;
+        scope: string;
+        scope_id: string;
+        content: string;
+        metadata: string | null;
+        deleted: number;
+      }>;
+      return rows.map((row) => {
+        const turnUserId = (JSON.parse(row.metadata || '{}') as { turnUserId?: string }).turnUserId;
+        return { id: row.id, scope: row.scope, scopeId: row.scope_id, content: row.content, deleted: row.deleted, ...(turnUserId ? { turnUserId } : {}) };
+      });
+    } finally {
+      db.close();
+    }
+  }
+  const traceOf = (file: string, content: string) => tracesIn(file).find((row) => row.content === content);
+
+  /** One chain's memory_write rows. */
+  const writesOn = async (store: LearningStore, chainKey: string) => (await store.chainRows(chainKey)).filter((row) => row.kind === 'memory_write');
+
+  /**
+   * One turn of a product's own turn loop on `session` (by default learner 42 of tenant A): what its preparation gave,
+   * what each tool call is told (`toolLearningContextFor`), and the context a tool call of the turn carries.
+   */
+  async function productCall(session: ILearnerSession, turn: Partial<TurnInputForLearning>, sessionData: Record<string, unknown>) {
+    const prepared = await session.prepareTurn(productTurn(turn));
+    const { tools: learning } = toolLearningContextFor(session, {
+      learner: prepared.learner,
+      mode: prepared.mode,
+      ...(prepared.scopes ? { scopes: prepared.scopes } : {}),
+      ...(prepared.turnUserId ? { turnUserId: prepared.turnUserId } : {}),
+      ...(typeof sessionData.conversationId === 'string' ? { conversationId: sessionData.conversationId } : {}),
+    });
+    const userId = turn.userId === undefined ? '42' : turn.userId;
+    return {
+      prepared,
+      learning,
+      context: { gmiId: 'gmi-1', personaId: 'tutor', userContext: { userId: userId ?? 'anonymous' }, sessionData: { ...sessionData, learning } },
+    };
+  }
+
+  /** A host's tool call with no learning layer. */
+  const NO_LAYER = { gmiId: 'gmi-1', personaId: 'tutor', userContext: { userId: '42' }, sessionData: { sessionId: 's-plain' } };
+
+  /** A gmi() agent named `Tutor` (persona id `tutor`) that registers the memory tools itself, its provider the stub. */
+  const tutorWithTools = (apiKey: string, learning: Record<string, unknown>, tools: unknown[]) =>
+    gmi({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey,
+      fallbackProviders: [],
+      name: 'Tutor',
+      instructions: 'You teach networking.',
+      personality: TUTOR_PERSONA,
+      learning,
+      tools,
+    } as never);
+
+  /** The tool results the model was sent in its last call, one text each. */
+  const toolTexts = (played: ReturnType<typeof script>): string[] =>
+    (played.seen.filter((call) => call.streamed).at(-1)?.messages ?? [])
+      .filter((message) => message.role === 'tool')
+      .map((message) => (typeof message.content === 'string' ? message.content : JSON.stringify(message.content)));
+
+  it("files a learner's memory tool writes on gmi() under the learner's scope ids, each with a pending row and its kept verdict in the learner's chain; the same user id in another namespace finds none of them and reaches none by id, and the learner's next session finds and changes them", async () => {
+    quiet();
+    const { memory, file } = await toolsOn();
+    const store = new InMemoryLearningStore();
+    const k = key();
+    const played = script('openai', k, { replies: [] });
+    const tenantA = tutorWithTools(k, { store, namespace: 'A', memoryTools: memory }, memory.createTools({ includeReflect: false }));
+    const tenantB = tutorWithTools(k, { store, namespace: 'B', memoryTools: memory }, memory.createTools({ includeReflect: false }));
+    try {
+      played.replies.push(
+        reply.tools([
+          { id: 'c1', name: 'memory_add', args: { content: 'My canary is LARK-7.' } },
+          { id: 'c2', name: 'memory_add', args: { content: 'This thread is about routing OWL-3.', scope: 'thread' } },
+          { id: 'c3', name: 'memory_add', args: { content: 'Every tenant uses ORG-9.', scope: 'organization' } },
+        ]),
+        reply.text('Noted.'),
+      );
+      await tenantA.session('s1', { userId: '42' }).send('Remember these.');
+      expect(toolTexts(played).some((text) => text.includes('organization_scope'))).toBe(true);
+      const lark = traceOf(file, 'My canary is LARK-7.')!;
+      const owl = traceOf(file, 'This thread is about routing OWL-3.')!;
+      expect(lark).toMatchObject({ scope: 'user', scopeId: 'A/42', deleted: 0 });
+      expect(owl).toMatchObject({ scope: 'thread', scopeId: expect.stringMatching(/^A\/\/./), deleted: 0 });
+      expect(traceOf(file, 'Every tenant uses ORG-9.')).toBeUndefined();
+      const filedRows = await writesOn(store, chainKeyOf(LEARNER_A));
+      expect(filedRows.map((row) => [row.rowType, row.verdict])).toEqual([
+        ['candidate', 'pending'],
+        ['verdict', 'kept'],
+        ['candidate', 'pending'],
+        ['verdict', 'kept'],
+      ]);
+      expect(
+        (await candidatesOf(store, chainKeyOf(LEARNER_A)))
+          .filter((entry) => entry.kind === 'memory_write')
+          .map((entry) => [entry.actor, entry.subject])
+          .sort(),
+      ).toEqual([['tool:memory_add', lark.id], ['tool:memory_add', owl.id]].sort());
+
+      // Tenant B's user 42 finds none of it and reaches none of it by id.
+      played.replies.push(
+        reply.tools([
+          { id: 'c4', name: 'memory_search', args: { query: 'LARK' } },
+          { id: 'c5', name: 'memory_update', args: { traceId: lark.id, content: 'My canary is CROW-1.' } },
+          { id: 'c6', name: 'memory_delete', args: { traceId: lark.id } },
+          { id: 'c7', name: 'memory_merge', args: { traceIds: [lark.id, owl.id] } },
+        ]),
+        reply.text('I find nothing.'),
+      );
+      await tenantB.session('s2', { userId: '42' }).send('What is my canary?');
+      const seenByB = toolTexts(played);
+      expect(seenByB).toEqual(expect.arrayContaining([JSON.stringify({ results: [] }), JSON.stringify({ updated: false }), JSON.stringify({ deleted: false })]));
+      expect(seenByB.some((text) => text.includes('Found only 0'))).toBe(true);
+      expect(traceOf(file, 'My canary is LARK-7.')).toMatchObject({ id: lark.id, deleted: 0 });
+      expect(traceOf(file, 'This thread is about routing OWL-3.')).toMatchObject({ id: owl.id, deleted: 0 });
+      expect(await writesOn(store, chainKeyOf({ ...LEARNER_A, namespace: 'B' }))).toEqual([]);
+
+      // Tenant A's next session finds it and changes it, recorded in the learner's chain.
+      played.replies.push(
+        reply.tools([{ id: 'c8', name: 'memory_search', args: { query: 'LARK' } }]),
+        reply.tools([{ id: 'c9', name: 'memory_update', args: { traceId: lark.id, content: 'My canary is LARK-8.' } }]),
+        reply.text('Changed.'),
+      );
+      await tenantA.session('s3', { userId: '42' }).send('Change my canary to LARK-8.');
+      const seenByA = toolTexts(played);
+      expect(seenByA.some((text) => text.includes('My canary is LARK-7.'))).toBe(true);
+      expect(seenByA).toContain(JSON.stringify({ updated: true }));
+      expect(traceOf(file, 'My canary is LARK-8.')).toMatchObject({ id: lark.id, scope: 'user', scopeId: 'A/42', deleted: 0 });
+      const changed = (await writesOn(store, chainKeyOf(LEARNER_A))).slice(-2);
+      expect(changed.map((row) => [row.rowType, row.subject, row.verdict])).toEqual([
+        ['candidate', lark.id, 'pending'],
+        ['verdict', lark.id, 'kept'],
+      ]);
+      expect(JSON.parse(changed[0]!.body)).toMatchObject({ actor: 'tool:memory_update' });
+    } finally {
+      await tenantA.close();
+      await tenantB.close();
+    }
+  });
+
+  it("reaches by id only a live trace of its turn's own scopes that its own user filed, and changes one only while it holds what the call read: another user's in a shared scope is refused (other_user), one another writer moved answers conflict with a rejected row, and a turn with no recorder or no thread writes nothing", async () => {
+    quiet();
+    const { memory, file, call } = await toolsOn();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: memory });
+    const shared = await layer.forLearner(LEARNER_A, productContext('s-shared'));
+
+    const learnerTurn = await productCall(shared, {}, { sessionId: 's-shared' });
+    expect(learnerTurn.prepared.learner).toBe('bound');
+    const kept = await call('memory_add', { content: 'Learner note KIWI-1.' }, learnerTurn.context);
+    expect(kept).toMatchObject({ success: true, details: { status: 'kept', ledgerId: expect.any(String) } });
+    const kiwi = traceOf(file, 'Learner note KIWI-1.')!;
+    expect(kiwi).toMatchObject({ scope: 'user', scopeId: 'A/42' });
+    expect((await writesOn(store, chainKeyOf(LEARNER_A)))[0]).toMatchObject({ rowType: 'candidate', id: kept.details!.ledgerId, subject: kiwi.id });
+    expect(await call('memory_add', { content: 'Learner persona note.', scope: 'persona' }, learnerTurn.context)).toMatchObject({ success: true });
+    expect(traceOf(file, 'Learner persona note.')).toMatchObject({ scope: 'persona', scopeId: learnerTurn.prepared.scopes!.personaScopeId });
+
+    // A second user on the learner's session: the session's form, and that user's id on the trace and its rows.
+    const bob = await productCall(shared, { userId: 'bob', turnId: 't-2' }, { sessionId: 's-shared' });
+    expect(bob.prepared).toMatchObject({ learner: 'none', turnUserId: 'bob' });
+    expect(await call('memory_add', { content: 'Visitor note PLUM-2.' }, bob.context)).toMatchObject({ success: true, details: { status: 'kept' } });
+    const plum = traceOf(file, 'Visitor note PLUM-2.')!;
+    expect(plum).toMatchObject({ scope: 'user', scopeId: 'A//s-shared', turnUserId: 'bob' });
+    const bobChain = chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }, 'bob');
+    expect((await writesOn(store, bobChain)).map((row) => [row.rowType, row.userId, row.turnUserId, row.verdict])).toEqual([
+      ['candidate', null, 'bob', 'pending'],
+      ['verdict', null, 'bob', 'kept'],
+    ]);
+
+    // A third user on the session: bob's trace lies in its own scopes and is refused; the learner's is not found.
+    const cy = await productCall(shared, { userId: 'cy', turnId: 't-3' }, { sessionId: 's-shared' });
+    expect(await call('memory_update', { traceId: plum.id, content: 'Changed by cy.' }, cy.context)).toMatchObject({
+      success: false,
+      details: { status: 'rejected', reason: 'other_user' },
+    });
+    expect(await call('memory_delete', { traceId: plum.id }, cy.context)).toMatchObject({ success: false, details: { reason: 'other_user' } });
+    expect(await call('memory_update', { traceId: kiwi.id, content: 'Changed by cy.' }, cy.context)).toEqual({ success: true, output: { updated: false } });
+    expect(await call('memory_delete', { traceId: kiwi.id }, cy.context)).toEqual({ success: true, output: { deleted: false } });
+    expect(await call('memory_add', { content: 'Visitor note FIG-3.' }, cy.context)).toMatchObject({ success: true });
+    const fig = traceOf(file, 'Visitor note FIG-3.')!;
+    expect(fig).toMatchObject({ scopeId: 'A//s-shared', turnUserId: 'cy' });
+    expect(await call('memory_merge', { traceIds: [fig.id, plum.id] }, cy.context)).toMatchObject({ success: false, details: { reason: 'other_user' } });
+    expect(await call('memory_merge', { traceIds: [fig.id, kiwi.id] }, cy.context)).toMatchObject({ success: false, error: expect.stringContaining('Found only 1') });
+    expect((await call('memory_search', { query: 'PLUM' }, cy.context)).output!.results!.map((result) => result.content)).toEqual(['Visitor note PLUM-2.']);
+    expect(traceOf(file, 'Visitor note PLUM-2.')).toMatchObject({ content: 'Visitor note PLUM-2.', deleted: 0 });
+    expect(traceOf(file, 'Learner note KIWI-1.')).toMatchObject({ deleted: 0 });
+
+    // forgetUser for bob takes bob's trace and rows, and leaves the session's others.
+    await layer.forgetUser('bob', { namespace: 'A' });
+    expect(liveContents(file)).toEqual(['Learner note KIWI-1.', 'Learner persona note.', 'Visitor note FIG-3.']);
+    expect(await writesOn(store, bobChain)).toEqual([]);
+
+    // A learner's own session, its call naming a conversation: a thread trace goes under the conversation's form.
+    const own = await layer.forLearner(LEARNER_A, productContext('s-own'));
+    const ownTurn = await productCall(own, { turnId: 't-4' }, { sessionId: 's-own', conversationId: 'conv-9' });
+    expect(ownTurn.prepared.learner).toBe('bound');
+    expect(await call('memory_add', { content: 'Thread note WREN-5.', scope: 'thread' }, ownTurn.context)).toMatchObject({ success: true });
+    expect(traceOf(file, 'Thread note WREN-5.')).toMatchObject({ scope: 'thread', scopeId: 'A//conv-9' });
+
+    // Another writer changes the trace after the call read it and before its write: the write changes nothing.
+    expect(await call('memory_add', { content: 'Draft TERN-3.' }, ownTurn.context)).toMatchObject({ success: true });
+    const tern = traceOf(file, 'Draft TERN-3.')!;
+    const racing = {
+      ...ownTurn.context,
+      sessionData: {
+        ...ownTurn.context.sessionData,
+        learning: {
+          ...ownTurn.learning,
+          recordSelfChange: async (change: SessionSelfChange<unknown>) => {
+            expect(await call('memory_update', { traceId: tern.id, content: 'Moved by another writer.' }, NO_LAYER)).toMatchObject({ success: true });
+            return ownTurn.learning.recordSelfChange!(change);
+          },
+        },
+      },
+    };
+    const conflict = await call('memory_update', { traceId: tern.id, content: 'Final TERN-4.' }, racing);
+    expect(conflict).toMatchObject({ success: false, details: { status: 'rejected', reason: 'conflict', ledgerId: expect.any(String) } });
+    expect(traceOf(file, 'Moved by another writer.')).toMatchObject({ id: tern.id, deleted: 0 });
+    expect(traceOf(file, 'Final TERN-4.')).toBeUndefined();
+    const conflictRows = (await writesOn(store, chainKeyOf(LEARNER_A))).filter((row) => row.candidateId === conflict.details!.ledgerId);
+    expect(conflictRows.map((row) => [row.rowType, row.verdict])).toEqual([
+      ['candidate', 'pending'],
+      ['verdict', 'rejected'],
+    ]);
+    expect(JSON.parse(conflictRows[1]!.body).reason).toBe('write_failed');
+
+    // A turn whose session gives scope ids and no recorder, and a thread write with no conversation or session.
+    const before = liveContents(file);
+    const withoutRecorder = { ...ownTurn.learning };
+    delete withoutRecorder.recordSelfChange;
+    const unrecorded = { ...ownTurn.context, sessionData: { ...ownTurn.context.sessionData, learning: withoutRecorder } };
+    for (const [name, args] of [
+      ['memory_add', { content: 'Unrecorded.' }],
+      ['memory_update', { traceId: tern.id, content: 'Unrecorded.' }],
+      ['memory_delete', { traceId: tern.id }],
+      ['memory_merge', { traceIds: [tern.id, kiwi.id] }],
+    ] as const) {
+      expect(await call(name, args, unrecorded)).toMatchObject({ success: false, details: { status: 'rejected', reason: 'no_recorder' } });
+    }
+    const threadless = { ...ownTurn.context, sessionData: { learning: ownTurn.learning } };
+    expect(await call('memory_add', { content: 'Threadless.', scope: 'thread' }, threadless)).toMatchObject({ success: false, details: { reason: 'no_thread' } });
+    expect(liveContents(file)).toEqual(before);
+  });
+
+  it("writes with no row in mode off and under a suspension, stops every write under a freeze (the process switch with a layer and without one, a turn in mode frozen, a run-time freeze read at the call), and refuses memory_reflect wherever a layer runs, after the freeze", async () => {
+    quiet();
+    const { memory, file, call } = await toolsOn(true);
+
+    const offStore = new InMemoryLearningStore();
+    const offLayer = createLearningLayer({ store: offStore, memoryTools: memory, mode: 'off' });
+    const offTurn = await productCall(await offLayer.forLearner(LEARNER_A, productContext('s-off')), {}, { sessionId: 's-off' });
+    expect(offTurn.prepared.mode).toBe('off');
+    expect(await call('memory_add', { content: 'Written in mode off.' }, offTurn.context)).toMatchObject({ success: true, details: { status: 'written' } });
+    expect(traceOf(file, 'Written in mode off.')).toMatchObject({ scope: 'user', scopeId: 'A/42', deleted: 0 });
+    expect(await writesOn(offStore, chainKeyOf(LEARNER_A))).toEqual([]);
+
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: memory });
+    await layer.suspend({ learner: LEARNER_A }, 'ops');
+    const suspended = await productCall(await layer.forLearner(LEARNER_A, productContext('s-suspended')), {}, { sessionId: 's-suspended' });
+    expect(await call('memory_add', { content: 'Written under a suspension.' }, suspended.context)).toMatchObject({ success: true, details: { status: 'written' } });
+    expect(traceOf(file, 'Written under a suspension.')).toMatchObject({ scopeId: 'A/42', deleted: 0 });
+    expect(await writesOn(store, chainKeyOf(LEARNER_A))).toEqual([]);
+    await layer.unsuspend({ learner: LEARNER_A });
+
+    const frozenLayer = createLearningLayer({ store: new InMemoryLearningStore(), memoryTools: memory, mode: 'frozen' });
+    const frozenTurn = await productCall(await frozenLayer.forLearner(LEARNER_A, productContext('s-frozen')), {}, { sessionId: 's-frozen' });
+    expect(await call('memory_add', { content: 'Frozen by the mode.' }, frozenTurn.context)).toMatchObject({ success: false, details: { status: 'rejected', reason: 'frozen' } });
+
+    // A run-time freeze, read at each call of a turn prepared before it.
+    const onTurn = await productCall(await layer.forLearner(LEARNER_A, productContext('s-on')), {}, { sessionId: 's-on' });
+    expect(await call('memory_add', { content: 'Kept before the freeze.' }, onTurn.context)).toMatchObject({ success: true, details: { status: 'kept' } });
+    const keptTrace = traceOf(file, 'Kept before the freeze.')!;
+    await layer.freeze({ learner: LEARNER_A }, 'ops');
+    for (const [name, args] of [
+      ['memory_add', { content: 'Frozen at the call.' }],
+      ['memory_update', { traceId: keptTrace.id, content: 'Frozen at the call.' }],
+      ['memory_delete', { traceId: keptTrace.id }],
+      ['memory_merge', { traceIds: [keptTrace.id, keptTrace.id] }],
+    ] as const) {
+      expect(await call(name, args, onTurn.context)).toMatchObject({ success: false, details: { status: 'rejected', reason: 'frozen' } });
+    }
+    expect((await call('memory_search', { query: 'freeze' }, onTurn.context)).output!.results!.map((result) => result.content)).toEqual(['Kept before the freeze.']);
+    await layer.unfreeze({ learner: LEARNER_A });
+    expect(await call('memory_update', { traceId: keptTrace.id, content: 'Kept after the freeze.' }, onTurn.context)).toMatchObject({ success: true, details: { status: 'kept' } });
+
+    // The process switch: every write stops, with a layer and without one, and memory_reflect says frozen first.
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    expect(await call('memory_add', { content: 'Frozen by the process.' }, onTurn.context)).toMatchObject({ success: false, details: { reason: 'frozen' } });
+    expect(await call('memory_add', { content: 'Frozen by the process.' }, NO_LAYER)).toMatchObject({ success: false, details: { reason: 'frozen' } });
+    expect(await call('memory_reflect', {}, onTurn.context)).toMatchObject({ success: false, details: { reason: 'frozen' } });
+    expect(await call('memory_reflect', {}, NO_LAYER)).toMatchObject({ success: false, details: { reason: 'frozen' } });
+    vi.unstubAllEnvs();
+    expect(traceOf(file, 'Frozen by the process.')).toBeUndefined();
+
+    // memory_reflect is withdrawn on every call that carries a layer's learning, and runs with none.
+    expect(await call('memory_reflect', {}, onTurn.context)).toMatchObject({ success: false, details: { status: 'rejected', reason: 'withdrawn' } });
+    expect(await call('memory_reflect', {}, offTurn.context)).toMatchObject({ success: false, details: { reason: 'withdrawn' } });
+    expect((await call('memory_reflect', {}, NO_LAYER)).success).toBe(true);
+
+    // With no layer, and with a host's learner session that gives no scope ids, a tool files as before the layer.
+    expect(await call('memory_add', { content: 'Written with no layer.' }, NO_LAYER)).toEqual({ success: true, output: { traceId: expect.any(String) } });
+    expect(traceOf(file, 'Written with no layer.')).toMatchObject({ scope: 'user', scopeId: '42' });
+    const hostLearning = { learner: 'bound', mode: 'on', frozen: () => false };
+    const hostCall = { ...NO_LAYER, sessionData: { sessionId: 's-host', learning: hostLearning } };
+    expect(await call('memory_add', { content: 'Filed as before the layer.' }, hostCall)).toEqual({ success: true, output: { traceId: expect.any(String) } });
+    expect(traceOf(file, 'Filed as before the layer.')).toMatchObject({ scope: 'user', scopeId: '42' });
+    const hostFrozen = { ...NO_LAYER, sessionData: { sessionId: 's-host', learning: { ...hostLearning, frozen: () => true } } };
+    expect(await call('memory_add', { content: 'Frozen by the host.' }, hostFrozen)).toMatchObject({ success: false, details: { reason: 'frozen' } });
+    expect(await call('memory_reflect', {}, hostCall)).toMatchObject({ success: false, details: { reason: 'withdrawn' } });
+  });
+
+  it("files nothing for a user forgotten before the write or while the learning store cannot be read, reverts a tool's write to the state it replaced, keeps the first of a tie's traceIds, and takes a deleted or merged trace's knowledge-graph copy with it", async () => {
+    quiet();
+    const { memory, file, call } = await toolsOn();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: memory });
+    const turn = await productCall(await layer.forLearner(LEARNER_A, productContext('s-1')), {}, { sessionId: 's-1' });
+
+    vi.spyOn(store, 'transaction').mockRejectedValueOnce(new Error('the database is down'));
+    expect(await call('memory_add', { content: 'Lost to a down store.' }, turn.context)).toMatchObject({
+      success: false,
+      details: { status: 'rejected', reason: 'store_unavailable' },
+    });
+    expect(traceOf(file, 'Lost to a down store.')).toBeUndefined();
+
+    const cyKey: LearnerKey = { namespace: 'A', agentKey: 'tutor', userId: 'cy' };
+    const cyTurn = await productCall(await layer.forLearner(cyKey, productContext('s-cy')), { userId: 'cy' }, { sessionId: 's-cy' });
+    await layer.forgetUser('cy', { namespace: 'A' });
+    expect(await call('memory_add', { content: 'Never filed.' }, cyTurn.context)).toMatchObject({ success: false, details: { status: 'rejected', reason: 'forgotten' } });
+    expect(traceOf(file, 'Never filed.')).toBeUndefined();
+
+    // revert: an update's before-state comes back, an add's trace goes.
+    const added = await call('memory_add', { content: 'Bees live in hives.' }, turn.context);
+    const bees = traceOf(file, 'Bees live in hives.')!;
+    const updated = await call('memory_update', { traceId: bees.id, content: 'Bees live in walls.' }, turn.context);
+    expect(updated).toMatchObject({ success: true, details: { status: 'kept' } });
+    await layer.revert(updated.details!.ledgerId!, 'ops');
+    expect(traceOf(file, 'Bees live in hives.')).toMatchObject({ id: bees.id, deleted: 0 });
+    expect(liveContents(file)).not.toContain('Bees live in walls.');
+    await layer.revert(added.details!.ledgerId!, 'ops');
+    expect(liveContents(file)).not.toContain('Bees live in hives.');
+
+    // A delete and a merge through the facade's tools, and Memory.forget(), take each deleted trace's copy with it.
+    for (const text of ['Owls hunt at night.', 'Owls nest in barns.', 'Owls eat mice.', 'Owls sleep by day.']) {
+      expect(await call('memory_add', { content: text }, turn.context)).toMatchObject({ success: true });
+    }
+    const [hunt, nest, eat, sleep] = ['Owls hunt at night.', 'Owls nest in barns.', 'Owls eat mice.', 'Owls sleep by day.'].map((text) => traceOf(file, text)!);
+    for (const trace of [hunt!, nest!, eat!, sleep!]) await memory.graph.recordMemory(leftoverCopy(trace.id, 'A/42', trace.content));
+    expect(await call('memory_delete', { traceId: hunt!.id }, turn.context)).toMatchObject({ success: true, output: { deleted: true }, details: { status: 'kept' } });
+    // Equal retrieval counts: the first of traceIds survives, and the joined text follows their order.
+    expect(await call('memory_merge', { traceIds: [nest!.id, eat!.id] }, turn.context)).toMatchObject({
+      success: true,
+      output: { survivorId: nest!.id, deletedIds: [eat!.id] },
+      details: { status: 'kept' },
+    });
+    expect(traceOf(file, 'Owls nest in barns. | Owls eat mice.')).toMatchObject({ id: nest!.id, deleted: 0 });
+    await memory.forget(sleep!.id);
+    expect((await copiesIn(memory.graph)).map((copy) => copy.traceId)).toEqual([nest!.id]);
+  });
+
+  it("searches the turn's own scopes, its organization and the traces filed under no scope id, never a persona-wide trace, another organization's, or a learner's of the same id in another namespace", async () => {
+    quiet();
+    const { memory, call } = await toolsOn();
+    const layer = createLearningLayer({ store: new InMemoryLearningStore(), memoryTools: memory });
+    await memory.remember('The canary manual GUIDE-1.');
+    await memory.remember('The persona-wide canary WIDE-2.', { scope: 'persona', scopeId: 'persona:tutor' });
+    await memory.remember("Tenant A's canary ORG-3.", { scope: 'organization', scopeId: 'A' });
+    await memory.remember("Tenant Z's canary ORG-4.", { scope: 'organization', scopeId: 'Z' });
+    await memory.remember('A canary filed before the layer PRE-6.', { scope: 'user', scopeId: '7' });
+    const found = async (context: unknown, args: Record<string, unknown> = {}): Promise<string[]> =>
+      ((await call('memory_search', { query: 'canary', ...args }, context)).output?.results ?? []).map((result) => result.content).sort();
+
+    const learnerA = await productCall(await layer.forLearner(LEARNER_A, productContext('s-a')), {}, { sessionId: 's-a', organizationId: 'A' });
+    expect(await call('memory_add', { content: "Learner 42's canary OWN-5." }, learnerA.context)).toMatchObject({ success: true });
+    expect(await found(learnerA.context)).toEqual(["Learner 42's canary OWN-5.", "Tenant A's canary ORG-3.", 'The canary manual GUIDE-1.'].sort());
+    expect(await found(learnerA.context, { scope: 'organization' })).toEqual(["Tenant A's canary ORG-3."]);
+    expect(await found(learnerA.context, { scope: 'user' })).toEqual(["Learner 42's canary OWN-5.", 'The canary manual GUIDE-1.'].sort());
+
+    // The user context keeps an organization an earlier turn's override set: it counts only when it is the turn's namespace.
+    const withoutTurnOrganization = (organizationId: string) => ({
+      ...learnerA.context,
+      userContext: { userId: '42', organizationId },
+      sessionData: { sessionId: 's-a', learning: learnerA.learning },
+    });
+    expect(await found(withoutTurnOrganization('Z'))).toEqual(["Learner 42's canary OWN-5.", 'The canary manual GUIDE-1.'].sort());
+    expect(await found(withoutTurnOrganization('A'))).toContain("Tenant A's canary ORG-3.");
+
+    const learnerB = await productCall(await layer.forLearner({ ...LEARNER_A, namespace: 'B' }, productContext('s-b')), { namespace: 'B' }, { sessionId: 's-b' });
+    expect(await found(learnerB.context)).toEqual(['The canary manual GUIDE-1.']);
+
+    // A learner with no namespace finds a trace filed under its plain id before the layer; learner 7 of tenant A does not.
+    const plain = await productCall(await layer.forLearner({ namespace: '', agentKey: 'tutor', userId: '7' }, productContext('s-7')), { userId: '7', namespace: '' }, { sessionId: 's-7' });
+    expect(await found(plain.context)).toEqual(['A canary filed before the layer PRE-6.', 'The canary manual GUIDE-1.'].sort());
+    const tenant7 = await productCall(await layer.forLearner({ ...LEARNER_A, userId: '7' }, productContext('s-a7')), { userId: '7' }, { sessionId: 's-a7' });
+    expect(await found(tenant7.context)).toEqual(['The canary manual GUIDE-1.']);
+  });
+});
+
 describe("gmi(): memory.persistAccessState", () => {
   let keys = 0;
   const key = () => `k-qa-scopes-${++keys}`;
@@ -8311,5 +8767,23 @@ describe('the docs a host reads about it', () => {
     expect(gmiDoc).not.toContain("a metaprompt's imprint between turns");
     expect(gmiDoc).toContain("Feedback (`recordUserFeedback()`) between turns is filed with the scope ids of the last turn the GMI prepared");
     expect(doc('docs/memory/COGNITIVE_MEMORY.md')).toContain("the user's message and the reply both go under the turn's own user scope id");
+  });
+
+  it('describe what the memory tools file, read and record where a learning layer runs, and the copy a deleted trace takes with it', () => {
+    const operations = doc('docs/MEMORY_OPERATIONS.md');
+    expect(operations).toMatch(/^### With a learning layer$/m);
+    expect(operations).toContain('It refuses an `organization` trace (`organization_scope`), and a `thread` trace on a call that names neither a conversation nor a session (`no_thread`).');
+    expect(operations).toContain("A kept write succeeds with `details: { status: 'kept', ledgerId }`; in mode `off` and under a suspension it succeeds with no row (`status: 'written'`).");
+    expect(operations).toContain('A turn whose session gives scope ids and no recorder refuses every write (`no_recorder`).');
+    expect(operations).toContain("another user's trace inside them (a shared thread, a session two users spoke on) is refused (`other_user`), and a merge that names one is refused whole.");
+    expect(operations).toContain('a trace another writer changed in between fails the write (`conflict`, its row `rejected`) and nothing changes.');
+    expect(operations).toContain("Only a freeze stops a write: `AGENTOS_LEARNING_FREEZE=1`, a turn in mode `frozen`, or a run-time freeze of the turn's scope, read at the call (`frozen`).");
+    expect(operations).toContain('**`memory_reflect`** refuses every call that carries `sessionData.learning` (`withdrawn`), after the freeze');
+    expect(operations).toContain('On a tie the first of `traceIds` survives, and joined contents follow the order of `traceIds`.');
+    expect(operations).toContain("Deletes the trace's knowledge-graph copy, the episodic record a memory manager on the same Brain writes of each trace it stores, when the tool was made by `Memory.createTools()`; `Memory.forget()` does the same.");
+    expect(doc('docs/GMI.md')).toContain('The memory tools file, read and write by that context ([With a learning layer](./MEMORY_OPERATIONS.md#with-a-learning-layer))');
+    expect(doc('docs/memory/COGNITIVE_MEMORY.md')).toContain(
+      "`Memory.forget()` and the memory tools' `memory_delete` and `memory_merge` delete each deleted trace's copy (`Memory.deleteGraphCopies`).",
+    );
   });
 });
