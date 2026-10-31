@@ -71,21 +71,23 @@ export const MAX_STEP_WITH_LEARNING = 0.02;
  */
 export const MAX_CALLS_PER_SESSION_WITH_LEARNING = 3;
 
-/** A non-blank string, trimmed; anything else reads as `''`. */
-function plainId(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
+/** A string as given; anything else reads as `''`. */
+function idOf(value: unknown): string {
+  return typeof value === 'string' ? value : '';
 }
 
 /**
- * The key a call's accepted count is kept under on a host with a learning layer: the turn's organization, persona and
- * user beside its session, each part encoded so no two of them run together.
+ * The key a learner's accepted calls are kept under on a host with a learning layer: the turn's
+ * organization, persona and user beside its session, each as given (the learning layer keeps a user id as it comes),
+ * serialized whole, so no two parts run together and no id fails to encode.
  */
-function callCountKey(context: ToolExecutionContext): string {
-  const organizationId = plainId(context.sessionData?.organizationId);
-  const userId = plainId((context.userContext as { userId?: unknown } | undefined)?.userId);
-  return [organizationId, plainId(context.personaId), userId, resolveSelfImprovementSessionKey(context)]
-    .map(encodeURIComponent)
-    .join('|');
+function learnerKeyOf(context: ToolExecutionContext): string {
+  return JSON.stringify([
+    idOf(context.sessionData?.organizationId),
+    idOf(context.personaId),
+    idOf((context.userContext as { userId?: unknown } | undefined)?.userId),
+    resolveSelfImprovementSessionKey(context),
+  ]);
 }
 
 /**
@@ -359,7 +361,7 @@ export class AdaptPersonalityTool
 
     // The learning layer retains its existing step and call limits.
     const learning = readToolLearningContext(context.sessionData);
-    const countKey = callCountKey(context);
+    const countKey = learnerKeyOf(context);
     if (learning) {
       if (Math.abs(delta) > MAX_STEP_WITH_LEARNING + 1e-9) {
         return refusedSelfChange(this.name, 'step_bound', `one call moves a trait by at most ${MAX_STEP_WITH_LEARNING}`);
