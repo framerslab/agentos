@@ -110,9 +110,10 @@ export async function ensureConversationSchema(adapter: StorageAdapter): Promise
 /**
  * Back-compat migration: adds the cacheReadTokens and cacheCreationTokens
  * columns to a `messages` table made before them. CREATE TABLE IF NOT EXISTS
- * leaves an existing table as it is, so they need an explicit ALTER. Neither
- * SQLite before 3.35 nor a portable statement has ADD COLUMN IF NOT EXISTS, so
- * a duplicate-column error is swallowed.
+ * leaves an existing table as it is, so they need an explicit ALTER. SQLite
+ * has no ADD COLUMN IF NOT EXISTS (https://www.sqlite.org/lang_altertable.html),
+ * so the ALTER is the plain ADD COLUMN both databases run, and a
+ * duplicate-column error is swallowed.
  *
  * Both columns are read first and the ALTERs run only when that read fails. On
  * Postgres an ALTER TABLE takes an ACCESS EXCLUSIVE lock even when the column
