@@ -7,8 +7,9 @@
  * freezes listed in one order and a session row's start kept when it is written again; text is ordered by UTF-16 code
  * unit, whatever order the database sorts text in; a user's rows are deleted in one namespace only, and the tombstone
  * stays; a transaction that throws takes back every write it made, a deletion included, and no read sees one of them;
- * a transaction's handle refuses every call once its transaction has ended; and every row a store is given or hands
- * out is a copy.
+ * a transaction's handle refuses every call once its transaction has ended; every row a store is given or hands out is
+ * a copy; and a store writes no text that holds a lone surrogate, which a SQL text column cannot hold, and reads,
+ * marks and deletes no other user's rows by such a key.
  */
 import { describe, expect, it } from 'vitest';
 import type {
@@ -485,6 +486,47 @@ export function runLearningStoreContract(name: string, open: () => Promise<Learn
         for (const table of ['outcomes', 'lessons', 'skills'] as const) {
           expect(await store.learnerDocs(table, 'A', 'tutor', '42')).toEqual([]);
         }
+      }));
+
+    it('writes no text that holds a lone surrogate, and reads, marks and deletes no other user\'s rows by one', () =>
+      withStore(async (store) => {
+        // A database driver writes U+FFFD in place of a lone surrogate, so the user 'ana\uD800' would be stored, read
+        // and deleted as the user 'ana\uFFFD', and read back as another id than the one written.
+        const lone = 'ana\uD800';
+        const other = 'ana\uFFFD';
+        const otherChain = 'u|A|tutor|other';
+        await store.insertLedgerRow(ledgerRow({ id: 'o-1', chainKey: otherChain, userId: other }));
+        await store.insertHead(headRow({ chainKey: otherChain, userId: other, lastId: 'o-1' }));
+        await store.insertTraitRow(traitRow({ userId: other }));
+        await store.putSessionRow(sessionRow({ userId: other }));
+        await store.insertFreeze(freezeRow({ scopeKey: 'learner|A|tutor|other', namespace: 'A', userId: other }));
+
+        expect(await store.traitRow('A', 'tutor', lone)).toBeUndefined();
+        expect(await store.learnerLedgerRows('A', 'tutor', lone)).toEqual([]);
+        expect(await store.sessionRow('A', 'tutor', 's-1', lone, 'learner')).toBeUndefined();
+        expect(await store.sessionRowsOf('A', lone)).toEqual([]);
+        expect(await store.learnerDocs('outcomes', 'A', 'tutor', lone)).toEqual([]);
+        expect(await store.markHeadsForgotten('A', lone)).toBe(0);
+        expect(await store.deleteUserRows('A', lone)).toEqual({ ledger: 0, heads: 0, traits: 0, outcomes: 0, lessons: 0, skills: 0, sessions: 0, freezes: 0 });
+
+        const refused = /lone surrogate/;
+        await expect(store.insertLedgerRow(ledgerRow({ id: 'l-1', userId: lone }))).rejects.toThrow(refused);
+        await expect(store.insertLedgerRow(ledgerRow({ id: 'l-2', sessionId: 's-\uDC00' }))).rejects.toThrow(refused);
+        await expect(store.insertHead(headRow({ chainKey: 'u|A|tutor|lone', userId: lone }))).rejects.toThrow(refused);
+        await expect(store.advanceHead(otherChain, 1, { lastId: 'r-\uDBFF', lastHash: 'h-2', seq: 2 })).rejects.toThrow(refused);
+        await expect(store.insertTraitRow(traitRow({ userId: lone }))).rejects.toThrow(refused);
+        await expect(store.updateTraitRow(traitRow({ userId: other, state: '{"note":"\uD800"}', version: 2 }), 1)).rejects.toThrow(refused);
+        await expect(store.putSessionRow(sessionRow({ userId: lone }))).rejects.toThrow(refused);
+        await expect(store.insertFreeze(freezeRow({ setBy: 'operator:\uDBFF' }))).rejects.toThrow(refused);
+        await expect(store.insertForgotten('hash-\uD800', NOW)).rejects.toThrow(refused);
+
+        expect(await store.ledgerRow('l-1')).toBeUndefined();
+        expect(await store.head('u|A|tutor|lone')).toBeUndefined();
+        expect(await store.traitRow('A', 'tutor', other)).toEqual(traitRow({ userId: other }));
+        expect((await store.learnerLedgerRows('A', 'tutor', other)).map((row) => row.id)).toEqual(['o-1']);
+        expect(await store.head(otherChain)).toEqual(headRow({ chainKey: otherChain, userId: other, lastId: 'o-1' }));
+        expect(await store.sessionRowsOf('A', other)).toEqual([sessionRow({ userId: other })]);
+        expect((await store.freezeRows()).map((row) => row.scopeKey)).toEqual(['learner|A|tutor|other']);
       }));
   });
 }
