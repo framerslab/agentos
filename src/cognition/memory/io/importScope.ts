@@ -4,7 +4,11 @@
  * An importer files each trace under its scope and scope id and deduplicates inside that pair: a record whose text a
  * trace of another scope id holds (another tenant's, user's or session's) is imported, and a record whose text a trace
  * of its own scope and scope id holds is a duplicate, whichever writer stored that trace. The Markdown export writes
- * the same scope id into a trace's front matter, so a note carries it out of one brain and into another.
+ * the same scope id into a trace's front matter, so a note carries it out of one brain and into another. An importer
+ * whose source marks forgotten traces reads the source's live records before its forgotten ones, so a text the source
+ * holds both forgotten and live arrives live. A trace's memory-graph node comes in with its trace alone, under its
+ * trace's id, so a record merged into another trace leaves no node behind that stands for a trace the brain does not
+ * hold.
  *
  * @module memory/io/importScope
  */
@@ -41,7 +45,9 @@ export function importedScopeId(metadata: unknown, scopeIdColumn?: unknown): str
  * `import_hash` (an import stores it) or `content_hash` (`remember()`, `ingest()` and `memory_add` store it). A trace
  * the cognitive memory store wrote carries neither hash, and its text finds it. A trace the brain forgot counts as any
  * other, so an import does not bring it back: a forgotten row stays a record of what the brain let go, and a JSON or
- * SQLite export carries it, so leaving it out would add another forgotten copy at each import of such a file.
+ * SQLite export carries it, so leaving it out would add another forgotten copy at each import of such a file. An
+ * importer reads a source's live records before its forgotten ones (see {@link liveRecordsFirst}), so a forgotten trace
+ * the same import writes is never what makes a live record of its text a duplicate.
  *
  * @param brain - The brain the query runs on; its dialect reads the metadata.
  * @returns A parenthesised condition on `memory_traces` with the three placeholders {@link duplicateTraceParams}
@@ -63,4 +69,85 @@ export function duplicateTraceCondition(brain: Pick<Brain, 'features'>): string 
  */
 export function duplicateTraceParams(hash: string, content: string): [string, string, string] {
   return [hash, hash, content];
+}
+
+/**
+ * A source's trace records in the order an importer reads them: its live records, then its forgotten ones, each group
+ * in the source's order. A source can hold a forgotten and a live trace of one text in one scope and scope id:
+ * `forget()` and then `remember()` of the text leave them, and so does a consolidation merge of two traces of it. An
+ * export holds its rows in no set order. Read first, the live record is imported and the forgotten one is its
+ * duplicate, so the text arrives live; read the other way round, the live record would be the duplicate of the
+ * forgotten trace the same import had just written, and the text would arrive forgotten.
+ *
+ * @param records - The source's trace records, in its order.
+ * @param isForgotten - Whether a record is of a trace its source forgot.
+ * @returns The live records, then the forgotten ones.
+ */
+export function liveRecordsFirst<T>(records: readonly T[], isForgotten: (record: T) => boolean): T[] {
+  const live: T[] = [];
+  const forgotten: T[] = [];
+  for (const record of records) (isForgotten(record) ? forgotten : live).push(record);
+  return live.concat(forgotten);
+}
+
+/**
+ * Whether a JSON or SQLite trace record is of a trace its source forgot: its `deleted` is present and not zero. A
+ * record whose `deleted` is absent or `null` is stored as live, as one whose `deleted` is `0` is.
+ *
+ * @param record - A trace record as its source holds it; a value that is not an object is not forgotten.
+ * @returns `true` when the record's `deleted` is present and not zero.
+ */
+export function isForgottenRecord(record: unknown): boolean {
+  if (typeof record !== 'object' || record === null) return false;
+  const deleted = (record as { deleted?: unknown }).deleted;
+  return deleted !== undefined && deleted !== null && Number(deleted) !== 0;
+}
+
+/**
+ * The `knowledge_nodes.type` of a memory-graph node (`SqlMemoryGraph`): the node of the trace whose id it carries as
+ * its own.
+ */
+export const MEMORY_GRAPH_NODE_TYPE = 'memory_graph';
+
+/** How an import takes a memory-graph node its file holds (see {@link memoryGraphNodeImport}). */
+export type MemoryGraphNodeImport = { action: 'write' | 'duplicate'; id: string } | { action: 'skip' };
+
+/**
+ * How an import takes a memory-graph node its file holds, the node of the trace whose id it carries. The node comes in
+ * with its trace alone and under that id. It is skipped, and so are the edges that name it, when the file holds its
+ * trace and the import did not write that trace, or match it as a duplicate, under that id (the record merged into a
+ * trace of another id, was written under a new id, or failed), or when the brain holds no trace of that id; written
+ * there, the node would stand for a trace the brain does not hold. A node the brain holds under that id is the
+ * record's duplicate, and the edges that name the record's node name it; a node of another type under that id makes
+ * the record's node a skip, as it cannot take that id. Otherwise the node is written under that id.
+ *
+ * A record merged into a trace of another id brings no node and no edges: the brain's node of that trace keeps its own
+ * edges, and the record merged is most often a forgotten one (see {@link liveRecordsFirst}), whose edges its source no
+ * longer reads.
+ *
+ * @param trx - The import's transaction.
+ * @param brainId - The brain the import writes.
+ * @param nodeId - The node record's id, which is its trace's id.
+ * @param unfiled - Whether the file holds the trace of an id that the import did not write, or match as a duplicate,
+ *   under that id.
+ * @returns `write` or `duplicate` with the id, or `skip`.
+ */
+export async function memoryGraphNodeImport(
+  trx: Pick<Brain, 'get'>,
+  brainId: string,
+  nodeId: unknown,
+  unfiled: (traceId: string) => boolean,
+): Promise<MemoryGraphNodeImport> {
+  if (typeof nodeId !== 'string' || unfiled(nodeId)) return { action: 'skip' };
+  const trace = await trx.get<{ id: string }>('SELECT id FROM memory_traces WHERE brain_id = ? AND id = ? LIMIT 1', [
+    brainId,
+    nodeId,
+  ]);
+  if (!trace) return { action: 'skip' };
+  const held = await trx.get<{ type: string }>('SELECT type FROM knowledge_nodes WHERE brain_id = ? AND id = ? LIMIT 1', [
+    brainId,
+    nodeId,
+  ]);
+  if (!held) return { action: 'write', id: nodeId };
+  return held.type === MEMORY_GRAPH_NODE_TYPE ? { action: 'duplicate', id: nodeId } : { action: 'skip' };
 }

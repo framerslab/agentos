@@ -14,8 +14,12 @@
  * scope id; and a trace no import wrote, with the hash `remember()` stores or no hash at all, is the duplicate of a
  * record of its text in its scope id, and of its own Markdown or Obsidian note whatever whitespace surrounds its text
  * and whatever tags and links the note adds after it, an Obsidian note adding to its trace the tags and links it holds
- * that the trace lacks; a trace the brain forgot stays forgotten through an import of its text. Real SQLite files
- * through `@framers/sql-storage-adapter`, as the store opens them in production.
+ * that the trace lacks; a trace the brain forgot stays forgotten through an import of its text, and a text a source
+ * forgot and stored again arrives live whichever of its two records the file holds first; and a JSON or SQLite import
+ * writes a trace's memory-graph node only under its trace's id, for a trace it wrote or matched under that id, so the
+ * node of a record merged into another trace stays out with the edges that name it, and an export imported into the
+ * brain it came from adds no node. Real SQLite files through `@framers/sql-storage-adapter`, as the store opens them
+ * in production.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -26,6 +30,7 @@ import { createStorageFeatures, resolveStorageAdapter, type StorageAdapter } fro
 import { Brain } from '../Brain.js';
 import { fillScopeIds, v2ToV3 } from '../migrations/v2-to-v3.js';
 import { MemoryStore } from '../MemoryStore.js';
+import { SqlMemoryGraph } from '../SqlMemoryGraph.js';
 import { Memory } from '../../../io/facade/Memory.js';
 import { MemoryAddTool } from '../../../io/tools/MemoryAddTool.js';
 import { JsonExporter } from '../../../io/JsonExporter.js';
@@ -752,6 +757,28 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       expect(await textsOf(brain)).toEqual(['Bare words.', 'Kept words.']);
     });
 
+    it('JSON and SQLite: an export of a brain with a memory graph imported into the brain it came from adds no graph node', async () => {
+      const memory = await Memory.createSqlite(tempFile(), { brainId: 'graph-self', graph: true });
+      closers.push(() => memory.close());
+      await memory.remember('Kept words.', { scope: 'user', scopeId: 'A%2F42' });
+      await memory.remember('Other words.', { scope: 'user', scopeId: 'A%2F42' });
+      const brain = (memory as unknown as { _brain: Brain })._brain;
+      const idsOf = async (sql: string) => (await brain.all<{ id: string }>(sql)).map((row) => row.id);
+      const nodes = () => idsOf(`SELECT id FROM knowledge_nodes WHERE type = 'memory_graph' ORDER BY id`);
+      const traces = await idsOf('SELECT id FROM memory_traces ORDER BY id');
+      expect(traces).toHaveLength(2);
+      expect(await nodes()).toEqual(traces);
+
+      const json = await new JsonExporter(brain).exportToString();
+      expect(await new JsonImporter(brain).importFromString(json)).toMatchObject({ imported: 0, skipped: 4, errors: [] });
+      expect(await nodes()).toEqual(traces);
+
+      const file = path.join(path.dirname(tempFile()), 'graph-self.sqlite');
+      expect((await memory.export(file, { format: 'sqlite' })).refused).toEqual([]);
+      expect(await new SqliteImporter(brain).import(file)).toMatchObject({ imported: 0, skipped: 4, errors: [] });
+      expect(await nodes()).toEqual(traces);
+    });
+
     it('Markdown: an export imported into the brain it came from adds nothing', async () => {
       const brain = await written('markdown-unhashed', 'A%2F42', 'Kept words.', 'Bare words.');
       const dir = path.join(path.dirname(tempFile()), 'export');
@@ -1101,6 +1128,130 @@ describe('the importers file by scope id and deduplicate inside one', () => {
       // remember() stores the text again.
       await memory.remember('Forgotten words.', { scope: 'user', scopeId: 'A%2F42' });
       expect(await textsOf(brain)).toEqual(['Forgotten words.']);
+    });
+
+    describe('a text the source forgot and stored again arrives live, whichever of its two records the file holds first', () => {
+      // forget() and then remember() leave a forgotten and a live trace of one text, as a merge of two equal traces
+      // does, and an export holds its rows in no set order: each order of the two records is read.
+      const orders = [
+        { name: 'the forgotten record first', deleted: [1, 0] },
+        { name: 'the live record first', deleted: [0, 1] },
+      ];
+
+      it.each(orders)('JSON, $name', async ({ deleted }) => {
+        const memory = await Memory.createSqlite(tempFile(), { brainId: 'stored-again', graph: false });
+        closers.push(() => memory.close());
+        const first = await memory.remember('Kept words.', { scope: 'user', scopeId: 'A%2F42' });
+        await memory.forget(first.id);
+        await memory.remember('Kept words.', { scope: 'user', scopeId: 'A%2F42' });
+        const exported = JSON.parse(
+          await new JsonExporter((memory as unknown as { _brain: Brain })._brain).exportToString(),
+        ) as { traces: Array<{ deleted: number }> };
+        expect(exported.traces.map((record) => record.deleted).sort()).toEqual([0, 1]);
+        const traces = deleted.map((flag) => exported.traces.find((record) => record.deleted === flag)!);
+        const file = JSON.stringify({ ...exported, traces });
+
+        const target = await open(tempFile(), 'json-target');
+        expect(await new JsonImporter(target).importFromString(file)).toMatchObject({ imported: 1, skipped: 1, errors: [] });
+        expect(await textsOf(target)).toEqual(['Kept words.']);
+        expect(await new JsonImporter(target).importFromString(file)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      });
+
+      it.each(orders)('SQLite, $name', async ({ deleted }) => {
+        // Inserted in this order, with their ids in this order and one creation time, the rows come back in it
+        // whichever index the importer's read of them takes.
+        const sourcePath = tempFile();
+        const source = await open(sourcePath, 'sqlite-source');
+        for (let index = 0; index < deleted.length; index++) {
+          await source.run(
+            `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, deleted, scope_id)
+             VALUES (?, ?, 'episodic', 'user', 'Kept words.', 1, ?, ?, 'A%2F42')`,
+            [source.brainId, `t-${index}`, JSON.stringify({ scopeId: 'A%2F42' }), deleted[index]],
+          );
+        }
+        const target = await open(tempFile(), 'sqlite-target');
+        expect(await new SqliteImporter(target).import(sourcePath)).toMatchObject({ imported: 1, skipped: 1, errors: [] });
+        expect(await textsOf(target)).toEqual(['Kept words.']);
+        expect(await new SqliteImporter(target).import(sourcePath)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      });
+
+      it.each(orders)('CSV, $name', async ({ deleted }) => {
+        const csv = `content,scope,scope_id,deleted\n${deleted.map((flag) => `"Kept words.",user,A%2F42,${flag}\n`).join('')}`;
+        const target = await open(tempFile(), 'csv-target');
+        expect(await new CsvImporter(target).importFromString(csv)).toMatchObject({ imported: 1, skipped: 1, errors: [] });
+        expect(await textsOf(target)).toEqual(['Kept words.']);
+        expect(await new CsvImporter(target).importFromString(csv)).toMatchObject({ imported: 0, skipped: 2, errors: [] });
+      });
+
+      /**
+       * A source brain whose two traces of one text, `t-0` and `t-1`, carry the forgotten flags `deleted`, with a
+       * third trace, `t-2`, and a memory graph that holds a node for each trace and an edge from each of the two to
+       * the third, as `remember()` and the consolidation's co-activation write them. Inserted in this order, with their
+       * ids in this order and one creation time, the rows come back in it, in a JSON export and a SQLite import alike.
+       */
+      async function graphSource(deleted: number[]): Promise<{ sourcePath: string; source: Brain }> {
+        const sourcePath = tempFile();
+        const source = await open(sourcePath, 'graph-source');
+        const rows: Array<[content: string, flag: number]> = [
+          ['Kept words.', deleted[0]!],
+          ['Kept words.', deleted[1]!],
+          ['Other words.', 0],
+        ];
+        for (let index = 0; index < rows.length; index++) {
+          await source.run(
+            `INSERT INTO memory_traces (brain_id, id, type, scope, content, created_at, metadata, deleted, scope_id)
+             VALUES (?, ?, 'episodic', 'user', ?, 1, ?, ?, 'A%2F42')`,
+            [source.brainId, `t-${index}`, rows[index]![0], JSON.stringify({ scopeId: 'A%2F42' }), rows[index]![1]],
+          );
+        }
+        const graph = new SqlMemoryGraph(source);
+        await graph.initialize();
+        for (const id of ['t-0', 't-1', 't-2']) {
+          await graph.addNode(id, { type: 'episodic', scope: 'user', scopeId: 'A%2F42', strength: 1, createdAt: 1 });
+        }
+        for (const id of ['t-0', 't-1']) {
+          await graph.addEdge({ sourceId: id, targetId: 't-2', type: 'SAME_TOPIC', weight: 0.5, createdAt: 1 });
+        }
+        return { sourcePath, source };
+      }
+
+      /** The ids of a brain's traces and memory-graph nodes, and its edges. */
+      const graphOf = async (brain: Brain) => ({
+        traces: (await brain.all<{ id: string }>('SELECT id FROM memory_traces ORDER BY id')).map((row) => row.id),
+        nodes: (
+          await brain.all<{ id: string }>(`SELECT id FROM knowledge_nodes WHERE type = 'memory_graph' ORDER BY id`)
+        ).map((row) => row.id),
+        edges: (
+          await brain.all<{ source_id: string; target_id: string }>(
+            'SELECT source_id, target_id FROM knowledge_edges ORDER BY source_id, target_id',
+          )
+        ).map((row) => `${row.source_id} -> ${row.target_id}`),
+      });
+
+      it.each(orders)("JSON, $name: the graph keeps the live trace's node and edge, and none of the record merged into it", async ({ deleted }) => {
+        const { source } = await graphSource(deleted);
+        const live = `t-${deleted.indexOf(0)}`;
+        const kept = { traces: [live, 't-2'], nodes: [live, 't-2'], edges: [`${live} -> t-2`] };
+        const file = await new JsonExporter(source).exportToString();
+
+        const target = await open(tempFile(), 'json-graph-target');
+        expect(await new JsonImporter(target).importFromString(file)).toMatchObject({ imported: 5, skipped: 3, errors: [] });
+        expect(await graphOf(target)).toEqual(kept);
+        expect(await new JsonImporter(target).importFromString(file)).toMatchObject({ imported: 0, skipped: 8, errors: [] });
+        expect(await graphOf(target)).toEqual(kept);
+      });
+
+      it.each(orders)("SQLite, $name: the graph keeps the live trace's node and edge, and none of the record merged into it", async ({ deleted }) => {
+        const { sourcePath } = await graphSource(deleted);
+        const live = `t-${deleted.indexOf(0)}`;
+        const kept = { traces: [live, 't-2'], nodes: [live, 't-2'], edges: [`${live} -> t-2`] };
+
+        const target = await open(tempFile(), 'sqlite-graph-target');
+        expect(await new SqliteImporter(target).import(sourcePath)).toMatchObject({ imported: 5, skipped: 3, errors: [] });
+        expect(await graphOf(target)).toEqual(kept);
+        expect(await new SqliteImporter(target).import(sourcePath)).toMatchObject({ imported: 0, skipped: 8, errors: [] });
+        expect(await graphOf(target)).toEqual(kept);
+      });
     });
   });
 });
