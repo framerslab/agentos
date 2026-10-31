@@ -235,7 +235,11 @@ export interface AgentOptions extends BaseAgentConfig {
    * ```
    */
   responseSchema?: import('zod').ZodType;
-  /** Pre-generation hook, called before each LLM step. */
+  /**
+   * Pre-generation hook, called before each LLM step. On the GMI path with `learning` on, its `system` is the
+   * persona's base prompt, which holds no personality section; the system text in `messages` holds the section after
+   * the base prompt.
+   */
   onBeforeGeneration?: (context: GenerationHookContext) => Promise<GenerationHookContext | void>;
   /** Post-generation hook, called after each LLM step. */
   onAfterGeneration?: (result: GenerationHookResult) => Promise<GenerationHookResult | void>;
