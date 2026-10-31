@@ -33,13 +33,15 @@ import {
   GMIOutputChunkType,
 } from '../../cognition/substrate/IGMI';
 import { GMIErrorCode } from '../../core/utils/errors.js';
-import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
+import { snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import { withAgentOSSpan } from '../../safety/evaluation/observability/otel';
 import { uuidv4 } from '../../core/utils/uuid.js';
 import type { ITurnPlanner, TurnPlan } from '../../orchestration/turn-planner/TurnPlanner';
 import { CapabilityContextAssembler } from '../../cognition/discovery/CapabilityContextAssembler.js';
 import { filterCapabilityDiscoveryResultByDisabledSkills } from './selfImprovementRuntime.js';
 import { multimodalTurnParts } from '../../cognition/substrate/turnContent';
+import { streamedToolCalls, toolCallChunkMode } from './externalToolPause';
+import { finalResponseFieldsOf } from './turnFinalResponse';
 
 /**
  * Minimal stream context shape needed by the transformer.
@@ -56,6 +58,8 @@ export interface TransformerStreamContext {
   userApiKeys?: Record<string, string>;
   processingOptions?: { preferredModelId?: string; preferredProviderId?: string };
   languageNegotiation?: any;
+  /** The sources the stream announced last, which the transformer records as it streams them. */
+  ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
 }
 
 /**
@@ -90,7 +94,8 @@ function buildToolCallChunkMetadata(
  *
  * - **processGMIOutput** - Converts a non-streaming {@link GMIOutput} (returned
  *   by `handleToolResult` or the generator return value) into AgentOS response
- *   chunks (text deltas, UI commands, errors, final responses).
+ *   chunks (sources, text deltas, UI commands, errors and, outside a
+ *   tool-result continuation, final responses).
  *
  * - **transformAndPushGMIChunk** - Maps a single streaming {@link GMIOutputChunk}
  *   to the corresponding {@link AgentOSResponseChunkType} and pushes it.
@@ -147,26 +152,42 @@ export class GMIChunkTransformer {
    * corresponding AgentOS response chunks.
    *
    * Handles:
+   * - The output's sources as a METADATA_UPDATE carrying `ragSources`, before
+   *   its text, as a turn's stream carries them before its first TEXT_DELTA
    * - Response text emission as TEXT_DELTA
    * - UI command emission
    * - Error handling with stream cleanup
-   * - Final response emission with conversation persistence
+   * - Final response emission with conversation persistence, except for a
+   *   tool-result continuation, whose caller ends it
    *
    * @param agentOSStreamId - The orchestrator stream ID.
    * @param streamContext - Active stream context for this interaction.
    * @param gmiOutput - The GMI output to transform.
-   * @param _isContinuation - Whether this output is from an internal GMI
-   *   continuation (currently informational only).
+   * @param isContinuation - Whether this output is a tool-result continuation's. Its caller decides whether the
+   *   continuation stops for the host or ends, and pushes its one FINAL_RESPONSE, so none is pushed here.
    */
   async processGMIOutput(
     agentOSStreamId: string,
     streamContext: TransformerStreamContext,
     gmiOutput: GMIOutput,
-    _isContinuation: boolean,
+    isContinuation: boolean,
   ): Promise<void> {
     const { gmi, personaId, conversationContext } = streamContext;
     const gmiInstanceIdForChunks = gmi.getGMIId();
 
+    // The sources reach the stream before the text, so an output guardrail that judges the text reads them; the stream
+    // keeps them for a continuation of its turn.
+    if (Array.isArray(gmiOutput.ragSources) && gmiOutput.ragSources.length > 0) {
+      streamContext.ragSources = gmiOutput.ragSources;
+      await this.chunks.pushChunk(
+        agentOSStreamId,
+        AgentOSResponseChunkType.METADATA_UPDATE,
+        gmiInstanceIdForChunks,
+        personaId,
+        false,
+        { updates: { ragSources: gmiOutput.ragSources } },
+      );
+    }
     if (gmiOutput.responseText) {
       await this.chunks.pushChunk(
         agentOSStreamId,
@@ -211,7 +232,7 @@ export class GMIChunkTransformer {
     // (orchestrateTurn or orchestrateToolResult) to decide on looping or
     // yielding ToolCallRequestChunks.
 
-    if (gmiOutput.isFinal && (!gmiOutput.toolCalls || gmiOutput.toolCalls.length === 0)) {
+    if (!isContinuation && gmiOutput.isFinal && (!gmiOutput.toolCalls || gmiOutput.toolCalls.length === 0)) {
       await this.clearPendingRequest(conversationContext);
       if (this.enableConversationalPersistence && conversationContext) {
         await withAgentOSSpan('agentos.conversation.save', async (span) => {
@@ -227,17 +248,9 @@ export class GMIChunkTransformer {
         personaId,
         true,
         {
-          finalResponseText: gmiOutput.responseText,
-          finalToolCalls: gmiOutput.toolCalls,
-          finalUiCommands: gmiOutput.uiCommands,
-          audioOutput: gmiOutput.audioOutput,
-          imageOutput: gmiOutput.imageOutput,
-          usage: normalizeUsage(gmiOutput.usage),
-          reasoningTrace: gmiOutput.reasoningTrace,
-          error: gmiOutput.error,
+          ...finalResponseFieldsOf(gmiOutput),
           updatedConversationContext: conversationContext.toJSON(),
           activePersonaDetails: snapshotPersonaDetails(gmi.getPersona?.()),
-          ragSources: gmiOutput.ragSources,
         },
       );
       this.activeStreamContexts.delete(agentOSStreamId);
@@ -305,10 +318,11 @@ export class GMIChunkTransformer {
         }
         break;
       case GMIOutputChunkType.TOOL_CALL_REQUEST:
-        if (gmiChunk.content && Array.isArray(gmiChunk.content)) {
+        // a request that names no call gives the host nothing to run, and the host stops reading at a request
+        if (streamedToolCalls(gmiChunk)) {
           const toolCalls = gmiChunk.content as ToolCallRequest[];
-          const executionMode =
-            gmiChunk.metadata?.executionMode === 'external' ? 'external' : 'internal';
+          // the turn reads the same mode to tell whether this chunk handed the host its calls
+          const { executionMode, requiresExternalToolResult } = toolCallChunkMode(gmiChunk.metadata);
           await this.chunks.pushChunk(
             agentOSStreamId,
             AgentOSResponseChunkType.TOOL_CALL_REQUEST,
@@ -319,10 +333,7 @@ export class GMIChunkTransformer {
               toolCalls,
               rationale: gmiChunk.metadata?.rationale || 'Agent requires tool execution.',
               executionMode,
-              requiresExternalToolResult:
-                typeof gmiChunk.metadata?.requiresExternalToolResult === 'boolean'
-                  ? gmiChunk.metadata.requiresExternalToolResult
-                  : executionMode === 'external',
+              requiresExternalToolResult,
               metadata: buildToolCallChunkMetadata(streamContext, gmiChunk.metadata),
             },
           );
@@ -372,7 +383,9 @@ export class GMIChunkTransformer {
           // Surface as METADATA_UPDATE so consumers (output guardrails, UI source
           // panels, telemetry) can pick up retrieved chunks before the model
           // emits text deltas. Grounding guardrails subscribe to this update to
-          // verify subsequent claims against the same sources the LLM saw.
+          // verify subsequent claims against the same sources the LLM saw. The stream keeps them: a continuation of
+          // the turn gives them to a GMI that does not hold them (ExternalToolResultHandler).
+          streamContext.ragSources = ragSources;
           await this.chunks.pushChunk(
             agentOSStreamId,
             AgentOSResponseChunkType.METADATA_UPDATE,

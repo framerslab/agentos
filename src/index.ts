@@ -333,6 +333,17 @@ export type {
 } from './api/runtime/agencyLaunch/types.js';
 export { sessionSeat } from './api/runtime/agencyLaunch/sessionSeat.js';
 export type { SeatHandle, SessionSeatOptions } from './api/runtime/agencyLaunch/sessionSeat.js';
+// The rest of the launch surface (docs/AGENCIES.md): the runtime's `agencies` option, a launch tree's limits, the frame
+// a seat's turns and tool calls carry, the live objects of the turn that made a tool call, a tool hook, and a launched
+// team's registry record.
+export type {
+  AgencyLaunchFrame,
+  CallerTurnContext,
+  LaunchLimits,
+  LaunchRecordMetadata,
+  RuntimeAgencyLaunchOptions,
+  ToolCallHook,
+} from './api/runtime/agencyLaunch/index.js';
 // The learning layer (docs/GMI.md, "Learning"): off unless a host sets its `learning` option.
 export { createLearningLayer } from './cognition/learning/index.js';
 export type {
@@ -355,6 +366,9 @@ export type {
   TurnInputForLearning,
   TurnPreparation,
 } from './cognition/learning/index.js';
+// The trait map a learner context carries (`LearnerContext.authoredTraits`) and a learner session answers
+// (`currentTraits()`).
+export type { HexacoTraitValues } from './cognition/substrate/personas/hexaco.js';
 export { createAgentCognitiveMemory } from './api/runtime/agentCognitiveMemory.js';
 export type { AgentCognitiveMemory, AgentCognitiveMemoryOptions } from './api/runtime/agentCognitiveMemory.js';
 export type { MemoryProviderHookOptions } from './api/runtime/memoryProviderHooks.js';

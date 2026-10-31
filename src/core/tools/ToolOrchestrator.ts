@@ -30,7 +30,7 @@
 
 import { uuidv4 } from '../utils/uuid.js';
 import { IToolOrchestrator, ToolDefinitionForLLM } from './IToolOrchestrator';
-import { ITool, JSONSchemaObject, ToolExecutionResult } from './ITool';
+import { ITool, JSONSchemaObject, ToolExecutionContext, ToolExecutionResult } from './ITool';
 import {
   IToolPermissionManager,
   PermissionCheckContext,
@@ -659,13 +659,23 @@ export class ToolOrchestrator implements IToolOrchestrator {
    * call meets. The orchestrator's refusals reach the step's result as
    * `details.code` (permission_denied, step_disabled, approval_rejected,
    * approval_unavailable, approval_failed, step_replaced, step_aborted), with
-   * the orchestrator's own code kept as `orchestratorCode`.
+   * the orchestrator's own code kept as `orchestratorCode`. A step is not a
+   * call the model requested, so the output guardrails that evaluate tool
+   * calls never judge it: they judge the composed tool's own call.
+   *
+   * A step of a composed call that carries `callerTurn.dispatch` (a call
+   * made through a view of this orchestrator, such as a launched seat's)
+   * runs through it, with that `callerTurn` on its request: the step meets
+   * the view's tool names, hooks and approval gate, then this orchestrator's
+   * checks, as a direct call through the view does. A composed call with no
+   * `callerTurn` runs its steps through this orchestrator's own
+   * processToolCall.
    */
   private buildStepGate(): StepGate {
     return {
       resolve: (name) => this.toolExecutor.getTool(name),
       run: async (step, args, context, signal) => {
-        const result = await this.processToolCall({
+        const request: ToolExecutionRequestDetails = {
           toolCallRequest: { id: `step-${uuidv4()}`, name: step.name, arguments: args },
           gmiId: context.gmiId,
           personaId: context.personaId,
@@ -675,7 +685,15 @@ export class ToolOrchestrator implements IToolOrchestrator {
           sessionData: context.sessionData,
           tool: step,
           ...(signal ? { signal } : {}),
-        });
+          // A composed call that came through a view (a launched seat's, a
+          // gmi() agent's tool hook) carries that view's turn: each step runs
+          // through the view's own processToolCall, so it meets the view's
+          // names, hooks and gate as a direct call does, and so do a nested
+          // composition's steps in turn.
+          ...(context.callerTurn ? { callerTurn: context.callerTurn } : {}),
+        };
+        const dispatch = context.callerTurn?.dispatch;
+        const result = dispatch ? await dispatch(request) : await this.processToolCall(request);
         const effects = result.effects ? { effects: result.effects } : {};
         if (!result.isError) {
           return { success: true, output: result.output, ...effects };
@@ -707,6 +725,41 @@ export class ToolOrchestrator implements IToolOrchestrator {
   }
 
   /**
+   * The refusal a tool names for a call before the approval gate ({@link ITool.refusalBeforeApproval}), read with the
+   * context the executor would give the call. A tool without the method, or one whose method throws, names none, and
+   * the call is gated as before.
+   */
+  private refusalBeforeApproval(tool: ITool, requestDetails: ToolExecutionRequestDetails): ToolExecutionResult | undefined {
+    if (typeof tool.refusalBeforeApproval !== 'function') return undefined;
+    const { toolCallRequest, gmiId, personaId, personaCapabilities, userContext, correlationId, sessionData, signal } = requestDetails;
+    let args: Record<string, any> = {};
+    try {
+      const raw = toolCallRequest.arguments as unknown;
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed as Record<string, any>;
+    } catch {
+      // Arguments that do not parse name no refusal here; the executor reports them.
+      return undefined;
+    }
+    const context: ToolExecutionContext = {
+      gmiId,
+      personaId,
+      userContext,
+      ...(correlationId ? { correlationId } : {}),
+      ...(sessionData ? { sessionData } : {}),
+      ...(personaCapabilities ? { personaCapabilities } : {}),
+      ...(signal ? { signal } : {}),
+      ...(requestDetails.callerTurn ? { callerTurn: requestDetails.callerTurn } : {}),
+    };
+    try {
+      const refusal = tool.refusalBeforeApproval(args, context);
+      return refusal && refusal.success === false ? refusal : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * @inheritdoc
    */
   public async processToolCall(
@@ -731,6 +784,18 @@ export class ToolOrchestrator implements IToolOrchestrator {
     const llmProvidedCallId = toolCallRequest.id;
 
     const logPrefix = `ToolOrchestrator (ID: ${this.orchestratorId}, GMI: ${gmiId}, Persona: ${personaId}, LLMCallID: ${llmProvidedCallId}, Tool: ${toolName}):`;
+    /** The refusal of a call whose stop came before it was delegated (its turn stopped, or its time ran out): nothing ran. */
+    const stopped = (): ToolCallResult => {
+      const errorMsg = `step_aborted: the call to '${toolName}' was stopped before it ran (its turn stopped or its time ran out); nothing ran.`;
+      console.warn(`${logPrefix} ${errorMsg}`);
+      return {
+        toolCallId: llmProvidedCallId,
+        toolName,
+        output: null,
+        isError: true,
+        errorDetails: { message: errorMsg, code: 'STEP_ABORTED' },
+      };
+    };
 
     if (this.config.logToolCalls) {
       const argsPreview =
@@ -841,6 +906,13 @@ export class ToolOrchestrator implements IToolOrchestrator {
       };
     }
 
+    // A call whose stop has already come (the next call of a turn that stopped, a step its composed call or workflow
+    // reached after the stop) is refused here, after its checks and before its approval, so no one is asked about a
+    // call that cannot run; a stop that comes while the approval is pending refuses the call after it, below.
+    if (signal?.aborted) {
+      return stopped();
+    }
+
     // Optional HITL gating for side-effect tools.
     const hitlConfig = this.config.hitl;
     const requiresSideEffectsApproval =
@@ -850,6 +922,23 @@ export class ToolOrchestrator implements IToolOrchestrator {
       // A composed tool's side-effecting steps are each asked when they run,
       // through the step gate; asking at the composed call too would ask twice.
       (tool as { emergentMode?: string }).emergentMode !== 'compose';
+
+    // A call the tool refuses whatever a human would answer (a self-modification tool on a turn the learning layer
+    // refuses) is answered with that refusal, so no one is asked to approve a call that cannot act.
+    const refusedBeforeApproval = requiresSideEffectsApproval ? this.refusalBeforeApproval(tool, requestDetails) : undefined;
+    if (refusedBeforeApproval) {
+      console.warn(`${logPrefix} Tool '${toolName}' refused the call before the approval gate: ${refusedBeforeApproval.error ?? 'refused'}`);
+      return {
+        toolCallId: llmProvidedCallId,
+        toolName,
+        output: null,
+        isError: true,
+        errorDetails: {
+          message: refusedBeforeApproval.error || `Tool '${toolName}' refused the call.`,
+          details: refusedBeforeApproval.details,
+        },
+      };
+    }
 
     if (requiresSideEffectsApproval) {
       if (!this.hitlManager) {
@@ -957,15 +1046,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
     }
 
     if (signal?.aborted) {
-      const errorMsg = `step_aborted: the call to '${toolName}' expired before it was delegated; nothing ran.`;
-      console.warn(`${logPrefix} ${errorMsg}`);
-      return {
-        toolCallId: llmProvidedCallId,
-        toolName,
-        output: null,
-        isError: true,
-        errorDetails: { message: errorMsg, code: 'STEP_ABORTED' },
-      };
+      return stopped();
     }
     // Every call runs the instance its checks and approval were for: a
     // composed step the one its pipeline checked, a direct call the one
@@ -994,10 +1075,14 @@ export class ToolOrchestrator implements IToolOrchestrator {
     } catch (executorPipelineError: any) {
       const errorMsg = `Critical error within ToolExecutor's internal pipeline while processing '${toolName}'. This is not an error from the tool's execute method itself.`;
       console.error(`${logPrefix} ${errorMsg}`, executorPipelineError);
+      // The failure's details go into the tool message the model receives and into the trace, both serialised: the
+      // request's facts, without the live objects a call carries (the calling turn's budget, gate, names and hooks, its
+      // stop, the resolved tool instance) or the session data its caller supplied, which can hold any value.
+      const { callerTurn: _callerTurn, signal: _signal, tool: _tool, sessionData: _sessionData, ...requestFacts } = requestDetails;
       const wrappedError = createGMIErrorFromError(
         executorPipelineError,
         GMIErrorCode.TOOL_EXECUTION_FAILED,
-        requestDetails,
+        requestFacts,
         errorMsg
       );
       return {

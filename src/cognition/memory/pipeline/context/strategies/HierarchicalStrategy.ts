@@ -20,6 +20,8 @@ import type {
   InfiniteContextConfig,
   SummaryChainNode,
 } from '../../../core/types.js';
+import { compactionSplitIndex } from './compactionSplit.js';
+import { extractiveSummary, summaryRoom } from './extractiveSummary.js';
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -36,9 +38,17 @@ const MAX_L2_NODES = 3;
 
 export class HierarchicalStrategy implements ICompactionStrategy {
   readonly name = 'hierarchical' as const;
-  private readonly llmInvoker: (prompt: string) => Promise<string>;
+  private readonly llmInvoker?: (prompt: string) => Promise<string>;
 
-  constructor(llmInvoker: (prompt: string) => Promise<string>) {
+  /**
+   * @param llmInvoker - Writes the summaries. Without one, or when it fails or
+   *   answers nothing, a segment's summary is its user messages, cut to 80
+   *   characters each, and no levels are merged. Either way the window's summary
+   *   message holds the newest summary whole, within the tokens the segment
+   *   held, and the older ones only as far as the window has room for them under
+   *   the compaction threshold.
+   */
+  constructor(llmInvoker?: (prompt: string) => Promise<string>) {
     this.llmInvoker = llmInvoker;
   }
 
@@ -49,12 +59,8 @@ export class HierarchicalStrategy implements ICompactionStrategy {
     const startTime = Date.now();
     const { messages, summaryChain } = input;
 
-    // Preserve recent turns.
-    const preserveCount = Math.min(
-      config.preserveRecentTurns * 2,
-      messages.length - 2,
-    );
-    const splitIdx = messages.length - preserveCount;
+    // The newest turns stay as they are; see compactionSplitIndex.
+    const splitIdx = compactionSplitIndex(messages.length, config.preserveRecentTurns);
     if (splitIdx <= 0) {
       return this.noopResult(messages, startTime);
     }
@@ -97,13 +103,21 @@ export class HierarchicalStrategy implements ICompactionStrategy {
     const activeNodes = [...summaryChain, ...allNewNodes].filter(
       (n) => !n.parentId,
     );
-    const summaryText = activeNodes
+    const parts = activeNodes
       .sort((a, b) => a.turnRange[0] - b.turnRange[0])
       .map((n) => {
         const levelTag = n.level > 0 ? ` (L${n.level} summary)` : '';
         return `[Turns ${n.turnRange[0]}–${n.turnRange[1]}${levelTag}]\n${n.summary}`;
-      })
-      .join('\n\n');
+      });
+    // The newest summary, which covers this segment, stays whole within the tokens the segment held; the older ones,
+    // cut from their end, take only the room left under the compaction threshold. Without a summarizer no level is
+    // merged, so the segment summaries would otherwise pile up in the window. The summary chain keeps them all.
+    const summaryText = extractiveSummary(
+      parts.slice(0, -1),
+      parts[parts.length - 1] ?? '',
+      Math.max(25, inputTokens - 20),
+      summaryRoom(input, config, toKeep.reduce((s, m) => s + m.tokenEstimate, 0), 20),
+    );
 
     const outputTokens = estimateTokens(summaryText);
 
@@ -160,9 +174,13 @@ export class HierarchicalStrategy implements ICompactionStrategy {
       80,
       Math.ceil(estimateTokens(text) / config.targetCompressionRatio),
     );
+    // The segment's own turns: the summary message an earlier compaction left at its head stands for other nodes,
+    // and its turn would give every later node the first turn of the conversation.
+    const own = messages.filter((m) => !m.compacted);
+    const span = own.length > 0 ? own : messages;
     const turnRange: [number, number] = [
-      messages[0].turnIndex,
-      messages[messages.length - 1].turnIndex,
+      span[0].turnIndex,
+      span[span.length - 1].turnIndex,
     ];
 
     const prompt = [
@@ -175,15 +193,18 @@ export class HierarchicalStrategy implements ICompactionStrategy {
       'Summary:',
     ].join('\n');
 
-    let summary: string;
-    try {
-      summary = (await this.llmInvoker(prompt)).trim();
-    } catch {
-      summary = `Conversation turns ${turnRange[0]}–${turnRange[1]}: ${messages
-        .filter((m) => m.role === 'user')
-        .map((m) => m.content.slice(0, 80))
-        .join('; ')}`;
+    let summary: string | undefined;
+    if (this.llmInvoker) {
+      try {
+        summary = (await this.llmInvoker(prompt)).trim() || undefined;
+      } catch {
+        // The extractive summary below.
+      }
     }
+    summary ??= `Conversation turns ${turnRange[0]}–${turnRange[1]}: ${messages
+      .filter((m) => m.role === 'user')
+      .map((m) => m.content.slice(0, 80))
+      .join('; ')}`;
 
     return {
       id: generateId(0),
@@ -228,8 +249,10 @@ export class HierarchicalStrategy implements ICompactionStrategy {
       'Merged summary:',
     ].join('\n');
 
+    if (!this.llmInvoker) return null;
     try {
       const summary = (await this.llmInvoker(prompt)).trim();
+      if (!summary) return null;
       const allEntities = new Set<string>();
       for (const n of nodes) {
         for (const e of n.entities) allEntities.add(e);

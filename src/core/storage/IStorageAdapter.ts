@@ -13,7 +13,7 @@
  * 
  * @version 1.0.0
  * @author AgentOS Team
- * @license MIT
+ * @license Apache-2.0
  */
 
 /**
@@ -390,7 +390,8 @@ export interface IStorageAdapter {
    * 
    * @param {IConversationMessage} message - The message to store
    * @returns {Promise<IConversationMessage>} The stored message
-   * @throws {Error} If conversation doesn't exist or validation fails
+   * @throws {Error} If conversation doesn't exist, a message with the same ID is
+   *   already stored, or validation fails
    * 
    * @example
    * ```typescript

@@ -33,8 +33,10 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
 });
 
 import { AgentOS } from '../AgentOS';
+import type { IAgentOS } from '../interfaces/IAgentOS';
 import { createAgentOSConfig } from '../../core/config/AgentOSConfig';
 import { createLearningLayer } from '../../cognition/learning/LearningLayer';
+import { GMIManager } from '../../cognition/substrate/GMIManager';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { renderPersonalitySection } from '../../cognition/substrate/personas/personalityPrompt';
 
@@ -77,7 +79,7 @@ afterEach(async () => {
 });
 
 describe('the full runtime with the learning flag off', () => {
-  it('sends no personality section, as before, and has no learning layer', async () => {
+  it('sends no personality section with learning unset, the same system text with learning false, and has no learning layer', async () => {
     booted = await boot();
     const unset = await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' });
     expect(unset).toContain('You teach networking.');
@@ -98,6 +100,16 @@ describe('the full runtime with the learning flag on', () => {
     expect(system).toContain(`You teach networking.\n\n${renderPersonalitySection(TRAITS)}`);
     expect(system.split(HEADING)).toHaveLength(2);
     expect(await send(booted, { userId: 'u', sessionId: 's-2', selectedPersonaId: 'calm' })).not.toContain(HEADING);
+  });
+
+  it('renders a trait a persona writes under its canonical key and an alias by the canonical key, with no overlay', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const both = { ...tutor, id: 'both', personalityTraits: { honesty: 0.9, openness: 0.4, opennessToExperience: 0.9 } } as unknown as IPersonaDefinition;
+    booted = await boot({ learning: true, personas: [both] });
+    const system = await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'both' });
+    // The canonical key wins, as the normalizer reads it: openness 0.4 renders no directive.
+    expect(system).toContain(renderPersonalitySection({ honesty: 0.9, openness: 0.4 })!);
+    expect(system).not.toContain('Explore creative angles');
   });
 
   it("returns its layer, whose manifest counts a learner's turn and a placeholder user's turn, and renders the authored traits in mode off", async () => {
@@ -124,6 +136,9 @@ describe('the full runtime with the learning flag on', () => {
     const base = await createAgentOSConfig();
     booted = await boot({ gmiManagerConfig: { ...base.gmiManagerConfig, learningLayer: passed } });
     expect(booted.getLearningLayer()).toBe(passed);
+    // A host that holds the runtime by its interface reaches the layer too.
+    const host: IAgentOS = booted;
+    expect(host.getLearningLayer?.()).toBe(passed);
     expect(await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' })).toContain(HEADING);
     await booted.shutdown();
     booted = undefined;
@@ -131,9 +146,12 @@ describe('the full runtime with the learning flag on', () => {
   });
 
   it('refuses learning.namespace, learning beside a passed layer, and an unknown mode, before any service starts', async () => {
+    const initialize = vi.spyOn(GMIManager.prototype, 'initialize');
     await expect(boot({ learning: { namespace: 'acme' } })).rejects.toThrow(/learning\.namespace/);
     await expect(boot({ learning: true, gmiManagerConfig: { personaLoaderConfig: {}, learningLayer: createLearningLayer() } })).rejects.toThrow(/gmiManagerConfig\.learningLayer/);
     await expect(boot({ learning: { mode: 'sideways' } })).rejects.toThrow(/learning\.mode: unknown mode 'sideways'/);
+    // No GMI manager was started, nor anything the runtime starts before it.
+    expect(initialize).not.toHaveBeenCalled();
   });
 
   it("has no learner on a turn of tenant B's user 42 on the session tenant A's user 42 opened, nor on the turns after it", async () => {
@@ -144,5 +162,39 @@ describe('the full runtime with the learning flag on', () => {
     await send(booted, { userId: '42', organizationId: 'A', sessionId: 'shared', selectedPersonaId: 'tutor' });
     const manifest = await booted.getLearningLayer()!.manifest();
     expect(manifest.turns).toEqual({ prepared: 3, bound: 1, none: { other_namespace: 2 } });
+  });
+
+  it('reports the approval gate and the tool-policy switch off where the configuration leaves them nothing to do', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const base = await createAgentOSConfig();
+    const loopsOf = async (extra: Record<string, unknown>) => {
+      booted = await boot({ learning: true, ...extra });
+      const { loops } = await booted.getLearningLayer()!.manifest();
+      await booted.shutdown();
+      booted = undefined;
+      return loops;
+    };
+    // This file's boot plans no turn, so the switch has no turn plan to change.
+    expect((await loopsOf({})).tool_policy).toEqual({ live: false, detail: 'no turn planner: the switch has no turn plan to change' });
+    const planned = { turnPlanning: { enabled: true, discovery: { enabled: false } } };
+    expect((await loopsOf(planned)).tool_policy).toEqual({ live: true });
+    const noTelemetry = { ...planned, orchestratorConfig: { ...base.orchestratorConfig, taskOutcomeTelemetry: { enabled: false } } };
+    expect((await loopsOf(noTelemetry)).tool_policy).toEqual({
+      live: false,
+      detail: 'orchestratorConfig.taskOutcomeTelemetry is off: the switch reads no success rate',
+    });
+
+    const hitl = (settings: Record<string, unknown>) => ({
+      toolOrchestratorConfig: { ...base.toolOrchestratorConfig, hitl: { ...base.toolOrchestratorConfig?.hitl, enabled: true, ...settings } },
+    });
+    expect((await loopsOf(hitl({ requireApprovalForSideEffects: false }))).hitl).toEqual({
+      live: false,
+      detail: 'toolOrchestratorConfig.hitl.requireApprovalForSideEffects is off: the gate asks for no tool',
+    });
+    expect((await loopsOf(hitl({ autoApproveWhenNoManager: true }))).hitl).toEqual({
+      live: false,
+      detail: 'no hitlManager, and hitl.autoApproveWhenNoManager approves every call',
+    });
+    expect((await loopsOf(hitl({}))).hitl).toEqual({ live: true, detail: 'no hitlManager: side-effect tools are refused' });
   });
 });

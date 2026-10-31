@@ -65,11 +65,12 @@ import type { ITool, ToolEffectRecord, ToolExecutionContext, ToolExecutionResult
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
 import type { AdaptPersonalityTool } from './AdaptPersonalityTool.js';
 import { ComposableToolBuilder } from './ComposableToolBuilder.js';
-import type { StepGate } from './StepGate.js';
+import { UNCHAINABLE_TOOLS, type StepGate } from './StepGate.js';
 import { SandboxedToolForge } from './SandboxedToolForge.js';
 import { EmergentJudge } from './EmergentJudge.js';
 import { EmergentToolRegistry } from './EmergentToolRegistry.js';
 import { InvalidToolNameError, forgedToolNameProblem } from './ToolName.js';
+import { selfChangeRefusal } from '../learning/toolContext.js';
 
 // ============================================================================
 // SELF-IMPROVEMENT TOOL DEPENDENCIES
@@ -229,6 +230,13 @@ export type EmergentExecutableTool = ITool<Record<string, unknown>, unknown> & {
    * step of a composition instead of at the composed call.
    */
   readonly emergentMode: 'compose' | 'sandbox';
+  /**
+   * A composition's step tools: the names its steps call, each once; a
+   * code-forged tool has none. `launch_agency` reads them to refuse a seat
+   * whose allowlist names the composition and leaves one of them out, since
+   * the composition could not run whole in that seat.
+   */
+  readonly stepTools?: readonly string[];
 };
 
 /** What happened to one stored tool at load. */
@@ -1995,6 +2003,13 @@ export class EmergentCapabilityEngine {
       }
       return null;
     }
+    // A tool that is never a step keeps a reason of its own, whichever step
+    // names it: it names no configuration key in the start-up line
+    // (REASON_CONFIG_KEYS has none for it), and a registration never checks
+    // it again (it is not in STEP_SUSPENSION_REASONS).
+    if (implementation.steps.some((step) => UNCHAINABLE_TOOLS.has(step.tool))) {
+      return 'step_never_chainable';
+    }
     for (const step of implementation.steps) {
       const verdict = this.composableBuilder.check(step.tool);
       if (!verdict.ok) {
@@ -2338,6 +2353,9 @@ export class EmergentCapabilityEngine {
       outputSchema: tool.outputSchema,
       category: 'emergent',
       emergentMode: tool.implementation.mode,
+      ...(tool.implementation.mode === 'compose'
+        ? { stepTools: [...new Set(tool.implementation.steps.map((step) => step.tool))] }
+        : {}),
       // A composition has side effects when one of its steps does (or is a
       // composition itself); each such step is then asked at the step (see
       // ToolOrchestrator), not at the composed call.
@@ -2462,8 +2480,11 @@ export class EmergentCapabilityEngine {
 
           // Only check promotion when execution succeeded AND output passed
           // validation. Promoting after validation failure would reward tools
-          // that produce structurally invalid output.
-          if (success && validationPassed) {
+          // that produce structurally invalid output. A promotion is a
+          // self-change: a use on a turn the learning layer refuses one (the
+          // freeze, mode `off` or `frozen`, a turn with no learner) is
+          // recorded and checks none.
+          if (success && validationPassed && !selfChangeRefusal(context.sessionData)) {
             await this.checkPromotion(tool.id);
           }
         }

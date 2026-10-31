@@ -39,28 +39,31 @@ wired outside `agency()`.
 
 Agency is the multi-brain primitive. Each roster member is an `agent()`: a
 system prompt with its instructions and HEXACO traits, its tools and its hooks.
-A member whose config sets `runtime: 'gmi'`, or a pre-built
-`agent({ runtime: 'gmi' })`, is served by [GMIs](/architecture/gmi). The
-strategies call a member's `generate()` or `stream()`, and on the GMI path each
-call runs on a GMI built for it, on the `'light'` profile: a persona, a PAD mood
-and a reasoning trace, with no history and no cognitive memory, whatever the
-member's `cognition` and `memory` options say. In an agency whose
-`hitl.approvals.beforeTool` is set, a GMI member's tool calls wait for the
-approval handler as other members' calls do. The agency layer adds three things
-on top of those members.
+A member whose config sets `runtime: 'gmi'` (or sets no `runtime` in an agency
+that does), or a pre-built `agent({ runtime: 'gmi' })`, is served by
+[GMIs](/architecture/gmi). The strategies call a member's `generate()` or
+`stream()`, and on the GMI path each call runs on a GMI built for it, on the
+`'light'` profile: a persona, a PAD mood and a reasoning trace, with no history
+and no cognitive memory, whatever the member's `cognition` and `memory` options
+say. A member seated with `sessionSeat()` runs as itself instead, on its own
+profile, through one session of its own for the run ([GMI Seats](#gmi-seats)).
+In an agency whose `hitl.approvals.beforeTool` is set, a GMI member's tool calls
+wait for the approval handler as other members' calls do. The agency layer adds
+three things on top of those members.
 
 **1. Orchestration strategy declares how outputs flow between brains.**
 Sequential chains them, parallel fans them out and synthesises, debate has them
 argue and refine, hierarchical lets a coordinator dispatch, graph DAG declares
-explicit dependencies. The strategy is the data-flow shape. Picking the
-strategy picks how brain-to-brain context propagates; the work itself happens
-inside each brain.
+explicit dependencies, and panel has each member answer on its own model for a
+chair to synthesise. The strategy is the data-flow shape. Picking the strategy
+picks how brain-to-brain context propagates; the work itself happens inside
+each brain.
 
 **2. The strategy connects the agents.** It decides the order and what each
-agent receives: the previous output (sequential), the same prompt (parallel),
-every prior argument (debate), the manager's delegations (hierarchical) or its
-predecessors' outputs (graph); the hierarchical strategy can add specialists at
-run time through [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts).
+agent receives: the previous output (sequential), the same prompt (parallel
+and panel), every prior argument (debate), the manager's delegations
+(hierarchical) or its predecessors' outputs (graph); the hierarchical strategy
+can add specialists at run time through [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts).
 `agency()` builds no shared memory store and runs no retrieval of its own: the
 `memory` and `rag` options are accepted and deferred on this path (see the
 capability contract), and
@@ -82,7 +85,7 @@ retrieval and memory through its own config, and no surface acts on
 graph TB
     Input["Input"]
     subgraph Agency["Agency · coordination shell · HITL approvals · controls · structured output"]
-        Strategy["Orchestration strategy<br/>sequential · parallel · debate<br/>review-loop · hierarchical · graph"]
+        Strategy["Orchestration strategy<br/>sequential · parallel · debate<br/>review-loop · hierarchical · graph · panel"]
         subgraph Members["Agents (lightweight agent() members)"]
             direction LR
             A["Agent A<br/>instructions · personality<br/>tools · own session"]
@@ -162,8 +165,9 @@ own orchestrator and reach into agentos for the lower-level primitives
 16. [Observability and Callbacks](#observability-and-callbacks)
 17. [Structured Output with Zod](#structured-output-with-zod)
 18. [Nested Agencies](#nested-agencies)
-19. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
-20. [Full-Featured Example](#full-featured-example)
+19. [GMI Seats](#gmi-seats)
+20. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
+21. [Full-Featured Example](#full-featured-example)
 
 ---
 
@@ -216,10 +220,13 @@ provider/model pair) to control the model explicitly.
 Every roster entry is a `BaseAgentConfig` or a pre-built `agent()`. For a
 config entry, `model`, `provider`, `apiKey` and `baseUrl` set on the seat win
 over the agency-level values, and each of the four is inherited on its own when
-the seat leaves it out. A seat's `tools` are merged with the agency's `tools`.
-Nothing else is inherited: `effort`, `thinking`, `maxTokens` and `instructions`
-apply to the seat that sets them, and agency-level `effort`, `thinking` and
-`maxTokens` reach neither the seats nor the chair. Agency-level `instructions`
+the seat leaves it out. A seat `baseUrl` that is empty or whitespace alone is
+unset and counts as left out: the seat inherits the agency-level `baseUrl`
+under the rule below, as a seat with none does. A seat's `tools` are merged
+with the agency's `tools`. Nothing else is inherited: `effort`, `thinking`,
+`maxTokens` and `instructions` apply to the seat that sets them, and
+agency-level `effort`, `thinking` and `maxTokens` reach neither the seats nor
+the chair. Agency-level `instructions`
 go to the chair (parallel), the judge (debate) and the coordinator
 (hierarchical). `output` is read at the agency level only: its schema is
 applied to the final text, and a seat's own `output` has no effect. A
@@ -315,7 +322,8 @@ that answered, and the record carries `fallback`. To pin every seat and the chai
 configured providers, pass `generate(prompt, { fallbackProviders: [] })`; to pin
 one seat, put a pre-built `agent({ ..., fallbackProviders: [] })` in the roster.
 
-The per-seat ledger `agentCalls` records each seat's name, input, output, tool
+The per-seat ledger `agentCalls` records each seat's name, input (the text the
+seat was sent, a `beforeAgent` approval's instructions included), output, tool
 calls, usage and duration; the chair's own call is not in it. The result's
 top-level `provider` and `model` are the chair's for parallel, debate and
 hierarchical, the last seat's for sequential, and the last result of the final
@@ -516,9 +524,12 @@ supported, `adaptive: true` is rejected, a seat named `chair` is rejected, and
 
 Through the host's logger factory (`setLoggerFactory`), with every message
 masked: `agency_no_seat_answered` (info; a run whose every seat was rejected
-returns `text: ''` and runs no validation retry), `parallel_seat_failed`
-(warn), `panel_seat_failed` (warn; a panel seat that failed, timed out or found
-no entry to sit on, with its `status`, written whether or not the run meets its
+returns `text: ''` and runs no validation retry), `agency_replacement_unparsed`
+(info; a `beforeReturn` approval's replacement that does not match `output` is
+returned with `parsed` `undefined` and runs no validation retry; the agency and
+the strategy, none of the text), `parallel_seat_failed` (warn),
+`panel_seat_failed` (warn; a panel seat that failed, timed out or found no
+entry to sit on, with its `status`, written whether or not the run meets its
 quorum), `panel_quorum_shortfall` and `parallel_quorum_shortfall` (warn; a
 shortfall the call goes on from under `onShortfall: 'proceed'`),
 `agency_callback_threw` (warn; the callback's name, its message masked), and
@@ -716,6 +727,10 @@ The coordinator decides which agents to invoke and in what order at runtime.
 Required for emergent agent synthesis. A delegate its approver rejects, or a
 nested agency that no seat of its own answered, returns a refusal the
 coordinator reads ("gave no answer" for the latter) and adds no call record.
+The coordinator's roster and each `delegate_to_<name>` tool describe a config
+agent by its `instructions`, and a pre-built agent by its own `description`
+when the handle carries a non-blank one (a `sessionSeat()` handle's, or a
+property set on a handle); any other agent reads "General purpose".
 
 ```typescript
 const team = agency({
@@ -740,13 +755,22 @@ in order. An agent with dependencies receives the original user prompt plus the
 plain-text outputs of its direct dependencies; an agent without any receives the
 prompt alone.
 
-**Auto-detection:** when _any_ agent in the roster has a `dependsOn` array, the
-strategy is automatically set to `'graph'` — you don't need to specify it
-explicitly (though doing so is fine).
+**Auto-detection:** when _any_ agent in the roster has a `dependsOn` array that
+names at least one agent, and the agency names no strategy and is not adaptive,
+the strategy is automatically set to `'graph'` — you don't need to specify it
+explicitly (though doing so is fine). An empty `dependsOn` names no agent. A
+pre-built agent in the roster counts too: a built `Agent` that carries its own
+`dependsOn` array of names (a `sessionSeat()` handle given `dependsOn`, or a
+property set on a handle) selects the graph and waits for those agents, on
+`generate()` and `stream()` alike. The handles `agent()`, `agency()`, `gmi()`
+and `importAgent()` return carry none.
 
 **Cycle detection:** `agency()` validates the dependency DAG when it is called
 and throws `AgencyConfigError` for a cycle or for a `dependsOn` entry that names
-no agent in the roster.
+no agent in the roster. It also throws `AgencyConfigError`, naming the agent, for
+a `dependsOn` that is set and is not a list of agent names (one name written as
+a string, a number among the names), on a config and a pre-built agent alike;
+`null` counts as unset.
 
 **Context passing:** an agent with dependencies receives:
 
@@ -770,7 +794,7 @@ rejected, or a nested agency that no seat of its own answered, is passed on as
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `dependsOn` | `string[]` | `[]` | Names of agents in the same agency that must complete before this agent runs.  Agents with no `dependsOn` are roots and execute first. |
+| `dependsOn` | `string[]` | `[]` | Names of agents in the same agency that must complete before this agent runs.  Agents with no `dependsOn`, or an empty one, are roots and execute first. Anything but a list of names throws `AgencyConfigError`. |
 
 #### Full example — research team
 
@@ -1370,10 +1394,32 @@ console.log(data?.title, data?.keyPoints);
 
 `agency()` appends a short JSON instruction to the prompt; for an object
 schema it names the top-level keys. It reads the reply as JSON, then from a fenced code block, then
-from the first `{ ... }` object in the text. When that fails, the run is
-repeated up to `controls.maxValidationRetries` times (default `1`) with the
-previous reply quoted in the prompt; when every attempt fails, `parsed` is
-`undefined` and no error is thrown. A member's own `output` is not read.
+from the first `{ ... }` object in the text. When that fails, `generate()` and
+a session's `send()` repeat the run up to `controls.maxValidationRetries`
+times (default `1`) with the previous reply quoted in the prompt; when every
+attempt fails, `parsed` is `undefined` and no error is thrown. `stream()` and
+a session's `stream()` finalize the one run they streamed and repeat nothing:
+a reply that does not match leaves `parsed` `undefined`. A member's own
+`output` is not read.
+
+The text parsed is the one the caller receives: the final text after the
+output guardrails and a `beforeReturn` approval. When the approval's
+`modifications.output` replaces the final text, `parsed` is read from the
+replacement. A replacement that does not match the schema is returned as it
+is, with `parsed` `undefined`, and `generate()` does not repeat the run: a
+retry would throw the approver's text away and ask for the approval again. A
+replacement equal to the strategy's text, an approver handing the text back
+unedited, replaces nothing and counts as an approval without modifications:
+under `generate()` a text that does not match is retried, and the approval is
+asked for the new attempt; under `stream()` it is returned with `parsed`
+`undefined`, as every reply that does not match is.
+
+In an agency without `output`, the `parsed` of `generate()`'s result is
+whatever the strategy's result carried: `sequential` returns its last seat's
+result and `graph` the last result of its final tier, so a seat with its own
+`responseSchema` passes on its `parsed`. A `beforeReturn` replacement that
+changes the text leaves `parsed` `undefined`, since nothing parsed the
+replacement.
 
 ---
 
@@ -1416,6 +1462,62 @@ outer totals; its `agentCalls` are not flattened, so it appears as one record
 whose `output` is its final text. `close()` propagates inward: the outer agency
 calls `close()` on every pre-built member of its roster, nested agencies
 included.
+
+---
+
+## GMI Seats
+
+`runtime: 'gmi'` on the agency serves every config seat with a GMI; a seat's own
+`runtime` wins:
+
+```typescript
+import { agency } from '@framers/agentos';
+
+const team = agency({
+  provider: 'openai',
+  model: 'gpt-4o',
+  runtime: 'gmi',
+  agents: {
+    researcher: { instructions: 'Find relevant papers.' },
+    writer: { runtime: 'legacy', instructions: 'Write a clear summary.' },
+  },
+});
+```
+
+`sessionSeat()` seats a persistent `gmi()` agent as itself, through a session of
+its own that runs every call of the run:
+
+```typescript
+import { agency, gmi, sessionSeat } from '@framers/agentos';
+
+const tutor = gmi({
+  provider: 'openai',
+  model: 'gpt-4o',
+  name: 'Tutor',
+  instructions: 'You are a patient maths tutor.',
+  tools: {
+    checkStep: {
+      description: 'Checks one step of a proof.',
+      parameters: { type: 'object', properties: { step: { type: 'string' } } },
+      execute: async ({ step }) => (step.includes('=') ? 'valid' : 'unclear'),
+    },
+  },
+});
+
+const team = agency({
+  provider: 'openai',
+  model: 'gpt-4o',
+  strategy: 'hierarchical',
+  agents: { tutor: sessionSeat(tutor, { tools: ['checkStep'], brief: 'Check each step.' }) },
+});
+```
+
+The seat's session has memory scoped to it and no learner; `team.close()` closes
+it and leaves `tutor` serving its own sessions. A pre-built seat may carry
+`description` and `dependsOn`, which the hierarchical and graph strategies read
+as they read a config's. [Seats served by GMIs](../AGENCIES.md#seats-served-by-gmis)
+lists the seat's options and what it refuses. A GMI can also launch a team from
+inside a turn: [Teams a GMI launches](../AGENCIES.md#teams-a-gmi-launches).
 
 ---
 

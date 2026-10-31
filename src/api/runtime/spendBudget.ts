@@ -11,7 +11,10 @@ import { CostCapExceededError, CostGuard } from '../../safety/runtime/CostGuard.
 import type { CostCapType } from '../../safety/runtime/CostGuard.js';
 import { openAIModelPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
 import { clampMaxOutputTokens } from '../../core/llm/providers/model-output-limits.js';
-import { contentSafeConsole as console } from '../../core/logging/contentSafeConsole.js';
+import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
+
+/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
+const console = createContentSafeConsole('spend_budget');
 
 /** What a budget was about to refuse, for an `onLimitReached` callback. */
 export interface SpendLimitInfo {
@@ -34,7 +37,8 @@ export interface SpendBudgetOptions {
   /**
    * What a call that would pass the budget does: `'throw'` (the default) refuses it with
    * {@link CostCapExceededError}; `'warn'` logs once per call and lets it run; a function is told
-   * what was about to be refused and the call is then refused as with `'throw'`.
+   * what was about to be refused and the call is then refused as with `'throw'`. A function that throws refuses the
+   * call with its own error, and the budgets that draw on this one hear of the refusal as of any other.
    */
   onLimitReached?: 'throw' | 'warn' | ((info: SpendLimitInfo) => void);
   /**
@@ -54,7 +58,8 @@ export interface SpendBudgetOptions {
    * A budget this one draws on. Every check asks the parent first, with the same estimate, and every record and
    * outside cost is added to the parent after this budget. A refusal by the parent, or by any budget above it, runs
    * this budget's own `onLimitReached` function (when it is one) with the refusing budget's {@link SpendLimitInfo},
-   * after the refusing budget's own, before the error goes on.
+   * after the refusing budget's own, before the error goes on. A parent chain that holds a budget on the same `guard`
+   * and `budgetId` as this one is refused: the two would keep one total and charge every call to it twice.
    */
   parent?: SpendBudget;
 }
@@ -85,10 +90,121 @@ export function outputEstimateTokens(modelId: string, maxOutputTokens: number | 
   return cap === undefined || Number.isNaN(cap) ? DEFAULT_OUTPUT_ESTIMATE_TOKENS : cap;
 }
 
-/** The info of the budget that refused, by the error it threw, so a child learns of an ancestor's refusal. */
-const refusalInfo = new WeakMap<object, SpendLimitInfo>();
+/**
+ * The info of the budget that refused, by the error it threw and the check it was thrown in, so a child learns of an
+ * ancestor's refusal. An error object a limit function throws again in a later check (one shared error) names that
+ * check's refusal.
+ */
+const refusalInfo = new WeakMap<object, { info: SpendLimitInfo; run: number }>();
+/**
+ * The refusal a thrown value that is not an object names (an `onLimitReached` function may throw a string), which the
+ * WeakMap cannot hold: a check runs synchronously, so the value thrown in the check in progress is the one the
+ * budgets below meet. Cleared when the next outermost check begins.
+ */
+let primitiveRefusal: { error: unknown; info: SpendLimitInfo } | undefined;
+/** How deep the checks in progress go: a check asks its parent's, and a two-budget check asks both. */
+let checkDepth = 0;
+/** The outermost checks begun so far: the run a refusal was named in. */
+let checkRun = 0;
+
+/** Names `info` as the refusal `error` carries, unless the error already names one: the first budget to refuse names it. */
+function markRefusal(error: unknown, info: SpendLimitInfo): void {
+  if (typeof error === 'object' && error !== null) {
+    const held = refusalInfo.get(error);
+    if (!held || held.run !== checkRun) refusalInfo.set(error, { info, run: checkRun });
+  } else if (!primitiveRefusal || !Object.is(primitiveRefusal.error, error)) {
+    primitiveRefusal = { error, info };
+  }
+}
+
+/** The refusal `error` names in the check in progress, an object's or a primitive's. */
+function refusalOf(error: unknown): SpendLimitInfo | undefined {
+  if (typeof error === 'object' && error !== null) {
+    const held = refusalInfo.get(error);
+    return held && held.run === checkRun ? held.info : undefined;
+  }
+  return primitiveRefusal && Object.is(primitiveRefusal.error, error) ? primitiveRefusal.info : undefined;
+}
+
+/** Runs `work` as one check, or as part of the one in progress: the outermost begins a run, which names refusals afresh. */
+function withinCheck(work: () => void): void {
+  if (checkDepth === 0) {
+    primitiveRefusal = undefined;
+    checkRun += 1;
+  }
+  checkDepth += 1;
+  try {
+    work();
+  } finally {
+    checkDepth -= 1;
+  }
+}
+
+/**
+ * Runs `on` with `info`. A function that throws refuses the call with its own error, which then names `info` as its
+ * refusal, so the budgets below still hear of it.
+ */
+function runLimitFunction(on: (info: SpendLimitInfo) => void, info: SpendLimitInfo): void {
+  try {
+    on(info);
+  } catch (error) {
+    markRefusal(error, info);
+    throw error;
+  }
+}
+
+/** Runs `budget`'s own `onLimitReached` function, when it is one, with the info of the budget that refused with `error`. */
+function hearRefusal(budget: SpendBudget, error: unknown): void {
+  const info = refusalOf(error);
+  const on = budget.options.onLimitReached;
+  if (info && typeof on === 'function') runLimitFunction(on, info);
+}
 
 let budgets = 0;
+
+/** What the check, or the record, of a call held to two budgets ({@link bothBudgets}) has reached so far. */
+interface Reach {
+  /** The budgets reached: a budget both draw on is checked, and charged, once. */
+  budgets: Set<SpendBudget>;
+  /**
+   * The spending totals the record has charged, by guard and id: budgets on one guard and one id keep one total, which
+   * one call is charged once, while each of those budgets still counts the call's tokens.
+   */
+  totals: Map<CostGuard, Set<string>>;
+}
+
+/** The two-budget check and record in progress; unset outside one, each of which runs synchronously. */
+const reaching: { check?: Reach; charge?: Reach } = {};
+
+/** Whether the two-budget check or record in progress has reached `budget` already; marks it reached. */
+function reachedBefore(kind: 'check' | 'charge', budget: SpendBudget): boolean {
+  const reach = reaching[kind];
+  if (!reach) return false;
+  if (reach.budgets.has(budget)) return true;
+  reach.budgets.add(budget);
+  return false;
+}
+
+/** Whether the two-budget record in progress has charged the total `guard` keeps under `id` already; marks it charged. */
+function totalChargedBefore(guard: CostGuard, id: string): boolean {
+  const reach = reaching.charge;
+  if (!reach) return false;
+  const ids = reach.totals.get(guard) ?? new Set<string>();
+  if (ids.has(id)) return true;
+  reach.totals.set(guard, ids.add(id));
+  return false;
+}
+
+/** Runs `work` as one two-budget check or record, or as part of the one in progress. */
+function reachOnce(kind: 'check' | 'charge', work: () => void): void {
+  const outer = reaching[kind];
+  reaching[kind] = outer ?? { budgets: new Set(), totals: new Map() };
+  try {
+    work();
+  } finally {
+    reaching[kind] = outer;
+  }
+}
 
 /** A budget for a run of calls; pass one instance to every call that should share it. */
 export class SpendBudget {
@@ -102,7 +218,8 @@ export class SpendBudget {
   /**
    * @param options - The budget's settings.
    * @throws {RangeError} When `maxCostUSD`, or a `maxTotalTokens` that is set, is not a number zero or more.
-   *   `maxCostUSD` may be `Number.POSITIVE_INFINITY` (a budget with no dollar cap).
+   *   `maxCostUSD` may be `Number.POSITIVE_INFINITY` (a budget with no dollar cap). Also when a budget in the
+   *   `parent` chain keeps its spending on the given `guard` under the same id; the guard is left as it was.
    */
   constructor(options: SpendBudgetOptions) {
     if (!(options.maxCostUSD >= 0)) throw new RangeError('maxCostUSD must be zero or more');
@@ -113,6 +230,15 @@ export class SpendBudget {
     }
     this.options = options;
     this.id = options.budgetId ?? `budget-${Date.now()}-${++budgets}`;
+    if (options.guard) {
+      // One guard and one id keep one total: a budget above this one that keeps it too would be charged every call twice
+      // (once by each budget), and this budget would replace the cap that budget holds for the id.
+      for (let above = options.parent; above; above = above.options.parent) {
+        if (above.guard === options.guard && above.id === this.id) {
+          throw new RangeError(`A spend budget cannot draw on a budget that keeps its spending on the same guard under the same id ('${this.id}')`);
+        }
+      }
+    }
     this.guard =
       options.guard ??
       new CostGuard({
@@ -170,15 +296,20 @@ export class SpendBudget {
     what: string,
     model?: { providerId: string; modelId: string },
   ): void {
+    withinCheck(() => this.check(estimateUSD, estimateTokens, what, model));
+  }
+
+  /** {@link SpendBudget.assertCanSpend}'s rules, inside the count of the checks in progress. */
+  private check(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
+    // Under a call held to two budgets, a budget both draw on is asked once.
+    if (reachedBefore('check', this)) return;
     const parent = this.options.parent;
     if (parent) {
       try {
         parent.assertCanSpend(estimateUSD, estimateTokens, what, model);
       } catch (error) {
         // An ancestor refused: this budget's own function hears of it, with that budget's info, before it goes on.
-        const info = typeof error === 'object' && error !== null ? refusalInfo.get(error) : undefined;
-        const on = this.options.onLimitReached;
-        if (info && typeof on === 'function') on(info);
+        hearRefusal(this, error);
         throw error;
       }
     }
@@ -225,9 +356,14 @@ export class SpendBudget {
    * there too, after itself.
    */
   record(costUSD: number | undefined, tokens: number, what: string): void {
+    // Under a call held to two budgets, a budget both draw on is charged once, and so is a total that budgets on one
+    // guard and one id keep.
+    if (reachedBefore('charge', this)) return;
     const counted = Math.max(0, tokens);
     this.tokens += Number.isNaN(counted) ? 0 : counted;
-    if (costUSD !== undefined && costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what });
+    if (costUSD !== undefined && costUSD > 0 && !totalChargedBefore(this.guard, this.id)) {
+      this.guard.recordCost(this.id, costUSD, undefined, { what });
+    }
     this.options.parent?.record(costUSD, tokens, what);
   }
 
@@ -242,7 +378,8 @@ export class SpendBudget {
     if (typeof costUSD !== 'number' || Number.isNaN(costUSD)) {
       throw new RangeError(`An outside cost must be a number of US dollars, not ${String(costUSD)}`);
     }
-    if (costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
+    if (reachedBefore('charge', this)) return;
+    if (costUSD > 0 && !totalChargedBefore(this.guard, this.id)) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
     this.options.parent?.recordExternal(costUSD, kind);
   }
 
@@ -252,15 +389,90 @@ export class SpendBudget {
       console.warn(`[agentos] spend budget ${info.budgetId}: ${info.what} would pass the budget (${info.reason}); running it`);
       return;
     }
-    if (typeof on === 'function') on(info);
+    if (typeof on === 'function') runLimitFunction(on, info);
     try {
       thrower();
     } catch (error) {
       // The first budget to refuse names the refusal; the budgets below it read it (assertCanSpend).
-      if (typeof error === 'object' && error !== null && !refusalInfo.has(error)) refusalInfo.set(error, info);
+      markRefusal(error, info);
       throw error;
     }
   }
+}
+
+/**
+ * A budget that holds each call to two budgets: a call is checked against the first, then the second, and refused when
+ * either refuses it, a refusal by the second (or a budget above it) running the first's own `onLimitReached` function as
+ * a refusal by the first's parent does; a finished call or an outside cost is recorded in both. A budget both draw on is checked and
+ * charged once, and so is the one total that budgets on one guard and one id keep, each of them still counting the
+ * call's tokens. What is left is the lesser of what each has left under its own caps; what it has spent, and the tokens
+ * it has counted, are the first's.
+ */
+class BothBudgets extends SpendBudget {
+  constructor(
+    private readonly first: SpendBudget,
+    private readonly second: SpendBudget,
+  ) {
+    // No cap of its own: every check and record goes to the two budgets.
+    super({ maxCostUSD: Number.POSITIVE_INFINITY, unpriced: 'allow', budgetId: first.id });
+  }
+
+  override spentUSD(): number {
+    return this.first.spentUSD();
+  }
+
+  override tokensUsed(): number {
+    return this.first.tokensUsed();
+  }
+
+  override remaining(): { usd: number; tokens?: number } {
+    const a = this.first.remaining();
+    const b = this.second.remaining();
+    const usd = Math.min(a.usd, b.usd);
+    if (a.tokens === undefined) return b.tokens === undefined ? { usd } : { usd, tokens: b.tokens };
+    return { usd, tokens: b.tokens === undefined ? a.tokens : Math.min(a.tokens, b.tokens) };
+  }
+
+  override assertCanSpend(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
+    // One check over both budgets: a refusal by the second is named in the run the first then hears of it in.
+    withinCheck(() => reachOnce('check', () => {
+      this.first.assertCanSpend(estimateUSD, estimateTokens, what, model);
+      try {
+        this.second.assertCanSpend(estimateUSD, estimateTokens, what, model);
+      } catch (error) {
+        // The first draws on the second as on a parent: its own function hears of the second's refusal before it goes on.
+        hearRefusal(this.first, error);
+        throw error;
+      }
+    }));
+  }
+
+  override record(costUSD: number | undefined, tokens: number, what: string): void {
+    reachOnce('charge', () => {
+      this.first.record(costUSD, tokens, what);
+      this.second.record(costUSD, tokens, what);
+    });
+  }
+
+  override recordExternal(costUSD: number, kind: string): void {
+    reachOnce('charge', () => {
+      this.first.recordExternal(costUSD, kind);
+      this.second.recordExternal(costUSD, kind);
+    });
+  }
+}
+
+/**
+ * A budget that holds each call to `first` and to `second`: checked against both (`first`'s own `onLimitReached`
+ * function hearing of a refusal by `second`, as of one by its parent), recorded in both, a budget both draw on checked
+ * and charged once, and a total that budgets on one guard and one id keep charged once. `first` itself when
+ * the two are one budget. A seat's turn runs under one: the budget its team's call carries, and the member's own
+ * (gmi.ts).
+ *
+ * @internal
+ */
+export function bothBudgets(first: SpendBudget, second: SpendBudget): SpendBudget {
+  return first === second ? first : new BothBudgets(first, second);
 }
 
 /** A budget from what a caller passed: an instance as it is, settings made into a new instance, or nothing. */

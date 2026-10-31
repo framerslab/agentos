@@ -14,8 +14,9 @@ await store.createCollection('library', 1536);
 const index = new LibraryIndex({
   store,
   collection: 'library',
-  embed: async (texts) =>
-    (await embedText({ provider: 'openai', model: 'text-embedding-3-small', input: texts })).embeddings,
+  embed: async (texts, options) =>
+    (await embedText({ provider: 'openai', model: 'text-embedding-3-small', input: texts, abortSignal: options?.signal }))
+      .embeddings,
 });
 
 const turns = [
@@ -50,7 +51,7 @@ The module is `@framers/agentos/cognition/library`; its names are also exported 
 
 A source is an id unique in the collection (`session:<id>`, `document:<id>`), a kind, a tenant, the access groups that may see it, an optional folder, tags and title, metadata copied onto every passage, and its passages.
 
-`indexSource(source)` deletes whatever the collection holds under the source's id, then embeds the passages and writes them `batchSize` at a time (64 unless given). A failed batch leaves the passages written before it; indexing the source again replaces them. A delete or a write the store reports as failed in its result (`failedCount` or `errors`), instead of throwing, fails the call as well. A source with no tenant or no access group is refused. The index makes no collection: create it on the store first.
+`indexSource(source)` deletes whatever the collection holds under the source's id, then embeds the passages and writes them `batchSize` at a time (64 unless given). A failed batch leaves the passages written before it; indexing the source again replaces them. A delete or a write the store reports as failed in its result (`failedCount` or `errors`), instead of throwing, fails the call as well, and so does an embedding function that answers a different number of vectors than the batch has passages, before that batch is written. A source with no tenant or no access group is refused. The index makes no collection: create it on the store first.
 
 Every passage carries these metadata keys:
 
@@ -72,7 +73,7 @@ The keys in this table come from the source's own fields: they win over the same
 
 ## Search
 
-`search({ text, scope, mode, topK, kinds, folderId, folderIds, tags, sourceIds, anyOf, match, prefix })` answers passages, at most `topK` (10 unless given).
+`search({ text, scope, mode, topK, kinds, folderId, folderIds, tags, sourceIds, anyOf, match, prefix, signal })` answers passages, at most `topK` (10 unless given).
 
 | `mode` | What runs | The store member it calls |
 |---|---|---|
@@ -82,7 +83,11 @@ The keys in this table come from the source's own fields: they win over the same
 
 A search with `anyOf` calls the store's legs apart and ranks them itself: see [Several narrowings at once](#several-narrowings-at-once).
 
+A `dense` or `hybrid` search asks the embedding function for one vector, the query's, and needs exactly one back: an answer of any other count, an empty list included, fails the search after that one call and before the store is asked anything, with the error `indexSource` throws for a miscounted batch (`LibraryIndex: the embedder answered a different number of vectors than texts.`). A search whose `signal` aborted while the query was embedded rejects with the signal's `reason` instead, whatever the embedding function answered.
+
 `match` asks for any word of the query (`'any'`, the default) or every word (`'all'`), and `prefix` (false by default) lets a stored word match when it begins with a query word; both go to the lexical leg of a `lexical` or `hybrid` search.
+
+`signal`, an `AbortSignal`, cancels a search. The index checks it when the search starts, right before and right after it embeds the query, and right before and after each call to the store; once it has aborted, the search starts no further call and rejects with the signal's `reason`. A search with `anyOf` therefore stops between its legs, a search whose embedding function ignores the signal asks the store nothing after the abort, and an answer the store gives after the abort is dropped. The embedding function receives the signal as its second argument, `embed([text], { signal })`, and an `embed` that forwards it to its request, as the example above does with `embedText`'s `abortSignal`, cancels a request in flight with the search, which then rejects with the embedding function's error (`embedText` rejects with the signal's reason). A search with `anyOf` hands the signal to its one embedding. Indexing, and a search with no signal, call `embed(texts)` with no second argument. The store's members take no signal, so a store call that has started runs to its end.
 
 Every search names its scope, `{ tenantId, aclGroups }`. A scope with no tenant or no group is refused before the embedder or the store is asked. The filter the store receives keeps the passages of that tenant whose `aclGroups` hold at least one of the scope's groups and whose `status` is `active`. The narrowing options add to it, each joined to the others with "and": `kinds` keeps any of those kinds, `folderId` that folder, `folderIds` any of those folders, `tags` passages that hold every one of those tags, and `sourceIds` any of those sources. Given `folderId` and `folderIds` together, both apply. An empty `kinds` or `tags` narrows nothing; an empty `sourceIds` or `folderIds` finds nothing, as does a `folderId` that is not in `folderIds`, and the index answers these without asking the embedder or the store. The index then checks every passage the store answers against the same tenant, groups, status and narrowing, and drops any that fails them: a store whose filter drops or ignores a condition cannot widen a search, and on such a store a search can answer fewer than `topK` passages.
 

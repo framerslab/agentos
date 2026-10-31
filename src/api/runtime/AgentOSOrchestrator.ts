@@ -34,11 +34,11 @@ import {
   IGMI,
   GMIOutput,
   GMIOutputChunkType,
+  type GMIOutputChunk,
   type GMIToolCallRefusal,
 } from '../../cognition/substrate/IGMI';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { ConversationContext } from '../../core/conversation/ConversationContext';
-import { MessageRole } from '../../core/conversation/ConversationMessage';
 // IToolOrchestrator — referenced via AgentOSOrchestratorDependencies
 // uuidv4 — now used by GMIChunkTransformer
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
@@ -69,7 +69,8 @@ import { ExternalToolResultHandler } from './ExternalToolResultHandler';
 import { GMIChunkTransformer } from './GMIChunkTransformer';
 import { TurnExecutionPipeline } from './TurnExecutionPipeline';
 import { gmiToolCallGateFor } from './toolCallGate';
-import { externalToolPauseCalls } from './externalToolPause';
+import { externalToolPauseCalls, streamedRequestForPause, streamsActionableToolCalls } from './externalToolPause';
+import { addReplyToConversation, finalResponseFieldsOf } from './turnFinalResponse';
 
 // Public config types extracted to types/OrchestratorConfig.ts
 export type {
@@ -144,36 +145,6 @@ const RECALL_PROFILE_DEFAULTS: Record<
     topKByScope: { user: 4, persona: 4, organization: 4 },
   },
 };
-
-function renderPlainText(markdown: string): string {
-  let text = String(markdown ?? '');
-  if (!text.trim()) return '';
-
-  text = text.replace(/\r\n/g, '\n');
-  // Fenced code blocks: keep inner content, drop fences.
-  text = text.replace(/```[a-zA-Z0-9_-]*\n([\s\S]*?)```/g, '$1');
-  // Inline code.
-  text = text.replace(/`([^`]+)`/g, '$1');
-  // Images + links.
-  text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
-  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-  // Headings + blockquotes.
-  text = text.replace(/^\s{0,3}#{1,6}\s+/gm, '');
-  text = text.replace(/^\s{0,3}>\s?/gm, '');
-  // Emphasis / strike-through.
-  text = text.replace(/(\*\*|__)(.*?)\1/g, '$2');
-  text = text.replace(/(\*|_)(.*?)\1/g, '$2');
-  text = text.replace(/~~(.*?)~~/g, '$1');
-  // Horizontal rules.
-  text = text.replace(/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/gm, '');
-  // Basic HTML tags.
-  text = text.replace(/<\/?[^>]+>/g, '');
-
-  text = text.replace(/&nbsp;/g, ' ');
-  text = text.replace(/\n{3,}/g, '\n\n');
-
-  return text.trim();
-}
 
 // normalizeTaskOutcomeOverride, normalizeRequestedToolFailureMode
 // moved to TaskOutcomeTelemetryManager
@@ -251,6 +222,8 @@ interface ActiveStreamContext {
   userApiKeys?: Record<string, string>;
   processingOptions?: ProcessingOptions;
   languageNegotiation?: any; // multilingual negotiation metadata
+  /** The sources the stream's turn retrieved, as the stream announced them; a continuation of the turn reads them. */
+  ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
   // Iterator is managed within the orchestrateTurn method directly
 }
 
@@ -274,8 +247,10 @@ function buildToolCallChunkMetadata(
 /** What AgentOS hands a turn, a continuation or a resumed turn from its output guardrails. */
 export interface AgentOSOrchestratorGuards {
   /**
-   * Judges each call the GMI runs itself before the call runs, as the TOOL_CALL_REQUEST chunk the stream carries for
-   * it; a blocking evaluation refuses the call. Unset when no output guardrail sets `config.evaluateToolCalls`.
+   * Judges the calls the GMI runs itself before any call of their model step runs: each call alone as a
+   * TOOL_CALL_REQUEST chunk holding it, then the step's calls that pass alone together, as the stream's chunk for the
+   * step holds them, each time with the sources the turn retrieved; a blocking evaluation refuses the calls it judged.
+   * Unset when no output guardrail sets `config.evaluateToolCalls`.
    */
   toolCallGate?: GuardrailToolCallGate;
 }
@@ -423,6 +398,7 @@ export class AgentOSOrchestrator {
       this.chunkTransformer,
       this.telemetry,
       this.resolveOrganizationContext.bind(this),
+      this.toolResultHandler.endPendingExternalToolRequestForNewTurn.bind(this.toolResultHandler),
     );
     await this.telemetry.loadPersistedWindows();
     this.initialized = true;
@@ -612,6 +588,14 @@ export class AgentOSOrchestrator {
     return agentOSStreamId;
   }
 
+  /**
+   * Resumes a pause from its snapshot on a new stream. The pause is taken before the stream is made or the session's
+   * GMI acquired, so a resume of a pause the conversation no longer holds, whose stream an output guardrail blocked, or
+   * that another resume holds, or with a result for a call the pause does not hold, is refused with nothing changed.
+   *
+   * @returns The new stream's id.
+   * @throws {GMIError} `INVALID_STATE` when the pause is not taken.
+   */
   public async orchestrateResumedToolResults(
     pendingRequest: AgentOSPendingExternalToolRequest,
     toolResults: AgentOSToolResultInput[],
@@ -619,7 +603,14 @@ export class AgentOSOrchestrator {
     guards: AgentOSOrchestratorGuards = {}
   ): Promise<StreamId> {
     this.ensureInitialized();
-    const agentOSStreamId = await this.dependencies.streamingManager.createStream();
+    const releasePause = await this.toolResultHandler.claimPendingExternalToolRequest(pendingRequest, toolResults);
+    let agentOSStreamId: StreamId;
+    try {
+      agentOSStreamId = await this.dependencies.streamingManager.createStream();
+    } catch (error) {
+      releasePause();
+      throw error;
+    }
     console.log(
       `AgentOSOrchestrator: Resuming external tool request for conversation ${pendingRequest.conversationId} on new stream ${agentOSStreamId}.`
     );
@@ -635,8 +626,13 @@ export class AgentOSOrchestrator {
       },
     });
 
-    const run = async () =>
-      this.toolResultHandler.resumeToolResultsInternal(agentOSStreamId, pendingRequest, toolResults, options, guards.toolCallGate);
+    const run = async () => {
+      try {
+        await this.toolResultHandler.resumeToolResultsInternal(agentOSStreamId, pendingRequest, toolResults, options, guards.toolCallGate);
+      } finally {
+        releasePause();
+      }
+    };
 
     const promise = rootSpan ? runWithSpanContext(rootSpan, run) : run();
     this.trackStreamRun(agentOSStreamId, promise
@@ -700,37 +696,56 @@ export class AgentOSOrchestrator {
   }
 
   /**
-   * Drops the pause a stream saved for tool calls an output guardrail withheld from the caller (the verdict's
-   * `toolCallIds`). It waits for the stream's turn or resumed turn to end, since a turn can save its pause after it
-   * streams the call; then, when the conversation's pending request is this stream's and holds one of the calls, it
-   * records a refused tool result for each call of the pause, clears the pending request and closes the stream, so the
-   * call can be neither continued on the stream nor resumed from the conversation. Anything else is left as it is.
-   * The stream is closed even when the store refuses the conversation's save; the stored conversation then keeps the
-   * pause until the conversation is saved again.
+   * Drops the pause a stream saved after an output guardrail blocked the stream. With `toolCallIds`, the calls the
+   * block withheld from the caller (the verdict's `toolCallIds`), it drops the pause that holds one of them; without,
+   * for a block that withheld no call (a streamed delta, or the chunk of calls the runtime runs itself, after which the
+   * turn goes on inside the runtime), it drops the pause the stream saves whatever calls it holds. It waits for the
+   * stream's turn or resumed turn to end, since a turn can save its pause after it streams the call or after the
+   * block; then, when the conversation's pending request is this stream's, it records a refused tool result for each
+   * call of the pause, clears the pending request and closes the stream, so the call can be neither continued on the
+   * stream nor resumed from the conversation. Anything else is left as it is. From the call until the drop ends, the
+   * stream is held as blocked (see {@link isStreamBlocked}): a pause the turn saves meanwhile is not offered, resumed
+   * or continued. The stream is closed even when the store refuses the conversation's save; the stored conversation
+   * then keeps the pause until the conversation is saved again.
    *
    * @param agentOSStreamId - The stream the guardrail blocked.
-   * @param toolCallIds - The ids of the calls the block withheld.
+   * @param toolCallIds - The ids of the calls the block withheld, or undefined for a block that withheld none.
    * @param refusal - What the refused tool results say.
    * @returns Whether a pause was dropped.
    * @throws The store's error when it refuses the save, after the pause is dropped in memory and the stream closed.
    */
   public async discardBlockedToolCalls(
     agentOSStreamId: StreamId,
-    toolCallIds: readonly string[],
+    toolCallIds: readonly string[] | undefined,
     refusal: GMIToolCallRefusal
   ): Promise<boolean> {
     this.ensureInitialized();
-    await this.streamRuns.get(agentOSStreamId);
-    const streamContext = this.activeStreamContexts.get(agentOSStreamId);
-    if (!streamContext) {
-      return false;
+    // held before the first wait, so the stream is blocked by the time the verdict reaches the caller
+    const releaseStream = this.toolResultHandler.holdBlockedStream(agentOSStreamId);
+    try {
+      await this.streamRuns.get(agentOSStreamId);
+      const streamContext = this.activeStreamContexts.get(agentOSStreamId);
+      if (!streamContext) {
+        return false;
+      }
+      return await this.toolResultHandler.discardPendingExternalToolRequest(
+        agentOSStreamId,
+        streamContext,
+        toolCallIds,
+        refusal
+      );
+    } finally {
+      releaseStream();
     }
-    return this.toolResultHandler.discardPendingExternalToolRequest(
-      agentOSStreamId,
-      streamContext,
-      toolCallIds,
-      refusal
-    );
+  }
+
+  /**
+   * Whether an output guardrail blocked the stream and the pause it saves is being dropped: until the drop ends, that
+   * pause is not offered by `getPendingExternalToolRequest()`, a resume of it is refused, and tool results do not
+   * continue the stream. Before `initialize()` no stream has run, so none is blocked.
+   */
+  public isStreamBlocked(agentOSStreamId: StreamId): boolean {
+    return this.toolResultHandler?.isBlockedStream(agentOSStreamId) ?? false;
   }
 
   /**
@@ -763,7 +778,8 @@ export class AgentOSOrchestrator {
     let didForceTerminate = false;
     let lifecycleDegraded = false;
     let keepStreamContextActive = false;
-    let streamedToolCallRequest = false;
+    // the requests for host calls the GMI streamed: the host stops reading at the first, so they wait for the GMI's output
+    const streamedHostToolCallRequests: GMIOutputChunk[] = [];
     // the spend meter: processRequest reserved this turn under input.operationId; the turn keeps the lease alive and settles it
     const spendMeter = this.dependencies.spendMeter;
     const meteredOperationId = spendMeter && typeof input.operationId === 'string' && input.operationId.trim() ? input.operationId.trim() : undefined;
@@ -784,7 +800,11 @@ export class AgentOSOrchestrator {
       const { gmiInput, streamContext } = prepared;
       const longTermMemoryFeedbackPayload = prepared.longTermMemoryFeedbackPayload;
 
-      // The output guardrails' tool-call gate, which the GMI asks before each call it runs itself.
+      // The output guardrails' tool-call gate, which the GMI asks before each call it runs itself. The stream keeps it
+      // for a continuation given none of its own, whatever GMI that continuation runs on.
+      if (toolCallGate) {
+        streamContext.toolCallGate = toolCallGate;
+      }
       const gmiToolCallGate = gmiToolCallGateFor(toolCallGate, agentOSStreamId, gmiInstanceIdForChunks, streamContext);
       if (gmiToolCallGate) {
         gmiInput.metadata = { ...(gmiInput.metadata ?? {}), toolCallGate: gmiToolCallGate };
@@ -850,6 +870,9 @@ export class AgentOSOrchestrator {
           throw new Error('AgentOSOrchestrator: GMI not initialized (unexpected).');
         }
         const gmiForTurn = gmi;
+        // The GMI records the turn in its own history, which a continuation of another conversation on the session
+        // must not read.
+        this.toolResultHandler.noteTurnOnGmi(gmiForTurn, streamContext.conversationId);
 
         await withAgentOSSpan('agentos.gmi.process_turn_stream', async (span) => {
           span?.setAttribute('agentos.stream_id', agentOSStreamId);
@@ -873,14 +896,14 @@ export class AgentOSOrchestrator {
             if (gmiChunk.type === GMIOutputChunkType.TEXT_DELTA && typeof gmiChunk.content === 'string' && gmiChunk.content.length > 0) {
               outputReached = true;
             }
-            if (
-              gmiChunk.type === GMIOutputChunkType.TOOL_CALL_REQUEST &&
-              Array.isArray(gmiChunk.content) &&
-              gmiChunk.content.length > 0
-            ) {
-              streamedToolCallRequest = true;
+            // A request for calls the host runs waits for the GMI's output, which names the calls the turn stops for:
+            // the host stops reading at the first such request and runs only its calls. A request for calls the GMI
+            // runs itself is informational, and the host reads on past it.
+            if (streamsActionableToolCalls(gmiChunk)) {
+              streamedHostToolCallRequests.push(gmiChunk);
+            } else {
+              await this.chunkTransformer.transformAndPushGMIChunk(agentOSStreamId, streamContext, gmiChunk);
             }
-            await this.chunkTransformer.transformAndPushGMIChunk(agentOSStreamId, streamContext, gmiChunk);
 
             // NOTE: Tool calls may be executed internally by the GMI/tool orchestrator. Do not stop
             // streaming on TOOL_CALL_REQUEST; treat it as informational for observers/UI.
@@ -939,7 +962,15 @@ export class AgentOSOrchestrator {
           );
         }
 
-        if (!streamedToolCallRequest) {
+        // One request reaches the host, after the pause is saved, naming the calls as the turn saved them: the GMI's
+        // own when it streamed one request for exactly these calls, and the turn's otherwise.
+        const streamedRequest = streamedRequestForPause(streamedHostToolCallRequests, pauseCalls);
+        if (streamedRequest) {
+          await this.chunkTransformer.transformAndPushGMIChunk(agentOSStreamId, streamContext, {
+            ...streamedRequest,
+            content: pauseCalls,
+          });
+        } else {
           await this.chunks.pushChunk(
             agentOSStreamId,
             AgentOSResponseChunkType.TOOL_CALL_REQUEST,
@@ -959,6 +990,13 @@ export class AgentOSOrchestrator {
         }
 
         return;
+      }
+
+      if (streamedHostToolCallRequests.length > 0) {
+        // the turn waits on no call, and a request would stop the host's read before the reply
+        console.warn(
+          `AgentOSOrchestrator: the GMI streamed ${streamedHostToolCallRequests.length} request(s) for host calls on stream ${agentOSStreamId}, but its output does not stop the turn; they were not streamed.`
+        );
       }
 
       const normalizedUsage = normalizeUsage(finalGMIStateForResponse.usage);
@@ -1070,30 +1108,12 @@ export class AgentOSOrchestrator {
         }
       }
 
-      // Persist assistant output into ConversationContext for durable memory / prompt reconstruction.
+      // Persist assistant output into ConversationContext for durable memory / prompt reconstruction: the reply, as a
+      // continuation stores it, and never the calls of the GMI's own tool rounds, whose results only the GMI holds.
       if (this.config.enableConversationalPersistence && conversationContext) {
         const persistContext = conversationContext;
         try {
-          if (
-            typeof finalGMIStateForResponse.responseText === 'string' &&
-            finalGMIStateForResponse.responseText.trim()
-          ) {
-            conversationContext.addMessage({
-              role: MessageRole.ASSISTANT,
-              content: finalGMIStateForResponse.responseText,
-              metadata: { agentPersonaId: currentPersonaId, source: 'agentos_output' },
-            });
-          } else if (
-            finalGMIStateForResponse.toolCalls &&
-            finalGMIStateForResponse.toolCalls.length > 0
-          ) {
-            conversationContext.addMessage({
-              role: MessageRole.ASSISTANT,
-              content: null,
-              tool_calls: finalGMIStateForResponse.toolCalls as any,
-              metadata: { agentPersonaId: currentPersonaId, source: 'agentos_output_tool_calls' },
-            });
-          }
+          addReplyToConversation(conversationContext, finalGMIStateForResponse, currentPersonaId);
 
           await withAgentOSSpan('agentos.conversation.save', async (span) => {
             span?.setAttribute('agentos.stage', 'assistant_output');
@@ -1115,29 +1135,20 @@ export class AgentOSOrchestrator {
         currentPersonaId,
         true,
         {
-          finalResponseText: finalGMIStateForResponse.responseText ?? null,
-          finalResponseTextPlain:
-            typeof finalGMIStateForResponse.responseText === 'string'
-              ? renderPlainText(finalGMIStateForResponse.responseText)
-              : null,
-          finalToolCalls: finalGMIStateForResponse.toolCalls,
-          finalUiCommands: finalGMIStateForResponse.uiCommands,
-          audioOutput: finalGMIStateForResponse.audioOutput,
-          imageOutput: finalGMIStateForResponse.imageOutput,
-          usage: normalizedUsage,
-          reasoningTrace: finalGMIStateForResponse.reasoningTrace,
-          error: finalGMIStateForResponse.error,
+          // built from the output as a continuation's final response is
+          ...finalResponseFieldsOf(finalGMIStateForResponse),
           updatedConversationContext: conversationContext
             ? conversationContext.toJSON()
             : undefined,
           activePersonaDetails: snapshotPersonaDetails(gmi?.getPersona?.()),
-          ragSources: finalGMIStateForResponse.ragSources,
-          ...(finalGMIStateForResponse.structuredOutput ? { structured: finalGMIStateForResponse.structuredOutput } : {}),
         }
       );
       await this.dependencies.streamingManager.closeStream(agentOSStreamId, 'Processing complete.');
     } catch (error: any) {
       turnMetricsStatus = 'error';
+      // the stream closes below and no result continues it: a pause the turn saved before it failed ends below, so
+      // the stream's context goes and the turn settles as a failed turn
+      keepStreamContextActive = false;
       recordExceptionOnActiveSpan(error, `Error in orchestrateTurn for stream ${agentOSStreamId}`);
       const gmiErr =
         GMIError.wrap?.(
@@ -1201,14 +1212,17 @@ export class AgentOSOrchestrator {
         gmiErr.message,
         gmiErr.details
       );
-      await this.toolResultHandler.clearPendingExternalToolRequest(conversationContext);
+      // a pause the turn saved before it failed never reached the host: its calls are answered as not run, so the
+      // next turn sends the model no call without its result
+      await this.toolResultHandler.endPauseOfFailedStream(agentOSStreamId, conversationContext, currentPersonaId);
       await this.dependencies.streamingManager.closeStream(
         agentOSStreamId,
         'Error during turn processing.'
       );
     } finally {
-      // The turn counts when it finished, when it asked for a tool (its continuation reserves nothing) or when any of
-      // its text reached the stream before an error; a turn that failed before any output is released.
+      // The turn counts when it finished, when it stopped for a tool the host runs (its continuation reserves nothing)
+      // or when any of its text reached the stream before an error; a turn that failed before any output is released,
+      // a turn that failed while it saved its pause included, since the host never read the request.
       if (spendMeter && meteredOperationId) {
         const outcome: SpendOutcome = keepStreamContextActive || turnMetricsStatus === 'ok' || outputReached ? 'consumed' : 'released';
         try {

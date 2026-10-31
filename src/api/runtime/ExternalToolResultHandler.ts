@@ -24,21 +24,27 @@ import {
   AgentOSResponseChunkType,
 } from '../types/AgentOSResponse';
 import type { ConversationContext } from '../../core/conversation/ConversationContext';
-import { MessageRole } from '../../core/conversation/ConversationMessage';
+import { MessageRole, createConversationMessage } from '../../core/conversation/ConversationMessage';
+import type { ConversationMessage } from '../../core/conversation/ConversationMessage';
 import type {
   IGMI,
   GMIOutput,
   GMIToolCallRefusal,
   GMIToolResultOptions,
+  GMITurnInput,
   ToolCallRequest,
   ToolResultPayload,
 } from '../../cognition/substrate/IGMI';
+import { GMIPrimeState } from '../../cognition/substrate/IGMI';
+import { turnContentText } from '../../cognition/substrate/turnContent';
+import type { RagRetrievedChunk } from '../../cognition/rag/IRetrievalAugmentor';
 import { refusedToolCallResult } from '../../cognition/substrate/toolCallGate';
 import type { GuardrailToolCallGate } from '../../safety/guardrails/guardrailDispatcher';
 import { gmiToolCallGateFor } from './toolCallGate';
 import { externalToolPauseCalls } from './externalToolPause';
+import { addReplyToConversation, finalResponseFieldsOf } from './turnFinalResponse';
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
-import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
+import { snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import {
   withAgentOSSpan,
   recordAgentOSToolResultMetrics,
@@ -63,6 +69,76 @@ export interface ActiveStreamContext {
   userApiKeys?: Record<string, string>;
   processingOptions?: { preferredModelId?: string; preferredProviderId?: string };
   languageNegotiation?: any;
+  /**
+   * The sources the stream's turn retrieved, as the stream announced them (`METADATA_UPDATE.updates.ragSources`);
+   * unset while it announced none. A continuation of the turn gives them to a GMI that does not hold them.
+   */
+  ragSources?: RagRetrievedChunk[];
+  /**
+   * The GMI's own history of the paused turn's conversation, with the pause's calls, read when the turn (or a
+   * continuation) stopped for the host: the GMI's whole history while it held that conversation alone, and otherwise
+   * the conversation's stored history before the turn followed by the turn's own messages as the GMI held them; unset
+   * when the runtime kept none ({@link ExternalToolResultHandler.pausedTurnHistoryOf}). It holds what the conversation
+   * store does not: the calls the GMI ran itself in the turn, their results and the thinking blocks of its assistant
+   * turns. A continuation sets it on a GMI that does not hold the paused turn
+   * ({@link ExternalToolResultHandler.setPausedTurnOn}).
+   */
+  pausedTurnHistory?: ConversationMessage[];
+  /**
+   * The output guardrails' tool-call gate of the stream: the one its turn ran with, or for a resumed stream the one
+   * the resume was given, else the paused stream's. A continuation of the stream given no gate of its own is judged
+   * with it, on whatever GMI it runs, since a GMI given the paused turn after another conversation's turn, or built
+   * again for it, keeps no gate of the paused turn.
+   */
+  toolCallGate?: GuardrailToolCallGate;
+}
+
+/**
+ * Marks a GMI whose own history holds turns of more than one conversation since this runtime last set it.
+ */
+const SEVERAL_CONVERSATIONS = Symbol('several conversations');
+
+/**
+ * `history` ending with an assistant message that names each call of the pause the history does not name. A GMI
+ * whose turn a host's own tool layer stopped never recorded the calls the host runs (the shipped GMI runs every call
+ * of its tool rounds itself), and a provider takes a tool result only after the assistant message that made its call.
+ */
+function withPauseCalls(history: ConversationMessage[], pauseCalls: ToolCallRequest[]): ConversationMessage[] {
+  const named = new Set(
+    history.flatMap((message) =>
+      message.role === MessageRole.ASSISTANT && Array.isArray(message.tool_calls)
+        ? message.tool_calls.map((call) => call.id)
+        : [],
+    ),
+  );
+  const missing = pauseCalls.filter((call) => !named.has(call.id));
+  return missing.length === 0
+    ? history
+    : [...history, createConversationMessage(MessageRole.ASSISTANT, null, { tool_calls: missing })];
+}
+
+/** Whether `gmi` was shut down or is shutting down, so it continues nothing. */
+function isShutDown(gmi: IGMI): boolean {
+  const state = typeof gmi.getCurrentState === 'function' ? gmi.getCurrentState() : undefined;
+  return state === GMIPrimeState.SHUTTING_DOWN || state === GMIPrimeState.SHUTDOWN;
+}
+
+/** The history a conversation holds, as a turn's prompt reads it: every message but errors and thoughts. */
+function storedHistoryOf(conversationContext: ConversationContext) {
+  return conversationContext.getHistory(undefined, [MessageRole.ERROR, MessageRole.THOUGHT]);
+}
+
+/**
+ * Whether `stored`, a message of the conversation, records the turn input `held` as a GMI's history holds it: the same
+ * role and the same text, since the turn pipeline stores a multimodal input as its text.
+ */
+function recordsTurnInput(stored: ConversationMessage | undefined, held: ConversationMessage | undefined): boolean {
+  return (
+    stored !== undefined &&
+    held !== undefined &&
+    stored.role === held.role &&
+    turnContentText(stored.content as GMITurnInput['content']) === turnContentText(held.content as GMITurnInput['content'])
+  );
 }
 
 /**
@@ -94,6 +170,138 @@ function buildToolCallChunkMetadata(
 }
 
 /**
+ * Whether `held`, the pending request a conversation holds, is the pause `given` names: the one its stream saved for
+ * the same calls. A snapshot read before its pause was answered, dropped or replaced names none the conversation holds.
+ */
+function isHeldPendingRequest(
+  held: AgentOSPendingExternalToolRequest | undefined,
+  given: AgentOSPendingExternalToolRequest,
+): boolean {
+  if (!held || held.streamId !== given.streamId || !Array.isArray(held.toolCalls) || !Array.isArray(given.toolCalls)) {
+    return false;
+  }
+  return (
+    held.toolCalls.length > 0 &&
+    held.toolCalls.length === given.toolCalls.length &&
+    held.toolCalls.every((call, index) => call.id === given.toolCalls[index]?.id)
+  );
+}
+
+/** The key a resume takes a pause under: the pause's conversation and the stream that saved it. */
+function pauseKeyOf(pendingRequest: AgentOSPendingExternalToolRequest): string {
+  return `${pendingRequest.conversationId}\u0000${pendingRequest.streamId}`;
+}
+
+/**
+ * Whether each of `toolResults` answers a call of `pendingRequest`, a pause that holds at least one call: the results a
+ * pause waits on, on its stream and on a resume alike.
+ */
+function answersCallsOf(
+  pendingRequest: AgentOSPendingExternalToolRequest,
+  toolResults: readonly AgentOSToolResultInput[],
+): boolean {
+  const calls = Array.isArray(pendingRequest.toolCalls) ? pendingRequest.toolCalls : [];
+  const callIds = new Set(calls.map((call) => call.id));
+  return callIds.size > 0 && toolResults.every((tr) => callIds.has(tr.toolCallId));
+}
+
+/** The message that records `toolResult` in the conversation. It throws for an output that has no JSON form. */
+function toolResultMessage(
+  toolResult: AgentOSToolResultInput,
+  personaId: string | undefined,
+): Parameters<ConversationContext['addMessage']>[0] {
+  return {
+    role: MessageRole.TOOL,
+    content: typeof toolResult.toolOutput === 'string' ? toolResult.toolOutput : JSON.stringify(toolResult.toolOutput),
+    tool_call_id: toolResult.toolCallId,
+    name: toolResult.toolName,
+    metadata: {
+      agentPersonaId: personaId,
+      source: 'agentos_tool_result',
+      isSuccess: toolResult.isSuccess,
+    },
+  };
+}
+
+/** The message of the error that refuses a resume of `pendingRequest`. */
+function staleResumeMessage(pendingRequest: AgentOSPendingExternalToolRequest): string {
+  return (
+    `The conversation '${pendingRequest.conversationId}' no longer holds the pending tool request of stream ` +
+    `'${pendingRequest.streamId}': it was answered, dropped, replaced or is being resumed already, so it is not resumed.`
+  );
+}
+
+/** The details of the error that refuses a resume of `pendingRequest`. */
+function staleResumeDetails(pendingRequest: AgentOSPendingExternalToolRequest): Record<string, unknown> {
+  return {
+    conversationId: pendingRequest.conversationId,
+    streamId: pendingRequest.streamId,
+    toolCallIds: Array.isArray(pendingRequest.toolCalls) ? pendingRequest.toolCalls.map((call) => call.id) : [],
+  };
+}
+
+/** The code of the tool result that answers a call of a pause that never got its result. */
+export const EXTERNAL_TOOL_NOT_RUN_CODE = 'EXTERNAL_TOOL_NOT_RUN';
+
+/** Records, for each of `calls`, a tool result that says why the call has no result, worded as the GMI words a failed result. */
+function answerAsNotRun(
+  conversationContext: ConversationContext,
+  calls: readonly ToolCallRequest[],
+  personaId: string | undefined,
+  why: (call: ToolCallRequest) => string,
+): void {
+  for (const call of calls) {
+    const notRun = { code: EXTERNAL_TOOL_NOT_RUN_CODE, message: why(call) };
+    conversationContext.addMessage({
+      role: MessageRole.TOOL,
+      content: `Error from tool '${call.name}': ${JSON.stringify(notRun)}`,
+      tool_call_id: call.id,
+      name: call.name,
+      metadata: {
+        agentPersonaId: personaId,
+        source: 'agentos_tool_call_not_run',
+        isSuccess: false,
+      },
+    });
+  }
+}
+
+/**
+ * The calls of `pendingRequest` that no tool message answers after the assistant message the pause recorded for them,
+ * or none when the conversation holds no such message (a conversation the runtime does not record, or one whose
+ * history no longer reaches the pause).
+ */
+function unansweredPauseCalls(
+  conversationContext: ConversationContext,
+  pendingRequest: AgentOSPendingExternalToolRequest,
+): ToolCallRequest[] {
+  const pauseCalls = Array.isArray(pendingRequest.toolCalls) ? pendingRequest.toolCalls : [];
+  if (pauseCalls.length === 0) {
+    return [];
+  }
+  const messages = conversationContext.getAllMessages();
+  let pauseAt = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    const declared = Array.isArray(message.tool_calls) ? message.tool_calls.map((call) => call?.id) : [];
+    if (message.role === MessageRole.ASSISTANT && pauseCalls.every((call) => declared.includes(call.id))) {
+      pauseAt = index;
+      break;
+    }
+  }
+  if (pauseAt < 0) {
+    return [];
+  }
+  const answered = new Set(
+    messages
+      .slice(pauseAt + 1)
+      .filter((message) => message.role === MessageRole.TOOL && typeof message.tool_call_id === 'string')
+      .map((message) => message.tool_call_id as string),
+  );
+  return pauseCalls.filter((call) => !answered.has(call.id));
+}
+
+/**
  * @class ExternalToolResultHandler
  * @description
  * Manages the full lifecycle of external tool result handling:
@@ -103,9 +311,10 @@ function buildToolCallChunkMetadata(
  *    GMI via `handleToolResult` / `handleToolResults`, and processes the
  *    resulting GMI output for further tool calls or final responses.
  *
- * 2. **_resumeToolResultsInternal** - Re-hydrates a stream context from a
+ * 2. **resumeToolResultsInternal** - Re-hydrates a stream context from a
  *    persisted `AgentOSPendingExternalToolRequest` after process restart and
- *    delegates to `orchestrateToolResults` for the actual processing.
+ *    continues the GMI with the results on a new stream, as the paused
+ *    stream's own continuation does.
  *
  * 3. **buildPendingExternalToolRequest / persistPendingExternalToolRequest /
  *    clearPendingExternalToolRequest** - Construct, persist, and clear the
@@ -114,6 +323,23 @@ function buildToolCallChunkMetadata(
  * All chunk emission is delegated to the shared {@link StreamChunkEmitter}.
  */
 export class ExternalToolResultHandler {
+  /** The pauses being resumed, by conversation and stream, until their resumes end. */
+  private readonly resumingPauses = new Set<string>();
+
+  /**
+   * The streams an output guardrail blocked whose pause is being dropped, with the number of drops under way for each.
+   * From the verdict until the drop ends, the pause such a stream saves is neither offered, resumed nor continued.
+   */
+  private readonly blockedStreams = new Map<string, number>();
+
+  /**
+   * The conversation each GMI's own history holds, as far as this runtime ran turns on the GMI: the one conversation
+   * whose turns it recorded since this runtime last set its history, or SEVERAL_CONVERSATIONS. A session's GMI serves
+   * every conversation of the session and records each turn in its own history, so a continuation reads that history
+   * only while it holds the continuation's conversation alone.
+   */
+  private readonly gmiHistoryOwners = new WeakMap<IGMI, string | typeof SEVERAL_CONVERSATIONS>();
+
   /**
    * Creates an ExternalToolResultHandler.
    *
@@ -147,6 +373,22 @@ export class ExternalToolResultHandler {
    */
   setProcessGMIOutputCallback(cb: ProcessGMIOutputCallback): void {
     this.processGMIOutputCallback = cb;
+  }
+
+  /**
+   * Notes that a turn of `conversationId` runs on `gmi`, which records the turn in its own history. The orchestrator
+   * calls it before each user turn reaches the GMI, and a continuation once the GMI it runs on holds the paused turn.
+   *
+   * @param gmi - The GMI the turn runs on.
+   * @param conversationId - The turn's conversation.
+   */
+  noteTurnOnGmi(gmi: IGMI, conversationId: string): void {
+    const owner = this.gmiHistoryOwners.get(gmi);
+    if (owner === undefined) {
+      this.gmiHistoryOwners.set(gmi, conversationId);
+    } else if (owner !== conversationId) {
+      this.gmiHistoryOwners.set(gmi, SEVERAL_CONVERSATIONS);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -184,20 +426,25 @@ export class ExternalToolResultHandler {
   /**
    * Handles one or more external tool results, feeds them into the GMI, and
    * processes the resulting output. Manages persistence, error recovery, and
-   * further tool-call chaining.
+   * further tool-call chaining. The results continue the stream only while the
+   * conversation holds the pause the stream saved and each result answers one
+   * of its calls; the pause is taken once, so a result delivered twice, or after
+   * the pause was resumed, ended by a newer turn or replaced, is refused. The
+   * GMI the results reach holds the paused turn, whatever the session's GMI ran
+   * since the pause ({@link gmiForContinuation}).
    *
    * @param agentOSStreamId - The orchestrator stream ID.
    * @param toolResults - Array of tool results to process.
    * @param toolCallGate - The output guardrails' tool-call gate, which the GMI asks before each call it runs itself in
    *   the continuation.
-   * @throws {GMIError} If the stream context is missing or processing fails.
+   * @throws {GMIError} If the stream context is missing or processing fails; `INVALID_STATE`, with nothing changed,
+   *   when an output guardrail blocked the stream or the stream does not wait on every one of the results.
    */
   async orchestrateToolResults(
     agentOSStreamId: StreamId,
     toolResults: AgentOSToolResultInput[],
     toolCallGate?: GuardrailToolCallGate,
   ): Promise<void> {
-    const startedAt = Date.now();
     if (!Array.isArray(toolResults) || toolResults.length === 0) {
       throw new GMIError(
         'At least one tool result is required to continue the stream.',
@@ -218,13 +465,93 @@ export class ExternalToolResultHandler {
         })),
       });
     }
+    if (this.isBlockedStream(agentOSStreamId)) {
+      // the stream's turn runs on after the block, and the pause it saves is dropped when the turn ends
+      const errMsg =
+        `Orchestrator: An output guardrail blocked stream ${agentOSStreamId}, so tool results do not continue it.`;
+      console.warn(errMsg);
+      throw new GMIError(errMsg, GMIErrorCode.INVALID_STATE, {
+        agentOSStreamId,
+        toolResults: toolResults.map((tr) => ({
+          toolCallId: tr.toolCallId,
+          toolName: tr.toolName,
+        })),
+      });
+    }
+    const takenPause = this.takeStreamPause(agentOSStreamId, streamContext, toolResults);
 
-    const { gmi, userId, personaId, conversationContext, userApiKeys } = streamContext;
-    const gmiInstanceIdForChunks = gmi.getGMIId();
-    const continuationGate = gmiToolCallGateFor(toolCallGate, agentOSStreamId, gmiInstanceIdForChunks, streamContext);
-    const continuationOptions: GMIToolResultOptions | undefined = continuationGate
-      ? { toolCallGate: continuationGate }
-      : undefined;
+    await this.continueWithToolResults(agentOSStreamId, streamContext, takenPause, toolResults, toolCallGate);
+  }
+
+  /**
+   * Takes the pause `agentOSStreamId` stopped for, for results the host passes on the stream. The conversation's
+   * pending request must be one this stream saved, each result must answer one of its calls, and no resume may hold
+   * it. The pending request is cleared at once, before the continuation waits on anything, so a second delivery of the
+   * results on the stream and a resume of the pause's snapshot find none.
+   *
+   * @throws {GMIError} `INVALID_STATE` when the stream does not wait on every call the results answer: its pause was
+   *   continued, resumed on another stream, ended by a newer turn or replaced by its next pause, or a result answers a
+   *   call the pause does not hold. The pending request and the stream are left as they are.
+   * @returns The pause taken.
+   */
+  private takeStreamPause(
+    agentOSStreamId: StreamId,
+    streamContext: ActiveStreamContext,
+    toolResults: AgentOSToolResultInput[],
+  ): AgentOSPendingExternalToolRequest {
+    const { conversationContext } = streamContext;
+    const held = conversationContext?.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    const streamPause = held !== undefined && held.streamId === agentOSStreamId ? held : undefined;
+    if (
+      !streamPause ||
+      !answersCallsOf(streamPause, toolResults) ||
+      this.resumingPauses.has(pauseKeyOf(streamPause))
+    ) {
+      const errMsg =
+        `Orchestrator: Stream ${agentOSStreamId} does not wait on every one of these tool results: the pause it stopped ` +
+        'for was continued, resumed, ended by a newer turn or replaced, or does not hold every call they answer, so they ' +
+        'do not continue it.';
+      console.warn(errMsg);
+      throw new GMIError(errMsg, GMIErrorCode.INVALID_STATE, {
+        agentOSStreamId,
+        toolResults: toolResults.map((tr) => ({
+          toolCallId: tr.toolCallId,
+          toolName: tr.toolName,
+        })),
+        pendingToolCallIds:
+          streamPause && Array.isArray(streamPause.toolCalls) ? streamPause.toolCalls.map((call) => call.id) : [],
+      });
+    }
+    conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
+    return streamPause;
+  }
+
+  /**
+   * Feeds `toolResults` to the stream's GMI and ends the continuation by the turn's rule: a pause for the calls of a
+   * non-final output, one `FINAL_RESPONSE` otherwise. The GMI holds the paused turn when the results reach it
+   * ({@link gmiForContinuation}). The caller has taken `takenPause`, the pause the results answer:
+   * the store keeps that it was taken before the results reach the GMI, and a call of it the results leave out is
+   * answered as not run, in the conversation and, for a GMI that takes results together (`handleToolResults()`), in the
+   * results the GMI reads, so both histories answer every call of the pause before the GMI writes again. A
+   * continuation that fails before the conversation records the results (the store refuses that save, a result has
+   * no JSON form, or no GMI holds the paused turn) puts the pause back, as the store holds it; one that fails later ends
+   * a pause it saved for its next calls, whose request the host never read, as a new turn ends a pause
+   * ({@link endPauseOfFailedStream}).
+   */
+  private async continueWithToolResults(
+    agentOSStreamId: StreamId,
+    streamContext: ActiveStreamContext,
+    takenPause: AgentOSPendingExternalToolRequest,
+    toolResults: AgentOSToolResultInput[],
+    toolCallGate?: GuardrailToolCallGate,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    const { userId, personaId, conversationContext, userApiKeys } = streamContext;
+    // the GMI the turn paused on, until the continuation knows the GMI it runs on
+    let gmi = streamContext.gmi;
+    let gmiInstanceIdForChunks = gmi.getGMIId();
     const metricToolName =
       toolResults.length === 1 ? toolResults[0].toolName : '__batch_external_tools__';
     const metricToolSuccess = toolResults.every((tr) => tr.isSuccess);
@@ -232,6 +559,9 @@ export class ExternalToolResultHandler {
     console.log(
       `AgentOSOrchestrator: Feeding ${toolResults.length} tool result(s) for stream ${agentOSStreamId}, GMI ${gmiInstanceIdForChunks} back to GMI.`,
     );
+    // set once nothing can refuse the results any more: the conversation records them next, when persistence is on,
+    // and the GMI takes them; a failure before it leaves the pause as it was, and one after it keeps them
+    let resultsRecorded = false;
 
     try {
       await withAgentOSSpan('agentos.tool_result', async (span) => {
@@ -249,10 +579,43 @@ export class ExternalToolResultHandler {
         span?.setAttribute('agentos.tool_success', metricToolSuccess);
 
         try {
-          await this.clearPendingExternalToolRequest(conversationContext);
+          // The results' messages are built before anything is stored, so a result the conversation cannot record
+          // fails the continuation with the pause as it was.
+          const resultMessages =
+            this.enableConversationalPersistence && conversationContext
+              ? toolResults.map((toolResult) => toolResultMessage(toolResult, personaId))
+              : [];
+          // The GMI the results reach, holding the paused turn, before the conversation records the results: a GMI
+          // given the conversation's history then reads them once, when it takes them.
+          gmi = await this.gmiForContinuation(streamContext);
+          gmiInstanceIdForChunks = gmi.getGMIId();
+          span?.setAttribute('agentos.gmi_id', gmiInstanceIdForChunks);
+          // the gate the continuation was given, else the one the stream's turn ran with: the GMI may hold no gate of
+          // the paused turn, having dropped another conversation's turn's or been built again for the continuation
+          const continuationGate = gmiToolCallGateFor(
+            toolCallGate ?? streamContext.toolCallGate,
+            agentOSStreamId,
+            gmiInstanceIdForChunks,
+            streamContext,
+          );
+          const continuationOptions: GMIToolResultOptions | undefined = continuationGate
+            ? { toolCallGate: continuationGate }
+            : undefined;
+          // The caller took the pause; the store keeps that before the results reach the GMI, since the GMI takes
+          // them once. A store that refuses the save fails the continuation here, with the pause put back as the store
+          // holds it.
+          if (this.enableConversationalPersistence && conversationContext) {
+            await withAgentOSSpan('agentos.conversation.save', async (child) => {
+              child?.setAttribute('agentos.stage', 'take_pending_external_tool_request');
+              child?.setAttribute('agentos.stream_id', agentOSStreamId);
+              await this.dependencies.conversationManager.saveConversation(conversationContext);
+            });
+          }
+
+          resultsRecorded = true;
 
           // Emit TOOL_RESULT_EMISSION chunk and persist each result.
-          for (const toolResult of toolResults) {
+          for (const [index, toolResult] of toolResults.entries()) {
             await this.chunks.pushChunk(
               agentOSStreamId,
               AgentOSResponseChunkType.TOOL_RESULT_EMISSION,
@@ -268,22 +631,27 @@ export class ExternalToolResultHandler {
               },
             );
 
-            if (this.enableConversationalPersistence && conversationContext) {
-              conversationContext.addMessage({
-                role: MessageRole.TOOL,
-                content:
-                  typeof toolResult.toolOutput === 'string'
-                    ? toolResult.toolOutput
-                    : JSON.stringify(toolResult.toolOutput),
-                tool_call_id: toolResult.toolCallId,
-                name: toolResult.toolName,
-                metadata: {
-                  agentPersonaId: personaId,
-                  source: 'agentos_tool_result',
-                  isSuccess: toolResult.isSuccess,
-                },
-              });
+            const resultMessage = resultMessages[index];
+            if (resultMessage && conversationContext) {
+              conversationContext.addMessage(resultMessage);
             }
+          }
+
+          // The calls of the pause the results leave out never get a result: the next message the GMI writes ends the
+          // pause's tool round, which a provider accepts only when every call of it is answered. The conversation
+          // records them as not run here; the GMI reads them as not run when it takes the results below.
+          const leftOutCalls = (Array.isArray(takenPause.toolCalls) ? takenPause.toolCalls : []).filter(
+            (call) => !toolResults.some((tr) => tr.toolCallId === call.id),
+          );
+          const leftOutReason = (call: ToolCallRequest) =>
+            `The host passed back results for this pause without one for '${call.name}', so the call has none.`;
+          if (this.enableConversationalPersistence && conversationContext) {
+            answerAsNotRun(
+              conversationContext,
+              unansweredPauseCalls(conversationContext, takenPause),
+              personaId,
+              leftOutReason,
+            );
           }
 
           // Persist tool result messages.
@@ -319,7 +687,19 @@ export class ExternalToolResultHandler {
               );
               child?.setAttribute('agentos.tool_success', metricToolSuccess);
 
-              if (toolResults.length > 1) {
+              // The GMI continues on its own history, so it reads the calls the results leave out as not run beside
+              // the host's results; an IGMI that takes one result at a time reads the host's result alone.
+              const notRunResults = leftOutCalls.map((call) => {
+                const notRun = { code: EXTERNAL_TOOL_NOT_RUN_CODE, message: leftOutReason(call) };
+                return {
+                  toolCallId: call.id,
+                  toolName: call.name,
+                  output: notRun,
+                  isError: true,
+                  errorDetails: notRun,
+                };
+              });
+              if (toolResults.length > 1 || (notRunResults.length > 0 && gmi.handleToolResults)) {
                 if (!gmi.handleToolResults) {
                   throw new GMIError(
                     `GMI ${gmiInstanceIdForChunks} does not support batched external tool continuation.`,
@@ -336,27 +716,30 @@ export class ExternalToolResultHandler {
                 }
 
                 return gmi.handleToolResults(
-                  toolResults.map((tr) => ({
-                    toolCallId: tr.toolCallId,
-                    toolName: tr.toolName,
-                    output: tr.isSuccess
-                      ? tr.toolOutput
-                      : {
-                          code: 'EXTERNAL_TOOL_ERROR',
-                          message:
-                            tr.errorMessage ||
-                            `External tool '${tr.toolName}' execution failed.`,
-                        },
-                    isError: !tr.isSuccess,
-                    errorDetails: tr.isSuccess
-                      ? undefined
-                      : {
-                          code: 'EXTERNAL_TOOL_ERROR',
-                          message:
-                            tr.errorMessage ||
-                            `External tool '${tr.toolName}' execution failed.`,
-                        },
-                  })),
+                  [
+                    ...toolResults.map((tr) => ({
+                      toolCallId: tr.toolCallId,
+                      toolName: tr.toolName,
+                      output: tr.isSuccess
+                        ? tr.toolOutput
+                        : {
+                            code: 'EXTERNAL_TOOL_ERROR',
+                            message:
+                              tr.errorMessage ||
+                              `External tool '${tr.toolName}' execution failed.`,
+                          },
+                      isError: !tr.isSuccess,
+                      errorDetails: tr.isSuccess
+                        ? undefined
+                        : {
+                            code: 'EXTERNAL_TOOL_ERROR',
+                            message:
+                              tr.errorMessage ||
+                              `External tool '${tr.toolName}' execution failed.`,
+                          },
+                    })),
+                    ...notRunResults,
+                  ],
                   userId,
                   userApiKeys || {},
                   continuationOptions,
@@ -388,8 +771,8 @@ export class ExternalToolResultHandler {
             },
           );
 
-          // Process the GMI output (text, ui commands, errors).
-          await this.processGMIOutputCallback(agentOSStreamId, streamContext, gmiOutputAfterTool, false);
+          // Process the GMI output (sources, text, ui commands, errors). The continuation's own end follows here.
+          await this.processGMIOutputCallback(agentOSStreamId, streamContext, gmiOutputAfterTool, true);
 
           // Handle further tool calls or finalization. The continuation stops for the host by the turn's rule, so the
           // calls a final output lists, which the GMI ran or refused itself, end the turn with the final response.
@@ -417,30 +800,12 @@ export class ExternalToolResultHandler {
                 metadata: buildToolCallChunkMetadata(streamContext),
               },
             );
-          } else if (gmiOutputAfterTool.isFinal) {
-            // Persist assistant output.
+          } else {
+            // An output that does not stop for the host ends the continuation as it ends a turn, marked final or not:
+            // the conversation keeps the reply, and one FINAL_RESPONSE carries what the turn's would.
             if (this.enableConversationalPersistence && conversationContext) {
               try {
-                if (
-                  typeof gmiOutputAfterTool.responseText === 'string' &&
-                  gmiOutputAfterTool.responseText.trim()
-                ) {
-                  conversationContext.addMessage({
-                    role: MessageRole.ASSISTANT,
-                    content: gmiOutputAfterTool.responseText,
-                    metadata: { agentPersonaId: personaId, source: 'agentos_output' },
-                  });
-                } else if (
-                  gmiOutputAfterTool.toolCalls &&
-                  gmiOutputAfterTool.toolCalls.length > 0
-                ) {
-                  conversationContext.addMessage({
-                    role: MessageRole.ASSISTANT,
-                    content: null,
-                    tool_calls: gmiOutputAfterTool.toolCalls as any,
-                    metadata: { agentPersonaId: personaId, source: 'agentos_output_tool_calls' },
-                  });
-                }
+                addReplyToConversation(conversationContext, gmiOutputAfterTool, personaId);
                 await withAgentOSSpan('agentos.conversation.save', async (child) => {
                   child?.setAttribute('agentos.stage', 'assistant_output_after_tool');
                   child?.setAttribute('agentos.stream_id', agentOSStreamId);
@@ -462,17 +827,9 @@ export class ExternalToolResultHandler {
               personaId,
               true,
               {
-                finalResponseText: gmiOutputAfterTool.responseText,
-                finalToolCalls: gmiOutputAfterTool.toolCalls,
-                finalUiCommands: gmiOutputAfterTool.uiCommands,
-                audioOutput: gmiOutputAfterTool.audioOutput,
-                imageOutput: gmiOutputAfterTool.imageOutput,
-                usage: normalizeUsage(gmiOutputAfterTool.usage),
-                reasoningTrace: gmiOutputAfterTool.reasoningTrace,
-                error: gmiOutputAfterTool.error,
+                ...finalResponseFieldsOf(gmiOutputAfterTool),
                 updatedConversationContext: conversationContext.toJSON(),
                 activePersonaDetails: snapshotPersonaDetails(gmi.getPersona?.()),
-                ...(gmiOutputAfterTool.structuredOutput ? { structured: gmiOutputAfterTool.structuredOutput } : {}),
               },
             );
             this.activeStreamContexts.delete(agentOSStreamId);
@@ -481,9 +838,12 @@ export class ExternalToolResultHandler {
               'Tool processing complete and final response generated.',
             );
           }
-          // If not final and no tool calls, the stream remains open for further
-          // GMI internal processing or new user input.
         } catch (error: any) {
+          if (!resultsRecorded) {
+            // neither the conversation nor the GMI took the results: the conversation holds the pause again, as the
+            // store does, at once, so the host can resume it and a new turn ends it
+            this.restoreTakenPause(conversationContext, takenPause);
+          }
           const gmiErr =
             GMIError.wrap?.(
               error,
@@ -499,7 +859,9 @@ export class ExternalToolResultHandler {
             `AgentOSOrchestrator: Critical error processing tool result for stream ${agentOSStreamId}:`,
             gmiErr,
           );
-          await this.clearPendingExternalToolRequest(conversationContext);
+          if (resultsRecorded) {
+            await this.endPauseOfFailedStream(agentOSStreamId, conversationContext, personaId);
+          }
           await this.chunks.pushError(
             agentOSStreamId,
             personaId,
@@ -534,13 +896,267 @@ export class ExternalToolResultHandler {
     }
   }
 
+  /**
+   * The GMI a continuation gives the results to, holding the paused turn. It is the stream's GMI unless that GMI was
+   * shut down, as the session's GMI is when a turn on the session asks for another persona or the manager's idle
+   * cleanup ends it: then it is the session's GMI for the stream's persona, acquired under the stream's organization as
+   * the turn acquired its own (the manager waits for a GMI it is shutting down before it gives the session another),
+   * and the stream goes on on it.
+   * Such a GMI, and one whose own history holds a turn of another conversation, is given the paused turn first
+   * ({@link setPausedTurnOn}). The stream's GMI keeps its own history while it holds this conversation alone, since
+   * that history also holds the calls the GMI ran itself in the turn, which the conversation does not.
+   *
+   * @param streamContext - The continuation's stream, which goes on on the GMI returned.
+   * @returns The GMI the continuation runs on.
+   * @throws {GMIError} `INVALID_STATE` when the stream's GMI was shut down and the conversation holds no history of the
+   *   paused turn (conversational persistence is off), or the session's GMI the manager gives is shut down too; the
+   *   manager's error when it gives the session no GMI.
+   */
+  private async gmiForContinuation(streamContext: ActiveStreamContext): Promise<IGMI> {
+    const { conversationId } = streamContext;
+    let gmi = streamContext.gmi;
+    if (isShutDown(gmi)) {
+      if (storedHistoryOf(streamContext.conversationContext).length === 0) {
+        const message =
+          `The GMI the turn of conversation '${conversationId}' paused on was shut down, and the conversation holds no ` +
+          'history of the paused turn to continue it on another GMI, so the results do not continue it.';
+        console.warn(`AgentOSOrchestrator: ${message}`);
+        throw new GMIError(message, GMIErrorCode.INVALID_STATE, { conversationId, gmiInstanceId: gmi.getGMIId() });
+      }
+      const acquired = await this.dependencies.gmiManager.getOrCreateGMIForSession(
+        streamContext.userId,
+        streamContext.sessionId,
+        streamContext.personaId,
+        conversationId,
+        streamContext.processingOptions?.preferredModelId,
+        streamContext.processingOptions?.preferredProviderId,
+        streamContext.userApiKeys,
+        undefined,
+        // the turn's resolved organization, '' for none, as the turn pipeline passed it for the turn: a GMI built here
+        // binds its learner as the GMI the turn paused on was bound
+        streamContext.organizationId ?? '',
+      );
+      gmi = acquired.gmi;
+      if (isShutDown(gmi)) {
+        // the manager waits for a GMI it deactivates before it gives the session another; one shut down without it
+        // continues nothing either
+        const message =
+          `The session's GMI for persona '${streamContext.personaId}' is shut down too, so the results do not ` +
+          `continue the paused turn of conversation '${conversationId}'.`;
+        console.warn(`AgentOSOrchestrator: ${message}`);
+        throw new GMIError(message, GMIErrorCode.INVALID_STATE, { conversationId, gmiInstanceId: gmi.getGMIId() });
+      }
+      streamContext.gmi = gmi;
+      this.setPausedTurnOn(gmi, streamContext);
+    } else {
+      const owner = this.gmiHistoryOwners.get(gmi);
+      if (owner !== undefined && owner !== conversationId) {
+        this.setPausedTurnOn(gmi, streamContext);
+      }
+    }
+    this.noteTurnOnGmi(gmi, conversationId);
+    return gmi;
+  }
+
+  /**
+   * Gives `gmi` the paused turn of `streamContext`'s stream before the results reach it: the GMI's own history of the
+   * paused turn when the stream kept it at the pause ({@link pausedTurnHistoryOf}), which holds the calls the GMI ran
+   * itself in the turn, and otherwise the conversation's history, as a turn's prompt reads it, when the conversation
+   * holds one (a conversation the runtime does not record holds none, and the GMI's own history goes on, with a
+   * warning when it holds a turn of another conversation); then the stream's session, conversation and organization,
+   * and the sources its turn retrieved. A GMI that ran a turn of another conversation keeps neither that turn's
+   * organization nor its sources: a stream with no organization clears the GMI's, and a stream with no sources of its
+   * turn, such as a resume in a process that does not hold the paused stream, clears the GMI's sources. A GMI that ran
+   * no turn here keeps what the stream does not set.
+   */
+  private setPausedTurnOn(gmi: IGMI, streamContext: ActiveStreamContext): void {
+    const { conversationId } = streamContext;
+    const owner = this.gmiHistoryOwners.get(gmi);
+    const servedAnother = owner !== undefined && owner !== conversationId;
+    // the GMI's own history of the paused turn when the stream holds it, which keeps the calls the GMI ran itself in
+    // the turn; the conversation's stored history otherwise
+    const history =
+      this.enableConversationalPersistence && streamContext.pausedTurnHistory
+        ? streamContext.pausedTurnHistory
+        : storedHistoryOf(streamContext.conversationContext);
+    if (gmi.hydrateConversationHistory && history.length > 0) {
+      gmi.hydrateConversationHistory(history as any);
+      this.gmiHistoryOwners.set(gmi, conversationId);
+    } else if (servedAnother) {
+      // with conversational persistence off the GMI's own history is the only record of the session's conversations,
+      // and setting another one would erase the other conversation's: the continuation reads it, as every turn of the
+      // session does
+      console.warn(
+        `AgentOSOrchestrator: GMI ${gmi.getGMIId()} continues the paused turn of conversation '${conversationId}' on ` +
+          'its own history, which also holds a turn of another conversation of the session: ' +
+          (history.length === 0 ? 'the conversation holds no history to set in its place.' : 'the GMI takes no history.'),
+      );
+    }
+    if (gmi.hydrateTurnContext) {
+      const sources = streamContext.ragSources;
+      gmi.hydrateTurnContext({
+        sessionId: streamContext.sessionId,
+        conversationId,
+        organizationId: streamContext.organizationId ?? (servedAnother ? '' : undefined),
+        ...(servedAnother || (owner !== conversationId && sources !== undefined) ? { ragSources: sources ?? [] } : {}),
+      });
+    }
+  }
+
+  /**
+   * What the GMI of `streamContext` holds of the turn that stops for `pauseCalls`, with the pause's calls
+   * ({@link withPauseCalls}), kept with the stream while the runtime records the conversation, for a continuation on a
+   * GMI that no longer holds the turn. While the GMI's history holds the stream's conversation alone it is that whole
+   * history (`getConversationHistory()`). When the history also holds a turn of another conversation of the session,
+   * it is the conversation's stored history before the paused turn followed by the turn's own messages as the GMI holds
+   * them (`getLastTurnHistory()`), while the conversation's last message is the input those messages start with, as the
+   * turn pipeline records it. Undefined otherwise, and for a GMI that does not give that history; a continuation then
+   * starts from the conversation's stored history.
+   */
+  private pausedTurnHistoryOf(
+    streamContext: ActiveStreamContext,
+    pauseCalls: ToolCallRequest[],
+  ): ConversationMessage[] | undefined {
+    const { gmi, conversationId } = streamContext;
+    const owner = this.gmiHistoryOwners.get(gmi);
+    if (!this.enableConversationalPersistence || owner === undefined) {
+      return undefined;
+    }
+    try {
+      if (owner === conversationId) {
+        return typeof gmi.getConversationHistory === 'function'
+          ? withPauseCalls(gmi.getConversationHistory(), pauseCalls)
+          : undefined;
+      }
+      if (typeof gmi.getLastTurnHistory !== 'function') {
+        return undefined;
+      }
+      // the GMI's history holds a turn of another conversation too: the paused turn's own messages, after what the
+      // conversation held before the turn
+      const turnMessages = gmi.getLastTurnHistory();
+      const stored = storedHistoryOf(streamContext.conversationContext);
+      if (!recordsTurnInput(stored[stored.length - 1], turnMessages[0])) {
+        console.warn(
+          `AgentOSOrchestrator: the conversation '${conversationId}' does not end with the input of the turn that ` +
+            `paused on GMI ${gmi.getGMIId()}, whose history also holds a turn of another conversation, so a ` +
+            "continuation that sets the paused turn on a GMI starts from the conversation's stored history.",
+        );
+        return undefined;
+      }
+      return withPauseCalls([...stored.slice(0, -1), ...turnMessages], pauseCalls);
+    } catch (error: any) {
+      console.warn(
+        `AgentOSOrchestrator: GMI ${gmi.getGMIId()} gave no history for the pause of conversation '${conversationId}', ` +
+          "so a continuation that sets the paused turn on a GMI starts from the conversation's stored history.",
+        error,
+      );
+      return undefined;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Resume from persisted state
   // ---------------------------------------------------------------------------
 
   /**
-   * Resumes an external tool request from persisted conversation metadata.
-   * Re-creates the stream context and delegates to {@link orchestrateToolResults}.
+   * Takes the pause `pendingRequest` names for one resume, before the resume
+   * makes a stream or acquires the session's GMI, so a refused resume changes
+   * nothing: acquiring the GMI records the resume's model and provider on the
+   * conversation and can replace the session's GMI. The pause is taken when the
+   * conversation holds it (saved by the same stream, for the same calls), no
+   * output guardrail blocked that stream, and no other resume holds it. The
+   * check and the take happen together, so of two resumes of one pause in this
+   * handler one takes it.
+   *
+   * @param pendingRequest - The snapshot the host resumes.
+   * @param toolResults - The results the resume passes: each must answer a call of the pause, as on the pause's stream.
+   * @returns The release, called when the resume ends.
+   * @throws {GMIError} `INVALID_STATE` when the pause is not taken: answered on
+   *   its stream, dropped after an output guardrail blocked its stream (or being
+   *   dropped), replaced by a newer pause, or held by another resume; or when a
+   *   result answers a call the pause does not hold.
+   */
+  async claimPendingExternalToolRequest(
+    pendingRequest: AgentOSPendingExternalToolRequest,
+    toolResults?: readonly AgentOSToolResultInput[],
+  ): Promise<() => void> {
+    const conversation = await this.dependencies.conversationManager.getConversation(pendingRequest.conversationId);
+    const heldRequest = conversation?.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    const pauseKey = pauseKeyOf(pendingRequest);
+    if (
+      !isHeldPendingRequest(heldRequest, pendingRequest) ||
+      this.isBlockedStream(pendingRequest.streamId) ||
+      this.resumingPauses.has(pauseKey)
+    ) {
+      const message = staleResumeMessage(pendingRequest);
+      console.warn(`AgentOSOrchestrator: ${message}`);
+      throw new GMIError(message, GMIErrorCode.INVALID_STATE, staleResumeDetails(pendingRequest));
+    }
+    if (toolResults !== undefined && !answersCallsOf(pendingRequest, toolResults)) {
+      const message =
+        `The pending tool request of stream '${pendingRequest.streamId}' does not hold every call these tool results ` +
+        'answer, so it is not resumed with them.';
+      console.warn(`AgentOSOrchestrator: ${message}`);
+      throw new GMIError(message, GMIErrorCode.INVALID_STATE, {
+        ...staleResumeDetails(pendingRequest),
+        resultToolCallIds: toolResults.map((tr) => tr.toolCallId),
+      });
+    }
+    this.resumingPauses.add(pauseKey);
+    let released = false;
+    return () => {
+      if (!released) {
+        released = true;
+        this.resumingPauses.delete(pauseKey);
+      }
+    };
+  }
+
+  /**
+   * Holds `agentOSStreamId` as a stream an output guardrail blocked until the
+   * returned release is called. Meanwhile the pause the stream saves is not
+   * offered (`getPendingExternalToolRequest()` returns `null` for it), a resume
+   * of it is refused, and tool results do not continue the stream.
+   *
+   * @param agentOSStreamId - The stream the guardrail blocked.
+   * @returns The release, called once the stream's pause is dropped or found absent.
+   */
+  holdBlockedStream(agentOSStreamId: string): () => void {
+    this.blockedStreams.set(agentOSStreamId, (this.blockedStreams.get(agentOSStreamId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      const holds = (this.blockedStreams.get(agentOSStreamId) ?? 1) - 1;
+      if (holds > 0) {
+        this.blockedStreams.set(agentOSStreamId, holds);
+      } else {
+        this.blockedStreams.delete(agentOSStreamId);
+      }
+    };
+  }
+
+  /** Whether an output guardrail blocked `agentOSStreamId` and the pause it saves is being dropped. */
+  isBlockedStream(agentOSStreamId: string): boolean {
+    return this.blockedStreams.has(agentOSStreamId);
+  }
+
+  /**
+   * Resumes an external tool request from persisted conversation metadata,
+   * once the caller has taken its pause with
+   * {@link claimPendingExternalToolRequest}. The pause is checked again once
+   * the session's GMI is acquired: when it was answered on its own stream or an
+   * output guardrail blocked that stream meanwhile, the stream ends with one
+   * error chunk (`SYS_INVALID_STATE`) before the GMI's history is replaced or
+   * the results reach the GMI. In the same step the stream's context is made,
+   * which throws for an organization the runtime refuses, the GMI's history is
+   * set from the conversation, and the pause is taken from the conversation;
+   * then the stream the pause was saved on ends and the results continue the
+   * GMI on the new stream. A refused organization leaves the pause as it was.
    *
    * @param agentOSStreamId - Fresh stream ID allocated by the orchestrator.
    * @param pendingRequest - The persisted pending request snapshot.
@@ -581,8 +1197,153 @@ export class ExternalToolResultHandler {
 
     const gmi = gmiResult.gmi;
     const conversationContext = gmiResult.conversationContext;
+
+    // the pause can be answered on its own stream, or its stream blocked, while the GMI is acquired; it is checked
+    // again before the GMI's history is replaced, since a stale snapshot can arrive while the conversation's next
+    // turn runs on the same GMI
+    const heldRequest = conversationContext.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    if (!isHeldPendingRequest(heldRequest, pendingRequest) || this.isBlockedStream(pendingRequest.streamId)) {
+      const message = staleResumeMessage(pendingRequest);
+      console.warn(`AgentOSOrchestrator: ${message}`);
+      await this.chunks.pushError(
+        agentOSStreamId,
+        pendingRequest.personaId,
+        pendingRequest.gmiInstanceId,
+        GMIErrorCode.INVALID_STATE,
+        message,
+        staleResumeDetails(pendingRequest),
+      );
+      await this.dependencies.streamingManager.closeStream(agentOSStreamId, 'The pending tool request is no longer current.');
+      return;
+    }
+    // what can refuse the resume (an organization the runtime refuses) runs here, in the same step as the check and
+    // before the take, so a refused resume leaves the pause as it was
+    const streamContext = this.openResumedStream(
+      agentOSStreamId,
+      pendingRequest,
+      options,
+      gmi,
+      conversationContext,
+      toolCallGate,
+    );
+    // the resume takes the pause in the same step as the check, so a result on the pause's stream or a new turn that
+    // comes while the resume waits below finds no pause to continue or end
+    conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
+    // the pause goes on on this stream, so the stream that stopped for it ends and no result on it continues it again
+    await this.endPausedStream(
+      pendingRequest.streamId,
+      agentOSStreamId,
+      `The pending tool request was resumed on stream ${agentOSStreamId}.`,
+    );
+
+    await this.chunks.pushChunk(
+      agentOSStreamId,
+      AgentOSResponseChunkType.SYSTEM_PROGRESS,
+      gmi.getGMIId(),
+      streamContext.personaId,
+      false,
+      {
+        message: `Resuming external tool request for conversation ${conversationContext.sessionId}...`,
+        progressPercentage: 10,
+      },
+    );
+
+    await this.continueWithToolResults(agentOSStreamId, streamContext, heldRequest!, toolResults, toolCallGate);
+  }
+
+  /** Puts `takenPause` back as the conversation's pending request, unless the conversation holds another one. */
+  private restoreTakenPause(
+    conversationContext: ConversationContext | undefined,
+    takenPause: AgentOSPendingExternalToolRequest,
+  ): void {
+    if (!conversationContext) {
+      return;
+    }
+    if (conversationContext.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) === undefined) {
+      conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, takenPause);
+    }
+  }
+
+  /**
+   * Ends the pause `agentOSStreamId` saved before the turn or the continuation on it failed: the host never read the
+   * request for its calls, so each call no tool message answers is answered as not run (code `EXTERNAL_TOOL_NOT_RUN`)
+   * and the pending request is cleared, as a new turn ends a pause, and the conversation is saved when persistence is
+   * on. A pause another stream saved is left as it is. Nothing here throws: a store that refuses the save is logged,
+   * and the conversation's next save stores the end of the pause.
+   *
+   * @param agentOSStreamId - The stream that failed.
+   * @param conversationContext - The stream's conversation, or `undefined` before the turn acquired it (no-op).
+   * @param personaId - The persona the not-run results are recorded for.
+   */
+  async endPauseOfFailedStream(
+    agentOSStreamId: StreamId,
+    conversationContext: ConversationContext | undefined,
+    personaId: string | undefined,
+  ): Promise<void> {
+    const pause = conversationContext?.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    if (!conversationContext || !pause || pause.streamId !== agentOSStreamId) {
+      return;
+    }
+    if (this.enableConversationalPersistence) {
+      answerAsNotRun(
+        conversationContext,
+        unansweredPauseCalls(conversationContext, pause),
+        personaId,
+        (call) => `The runtime failed before it asked the host to run '${call.name}', so the call has no result.`,
+      );
+    }
+    conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
+    if (this.enableConversationalPersistence) {
+      try {
+        await withAgentOSSpan('agentos.conversation.save', async (span) => {
+          span?.setAttribute('agentos.stage', 'end_pending_external_tool_request_after_failure');
+          span?.setAttribute('agentos.stream_id', agentOSStreamId);
+          await this.dependencies.conversationManager.saveConversation(conversationContext);
+        });
+      } catch (persistError: unknown) {
+        console.warn(
+          `AgentOSOrchestrator: Failed to persist the end of the pause stream ${agentOSStreamId} saved before it failed.`,
+          persistError,
+        );
+      }
+    }
+  }
+
+  /** Ends `pausedStreamId`, the stream a pause was saved on, unless it is `currentStreamId` or has ended already. */
+  private async endPausedStream(pausedStreamId: string, currentStreamId: string, reason: string): Promise<void> {
+    if (pausedStreamId === currentStreamId || !this.activeStreamContexts.has(pausedStreamId)) {
+      return;
+    }
+    this.activeStreamContexts.delete(pausedStreamId);
+    try {
+      await this.dependencies.streamingManager.closeStream(pausedStreamId, reason);
+    } catch (closeError: unknown) {
+      console.warn(`AgentOSOrchestrator: Could not close stream ${pausedStreamId} after its pause moved on.`, closeError);
+    }
+  }
+
+  /**
+   * Opens the stream a resume continues a pause on: its context, with the organization the runtime resolves for the
+   * resume and the tool-call gate the resume was given; while this process still holds the paused stream, also the
+   * sources the paused turn retrieved, the GMI's own history of the turn and, for a resume given no gate, the gate the
+   * paused turn ran with; and the GMI's history and turn context set from them, from the conversation and from the
+   * new stream ({@link setPausedTurnOn}).
+   *
+   * @throws {GMIError} When the runtime refuses the resume's organization.
+   */
+  private openResumedStream(
+    agentOSStreamId: StreamId,
+    pendingRequest: AgentOSPendingExternalToolRequest,
+    options: AgentOSResumeExternalToolRequestOptions,
+    gmi: IGMI,
+    conversationContext: ConversationContext,
+    toolCallGate?: GuardrailToolCallGate,
+  ): ActiveStreamContext {
     const currentPersonaId = gmi.getCurrentPrimaryPersonaId();
-    const gmiInstanceIdForChunks = gmi.getGMIId();
     const storedOrganizationId = conversationContext.getMetadata(ORGANIZATION_ID_METADATA_KEY);
     const resolvedOrganizationId = this.resolveOrganizationContext(
       options.organizationId ?? storedOrganizationId,
@@ -601,35 +1362,16 @@ export class ExternalToolResultHandler {
         preferredModelId: options.preferredModelId,
         preferredProviderId: options.preferredProviderId,
       },
+      // the pause stores the calls and never the documents its turn retrieved, nor the GMI's own tool rounds; the
+      // stream that saved it keeps them
+      ragSources: this.activeStreamContexts.get(pendingRequest.streamId)?.ragSources,
+      pausedTurnHistory: this.activeStreamContexts.get(pendingRequest.streamId)?.pausedTurnHistory,
+      toolCallGate: toolCallGate ?? this.activeStreamContexts.get(pendingRequest.streamId)?.toolCallGate,
     };
     this.activeStreamContexts.set(agentOSStreamId, streamContext);
 
-    if (gmi.hydrateConversationHistory) {
-      gmi.hydrateConversationHistory(
-        conversationContext.getHistory(undefined, [MessageRole.ERROR, MessageRole.THOUGHT]) as any,
-      );
-    }
-    if (gmi.hydrateTurnContext) {
-      gmi.hydrateTurnContext({
-        sessionId: pendingRequest.sessionId,
-        conversationId: conversationContext.sessionId,
-        organizationId: resolvedOrganizationId,
-      });
-    }
-
-    await this.chunks.pushChunk(
-      agentOSStreamId,
-      AgentOSResponseChunkType.SYSTEM_PROGRESS,
-      gmiInstanceIdForChunks,
-      currentPersonaId,
-      false,
-      {
-        message: `Resuming external tool request for conversation ${conversationContext.sessionId}...`,
-        progressPercentage: 10,
-      },
-    );
-
-    await this.orchestrateToolResults(agentOSStreamId, toolResults, toolCallGate);
+    this.setPausedTurnOn(gmi, streamContext);
+    return streamContext;
   }
 
   // ---------------------------------------------------------------------------
@@ -692,8 +1434,12 @@ export class ExternalToolResultHandler {
       toolCalls,
       rationale,
     );
+    // what the GMI holds of the paused turn and the store does not, for a continuation on a GMI that no longer holds it
+    streamContext.pausedTurnHistory = this.pausedTurnHistoryOf(streamContext, toolCalls);
 
-    if (toolCalls.length > 0) {
+    // recorded only in a conversation the runtime records: its tool results and replies are recorded there too, and
+    // a call recorded alone would reach the next turn's prompt with no result
+    if (toolCalls.length > 0 && this.enableConversationalPersistence) {
       conversationContext.addMessage({
         role: MessageRole.ASSISTANT,
         content: null,
@@ -718,11 +1464,11 @@ export class ExternalToolResultHandler {
   }
 
   /**
-   * Drops the pause a stream saved for tool calls an output guardrail withheld
-   * from the caller. It acts only when the conversation's pending request was
-   * saved by `agentOSStreamId` and holds one of `toolCallIds`: each call of the
-   * pause is answered with a refused tool result, so the history answers every
-   * call the pause's assistant message declared, the pending request is
+   * Drops the pause a stream saved after an output guardrail blocked the
+   * stream. It acts only when the conversation's pending request was saved by
+   * `agentOSStreamId` and, with `toolCallIds`, holds one of them: each call of
+   * the pause is answered with a refused tool result, so the history answers
+   * every call the pause's assistant message declared, the pending request is
    * cleared, and the stream's context is removed and the stream closed, so no
    * result for the calls can continue it. The conversation is saved when
    * persistence is on. The stream is closed whether or not the store takes the
@@ -731,7 +1477,9 @@ export class ExternalToolResultHandler {
    *
    * @param agentOSStreamId - The stream the guardrail blocked.
    * @param streamContext - The stream's context.
-   * @param toolCallIds - The ids of the calls the block withheld.
+   * @param toolCallIds - The ids of the calls the block withheld, or undefined
+   *   for a block that withheld none, which drops the stream's pause whatever
+   *   calls it holds.
    * @param refusal - What the refused tool results say.
    * @returns Whether the pause was dropped.
    * @throws The store's error when it refuses the save, after the stream is closed.
@@ -739,7 +1487,7 @@ export class ExternalToolResultHandler {
   async discardPendingExternalToolRequest(
     agentOSStreamId: string,
     streamContext: ActiveStreamContext,
-    toolCallIds: readonly string[],
+    toolCallIds: readonly string[] | undefined,
     refusal: GMIToolCallRefusal,
   ): Promise<boolean> {
     const { conversationContext, personaId } = streamContext;
@@ -750,12 +1498,14 @@ export class ExternalToolResultHandler {
       !pending ||
       pending.streamId !== agentOSStreamId ||
       !Array.isArray(pending.toolCalls) ||
-      !pending.toolCalls.some((call) => toolCallIds.includes(call.id))
+      pending.toolCalls.length === 0 ||
+      (toolCallIds !== undefined && !pending.toolCalls.some((call) => toolCallIds.includes(call.id)))
     ) {
       return false;
     }
 
-    for (const call of pending.toolCalls) {
+    // a conversation the runtime does not record holds no message of the pause to answer
+    for (const call of this.enableConversationalPersistence ? pending.toolCalls : []) {
       const refused = refusedToolCallResult(call, refusal);
       conversationContext.addMessage({
         role: MessageRole.TOOL,
@@ -785,8 +1535,70 @@ export class ExternalToolResultHandler {
     } finally {
       await this.dependencies.streamingManager.closeStream(
         agentOSStreamId,
-        'An output guardrail blocked the tool call the stream stopped for.',
+        'An output guardrail blocked the stream, so the tool call it stopped for was dropped.',
       );
+    }
+    return true;
+  }
+
+  /**
+   * Ends the pause a conversation holds when a new turn starts on it, before the
+   * turn records its input. Each call of the pause that no tool message answers
+   * yet is answered with a tool result that says the call never ran (code
+   * `EXTERNAL_TOOL_NOT_RUN`), right after the pause's assistant message, so the
+   * new turn's prompt holds no call without its result; the pending request is
+   * cleared, and the stream that stopped for the pause is removed and closed, so
+   * a result passed on it later continues nothing. A conversation the runtime
+   * does not record holds no message of the pause, and gets none. The
+   * conversation is saved when persistence is on. Nothing here throws: a store
+   * that refuses the save is logged, and the turn saves the conversation again
+   * when it records its input.
+   *
+   * @param conversationContext - The conversation the new turn runs on.
+   * @param newStreamId - The new turn's stream.
+   * @returns Whether a pause was ended.
+   */
+  async endPendingExternalToolRequestForNewTurn(
+    conversationContext: ConversationContext | undefined,
+    newStreamId: string,
+  ): Promise<boolean> {
+    const pending = conversationContext?.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY) as
+      | AgentOSPendingExternalToolRequest
+      | undefined;
+    if (!conversationContext || !pending || pending.streamId === newStreamId) {
+      return false;
+    }
+
+    if (this.enableConversationalPersistence) {
+      answerAsNotRun(
+        conversationContext,
+        unansweredPauseCalls(conversationContext, pending),
+        pending.personaId,
+        (call) =>
+          `A new turn started on the conversation before the host passed back the result of '${call.name}', so the ` +
+          'call has none.',
+      );
+    }
+    conversationContext.setMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY, undefined);
+    await this.endPausedStream(
+      pending.streamId,
+      newStreamId,
+      'A new turn started on the conversation, so the tool call the stream stopped for never ran.',
+    );
+
+    if (this.enableConversationalPersistence) {
+      try {
+        await withAgentOSSpan('agentos.conversation.save', async (span) => {
+          span?.setAttribute('agentos.stage', 'end_pending_external_tool_request');
+          span?.setAttribute('agentos.stream_id', newStreamId);
+          await this.dependencies.conversationManager.saveConversation(conversationContext);
+        });
+      } catch (persistError: unknown) {
+        console.warn(
+          `AgentOSOrchestrator: Failed to persist the end of the pause of stream ${pending.streamId} for the new turn on stream ${newStreamId}.`,
+          persistError,
+        );
+      }
     }
     return true;
   }

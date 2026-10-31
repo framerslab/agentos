@@ -305,8 +305,11 @@ export interface RememberOptions {
   scope?: string;
 
   /**
-   * Identifier for the scope (e.g. thread ID, user ID).
-   * Required when `scope` is set.
+   * Identifier for the scope (e.g. thread ID, user ID). The trace is filed
+   * under it, in the `scope_id` column and in its metadata, and a trace of the
+   * same text, type and scope counts as its duplicate only under the same
+   * scope id. A call that names none files the trace under `''`, whatever its
+   * `scope`.
    */
   scopeId?: string;
 
@@ -468,24 +471,29 @@ export interface IngestResult {
 export interface ExportOptions {
   /**
    * Serialisation format for the export artifact.
-   * - `'sqlite'`   – copy of the SQLite file (binary).
-   * - `'json'`     – newline-delimited JSON of all traces.
-   * - `'markdown'` – human-readable Markdown summary.
-   * - `'obsidian'` – Obsidian vault with one note per trace and wiki-links.
-   * @default 'json'
+   * - `'sqlite'`   – a new SQLite file holding this brain's rows of every portable table.
+   * - `'json'`     – one JSON document: the brain's metadata, its traces (forgotten ones included), graph rows,
+   *   documents with their chunks and images, and conversations with their messages.
+   * - `'markdown'` – a folder of Markdown files, one per active trace, each with YAML front matter.
+   * - `'obsidian'` – the Markdown folder, each note's body followed by the trace's tags as `#tags` and a **Related:**
+   *   list of `[[wikilinks]]` to the labels its knowledge-graph node links to, each when there are any.
+   *
+   * When omitted, the output path names the format: a `.json` path is JSON, a `.sqlite` or `.db` path SQLite, and any
+   * other path a Markdown folder.
    */
   format?: 'sqlite' | 'json' | 'markdown' | 'obsidian';
 
   /**
-   * Whether to include raw embedding vectors in the export.
-   * Embeddings dramatically increase file size but allow round-trip import
-   * without re-embedding.
+   * Whether a JSON export holds the raw embedding vectors of its traces, knowledge nodes, chunks and images, as
+   * base64. They make the file much larger; an import of a file without them stores those rows with no vector. A
+   * SQLite export always holds them, and a Markdown or Obsidian export never does.
    * @default false
    */
   includeEmbeddings?: boolean;
 
   /**
-   * Whether to include conversation turn traces in the export.
+   * Whether a JSON export holds the brain's `conversations` and `messages` rows. The other formats ignore it: a
+   * SQLite export holds every portable table, and a Markdown or Obsidian export holds traces alone.
    * @default true
    */
   includeConversations?: boolean;
@@ -544,26 +552,37 @@ export interface ExportResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Options for importing memory data via `Memory.import()`.
+ * Options for importing memory data via `Memory.importFrom()`. `Memory.importFromString()` takes `dedup` alone, with
+ * the format as its own argument.
  */
 export interface ImportOptions {
   /**
    * Source format of the import file.
-   * - `'auto'`     – detect from file extension / magic bytes.
-   * - `'sqlite'`   – AgentOS SQLite export.
-   * - `'json'`     – newline-delimited JSON export.
-   * - `'markdown'` – parse headings as trace content.
-   * - `'obsidian'` – Obsidian vault (wiki-links become graph edges).
-   * - `'chatgpt'`  – ChatGPT conversation export (conversations.json).
-   * - `'csv'`      – flat CSV with `content` column.
+   * - `'auto'`     – read from the source: a `.json` file is a ChatGPT export when its text holds `"mapping"` and
+   *   `"conversation_id"`, and JSON otherwise; a `.sqlite` or `.db` file is SQLite, a `.csv` file CSV, a folder
+   *   Markdown (name `'obsidian'` for an Obsidian vault), and any other path JSON.
+   * - `'sqlite'`   – one brain's SQLite file, as a `'sqlite'` export writes it.
+   * - `'json'`     – one JSON document, as a `'json'` export writes it.
+   * - `'markdown'` – a folder of Markdown files: each file whose body is not blank is one trace, its front matter
+   *   read into the trace's fields.
+   * - `'obsidian'` – an Obsidian vault: the Markdown import, with each note's `#tags` and `[[wikilinks]]` read as the
+   *   trace's tags and knowledge-graph edges.
+   * - `'chatgpt'`  – ChatGPT's `conversations.json` export: each user message, with the assistant reply that follows
+   *   it, is one trace.
+   * - `'csv'`      – a CSV file with a header row and a `content` column.
    * @default 'auto'
    */
   format?: 'auto' | 'sqlite' | 'json' | 'markdown' | 'obsidian' | 'chatgpt' | 'csv';
 
   /**
-   * Whether to skip importing traces whose content hash a trace of the same
-   * scope and scope id already holds, preventing duplicates on repeated
-   * imports. A trace of another scope id is not a duplicate.
+   * Whether a record is skipped as a duplicate when a trace of the same scope and scope id holds its text, or names
+   * that text's SHA-256 as `import_hash` or `content_hash`; a Markdown or Obsidian note is also skipped when it is
+   * the own note of the trace its front-matter `id` names. A trace of another scope id is not a duplicate, and a trace
+   * the brain forgot counts as any other. A JSON, SQLite or CSV import reads a file's live records before its forgotten
+   * ones, so a text the file holds both forgotten and live arrives live. A SQLite import merges a skipped record's
+   * tags, and the later creation time, into the trace it matches, and an Obsidian note adds the tags and links that
+   * trace lacks. With `false`, no trace record is skipped as a duplicate and nothing is merged into a trace the brain
+   * holds.
    * @default true
    */
   dedup?: boolean;
@@ -574,21 +593,28 @@ export interface ImportOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Summary of a completed import operation returned by `Memory.import()`.
+ * Summary of a completed import, as `Memory.importFrom()` and `Memory.importFromString()` return it.
  */
 export interface ImportResult {
   /**
-   * Number of traces successfully imported and written to the store.
+   * How many traces the import wrote, and, from a JSON file, its knowledge nodes and edges, documents, chunks,
+   * images, conversations and messages too; from a SQLite file, its knowledge nodes and edges too. A JSON file's brain
+   * metadata, the knowledge nodes and edge an Obsidian note's wikilink adds, and the `conversations` row of each
+   * conversation in a ChatGPT export are written and not counted.
    */
   imported: number;
 
   /**
-   * Number of traces skipped (deduplication or format mismatch).
+   * How many records the import did not write: a duplicate trace (see `ImportOptions.dedup`), a graph, document,
+   * chunk, image, conversation or message row the brain holds already, a Markdown or Obsidian note whose body is
+   * blank, a CSV row whose `content` is blank, a memory-graph node whose trace the import did not write under its id
+   * and an edge that names one, and a row that lacks a field it needs, such as an edge with no source or target.
    */
   skipped: number;
 
   /**
-   * Human-readable error messages for any traces that failed to import.
+   * Human-readable messages for the records that failed to import, for an Obsidian note's link or tag the import
+   * could not write, and for a source that could not be read or parsed.
    */
   errors: string[];
 }

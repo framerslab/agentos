@@ -77,7 +77,7 @@ for the requested task automatically:
 | `stable-diffusion-local` | Local | —                          | `v1-5-pruned-emaonly`            | —                        | `STABLE_DIFFUSION_LOCAL_BASE_URL` |
 
 When neither `provider` nor `model` is given, AgentOS checks configured runtimes in order
-(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `MINIMAX_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
+(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `MINIMAX_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). An empty or whitespace-only `OLLAMA_BASE_URL` or `STABLE_DIFFUSION_LOCAL_BASE_URL` is unset, as the call reads it, so detection goes on to the next runtime. Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
 
 MiniMax text requests default to `MiniMax-M3.1-Flash`; the current catalog also includes
 `MiniMax-M3`. Both accept image input and tools. Explicit model IDs, including saved
@@ -100,9 +100,10 @@ are forwarded through the Chat Completions API. See the
 MiniMax image generation uses `image-01`, also when `setDefaultProvider()` names a MiniMax text
 model such as `MiniMax-M3.1-Flash`: on the global root and on either China root, an image call drops
 the chat model the default names and takes the provider's image model. A root counts as one in any
-letter case of its scheme and host, as fetch lowercases them. An empty `baseUrl` on the
-call or the default is the URL the call is sent with, ahead of `MINIMAX_BASE_URL`, so the call goes
-to the global root and takes `image-01` there too. MiniMax publishes no
+letter case of its scheme and host, as fetch lowercases them. An empty or whitespace-only `baseUrl`
+on the call or the default is unset, so `MINIMAX_BASE_URL` applies as it does for a call with no
+`baseUrl`: a MiniMax root there takes `image-01`, a custom endpoint there keeps the default's model,
+and with no variable the call goes to the global root and takes `image-01` there too. MiniMax publishes no
 embedding model, so the `minimax` provider and `embedText()` refuse an embedding request before
 sending it; embed with another provider.
 
@@ -127,6 +128,8 @@ const bot = agent({
   instructions: 'You are a helpful assistant.',
 });
 ```
+
+A `baseUrl` that is an empty or whitespace-only string is unset: the call reads the global default's URL, then the provider's base-URL variable, as it does with no `baseUrl`, and with none it goes to the provider's own endpoint. The same reading applies to the default's `baseUrl` and to the variable (`OPENAI_BASE_URL=` leaves OpenAI's own endpoint), so no request is built on a blank base, whose relative URL (`/chat/completions`) Node's fetch rejects and a browser's would resolve against the page's own origin, with the key. A blank `baseUrl` names no endpoint, so it is not refused where a base URL meant for one provider would be: beside a `model` whose `provider:` prefix names another provider than `provider`, and on an image call that names no provider, the call runs as it does with no `baseUrl`. A key there is still refused.
 
 ### Local Providers
 
@@ -247,10 +250,10 @@ try {
 
 - The provider request in flight is cancelled. A non-streamed request to OpenAI, Anthropic or Gemini is aborted at once, and so is an OpenAI stream; an Anthropic or Gemini stream stops at its next event. `embedText()` aborts its request to the embeddings endpoint, Ollama or Gemini. A provider that does not read the signal runs its request to the end, and the call still ends as below.
 - No further step, retry or fallback hop starts, and `generateObject()` starts no further attempt. A tool round that `generateText()` or `streamText()` has started runs to its end first; the call then ends as below rather than returning that round as its result. The call is not counted against the provider's health.
-- The call rejects with the signal's reason: a `DOMException` named `AbortError` after `controller.abort()`, one named `TimeoutError` from `AbortSignal.timeout()`, or the value given to `controller.abort(reason)`. `streamText()` ends with an `error` part that carries the reason (in an `Error` when the reason is not one), a session's `stream()` ends with an `error` part, and `streamObject()`'s `object` rejects with the reason.
+- The call rejects with the signal's reason: a `DOMException` named `AbortError` after `controller.abort()`, one named `TimeoutError` from `AbortSignal.timeout()`, or the value given to `controller.abort(reason)`. `streamText()` and a session's `stream()` end with an `error` part that carries the reason (in an `Error` when the reason is not one), and `streamObject()`'s `object` rejects with the reason.
 - A call whose signal has already aborted sends no request.
 
-A session stays open after an aborted `send()` or `stream()`, and its next call runs as usual. Without `runtime: 'gmi'`, the aborted turn is added to no history. With it, the signal is joined with the session's own stop: the turn ends as one `close()` stops (the steps it finished stay in `messages()`, marked partial), and `close()` still stops a turn sent with a signal of its own. An agent's `generate()` and `stream()` pass an `abortSignal` in their options to `generateText()` and `streamText()`; with `runtime: 'gmi'` those two take no `abortSignal` ([GMIs from agent()](../GMI.md#gmis-from-agent)).
+A session stays open after an aborted `send()` or `stream()`, and its next call runs as usual. Without `runtime: 'gmi'`, the aborted turn is added to no history. With it, the signal is joined with the session's own stop: the turn ends as one `close()` stops (the steps it finished stay in `messages()`, marked partial), a turn that had already failed when the signal aborted keeps its own error, and `close()` still stops a turn sent with a signal of its own. An agent's `generate()` and `stream()` pass an `abortSignal` in their options to `generateText()` and `streamText()`; with `runtime: 'gmi'` they take one too and end the same way ([GMIs from agent()](../GMI.md#gmis-from-agent)).
 
 ```ts
 import { agent } from '@framers/agentos';
@@ -715,7 +718,7 @@ await tutor.close();
 
 With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), the same function under its own name), every session is a Generalized Mind Instance built from the options, and `memory` turns on cognitive memory: one manager for the sessions, scoped per user, embedding with `memory.embedding` (unset, a model picked from the global default provider or the environment's keys). `cognition: 'full'` adds sentiment tracking and the metaprompt presets. Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`; it does not read `types`, `working` or `shared`. The default runtime reads only the `memory.working` callback described above. [GMIs from agent()](../GMI.md#gmis-from-agent) lists what each option does on this path.
 
-`learning: true`, or a `LearningConfig`, turns on the agent's learning layer: every GMI of the agent sends the persona's personality section as a system prompt of its own on every turn, in the words `agent()` writes, a session opened with a `userId` is bound to a learner, and `agent.learning.manifest()` says which loops run. Unset or `false` (the default), the agent builds no layer and the persona's base prompt carries the section; `agent()` without `runtime: 'gmi'` ignores the option. [Learning](../GMI.md#learning) has the rules.
+`learning: true`, or a `LearningConfig`, turns on the agent's learning layer: every GMI of the agent sends the persona's personality section as a system prompt of its own on every turn, in the words `agent()` writes, a session opened with a `userId` is bound to a learner when the id is not one the layer reads as anonymous (`anonymous_user`, `guest` and the others, with `learning.anonymousUserIds`) and the agent has a `name` or `learning.agentKey`, and `agent.learning.manifest()` says which loops run. Unset or `false` (the default), the agent builds no layer and the persona's base prompt carries the section; `agent()` without `runtime: 'gmi'` ignores the option. [Learning](../GMI.md#learning) has the rules.
 
 ### Per-agent identity via SOUL.md
 
@@ -910,6 +913,57 @@ For custom host-managed tools that are not registered in AgentOS, keep using
 
 This recovery path assumes the conversation store is still available after the
 original process exits.
+
+A pause is resumed once. When the conversation no longer holds the pause the
+snapshot names (its results were passed on its stream, an output guardrail
+blocked its stream, a newer turn ended it, or a newer pause replaced it),
+another resume of it is under way, or a result answers a call the pause does
+not hold, `resumeExternalToolRequest(...)` yields one error chunk with the code
+`SYS_INVALID_STATE` and the GMI takes none of the results. A resume ends the
+stream the pause was saved on. The same rule holds on that stream:
+`handleToolResult(...)` and `handleToolResults(...)` continue the pause once,
+with results for its calls. A second delivery while the pause
+is being continued, or a result for a call the stream's next pause does not
+hold, yields one error chunk with the code `SYS_INVALID_STATE`; a result passed
+after the stream closed (a resume took the pause, a newer turn ended it, or the
+continuation finished) yields the closed stream's error chunk (`TOOL_ERROR`).
+A resume refused for these reasons is refused before it acquires the session's
+GMI, so it changes neither the conversation nor that GMI: the `preferredModelId` and
+`preferredProviderId` a refused resume names are not recorded. Read the pending
+request again with `getPendingExternalToolRequest(...)` before a retry.
+
+Pass every result of a pause together: a call the results leave out is answered
+with a tool result that says it has none (code `EXTERNAL_TOOL_NOT_RUN`), in the
+conversation and in the results the GMI reads when it takes results together
+(`IGMI.handleToolResults()`, as the shipped `GMI` does), and so is each call of
+a pause a new turn ends, so the model never reads a call without its result. A
+GMI that takes one result at a time reads the host's result alone.
+
+A continuation that fails before the conversation records its results (the
+store refuses to save that the pause was taken, or a result has no JSON form,
+as an output holding a `BigInt` has none) yields an error chunk, ends its
+stream and leaves the pause as it was: `getPendingExternalToolRequest(...)`
+returns it, `resumeExternalToolRequest(...)` continues it, and a new turn ends
+it. A resume whose `organizationId` the runtime refuses (a single-tenant
+runtime with `strictOrganizationIsolation` and another organization) leaves the
+pause as it was too, and so does a new turn the runtime refuses before it
+records its input, for such an organization or because its turn plan fails.
+A continuation that fails after the conversation recorded
+its results keeps them, and a pause that a turn or a continuation saved before
+it failed (the store refuses that save) ends the way a new turn ends one, since
+the host never read its request.
+
+The once-only rule holds within one AgentOS instance. Each instance keeps a
+conversation in memory and saves it whole, so two instances that resume one
+pause at the same time both resume it, and the later save overwrites the
+earlier one. A deployment that runs several instances over one conversation
+store sends each conversation's turns, tool results and resumes to one
+instance at a time. Within one instance AgentOS does not queue a
+conversation's operations either: a turn, a continuation and a resume each
+start when the host calls them. Start a conversation's next turn once the
+stream of its continuation or resume has ended: a turn that starts while one
+runs finds no pause to end, and its input lands among the continuation's
+messages.
 
 `AgentOSConfig.learning` turns on the runtime's learning layer: every GMI sends its persona's personality section as a system prompt of its own on every turn, each session is bound to its user under the turn's resolved organization, and `AgentOS.getLearningLayer()` returns the layer (`undefined` while learning is off). [Learning](../GMI.md#learning) has the rules.
 

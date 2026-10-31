@@ -270,6 +270,11 @@
       "default": "./dist/cognition/emergent/index.js",
       "types": "./dist/cognition/emergent/index.d.ts"
     },
+    "./cognition/learning": {
+      "import": "./dist/cognition/learning/index.js",
+      "default": "./dist/cognition/learning/index.js",
+      "types": "./dist/cognition/learning/index.d.ts"
+    },
     "./cognition/substrate": {
       "import": "./dist/cognition/substrate/index.js",
       "default": "./dist/cognition/substrate/index.js",
@@ -647,6 +652,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "node scripts/strip-nbsp.mjs && eslint \"src/**/*.ts\"",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "dev:test": "vitest",
     "docs:clean": "rimraf docs/api ../../docs-generated/library ../../docs-generated/api",
@@ -741,6 +747,7 @@
     "@types/ws": "^8.18.1",
     "@types/pg": "^8.20.0",
     "@vitest/browser-playwright": "5.0.3",
+    "@vitest/coverage-v8": "5.0.3",
     "better-sqlite3": "^13.0.3",
     "conventional-changelog-conventionalcommits": "^9.3.1",
     "eslint": "^10.12.0",

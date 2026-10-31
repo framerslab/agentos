@@ -75,14 +75,15 @@ A `gmi` node runs [`LoopController`](https://github.com/framerslab/agentos/blob/
 
 - `invoke(input)` freezes `input` into `state.input`. `state.scratch` and `state.artifacts` start empty. The Zod schemas passed to a builder are lowered to JSON Schema and stored in the IR; the runtime neither validates against them nor applies their defaults.
 - A node's output goes into `state.artifacts` under the node's id (a `workflow()` step's `outputAs` names another key). `invoke()` returns `state.artifacts`. A `gmi` node's output is its text, a `tool` node's is the tool's `output`.
-- `scratch` changes only through executors that return a scratch update: a `subgraph` node's `outputMapping`, an `extension` node whose output is an object, and a `voice` node (its checkpoint). Reducers merge those updates.
+- `scratch` changes only through executors that return a scratch update: a `subgraph` node's `outputMapping`, an `extension` node whose output is an object, and a `voice` node (its checkpoint). Reducers merge those updates. Every key of an update, `__proto__` included (an output parsed from JSON can carry one), becomes an own key of `scratch`; no update sets the prototype of `scratch`.
 - A `tool` node sends the tool the static `args` from `toolNode(name, { args })` and nothing from the graph state.
 
 ### Scheduling
 
 - A node runs when every node with an edge into it has completed or been skipped, and it runs at most once per run. A router marks the targets it did not pick skipped; skipping goes no further, so a node whose incoming edges all come from skipped nodes still runs.
 - Nodes that become ready together run concurrently, each on its own copy of the state. After such a batch the runtime merges the keys each node wrote to `scratch` and `artifacts`, in the order the nodes are declared: a reducer registered for the key (`scratch.<key>` or `artifacts.<key>`) combines each write with the value the key held before it, as when the nodes run one after another, so the value from before the batch counts once; without one the node declared later wins. A node's copy of a key it did not write is not merged, so it never undoes another node's write. The outputs of every node in the batch reach the nodes after it and the result.
-- A node that fails stops the run: the runtime saves a checkpoint and emits `error`, `interrupt` and `run_end` (see [Checkpointing](./CHECKPOINTING.md)). `toolNode(name, { retryPolicy })` and a `workflow()` step's `retryPolicy` re-run a failed node first.
+- A node that fails stops the run: the runtime saves a checkpoint and emits `error`, `interrupt` and `run_end` (see [Checkpointing](./CHECKPOINTING.md)). `toolNode(name, { retryPolicy })` and a `workflow()` step's `retryPolicy` re-run a failed node first. A node that fails writes nothing to `scratch` or `artifacts` and records no result, so a resume runs it again. What a failed attempt did outside the graph, such as a call a tool made before it failed, is not undone, and the node's next run repeats it, so a `write` or `external` node should be safe to repeat.
+- The events of a batch are yielded once every node of it has run, in the order the nodes are declared. When a node of the batch interrupts or fails, the run reports every node of the batch that completed, then that node and the stop. When the store refuses a checkpoint a node of the batch saves, or a function on one of its edges throws, the other nodes of the batch finish first, and the run then ends with that error and yields none of the batch's events (see [Checkpointing](./CHECKPOINTING.md#when-a-save-or-an-edge-throws)).
 
 ---
 
@@ -521,7 +522,7 @@ for await (const event of graph.stream({ topic: 'AI safety' })) {
 | `guardrail:hitl-override` | `nodeId`, `guardrailId`, `reason` | A human node's post-approval guardrails rejected the approval |
 | `run_end` | `runId`, `finalOutput` (the artifacts), `totalDurationMs` | The run ends |
 
-A `GraphRuntime` built with an `expansionHandler` also emits `mission:*` events; none of the builders sets one. The other event types the union declares (`text_delta`, `tool_call`, `tool_result`, `memory_read`, `memory_write`, `discovery_result`, `guardrail_result`) are not emitted by the runtime.
+A `GraphRuntime` built with an `expansionHandler` also emits `mission:*` events; none of the builders sets one. The checkpoint it saves before an expansion is described in [Checkpointing](./CHECKPOINTING.md#the-checkpoint-before-an-expansion). The other event types the union declares (`text_delta`, `tool_call`, `tool_result`, `memory_read`, `memory_write`, `discovery_result`, `guardrail_result`) are not emitted by the runtime.
 
 ---
 

@@ -71,6 +71,7 @@ interface Checkpoint {
     effectClass: EffectClass;
     output: unknown;
     durationMs: number;
+    routeTarget?: string; // The target the node picked itself, when it did
   }>;
 
   visitedNodes: string[]; // Nodes completed at checkpoint time
@@ -80,6 +81,8 @@ interface Checkpoint {
 ```
 
 `state` holds the `input`, `scratch`, `artifacts` and `diagnostics` partitions; the `memory` partition is not saved. The runtime never sets `memorySnapshot`, and a resumed run starts with an empty memory view and fresh diagnostics. `pendingEdges` lists the edges a node chose when its checkpoint was taken after it ran, and is empty otherwise.
+
+`nodeResults` holds the results recorded when the checkpoint was saved: those of the nodes in `visitedNodes` and, in the checkpoint of a run that a node interrupted, that node's, as in the checkpoint saved before an expansion that came after a `write`, `external` or `human` node (see [The Checkpoint Before an Expansion](#the-checkpoint-before-an-expansion)). A result recorded later reaches only the checkpoints saved after it, so a resume or a fork from an earlier checkpoint runs the nodes after it again, and a human node among them asks again.
 
 ## Checkpoint Policies
 
@@ -109,7 +112,7 @@ gmiNode(
 A resumed run restores `input`, `scratch`, `artifacts` and the list of completed nodes from the checkpoint, then schedules the nodes that have not completed:
 
 - A node in `visitedNodes` does not run again, whatever its `effectClass`.
-- A node with a recorded result in `nodeResults` that is not in `visitedNodes` (the node that failed or interrupted the run) is handled by its `effectClass`:
+- A node with a recorded result in `nodeResults` that is not in `visitedNodes` (the node that interrupted the run, or a `write`, `external` or `human` node an expansion came after) is handled by its `effectClass`:
 
 | effectClass | Resume behavior | Rationale |
 |---|---|---|
@@ -121,7 +124,9 @@ A resumed run restores `input`, `scratch`, `artifacts` and the list of completed
 
 - Every other node runs as in a fresh run.
 
-A `write` or `external` node that failed is therefore not retried on resume: its recorded output, from the failed attempt, stands as its result. Declare `effectClass` on tool nodes to match what the node does; `toolNode()` defaults to `'external'` and `gmiNode()` to `'read'`:
+A node marked complete with its recorded output does not run again, but its edges still decide where the run goes. They are evaluated on the state the run resumes with, which records the node's visit as the state after a node runs does: `currentNodeId` names the node and `visitedNodes` lists it. The run follows the targets they pick and skips the others, and the resumed stream yields their `edge_transition` events after the node's `node_end`. A condition on such an edge can read a decision the host writes into the checkpoint it forks (see [Time-Travel with fork()](#time-travel-with-fork)). Such a node that picked its target itself, as the exit of a voice node (an `external` node) does, goes to the target its recorded result names in `routeTarget`, and the run skips the other targets of its edges. A router and a guardrail that reroutes pick their target too, but `routerNode()` and `guardrailNode()` build them `pure`, so a resume never marks them complete from a recorded result: one the checkpoint does not list as completed runs again and picks its target anew.
+
+A node that fails records no result and writes nothing to `scratch` or `artifacts`, as an attempt its `retryPolicy` runs again does. The checkpoint of a failed run therefore holds the state the node ran on, and a resume executes the node again, whatever its `effectClass`. What a failed attempt did outside the graph, such as a call a tool made before it failed, is not undone, so a `write` or `external` node that runs again, by its `retryPolicy` or on resume, repeats it: such a node should be safe to repeat. Declare `effectClass` on tool nodes to match what the node does; `toolNode()` defaults to `'external'` and `gmiNode()` to `'read'`:
 
 ```typescript
 // web_search makes external calls (the toolNode default)
@@ -134,7 +139,11 @@ toolNode('json_formatter', {}, { effectClass: 'pure' })
 toolNode('create_record', {}, { effectClass: 'write' })
 ```
 
-Nodes that become ready together run as one parallel batch (see [Scheduling](./ORCHESTRATION.md#scheduling)). A node of the batch that saves a checkpoint after it runs, as every node does under `every_node`, saves its own copy of the state; once the batch has merged, the runtime saves one more checkpoint, of the merged state and named for the batch's last node in the order the nodes are declared, so the last checkpoint of the batch holds what every node wrote. When a node of the batch interrupts or fails, the others in the batch have run too, and the ones that completed are in the checkpoint's `visitedNodes`, so a resume does not run them again. The checkpoint's `scratch` and `artifacts` hold what each of them wrote, merged with what the halting node wrote in the order the nodes are declared, so the nodes after the batch read their outputs when the run resumes. The run reports the halting node alone, the first in the order the nodes are declared. Another node of the batch that interrupted has not been asked, so the checkpoint holds neither its writes nor its result: a resume executes it again, and it interrupts the resumed run with its own `interrupt`.
+Nodes that become ready together run as one parallel batch (see [Scheduling](./ORCHESTRATION.md#scheduling)). A node of the batch that saves a checkpoint after it runs, as every node does under `every_node`, lists in `visitedNodes` every node completed by then, which can include nodes of the batch that finished before it, and its `scratch` and `artifacts` hold what each of those nodes wrote, merged in the order the nodes are declared, with their results alone in `nodeResults`: a resume from it does not run them again and loses none of their outputs, and runs the nodes of the batch that had not completed, so one that waits for a person asks. Once the batch has merged, the runtime saves one more checkpoint, of the merged state and named for the batch's last node in the order the nodes are declared, so the last checkpoint of the batch holds what every node wrote. It saves that checkpoint before it yields any of the batch's events, so a host that stops reading during them, or a process that stops there, resumes by the run id from what every node wrote.
+
+The checkpoint each node of the batch saves after it runs merges again what every node completed by then wrote, and holds all of it, so under `every_node` the work of saving a batch's checkpoints grows with the square of the number of its nodes, and faster with a reducer that copies the value it extends, such as `concat`. A graph built with `AgentGraph` that has a wide batch saves less under `explicit`, with `checkpoint: 'before'` on the node after the batch: that node saves one checkpoint, of what every node of the batch wrote, before it runs.
+
+When a node of the batch interrupts or fails, the others in the batch have run too, and the ones that completed are in the checkpoint's `visitedNodes`, so a resume does not run them again. The checkpoint's `scratch` and `artifacts` hold what each of them wrote, merged with what the halting node wrote in the order the nodes are declared, so the nodes after the batch read their outputs when the run resumes. The run reports every node of the batch that completed, in the order the nodes are declared, then the halting node, the first in that order that interrupted or failed, and the stop. Another node of the batch that interrupted has not been asked, so the checkpoint holds neither its writes nor its result: a resume executes it again, and it interrupts the resumed run with its own `interrupt`. Another node that failed, like the halting one when it fails, wrote nothing and left no result, so a resume executes it again too.
 
 ## Resuming a Run
 
@@ -175,6 +184,25 @@ The same API applies to compiled `workflow()` and `mission()` graphs. The `resum
 const result = await workflow.resume(checkpointId);
 const result = await missionCompiled.resume(checkpointId);
 ```
+
+## When a Save or an Edge Throws
+
+A store backed by a database or a network can refuse a save, and its `save()` rejects. A function on a conditional edge is the host's code, and it can throw. Either ends the run with that error: the runtime does not retry the save or pass over the edge, `stream()` and `streamResume()` throw the error where the runtime asked for the checkpoint or evaluated the edge, and `invoke()` and `resume()` reject with it.
+
+- The checkpoint of a node that interrupts or fails is saved before the node's events, so that a host that stops reading at `interrupt` or `error` can resume. When the store refuses that save, the error comes before those events, and the host reads the store's error instead of `interrupt` or `error`.
+- In a parallel batch, the other nodes of the batch run to the end, and save the checkpoints they save, before the error reaches the host, so no node of the run still runs once `stream()` has thrown. The error is the first in the order the nodes are declared, and none of the batch's events is yielded.
+- A node of a batch counts as completed once its edges are decided. A checkpoint another node of the batch saves before then leaves it out, so a node whose edges threw is in no checkpoint's `visitedNodes`, and a resume runs it again and follows the edge it picks then. The checkpoint saved before an expansion leaves out the node the expansion came after in the same way (see [The Checkpoint Before an Expansion](#the-checkpoint-before-an-expansion)).
+
+A resume by the run id from `run_start` continues from the last checkpoint the store saved, and runs again every node that completed after it.
+
+## The Checkpoint Before an Expansion
+
+A `GraphRuntime` built with an `expansionHandler` saves a checkpoint after a node that asks for an expansion, or after which the planner reevaluates under `reevalInterval`, before it hands the requests to the handler, and passes the checkpoint's id to the handler as `checkpointIdBefore`. The node's edges are decided after the expansion, on the graph the expansion leaves, so the checkpoint does not list the node in `visitedNodes`. When the run stops there, as when the handler throws, a function on one of the node's edges throws or the process stops, a resume by the run id continues from that checkpoint and routes the node once by its edges, as [Resume Semantics](#resume-semantics) describes:
+
+- A `write`, `external` or `human` node is marked complete with its recorded output: the checkpoint holds its result and what it wrote, as the checkpoint of a node that interrupts does. The expansion requests that came after it are not handed to the handler again, and the run goes on as after an expansion the handler did not apply.
+- A `pure` or `read` node runs again, on the state it ran on: the checkpoint holds neither its result nor what it wrote, so a reducer does not count its writes twice. When it runs again, the expansion requests it makes, and a planner reevaluation that falls after it, go to the handler again.
+
+After a parallel batch the runtime decides the edges of every node of the batch before it hands the batch's expansion requests to the handler, so that checkpoint lists every node of the batch. A resume runs on the graph passed to it, so an expansion the stopped run applied is not part of the resumed run.
 
 ## Time-Travel with fork()
 
@@ -294,6 +322,8 @@ class PostgresCheckpointStore implements ICheckpointStore {
 ```
 
 The runtime can save several checkpoints of one run in the same millisecond, such as the checkpoints of a parallel batch's nodes and the one it saves after the batch, so `load()` and `latest()` return the checkpoint saved last of those with the latest `timestamp`, and `list()` puts it first. The example's `checkpoints` table has a `seq bigserial` column to order them: it takes the next value at each insert, and `save()` sets it again (`seq = DEFAULT`) when it saves a checkpoint again under its id, so that save counts as the last. `InMemoryCheckpointStore` orders them by each checkpoint's last save.
+
+A `save()` that rejects ends the run with its error (see [When a Save or an Edge Throws](#when-a-save-or-an-edge-throws)).
 
 The order a store has to keep is that of saves that do not overlap. The runtime starts each save once the one before it has finished, except the saves of a parallel batch's nodes, which run together; a checkpoint it saves after them, such as the one after the batch or the one of a batch that halts, starts once they have all finished. In the example, a save that starts after another has finished takes the larger `seq`, since a sequence with the default `CACHE 1` hands out its values in the order they are asked for.
 

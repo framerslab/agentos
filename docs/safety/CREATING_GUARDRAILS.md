@@ -196,6 +196,7 @@ interface GuardrailEvaluationResult {
 
 - If `canSanitize: true` is set in your config, your guardrail runs in **Phase 1 (sequential)** and your `modifiedText` is applied before downstream guardrails see the content.
 - If your guardrail is in **Phase 2** (no `canSanitize` or `canSanitize: false`) and it returns SANITIZE, the action is **automatically downgraded to FLAG** with a warning logged. This prevents non-deterministic concurrent modifications.
+- On a `FINAL_RESPONSE`, `modifiedText` replaces the reply in every field that carries it: `finalResponseText`; `finalResponseTextPlain`, rendered as plain text as a turn renders its own reply; the reply in `updatedConversationContext`; and `audioOutput`, which keeps its voice settings, speaks the new text as plain text in `textToSpeak` and drops the `url` of the audio made from the replaced reply. A `null` `modifiedText` removes the reply, and the audio output with it. A structured value parsed from the replaced reply is withdrawn, as [Structured replies](../features/STRUCTURED_REPLY.md) (item 5) states. A `modifiedText` equal to the reply changes nothing: the parsed value and the audio output stay.
 
 ---
 
@@ -241,11 +242,11 @@ The complete, assembled response emitted at the end of a turn.
 
 Emitted when the model requests a tool call. It carries `isFinal: false`, and `evaluateOutput` receives it only when the guardrail's `config.evaluateToolCalls` is `true`:
 
-- **`BLOCK`** ends the stream with the guardrail's verdict (the error chunk, or the final response holding `replacementText`) in place of the chunk, so the stream never hands the host an actionable call to execute. AgentOS drops the pause the runtime saved for that call: `getPendingExternalToolRequest()` no longer returns it, and the conversation answers the call with a refused tool result.
+- **`BLOCK`** ends the stream with the guardrail's verdict (the error chunk, or the final response holding `replacementText`) in place of the chunk, so the stream never hands the host an actionable call to execute. AgentOS drops the pause the runtime saved for that call: `getPendingExternalToolRequest()` no longer returns it, and the conversation answers the call with a refused tool result. A `BLOCK` on a chunk that holds no actionable call (the chunk of calls the runtime runs itself, or a streamed delta) ends the stream while the turn goes on inside the runtime; when the turn then stops for calls the host runs, AgentOS drops that pause once the turn ends, and until then neither offers it through `getPendingExternalToolRequest()` nor lets it be resumed or continued.
 - **`SANITIZE`** cannot rewrite a tool call: it is applied as a `BLOCK` that keeps your reason and reason code.
 - **`FLAG`** and **`ALLOW`** pass the chunk on, with the evaluation in its `metadata.guardrail.output`.
 
-A call with `executionMode: 'internal'` is one the runtime executes itself. AgentOS asks your guardrail about it before it runs, as a `TOOL_CALL_REQUEST` chunk holding that one call: a `BLOCK` (or a `SANITIZE`) refuses the call, the tool does not run, and the model reads a refused tool result. On the stream `processRequest()` returns, your guardrail also receives the stream's chunk for the call, where a `BLOCK` ends the stream; a continuation's stream carries no chunk for such a call. A refused call never becomes an actionable request, and the `FINAL_RESPONSE` lists it in `finalToolCalls`.
+A call with `executionMode: 'internal'` is one the runtime executes itself. AgentOS asks your guardrail about it before it runs, as a `TOOL_CALL_REQUEST` chunk holding that one call, with the sources the turn retrieved in `ragSources` (in a continuation, the sources of the user turn it continues): a `BLOCK` (or a `SANITIZE`) refuses the call, the tool does not run, and the model reads a refused tool result. When a model step asks for several such calls, each is judged before any of them runs, and the calls that pass alone are judged once more together, as the stream's chunk for the step holds them; a `BLOCK` there refuses each of them. On the stream `processRequest()` returns, your guardrail also receives the stream's chunk for the step, where a `BLOCK` ends the stream; a continuation's stream carries no chunk for such calls. A refused call never becomes an actionable request, and the `FINAL_RESPONSE` lists it in `finalToolCalls`.
 
 ```typescript
 {
@@ -1086,7 +1087,7 @@ async evaluateOutput(
 
 ### When ragSources is available
 
-- `ragSources` comes with every evaluation after the turn's retrieval: the GMI's sources reach the stream as a `METADATA_UPDATE` before the first `TEXT_DELTA`, and the `FINAL_RESPONSE` carries them too.
+- `ragSources` comes with every evaluation after the turn's retrieval: the GMI's sources reach the stream as a `METADATA_UPDATE` before the first `TEXT_DELTA`, and the `FINAL_RESPONSE` carries them too. A tool-result continuation (`handleToolResult()`, `handleToolResults()`, `resumeExternalToolRequest()`) streams the sources of the GMI's output the same way, before its text. `GMI` retrieves nothing in a continuation: its output carries the sources of the user turn it continues, so a continuation's reply is judged with them, as its calls are. The runtime keeps them with the turn's stream and gives them to the GMI the continuation runs on when that GMI's own history holds a turn of another conversation of the session, or the GMI replaced the one the turn paused on. A continuation resumed after a restart carries none: the pause stores the calls, never the documents the turn retrieved.
 - It is `undefined` when the turn retrieved no sources.
 - Each [`RagRetrievedChunk`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/IRetrievalAugmentor.ts) contains `content`, `relevanceScore`, `metadata`, and source identifiers (`originalDocumentId`, `dataSourceId`, `source`).
 

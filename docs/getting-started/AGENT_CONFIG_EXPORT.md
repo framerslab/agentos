@@ -681,9 +681,9 @@ deletes it when the importing process supplies a URL of its own for that
 provider:
 
 - a `setDefaultProvider()` default that names the provider and carries a
-  non-empty `baseUrl`, or
-- the provider's URL variable, set to a non-empty value. Eight providers
-  have one:
+  `baseUrl` that is set (not empty or whitespace alone), or
+- the provider's URL variable, set to a value that is not empty or
+  whitespace alone. Eight providers have one:
 
 | Provider | URL variable |
 | --- | --- |
@@ -697,9 +697,12 @@ provider:
 | `stable-diffusion-local` | `STABLE_DIFFUSION_LOCAL_BASE_URL` |
 
 The deleted URL then resolves as an unset one does: the applicable default's
-`baseUrl` first, then the variable. With neither, import throws and lists
-the path, because dropping the URL would send the call, with the importer's
-key, to the provider's public endpoint in place of the configured one.
+`baseUrl` first, then the variable, each read the way the agent's calls read
+it, so an empty or whitespace-only value at either step is passed over (a
+default with `baseUrl: ''` leaves the variable to apply). With neither,
+import throws and lists the path, because dropping the URL would send the
+call, with the importer's key, to the provider's public endpoint in place of
+the configured one.
 
 A redacted `baseUrl` needs a `secrets` entry, or import throws, in these
 cases:

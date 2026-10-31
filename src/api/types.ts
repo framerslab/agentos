@@ -295,15 +295,18 @@ export interface HitlConfig {
    * the agent's name and input, or the final text. These are fixed pattern
    * checks inside `agency()`, not guardrail packs. The agent's input is
    * checked as the strategy passes it, other agents' output included under
-   * the graph, review-loop and debate strategies, and as the agent receives
-   * it, with the approval's `modifications.instructions` that every strategy
-   * appends, so instructions a check blocks override the approval. The
-   * final text is checked as the strategy produced it and, when the
-   * approval's `modifications.output` replaces it, as the replacement, after
-   * the agency's output guardrails have read it. If a check matches, the
-   * approval is overridden: the tool call is skipped, the agent does not
-   * run, or the final output is rejected. A `beforeEmergent` approval is not
-   * checked.
+   * the sequential, graph, review-loop and debate strategies and at the
+   * panel's chair, and as the agent receives it, with the approval's
+   * `modifications.instructions` that every strategy appends, so
+   * instructions a check blocks override the approval. Where the strategy
+   * writes more text after the task or after another agent's output, the
+   * task and each output are checked on their own too. The final text is
+   * checked as the strategy produced it and, when the approval's
+   * `modifications.output` replaces it, as the replacement, after the
+   * agency's output guardrails have read it; a replacement does not clear a
+   * strategy text a check blocks. If a check matches, the approval is
+   * overridden: the tool call is skipped, the agent does not run, or the
+   * final output is rejected. A `beforeEmergent` approval is not checked.
    *
    * Set to `false` to disable this safety net and give full autonomy to the
    * HITL handler's decision.
@@ -694,7 +697,13 @@ export interface ResourceControls {
    * When `agent({ output: someZodSchema })` is set and the LLM returns text
    * that does not parse or validate against the schema, the agency will
    * retry the generation up to this many times, each time appending an
-   * error feedback hint to the prompt so the model can self-correct.
+   * error feedback hint to the prompt so the model can self-correct. The
+   * retry runs under `generate()` and a session's `send()`; `stream()` and a
+   * session's `stream()` finalize the one run they streamed. A final
+   * text that a `beforeReturn` approval replaced with a different one is not
+   * retried: the replacement is returned, with `parsed` undefined when it
+   * does not match. A replacement equal to the strategy's text counts as an
+   * approval without modifications, and is retried as that is.
    *
    * Defaults to `1` (one extra attempt = two total calls). Set to `0` to
    * disable retries entirely.
@@ -788,6 +797,20 @@ export interface ApprovalDecision {
      * Replaces the final text, on a `beforeReturn` approval. The replacement
      * goes through the agency's output guardrails and the post-approval check
      * first, and one the check blocks is refused as a blocked final text is.
+     * It does not clear a strategy text the check blocks: the check reads
+     * that text beside the replacement, since `stream()` has streamed it
+     * before the approval is asked for and the call records of sequential,
+     * graph and review-loop still hold it, so a replacement that sanitizes it
+     * is refused too.
+     * With the agency's `output` schema, `parsed` is read from the
+     * replacement; one that does not match the schema is returned with
+     * `parsed` undefined, and `generate()` does not run the strategy again.
+     * A replacement equal to the strategy's text (the text handed back
+     * unedited) counts as an approval without modifications: under
+     * `generate()` a text that does not match is retried, and the approval is
+     * asked for the new one; `stream()` runs no validation retry.
+     * Without the schema, a replacement that changes the text leaves
+     * `parsed` undefined.
      */
     output?: string;
     /**
@@ -809,7 +832,11 @@ export interface ApprovalDecision {
 export interface AgentCallRecord {
   /** Name of the agent that was invoked. */
   agent: string;
-  /** Input prompt or message sent to the agent. */
+  /**
+   * The text the agent was sent: the input the strategy built for it, with a
+   * `beforeAgent` approval's `modifications.instructions` appended when the
+   * approval carried them.
+   */
   input: string;
   /** Final text output produced by the agent. */
   output: string;
@@ -1188,8 +1215,10 @@ export interface AgencyStreamResult<R extends AgencyResult = AgencyResult> {
   /** Final per-agent execution ledger for the streamed run. */
   agentCalls: Promise<AgentCallRecord[]>;
   /**
-   * Final structured payload; resolves to `undefined` when structured output
-   * was not configured for the run.
+   * Final structured payload, parsed from the finalized text (a
+   * `beforeReturn` approval's replacement when it carries one); resolves to
+   * `undefined` when structured output was not configured for the run or
+   * that text does not match the schema. A stream runs no validation retry.
    */
   parsed: Promise<unknown>;
   /**
@@ -1392,7 +1421,11 @@ export interface BaseAgentConfig {
   name?: string;
   /** Override the provider API key instead of reading from environment variables. */
   apiKey?: string;
-  /** Override the provider base URL (useful for local proxies or Ollama). */
+  /**
+   * Override the provider base URL (useful for local proxies or Ollama). An empty or whitespace-only value is
+   * unset: a same-provider `setDefaultProvider()` URL, then the provider's URL variable, apply as with none. A seat
+   * of an agency with a blank value takes the agency-level `baseUrl` as a seat with none does.
+   */
   baseUrl?: string;
   /**
    * HEXACO-inspired personality trait overrides (0–1 scale).
@@ -1549,7 +1582,12 @@ export interface BaseAgentConfig {
   provenance?: AgencyProvenanceConfig;
   /** Observability and telemetry configuration. */
   observability?: ObservabilityConfig;
-  /** Event callbacks fired at various lifecycle points during the run. */
+  /**
+   * Event callbacks fired at various lifecycle points during the run. `agency()` fires them for its run. A gmi() agent
+   * fires them only for the teams it launches with `launch_agency` (`agencies.launch`), each named
+   * `launch:<agencyId>`, and for those launches' failures; its own turns fire none, and neither does `agent()` without
+   * `runtime: 'gmi'`.
+   */
   on?: AgencyCallbacks;
   /**
    * Resource limits (tokens, cost, time). `agency()` and the full runtime
@@ -1564,7 +1602,8 @@ export interface BaseAgentConfig {
   /**
    * Names of other agents in the agency that must complete before this agent runs.
    * Used with `strategy: 'graph'` to build an explicit dependency DAG.
-   * Agents with no `dependsOn` are roots and run first.
+   * Agents with no `dependsOn`, or an empty one, are roots and run first. `agency()` throws
+   * `AgencyConfigError`, naming the agent, for a value that is not an array of names.
    * @example `dependsOn: ['researcher']` — this agent waits for `researcher` to finish.
    */
   dependsOn?: string[];
@@ -1730,7 +1769,9 @@ export interface AgencySeatConfig extends BaseAgentConfig {
   /**
    * Which engine serves the seat. `'legacy'` (the default) calls the model through
    * generateText and streamText; `'gmi'` serves each of the seat's calls with a
-   * Generalized Mind Instance (docs/GMI.md, "GMIs from agent()").
+   * Generalized Mind Instance (docs/GMI.md, "GMIs from agent()"). `agency()` throws
+   * `AgencyConfigError`, naming the seat, for any other value; `null` is unset, so the
+   * agency's `runtime` applies.
    */
   runtime?: 'legacy' | 'gmi';
   /**
@@ -1759,7 +1800,8 @@ export interface SeatMetadata {
   description?: string;
   /**
    * Seats this one waits for under the graph strategy. An agency that names no strategy and is not adaptive
-   * runs `graph` when any seat's `dependsOn` lists a seat.
+   * runs `graph` when any seat's `dependsOn` lists a seat; an empty list lists none. `agency()` throws
+   * `AgencyConfigError`, naming the seat, for a `dependsOn` that is set and is not an array of seat names.
    */
   dependsOn?: string[];
 }
@@ -1847,10 +1889,12 @@ export interface AgencyOptions extends BaseAgentConfig {
    */
   maxRounds?: number;
   /**
-   * The engine of every config seat that names none: `'legacy'` (the default) calls the model through
-   * generateText and streamText, `'gmi'` serves each of the seat's calls with a Generalized Mind Instance
-   * (docs/GMI.md, "GMIs from agent()"). A seat's own `runtime` wins. Pre-built seats keep the engine they were
-   * built with, and the hierarchical manager and the parallel and debate synthesizers stay on the legacy engine.
+   * The engine of every config seat that names none (a roster config, the panel's chair, a specialist the hierarchical
+   * manager spawns): `'legacy'` (the default) calls the model through generateText and streamText, `'gmi'` serves each
+   * of the seat's calls with a Generalized Mind Instance (docs/GMI.md, "GMIs from agent()"). A seat's own `runtime`
+   * wins. Pre-built seats keep the engine they were built with, and the hierarchical manager and the parallel and
+   * debate synthesizers stay on the legacy engine.
+   * Any other value throws `AgencyConfigError`, here and on a seat; `null` is unset at both levels.
    * The agency itself takes no `cognition`: a strategy runs a config seat through its `generate()` or `stream()`,
    * which run the `'light'` profile; seat a persistent GMI with `sessionSeat()` to run its own profile.
    */
@@ -1970,7 +2014,7 @@ export interface ModelPoolEntry {
   model: string;
   /** Key for this entry. Falls back to a same-provider `setDefaultProvider()` key, then the provider's environment variable; never to the agency-level `apiKey`. */
   apiKey?: string;
-  /** Base URL for this entry. Falls back as `apiKey` does, to a same-provider `setDefaultProvider()` URL, then the provider's URL variable. */
+  /** Base URL for this entry. Falls back as `apiKey` does, to a same-provider `setDefaultProvider()` URL, then the provider's URL variable; an empty or whitespace-only value at any step counts as missing. */
   baseUrl?: string;
   /** Defaults for a seat that sits here and sets none of its own. */
   effort?: BaseAgentConfig['effort'];
@@ -2090,6 +2134,14 @@ export interface AgencyResult {
   text: string;
   usage: { promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number; cacheReadTokens?: number; cacheCreationTokens?: number };
   agentCalls: AgentCallRecord[];
+  /**
+   * With `output`, the value `text` parses to: after a `beforeReturn`
+   * approval that replaced the final text, the replacement's; `undefined`
+   * when that text does not match the schema. Without `output`, the value
+   * the strategy's result carried (an agent's own `parsed`, such as the last
+   * seat's under sequential), and `undefined` after a `beforeReturn`
+   * replacement that changed the text.
+   */
   parsed?: unknown;
   provenanceTrail?: import('./agency-provenance.js').AgencyProvenanceTrail;
   provider?: string;

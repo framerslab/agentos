@@ -74,8 +74,11 @@ export interface Checkpoint {
   };
 
   /**
-   * Results from every node that completed execution before this checkpoint was taken.
-   * Keyed by node id.
+   * Results recorded when this checkpoint was taken, keyed by node id: those of the
+   * nodes in `visitedNodes` and, in the checkpoint of a run that a node interrupted,
+   * that node's, as in the checkpoint saved before an expansion that came after a
+   * `write`, `external` or `human` node. A node that failed records none, so a
+   * resume runs it again.
    */
   nodeResults: Record<string, {
     /** The node's declared effect class. */
@@ -84,6 +87,16 @@ export interface Checkpoint {
     output: unknown;
     /** Wall-clock execution time in milliseconds. */
     durationMs: number;
+    /**
+     * The target the node picked itself, as a router, a guardrail that reroutes or
+     * the exit of a voice node does. A resume that marks the node complete with this
+     * result, as it does a `write`, `external` or `human` node such as a voice node,
+     * goes there rather than evaluating the node's edges. `routerNode()` and
+     * `guardrailNode()` build `pure` nodes, which a resume never marks complete from
+     * a recorded result: one the checkpoint does not list as completed runs again and
+     * picks its target anew.
+     */
+    routeTarget?: string;
   }>;
 
   /** Ordered list of node ids that had completed execution when this checkpoint was taken. */
@@ -121,7 +134,14 @@ export interface ICheckpointStore {
    *
    * If a checkpoint with the same `id` already exists it is overwritten.
    *
+   * The runtime awaits each save and does not retry one that rejects: the run that
+   * asked for the checkpoint ends with the store's error, which `GraphRuntime.stream()`
+   * throws, and a resume by the run id continues from the last checkpoint the store
+   * saved. When a save inside a parallel batch rejects, the run ends with the error
+   * once the batch's other nodes have finished.
+   *
    * @param checkpoint - The snapshot to persist.
+   * @throws The store's error when it cannot persist the checkpoint.
    */
   save(checkpoint: Checkpoint): Promise<void>;
 

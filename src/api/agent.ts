@@ -172,6 +172,9 @@ export interface AgentOptions extends BaseAgentConfig {
    * outside AgentOS to it. Settings make one {@link SpendBudget} for the agent; pass an instance to share it wider.
    * With `runtime: 'gmi'` every completion call a GMI makes is checked against it before it is sent, metaprompts and
    * self-reflection included; its cognitive memory's embeddings and the learning layer's own calls are not counted.
+   * A seat's turn (`sessionSeat()`, or a member a launched team seats) is checked against it and charged to it beside the
+   * budget its team's call carries, and so is a team the seat's turn launches; its refusal of a seat's call runs the
+   * carried budget's `onLimitReached` function, as a refusal by that budget's parent does.
    */
   budget?: SpendBudget | SpendBudgetOptions;
   /**
@@ -232,7 +235,11 @@ export interface AgentOptions extends BaseAgentConfig {
    * ```
    */
   responseSchema?: import('zod').ZodType;
-  /** Pre-generation hook, called before each LLM step. */
+  /**
+   * Pre-generation hook, called before each LLM step. On the GMI path with `learning` on, its `system` is the
+   * persona's base prompt, which holds no personality section; the system text in `messages` holds the section after
+   * the base prompt.
+   */
   onBeforeGeneration?: (context: GenerationHookContext) => Promise<GenerationHookContext | void>;
   /** Post-generation hook, called after each LLM step. */
   onAfterGeneration?: (result: GenerationHookResult) => Promise<GenerationHookResult | void>;
@@ -343,8 +350,10 @@ export interface AgentOptions extends BaseAgentConfig {
    * Temporary teams this agent launches from a turn, with `runtime: 'gmi'`: `launch: true` registers the
    * `launch_agency` tool, which runs an `agency()` team on one goal and returns its answer as the call's result, and
    * the other fields bound every launch (depth, seats, launches in flight, budget share and pool, deadline, `members`
-   * a launch may seat by key, `hitl`). Every bound is checked at construction. Off unless `launch` is true; the legacy
-   * runtime throws when it is.
+   * a launch may seat by key, `hitl`). Every bound is checked, and the `members` record read, at construction: a member
+   * put in the record afterwards is never seated. Off unless `launch` is true; the legacy
+   * runtime throws when it is, and its construction warning names `agencies` when another field is set, since it
+   * applies none of them.
    */
   agencies?: AgencyLaunchOptions;
   /** Explicit runtime binding. No provider is discovered from the process environment for this path. */
@@ -414,9 +423,10 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    */
   abortSignal?: AbortSignal;
   /**
-   * A spend budget for this send in place of the agent's: every provider call of the send is checked against it
-   * before it is made and recorded after it (settings make a new {@link SpendBudget} for the send). With
-   * `runtime: 'gmi'`, every completion call of the turn, metaprompts included.
+   * A spend budget for this send in place of the agent's; on a seat session (`sessionSeat()`, or a member a launched
+   * team seats) held beside it, each call checked against both and charged to both. Every provider call of the send
+   * is checked against it before it is made and recorded after it (settings make a new {@link SpendBudget} for the
+   * send). With `runtime: 'gmi'`, every completion call of the turn, metaprompts included.
    */
   budget?: SpendBudget | SpendBudgetOptions;
 }
@@ -1024,6 +1034,8 @@ export function agent(opts: AgentOptions): Agent {
         const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
         const genOpts: Partial<GenerateTextOptions> = {
           ...callOptions(extra),
+          // Settings become one budget here, so the call's validation retries are charged to the same one.
+          ...(extra?.budget !== undefined ? { budget: asSpendBudget(extra.budget) } : {}),
           usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
             source: extra?.usageLedger?.source ?? 'agent.generate',
           }),

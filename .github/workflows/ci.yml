@@ -69,6 +69,12 @@ jobs:
       - name: The bump's lockfile integrity check
         run: node --test .github/scripts/check-lockfile-integrity.test.mjs
 
+      # release.yml runs semantic-release a second time when npm publish failed on a transparency-log 409 after the tag
+      # was pushed; this script decides whether that tag goes. Its tests run it on run 41126134054's output in a git
+      # repository of their own, with stand-ins for gh and npm.
+      - name: The release's tag cleanup after a transparency-log conflict
+        run: node --test .github/scripts/drop-unpublished-release-tag.test.mjs
+
       - name: Install PNPM
         uses: pnpm/action-setup@v6
         with:
@@ -98,6 +104,13 @@ jobs:
 
       - name: Package exports point at built files
         run: pnpm run verify:exports
+
+      # The tags module as an application installs it: the packed candidate in an empty project, imported through
+      # its subpath, @framers/agentos/cognition/library/tags, compiled against the installed declarations under
+      # NodeNext and run with network access refused (scripts/fixtures/tags-consumer.ts).
+      - name: The tags module runs from the packed package
+        timeout-minutes: 10
+        run: node --test scripts/tags-package.test.mjs
 
       # The executor from the built package, as a host loads it: its prelude and
       # bindings are compiled source, and its engine resolves from node_modules.
@@ -197,17 +210,25 @@ jobs:
       - name: Built content-safe logging export
         run: |
           node --input-type=module <<'JS'
-          import { enableContentSafeTelemetry, createLogger, PinoLogger } from '@framers/agentos/logging';
+          import { enableContentSafeTelemetry, createLogger, PinoLogger, CONTENT_SAFE_COMPONENTS } from '@framers/agentos/logging';
           const events = [];
           const before = new PinoLogger().child({ opaque: 'fixture-private-binding' });
-          enableContentSafeTelemetry((event) => events.push(event));
+          const early = createLogger('fixture-private-component');
+          enableContentSafeTelemetry((event) => events.push(event), { minLevel: 'info' });
+          before.debug('fixture-private-content');
+          early.debug('fixture-private-content');
           before.error('fixture-private-content', { err: new Error('fixture-private-error') });
-          createLogger('fixture-private-component').warn('fixture-private-content');
-          if (events.length !== 2) throw new Error('missing_safe_events');
-          if (JSON.stringify(events).includes('fixture-private')) throw new Error('unsafe_event');
-          if (events.some((event) => Object.keys(event).sort().join(',') !== 'kind,n,state')) {
-            throw new Error('unexpected_safe_event_keys');
-          }
+          early.warn('fixture-private-content');
+          if (events.length === 2) {
+            if (events[0].component === 'pino_logger' && events[1].component === 'logger_factory') {
+              if (JSON.stringify(events).includes('fixture-private')) throw new Error('unsafe_event');
+              for (const event of events) {
+                if ((Object.keys(event).sort().join(',') === 'component,kind,n,state') === false) throw new Error('unexpected_safe_event_keys');
+                if (Object.isFrozen(event) === false) throw new Error('mutable_safe_event');
+              }
+            } else throw new Error('unexpected_component');
+          } else throw new Error('unexpected_safe_event_count');
+          if (Object.isFrozen(CONTENT_SAFE_COMPONENTS) === false || CONTENT_SAFE_COMPONENTS.includes('listen_session') === false) throw new Error('missing_component_contract');
           JS
 
       # The examples the text processing and search pages link to. They need no key and no
@@ -309,15 +330,42 @@ jobs:
           fi
           echo "AGENTOS_TEST_MOONSHINE_DIR=$PWD/$dir" >> "$GITHUB_ENV"
 
+      # The whole suite with coverage on. A run under the thresholds in vitest.config.ts
+      # fails here. The totals print at the end of the step; coverage/ holds
+      # coverage-summary.json (the totals and each file's figures) and lcov.info.
       - name: Test with coverage
-        run: pnpm run test -- --coverage
+        run: pnpm run test:coverage
 
+      # Each file's figures, for a run that Codecov does not keep. A re-run of the job
+      # replaces the artifact an earlier attempt kept.
+      - name: Keep the coverage summary
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage/coverage-summary.json
+            coverage/lcov.info
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: true
+
+      # Codecov keeps master's figure, which the coverage badge in the README reads,
+      # and compares a pull request opened from a branch of this repository with its
+      # base. A pull request from a fork gets no token and uploads nothing, and a
+      # dispatched run reads no secret (see the note on workflow_dispatch above). It runs
+      # after a test step that failed too, so a push whose coverage fell under the
+      # thresholds still sends its lower figure and the badge shows it. On a push to
+      # master a failed upload fails the job, so the badge never goes stale unnoticed; on
+      # any other push and on a pull request it is reported in the step's log.
       - name: Upload coverage to Codecov
-        # Not on a dispatched run: see the note on workflow_dispatch above.
-        if: always() && github.event_name != 'workflow_dispatch'
+        if: ${{ !cancelled() && hashFiles('coverage/lcov.info') != '' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          disable_search: true
+          fail_ci_if_error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
   browser:
     name: Browser tests

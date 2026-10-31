@@ -1,32 +1,42 @@
 /**
- * @fileoverview The console binding of AgentOS's provider, generation and embedding modules, which honours
- * content-safe telemetry. A module imports it as `console` in place of the global one; the global console object is
- * never replaced.
- * @module agentos/logging/contentSafeConsole
+ * Module-local console bindings; the global console object is never replaced.
+ *
+ * @module
  */
-import { emitContentSafeLog, type ContentSafeLogLevel } from './contentSafeTelemetry.js';
+import { emitContentSafeLog, type ContentSafeLogComponent, type ContentSafeLogLevel } from './contentSafeTelemetry.js';
 
+/** Console operations used by the covered library modules. */
 type ConsoleMethod = 'debug' | 'info' | 'warn' | 'error' | 'log';
-function write(method: ConsoleMethod, args: unknown[]): void {
+/** All methods accept opaque arguments and read none while interception is enabled. */
+export type ContentSafeConsole = Readonly<Record<ConsoleMethod, (...args: unknown[]) => void>>;
+
+/** Intercept first, otherwise delegate unchanged arguments to the current global method. */
+function write(component: ContentSafeLogComponent, method: ConsoleMethod, args: unknown[]): void {
   const level: ContentSafeLogLevel = method === 'log' ? 'info' : method;
-  if (emitContentSafeLog(level)) return;
+  if (emitContentSafeLog(level, component)) return;
   globalThis.console[method](...args);
 }
 
 /**
- * The five console methods AgentOS's provider, generation and embedding modules use, imported there with
- * `import { contentSafeConsole as console }`.
- *
- * While content-safe telemetry is off, each method calls the global console's method of the same name, looked up at
- * call time, with the same arguments. While it is on, a call becomes one fixed event (`log` counts as `info`) and none
- * of its arguments is enumerated, serialized or forwarded. The calling expression still evaluates its arguments.
- *
+ * Bind a library-authored origin at module initialization. Arguments at call sites still evaluate normally, so
+ * voice error projections explicitly check the mode before accessing a message or error description.
+ * @param component - Fixed module word, never the caller's name or a provider id.
  * @internal
  */
-export const contentSafeConsole = Object.freeze({
-  debug: (...args: unknown[]): void => write('debug', args),
-  info: (...args: unknown[]): void => write('info', args),
-  warn: (...args: unknown[]): void => write('warn', args),
-  error: (...args: unknown[]): void => write('error', args),
-  log: (...args: unknown[]): void => write('log', args),
-});
+export function createContentSafeConsole(component: ContentSafeLogComponent): ContentSafeConsole {
+  return Object.freeze({
+    /** Debug records retain their source level. */
+    debug: (...args: unknown[]): void => write(component, 'debug', args),
+    /** Info records retain their source level. */
+    info: (...args: unknown[]): void => write(component, 'info', args),
+    /** Warning records retain their source level. */
+    warn: (...args: unknown[]): void => write(component, 'warn', args),
+    /** Error records retain their source level. */
+    error: (...args: unknown[]): void => write(component, 'error', args),
+    /** Console log is an info source record. */
+    log: (...args: unknown[]): void => write(component, 'log', args),
+  });
+}
+
+/** Compatibility binding for existing internal callers; its origin is the console adapter. @internal */
+export const contentSafeConsole = createContentSafeConsole('library_console');

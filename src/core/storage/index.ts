@@ -6,7 +6,7 @@
  * 
  * @version 1.0.0
  * @author AgentOS Team
- * @license MIT
+ * @license Apache-2.0
  */
 
 export * from './IStorageAdapter.js';
