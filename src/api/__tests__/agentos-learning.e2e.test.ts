@@ -35,6 +35,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', () => {
 import { AgentOS } from '../AgentOS';
 import { createAgentOSConfig } from '../../core/config/AgentOSConfig';
 import { createLearningLayer } from '../../cognition/learning/LearningLayer';
+import { GMIManager } from '../../cognition/substrate/GMIManager';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { renderPersonalitySection } from '../../cognition/substrate/personas/personalityPrompt';
 
@@ -77,7 +78,7 @@ afterEach(async () => {
 });
 
 describe('the full runtime with the learning flag off', () => {
-  it('sends no personality section, as before, and has no learning layer', async () => {
+  it('sends no personality section with learning unset, the same system text with learning false, and has no learning layer', async () => {
     booted = await boot();
     const unset = await send(booted, { userId: 'u', sessionId: 's-1', selectedPersonaId: 'tutor' });
     expect(unset).toContain('You teach networking.');
@@ -131,9 +132,12 @@ describe('the full runtime with the learning flag on', () => {
   });
 
   it('refuses learning.namespace, learning beside a passed layer, and an unknown mode, before any service starts', async () => {
+    const initialize = vi.spyOn(GMIManager.prototype, 'initialize');
     await expect(boot({ learning: { namespace: 'acme' } })).rejects.toThrow(/learning\.namespace/);
     await expect(boot({ learning: true, gmiManagerConfig: { personaLoaderConfig: {}, learningLayer: createLearningLayer() } })).rejects.toThrow(/gmiManagerConfig\.learningLayer/);
     await expect(boot({ learning: { mode: 'sideways' } })).rejects.toThrow(/learning\.mode: unknown mode 'sideways'/);
+    // No GMI manager was started, nor anything the runtime starts before it.
+    expect(initialize).not.toHaveBeenCalled();
   });
 
   it("has no learner on a turn of tenant B's user 42 on the session tenant A's user 42 opened, nor on the turns after it", async () => {
