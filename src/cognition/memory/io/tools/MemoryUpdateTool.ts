@@ -130,6 +130,25 @@ export class MemoryUpdateTool implements ITool<MemoryUpdateInput, MemoryUpdateOu
   // ---------------------------------------------------------------------------
 
   /**
+   * The refusal an update meets whatever a human would answer, read before the tool orchestrator's approval gate
+   * (`ITool.refusalBeforeApproval`), so no one is asked to approve a write that cannot act: a freeze, and, with the
+   * turn's scope ids on the call, a session that records no writes. A refusal that reads the trace (`other_user`,
+   * `conflict`) is given when the call runs. `execute` refuses the same call itself, in the same order.
+   *
+   * @param args - The call's arguments, before the input schema is checked.
+   * @param context - The call's context.
+   * @returns The refusal, or `undefined` when the call may run.
+   */
+  refusalBeforeApproval(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<MemoryUpdateOutput> | undefined {
+    const refusal = memoryWriteRefusal(context.sessionData);
+    if (refusal) return refusedMemoryWrite(this.name, refusal);
+    // A call with nothing to update changes nothing and answers `updated: false`.
+    if (args?.content === undefined && args?.tags === undefined) return undefined;
+    const turn = memoryToolTurnOf(context);
+    return turn && !turn.record ? refusedMemoryWrite(this.name, 'no_recorder') : undefined;
+  }
+
+  /**
    * Update a memory trace identified by `traceId`.
    *
    * The method builds a dynamic SET clause based on which optional fields

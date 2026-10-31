@@ -125,6 +125,23 @@ export class MemoryDeleteTool implements ITool<MemoryDeleteInput, MemoryDeleteOu
   // ---------------------------------------------------------------------------
 
   /**
+   * The refusal a delete meets whatever a human would answer, read before the tool orchestrator's approval gate
+   * (`ITool.refusalBeforeApproval`), so no one is asked to approve a write that cannot act: a freeze, and, with the
+   * turn's scope ids on the call, a session that records no writes. A refusal that reads the trace (`other_user`,
+   * `conflict`) is given when the call runs. `execute` refuses the same call itself, in the same order.
+   *
+   * @param _args - The call's arguments, before the input schema is checked.
+   * @param context - The call's context.
+   * @returns The refusal, or `undefined` when the call may run.
+   */
+  refusalBeforeApproval(_args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<MemoryDeleteOutput> | undefined {
+    const refusal = memoryWriteRefusal(context.sessionData);
+    if (refusal) return refusedMemoryWrite(this.name, refusal);
+    const turn = memoryToolTurnOf(context);
+    return turn && !turn.record ? refusedMemoryWrite(this.name, 'no_recorder') : undefined;
+  }
+
+  /**
    * Set `deleted = 1` on the memory trace matching `traceId`.
    *
    * The WHERE clause filters to `deleted = 0` so that attempting to

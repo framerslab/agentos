@@ -170,6 +170,25 @@ export class MemoryMergeTool implements ITool<MemoryMergeInput, MemoryMergeOutpu
   // ---------------------------------------------------------------------------
 
   /**
+   * The refusal a merge meets whatever a human would answer, read before the tool orchestrator's approval gate
+   * (`ITool.refusalBeforeApproval`), so no one is asked to approve a write that cannot act: a freeze, and, with the
+   * turn's scope ids on the call, a session that records no writes. A refusal that reads the traces (`other_user`,
+   * `conflict`) is given when the call runs, and fewer than two ids are left to `execute`, which refuses the same call
+   * itself, in the same order.
+   *
+   * @param args - The call's arguments, before the input schema is checked.
+   * @param context - The call's context.
+   * @returns The refusal, or `undefined` when the call may run.
+   */
+  refusalBeforeApproval(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<MemoryMergeOutput> | undefined {
+    const refusal = memoryWriteRefusal(context.sessionData);
+    if (refusal) return refusedMemoryWrite(this.name, refusal);
+    if (!Array.isArray(args?.traceIds) || args.traceIds.length < 2) return undefined;
+    const turn = memoryToolTurnOf(context);
+    return turn && !turn.record ? refusedMemoryWrite(this.name, 'no_recorder') : undefined;
+  }
+
+  /**
    * Merge the specified traces into one survivor.
    *
    * Steps:
