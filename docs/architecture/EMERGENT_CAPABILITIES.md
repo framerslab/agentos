@@ -521,6 +521,8 @@ session ──(5 or more uses, confidence 0.8 or higher, panel approved)──�
 | **Agent** | Persisted for the creating agent | Survives restarts | 5 or more uses, confidence 0.8 or higher, two-reviewer panel |
 | **Shared** | All agents in the runtime | Permanent until demoted | An explicit `promote()` call; `approvedBy` is optional and recorded when passed (null otherwise); the runtime ships no human-in-the-loop gate for it |
 
+A promotion is a self-change: a use on a turn the learning layer refuses one (`AGENTOS_LEARNING_FREEZE=1`, mode `off` or `frozen`, a turn with no learner) is recorded and checks no promotion, and the next use on a turn that allows one does.
+
 ### Stored tools: state, loading and suspension
 
 Agent and shared tier tools live in `agentos_emergent_tools`. Their state lives beside them in `agentos_emergent_tool_state`: one row per tool with `state` (`active`, `suspended` or `demoted`), `state_reason`, `set_by` (who recorded the state: `library` or `host`), `state_at` and `request_json`, the capabilities the tool was forged with (catalogue names: `fetch`, `fs.read`, `crypto`; `fs.readFile` is accepted as an alias of `fs.read`). The state row is its own table because the tool row is rewritten whole on every persist, which would reset any column added to it. Every path that writes `state` writes `is_active` on the tool row to match, so a host that reads `is_active` with its own SQL sees the same values as before.
@@ -865,7 +867,7 @@ Without `capabilities`, a forge request names the APIs it needs in `implementati
 - Writes, deletes and state-changing requests are granted only under a ceiling, only on an executor that declares `isolates: true`, within roots and bounds the host writes out, and never while a forge's tests run (see [Effects](#effects-writes-deletes-and-state-changing-requests))
 - Raw sandbox source is redacted at rest by default
 - If no LLM is configured, all forge requests are rejected (fail-closed)
-- Under `AGENTOS_LEARNING_FREEZE=1`, `forge_tool` and the four self-improvement tools refuse every action that changes the agent (`frozen`), with a learning layer or without one
+- Under `AGENTOS_LEARNING_FREEZE=1`, `forge_tool` and the four self-improvement tools refuse every action that changes the agent (`frozen`), with a learning layer or without one, and a forged tool used then runs and is not promoted
 
 ## Self-Improvement Tools
 
@@ -894,7 +896,9 @@ Configuration:
 
 ### Refusals where a learning layer exists
 
-On a host whose `learning` option is on ([Learning](../GMI.md#learning)), each tool call carries the turn's learner and mode in `sessionData.learning`, and `forge_tool`, `create_workflow` (`create`), `manage_skills` (`enable`, `disable`), `self_evaluate` (`adjust`) and `adapt_personality` refuse before they act: `frozen` in mode `frozen`, `off` in mode `off`, `no_learner` on a turn with no learner. A refusal is a failed tool result with `details: { status: 'rejected', reason }`, and nothing changes. `self_evaluate`'s `evaluate` on such a turn answers, stores no trace, applies no adjustment and sets `selfChangeRefused`. On every host, with a layer or without one, `adapt_personality` refuses `honesty` and `emotionality` (`operator_only`); with a layer it also refuses a delta above 0.02 (`step_bound`) and a fourth accepted call in a session (`call_limit`). `AGENTOS_LEARNING_FREEZE=1` makes all five refuse with `frozen`, with a layer or without one.
+On a host with a learning layer (the `learning` option, or a layer passed in `gmiManagerConfig.learningLayer`; [Learning](../GMI.md#learning)), each tool call carries the turn's learner and mode in `sessionData.learning`, and `forge_tool`, `create_workflow` (`create`), `manage_skills` (`enable`, `disable`), `self_evaluate` (`adjust`) and `adapt_personality` refuse before they act: `frozen` in mode `frozen`, `off` in mode `off`, `no_learner` on a turn with no learner. A refusal is a failed tool result with `details: { status: 'rejected', reason }`, and nothing changes. `self_evaluate`'s `evaluate` on such a turn answers, stores no trace, applies no adjustment and sets `selfChangeRefused`. On every host, with a layer or without one, `adapt_personality` refuses `honesty` and `emotionality` (`operator_only`); with a layer it also refuses a delta above 0.02 (`step_bound`) and a fourth accepted call in a session (`call_limit`). `AGENTOS_LEARNING_FREEZE=1` makes all five refuse with `frozen`, with a layer or without one.
+
+With the tool orchestrator's approval gate on (`toolOrchestratorConfig.hitl.enabled`), each of these refusals, and `adapt_personality`'s `operator_only`, is answered before the gate: no one is asked to approve a call that cannot act, and with no `hitlManager` the call names its refusal rather than the missing manager. The tools name such a refusal through `ITool.refusalBeforeApproval`, which `wrapForgeTool` keeps; a call the layer lets act is asked about as any tool with side effects is. `adapt_personality` counts a session's accepted calls per learner: the turn's organization, persona and user beside the session id, so two tenants or two users that share a session id count apart. The counts and the per-trait budgets are kept in the tool's memory for the life of the process. The registered-tool helpers (`processRequestWithRegisteredTools`, `resumeExternalToolRequestWithRegisteredTools`) run a tool with the request's session, conversation and organization and no `sessionData.learning`, so a self-modification tool run through them reads as on a host with no layer; a GMI runs these tools in its own tool rounds and never pauses a turn for them, so a runtime turn hands none to the helpers.
 
 See [Self-Extension](../SELF_EXTENSION.md) for how each tool is gated.
 
