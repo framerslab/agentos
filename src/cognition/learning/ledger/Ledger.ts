@@ -243,9 +243,10 @@ export class Ledger {
    * is an operator's. A forgotten user's chain takes nothing (`forgotten`). With `verdict`, the candidate's verdict,
    * any `alsoDecide` verdicts and `change` run in the same transaction as the candidate.
    *
-   * @throws {Error} When the store fails or `change` throws, with nothing written; when a row with a learner names a
-   *   `turnUserId`; when an `alsoDecide` entry names a candidate twice, one outside this chain, or one whose current
-   *   verdict it cannot follow.
+   * @throws {Error} When the store fails or `change` throws, with nothing written, a store's refusal of a row whose
+   *   text holds a lone surrogate included (a namespace, an agent key, a user id, a subject or a session id with one,
+   *   which a SQL text column cannot hold); when a row with a learner names a `turnUserId`; when an `alsoDecide` entry
+   *   names a candidate twice, one outside this chain, or one whose current verdict it cannot follow.
    * @throws {RangeError} When the clock gives a time a ULID cannot hold, with nothing written.
    */
   async propose(input: CandidateInput, options: ProposeOptions = {}): Promise<ProposeResult> {

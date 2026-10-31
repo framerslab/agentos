@@ -113,7 +113,9 @@ export type LearnerDocTable = 'outcomes' | 'lessons' | 'skills';
 
 /**
  * What one transaction, or the store outside one, reads and writes. Every row the store is given is copied, and every
- * row it hands out is a copy: changing either changes nothing stored.
+ * row it hands out is a copy: changing either changes nothing stored. A write whose text holds a lone surrogate, which
+ * a SQL text column cannot hold, throws and writes nothing, and a read, change or deletion by a key that holds one
+ * finds no row (`storableText.ts`).
  */
 export interface LearningStoreTx {
   /** Appends a row; throws when a row has its id, or its chain has a row at its seq. */

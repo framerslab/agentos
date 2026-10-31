@@ -9,7 +9,8 @@
  * own. A transaction writes the rows in place and keeps an undo log, which it replays newest first when its function
  * throws, so no call copies the store's state and no call sees a write that a transaction takes back. A chain's,
  * a candidate's and a learner's ledger rows are found through maps keyed by each; a user's deletion is the one call
- * that reads every ledger row.
+ * that reads every ledger row. Like the SQL store, it writes no text that holds a lone surrogate, so a learner's state
+ * moves between the two stores unchanged.
  */
 import {
   TransactionalLearningStore,
@@ -22,6 +23,7 @@ import {
   type StoredLedgerRow,
   type StoredTraitRow,
 } from './LearningStore.js';
+import { assertStorableText } from './storableText.js';
 
 /** Every table's rows, and the maps that find ledger rows. Stored rows are never changed in place: a write replaces one. */
 interface Tables {
@@ -126,6 +128,7 @@ class MemoryTx implements LearningStoreTx {
 
   async insertLedgerRow(row: StoredLedgerRow): Promise<void> {
     const t = this.open();
+    assertStorableText('ledger row', row);
     if (t.ledger.has(row.id)) throw new Error(`The learning ledger has a row with id ${row.id}.`);
     if (t.chains.get(row.chainKey)?.has(row.seq)) throw new Error(`The learning ledger's chain has a row at seq ${row.seq}.`);
     const stored = { ...row };
@@ -165,6 +168,7 @@ class MemoryTx implements LearningStoreTx {
 
   async insertHead(head: ChainHead): Promise<boolean> {
     const t = this.open();
+    assertStorableText('chain head', head);
     if (t.heads.has(head.chainKey)) return false;
     this.log.set(t.heads, head.chainKey, { ...head });
     return true;
@@ -172,6 +176,7 @@ class MemoryTx implements LearningStoreTx {
 
   async advanceHead(chainKey: string, expectedSeq: number, next: { lastId: string; lastHash: string; seq: number }): Promise<boolean> {
     const t = this.open();
+    assertStorableText('chain head', { lastId: next.lastId, lastHash: next.lastHash });
     const head = t.heads.get(chainKey);
     if (!head || head.forgotten || head.seq !== expectedSeq) return false;
     this.log.set(t.heads, chainKey, { ...head, lastId: next.lastId, lastHash: next.lastHash, seq: next.seq });
@@ -192,6 +197,7 @@ class MemoryTx implements LearningStoreTx {
 
   async insertTraitRow(row: StoredTraitRow): Promise<boolean> {
     const t = this.open();
+    assertStorableText('trait row', row);
     const key = keyOf(row.namespace, row.agentKey, row.userId);
     if (t.traits.has(key)) return false;
     this.log.set(t.traits, key, { ...row });
@@ -200,6 +206,7 @@ class MemoryTx implements LearningStoreTx {
 
   async updateTraitRow(row: StoredTraitRow, expectedVersion: number): Promise<boolean> {
     const t = this.open();
+    assertStorableText('trait row', row);
     const key = keyOf(row.namespace, row.agentKey, row.userId);
     if (t.traits.get(key)?.version !== expectedVersion) return false;
     this.log.set(t.traits, key, { ...row });
@@ -214,6 +221,7 @@ class MemoryTx implements LearningStoreTx {
 
   async insertFreeze(row: FreezeRow): Promise<void> {
     const t = this.open();
+    assertStorableText('freeze', row);
     const key = keyOf(row.scopeKey, row.mode);
     if (!t.freezes.has(key)) this.log.set(t.freezes, key, { ...row });
   }
@@ -229,6 +237,7 @@ class MemoryTx implements LearningStoreTx {
 
   async putSessionRow(row: SessionRow): Promise<void> {
     const t = this.open();
+    assertStorableText('session row', row);
     const key = keyOf(row.namespace, row.agentKey, row.sessionId, row.userId, row.kind);
     const startedAt = t.sessions.get(key)?.startedAt ?? row.startedAt;
     this.log.set(t.sessions, key, { ...copySession(row), startedAt });
@@ -247,6 +256,7 @@ class MemoryTx implements LearningStoreTx {
 
   async insertForgotten(hash: string, forgottenAt: string): Promise<void> {
     const t = this.open();
+    assertStorableText('tombstone', { hash, forgottenAt });
     if (!t.forgotten.has(hash)) this.log.set(t.forgotten, hash, forgottenAt);
   }
 
