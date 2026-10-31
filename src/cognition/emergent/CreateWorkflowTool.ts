@@ -14,8 +14,8 @@
  * - Maximum step count is enforced via `config.maxSteps`.
  * - Only tools from `config.allowedTools` may be used in steps.
  * - With `deps.checkStep` (the emergent engine supplies it), a step its chaining
- *   rule refuses is refused at creation and again before each run; that rule
- *   never chains `launch_agency`, listed or not.
+ *   rule refuses is refused at creation, and each step is checked again just
+ *   before it runs; that rule never chains `launch_agency`, listed or not.
  * - Recursive workflow creation is blocked (`create_workflow` cannot appear in steps).
  * - Each step execution has a 30-second timeout enforced via `Promise.race`.
  * - A step that would start after the workflow's own call stopped (`ToolExecutionContext.signal`)

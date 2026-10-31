@@ -129,8 +129,8 @@ export interface SelfImprovementConfig {
      * engine's chaining rule applies to every step as well (see
      * `EmergentConfig.compose`): a tool with side effects the host has not
      * listed there, a tool that declares no `hasSideEffects`, and
-     * `launch_agency`, listed or not, are refused when the workflow is created
-     * and again before each run.
+     * `launch_agency`, listed or not, are refused when the workflow is created,
+     * and each step is checked again just before it runs.
      * @default ['*']
      */
     allowedTools: string[];
