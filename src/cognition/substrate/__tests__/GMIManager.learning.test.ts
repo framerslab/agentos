@@ -220,6 +220,26 @@ describe('a runtime with a learning layer', () => {
     expect(warn.mock.calls.some((call) => String(call[0]).includes('no learner session'))).toBe(true);
     await expect(gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow(/no learner session/);
   });
+
+  it('asks the layer again for a session an open has not given within shutdownTimeoutMs, and ends one it gives later', async () => {
+    // A stalled open would otherwise hold every later turn of the GMI to its preparation budget, with no new ask.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const real = createLearningLayer();
+    const lateEnd = vi.fn(async () => undefined);
+    let opens = 0;
+    const layer = recordingLayer(async (learnerKey, context) => {
+      opens += 1;
+      if (opens > 1) return real.forLearner(learnerKey, context);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      return { prepareTurn: vi.fn(), currentTraits: () => ({}), endSession: lateEnd } as unknown as ILearnerSession;
+    });
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 200 });
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    expect(stateOf(await gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' })))).toBe('bound');
+    expect(layer.forLearner).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(lateEnd).toHaveBeenCalledTimes(1));
+  }, 10_000);
 });
 
 describe('a runtime without a learning layer', () => {
