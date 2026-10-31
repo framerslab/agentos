@@ -1,9 +1,34 @@
 import { createServer, IncomingMessage, Server as HTTPServer, ServerResponse } from 'http';
+import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { AgentOS } from '../AgentOS.js';
 import type { AgentOSConfig } from '../AgentOS.js';
 import type { AgentOSInput } from '../types/AgentOSInput.js';
 import type { AgentOSResponse } from '../types/AgentOSResponse.js';
 import { AgentOSServerConfig } from './config/ServerConfig';
+import { moduleLogger } from '../../core/logging/loggerFactory.js';
+import { getLoggingState } from '../../core/logging/state.js';
+import { errorFields } from '../../core/logging/events.js';
+
+/** The server's events, to the target current when each is written; each line of a request carries its id. */
+const log = moduleLogger('http', 'agentos_server');
+
+/** The methods an `http.request` line names; any other is written as `OTHER`. */
+const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE'] as const;
+type Method = (typeof METHODS)[number] | 'OTHER';
+
+/**
+ * The route an `http.request` line names: one of the server's own paths, or a fixed word for the rest, so no path a
+ * client sent, its query or a parameter in it reaches a line.
+ */
+type Route = '/health' | '/api/agentos/personas' | '/api/agentos/chat' | 'preflight' | 'extension' | 'unmatched' | 'unready';
+
+/** What one request's completion line is built from, filled in as the request is handled. */
+interface RequestRecord {
+  route: Route;
+  /** Set when a handler threw, so the line reads `error` whatever the status. */
+  failed: boolean;
+}
 
 interface ChatRequestPayload {
   userId?: string;
@@ -24,13 +49,47 @@ export class AgentOSServer {
     this.config = serverConfig;
     this.agentOS = new AgentOS();
     this.agentReady = this.agentOS.initialize(agentOSConfig);
-    this.server = createServer((req, res) => this.handleRequest(req, res));
+    this.server = createServer((req, res) => this.receive(req, res));
   }
 
-  private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  /**
+   * Runs one request under a fresh id. The id is returned in `x-request-id`, and every AgentOS event line written
+   * while the request runs carries it as `requestId`. When the response closes, one `http.request` line gives the
+   * method, the route as the server names it, the status (0 when no status was sent), the milliseconds and the
+   * outcome: `ok`, `error` for a 5xx status or a handler that threw, or `aborted` when the connection closed first.
+   * It is written at `info`, `error` or `warn` to match.
+   */
+  private receive(req: IncomingMessage, res: ServerResponse): void {
+    const requestId = randomUUID();
+    const started = performance.now();
+    const record: RequestRecord = { route: 'unmatched', failed: false };
+    const requests = getLoggingState().requests;
+    res.setHeader('x-request-id', requestId);
+    // A close that comes from the socket runs outside the request's context, so the line enters it again.
+    res.once('close', () => requests.run({ requestId }, () => {
+      const status = res.headersSent ? res.statusCode : 0;
+      const outcome = !res.writableFinished ? 'aborted' : record.failed || status >= 500 ? 'error' : 'ok';
+      const method: Method = (METHODS as readonly string[]).includes(req.method ?? '') ? req.method as Method : 'OTHER';
+      const fields = { method, route: record.route, status, ms: Math.max(0, Math.round(performance.now() - started)), outcome } as const;
+      if (outcome === 'ok') log.info('http.request', fields);
+      else if (outcome === 'error') log.error('http.request', fields);
+      else log.warn('http.request', fields);
+    }));
+    requests.run({ requestId }, () => {
+      void this.handleRequest(req, res, record).catch((error: unknown) => {
+        record.failed = true;
+        log.error('http.handler_failed', errorFields(error));
+        if (!res.headersSent) this.sendJson(res, 500, { error: 'Internal Server Error' });
+        else res.destroy();
+      });
+    });
+  }
+
+  private async handleRequest(req: IncomingMessage, res: ServerResponse, record: RequestRecord): Promise<void> {
     try {
       await this.agentReady;
     } catch (error) {
+      record.route = 'unready';
       this.sendJson(res, 500, { error: 'AgentOS failed to initialise', details: (error as Error).message });
       return;
     }
@@ -43,6 +102,7 @@ export class AgentOSServer {
     }
 
     if (req.method === 'OPTIONS') {
+      record.route = 'preflight';
       res.writeHead(204);
       res.end();
       return;
@@ -50,31 +110,38 @@ export class AgentOSServer {
 
     const url = new URL(req.url ?? '/', `http://${req.headers.host || this.config.host || 'localhost'}`);
     if (req.method === 'GET' && url.pathname === '/health') {
+      record.route = '/health';
       this.sendJson(res, 200, { status: 'ok', service: 'agentos-server' });
       return;
     }
 
     if (req.method === 'GET' && url.pathname === '/api/agentos/personas') {
+      record.route = '/api/agentos/personas';
       await this.handleListPersonasRequest(url, res);
       return;
     }
 
     if (req.method === 'POST' && url.pathname === '/api/agentos/chat') {
+      record.route = '/api/agentos/chat';
       await this.handleChatRequest(req, res);
       return;
     }
 
     if (this.config.dispatchExtensionHandlers !== false) {
       for (const handler of this.agentOS.getHttpHandlers()) {
+        // Set before the call: a handler that claims the request may answer it before it returns.
+        record.route = 'extension';
         try {
           if (await handler(req, res)) return;
         } catch (error) {
-          // Log the detail server-side; never echo arbitrary extension error
-          // text back to the client (it can carry internal/sensitive strings).
-          console.error('[AgentOSServer] Extension HTTP handler error:', (error as Error).message);
+          // The error is written as its type and code alone; its text, which can carry internal or sensitive strings,
+          // reaches neither the line nor the client.
+          record.failed = true;
+          log.error('http.handler_failed', errorFields(error));
           this.sendJson(res, 500, { error: 'Extension HTTP handler error' });
           return;
         }
+        record.route = 'unmatched';
       }
     }
 
