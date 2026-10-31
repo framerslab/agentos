@@ -46,6 +46,14 @@ import type { ILearnerSession, ILearningLayer, LearnerContext } from '../learnin
  */
 const LEARNER_OPEN_BUDGET_MS = 2_000;
 
+/** A layer's answer as a learner session; an answer with no `prepareTurn` is a failed open. */
+function asLearnerSession(answer: unknown): ILearnerSession {
+  if (!answer || typeof (answer as ILearnerSession).prepareTurn !== 'function') {
+    throw new Error('the learning layer answered with no learner session');
+  }
+  return answer as ILearnerSession;
+}
+
 /**
  * Custom error class for GMIManager-specific operational errors.
  */
@@ -516,11 +524,11 @@ export class GMIManager {
    * session is bound to the user the GMI is created for: under the turn's resolved organization when the caller
    * passed it, else under the organization of the GMI's first prepared turn (a GMI built again for a tool-result
    * resume, whose organization is read from the conversation after the GMI is acquired). The open has the budget a
-   * turn's preparation has, 2,000 ms. A layer that fails to open the session, or has not answered by then, never fails
-   * the GMI: the GMI gets a session that asks again at each turn (its first turn takes an open that answers late), and
-   * until one opens each turn has no learner and the GMI renders the persona's traits itself, so its tools refuse
-   * rather than act as on a host with no layer. Without a layer the result is empty, and the GMI is built as before
-   * the layer existed.
+   * turn's preparation has, 2,000 ms. A layer that fails to open the session, answers with something that is not a
+   * session, or has not answered by then never fails the GMI: the GMI gets a session that asks again at each turn
+   * (its first turn takes an open that answers late), and until one opens each turn has no learner and the GMI
+   * renders the persona's traits itself, so its tools refuse rather than act as on a host with no layer. Without a
+   * layer the result is empty, and the GMI is built as before the layer existed.
    *
    * @param effectivePersona - The persona the GMI is initialized with: the registry persona, overlay applied.
    * @param runtimeContext - The GMI's id, its session and the user it is created for.
@@ -543,9 +551,9 @@ export class GMIManager {
       ...(overlay ? { overlayTraits: overlay } : {}),
     };
     const open = (namespace: string): Promise<ILearnerSession> =>
-      Promise.resolve().then(() =>
-        layer.forLearner({ namespace, agentKey: source.registryPersona.id, userId: runtimeContext.userId }, context),
-      );
+      Promise.resolve()
+        .then(() => layer.forLearner({ namespace, agentKey: source.registryPersona.id, userId: runtimeContext.userId }, context))
+        .then(asLearnerSession);
     // Without the turn's organization the session opens at the GMI's first prepared turn, under that turn's.
     if (!source.workflowSeat && source.organizationId === undefined) {
       return { learning: deferLearnerSession({ traits: authored, open }), personaTraits };
@@ -553,7 +561,9 @@ export class GMIManager {
     const organizationId = (source.organizationId ?? '').trim();
     const openNow = (): Promise<ILearnerSession> =>
       source.workflowSeat
-        ? Promise.resolve().then(() => layer.forLearner(null, { ...context, noLearnerReason: 'workflow_seat' }))
+        ? Promise.resolve()
+            .then(() => layer.forLearner(null, { ...context, noLearnerReason: 'workflow_seat' }))
+            .then(asLearnerSession)
         : open(organizationId);
     // The open runs inside GMI acquisition, so it has the budget a turn's preparation has.
     let late: Promise<ILearnerSession> | undefined = openNow();
