@@ -45,6 +45,16 @@
  * rows in one namespace go with their tombstone kept. The SQL store makes its ten tables at its first call, keeps them
  * across a restart, leaves the host's adapter open, orders text by code unit on any collation, and takes a column a
  * later release adds into the tables an earlier one made.
+ *
+ * The ledger (the package's `cognition/learning/ledger/index` path) over each of those stores. A learner's candidate
+ * and its verdict chain under the learner's key, each row the canonical text of its entry, hashed (SHA-256, or
+ * HMAC-SHA-256 under a key the store never holds) and linked to the row before it; a change runs in its rows'
+ * transaction; a row with no learner chains under the agent or the second user it names, so a user's deletion takes
+ * whole chains. A head moves by compare-and-swap: a writer that lost re-reads it, and two processes on Postgres keep
+ * one chain and one verdict per candidate. A forgotten user's chain takes nothing, and an append that finds the
+ * tombstone once it committed deletes its rows. A freeze refuses a new candidate and lets an operator act; a verdict
+ * follows the candidate's current one; and the load check names what an edit made outside the layer broke, from an
+ * operator's reanchor on.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -106,7 +116,23 @@ import {
   type StoredLedgerRow,
   type StoredTraitRow,
 } from '@framers/agentos/cognition/learning/store/index';
-import type { LearningKind, LedgerVerdict } from '@framers/agentos/cognition/learning/types';
+import type { LearningKind, LedgerEntry, LedgerLearner, LedgerVerdict } from '@framers/agentos/cognition/learning/types';
+import {
+  GENESIS_HASH,
+  Ledger,
+  canonicalJson,
+  chainKeyOf,
+  hmacSha256Hex,
+  sha256Hex,
+  tombstoneHash,
+  ulid,
+  type CandidateInput,
+  type ChainCheck,
+  type DecideResult,
+  type LedgerOptions,
+  type ProposeOptions,
+  type ProposeResult,
+} from '@framers/agentos/cognition/learning/ledger/index';
 import { createPostgresAdapter, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import Database from 'better-sqlite3';
 import { reply, script } from './helpers/stubProviders';
@@ -3494,6 +3520,986 @@ describe.skipIf(!POSTGRES_URL)('the learning store on Postgres', () => {
       await laterColumnReachesEarlierTables(adapter);
     } finally {
       await adapter.close();
+    }
+  });
+});
+
+/** The learner the ledger cases record for: user `42` of tenant `A` on agent `tutor`. */
+const LEDGER_LEARNER: LedgerLearner = { namespace: 'A', agentKey: 'tutor', userId: '42' };
+/** The ledger's clock in these cases: one moment, so every row a case writes was made at LEARNED_AT. */
+const ledgerClock = (): number => Date.parse(LEARNED_AT);
+/** The secret a host keys its ledger's hashes with. */
+const LEDGER_KEY = 'qa-ledger-key-5b1c';
+
+/** A self-change a host proposes for the learner: by default a rule's step of openness. */
+const selfChange = (subject: string, over: Partial<CandidateInput> = {}): CandidateInput => ({
+  learner: LEDGER_LEARNER,
+  kind: 'trait',
+  actor: 'rule:style.shorter@1',
+  subject,
+  before: { openness: 0.5 },
+  after: { openness: 0.6 },
+  evidence: { note: 'qa' },
+  sessionId: 's-1',
+  ...over,
+});
+
+/** An operator's act: a learner's traits set by hand. */
+const operatorAct = (userId: string | null = '42'): CandidateInput =>
+  selfChange('traits', { learner: { ...LEDGER_LEARNER, userId }, kind: 'operator_set', actor: 'operator:ops', before: null, after: { openness: 0.5 } });
+
+/** A ledger over `store` on the cases' clock. */
+const ledgerOver = (store: LearningStore, options: Omit<LedgerOptions, 'store'> = {}): Ledger =>
+  new Ledger({ store, clock: ledgerClock, ...options });
+
+/** What `propose` wrote; a failure naming its answer when it wrote nothing. */
+function appended(result: ProposeResult): Extract<ProposeResult, { rows: LedgerEntry[] }> {
+  if (!('rows' in result)) throw new Error(`propose answered ${result.status}`);
+  return result;
+}
+
+/**
+ * `store` as a writer in a race sees it: its next `times` transactions read each chain's head one row back, as it stood
+ * before another writer appended, so their compare-and-swap loses.
+ */
+function racedStore(store: LearningStore, times: number): LearningStore {
+  let left = times;
+  const behind = (tx: LearningStoreTx): LearningStoreTx =>
+    new Proxy(tx, {
+      get(target, property) {
+        if (property === 'head') {
+          return async (chainKey: string) => {
+            const head = await target.head(chainKey);
+            return head ? { ...head, seq: head.seq - 1, lastHash: 'stale' } : head;
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  return new Proxy(store, {
+    get(target, property) {
+      if (property === 'transaction') {
+        return <T>(fn: (tx: LearningStoreTx) => Promise<T>): Promise<T> =>
+          target.transaction((tx) => {
+            if (left <= 0) return fn(tx);
+            left -= 1;
+            return fn(behind(tx));
+          });
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
+ * What the ledger does over a store, as a host calls it. `oneAtATime`: the store runs one transaction at a time in this
+ * process (the in-process store, a SQLite file), so appends made at once all land.
+ */
+function ledgerCases(name: string, open: () => Promise<OpenedLearningStore>, oneAtATime: boolean): void {
+  describe(name, () => {
+    const opened: OpenedLearningStore[] = [];
+    const fresh = async (): Promise<LearningStore> => {
+      const made = await open();
+      opened.push(made);
+      return made.store;
+    };
+    afterEach(async () => {
+      for (const made of opened.splice(0)) await made.close();
+    });
+
+    it("chains a learner's candidate and its verdict: each row the canonical text of its entry, hashed and linked to the row before it, the head at the newest row, and the chain verifies", async () => {
+      const store = await fresh();
+      const ledger = ledgerOver(store, { versions: { model: 'stub-model' } });
+      const key = chainKeyOf(LEDGER_LEARNER);
+      expect(key).toBe('u|A|tutor|42');
+      const version = (JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8')) as { version: string }).version;
+
+      const proposed = appended(await ledger.propose(selfChange('openness', { versions: { rules: 'style@1' } })));
+      expect(proposed.status).toBe('pending');
+      expect(proposed).not.toHaveProperty('verdict');
+      const candidate = proposed.candidate;
+      expect(proposed.rows).toEqual([candidate]);
+      expect(candidate.id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+      expect(candidate).toEqual({
+        id: candidate.id,
+        rowType: 'candidate',
+        candidateId: candidate.id,
+        learner: LEDGER_LEARNER,
+        kind: 'trait',
+        actor: 'rule:style.shorter@1',
+        subject: 'openness',
+        before: { openness: 0.5 },
+        after: { openness: 0.6 },
+        evidence: { note: 'qa' },
+        verdict: 'pending',
+        reason: 'pending',
+        versions: { agentos: version, rules: 'style@1', renderer: 1, probes: 'none', model: 'stub-model' },
+        sessionId: 's-1',
+        prevHash: GENESIS_HASH,
+        seq: 1,
+        createdAt: LEARNED_AT,
+      });
+
+      const decided = await ledger.decide(candidate.id, 'kept', 'no rendered change', {
+        evidence: { signals: { shorter: 1 } },
+        stateDigest: 'digest-1',
+      });
+      if (decided.status !== 'kept') throw new Error(`decide answered ${decided.status}`);
+      const verdict = decided.verdict;
+      expect(verdict).toEqual({
+        id: verdict.id,
+        rowType: 'verdict',
+        candidateId: candidate.id,
+        learner: LEDGER_LEARNER,
+        kind: 'trait',
+        actor: 'rule:style.shorter@1',
+        subject: 'openness',
+        before: null,
+        after: null,
+        evidence: { signals: { shorter: 1 } },
+        verdict: 'kept',
+        reason: 'no rendered change',
+        versions: candidate.versions,
+        sessionId: 's-1',
+        prevHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        seq: 2,
+        stateDigest: 'digest-1',
+        createdAt: LEARNED_AT,
+      });
+
+      const rows = await store.chainRows(key);
+      expect(rows.map((row) => row.id)).toEqual([candidate.id, verdict.id]);
+      expect([...rows.map((row) => row.id)].sort()).toEqual(rows.map((row) => row.id));
+      for (const [at, entry] of [candidate, verdict].entries()) {
+        const row = rows[at]!;
+        expect(row.body).toBe(canonicalJson(entry));
+        expect(row.hash).toBe(await sha256Hex(row.body));
+        expect(row).toMatchObject({
+          chainKey: key,
+          seq: entry.seq,
+          rowType: entry.rowType,
+          candidateId: candidate.id,
+          namespace: 'A',
+          agentKey: 'tutor',
+          userId: '42',
+          turnUserId: null,
+          sessionId: 's-1',
+          kind: 'trait',
+          subject: 'openness',
+          verdict: entry.verdict,
+          prevHash: entry.prevHash,
+          stateDigest: entry.stateDigest ?? null,
+          createdAt: LEARNED_AT,
+        });
+      }
+      expect(rows[1]!.prevHash).toBe(rows[0]!.hash);
+      expect(await store.head(key)).toEqual({
+        chainKey: key,
+        namespace: 'A',
+        agentKey: 'tutor',
+        userId: '42',
+        lastId: verdict.id,
+        lastHash: rows[1]!.hash,
+        seq: 2,
+        forgotten: false,
+      });
+      expect(await ledger.latestVerdict(candidate.id)).toBe('kept');
+      expect(await ledger.latestVerdict('no-such-candidate')).toBeUndefined();
+      expect(await ledger.entries(key)).toEqual([candidate, verdict]);
+      expect(await ledger.latestStateRow(key, ['trait'])).toEqual(verdict);
+      expect(await ledger.latestStateRow(key, ['lesson'])).toBeUndefined();
+      expect(ledger.keyed).toBe(false);
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+    });
+
+    it("runs the change in its rows' transaction: a change that throws leaves no row, no head and none of its own writes, a value with no JSON form writes nothing, and a change that returns commits with its rows", async () => {
+      const store = await fresh();
+      const ledger = ledgerOver(store);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      const stepped = traitRowOf(1, '{"current":{"openness":0.6}}');
+      await expect(
+        ledger.propose(selfChange('openness'), {
+          verdict: 'kept',
+          change: async (tx) => {
+            expect(await tx.insertTraitRow(stepped)).toBe(true);
+            throw new Error('the rendered personality could not be written');
+          },
+        }),
+      ).rejects.toThrow('the rendered personality could not be written');
+      const contained: Record<string, unknown> = { openness: 0.6 };
+      contained.again = { contained };
+      await expect(ledger.propose(selfChange('openness', { after: { openness: BigInt(6) } }))).rejects.toThrow(TypeError);
+      await expect(ledger.propose(selfChange('openness', { after: contained }))).rejects.toThrow(TypeError);
+      expect(await store.chainRows(key)).toEqual([]);
+      expect(await store.head(key)).toBeUndefined();
+      expect(await store.traitRow('A', 'tutor', '42')).toBeUndefined();
+
+      const kept = appended(
+        await ledger.propose(selfChange('openness'), {
+          verdict: 'kept',
+          stateDigest: 'digest-1',
+          change: async (tx, rows) => {
+            expect(rows.map((row) => [row.rowType, row.verdict])).toEqual([
+              ['candidate', 'pending'],
+              ['verdict', 'kept'],
+            ]);
+            await tx.insertTraitRow(stepped);
+          },
+        }),
+      );
+      expect(kept.status).toBe('kept');
+      expect(kept.candidate).toMatchObject({ verdict: 'pending', reason: 'kept' });
+      expect(kept.candidate).not.toHaveProperty('stateDigest');
+      expect(kept.verdict).toMatchObject({ rowType: 'verdict', candidateId: kept.candidate.id, verdict: 'kept', reason: 'kept', stateDigest: 'digest-1' });
+      expect(kept.rows).toEqual([kept.candidate, kept.verdict]);
+      expect(await store.traitRow('A', 'tutor', '42')).toEqual(stepped);
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+    });
+
+    it("chains a row with no learner under the agent and a second user's under that user, keeps every id's part apart, refuses a second user on a learner's row, and a user's deletion takes that user's chains whole and leaves the others verifying", async () => {
+      const store = await fresh();
+      const ledger = ledgerOver(store);
+      const agentRow = { ...LEDGER_LEARNER, userId: null };
+      const memoryWrite = (over: Partial<CandidateInput>): CandidateInput =>
+        selfChange('trace-1', { kind: 'memory_write', actor: 'memory:tools', before: null, after: { content: 'Ana plays the cello.' }, ...over });
+
+      appended(await ledger.propose(memoryWrite({}), { verdict: 'kept' }));
+      appended(await ledger.propose(memoryWrite({ learner: agentRow }), { verdict: 'kept' }));
+      const visitor = appended(await ledger.propose(memoryWrite({ learner: agentRow, turnUserId: 'bo' }), { verdict: 'kept' }));
+      const blank = appended(await ledger.propose(memoryWrite({ learner: agentRow, turnUserId: '' }), { verdict: 'kept' }));
+      appended(await ledger.propose(memoryWrite({ learner: { ...LEDGER_LEARNER, userId: 'bo' } }), { verdict: 'kept' }));
+
+      expect(chainKeyOf(agentRow)).toBe('a|A|tutor');
+      expect(chainKeyOf(agentRow, 'bo')).toBe('t|A|tutor|bo');
+      expect(chainKeyOf(agentRow, '')).toBe('a|A|tutor');
+      expect(visitor.candidate.turnUserId).toBe('bo');
+      expect(blank.candidate).not.toHaveProperty('turnUserId');
+      expect(await store.chainRows('a|A|tutor')).toHaveLength(4);
+      expect((await store.chainRows('t|A|tutor|bo')).map((row) => [row.userId, row.turnUserId])).toEqual([
+        [null, 'bo'],
+        [null, 'bo'],
+      ]);
+      expect(await store.head('a|A|tutor')).toMatchObject({ userId: null, seq: 4 });
+      expect(await store.head('t|A|tutor|bo')).toMatchObject({ userId: 'bo', seq: 2 });
+      expect(await store.head('u|A|tutor|bo')).toMatchObject({ userId: 'bo', seq: 2 });
+
+      // Each part of a key is percent-encoded, so no id moves the boundary between two parts.
+      expect(chainKeyOf({ namespace: 'org/1', agentKey: 'tutor', userId: 'auth0|ana' })).toBe('u|org%2F1|tutor|auth0%7Cana');
+      expect(chainKeyOf({ namespace: 'A', agentKey: 'tutor|auth0', userId: 'ana' })).toBe('u|A|tutor%7Cauth0|ana');
+      expect(chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: 'a\uD800' })).toBe('u|A|tutor|a%uD800');
+      expect(chainKeyOf({ namespace: 'A:1', agentKey: 'tutor', userId: null }, 'ana maria')).toBe('t|A%3A1|tutor|ana%20maria');
+
+      await expect(ledger.propose(memoryWrite({ turnUserId: 'bo' }), { verdict: 'kept' })).rejects.toThrow(/turnUserId/);
+      expect(await store.chainRows('u|A|tutor|42')).toHaveLength(2);
+
+      // forgetUser's deletion for bo in the store: both of bo's chains go whole, and every other chain verifies.
+      expect(await store.deleteUserRows('A', 'bo')).toMatchObject({ ledger: 4, heads: 2 });
+      expect(await store.chainRows('t|A|tutor|bo')).toEqual([]);
+      expect(await store.chainRows('u|A|tutor|bo')).toEqual([]);
+      expect(await store.head('t|A|tutor|bo')).toBeUndefined();
+      expect(await store.head('u|A|tutor|bo')).toBeUndefined();
+      expect(await store.chainRows('a|A|tutor')).toHaveLength(4);
+      for (const key of ['u|A|tutor|42', 'a|A|tutor', 't|A|tutor|bo', 'u|A|tutor|bo']) {
+        expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+      }
+    });
+
+    it("takes nothing for a forgotten user: a head forgetUser marked, a new chain behind the user's tombstone, and an append that finds the tombstone once it committed, whose rows go with the user's others", async () => {
+      const store = await fresh();
+      const ledger = ledgerOver(store);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      const pending = appended(await ledger.propose(selfChange('openness')));
+      const tomb = await tombstoneHash('A', '42');
+      expect(tomb).toBe(await sha256Hex('["A","42"]'));
+
+      // forgetUser's order: the tombstone first, then the user's heads marked forgotten, then the deletion.
+      await store.insertForgotten(tomb, LATER);
+      expect(await store.markHeadsForgotten('A', '42')).toBe(1);
+      expect(await ledger.propose(selfChange('agreeableness'), { verdict: 'kept' })).toEqual({ status: 'forgotten' });
+      expect(await ledger.propose(operatorAct(), { verdict: 'kept', operator: true })).toEqual({ status: 'forgotten' });
+      expect(await ledger.decide(pending.candidate.id, 'kept', 'evidence')).toEqual({ status: 'forgotten' });
+      expect(await store.chainRows(key)).toHaveLength(1);
+
+      await store.deleteUserRows('A', '42');
+      expect(await ledger.propose(selfChange('openness'), { verdict: 'kept' })).toEqual({ status: 'forgotten' });
+      expect(
+        await ledger.propose(selfChange('trace-1', { kind: 'memory_write', learner: { ...LEDGER_LEARNER, userId: null }, turnUserId: '42' }), { verdict: 'kept' }),
+      ).toEqual({ status: 'forgotten' });
+      expect(await store.head(key)).toBeUndefined();
+      expect(await store.head('t|A|tutor|42')).toBeUndefined();
+      // The same id in another tenant is another user.
+      const tenantB = { ...LEDGER_LEARNER, namespace: 'B' };
+      expect(appended(await ledger.propose(selfChange('openness', { learner: tenantB }), { verdict: 'kept' })).status).toBe('kept');
+      expect(await ledger.verifyChain(chainKeyOf(tenantB))).toEqual({ ok: true, keyed: false });
+
+      // bo is forgotten while an append of theirs runs: its rows commit, then the append finds the tombstone and the
+      // deletion the host gave runs again.
+      const bo = { ...LEDGER_LEARNER, userId: 'bo' };
+      const boTomb = await tombstoneHash('A', 'bo');
+      const deletedAgain: string[] = [];
+      const forgetting = ledgerOver(store, {
+        onForgottenAfterCommit: async (namespace, userId) => {
+          deletedAgain.push(`${namespace}/${userId}`);
+          await store.deleteUserRows(namespace, userId);
+        },
+      });
+      expect(
+        await forgetting.propose(selfChange('openness', { learner: bo }), { verdict: 'kept', change: async (tx) => tx.insertForgotten(boTomb, LATER) }),
+      ).toEqual({ status: 'forgotten' });
+      expect(deletedAgain).toEqual(['A/bo']);
+      expect(await store.chainRows(chainKeyOf(bo))).toEqual([]);
+      expect(await store.head(chainKeyOf(bo))).toBeUndefined();
+      expect(await store.isForgotten(boTomb)).toBe(true);
+
+      // With no deletion given, the ledger deletes the user's rows itself.
+      const cy = { ...LEDGER_LEARNER, userId: 'cy' };
+      const cyTomb = await tombstoneHash('A', 'cy');
+      expect(
+        await ledger.propose(selfChange('openness', { learner: cy }), { verdict: 'kept', change: async (tx) => tx.insertForgotten(cyTomb, LATER) }),
+      ).toEqual({ status: 'forgotten' });
+      expect(await store.chainRows(chainKeyOf(cy))).toEqual([]);
+      expect(await store.head(chainKeyOf(cy))).toBeUndefined();
+    });
+
+    it('refuses a new candidate while its learner is frozen and while AGENTOS_LEARNING_FREEZE=1 freezes the process, writing nothing, and lets an operator act and a verdict be written', async () => {
+      const store = await fresh();
+      const frozenUsers = new Set<string>(['42']);
+      const asked: LedgerLearner[] = [];
+      const ledger = ledgerOver(store, {
+        isFrozen: (learner) => {
+          asked.push(learner);
+          return learner.userId !== null && frozenUsers.has(learner.userId);
+        },
+      });
+      const key = chainKeyOf(LEDGER_LEARNER);
+      const seven = { ...LEDGER_LEARNER, userId: '7' };
+      expect(await ledger.propose(selfChange('openness'))).toEqual({ status: 'frozen' });
+      expect(await ledger.propose(selfChange('openness'), { verdict: 'kept' })).toEqual({ status: 'frozen' });
+      expect(asked).toEqual([LEDGER_LEARNER, LEDGER_LEARNER]);
+      expect(await store.head(key)).toBeUndefined();
+      expect(appended(await ledger.propose(selfChange('openness', { learner: seven }))).status).toBe('pending');
+      expect(appended(await ledger.propose(operatorAct(), { verdict: 'kept', operator: true })).status).toBe('kept');
+
+      frozenUsers.clear();
+      const trial = appended(await ledger.propose(selfChange('agreeableness')));
+      vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+      const unconfigured = ledgerOver(store);
+      expect(await unconfigured.propose(selfChange('openness'))).toEqual({ status: 'frozen' });
+      expect(await ledger.propose(selfChange('openness', { learner: seven }))).toEqual({ status: 'frozen' });
+      expect(appended(await unconfigured.propose(operatorAct(), { verdict: 'kept', operator: true })).status).toBe('kept');
+      // A verdict on a candidate proposed before the freeze, as a retirement writes one, is written under it.
+      expect((await unconfigured.decide(trial.candidate.id, 'rejected', 'evidence')).status).toBe('rejected');
+      vi.stubEnv('AGENTOS_LEARNING_FREEZE', '0');
+      expect(appended(await unconfigured.propose(selfChange('openness'))).status).toBe('pending');
+
+      expect((await store.chainRows(key)).map((row) => [row.rowType, row.kind, row.verdict])).toEqual([
+        ['candidate', 'operator_set', 'pending'],
+        ['verdict', 'operator_set', 'kept'],
+        ['candidate', 'trait', 'pending'],
+        ['candidate', 'operator_set', 'pending'],
+        ['verdict', 'operator_set', 'kept'],
+        ['verdict', 'trait', 'rejected'],
+        ['candidate', 'trait', 'pending'],
+      ]);
+      expect(await store.chainRows(chainKeyOf(seven))).toHaveLength(1);
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+    });
+
+    it("writes a verdict only where it follows the candidate's current one, on the candidate's own chain, and answers refused or unknown_candidate otherwise, writing nothing", async () => {
+      const store = await fresh();
+      const ledger = ledgerOver(store);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      const one = appended(await ledger.propose(selfChange('openness')));
+      const two = appended(await ledger.propose(selfChange('agreeableness')));
+      expect(await ledger.latestVerdict(one.candidate.id)).toBe('pending');
+      expect(await ledger.pendingCandidates(key)).toEqual([one.candidate, two.candidate]);
+
+      expect((await ledger.decide(one.candidate.id, 'kept', 'evidence')).status).toBe('kept');
+      expect(await ledger.decide(one.candidate.id, 'rejected', 'late')).toEqual({ status: 'refused', current: 'kept' });
+      expect(await ledger.decide(one.candidate.id, 'kept', 'again')).toEqual({ status: 'refused', current: 'kept' });
+      expect(await ledger.decide(one.candidate.id, 'pending', 'back')).toEqual({ status: 'refused', current: 'kept' });
+      expect((await ledger.decide(one.candidate.id, 'reverted', 'probe')).status).toBe('reverted');
+      expect(await ledger.decide(one.candidate.id, 'kept', 'again')).toEqual({ status: 'refused', current: 'reverted' });
+      expect((await ledger.decide(two.candidate.id, 'rejected', 'bounds')).status).toBe('rejected');
+      expect(await ledger.decide(two.candidate.id, 'reverted', 'late')).toEqual({ status: 'refused', current: 'rejected' });
+      expect(await ledger.latestVerdict(one.candidate.id)).toBe('reverted');
+      expect(await ledger.latestVerdict(two.candidate.id)).toBe('rejected');
+      expect(await ledger.pendingCandidates(key)).toEqual([]);
+
+      const verdictId = (await store.chainRows(key)).find((row) => row.rowType === 'verdict')!.id;
+      expect(await ledger.decide('no-such-candidate', 'kept', 'x')).toEqual({ status: 'unknown_candidate' });
+      expect(await ledger.decide(verdictId, 'kept', 'x')).toEqual({ status: 'unknown_candidate' });
+
+      const three = appended(await ledger.propose(selfChange('conscientiousness')));
+      await expect(
+        ledger.decide(three.candidate.id, 'kept', 'evidence', {
+          change: async () => {
+            throw new Error('the lesson could not be activated');
+          },
+        }),
+      ).rejects.toThrow('the lesson could not be activated');
+      expect(await ledger.latestVerdict(three.candidate.id)).toBe('pending');
+      expect((await store.chainRows(key)).map((row) => [row.seq, row.rowType, row.verdict])).toEqual([
+        [1, 'candidate', 'pending'],
+        [2, 'candidate', 'pending'],
+        [3, 'verdict', 'kept'],
+        [4, 'verdict', 'reverted'],
+        [5, 'verdict', 'rejected'],
+        [6, 'candidate', 'pending'],
+      ]);
+
+      // A second user's write on another user's session: its verdict goes on that user's chain, with the candidate's session.
+      const visit = appended(
+        await ledger.propose(
+          selfChange('trace-9', { kind: 'memory_write', actor: 'memory:tools', learner: { ...LEDGER_LEARNER, userId: null }, turnUserId: 'bo', sessionId: 's-ana' }),
+        ),
+      );
+      expect((await ledger.decide(visit.candidate.id, 'kept', 'write landed', { stateDigest: 'digest-9' })).status).toBe('kept');
+      expect((await store.chainRows('t|A|tutor|bo')).map((row) => [row.rowType, row.turnUserId, row.sessionId, row.stateDigest])).toEqual([
+        ['candidate', 'bo', 's-ana', null],
+        ['verdict', 'bo', 's-ana', 'digest-9'],
+      ]);
+      for (const chain of [key, 't|A|tutor|bo']) expect(await ledger.verifyChain(chain)).toEqual({ ok: true, keyed: false });
+    });
+
+    it("writes a revert's verdict on the candidate it names in one append with its own candidate, and throws, writing nothing, for a candidate named twice, one of another chain, or one whose verdict cannot follow", async () => {
+      const store = await fresh();
+      const ledger = ledgerOver(store);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      const step = appended(await ledger.propose(selfChange('openness'), { verdict: 'kept' }));
+      const rejectedStep = appended(await ledger.propose(selfChange('agreeableness'), { verdict: 'rejected', reason: 'bounds' }));
+      const elsewhere = appended(await ledger.propose(selfChange('openness', { learner: { ...LEDGER_LEARNER, userId: '7' } }), { verdict: 'kept' }));
+      const revert = (alsoDecide: NonNullable<ProposeOptions['alsoDecide']>) =>
+        ledger.propose(selfChange('openness', { actor: 'operator:ops', before: { openness: 0.6 }, after: { openness: 0.5 } }), {
+          verdict: 'kept',
+          reason: 'revert',
+          operator: true,
+          alsoDecide,
+        });
+      const reverting = (candidateId: string) => ({ candidateId, verdict: 'reverted' as const, reason: 'revert' });
+
+      for (const wrong of [
+        [reverting(step.candidate.id), reverting(step.candidate.id)],
+        [reverting(elsewhere.candidate.id)],
+        [reverting(rejectedStep.candidate.id)],
+        [reverting('no-such-candidate')],
+      ]) {
+        await expect(revert(wrong)).rejects.toThrow(/learning ledger writes no/);
+      }
+      expect(await store.chainRows(key)).toHaveLength(4);
+      expect(await ledger.latestVerdict(step.candidate.id)).toBe('kept');
+
+      const done = appended(await revert([reverting(step.candidate.id)]));
+      expect(done.status).toBe('kept');
+      expect(done.rows.map((row) => [row.seq, row.rowType, row.candidateId, row.verdict])).toEqual([
+        [5, 'candidate', done.candidate.id, 'pending'],
+        [6, 'verdict', done.candidate.id, 'kept'],
+        [7, 'verdict', step.candidate.id, 'reverted'],
+      ]);
+      expect(done.verdict).toEqual(done.rows[1]);
+      expect(await ledger.latestVerdict(step.candidate.id)).toBe('reverted');
+      await expect(revert([reverting(step.candidate.id)])).rejects.toThrow(/its verdict is reverted/);
+
+      // A pending candidate written with a verdict on another reports no verdict of its own.
+      const other = appended(await ledger.propose(selfChange('extraversion'), { verdict: 'kept' }));
+      const superseding = appended(
+        await ledger.propose(selfChange('extraversion'), { alsoDecide: [{ candidateId: other.candidate.id, verdict: 'reverted', reason: 'superseded' }] }),
+      );
+      expect(superseding.status).toBe('pending');
+      expect(superseding).not.toHaveProperty('verdict');
+      expect(superseding.rows.map((row) => [row.rowType, row.candidateId])).toEqual([
+        ['candidate', superseding.candidate.id],
+        ['verdict', other.candidate.id],
+      ]);
+      expect(await ledger.latestVerdict(other.candidate.id)).toBe('reverted');
+      expect(await ledger.latestVerdict(superseding.candidate.id)).toBe('pending');
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+    });
+
+    it('retries onto the head when another writer appended after its read, so the chain stays one line that verifies and the change runs once; after four lost swaps it answers conflict and writes nothing; and appends made at once all keep one line', async () => {
+      const store = await fresh();
+      const ledger = ledgerOver(store);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      appended(await ledger.propose(selfChange('one'), { verdict: 'kept' }));
+
+      let changes = 0;
+      const counted: ProposeOptions = {
+        verdict: 'kept',
+        change: async () => {
+          changes += 1;
+        },
+      };
+      expect((await ledgerOver(racedStore(store, 3)).propose(selfChange('two'), counted)).status).toBe('kept');
+      expect(changes).toBe(1);
+      expect(await ledgerOver(racedStore(store, 4)).propose(selfChange('three'), counted)).toEqual({ status: 'conflict' });
+      expect(changes).toBe(1);
+      expect((await store.chainRows(key)).map((row) => [row.seq, row.subject, row.verdict])).toEqual([
+        [1, 'one', 'pending'],
+        [2, 'one', 'kept'],
+        [3, 'two', 'pending'],
+        [4, 'two', 'kept'],
+      ]);
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+
+      const results = await Promise.all(Array.from({ length: 6 }, (_, i) => ledger.propose(selfChange(`at-once-${i}`), { verdict: 'kept' })));
+      if (oneAtATime) expect(results.map((result) => result.status)).toEqual(Array(6).fill('kept'));
+      else expect(results.every((result) => result.status === 'kept' || result.status === 'conflict')).toBe(true);
+      const kept = results.filter((result) => result.status === 'kept').length;
+      expect(kept).toBeGreaterThan(0);
+      const rows = await store.chainRows(key);
+      expect(rows.map((row) => row.seq)).toEqual(rows.map((_, i) => i + 1));
+      expect(rows).toHaveLength(4 + 2 * kept);
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+    });
+
+    it('keys every hash under a ledger key the store never holds: a ledger without the key, or with another, reads the chain as broken, and a tombstone stays unkeyed', async () => {
+      const store = await fresh();
+      const keyed = ledgerOver(store, { ledgerKey: LEDGER_KEY });
+      expect(keyed.keyed).toBe(true);
+      expect(ledgerOver(store, { ledgerKey: '' }).keyed).toBe(false);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      appended(await keyed.propose(selfChange('openness'), { verdict: 'kept' }));
+      const rows = await store.chainRows(key);
+      for (const row of rows) {
+        expect(row.hash).toBe(await hmacSha256Hex(LEDGER_KEY, row.body));
+        expect(row.hash).not.toBe(await sha256Hex(row.body));
+      }
+      expect(rows[1]!.prevHash).toBe(rows[0]!.hash);
+      expect(await keyed.verifyChain(key)).toEqual({ ok: true, keyed: true });
+      expect(await ledgerOver(store).verifyChain(key)).toEqual({ ok: false, keyed: false, reason: `row ${rows[0]!.id}: hash` });
+      expect(await ledgerOver(store, { ledgerKey: 'another-key' }).verifyChain(key)).toEqual({ ok: false, keyed: true, reason: `row ${rows[0]!.id}: hash` });
+      expect(JSON.stringify([rows, await store.head(key)])).not.toContain(LEDGER_KEY);
+
+      await store.insertForgotten(await tombstoneHash('A', '7'), LATER);
+      expect(await keyed.propose(selfChange('openness', { learner: { ...LEDGER_LEARNER, userId: '7' } }), { verdict: 'kept' })).toEqual({ status: 'forgotten' });
+    });
+
+    it("verifies a chain again from an operator's reanchor once a writer outside the ledger broke it, whatever the rows before the reanchor hold", async () => {
+      const store = await fresh();
+      const ledger = ledgerOver(store);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      appended(await ledger.propose(selfChange('openness'), { verdict: 'kept' }));
+      // A writer outside the ledger appends a row whose text is no entry, and moves the head to it.
+      const junk = ledgerRow({ id: 'junk-1', chainKey: key, seq: 3, kind: 'trait', body: 'not json', prevHash: 'x', hash: 'y', stateDigest: 'digest-junk' });
+      await store.transaction(async (tx) => {
+        await tx.insertLedgerRow(junk);
+        expect(await tx.advanceHead(key, 2, { lastId: junk.id, lastHash: junk.hash, seq: 3 })).toBe(true);
+      });
+      expect(await ledger.verifyChain(key)).toEqual({ ok: false, keyed: false, reason: 'row junk-1: unreadable' });
+      const unreadable = "The learning ledger's row junk-1 is unreadable.";
+      await expect(ledger.entries(key)).rejects.toThrow(unreadable);
+      await expect(ledger.pendingCandidates(key)).rejects.toThrow(unreadable);
+      await expect(ledger.latestStateRow(key, ['trait'])).rejects.toThrow(unreadable);
+      await expect(ledger.decide('junk-1', 'kept', 'evidence')).rejects.toThrow(unreadable);
+
+      // A row that is no operator_set candidate anchors nothing, whatever its reason.
+      appended(await ledger.propose(selfChange('agreeableness'), { verdict: 'kept', reason: 'reanchor' }));
+      expect(await ledger.verifyChain(key)).toEqual({ ok: false, keyed: false, reason: 'row junk-1: unreadable' });
+
+      const reanchor = appended(await ledger.propose(operatorAct(), { verdict: 'kept', reason: 'reanchor', operator: true }));
+      expect(reanchor.rows.map((row) => [row.seq, row.kind, row.reason])).toEqual([
+        [6, 'operator_set', 'reanchor'],
+        [7, 'operator_set', 'reanchor'],
+      ]);
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+      appended(await ledger.propose(selfChange('conscientiousness'), { verdict: 'kept' }));
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+      expect((await store.head(key))?.seq).toBe(9);
+    });
+  });
+}
+
+describe('the ledger', () => {
+  ledgerCases('in the process', async () => ({ store: new InMemoryLearningStore(), close: async () => undefined }), true);
+
+  ledgerCases(
+    'over a SQLite file',
+    async () => {
+      const adapter = await openSqliteAt(learningFile());
+      const store = new SqlLearningStore({ adapter });
+      return {
+        store,
+        close: async () => {
+          await store.close();
+          await adapter.close();
+        },
+      };
+    },
+    true,
+  );
+
+  it('over a SQLite file keeps its chains across a restart: a ledger over the reopened file verifies them, decides a candidate proposed before, and appends after the head', async () => {
+    const file = learningFile();
+    const key = chainKeyOf(LEDGER_LEARNER);
+    let pendingId = '';
+    let before: StoredLedgerRow[] = [];
+    const first = await openSqliteAt(file);
+    try {
+      const store = new SqlLearningStore({ adapter: first });
+      const ledger = ledgerOver(store);
+      appended(await ledger.propose(selfChange('openness'), { verdict: 'kept' }));
+      pendingId = appended(await ledger.propose(selfChange('agreeableness'))).candidate.id;
+      appended(
+        await ledger.propose(selfChange('trace-1', { kind: 'memory_write', learner: { ...LEDGER_LEARNER, userId: null }, turnUserId: 'bo' }), { verdict: 'kept' }),
+      );
+      before = await store.chainRows(key);
+    } finally {
+      await first.close();
+    }
+
+    const reopened = await openSqliteAt(file);
+    try {
+      const store = new SqlLearningStore({ adapter: reopened });
+      const ledger = ledgerOver(store);
+      expect(await store.chainRows(key)).toEqual(before);
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+      expect(await ledger.verifyChain('t|A|tutor|bo')).toEqual({ ok: true, keyed: false });
+      expect(await ledger.latestVerdict(pendingId)).toBe('pending');
+      expect((await ledger.pendingCandidates(key)).map((entry) => entry.id)).toEqual([pendingId]);
+      expect((await ledger.decide(pendingId, 'kept', 'evidence')).status).toBe('kept');
+      const next = appended(await ledger.propose(selfChange('conscientiousness'), { verdict: 'kept' }));
+      const rows = await store.chainRows(key);
+      expect(rows.map((row) => row.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+      expect(rows[3]!.prevHash).toBe(before[2]!.hash);
+      expect(rows[5]!.id).toBe(next.rows[1]!.id);
+      expect(await ledger.verifyChain(key)).toEqual({ ok: true, keyed: false });
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it('over a SQLite file reads an edit made outside the layer as a broken chain and names what broke, never throws for a row that is no entry, and verifies a chain whose head row was deleted from the reanchor written after its newest row', async () => {
+    const adapter = await openSqliteAt(learningFile());
+    try {
+      const store = new SqlLearningStore({ adapter });
+      const ledger = ledgerOver(store);
+      /** A learner's chain of four rows: two kept steps. */
+      const chainFor = async (userId: string): Promise<{ key: string; rows: StoredLedgerRow[] }> => {
+        const learner = { ...LEDGER_LEARNER, userId };
+        appended(await ledger.propose(selfChange('openness', { learner }), { verdict: 'kept' }));
+        appended(await ledger.propose(selfChange('agreeableness', { learner }), { verdict: 'kept' }));
+        const key = chainKeyOf(learner);
+        return { key, rows: await store.chainRows(key) };
+      };
+      const setBody = (id: string, body: string) => adapter.run('UPDATE agentos_learning_ledger SET body = ? WHERE id = ?', [body, id]);
+      const deleteRow = (id: string) => adapter.run('DELETE FROM agentos_learning_ledger WHERE id = ?', [id]);
+      const broken = (reason: string) => ({ ok: false, keyed: false, reason });
+
+      const untouched = await chainFor('untouched');
+
+      const text = await chainFor('text');
+      await setBody(text.rows[0]!.id, text.rows[0]!.body.replace('"openness":0.6', '"openness":0.9'));
+      expect(await ledger.verifyChain(text.key)).toEqual(broken(`row ${text.rows[0]!.id}: hash`));
+
+      const column = await chainFor('column');
+      await adapter.run('UPDATE agentos_learning_ledger SET subject = ? WHERE id = ?', ['honesty', column.rows[1]!.id]);
+      expect(await ledger.verifyChain(column.key)).toEqual(broken(`row ${column.rows[1]!.id}: column subject`));
+
+      const newest = await chainFor('newest');
+      await deleteRow(newest.rows[3]!.id);
+      expect(await ledger.verifyChain(newest.key)).toEqual(broken('head'));
+
+      const middle = await chainFor('middle');
+      await deleteRow(middle.rows[1]!.id);
+      expect(await ledger.verifyChain(middle.key)).toEqual(broken(`row ${middle.rows[2]!.id}: link`));
+
+      // One learner's rows moved under another learner's key, with a head made there to name them.
+      const moved = await chainFor('moved');
+      const into = chainKeyOf({ ...LEDGER_LEARNER, userId: 'into' });
+      await adapter.run('UPDATE agentos_learning_ledger SET chain_key = ? WHERE chain_key = ?', [into, moved.key]);
+      await adapter.run('UPDATE agentos_learning_heads SET chain_key = ? WHERE chain_key = ?', [into, moved.key]);
+      expect(await ledger.verifyChain(into)).toEqual(broken(`row ${moved.rows[0]!.id}: column chainKey`));
+
+      const unreadable = await chainFor('unreadable');
+      await setBody(unreadable.rows[2]!.id, '[1,2]');
+      await setBody(unreadable.rows[3]!.id, 'null');
+      expect(await ledger.verifyChain(unreadable.key)).toEqual(broken(`row ${unreadable.rows[3]!.id}: unreadable`));
+      const named = `The learning ledger's row ${unreadable.rows[2]!.id} is unreadable.`;
+      await expect(ledger.entries(unreadable.key)).rejects.toThrow(named);
+      await expect(ledger.decide(unreadable.rows[2]!.id, 'reverted', 'probe')).rejects.toThrow(named);
+
+      const rowsGone = await chainFor('rows-gone');
+      await adapter.run('DELETE FROM agentos_learning_ledger WHERE chain_key = ?', [rowsGone.key]);
+      expect(await ledger.verifyChain(rowsGone.key)).toEqual(broken('head with no rows'));
+
+      const headless = await chainFor('headless');
+      await setBody(headless.rows[0]!.id, headless.rows[0]!.body.replace('"openness":0.6', '"openness":0.9'));
+      await adapter.run('DELETE FROM agentos_learning_heads WHERE chain_key = ?', [headless.key]);
+      expect(await ledger.verifyChain(headless.key)).toEqual(broken(`row ${headless.rows[0]!.id}: hash`));
+      const reanchor = appended(await ledger.propose(operatorAct('headless'), { verdict: 'kept', reason: 'reanchor', operator: true }));
+      expect(reanchor.rows.map((row) => row.seq)).toEqual([5, 6]);
+      expect(reanchor.candidate.prevHash).toBe(headless.rows[3]!.hash);
+      expect(await ledger.verifyChain(headless.key)).toEqual({ ok: true, keyed: false });
+
+      expect(await ledger.verifyChain(untouched.key)).toEqual({ ok: true, keyed: false });
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it('over a SQLite file with a key reads a chain a writer without the key recomputed as broken, which a ledger without a key reads as whole, unkeyed', async () => {
+    const adapter = await openSqliteAt(learningFile());
+    try {
+      const store = new SqlLearningStore({ adapter });
+      const keyed = ledgerOver(store, { ledgerKey: LEDGER_KEY });
+      const key = chainKeyOf(LEDGER_LEARNER);
+      appended(await keyed.propose(selfChange('openness'), { verdict: 'kept' }));
+      appended(await keyed.propose(selfChange('agreeableness'), { verdict: 'kept' }));
+      expect(await keyed.verifyChain(key)).toEqual({ ok: true, keyed: true });
+
+      // The writer changes the first step's value and recomputes every hash with plain SHA-256, and the head with them.
+      let prev = GENESIS_HASH;
+      let last = { id: '', hash: '', seq: 0 };
+      for (const row of await store.chainRows(key)) {
+        const entry = JSON.parse(row.body) as Record<string, unknown>;
+        const body = canonicalJson({ ...entry, prevHash: prev, ...(row.seq === 1 ? { after: { openness: 0.9 } } : {}) });
+        const hash = await sha256Hex(body);
+        await adapter.run('UPDATE agentos_learning_ledger SET body = ?, prev_hash = ?, hash = ? WHERE id = ?', [body, prev, hash, row.id]);
+        prev = hash;
+        last = { id: row.id, hash, seq: row.seq };
+      }
+      await adapter.run('UPDATE agentos_learning_heads SET last_id = ?, last_hash = ?, seq = ? WHERE chain_key = ?', [last.id, last.hash, last.seq, key]);
+      expect(await keyed.verifyChain(key)).toMatchObject({ ok: false, keyed: true });
+      expect(await ledgerOver(store).verifyChain(key)).toEqual({ ok: true, keyed: false });
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it('keeps an append that committed when its second read of the tombstone fails, and answers forgotten when the deletion it runs again fails, saying so with the tombstone and never the user', async () => {
+    const store = new InMemoryLearningStore();
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const user = { ...LEDGER_LEARNER, userId: 'ana@example.org' };
+    const key = chainKeyOf(user);
+    let unreachable = true;
+    // The store fails a read made outside a transaction once the append has committed, as a database that went away does.
+    const flaky = new Proxy(store, {
+      get(target, property) {
+        if (property === 'isForgotten' && unreachable) {
+          return async () => {
+            throw new Error('the database is not reachable');
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    expect(appended(await ledgerOver(flaky).propose(selfChange('openness', { learner: user }), { verdict: 'kept' })).status).toBe('kept');
+    expect(await store.chainRows(key)).toHaveLength(2);
+    const readWarning = warned.mock.calls.map((call) => call.join(' ')).join('\n');
+    expect(readWarning).toMatch(/did not read the tombstone again/);
+    expect(readWarning).toContain('the database is not reachable');
+    expect(readWarning).not.toContain('ana@example.org');
+    unreachable = false;
+    warned.mockClear();
+
+    const tomb = await tombstoneHash('A', 'ana@example.org');
+    const failing = ledgerOver(store, {
+      onForgottenAfterCommit: async () => {
+        throw new Error('the deletion failed');
+      },
+    });
+    expect(
+      await failing.propose(selfChange('agreeableness', { learner: user }), { verdict: 'kept', change: async (tx) => tx.insertForgotten(tomb, LATER) }),
+    ).toEqual({ status: 'forgotten' });
+    const deleteWarning = warned.mock.calls.map((call) => call.join(' ')).join('\n');
+    expect(deleteWarning).toContain(`tombstone ${tomb.slice(0, 16)}`);
+    expect(deleteWarning).toContain('the deletion failed');
+    expect(deleteWarning).not.toContain(tomb);
+    expect(deleteWarning).not.toContain('ana@example.org');
+    // Its rows stand until a second forgetUser call deletes them.
+    expect(await store.chainRows(key)).toHaveLength(4);
+    await store.deleteUserRows('A', 'ana@example.org');
+    expect(await store.chainRows(key)).toEqual([]);
+  });
+
+  it('writes the canonical text of a value with its keys in code-unit order at every depth, hashes it with SHA-256 or HMAC-SHA-256, and gives ids that sort by time', async () => {
+    expect(canonicalJson({ b: 1, a: { d: [3, { f: 1, e: 2 }], c: undefined } })).toBe('{"a":{"d":[3,{"e":2,"f":1}]},"b":1}');
+    expect(canonicalJson({ 10: 'ten', 9: 'nine', B: 'upper', a: 'lower', 'é': 'accent' })).toBe('{"10":"ten","9":"nine","B":"upper","a":"lower","é":"accent"}');
+    expect(canonicalJson({ list: [undefined, () => 1, Symbol('s'), null], at: new Date(Date.parse(LEARNED_AT)), skip: () => 1, gone: undefined })).toBe(
+      `{"at":"${LEARNED_AT}","list":[null,null,null,null]}`,
+    );
+    expect(canonicalJson({ toJSON: () => ({ z: 1, y: [2, { x: 3, w: 4 }] }) })).toBe('{"y":[2,{"w":4,"x":3}],"z":1}');
+    expect(canonicalJson(undefined)).toBe('null');
+    expect(canonicalJson('a "quoted" line\nbreak')).toBe(JSON.stringify('a "quoted" line\nbreak'));
+    expect(canonicalJson(0.1 + 0.2)).toBe('0.30000000000000004');
+    const shared = { n: 1 };
+    expect(canonicalJson({ a: shared, b: [shared] })).toBe('{"a":{"n":1},"b":[{"n":1}]}');
+    const loop: Record<string, unknown> = {};
+    loop.inner = { loop };
+    expect(() => canonicalJson(loop)).toThrow(TypeError);
+    expect(() => canonicalJson({ big: BigInt(1) })).toThrow(TypeError);
+
+    expect(GENESIS_HASH).toBe('0'.repeat(64));
+    // FIPS 180-2's "abc", and RFC 4231's test case 2.
+    expect(await sha256Hex('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+    expect(await hmacSha256Hex('Jefe', 'what do ya want for nothing?')).toBe('5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843');
+
+    const ids = [ulid(1_000), ulid(1_000), ulid(1_001), ulid(999), ulid()];
+    expect(ids.every((id) => /^[0-9A-HJKMNP-TV-Z]{26}$/.test(id))).toBe(true);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect([...ids].sort()).toEqual(ids);
+  });
+
+  it('names the ledger, its answers and its rows in the types a host imports', () => {
+    expectTypeOf<ProposeResult['status']>().toEqualTypeOf<'pending' | 'kept' | 'rejected' | 'reverted' | 'frozen' | 'forgotten' | 'conflict'>();
+    expectTypeOf<DecideResult['status']>().toEqualTypeOf<'kept' | 'rejected' | 'reverted' | 'forgotten' | 'conflict' | 'unknown_candidate' | 'refused'>();
+    expectTypeOf<Extract<DecideResult, { status: 'refused' }>['current']>().toEqualTypeOf<LedgerVerdict>();
+    expectTypeOf<ChainCheck>().toEqualTypeOf<{ ok: true; keyed: boolean } | { ok: false; keyed: boolean; reason: string }>();
+    expectTypeOf<CandidateInput['learner']>().toEqualTypeOf<LedgerLearner>();
+    expectTypeOf<LedgerLearner['userId']>().toEqualTypeOf<string | null>();
+    expectTypeOf<LedgerEntry['rowType']>().toEqualTypeOf<'candidate' | 'verdict'>();
+    expectTypeOf<LedgerEntry['kind']>().toEqualTypeOf<LearningKind>();
+    expectTypeOf<LedgerOptions['store']>().toEqualTypeOf<LearningStore>();
+    expectTypeOf<NonNullable<LedgerOptions['isFrozen']>>().toEqualTypeOf<(learner: LedgerLearner) => boolean>();
+    expectTypeOf<NonNullable<ProposeOptions['change']>>().parameters.toEqualTypeOf<[LearningStoreTx, LedgerEntry[]]>();
+    expectTypeOf(chainKeyOf).parameter(0).toEqualTypeOf<LedgerLearner>();
+    expectTypeOf(chainKeyOf).returns.toEqualTypeOf<string>();
+    expectTypeOf(tombstoneHash).returns.toEqualTypeOf<Promise<string>>();
+    expect(new Ledger({ store: new InMemoryLearningStore() }).keyed).toBe(false);
+  });
+});
+
+describe.skipIf(!POSTGRES_URL)('the ledger on Postgres', () => {
+  /** This run's own mark, in the names of the schemas its cases make and drop. */
+  const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const segments: string[] = [];
+
+  /** A new schema of this run's own, dropped once the cases have run. */
+  function newSegment(): string {
+    const segment = `qa_ledger_${run}_${segments.length}`;
+    segments.push(segment);
+    return segment;
+  }
+
+  /** The host's Postgres adapter, its tables in `segment`: by default a new schema of this run's own. */
+  async function openPostgresAdapter(segment: string = newSegment()): Promise<StorageAdapter> {
+    const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, segment, max: 5 });
+    await adapter.open();
+    return adapter;
+  }
+
+  /** Two stores over one schema, as two processes hold them, each having made or found its tables before they meet. */
+  async function twoProcesses(): Promise<{ first: SqlLearningStore; second: SqlLearningStore; close: () => Promise<void> }> {
+    const segment = newSegment();
+    const one = await openPostgresAdapter(segment);
+    const two = await openPostgresAdapter(segment);
+    const first = new SqlLearningStore({ adapter: one });
+    const second = new SqlLearningStore({ adapter: two });
+    expect(await first.isForgotten('warm-up')).toBe(false);
+    expect(await second.isForgotten('warm-up')).toBe(false);
+    return {
+      first,
+      second,
+      close: async () => {
+        await one.close();
+        await two.close();
+      },
+    };
+  }
+
+  afterAll(async () => {
+    if (segments.length === 0) return;
+    const admin = createPostgresAdapter({ connectionString: POSTGRES_URL! });
+    await admin.open();
+    try {
+      for (const segment of segments) await admin.exec(`DROP SCHEMA IF EXISTS "${segment}" CASCADE`);
+    } finally {
+      await admin.close();
+    }
+  });
+
+  ledgerCases(
+    'over a schema of its own',
+    async () => {
+      const adapter = await openPostgresAdapter();
+      const store = new SqlLearningStore({ adapter });
+      return {
+        store,
+        close: async () => {
+          await store.close();
+          await adapter.close();
+        },
+      };
+    },
+    false,
+  );
+
+  it("keeps one chain both of two processes read and verify when they append to a learner's chain at once", async () => {
+    const { first, second, close } = await twoProcesses();
+    try {
+      const a = ledgerOver(first);
+      const b = ledgerOver(second);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      appended(await a.propose(selfChange('first'), { verdict: 'kept' }));
+      expect(await b.verifyChain(key)).toEqual({ ok: true, keyed: false });
+      const results = await Promise.all(Array.from({ length: 6 }, (_, i) => (i % 2 === 0 ? a : b).propose(selfChange(`s-${i}`), { verdict: 'kept' })));
+      expect(results.every((result) => result.status === 'kept' || result.status === 'conflict')).toBe(true);
+      const kept = results.filter((result) => result.status === 'kept').length;
+      expect(kept).toBeGreaterThan(0);
+      const rows = await second.chainRows(key);
+      expect(rows.map((row) => row.seq)).toEqual(rows.map((_, i) => i + 1));
+      expect(rows).toHaveLength(2 + 2 * kept);
+      expect(await a.entries(key)).toEqual(await b.entries(key));
+      expect(await a.verifyChain(key)).toEqual({ ok: true, keyed: false });
+      expect(await b.verifyChain(key)).toEqual({ ok: true, keyed: false });
+    } finally {
+      await close();
+    }
+  });
+
+  it('lets one of two processes write its verdict when both decide one candidate at once, and answers the other refused with that verdict', async () => {
+    const { first, second, close } = await twoProcesses();
+    try {
+      const a = ledgerOver(first);
+      const b = ledgerOver(second);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      const proposed = appended(await a.propose(selfChange('openness')));
+      expect(await b.latestVerdict(proposed.candidate.id)).toBe('pending');
+      const results = await Promise.all([a.decide(proposed.candidate.id, 'kept', 'evidence'), b.decide(proposed.candidate.id, 'rejected', 'probe')]);
+      const winner = results.find((result) => result.status === 'kept' || result.status === 'rejected');
+      if (!winner) throw new Error(`neither verdict was written: ${JSON.stringify(results)}`);
+      expect(results.filter((result) => result !== winner)).toEqual([{ status: 'refused', current: winner.status }]);
+      expect((await second.chainRows(key)).map((row) => [row.seq, row.rowType, row.verdict])).toEqual([
+        [1, 'candidate', 'pending'],
+        [2, 'verdict', winner.status],
+      ]);
+      expect(await a.latestVerdict(proposed.candidate.id)).toBe(winner.status);
+      expect(await b.verifyChain(key)).toEqual({ ok: true, keyed: false });
+    } finally {
+      await close();
+    }
+  });
+
+  it('leaves nothing of an append whose user another process forgets while it runs: its rows commit, then it finds the tombstone and deletes them', async () => {
+    const { first, second, close } = await twoProcesses();
+    try {
+      const ledger = ledgerOver(first);
+      const key = chainKeyOf(LEDGER_LEARNER);
+      const seven = chainKeyOf({ ...LEDGER_LEARNER, userId: '7' });
+      const other = appended(await ledger.propose(selfChange('openness', { learner: { ...LEDGER_LEARNER, userId: '7' } }), { verdict: 'kept' }));
+      const tomb = await tombstoneHash('A', '42');
+      const result = await ledger.propose(selfChange('openness'), {
+        verdict: 'kept',
+        change: async () => {
+          // forgetUser in the other process, between this append's check of the tombstone and its commit: the tombstone,
+          // the user's heads marked forgotten, the user's rows deleted. None of them sees this append's rows.
+          await second.insertForgotten(tomb, LATER);
+          expect(await second.markHeadsForgotten('A', '42')).toBe(0);
+          expect(await second.deleteUserRows('A', '42')).toMatchObject({ ledger: 0, heads: 0 });
+        },
+      });
+      expect(result).toEqual({ status: 'forgotten' });
+      expect(await second.chainRows(key)).toEqual([]);
+      expect(await second.head(key)).toBeUndefined();
+      expect(await first.isForgotten(tomb)).toBe(true);
+      expect(await ledger.propose(selfChange('agreeableness'), { verdict: 'kept' })).toEqual({ status: 'forgotten' });
+      expect((await second.chainRows(seven)).map((row) => row.id)).toEqual(other.rows.map((row) => row.id));
+      expect(await ledgerOver(second).verifyChain(seven)).toEqual({ ok: true, keyed: false });
+    } finally {
+      await close();
     }
   });
 });
