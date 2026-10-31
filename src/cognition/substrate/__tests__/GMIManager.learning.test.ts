@@ -210,6 +210,16 @@ describe('a runtime with a learning layer', () => {
     await expect(session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow(/no learner session/);
     expect(layer.forLearner).toHaveBeenCalledTimes(2);
   });
+
+  it('treats an answer with only some of a learner session as a failed open', async () => {
+    // A session that cannot end, or say its traits, would fail at the GMI's shutdown instead of at its open.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const layer = recordingLayer(async () => ({ prepareTurn: vi.fn() }) as unknown as ILearnerSession);
+    const manager = await managerWith(layer);
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('no learner session'))).toBe(true);
+    await expect(gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow(/no learner session/);
+  });
 });
 
 describe('a runtime without a learning layer', () => {
