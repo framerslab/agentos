@@ -198,7 +198,7 @@ describe('with the learning flag on', () => {
     expect((await tutor.learning!.manifest()).turns).toEqual({ prepared: 3, bound: 2, none: { no_user_id: 1 } });
   });
 
-  it("tells each tool call its own turn's learner and mode: a session's with a user, a call's with none", async () => {
+  it("tells each tool call its own turn's learner, mode and scope ids: a session's with a user, a call's with none", async () => {
     quietManifest();
     const k = key();
     script('openai', k, {
@@ -221,8 +221,14 @@ describe('with the learning flag on', () => {
     await tutor.session('s1', { userId: 'ana' }).send('Probe.');
     await tutor.generate('Probe.');
     expect(seen).toEqual([
-      { learner: 'bound', mode: 'on' },
-      { learner: 'none', mode: 'on' },
+      expect.objectContaining({
+        learner: 'bound',
+        mode: 'on',
+        scopes: expect.objectContaining({ learner: 'bound', mode: 'on', userScopeId: 'ana', namespace: '' }),
+        recordSelfChange: expect.any(Function),
+        frozen: expect.any(Function),
+      }),
+      expect.objectContaining({ learner: 'none', mode: 'on', scopes: expect.objectContaining({ learner: 'none', mode: 'on', namespace: '' }) }),
     ]);
   });
 });

@@ -39,16 +39,15 @@ function embed(text: string): number[] {
   return vector.map((value) => value + 0.01);
 }
 
-/** A memory manager over a SQLite Brain, as a GMI's. */
-export async function managerOver(filePath: string, brainId: string): Promise<{ manager: CognitiveMemoryManager; brain: Brain }> {
-  const brain = await Brain.openSqlite(filePath, { brainId });
+/** A memory manager over a Brain the caller opened and closes, as a GMI's. */
+export async function managerOnBrain(brain: Brain): Promise<CognitiveMemoryManager> {
   const knowledgeGraph = new SqlKnowledgeGraph(brain);
   await knowledgeGraph.initialize();
   const vectorStore = new InMemoryVectorStore();
-  await vectorStore.initialize({ id: `learning-${brainId}-${Math.random()}`, type: 'in_memory' });
+  await vectorStore.initialize({ id: `learning-${brain.brainId}-${Math.random()}`, type: 'in_memory' });
   const manager = new CognitiveMemoryManager();
   await manager.initialize({
-    agentId: brainId,
+    agentId: brain.brainId,
     traits: { openness: 0.5, conscientiousness: 0.5, extraversion: 0.5, agreeableness: 0.5, emotionality: 0.5, honesty: 0.5 },
     moodProvider: () => MOOD,
     featureDetectionStrategy: 'keyword',
@@ -63,11 +62,16 @@ export async function managerOver(filePath: string, brainId: string): Promise<{ 
     encoding: { baseStrength: 0.5, flashbulbThreshold: 0.8, flashbulbStrengthMultiplier: 2, flashbulbStabilityMultiplier: 5, baseStabilityMs: 3_600_000 },
     brain,
   } as never);
-  closers.push(async () => {
-    await manager.shutdown();
-    await brain.close();
-  });
-  return { manager, brain };
+  closers.push(() => manager.shutdown());
+  return manager;
+}
+
+/** A memory manager over a SQLite Brain, as a GMI's. */
+export async function managerOver(filePath: string, brainId: string): Promise<{ manager: CognitiveMemoryManager; brain: Brain }> {
+  const brain = await Brain.openSqlite(filePath, { brainId });
+  // Pushed first, so it runs after the manager's shutdown (closers run newest first).
+  closers.push(() => brain.close());
+  return { manager: await managerOnBrain(brain), brain };
 }
 
 /** A Memory facade over a SQLite file of its own, as a host's memory tools are built over. */

@@ -4929,12 +4929,23 @@ describe('the learning option and its fields, on gmi() and the full runtime', ()
       return seen[0];
     };
 
-    expect(await probed(true, 'ana')).toEqual({ context: { learner: 'bound', mode: 'on' }, selfChange: undefined, memoryWrite: undefined });
-    expect(await probed({ mode: 'off' }, 'ana')).toEqual({ context: { learner: 'bound', mode: 'off' }, selfChange: 'off', memoryWrite: undefined });
-    expect(await probed(true)).toEqual({ context: { learner: 'none', mode: 'on' }, selfChange: 'no_learner', memoryWrite: undefined });
+    // A learner's turn also tells its tools the turn's scope ids and the recorder their writes go through.
+    expect(await probed(true, 'ana')).toMatchObject({
+      context: {
+        learner: 'bound',
+        mode: 'on',
+        scopes: { learner: 'bound', mode: 'on', userScopeId: 'ana', namespace: '' },
+        recordSelfChange: expect.any(Function),
+        frozen: expect.any(Function),
+      },
+      selfChange: undefined,
+      memoryWrite: undefined,
+    });
+    expect(await probed({ mode: 'off' }, 'ana')).toMatchObject({ context: { learner: 'bound', mode: 'off' }, selfChange: 'off', memoryWrite: undefined });
+    expect(await probed(true)).toMatchObject({ context: { learner: 'none', mode: 'on', scopes: { learner: 'none', mode: 'on' } }, selfChange: 'no_learner', memoryWrite: undefined });
     expect(await probed(undefined, 'ana')).toEqual({ context: undefined, selfChange: undefined, memoryWrite: undefined });
     vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
-    expect(await probed(true, 'ana')).toEqual({ context: { learner: 'bound', mode: 'frozen' }, selfChange: 'frozen', memoryWrite: 'frozen' });
+    expect(await probed(true, 'ana')).toMatchObject({ context: { learner: 'bound', mode: 'frozen' }, selfChange: 'frozen', memoryWrite: 'frozen' });
     expect(await probed(undefined, 'ana')).toEqual({ context: undefined, selfChange: 'frozen', memoryWrite: 'frozen' });
   });
 
@@ -5341,28 +5352,28 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
     const lowExtraversion = directiveFor('extraversion', 0.3);
     try {
       const on = await probed();
-      expect(on.read).toEqual({ context: { learner: 'bound', mode: 'on' }, selfChange: undefined, memoryWrite: undefined });
+      expect(on.read).toMatchObject({ context: { learner: 'bound', mode: 'on' }, selfChange: undefined, memoryWrite: undefined });
       expect(on.system).toContain(rowSection);
       expect(on.system).not.toContain(lowExtraversion);
 
       await operator.store.insertFreeze(freezeRow(learnerScope, 'frozen'));
       const frozen = await probed();
-      expect(frozen.read).toEqual({ context: { learner: 'bound', mode: 'frozen' }, selfChange: 'frozen', memoryWrite: 'frozen' });
+      expect(frozen.read).toMatchObject({ context: { learner: 'bound', mode: 'frozen' }, selfChange: 'frozen', memoryWrite: 'frozen' });
       expect(frozen.system).toContain(rowSection);
       expect(frozen.system).not.toContain(lowExtraversion);
 
       await operator.store.deleteFreeze(learnerScope, 'frozen');
       await operator.store.insertFreeze(freezeRow(agentScope, 'off'));
       const suspended = await probed();
-      expect(suspended.read).toEqual({ context: { learner: 'bound', mode: 'off' }, selfChange: 'off', memoryWrite: undefined });
+      expect(suspended.read).toMatchObject({ context: { learner: 'bound', mode: 'off' }, selfChange: 'off', memoryWrite: undefined });
       expect(suspended.system).toContain(renderPersonalitySection(moved)!);
 
       await operator.store.deleteFreeze(agentScope, 'off');
       await operator.store.insertFreeze(freezeRow('all', 'frozen'));
-      expect((await probed()).read).toEqual({ context: { learner: 'bound', mode: 'frozen' }, selfChange: 'frozen', memoryWrite: 'frozen' });
+      expect((await probed()).read).toMatchObject({ context: { learner: 'bound', mode: 'frozen' }, selfChange: 'frozen', memoryWrite: 'frozen' });
 
       await operator.store.deleteFreeze('all', 'frozen');
-      expect((await probed()).read).toEqual({ context: { learner: 'bound', mode: 'on' }, selfChange: undefined, memoryWrite: undefined });
+      expect((await probed()).read).toMatchObject({ context: { learner: 'bound', mode: 'on' }, selfChange: undefined, memoryWrite: undefined });
     } finally {
       await tutor.close();
     }
