@@ -23,8 +23,9 @@ export type PersonalityRegister = 'conversation' | 'writing';
 export const PERSONALITY_SECTION_HEADING = '## Personality & Communication Style';
 
 /**
- * The priority a GMI gives the section among its system prompts: right after the persona's base prompt, which has
- * priority 1 (the prompt engine sorts ascending and keeps order among equals).
+ * The priority a GMI gives the section among its system prompts: after the persona's base prompt when it is a string
+ * or a template, which has priority 1 (the prompt engine sorts ascending and keeps order among equals). The entries of
+ * a base prompt given as a list keep their own priorities, so an entry above 2 comes after the section.
  */
 export const PERSONALITY_PROMPT_PRIORITY = 2;
 
@@ -180,7 +181,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> => !!value &
  * the patch is read back as the difference.) A trait the overlay writes under an alias (`honestyHumility`,
  * `honesty_humility`, `opennessToExperience`) beside the persona's canonical key is read as a patch of that key.
  *
- * @param authored - The registry persona's `personalityTraits`.
+ * @param authored - The registry persona's `personalityTraits` as written, not normalized: an alias the persona writes
+ *   itself beside its canonical key is then no patch.
  * @param resolved - The overlay-resolved persona's `personalityTraits`.
  * @returns The patched traits under canonical keys, or `undefined` when the overlay changes none.
  */

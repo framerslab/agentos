@@ -229,7 +229,8 @@ export class LearnerSession implements ILearnerSession {
   /**
    * Takes the loss of the learner that a deferred session saw on a turn it could not open for
    * ({@link deferLearnerSession}): no turn of this session has a learner from now on, as if the session had been open
-   * at that turn. A session with no learner keeps its own reason.
+   * at that turn, and the layer counts each such turn under the reason. A session with no learner keeps its own
+   * reason. A host's own session that has a method of this name and shape takes the loss the same way.
    *
    * @param reason - Why the turn the deferred session saw has no learner.
    */
@@ -279,7 +280,7 @@ export class LearnerSession implements ILearnerSession {
    * Why this turn has no learner, or `undefined` when it has one. Every turn is read against the session's user and
    * namespace first, a workflow turn included, so a turn of another user or namespace ends the session's learner
    * whatever else it is. A tool continuation carries the GMI's own user (the GMI builds its input), so only its
-   * namespace is read.
+   * namespace is read: a continuation under another organization (a resume whose host passed one) ends it too.
    */
   private noLearnerReasonFor(
     input: Pick<TurnInputForLearning, 'userId' | 'namespace' | 'workflowSeat' | 'continuation'>,
@@ -600,15 +601,16 @@ export class LearnerSession implements ILearnerSession {
 
 /**
  * A learner session whose learner is named at its first turn: the full runtime's GMIs built where the turn's
- * organization is not known yet (a GMI built again for a tool-result resume), and every GMI whose session the layer
- * could not open when it was built. The session opens under the namespace its first turn carries, on every attempt,
- * and every later turn is read against it. While the open fails each turn rejects (the GMI runs it degraded, with no
- * learner), and each turn is read against the first one as the opened session reads it: the first turn of another
- * user (a tool continuation carries the GMI's own user, so only its namespace is read) or of another namespace is
- * remembered, and once the session opens no turn has a learner. A session the layer answers with that cannot take the
- * loss ({@link LearnerSession.adoptLatch}: a host's own) has its later turns answered here with no learner, rendering
- * the authored traits. Before it opens it answers `scopesFor` with the session's own form and no learner, and its
- * recorder and guard try the open and refuse (`store_unavailable`) while it fails.
+ * organization is not known yet (a GMI built again for a tool-result resume), and a session whose open failed. The
+ * session is opened under the namespace its first turn carries, on every attempt, and every later turn is read against
+ * it. A turn the open failed for is read against the first one as the opened session reads it (a tool continuation
+ * carries the GMI's own user, so only its namespace is read): the first such turn of another user or another namespace
+ * is remembered, and once the session opens no turn has a learner. A turn the opened session prepares, one that waited
+ * on the same open included, is read by the session itself, in the order the turns came. A session that cannot take
+ * the loss ({@link LearnerSession.adoptLatch}, a host's own that has no `adoptLatch`) has its later turns answered with
+ * no learner here: a turn it would bind renders the authored traits and files under the session's own form. Before
+ * it opens it answers `scopesFor` with the session's own form and no learner, and its recorder and guard try the open
+ * and refuse (`store_unavailable`) while it fails.
  *
  * @param args.open - Opens the session for the first turn's namespace. A failed open is tried again at the next call,
  *   under the same namespace.
@@ -634,27 +636,22 @@ export function deferLearnerSession(args: {
   let firstNamespace: string | undefined;
   /** The user of the session's first turn that is not a tool continuation. */
   let firstUser: { id: string | null } | undefined;
-  /** Why no turn has a learner since a turn the session could not open for. */
+  /** The loss of the learner the first turn the open failed for, of another user or namespace, carried. */
   let lost: 'other_user' | 'other_namespace' | undefined;
   /** Whether the opened session took `lost` itself. */
   let adopted = false;
   const modeNow = args.mode ?? ((): LearningMode => resolveTurnMode('on').mode);
   const { sessionId, personaId } = args;
 
-  /** Reads a turn the session is not open for against the first one, in the order the opened session reads it. */
-  const note = (turn: { userId: string | null; namespace?: string; continuation?: boolean }): void => {
+  /** Why a turn has no learner by the session's rule, read against the first turn as the opened session reads it. */
+  const ruleOf = (turn: { userId: string | null; namespace?: string; continuation?: boolean }): 'other_user' | 'other_namespace' | undefined => {
     const namespace = turn.namespace ?? '';
     if (firstNamespace === undefined) firstNamespace = namespace;
-    if (lost) return;
     if (!turn.continuation) {
-      if (!firstUser) {
-        firstUser = { id: turn.userId };
-      } else if (turn.userId !== firstUser.id) {
-        lost = 'other_user';
-        return;
-      }
+      if (!firstUser) firstUser = { id: turn.userId };
+      else if (turn.userId !== firstUser.id) return 'other_user';
     }
-    if (namespace !== firstNamespace) lost = 'other_namespace';
+    return namespace !== firstNamespace ? 'other_namespace' : undefined;
   };
 
   /** The session's own form with no learner, under the turn's namespace, else the agent's. */
@@ -671,6 +668,8 @@ export function deferLearnerSession(args: {
     const attempt = Promise.resolve()
       .then(() => args.open(firstNamespace ?? ''))
       .then((inner) => {
+        // The first loss a failed open carried goes to the session as it opens, whichever call opens it (a turn, a
+        // write), so every turn and write after it reads it.
         const adopt = (inner as { adoptLatch?: unknown }).adoptLatch;
         if (lost && typeof adopt === 'function') {
           adopt.call(inner, lost);
@@ -689,22 +688,35 @@ export function deferLearnerSession(args: {
 
   const session: ILearnerSession = {
     async prepareTurn(input: TurnInputForLearning): Promise<TurnPreparation> {
-      if (!opened) note(input);
-      // The loss in force when this turn began: a turn read before it keeps its own answer.
-      const turnLost = lost;
-      const prepared = await (await sessionFor()).prepareTurn(input);
-      if (turnLost && !adopted && prepared && prepared.learner === 'bound') {
-        // The opened session never saw the turn that ended its learner: this turn has none, renders the authored
-        // traits and files under the session's own form.
+      const rule = opened ? undefined : ruleOf(input);
+      let inner: ILearnerSession;
+      try {
+        inner = await sessionFor();
+      } catch (error) {
+        // The open failed for this turn: the session it opens takes the first such loss.
+        lost ??= rule;
+        throw error;
+      }
+      const prepared = await inner.prepareTurn(input);
+      if (!lost || adopted || !prepared) return prepared;
+      // A session that could not take the loss reads the turn by its own rule; the loss is the first and stands over
+      // that reading. A reason the session has whatever the turn (no user id, a placeholder user, no agent key, a
+      // workflow seat) stays.
+      if (prepared.learner === 'bound') {
+        // The session never saw the turn that ended its learner: this turn renders the authored traits and files under
+        // the session's own form.
         const section = renderPersonalitySection(args.traits);
         const scopes = sessionForm(input.namespace, prepared.mode);
         return {
           systemPrompts: section ? [{ content: section, priority: PERSONALITY_PROMPT_PRIORITY, source: 'learning:personality' }] : [],
           learner: 'none',
-          noLearnerReason: turnLost,
+          noLearnerReason: lost,
           mode: prepared.mode,
           ...(scopes ? { scopes } : {}),
         };
+      }
+      if (prepared.noLearnerReason === 'other_user' || prepared.noLearnerReason === 'other_namespace') {
+        return { ...prepared, noLearnerReason: lost };
       }
       return prepared;
     },
@@ -730,7 +742,9 @@ export function deferLearnerSession(args: {
     session.scopesFor = (turn): TurnScopes => {
       // A host's own session that could not take a loss, or that names no scopes, answers with the session's form.
       if (opened && !(lost && !adopted) && opened.scopesFor) return opened.scopesFor(turn);
-      if (!opened) note(turn);
+      // Before the open: the turn's namespace and user are read as the first turn's when it is the first; the turn's
+      // own preparation reads it against the first and keeps the loss when its open fails.
+      if (!opened) ruleOf(turn);
       return sessionForm(turn.namespace, modeNow())!;
     };
   }
