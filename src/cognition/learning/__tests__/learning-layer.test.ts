@@ -47,8 +47,9 @@ describe('a learner session prepares each turn', () => {
       systemPrompts: [{ content: renderPersonalitySection(AUTHORED), priority: 2, source: 'learning:personality' }],
       learner: 'bound',
       mode: 'on',
+      scopes: { learner: 'bound', mode: 'on', userScopeId: 'ana', personaScopeId: 'ana::tutor', namespace: '' },
     });
-    expect(session.currentTraits()).toEqual(AUTHORED);
+    expect(session.currentTraits()).toEqual({ ...AUTHORED, emotionality: 0.5, agreeableness: 0.5, conscientiousness: 0.5, openness: 0.5 });
     await expect(session.endSession()).resolves.toBeUndefined();
     await expect(session.endSession()).resolves.toBeUndefined();
   });
@@ -147,7 +148,7 @@ describe('a session belongs to the user of its first turn, in the namespace it w
   });
 
   it('has no learner after a workflow turn of another user, nor on any turn after it', async () => {
-    // The workflow exclusion never hides a hand-over to another user (D3).
+    // The workflow exclusion never hides a hand-over to another user.
     const session = await open();
     expect(stateOf(await session.prepareTurn(turn()))).toBe('bound');
     expect(stateOf(await session.prepareTurn(turn({ userId: 'bob', workflowSeat: true })))).toBe('other_user');
@@ -204,7 +205,7 @@ describe('the loop manifest', () => {
     expect(manifest.loops.rag).toEqual({ live: false, detail: 'not reported by the host' });
     expect(manifest.loops.personality_rendering).toEqual({ live: true });
     expect(manifest.loops.trait_changes).toEqual({ live: false, detail: 'asked for; this release changes no trait' });
-    expect(manifest.loops.ledger.live).toBe(false);
+    expect(manifest.loops.ledger).toEqual({ live: true, detail: 'in process: the ledger and the state it records end with the process; unkeyed' });
     expect(manifest.guardrails.complete).toBe(false);
     expect(manifest.turns).toEqual({ prepared: 3, bound: 2, none: { no_user_id: 1 } });
     expect(log.mock.calls.filter((call) => String(call[0]).startsWith('[agentos] learning layer manifest: '))).toHaveLength(1);
@@ -278,5 +279,98 @@ describe('a learner session named at its first turn', () => {
     expect(opened).toEqual(['', '']);
     await session.endSession();
     expect(ended).toHaveBeenCalledTimes(1);
+  });
+
+  /** A deferred session over the layer whose first `failures` opens reject; `wrap` stands for a host's own session. */
+  const failingOpens = (failures: number, wrap?: (inner: ILearnerSession) => ILearnerSession) => {
+    quiet();
+    const layer = createLearningLayer();
+    const opened: string[] = [];
+    let left = failures;
+    const session = deferLearnerSession({
+      traits: AUTHORED,
+      open: async (namespace) => {
+        opened.push(namespace);
+        if (left-- > 0) throw new Error('store offline');
+        const inner = await layer.forLearner(key({ namespace }), context());
+        return wrap ? wrap(inner) : inner;
+      },
+    });
+    return { session, opened };
+  };
+
+  it("opens under the first turn's namespace on every attempt", async () => {
+    const { session, opened } = failingOpens(1);
+    await expect(session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow('store offline');
+    expect(stateOf(await session.prepareTurn(turn({ namespace: 'B' })))).toBe('other_namespace');
+    expect(opened).toEqual(['A', 'A']);
+  });
+
+  it('keeps a hand-over to another user or another organization made while it could not open', async () => {
+    const byUser = failingOpens(2);
+    await expect(byUser.session.prepareTurn(turn())).rejects.toThrow('store offline');
+    await expect(byUser.session.prepareTurn(turn({ userId: 'bob' }))).rejects.toThrow('store offline');
+    expect(stateOf(await byUser.session.prepareTurn(turn()))).toBe('other_user');
+    expect(stateOf(await byUser.session.prepareTurn(turn()))).toBe('other_user');
+
+    const byNamespace = failingOpens(2);
+    await expect(byNamespace.session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow('store offline');
+    await expect(byNamespace.session.prepareTurn(turn({ namespace: 'B' }))).rejects.toThrow('store offline');
+    expect(stateOf(await byNamespace.session.prepareTurn(turn({ namespace: 'A' })))).toBe('other_namespace');
+  });
+
+  it("keeps the hand-over for a host's own session, and reads no tool continuation as another user", async () => {
+    // A host's layer answers with a session of its own, which nothing tells what happened before it opened.
+    const hostSession = (inner: ILearnerSession): ILearnerSession => ({
+      prepareTurn: (input) => inner.prepareTurn(input),
+      currentTraits: () => inner.currentTraits(),
+      endSession: () => inner.endSession(),
+    });
+    const { session } = failingOpens(2, hostSession);
+    await expect(session.prepareTurn(turn())).rejects.toThrow('store offline');
+    await expect(session.prepareTurn(turn({ userId: 'bob' }))).rejects.toThrow('store offline');
+    const after = await session.prepareTurn(turn());
+    expect(after).toMatchObject({ learner: 'none', noLearnerReason: 'other_user', mode: 'on' });
+    expect(after.systemPrompts[0].content).toBe(renderPersonalitySection(AUTHORED));
+
+    const continued = failingOpens(1);
+    await expect(continued.session.prepareTurn(turn())).rejects.toThrow('store offline');
+    const continuation = turn({ userId: 'uninitialized-user', text: null, continuation: true });
+    expect(stateOf(await continued.session.prepareTurn(continuation))).toBe('bound');
+    expect(stateOf(await continued.session.prepareTurn(turn()))).toBe('bound');
+  });
+});
+
+describe('a learner session named at its first turn, before it opens', () => {
+  it("answers the session's form with no learner, and refuses a write while it cannot open", async () => {
+    quiet();
+    const session = deferLearnerSession({
+      traits: AUTHORED,
+      sessionId: 's-1',
+      personaId: 'tutor',
+      open: async () => {
+        throw new Error('store offline');
+      },
+    });
+    expect(session.scopesFor!({ userId: 'ana', namespace: '', workflowSeat: false })).toEqual({
+      learner: 'none',
+      mode: 'on',
+      userScopeId: '/s-1',
+      personaScopeId: '/s-1::tutor',
+      namespace: '',
+    });
+    const write = {
+      kind: 'memory_write' as const,
+      actor: 'tool:memory_add',
+      subject: 'mt-1',
+      before: null,
+      after: { created: ['mt-1'], changed: [], deleted: [] },
+      brainId: 'b',
+      apply: async () => 'mt-1',
+      undo: async () => undefined,
+    };
+    expect(await session.recordSelfChange!(write)).toMatchObject({ status: 'rejected', reason: 'store_unavailable' });
+    expect(await session.guardMemoryWrite!({ apply: async () => 1, undo: async () => undefined })).toEqual({ status: 'rejected', reason: 'store_unavailable' });
+    expect(session.isFrozen!()).toBe(false);
   });
 });
