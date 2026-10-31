@@ -78,7 +78,9 @@ import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPer
 import type { IRetrievalAugmentor } from '../../cognition/rag/IRetrievalAugmentor';
 import type { ITool, ToolExecutionContext } from '../../core/tools/ITool';
 import type { ILogger } from '../../core/logging/ILogger';
+import type { ToolOrchestrator } from '../../core/tools/ToolOrchestrator';
 import { checkChainable } from '../../cognition/emergent/StepGate';
+import type { ForgeToolRequest } from '../../cognition/emergent/types';
 import { callTool, makeForgeHost } from '../../cognition/emergent/__tests__/helpers/forge-host';
 import { createSqliteAdapter } from '../../cognition/emergent/__tests__/helpers/sqlite-adapter';
 import { seedToolRow } from '../../cognition/emergent/__tests__/helpers/seed-rows';
@@ -670,6 +672,81 @@ describe('launch_agency on the full runtime', () => {
     expect(searches).toEqual([{ q: 'x' }]);
     expect(asked).toEqual(['search']);
     expect(askedBy).toEqual([`launch:${/"agencyId":"([^"]+)"/.exec(root)?.[1]}`]);
+  });
+
+  it("a composed tool in a seat runs whole under the seat's names and gate", async () => {
+    const searches: unknown[] = [];
+    const sends: unknown[] = [];
+    const asked: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      return { approved: false, reason: 'mail is paused' };
+    };
+    booted = await boot({
+      emergent: true,
+      // search has no side effects and send_email has, so the step gate chains both once send_email is listed.
+      emergentConfig: { compose: { sideEffectingTools: ['send_email'] } },
+      tools: {
+        search: hostTool('search', async (args) => {
+          searches.push(args);
+          return 'found';
+        }),
+        send_email: hostTool('send_email', async (args) => {
+          sends.push(args);
+          return 'sent';
+        }, true),
+      },
+      agencies: { launch: true, hitl: { approvals: { beforeTool: ['send_email'] }, handler } },
+    });
+    // The runtime's emergent engine holds a composition of search and send_email, built over the shared step gate.
+    const engine = (booted.getToolOrchestrator() as ToolOrchestrator).getEmergentEngine()!;
+    const forged = await engine.forge(
+      {
+        name: 'notify',
+        description: 'Looks it up, then emails the team.',
+        inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+        outputSchema: {},
+        implementation: {
+          mode: 'compose',
+          steps: [
+            { name: 'find', tool: 'search', inputMapping: { q: '$input.q' } },
+            { name: 'send', tool: 'send_email', inputMapping: { q: '$input.q' } },
+          ],
+        },
+        // The forge's test runs search and takes send_email's output from the case.
+        testCases: [{ input: { q: 'x' }, expectedOutput: 'sent', stepOutputs: { send: 'sent' } }],
+      } as ForgeToolRequest,
+      { agentId: 'lead', sessionId: 'forge-notify' },
+    );
+    expect(forged).toMatchObject({ success: true });
+    const searchesBeforeLaunch = searches.length;
+
+    provider.replies.push(
+      toolStep(
+        // Without send_email in the allowlist the composition could not run whole.
+        ['launch_agency', { goal: 'Notify.', seats: [{ role: 'mailer', instructions: 'Notify the team.', tools: ['notify', 'search'] }] }],
+        ['launch_agency', { goal: 'Notify.', seats: [{ role: 'mailer', instructions: 'Notify the team.', tools: ['notify', 'search', 'send_email'] }] }],
+      ),
+      toolStep(['notify', { q: 'x' }]),
+      textStep('Mail held.'),
+      textStep('Done.'),
+    );
+    await send(booted, { selectedPersonaId: 'lead', sessionId: 's-lead' });
+    // The lead's last request read both launches' results: the narrow one refused, the wide one completed.
+    const [narrow, wide] = toolMessages(provider.seen[provider.seen.length - 1].messages);
+    expect(narrow).toContain('tool_not_allowed');
+    expect(narrow).toContain("step 'send_email'");
+    expect(wide).toContain('"status":"completed"');
+    // The lead, the mailer's two steps, the lead: the narrow launch ran no seat, and the mailer was offered the
+    // composition and the tools its steps call.
+    expect(provider.seen).toHaveLength(4);
+    expect(provider.seen[1].tools).toEqual(expect.arrayContaining(['notify', 'search', 'send_email']));
+    // The composition ran (its search step did: the precondition); its send_email step was asked once and did not run,
+    // and the mailer read why.
+    expect(searches.length).toBe(searchesBeforeLaunch + 1);
+    expect(asked).toEqual(['send_email']);
+    expect(sends).toEqual([]);
+    expect(toolMessages(provider.seen[2].messages)[0]).toContain('mail is paused');
   });
 });
 
