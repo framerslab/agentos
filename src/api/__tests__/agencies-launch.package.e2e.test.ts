@@ -8,21 +8,35 @@
  * handed, a session's kept messages, the events an agent's callbacks receive, the approvals a host's handler is asked,
  * budgets, warnings and construction errors. On the full runtime (`AgentOS.create()` with `agencies`) the cases read the
  * same, and what the runtime itself shows a host: the agencies it lists, the GMIs its snapshot names, the logger it was
- * given, the approvals its own HITL manager is asked and the errors it starts with.
+ * given, the approvals its own HITL manager is asked and the errors it starts with, and the key and base URL each
+ * provider it starts was given.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // The provider class alone is replaced: the package root reads the module's other exports (its default base URL). It is
 // the repository's stub, and a script that sets `answerWhole` answers each unstreamed call with that text and spends no
 // reply: what the full runtime's own unstreamed calls (an emergent judge's, a parallel team's synthesizer's) receive.
+// Each provider that starts records on its script the key and base URL it was started with, and each unstreamed call it
+// answers records them beside the call's model.
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => {
   const { stubProviderClass } = await import('./helpers/stubProviders');
   const Stub = stubProviderClass('openai');
   class OpenAIProvider extends Stub {
+    /** The key and base URL this provider was started with. */
+    startedWith: StartedWith = {};
+    override async initialize(config: { apiKey?: string; baseURL?: string }): Promise<void> {
+      await super.initialize(config);
+      this.startedWith = {
+        ...(config.apiKey !== undefined ? { apiKey: config.apiKey } : {}),
+        ...(config.baseURL !== undefined ? { baseURL: config.baseURL } : {}),
+      };
+      ((this.script as WholeAnswering).starts ??= []).push({ ...this.startedWith });
+    }
     override async generateCompletion(...args: Parameters<InstanceType<typeof Stub>['generateCompletion']>) {
       const s = this.script as WholeAnswering | undefined;
       const answer = s?.answerWhole;
       if (s === undefined || answer === undefined) return super.generateCompletion(...args);
       (s.wholeSeen ??= []).push(JSON.stringify(args[1]));
+      (s.wholeFrom ??= []).push({ modelId: args[0], ...this.startedWith });
       return {
         id: 'stub',
         object: 'chat.completion',
@@ -65,8 +79,18 @@ import { ComposableToolBuilder, CreateWorkflowTool, checkChainable, createStepGa
 import type { StepGate } from '../../cognition/emergent/index';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 
-/** A script whose provider answers unstreamed calls itself (see the provider mock above), and those calls' messages. */
-type WholeAnswering = ProviderScript & { answerWhole?: string; wholeSeen?: string[] };
+/** The key and base URL a provider was started with, each when it was given one. */
+type StartedWith = { apiKey?: string; baseURL?: string };
+/**
+ * A script whose provider answers unstreamed calls itself (see the provider mock above), and those calls' messages; for
+ * each of those calls its model and what its provider was started with; and each start of a provider that plays it.
+ */
+type WholeAnswering = ProviderScript & {
+  answerWhole?: string;
+  wholeSeen?: string[];
+  wholeFrom?: Array<{ modelId: string } & StartedWith>;
+  starts?: StartedWith[];
+};
 
 let n = 0;
 const key = () => `k-agencies-package-${++n}`;
@@ -3301,5 +3325,113 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
     const launchWarnings = warnings.filter(({ message }) => message.startsWith('[AgentOS] launch_agency'));
     expect(launchWarnings.map(({ message }) => message)).toEqual(['[AgentOS] launch_agency run failed']);
     expect(launchWarnings[0].meta).toEqual({ error: expect.objectContaining({ name: 'WebhookError', message: expect.stringContaining(canary) }) });
+  });
+
+  it("a launched team's manager and synthesizer go out under the key and base URL of the runtime's entry for their provider, the one its own provider runs on, before the environment's; a coordinator the host names takes that pair when it names neither, and keeps a key or a base URL it names without the entry's", async () => {
+    // A provider's key picks the script it plays, so a call shows the key it went out under; the base URL is what the
+    // provider was started with. The environment holds no key and no base URL until a step sets one.
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('OPENAI_BASE_URL', '');
+    try {
+      /** The manager's call a script's provider answered: its model, and the key and base URL that provider started with. */
+      const managerCall = (played: WholeAnswering) => {
+        const i = (played.wholeSeen ?? []).findIndex((messages) => messages.includes('You are a manager agent'));
+        return i < 0 ? undefined : played.wholeFrom?.[i];
+      };
+      const hierarchical = (id: string) => launchStep({ goal: 'Decide.', strategy: 'hierarchical', seats: [{ role: 'checker', personaId: 'checker' }] }, id);
+      const entry = (apiKey: string, extra: Record<string, unknown> = {}, enabled = true) => ({ providerId: 'openai', enabled, isDefault: true, config: { apiKey, ...extra } });
+
+      // The runtime's one entry names a key and a base URL, and the host names no coordinator: the hierarchical manager
+      // goes out under the entry's key, to its base URL, on the lead's model, and its answer completes the launch.
+      const k = key();
+      const url = 'https://llm.example.test/v1';
+      const s = answerWhole(script('openai', k, { replies: [hierarchical('h1'), reply.text('Done.')] }), 'Decided by the manager.');
+      const os = await startRuntime(k, { modelProviderManagerConfig: { providers: [entry(k, { baseURL: url })] } });
+      await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-key-1' });
+      // The lead's two requests (the precondition): the manager answered without delegating.
+      expect(s.seen).toHaveLength(2);
+      const decided = launchedIn(s.seen[1], 'h1');
+      expect(decided).toMatchObject({ status: 'completed', text: 'Decided by the manager.' });
+      expect(managerCall(s)).toEqual({ modelId: 'stub-model', apiKey: k, baseURL: url });
+      // The manager's calls are the coordinator's, charged to the launch's budget.
+      expect(decided.coordinatorUsage.totalTokens).toBeGreaterThan(0);
+      expect(decided.provenance.budget.tokensUsed).toBeGreaterThanOrEqual(decided.coordinatorUsage.totalTokens);
+
+      // With a key in the environment too, a parallel team's synthesizer goes out under the entry's key and base URL.
+      const kEnv = key();
+      const fromEnv = answerWhole(script('openai', kEnv), "Answered under the environment's key.");
+      vi.stubEnv('OPENAI_API_KEY', kEnv);
+      s.answerWhole = 'Two answers in one.';
+      s.replies.push(
+        launchStep({ goal: 'Two views.', strategy: 'parallel', seats: [{ role: 'a', instructions: 'Give view A.' }, { role: 'b', instructions: 'Give view B.' }] }, 'p1'),
+        reply.text('View A.'),
+        reply.text('View B.'),
+        reply.text('Done.'),
+      );
+      await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-key-2' });
+      // The lead, the two seats, the lead (the precondition).
+      expect(s.seen).toHaveLength(6);
+      expect(launchedIn(s.seen[5], 'p1')).toMatchObject({ status: 'completed', text: 'Two answers in one.' });
+      const synthesis = (s.wholeSeen ?? []).findIndex((messages) => messages.includes('Synthesize these into a single coherent response.'));
+      expect(synthesis).toBeGreaterThanOrEqual(0);
+      expect(s.wholeFrom?.[synthesis]).toEqual({ modelId: 'stub-model', apiKey: k, baseURL: url });
+      expect(fromEnv.wholeSeen ?? []).toEqual([]);
+
+      // The runtime's own provider runs on its last enabled entry for the provider, a disabled one passed over, and the
+      // manager takes that entry's pair; a coordinator the host names with neither a key nor a base URL takes it too,
+      // on the coordinator's own model.
+      vi.stubEnv('OPENAI_API_KEY', '');
+      const [kOff, kFirst, kLast] = [key(), key(), key()];
+      const urlLast = 'https://last.example.test/v1';
+      const off: WholeAnswering = script('openai', kOff);
+      const first = answerWhole(script('openai', kFirst), 'Answered under the first entry.');
+      const last = answerWhole(script('openai', kLast, { replies: [hierarchical('h2'), reply.text('Done.')] }), "Decided on the coordinator's model.");
+      const os2 = await startRuntime(kLast, {
+        modelProviderManagerConfig: { providers: [entry(kOff, { baseURL: 'https://off.example.test/v1' }, false), entry(kFirst), entry(kLast, { baseURL: urlLast })] },
+        agencies: { launch: true, coordinator: { provider: 'openai', model: 'coordinator-model' } },
+      });
+      await runTurn(os2, { selectedPersonaId: 'lead', sessionId: 'r-key-3' });
+      // The lead ran on the last entry and the disabled entry's provider never started (the preconditions).
+      expect(last.seen).toHaveLength(2);
+      expect(off.starts ?? []).toEqual([]);
+      expect(launchedIn(last.seen[1], 'h2')).toMatchObject({ status: 'completed', text: "Decided on the coordinator's model." });
+      expect(managerCall(last)).toEqual({ modelId: 'coordinator-model', apiKey: kLast, baseURL: urlLast });
+      expect(first.wholeSeen ?? []).toEqual([]);
+
+      // A coordinator that names its own key keeps it, and takes no base URL of the entry's.
+      const [kRun, kOwn] = [key(), key()];
+      const run = answerWhole(script('openai', kRun, { replies: [hierarchical('h3'), reply.text('Done.')] }), "Answered under the runtime's key.");
+      const own = answerWhole(script('openai', kOwn), "Decided under the coordinator's key.");
+      const os3 = await startRuntime(kRun, {
+        modelProviderManagerConfig: { providers: [entry(kRun, { baseURL: 'https://run.example.test/v1' })] },
+        agencies: { launch: true, coordinator: { provider: 'openai', model: 'stub-model', apiKey: kOwn } },
+      });
+      await runTurn(os3, { selectedPersonaId: 'lead', sessionId: 'r-key-4' });
+      expect(run.seen).toHaveLength(2);
+      expect(launchedIn(run.seen[1], 'h3')).toMatchObject({ status: 'completed', text: "Decided under the coordinator's key." });
+      expect(managerCall(own)).toEqual({ modelId: 'stub-model', apiKey: kOwn });
+      expect(managerCall(run)).toBeUndefined();
+
+      // A coordinator that names its own base URL takes no key of the entry's: the key is the one generateText resolves
+      // for a call that names none, here the environment's, so the runtime's key never goes to a base URL the host did
+      // not name with it.
+      vi.stubEnv('OPENAI_API_KEY', kEnv);
+      fromEnv.answerWhole = "Decided under the environment's key.";
+      const kRun2 = key();
+      const mine = 'https://mine.example.test/v1';
+      const run2 = answerWhole(script('openai', kRun2, { replies: [hierarchical('h4'), reply.text('Done.')] }), "Answered under the runtime's key.");
+      const os4 = await startRuntime(kRun2, {
+        modelProviderManagerConfig: { providers: [entry(kRun2, { baseURL: 'https://run2.example.test/v1' })] },
+        agencies: { launch: true, coordinator: { provider: 'openai', model: 'stub-model', baseUrl: mine } },
+      });
+      await runTurn(os4, { selectedPersonaId: 'lead', sessionId: 'r-key-5' });
+      expect(run2.seen).toHaveLength(2);
+      expect(launchedIn(run2.seen[1], 'h4')).toMatchObject({ status: 'completed', text: "Decided under the environment's key." });
+      expect(managerCall(fromEnv)).toEqual({ modelId: 'stub-model', apiKey: kEnv, baseURL: mine });
+      expect((run2.starts ?? []).filter((start) => start.baseURL === mine)).toEqual([]);
+      expect(managerCall(run2)).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
