@@ -376,8 +376,9 @@ export class JsonImporter {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
     for (const t of liveRecordsFirst(traces, isForgottenRecord)) {
-      if (t.id) context.sourceTraceIds.add(t.id);
       try {
+        // A record that is not an object fails here, as an error of its own.
+        if (t.id) context.sourceTraceIds.add(t.id);
         const hash = await this._sha256(t.content);
         const sourceId = t.id;
         const scope = t.scope ?? 'user';

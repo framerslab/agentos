@@ -282,8 +282,8 @@ export class SqliteImporter {
     const updateTimestampSql = `UPDATE memory_traces SET created_at = ?, tags = ? WHERE brain_id = ? AND id = ?`;
 
     for (const row of liveRecordsFirst(sourceRows, isForgottenRecord)) {
-      if (row.id) seen.add(row.id);
       try {
+        if (row.id) seen.add(row.id);
         const hash = await this._sha256(row.content);
         const scope = row.scope ?? 'user';
 
