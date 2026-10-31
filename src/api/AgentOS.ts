@@ -779,8 +779,8 @@ export interface AgentOSConfig {
   observability?: AgentOSObservabilityConfig;
 
   /**
-   * The learning layer (docs/GMI.md, "Learning"). Unset or `false`: off, and the runtime's GMIs run as they did
-   * before the layer existed. `true` or a {@link LearningConfig}: every GMI sends its persona's personality section
+   * The learning layer (docs/GMI.md, "Learning"). Unset, `false` or `null`: off, and the runtime's GMIs run as they
+   * did before the layer existed. `true` or a {@link LearningConfig}: every GMI sends its persona's personality section
    * as a system prompt of its own on every turn, and each session is bound to a learner: its persona with the user
    * and the resolved organization of its first turn. `namespace` is refused here, because the runtime takes the
    * organization from each turn. A host that built a layer itself passes it in `gmiManagerConfig.learningLayer`
@@ -1825,20 +1825,22 @@ export class AgentOS implements IAgentOS {
   /**
    * Checks the `learning` option before any service starts: a `LearningConfig` must be valid, `learning.namespace`
    * is refused (the runtime takes each turn's resolved organization), and `learning` and
-   * `gmiManagerConfig.learningLayer` are not both set (the manager takes one layer).
+   * `gmiManagerConfig.learningLayer` are not both set (the manager takes one layer). `learning: null`, and a field set
+   * to `null`, read as unset, as a config read from JSON or YAML writes them.
    *
    * @throws {AgentOSServiceError} With `CONFIGURATION_ERROR`, naming the option.
    */
   private assertLearningConfig(config: AgentOSConfig): void {
-    const option = config.learning;
-    if (option === undefined || option === false) return;
+    const option = config.learning as boolean | LearningConfig | null | undefined;
+    if (option === undefined || option === null || option === false) return;
     const refuse = (message: string): never => {
       throw new AgentOSServiceError(message, GMIErrorCode.CONFIGURATION_ERROR, undefined, 'AgentOS.initialize');
     };
     if (config.gmiManagerConfig?.learningLayer) {
       refuse('Both learning and gmiManagerConfig.learningLayer are set; set one.');
     }
-    if (option !== true && (option as LearningConfig | null)?.namespace !== undefined) {
+    const namespace = option === true ? undefined : (option as { namespace?: unknown }).namespace;
+    if (namespace !== undefined && namespace !== null) {
       refuse("learning.namespace is read by gmi() only; the runtime takes each turn's resolved organizationId.");
     }
     try {
@@ -1854,9 +1856,10 @@ export class AgentOS implements IAgentOS {
    * the one the host passed in `gmiManagerConfig.learningLayer`, or none.
    */
   private resolveLearningLayer(): ILearningLayer | undefined {
-    const option = this.config.learning;
+    const option = this.config.learning as boolean | LearningConfig | null | undefined;
     this.ownsLearningLayer = false;
-    if (option === undefined || option === false) return this.config.gmiManagerConfig.learningLayer;
+    // Unset, null or false: no layer of the runtime's own.
+    if (option === undefined || option === null || option === false) return this.config.gmiManagerConfig.learningLayer;
     const layer = createLearningLayer({
       ...(option === true ? {} : option),
       profile: 'custom',

@@ -70,7 +70,15 @@ import {
   parseTraceMetadata,
   readPersistedDecayState,
   withPersistedDecayState,
+  writeTraceSnapshot,
+  deleteTraceRows,
+  holdsEncodedScopeIdForm,
+  readTraceSnapshot,
+  traceNamesUser,
+  type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
+import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
+import { refileBrainScopeIds, snapshotInEncodedForm, takeScopeIdFormLock } from '../../retrieval/store/scopeIdForm.js';
 import { SqlKnowledgeGraph } from '../../retrieval/store/SqlKnowledgeGraph.js';
 import { SqlMemoryGraph } from '../../retrieval/store/SqlMemoryGraph.js';
 import { ChunkingEngine } from '../ingestion/ChunkingEngine.js';
@@ -477,16 +485,22 @@ export class Memory {
     const type = options?.type ?? 'episodic';
     const scope = options?.scope ?? 'user';
     const scopeId = options?.scopeId ?? '';
-    const existing = await this._findExistingTraceByHash(contentHash, type, scope, scopeId);
+    const declaredUser = options?.metadata?.turnUserId;
+    const turnUserId = typeof declaredUser === 'string' ? declaredUser : '';
+    const existing = await this._findExistingTraceByHash(contentHash, type, scope, scopeId, turnUserId);
     if (existing) {
       return this._buildTrace(existing);
     }
 
-    const id = nextTraceId();
+    const id = typeof options?.id === 'string' && options.id !== '' ? options.id : nextTraceId();
     const now = Date.now();
     const tags = options?.tags ?? [];
     const entities = options?.entities ?? [];
     const importance = options?.importance ?? 1.0;
+    // The caller's keys go under the facade's own, which win.
+    const metadata = JSON.stringify(
+      buildInitialTraceMetadata({ ...(options?.metadata ?? {}) }, { contentHash, entities, scopeId }),
+    );
 
     // Generate embedding if embed function is available.
     let embeddingBlob: Uint8Array | null = null;
@@ -517,7 +531,7 @@ export class Memory {
         now,
         JSON.stringify(tags),
         JSON.stringify({}),
-        JSON.stringify(buildInitialTraceMetadata({}, { contentHash, entities, scopeId })),
+        metadata,
         scopeId,
       ],
     );
@@ -591,7 +605,7 @@ export class Memory {
       retrieval_count: 0,
       tags: JSON.stringify(tags),
       emotions: JSON.stringify({}),
-      metadata: JSON.stringify(buildInitialTraceMetadata({}, { contentHash, entities, scopeId })),
+      metadata,
       deleted: 0,
     });
   }
@@ -823,7 +837,9 @@ export class Memory {
    * Soft-delete a memory trace by setting `deleted = 1`.
    *
    * The trace remains in the database for audit/recovery purposes but is
-   * excluded from all recall queries and health reports.
+   * excluded from all recall queries and health reports. Its knowledge-graph
+   * copy goes ({@link deleteGraphCopies}), so its words do not stay in the
+   * graph.
    *
    * @param traceId - The ID of the trace to forget.
    */
@@ -834,6 +850,175 @@ export class Memory {
       'UPDATE memory_traces SET deleted = 1 WHERE brain_id = ? AND id = ?',
       [this._brain.brainId, traceId],
     );
+    await this.deleteGraphCopies([traceId]);
+  }
+
+  /**
+   * Deletes the knowledge-graph copies of the given traces and leaves the traces: the episodic record a memory
+   * manager on this facade's Brain writes of each trace it stores (`SqlKnowledgeGraph.recordMemory`). A soft delete
+   * calls it ({@link forget}, and the memory tools' `memory_delete` and `memory_merge`), so a deleted trace's words do
+   * not stay in the graph; a trace a revert brings back needs no copy, since no recall reads one. Best-effort: a graph
+   * that cannot be reached leaves its copies, which a later delete by trace id or by scope finds.
+   *
+   * @returns How many copies it deleted.
+   */
+  async deleteGraphCopies(traceIds: readonly string[]): Promise<number> {
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    if (ids.length === 0) return 0;
+    try {
+      return await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+    } catch {
+      return 0;
+    }
+  }
+
+  /** The id of the brain this facade reads and writes; a ledger row names it for the writes it records. */
+  get brainId(): string {
+    return this._brain.brainId;
+  }
+
+  /**
+   * Deletes every trace of one scope for good: the rows, their memory-graph nodes and knowledge-graph copies, and
+   * the full-text index entries. With `turnUserId`, only the scope's traces whose metadata names that user, as the
+   * second user a memory write on another user's session records, or among the contributors of a summary the
+   * rolling-summary sink filed. Account deletion calls it.
+   *
+   * It reads the rows by their `scope_id` column, after filing the brain's rows that hold `''` there while their
+   * metadata names a scope id: a release older than the column writes those, to a Brain this facade holds open too.
+   *
+   * @throws TypeError when `scopeId` is empty, so a caller's missing id never deletes every trace filed under no scope
+   *   id, or when `turnUserId` is given and is not a non-empty string.
+   */
+  async deleteScope(scope: string, scopeId: string, options: { turnUserId?: string } = {}): Promise<{ deleted: number }> {
+    if (typeof scopeId !== 'string' || scopeId === '') {
+      throw new TypeError('Memory.deleteScope: scopeId must be a non-empty string');
+    }
+    const only = options.turnUserId;
+    if (only !== undefined && (typeof only !== 'string' || only === '')) {
+      throw new TypeError('Memory.deleteScope: turnUserId must be a non-empty string');
+    }
+    await this._initPromise;
+    await fillScopeIds(this._brain.adapter, this._brain.brainId);
+    const rows = await this._brain.all<{ id: string; metadata: string | null }>(
+      'SELECT id, metadata FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?',
+      [this._brain.brainId, scope, scopeId],
+    );
+    const ids = rows
+      .filter((row) => only === undefined || traceNamesUser(row.metadata, only))
+      .map((row) => row.id);
+    const result = await this.deleteTraces(ids);
+    if (only === undefined) {
+      try {
+        await this._knowledgeGraph.deleteMemories({ scopes: [{ scope, scopeId }] });
+      } catch {
+        // The per-trace deletes above took each trace's own copy.
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Deletes the given traces for good, as {@link deleteScope} does for a scope. The rows that name a trace go first,
+   * as the Brain's foreign keys require: its `retrieval_feedback` rows are deleted, and a `document_chunks` row it was
+   * filed from lets go of it and keeps its text. Each trace's memory-graph node goes with its edges, whichever facade
+   * on the Brain wrote them, a relation a host made to the node ({@link addRelation}) included. Unknown ids are
+   * skipped.
+   *
+   * @returns How many trace rows it deleted, so a call made again counts none.
+   */
+  async deleteTraces(traceIds: readonly string[]): Promise<{ deleted: number }> {
+    await this._initPromise;
+    const ids = [...new Set(traceIds)];
+    if (ids.length === 0) return { deleted: 0 };
+    const deleted = await deleteTraceRows(this._brain, this._brain.brainId, ids);
+    for (const id of ids) {
+      try {
+        await this._memoryGraph.removeNode(id);
+      } catch {
+        // A node whose delete fails stays, holding no words of the trace; its trace is gone.
+      }
+      this._hnswSidecar?.remove(id);
+    }
+    try {
+      await this._knowledgeGraph.deleteMemories({ traceIds: ids });
+    } catch {
+      // Non-critical, as for the store's deletes.
+    }
+    // Postgres keeps the index in each row's own column, which went with the row.
+    if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFtsIndex();
+    return { deleted };
+  }
+
+  /**
+   * Brings one trace back to the state a snapshot holds (`readTraceSnapshot`): its content, tags, scope and
+   * metadata, live again. A ledger revert of a memory tool's update, delete or merge calls it with the before-state
+   * its row recorded; a revert of an add calls {@link forget}. The full-text index then matches the restored words:
+   * SQLite rebuilds its index, and Postgres re-indexes the restored row alone.
+   *
+   * A snapshot read before the Brain was re-filed in the encoded scope-id form ({@link ensureEncodedScopeIds}) is
+   * written under the encoded id, as the re-file wrote the row: once the Brain holds the record, the plain form of an
+   * id that holds a `/` names a namespaced user (`team/ana` is user `ana` of namespace `team`), so the trace stays the
+   * plain user's. On Postgres the restore reads the record under the lock a re-file takes, so a re-file another process
+   * makes meanwhile comes before or after it.
+   *
+   * @throws When the snapshot is of another trace.
+   */
+  async restoreTrace(traceId: string, before: TraceSnapshot): Promise<void> {
+    await this._initPromise;
+    if (before.id !== traceId) {
+      throw new Error(`Memory.restoreTrace: the snapshot of trace ${before.id} cannot restore ${traceId}`);
+    }
+    const { dialect } = this._brain.features;
+    const brainId = this._brain.brainId;
+    await this._brain.transaction(async (trx) => {
+      let snapshot = before;
+      if (before.scopeIdForm === 'plain') {
+        if (dialect.name === 'postgres') await takeScopeIdFormLock(trx, brainId);
+        if (await holdsEncodedScopeIdForm(trx, brainId)) snapshot = snapshotInEncodedForm(before);
+      }
+      await writeTraceSnapshot(trx, dialect.insertOrReplace.bind(dialect), brainId, snapshot);
+    });
+    if (dialect.name === 'postgres') {
+      // The index is the row's own `_tsv` column, which the upsert leaves as it was: re-index the restored row alone.
+      try {
+        const rebuild = this._brain.fullTextRebuild();
+        await this._brain.run(`${rebuild.sql} AND id = ?`, [...rebuild.params, traceId]);
+      } catch {
+        // Best-effort, as every full-text sync of the facade is; an open fills a column left null.
+      }
+      return;
+    }
+    await this._rebuildFtsIndex();
+  }
+
+  /**
+   * Re-files this facade's Brain in the encoded form a learning layer reads, once per Brain
+   * (`refileBrainScopeIds`); every live `MemoryStore` on the Brain in this process then moves what it holds of the
+   * traces the re-file moved. The layer calls it when it is first handed the facade.
+   *
+   * @returns How many traces it moved: none when the Brain held the record already.
+   */
+  async ensureEncodedScopeIds(): Promise<number> {
+    await this._initPromise;
+    const { moved } = await refileBrainScopeIds(this._brain);
+    return moved.reduce((sum, pair) => sum + pair.traces, 0);
+  }
+
+  /** One row of this facade's Brain as a snapshot, live or deleted; `undefined` when there is none. */
+  async readTrace(traceId: string): Promise<TraceSnapshot | undefined> {
+    await this._initPromise;
+    return readTraceSnapshot(this._brain, this._brain.brainId, traceId);
+  }
+
+  /** How many live traces one scope holds in this facade's Brain. */
+  async countScope(scope: string, scopeId: string): Promise<number> {
+    await this._initPromise;
+    const row = await this._brain.get<{ n: number | string }>(
+      'SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ? AND deleted = 0',
+      [this._brain.brainId, scope, scopeId],
+    );
+    return Number(row?.n ?? 0);
   }
 
   /**
@@ -1489,15 +1674,23 @@ export class Memory {
    * }
    * ```
    *
+   * Where a learning layer puts a turn's scope ids on a call, the tools file
+   * and read under them and record each write in the layer's ledger, and
+   * `memory_reflect` refuses (`withdrawn`); a host that registers the tools
+   * itself leaves `memory_reflect` out (`includeReflect: false`).
+   *
    * When self-improvement is disabled, `memory_reflect` is omitted because
    * there is no backing {@link ConsolidationLoop} instance.
    */
   createTools(options?: { includeReflect?: boolean }): ITool[] {
+    // The four tools that write delete a trace's knowledge-graph copy with it, and take back a write a learning layer
+    // does not keep, through this facade, so a trace's memory-graph node, index entry and knowledge-graph copy go with
+    // its row.
     const tools: ITool[] = [
-      new MemoryAddTool(this._brain),
-      new MemoryUpdateTool(this._brain),
-      new MemoryDeleteTool(this._brain),
-      new MemoryMergeTool(this._brain),
+      new MemoryAddTool(this._brain, this),
+      new MemoryUpdateTool(this._brain, this),
+      new MemoryDeleteTool(this._brain, this),
+      new MemoryMergeTool(this._brain, this),
       new MemorySearchTool(this._brain),
     ];
 
@@ -1656,6 +1849,7 @@ export class Memory {
       type: row.type as MemoryTrace['type'],
       scope: row.scope as MemoryTrace['scope'],
       scopeId,
+      ...(typeof metadata.turnUserId === 'string' && metadata.turnUserId ? { turnUserId: metadata.turnUserId } : {}),
       content: row.content,
       entities,
       tags,
@@ -1695,13 +1889,19 @@ export class Memory {
    *
    * Checks both the facade-native `content_hash` metadata key and the
    * importer-used `import_hash` key so dedup works across facade and import
-   * workflows. Another brain's trace of the same text is not a duplicate.
+   * workflows. Another brain's trace of the same text is not a duplicate, and
+   * neither is a trace another user filed (`metadata.turnUserId`): a second
+   * user's words stay a trace of their own beside the same words of the
+   * session's owner, so a deletion of either user's traces leaves the other's.
+   *
+   * @param turnUserId - The second user the new trace is filed for, or `''`.
    */
   private async _findExistingTraceByHash(
     contentHash: string,
     type: string,
     scope: string,
     scopeId: string,
+    turnUserId: string,
   ): Promise<TraceRow | undefined> {
     const { dialect } = this._brain.features;
     const row = await this._brain.get<TraceRow>(
@@ -1713,12 +1913,13 @@ export class Memory {
          AND type = ?
          AND scope = ?
          AND ${dialect.ifnull(dialect.jsonExtract('metadata', '$.scopeId'), "''")} = ?
+         AND ${dialect.ifnull(dialect.jsonExtract('metadata', '$.turnUserId'), "''")} = ?
          AND (
            ${dialect.jsonExtract('metadata', '$.content_hash')} = ?
            OR ${dialect.jsonExtract('metadata', '$.import_hash')} = ?
          )
        LIMIT 1`,
-      [this._brain.brainId, type, scope, scopeId, contentHash, contentHash],
+      [this._brain.brainId, type, scope, scopeId, turnUserId, contentHash, contentHash],
     );
     return row ?? undefined;
   }

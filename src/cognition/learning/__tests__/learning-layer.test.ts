@@ -47,8 +47,9 @@ describe('a learner session prepares each turn', () => {
       systemPrompts: [{ content: renderPersonalitySection(AUTHORED), priority: 2, source: 'learning:personality' }],
       learner: 'bound',
       mode: 'on',
+      scopes: { learner: 'bound', mode: 'on', userScopeId: 'ana', personaScopeId: 'ana::tutor', namespace: '' },
     });
-    expect(session.currentTraits()).toEqual(AUTHORED);
+    expect(session.currentTraits()).toEqual({ ...AUTHORED, emotionality: 0.5, agreeableness: 0.5, conscientiousness: 0.5, openness: 0.5 });
     await expect(session.endSession()).resolves.toBeUndefined();
     await expect(session.endSession()).resolves.toBeUndefined();
   });
@@ -204,7 +205,7 @@ describe('the loop manifest', () => {
     expect(manifest.loops.rag).toEqual({ live: false, detail: 'not reported by the host' });
     expect(manifest.loops.personality_rendering).toEqual({ live: true });
     expect(manifest.loops.trait_changes).toEqual({ live: false, detail: 'asked for; this release changes no trait' });
-    expect(manifest.loops.ledger.live).toBe(false);
+    expect(manifest.loops.ledger).toEqual({ live: true, detail: 'in process: the ledger and the state it records end with the process; unkeyed' });
     expect(manifest.guardrails.complete).toBe(false);
     expect(manifest.turns).toEqual({ prepared: 3, bound: 2, none: { no_user_id: 1 } });
     expect(log.mock.calls.filter((call) => String(call[0]).startsWith('[agentos] learning layer manifest: '))).toHaveLength(1);
@@ -222,6 +223,18 @@ describe('the loop manifest', () => {
     await layer.close();
     await expect(layer.forLearner(key(), context())).rejects.toThrow('The learning layer is closed.');
     expect(() => createLearningLayer({ mode: 'sideways' as never })).toThrow(/learning\.mode/);
+  });
+
+  it('reads an option set to null as unset, as one read from JSON or YAML writes it, so each default stands', async () => {
+    quiet();
+    const nulls = { profile: null, surface: null, hostLoops: null, mode: null, agentKey: null, namespace: null, anonymousUserIds: null };
+    const layer = createLearningLayer(nulls as never);
+    const session = await layer.forLearner(key(), context());
+    expect(stateOf(await session.prepareTurn(turn()))).toBe('bound');
+    const manifest = await layer.manifest();
+    expect(manifest).toMatchObject({ surface: 'custom', profile: 'custom', mode: 'on', modeSetBy: 'config' });
+    expect(manifest.loops.rag).toEqual({ live: false, detail: 'not reported by the host' });
+    expect(manifest.loops.trait_changes).toEqual({ live: false, detail: 'switched off' });
   });
 });
 
@@ -358,5 +371,49 @@ describe('a learner session named at its first turn', () => {
     release();
     expect(stateOf(await owner)).toBe('bound');
     expect(stateOf(await other)).toBe('other_user');
+  });
+
+  it("reads the first user an outage saw after a tool continuation against the learner of the session it opens", async () => {
+    // A GMI built again for a tool-result resume: its first turn continues a tool call, and carries the GMI's user.
+    const { session } = failingOpens(2);
+    const continuation = turn({ userId: 'uninitialized-user', text: null, continuation: true });
+    await expect(session.prepareTurn(continuation)).rejects.toThrow('store offline');
+    await expect(session.prepareTurn(turn({ userId: 'bob' }))).rejects.toThrow('store offline');
+    // The session opens for ana, on whose session bob spoke while it could not open.
+    expect(stateOf(await session.prepareTurn(turn()))).toBe('other_user');
+  });
+});
+
+describe('a learner session named at its first turn, before it opens', () => {
+  it("answers the session's form with no learner, and refuses a write while it cannot open", async () => {
+    quiet();
+    const session = deferLearnerSession({
+      traits: AUTHORED,
+      sessionId: 's-1',
+      personaId: 'tutor',
+      open: async () => {
+        throw new Error('store offline');
+      },
+    });
+    expect(session.scopesFor!({ userId: 'ana', namespace: '', workflowSeat: false })).toEqual({
+      learner: 'none',
+      mode: 'on',
+      userScopeId: '/s-1',
+      personaScopeId: '/s-1::tutor',
+      namespace: '',
+    });
+    const write = {
+      kind: 'memory_write' as const,
+      actor: 'tool:memory_add',
+      subject: 'mt-1',
+      before: null,
+      after: { created: ['mt-1'], changed: [], deleted: [] },
+      brainId: 'b',
+      apply: async () => 'mt-1',
+      undo: async () => undefined,
+    };
+    expect(await session.recordSelfChange!(write)).toMatchObject({ status: 'rejected', reason: 'store_unavailable' });
+    expect(await session.guardMemoryWrite!({ apply: async () => 1, undo: async () => undefined })).toEqual({ status: 'rejected', reason: 'store_unavailable' });
+    expect(session.isFrozen!()).toBe(false);
   });
 });

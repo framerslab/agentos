@@ -415,6 +415,7 @@ export async function* runGmiTurn(
       content: input as GMITurnInput['content'],
       metadata: {
         providerUserId: deps.providerUserId ?? null,
+        ...(deps.providerUserId === undefined ? { noTurnUser: true } : {}),
         ...(deps.memoryScope ? { memoryScope: deps.memoryScope } : {}),
         ...(turn.launchFrame ? { agencyLaunch: turn.launchFrame } : {}),
         options: {

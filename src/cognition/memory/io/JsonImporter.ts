@@ -19,6 +19,29 @@
  * (`memoryGraphNodeImport`): the node of a record merged into another trace is
  * skipped, with the edges that name it.
  *
+ * A trace's episodic copy written under another node id than its trace's key
+ * (an export from a release older than keyed copies, or a copy whose key the
+ * brain's own copy of the trace holds, written under a new id) is filed under
+ * the key once the edges are in, with the relations that name it, so a delete
+ * by its trace id finds it (`keyTraceCopies`); a copy whose key the brain's own
+ * copy holds is deleted. A trace's copy comes in with its trace alone: the copy
+ * of a trace the import merges into a trace the brain holds, writes under
+ * another id because its id names another trace, or does not write, is
+ * skipped, with the edges that name it.
+ *
+ * A Brain a learning layer serves holds its plain `user` and `persona` scope
+ * ids in the encoded form (`scopeIdForm.ts`), and its export's `meta` names
+ * the record (`scope_id_form`). An export without it is in the plain form, and
+ * so is one with it whose `user` and `persona` scope ids, in its traces and
+ * its knowledge-graph copies, hold none of `/`, `%` and `:`, since they read
+ * the same in both forms: a Brain without the record then stays without it.
+ * Into a Brain that holds the record, a plain export's ids are encoded as they
+ * are written, each trace's knowledge-graph copy with it. An export with the
+ * record goes into a Brain without it, which then gets the record, unless that
+ * Brain holds a plain id the record would read as another, in a trace or a
+ * copy: then nothing is imported and `errors` names the record. The Brain's
+ * form is read in the transaction the import writes in.
+ *
  * @module memory/io/JsonImporter
  */
 
@@ -31,13 +54,24 @@ import {
   duplicateTraceCondition,
   duplicateTraceParams,
   importedScopeId,
+  importedTurnUserId,
   isForgottenRecord,
   liveRecordsFirst,
   MEMORY_GRAPH_NODE_TYPE,
   memoryGraphNodeImport,
 } from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { keyTraceCopies, storedCopyTraceId } from '../retrieval/store/SqlKnowledgeGraph.js';
 import { parseTraceMetadata } from '../retrieval/store/tracePersistence.js';
+import {
+  ENCODED_SCOPE_ID_FORM,
+  encodedCopyProperties,
+  encodePlainScopeId,
+  holdsScopeIdsTheFormChanges,
+  importScopeIdFormDecision,
+  SCOPE_ID_FORM_KEY,
+  writeScopeIdFormRecord,
+} from '../retrieval/store/scopeIdForm.js';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -159,12 +193,20 @@ interface MessageRecord {
 
 interface ImportContext {
   dedup: boolean;
+  /**
+   * Encode the source's plain user and persona ids as they are written, in each trace and in each trace's
+   * knowledge-graph copy (an import into a Brain that holds the encoded form).
+   */
+  encodePlainIds: boolean;
   traceIds: Map<string, string>;
   /** The payload's trace ids. */
   sourceTraceIds: Set<string>;
   /** The payload's trace ids the import wrote, or matched as a duplicate, under that same id. */
   filedTraceIds: Set<string>;
-  /** The payload ids of the memory-graph nodes left out, whose edges stay out with them. */
+  /**
+   * The payload ids of the nodes left out, whose edges stay out with them: a trace's copy and a memory-graph node
+   * whose trace was not filed under its own id.
+   */
   skippedNodeIds: Set<string>;
   nodeIds: Map<string, string>;
   documentIds: Map<string, string>;
@@ -274,9 +316,16 @@ export class JsonImporter {
       return result;
     }
 
+    // The source's form comes from its own record. A source whose user and persona scope ids read the same in both forms
+    // is taken as a plain one, so a Brain without the record keeps its plain form.
+    const sourceEncoded =
+      payload.meta?.[SCOPE_ID_FORM_KEY] === ENCODED_SCOPE_ID_FORM &&
+      holdsScopeIdsTheFormChanges(payload.traces, Array.isArray(payload.nodes) ? payload.nodes : []);
+
     // ---- Import in a single transaction for atomicity ----
     const context: ImportContext = {
       dedup: options?.dedup ?? true,
+      encodePlainIds: false,
       traceIds: new Map<string, string>(),
       sourceTraceIds: new Set<string>(),
       filedTraceIds: new Set<string>(),
@@ -288,12 +337,23 @@ export class JsonImporter {
     };
 
     await this.brain.transaction(async (trx) => {
+      // The target's form is read in the transaction the import writes in, so a re-file or another import that commits
+      // first is followed (on Postgres the import waits for the brain's form lock).
+      const decision = await importScopeIdFormDecision(trx, this.brain, { encoded: sourceEncoded });
+      if (decision.action === 'refuse') {
+        result.errors.push(`${SCOPE_ID_FORM_KEY}: ${decision.reason}`);
+        return;
+      }
+      context.encodePlainIds = decision.action === 'encode';
       await this._importMeta(trx, payload.meta);
+      if (decision.action === 'record') await writeScopeIdFormRecord(trx, this.brain);
       // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
       if (context.dedup) await fillScopeIds(trx, this.brain.brainId);
       await this._importTraces(trx, payload.traces, result, context);
-      await this._importNodes(trx, payload.nodes ?? [], result, context);
+      const memoryNodes = await this._importNodes(trx, payload.nodes ?? [], result, context);
       await this._importEdges(trx, payload.edges ?? [], result, context);
+      // A trace's copy is found by its trace's key: one written under another node id gets the key here.
+      if (memoryNodes > 0) await keyTraceCopies(trx, this.brain.brainId);
       await this._importDocuments(trx, payload.documents ?? [], result, context);
       await this._importChunks(trx, payload.chunks ?? [], result, context);
       await this._importImages(trx, payload.images ?? [], result, context);
@@ -322,7 +382,9 @@ export class JsonImporter {
   /**
    * Restore brain metadata keys from the export payload.
    *
-   * `exported_at` is export-specific and intentionally ignored on import.
+   * `exported_at` is export-specific and intentionally ignored on import. The
+   * scope-id form record (`scope_id_form`) is the handshake's to write: it is
+   * written only where the target can take the source's form.
    */
   private async _importMeta(
     trx: { run: Brain['run'] },
@@ -338,7 +400,7 @@ export class JsonImporter {
     );
 
     for (const [key, value] of Object.entries(meta)) {
-      if (key === 'exported_at') continue;
+      if (key === 'exported_at' || key === SCOPE_ID_FORM_KEY) continue;
       await trx.run(upsertSql, [this.brain.brainId, key, value]);
     }
   }
@@ -347,12 +409,12 @@ export class JsonImporter {
    * Import memory trace records into `memory_traces`.
    *
    * Each trace is filed under its scope and scope id (see `importedScopeId`)
-   * and deduplicated inside them (see `duplicateTraceCondition`): if a trace of
-   * the same scope and scope id holds the record's text, or names its hash, the
-   * record is skipped and its id maps to that trace's. The live records are
-   * read before the forgotten ones (see `liveRecordsFirst`), so of two records
-   * of one text, the forgotten one is the duplicate of the live one, never the
-   * reverse.
+   * and deduplicated inside them and its user (see `duplicateTraceCondition`):
+   * if a trace of the same scope, scope id and user holds the record's text, or
+   * names its hash, the record is skipped and its id maps to that trace's. The
+   * live records are read before the forgotten ones (see `liveRecordsFirst`),
+   * so of two records of one text, the forgotten one is the duplicate of the
+   * live one, never the reverse.
    *
    * @param trx    - Transactional storage adapter.
    * @param traces - Array of serialised trace objects from the export.
@@ -386,11 +448,15 @@ export class JsonImporter {
         // The metadata names the scope id, so it is read before the dedup check. Metadata that is not a JSON object
         // (malformed text, an array, null) starts fresh: the object stored names the scope id and the import hash.
         const meta = parseTraceMetadata(t.metadata);
-        const scopeId = importedScopeId(meta, t.scope_id);
+        let scopeId = importedScopeId(meta, t.scope_id);
+        if (context.encodePlainIds) {
+          scopeId = encodePlainScopeId(scope, scopeId);
+          if (scopeId !== '') meta.scopeId = scopeId;
+        }
 
         if (context.dedup) {
           const existing = await trx.get<{ id: string }>(checkSql, [
-            brainId, scope, scopeId, ...duplicateTraceParams(hash, t.content),
+            brainId, scope, scopeId, ...duplicateTraceParams(hash, t.content, importedTurnUserId(meta)),
           ]);
           if (existing) {
             if (sourceId) context.traceIds.set(sourceId, existing.id);
@@ -446,20 +512,24 @@ export class JsonImporter {
   /**
    * Import knowledge node records into `knowledge_nodes`.
    *
-   * Dedup key: SHA-256 of `label` concatenated with `type`. A memory-graph
+   * Dedup key: SHA-256 of `label` concatenated with `type`. The copy of a
+   * payload trace the import did not file under its own id is skipped: it
+   * would name a trace the brain does not hold under that id. A memory-graph
    * node comes in with its trace alone, under its trace's id (see
    * `_importMemoryGraphNode`).
    *
    * @param trx    - Transactional storage adapter.
    * @param nodes  - Array of serialised node objects.
    * @param result - Mutable `ImportResult` to accumulate counts.
+   * @returns How many of the nodes it wrote are of type `memory`.
    */
   private async _importNodes(
     trx: { run: Brain['run']; get: Brain['get'] },
     nodes: NodeRecord[],
     result: ImportResult,
     context: ImportContext,
-  ): Promise<void> {
+  ): Promise<number> {
+    let memoryNodes = 0;
     const { dialect } = this.brain.features;
     const brainId = this.brain.brainId;
     const checkSql = `SELECT id FROM knowledge_nodes WHERE brain_id = ? AND ${dialect.jsonExtract('properties', '$.import_hash')} = ? LIMIT 1`;
@@ -477,6 +547,14 @@ export class JsonImporter {
           continue;
         }
 
+        // A trace's copy comes in with its trace alone.
+        const copied = n.type === 'memory' ? storedCopyTraceId(n.properties) : undefined;
+        if (copied !== undefined && context.sourceTraceIds.has(copied) && !context.filedTraceIds.has(copied)) {
+          if (n.id) context.skippedNodeIds.add(n.id);
+          result.skipped++;
+          continue;
+        }
+
         const hash = await this._sha256(`${n.label ?? ''}::${n.type ?? ''}`);
         const sourceId = n.id;
         const existing = await trx.get<{ id: string }>(checkSql, [brainId, hash]);
@@ -487,7 +565,12 @@ export class JsonImporter {
         }
 
         // Properties that are not a JSON object (malformed text, an array, null) start fresh and keep the import hash.
-        const props = parseTraceMetadata(n.properties);
+        // A trace's copy is filed under its trace's scope id, encoded with it.
+        const props = parseTraceMetadata(
+          context.encodePlainIds && n.type === 'memory' && typeof n.properties === 'string'
+            ? encodedCopyProperties(n.properties)
+            : n.properties,
+        );
         props['import_hash'] = hash;
 
         let embeddingBuf: Uint8Array | null = null;
@@ -515,11 +598,13 @@ export class JsonImporter {
         ]);
 
         if (sourceId) context.nodeIds.set(sourceId, id);
+        if (n.type === 'memory') memoryNodes++;
         result.imported++;
       } catch (err) {
         result.errors.push(`Node import error: ${String(err)}`);
       }
     }
+    return memoryNodes;
   }
 
   /**
@@ -585,8 +670,8 @@ export class JsonImporter {
    *
    * Dedup key: SHA-256 of `source_id + target_id + type`.
    * Edges referencing non-existent nodes are silently skipped (FK constraint),
-   * and an edge that names a memory-graph node the node import skipped is
-   * skipped.
+   * and an edge that names a copy or a memory-graph node the node import
+   * skipped is skipped.
    *
    * @param trx    - Transactional storage adapter.
    * @param edges  - Array of serialised edge objects.

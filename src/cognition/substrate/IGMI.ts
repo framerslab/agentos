@@ -343,6 +343,11 @@ export interface GMITurnInput {
      */
     memoryScope?: { userId?: string; sessionId?: string } | null;
     /**
+     * True on a turn that names no user: a `gmi()` session opened with no user id, `generate()` and `stream()` run as
+     * their own session id, which is no user's. A learning layer reads such a turn's user as `null`.
+     */
+    noTurnUser?: boolean;
+    /**
      * The launched team this turn's GMI sits in (`launch_agency`): the launch, the seat's role and the team's level.
      * The GMI hands each tool call of the turn a frozen copy in `sessionData.agencyLaunch`, where a launch from that
      * call reads its parent; a tool continuation that names none keeps the frame of the turn it continues.

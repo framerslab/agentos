@@ -17,8 +17,11 @@ import type {
   AssembledMemoryContext,
   MemoryScope,
   MemorySourceType,
+  MemoryTrace,
   MemoryType,
 } from '../memory/core/types.js';
+import { couldBeSessionForm, scopeIdOf, taggedScopeId } from '../learning/scopes.js';
+import type { GuardedMemoryWrite, TurnScopes } from '../learning/types.js';
 import { GMIMood, GMIInteractionType } from './IGMI';
 import type { UserContext, GMITurnInput } from './IGMI';
 import { turnContentText } from './turnContent';
@@ -35,6 +38,26 @@ export interface CognitiveMemoryTurnScope {
   conversationId?: string;
   /** Organization the turn runs under, when known. */
   organizationId?: string;
+  /** Where a learning layer exists: the turn's scope ids, which take the place of the lists below. */
+  learning?: CognitiveMemoryTurnLearning;
+}
+
+/**
+ * A turn's memory where a learning layer exists: the scope ids the turn files and reads under, the second user
+ * it names, and the guard every filing of the user's words runs through.
+ */
+export interface CognitiveMemoryTurnLearning {
+  /** The turn's scope ids: the learner's two, or, on a turn with no learner, the session's, in a form no user id takes. */
+  scopes: TurnScopes;
+  /** On a turn with no learner: the explicit id of a user other than the session's learner, written on each trace. */
+  turnUserId?: string;
+  /**
+   * Runs one filing inside the user's write chain, with the user's tombstone read before it and once it has
+   * committed (`ILearnerSession.guardMemoryWrite`, bound to the turn). Without it the filing runs unguarded.
+   */
+  guard?: <T>(
+    write: GuardedMemoryWrite<T>,
+  ) => Promise<{ status: 'written'; result: T } | { status: 'rejected'; reason: 'forgotten' | 'store_unavailable' }>;
 }
 
 /**
@@ -59,6 +82,11 @@ export interface CognitiveMemoryEncodeOptions {
   role: 'user' | 'assistant' | 'tool' | 'system';
   /** Optional additional tags to attach to the memory trace. */
   tags?: string[];
+  /**
+   * Where a learning layer exists: the trace is filed under the turn's own user scope id (`scopeId` is not read),
+   * names the turn's second user, and is written only while that user's tombstone is clear.
+   */
+  learning?: CognitiveMemoryTurnLearning;
 }
 
 /**
@@ -165,12 +193,16 @@ export class CognitiveMemoryBridge {
    *
    * Scopes owned by other users or other sessions are never listed.
    *
+   * Where a learning layer exists (`turn.learning`) the lists are the turn's own: see
+   * {@link CognitiveMemoryBridge.learnerRetrievalScopes}.
+   *
    * @param turn - Session, conversation and organization of the current turn.
    * @returns A de-duplicated scope list.
    */
   public buildRetrievalScopes(
     turn?: CognitiveMemoryTurnScope,
   ): Array<{ scope: MemoryScope; scopeId: string }> {
+    if (turn?.learning) return this.learnerRetrievalScopes(turn, turn.learning.scopes);
     const userId = nonBlank(this.getUserContext()?.userId);
     const personaId = nonBlank(this.getPersonaId());
     const sessionId = nonBlank(turn?.sessionId);
@@ -201,6 +233,46 @@ export class CognitiveMemoryBridge {
       add(scope, owner);
     }
     return scopes;
+  }
+
+  /**
+   * The scopes a turn reads where a learning layer exists. `user` holds the turn's own scope id alone, the
+   * learner's or the session's form, never the GMI id or the memory owner id, either of which a user id can equal.
+   * `thread` holds the turn's conversation and session ids in the session's form, and the owner id in its plain form
+   * unless it could equal a session's form. `persona` holds the turn's persona scope, the persona id and the owner id.
+   * `organization` holds the turn's own organization id, never the owner id, and the user context's organization only
+   * when it is the turn's: a user-context override of an earlier turn leaves its organization on the GMI for every
+   * later turn, and a turn of another organization must not read it. A turn that names no organization takes the user
+   * context's when it is the namespace of the turn's scope ids.
+   */
+  private learnerRetrievalScopes(
+    turn: CognitiveMemoryTurnScope,
+    scopes: TurnScopes,
+  ): Array<{ scope: MemoryScope; scopeId: string }> {
+    const list: Array<{ scope: MemoryScope; scopeId: string }> = [];
+    const seen = new Set<string>();
+    const add = (scope: MemoryScope, scopeId: string | undefined): void => {
+      if (!scopeId || seen.has(`${scope}:${scopeId}`)) return;
+      seen.add(`${scope}:${scopeId}`);
+      list.push({ scope, scopeId });
+    };
+    const personaId = nonBlank(this.getPersonaId());
+    const owner = this.memoryOwnerId();
+    add('user', scopes.userScopeId);
+    for (const id of [nonBlank(turn.conversationId), nonBlank(turn.sessionId)]) {
+      if (id) add('thread', taggedScopeId(id, scopes.namespace));
+    }
+    if (owner && !couldBeSessionForm(owner)) add('thread', owner);
+    add('persona', scopes.personaScopeId);
+    if (personaId) add('persona', scopeIdOf(personaId));
+    if (owner) add('persona', scopeIdOf(owner));
+    const turnOrganization = nonBlank(turn.organizationId);
+    add('organization', turnOrganization);
+    const contextOrganization = nonBlank(this.getUserContext()?.organizationId);
+    if (contextOrganization && contextOrganization === (turnOrganization ?? nonBlank(scopes.namespace))) {
+      add('organization', contextOrganization);
+    }
+    return list;
   }
 
   /**
@@ -272,24 +344,52 @@ export class CognitiveMemoryBridge {
    * First fires the observer hook (if available), then encodes the content
    * with the current PAD state, mood, and derived tags.
    *
+   * With `options.learning`, the trace goes under the turn's user scope id through the turn's guard; a refused filing
+   * is traced with its reason, never its words, and feeds no observer either.
+   *
    * @param content - The text content to encode.
-   * @param options - Encoding options (type, sourceType, scopeId, role).
+   * @param options - Encoding options (type, sourceType, scopeId, role, and the turn's learning).
    */
   public async encode(content: string, options: CognitiveMemoryEncodeOptions): Promise<void> {
     if (!content.trim()) {
       return;
     }
 
+    const learning = options.learning;
     const userCtx = this.getUserContext();
-    try {
+    const scopeId = learning ? learning.scopes.userScopeId : options.scopeId ?? userCtx.userId ?? this.getGmiId();
+    const file = async (): Promise<MemoryTrace> => {
       await this.cognitiveMemory.observe?.(options.role, content, this.getPadState());
-      await this.cognitiveMemory.encode(content, this.getPadState(), this.getMood(), {
+      return this.cognitiveMemory.encode(content, this.getPadState(), this.getMood(), {
         type: options.type,
         scope: 'user',
-        scopeId: options.scopeId ?? userCtx.userId ?? this.getGmiId(),
+        scopeId,
         sourceType: options.sourceType,
         tags: options.tags ?? this.buildTags(options.role),
+        ...(learning?.turnUserId ? { turnUserId: learning.turnUserId } : {}),
       });
+    };
+    try {
+      if (!learning?.guard) {
+        await file();
+        return;
+      }
+      const outcome = await learning.guard({
+        apply: file,
+        undo: async (trace) => {
+          if (typeof this.cognitiveMemory.deleteTraces !== 'function') {
+            throw new Error('the memory manager has no deleteTraces');
+          }
+          await this.cognitiveMemory.deleteTraces([trace.id]);
+        },
+      });
+      if (outcome.status === 'rejected') {
+        this.addTraceEntry(
+          outcome.reason === 'forgotten' ? 'DEBUG' : 'WARNING',
+          `Cognitive memory did not file the ${options.role} message (${outcome.reason}).`,
+          { role: options.role, reason: outcome.reason },
+        );
+      }
     } catch (error: any) {
       this.addTraceEntry('WARNING', 'Cognitive memory encoding failed.', {
         role: options.role,
@@ -308,10 +408,17 @@ export class CognitiveMemoryBridge {
    *
    * @param turnInput - The turn's input payload.
    * @param responseText - The assistant's generated response text.
+   * @param learning - Where a learning layer exists: both are filed under the turn's own user scope id, each through
+   *   the turn's guard.
    */
-  public async syncForTurn(turnInput: GMITurnInput, responseText: string): Promise<void> {
+  public async syncForTurn(
+    turnInput: GMITurnInput,
+    responseText: string,
+    learning?: CognitiveMemoryTurnLearning,
+  ): Promise<void> {
     const inputText = this.stringifyTurnContent(turnInput.content);
     const userCtx = this.getUserContext();
+    const filing = learning ? { learning } : {};
 
     if (inputText && (
       turnInput.type === GMIInteractionType.TEXT ||
@@ -322,6 +429,7 @@ export class CognitiveMemoryBridge {
         sourceType: 'user_statement',
         scopeId: userCtx.userId,
         role: 'user',
+        ...filing,
       });
     }
 
@@ -331,6 +439,7 @@ export class CognitiveMemoryBridge {
         sourceType: 'agent_inference',
         scopeId: turnInput.sessionId ?? userCtx.userId ?? this.getGmiId(),
         role: 'assistant',
+        ...filing,
       });
     }
   }

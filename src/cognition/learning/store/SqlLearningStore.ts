@@ -1,0 +1,512 @@
+/**
+ * @module learning/store/SqlLearningStore
+ *
+ * The learning store over a `@framers/sql-storage-adapter` store: Postgres for a deployment that several processes
+ * share, SQLite for one adapter in one process and the tests (of two adapters on one SQLite file, an append that
+ * runs while the other's does can fail with SQLite's busy error, as the ledger's limits say). Each chain's head row
+ * orders appends across processes by compare-and-swap (`advanceHead`), and every state change runs in one adapter
+ * transaction with its ledger row.
+ *
+ * Give it the runtime's raw storage adapter, never AgentOS's provenance-wrapped one, whose write hooks can turn a
+ * `run()` into a no-op: a ledger write that silently does nothing would leave a change with no record. The store
+ * leaves the adapter open when it closes.
+ *
+ * The store orders what it reads by UTF-16 code unit, as the in-process store does, whatever order the database sorts
+ * text in: a database orders TEXT by its collation, and Postgres by the database's locale, under which `agent|a` sorts
+ * before `agent|C`. So the rows are sorted once read, and only a chain's rows, by their integer `seq`, are ordered by
+ * the database. A chain's rows and its head are read in one statement (`chainWithHead`), so they are one snapshot
+ * though Postgres at Read Committed gives each statement of a transaction its own. A transaction's handle refuses
+ * every call once its transaction has ended, where the adapter's own handle would run the call outside any
+ * transaction (on Postgres, on the pool).
+ */
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import {
+  TransactionalLearningStore,
+  type ChainHead,
+  type FreezeRow,
+  type LearnerDocRow,
+  type LearnerDocTable,
+  type LearningStoreTx,
+  type SessionRow,
+  type StoredLedgerRow,
+  type StoredTraitRow,
+} from './LearningStore.js';
+import { ensureLearningSchema } from './schema.js';
+import { assertStorableText, holdsLoneSurrogate } from './storableText.js';
+import type { LearningKind, LedgerVerdict } from '../types.js';
+
+export interface SqlLearningStoreOptions {
+  /** The host's storage adapter, with transactions. The store never closes it. */
+  adapter: StorageAdapter;
+  /**
+   * Create the tables and add the columns a later release names before the store's first statement. Default `true`;
+   * `false` for a product that runs the learning store's DDL in its own migrations.
+   */
+  ensureSchema?: boolean;
+}
+
+type Row = Record<string, unknown>;
+const str = (value: unknown): string => String(value);
+const strOrNull = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+
+const toLedger = (r: Row): StoredLedgerRow => ({
+  id: str(r.id),
+  chainKey: str(r.chain_key),
+  seq: Number(r.seq),
+  rowType: str(r.row_type) as StoredLedgerRow['rowType'],
+  candidateId: str(r.candidate_id),
+  namespace: str(r.namespace),
+  agentKey: str(r.agent_key),
+  userId: strOrNull(r.user_id),
+  turnUserId: strOrNull(r.turn_user_id),
+  sessionId: strOrNull(r.session_id),
+  kind: str(r.kind) as LearningKind,
+  subject: str(r.subject),
+  verdict: str(r.verdict) as LedgerVerdict,
+  body: str(r.body),
+  prevHash: str(r.prev_hash),
+  hash: str(r.hash),
+  stateDigest: strOrNull(r.state_digest),
+  createdAt: str(r.created_at),
+});
+
+const toHead = (r: Row): ChainHead => ({
+  chainKey: str(r.chain_key),
+  namespace: str(r.namespace),
+  agentKey: str(r.agent_key),
+  userId: strOrNull(r.user_id),
+  lastId: str(r.last_id),
+  lastHash: str(r.last_hash),
+  seq: Number(r.seq),
+  forgotten: Number(r.forgotten) === 1,
+});
+
+const toTrait = (r: Row): StoredTraitRow => ({
+  namespace: str(r.namespace),
+  agentKey: str(r.agent_key),
+  userId: str(r.user_id),
+  personaId: str(r.persona_id),
+  state: str(r.state),
+  version: Number(r.version),
+  updatedAt: str(r.updated_at),
+});
+
+const toFreeze = (r: Row): FreezeRow => ({
+  scopeKey: str(r.scope_key),
+  mode: str(r.mode) as FreezeRow['mode'],
+  namespace: str(r.namespace),
+  agentKey: strOrNull(r.agent_key),
+  userId: strOrNull(r.user_id),
+  setBy: str(r.set_by),
+  createdAt: str(r.created_at),
+});
+
+/** A JSON list of strings as stored; anything else reads as an empty list. */
+const parseList = (value: unknown): string[] => {
+  try {
+    const parsed = JSON.parse(str(value)) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+
+const toSession = (r: Row): SessionRow => ({
+  namespace: str(r.namespace),
+  agentKey: str(r.agent_key),
+  sessionId: str(r.session_id),
+  userId: str(r.user_id),
+  kind: str(r.kind) as SessionRow['kind'],
+  personaId: str(r.persona_id),
+  conversationIds: parseList(r.conversation_ids),
+  brainIds: parseList(r.brain_ids),
+  startedAt: str(r.started_at),
+  version: Number(r.version),
+});
+
+const toDoc = (r: Row): LearnerDocRow => ({
+  id: str(r.id),
+  namespace: str(r.namespace),
+  agentKey: str(r.agent_key),
+  userId: str(r.user_id),
+  body: str(r.body),
+  version: Number(r.version),
+  createdAt: str(r.created_at),
+  updatedAt: str(r.updated_at),
+});
+
+/** Text by UTF-16 code unit, as the in-process store orders it. */
+const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+const byChainAndSeq = (a: StoredLedgerRow, b: StoredLedgerRow): number => compareText(a.chainKey, b.chainKey) || a.seq - b.seq;
+
+const LEDGER_COLUMNS =
+  'id, chain_key, seq, row_type, candidate_id, namespace, agent_key, user_id, turn_user_id, session_id, kind, subject, verdict, body, prev_hash, hash, state_digest, created_at';
+
+/**
+ * A chain's rows and its head in one statement, so both are read in one snapshot: the ledger's columns under their
+ * own names, the head's under `head_`, and one row of NULL ledger columns when the chain has none.
+ */
+const CHAIN_WITH_HEAD = `SELECT ${LEDGER_COLUMNS.split(', ').map((column) => `l.${column}`).join(', ')},
+       h.chain_key AS head_chain_key, h.namespace AS head_namespace, h.agent_key AS head_agent_key,
+       h.user_id AS head_user_id, h.last_id AS head_last_id, h.last_hash AS head_last_hash, h.seq AS head_seq,
+       h.forgotten AS head_forgotten
+  FROM (SELECT CAST(? AS TEXT) AS chain_key) AS wanted
+  LEFT JOIN agentos_learning_heads h ON h.chain_key = wanted.chain_key
+  LEFT JOIN agentos_learning_ledger l ON l.chain_key = wanted.chain_key
+ ORDER BY l.seq`;
+
+const DOC_TABLES: Record<LearnerDocTable, string> = {
+  outcomes: 'agentos_learning_outcomes',
+  lessons: 'agentos_learning_lessons',
+  skills: 'agentos_learning_skills',
+};
+
+/** The tables `deleteUserRows` deletes a user's rows from by `user_id`, after the ledger, each under its count's name. */
+const USER_TABLES: ReadonlyArray<[name: string, table: string]> = [
+  ['heads', 'agentos_learning_heads'],
+  ['traits', 'agentos_learning_traits'],
+  ['outcomes', 'agentos_learning_outcomes'],
+  ['lessons', 'agentos_learning_lessons'],
+  ['skills', 'agentos_learning_skills'],
+  ['sessions', 'agentos_learning_sessions'],
+  ['freezes', 'agentos_learning_freezes'],
+];
+
+/**
+ * One transaction's handle, over the adapter's handle for that transaction. Once the transaction has ended, every call
+ * throws.
+ */
+class SqlTx implements LearningStoreTx {
+  private ended = false;
+
+  constructor(private readonly trx: StorageAdapter) {}
+
+  /** Ends the transaction: every later call on this handle throws. */
+  end(): void {
+    this.ended = true;
+  }
+
+  /** Throws once the transaction has ended. */
+  private checkOpen(): void {
+    if (this.ended) throw new Error('A learning store transaction was used after it ended: make every call inside its function.');
+  }
+
+  /** The adapter's handle, while the transaction is open. */
+  private get db(): StorageAdapter {
+    this.checkOpen();
+    return this.trx;
+  }
+
+  /**
+   * The answer to a read, change or deletion by a key that holds a lone surrogate, which no row is stored under: sent
+   * to the database, the key would reach the rows of the key with U+FFFD in its place. Refused once the transaction
+   * has ended, as every other call is.
+   */
+  private none<T>(answer: T): T {
+    this.checkOpen();
+    return answer;
+  }
+
+  async insertLedgerRow(row: StoredLedgerRow): Promise<void> {
+    assertStorableText('ledger row', row);
+    await this.db.run(
+      `INSERT INTO agentos_learning_ledger (${LEDGER_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.id, row.chainKey, row.seq, row.rowType, row.candidateId, row.namespace, row.agentKey, row.userId,
+        row.turnUserId, row.sessionId, row.kind, row.subject, row.verdict, row.body, row.prevHash, row.hash,
+        row.stateDigest, row.createdAt,
+      ],
+    );
+  }
+
+  async ledgerRow(id: string): Promise<StoredLedgerRow | undefined> {
+    if (holdsLoneSurrogate(id)) return this.none(undefined);
+    const row = await this.db.get<Row>(`SELECT ${LEDGER_COLUMNS} FROM agentos_learning_ledger WHERE id = ?`, [id]);
+    return row ? toLedger(row) : undefined;
+  }
+
+  async chainRows(chainKey: string): Promise<StoredLedgerRow[]> {
+    if (holdsLoneSurrogate(chainKey)) return this.none([]);
+    return (await this.db.all<Row>(`SELECT ${LEDGER_COLUMNS} FROM agentos_learning_ledger WHERE chain_key = ? ORDER BY seq`, [chainKey])).map(toLedger);
+  }
+
+  async chainWithHead(chainKey: string): Promise<{ rows: StoredLedgerRow[]; head: ChainHead | undefined }> {
+    if (holdsLoneSurrogate(chainKey)) return this.none({ rows: [], head: undefined });
+    const found = await this.db.all<Row>(CHAIN_WITH_HEAD, [chainKey]);
+    const first: Row | undefined = found[0];
+    const head =
+      first !== undefined && first.head_chain_key !== null && first.head_chain_key !== undefined
+        ? toHead({
+            chain_key: first.head_chain_key,
+            namespace: first.head_namespace,
+            agent_key: first.head_agent_key,
+            user_id: first.head_user_id,
+            last_id: first.head_last_id,
+            last_hash: first.head_last_hash,
+            seq: first.head_seq,
+            forgotten: first.head_forgotten,
+          })
+        : undefined;
+    return { rows: found.filter((row) => row.id !== null && row.id !== undefined).map(toLedger), head };
+  }
+
+  async candidateRows(candidateId: string): Promise<StoredLedgerRow[]> {
+    if (holdsLoneSurrogate(candidateId)) return this.none([]);
+    return (
+      await this.db.all<Row>(`SELECT ${LEDGER_COLUMNS} FROM agentos_learning_ledger WHERE candidate_id = ?`, [candidateId])
+    )
+      .map(toLedger)
+      .sort(byChainAndSeq);
+  }
+
+  async learnerLedgerRows(namespace: string, agentKey: string, userId: string): Promise<StoredLedgerRow[]> {
+    if (holdsLoneSurrogate(namespace, agentKey, userId)) return this.none([]);
+    return (
+      await this.db.all<Row>(
+        `SELECT ${LEDGER_COLUMNS} FROM agentos_learning_ledger WHERE namespace = ? AND agent_key = ? AND user_id = ?`,
+        [namespace, agentKey, userId],
+      )
+    )
+      .map(toLedger)
+      .sort(byChainAndSeq);
+  }
+
+  async agentPendingRows(namespace: string, agentKey: string, createdBefore: string): Promise<StoredLedgerRow[]> {
+    if (holdsLoneSurrogate(namespace, agentKey, createdBefore)) return this.none([]);
+    // The time is compared once read, by code unit, as every text the store orders: a database compares TEXT by its
+    // collation.
+    return (
+      await this.db.all<Row>(
+        `SELECT ${LEDGER_COLUMNS.split(', ').map((column) => `c.${column}`).join(', ')} FROM agentos_learning_ledger c
+          WHERE c.namespace = ? AND c.agent_key = ? AND c.user_id IS NULL AND c.row_type = 'candidate'
+            AND NOT EXISTS (SELECT 1 FROM agentos_learning_ledger v WHERE v.candidate_id = c.id AND v.row_type = 'verdict')`,
+        [namespace, agentKey],
+      )
+    )
+      .map(toLedger)
+      .filter((row) => row.createdAt <= createdBefore)
+      .sort(byChainAndSeq);
+  }
+
+  async head(chainKey: string): Promise<ChainHead | undefined> {
+    if (holdsLoneSurrogate(chainKey)) return this.none(undefined);
+    const row = await this.db.get<Row>('SELECT * FROM agentos_learning_heads WHERE chain_key = ?', [chainKey]);
+    return row ? toHead(row) : undefined;
+  }
+
+  async insertHead(head: ChainHead): Promise<boolean> {
+    assertStorableText('chain head', head);
+    const result = await this.db.run(
+      `INSERT INTO agentos_learning_heads (chain_key, namespace, agent_key, user_id, last_id, last_hash, seq, forgotten)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (chain_key) DO NOTHING`,
+      [head.chainKey, head.namespace, head.agentKey, head.userId, head.lastId, head.lastHash, head.seq, head.forgotten ? 1 : 0],
+    );
+    return result.changes > 0;
+  }
+
+  async advanceHead(chainKey: string, expectedSeq: number, next: { lastId: string; lastHash: string; seq: number }): Promise<boolean> {
+    assertStorableText('chain head', { lastId: next.lastId, lastHash: next.lastHash });
+    if (holdsLoneSurrogate(chainKey)) return this.none(false);
+    const result = await this.db.run(
+      `UPDATE agentos_learning_heads SET last_id = ?, last_hash = ?, seq = ?
+        WHERE chain_key = ? AND seq = ? AND forgotten = 0`,
+      [next.lastId, next.lastHash, next.seq, chainKey, expectedSeq],
+    );
+    return result.changes > 0;
+  }
+
+  async markHeadsForgotten(namespace: string, userId: string): Promise<number> {
+    if (holdsLoneSurrogate(namespace, userId)) return this.none(0);
+    const result = await this.db.run('UPDATE agentos_learning_heads SET forgotten = 1 WHERE namespace = ? AND user_id = ?', [namespace, userId]);
+    return result.changes;
+  }
+
+  async traitRow(namespace: string, agentKey: string, userId: string): Promise<StoredTraitRow | undefined> {
+    if (holdsLoneSurrogate(namespace, agentKey, userId)) return this.none(undefined);
+    const row = await this.db.get<Row>(
+      'SELECT * FROM agentos_learning_traits WHERE namespace = ? AND agent_key = ? AND user_id = ?',
+      [namespace, agentKey, userId],
+    );
+    return row ? toTrait(row) : undefined;
+  }
+
+  async insertTraitRow(row: StoredTraitRow): Promise<boolean> {
+    assertStorableText('trait row', row);
+    const result = await this.db.run(
+      `INSERT INTO agentos_learning_traits (namespace, agent_key, user_id, persona_id, state, version, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (namespace, agent_key, user_id) DO NOTHING`,
+      [row.namespace, row.agentKey, row.userId, row.personaId, row.state, row.version, row.updatedAt],
+    );
+    return result.changes > 0;
+  }
+
+  async updateTraitRow(row: StoredTraitRow, expectedVersion: number): Promise<boolean> {
+    assertStorableText('trait row', row);
+    const result = await this.db.run(
+      `UPDATE agentos_learning_traits SET persona_id = ?, state = ?, version = ?, updated_at = ?
+        WHERE namespace = ? AND agent_key = ? AND user_id = ? AND version = ?`,
+      [row.personaId, row.state, row.version, row.updatedAt, row.namespace, row.agentKey, row.userId, expectedVersion],
+    );
+    return result.changes > 0;
+  }
+
+  async freezeRows(): Promise<FreezeRow[]> {
+    return (await this.db.all<Row>('SELECT * FROM agentos_learning_freezes'))
+      .map(toFreeze)
+      .sort((a, b) => compareText(a.scopeKey, b.scopeKey) || compareText(a.mode, b.mode));
+  }
+
+  async insertFreeze(row: FreezeRow): Promise<void> {
+    assertStorableText('freeze', row);
+    await this.db.run(
+      `INSERT INTO agentos_learning_freezes (scope_key, mode, namespace, agent_key, user_id, set_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (scope_key, mode) DO NOTHING`,
+      [row.scopeKey, row.mode, row.namespace, row.agentKey, row.userId, row.setBy, row.createdAt],
+    );
+  }
+
+  async deleteFreeze(scopeKey: string, mode: FreezeRow['mode']): Promise<boolean> {
+    if (holdsLoneSurrogate(scopeKey, mode)) return this.none(false);
+    const result = await this.db.run('DELETE FROM agentos_learning_freezes WHERE scope_key = ? AND mode = ?', [scopeKey, mode]);
+    return result.changes > 0;
+  }
+
+  async sessionRow(namespace: string, agentKey: string, sessionId: string, userId: string, kind: SessionRow['kind']): Promise<SessionRow | undefined> {
+    if (holdsLoneSurrogate(namespace, agentKey, sessionId, userId, kind)) return this.none(undefined);
+    const row = await this.db.get<Row>(
+      `SELECT * FROM agentos_learning_sessions
+        WHERE namespace = ? AND agent_key = ? AND session_id = ? AND user_id = ? AND kind = ?`,
+      [namespace, agentKey, sessionId, userId, kind],
+    );
+    return row ? toSession(row) : undefined;
+  }
+
+  async putSessionRow(row: SessionRow, expectedVersion?: number): Promise<void> {
+    assertStorableText('session row', row);
+    const conversationIds = JSON.stringify(row.conversationIds);
+    const brainIds = JSON.stringify(row.brainIds);
+    if (expectedVersion !== undefined && expectedVersion !== 0) {
+      // Over the row at the version its writer read only: a row another writer moved on is left as it is.
+      await this.db.run(
+        `UPDATE agentos_learning_sessions SET persona_id = ?, conversation_ids = ?, brain_ids = ?, version = ?
+          WHERE namespace = ? AND agent_key = ? AND session_id = ? AND user_id = ? AND kind = ? AND version = ?`,
+        [
+          row.personaId, conversationIds, brainIds, row.version,
+          row.namespace, row.agentKey, row.sessionId, row.userId, row.kind, expectedVersion,
+        ],
+      );
+      return;
+    }
+    // With version 0 the row goes in only where there is none; with no version it goes in or over the row.
+    const onConflict =
+      expectedVersion === 0
+        ? 'DO NOTHING'
+        : `DO UPDATE SET
+         persona_id = excluded.persona_id, conversation_ids = excluded.conversation_ids,
+         brain_ids = excluded.brain_ids, version = excluded.version`;
+    await this.db.run(
+      `INSERT INTO agentos_learning_sessions
+         (namespace, agent_key, session_id, user_id, kind, persona_id, conversation_ids, brain_ids, started_at, version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (namespace, agent_key, session_id, user_id, kind) ${onConflict}`,
+      [
+        row.namespace, row.agentKey, row.sessionId, row.userId, row.kind, row.personaId,
+        conversationIds, brainIds, row.startedAt, row.version,
+      ],
+    );
+  }
+
+  async sessionRowsOf(namespace: string, userId: string): Promise<SessionRow[]> {
+    if (holdsLoneSurrogate(namespace, userId)) return this.none([]);
+    return (
+      await this.db.all<Row>('SELECT * FROM agentos_learning_sessions WHERE namespace = ? AND user_id = ?', [namespace, userId])
+    )
+      .map(toSession)
+      .sort((a, b) => compareText(a.sessionId, b.sessionId) || compareText(a.kind, b.kind));
+  }
+
+  async isForgotten(hash: string): Promise<boolean> {
+    if (holdsLoneSurrogate(hash)) return this.none(false);
+    return Boolean(await this.db.get<Row>('SELECT hash FROM agentos_learning_forgotten WHERE hash = ?', [hash]));
+  }
+
+  async insertForgotten(hash: string, forgottenAt: string): Promise<void> {
+    assertStorableText('tombstone', { hash, forgottenAt });
+    await this.db.run('INSERT INTO agentos_learning_forgotten (hash, forgotten_at) VALUES (?, ?) ON CONFLICT (hash) DO NOTHING', [hash, forgottenAt]);
+  }
+
+  async learnerDocs(table: LearnerDocTable, namespace: string, agentKey: string, userId: string): Promise<LearnerDocRow[]> {
+    if (holdsLoneSurrogate(namespace, agentKey, userId)) return this.none([]);
+    return (
+      await this.db.all<Row>(
+        `SELECT * FROM ${DOC_TABLES[table]} WHERE namespace = ? AND agent_key = ? AND user_id = ?`,
+        [namespace, agentKey, userId],
+      )
+    )
+      .map(toDoc)
+      .sort((a, b) => compareText(a.createdAt, b.createdAt) || compareText(a.id, b.id));
+  }
+
+  async deleteUserRows(namespace: string, userId: string): Promise<Record<string, number>> {
+    if (holdsLoneSurrogate(namespace, userId)) {
+      const none: Record<string, number> = { ledger: 0 };
+      for (const [name] of USER_TABLES) none[name] = 0;
+      return this.none(none);
+    }
+    const deleted: Record<string, number> = {};
+    deleted.ledger = (
+      await this.db.run('DELETE FROM agentos_learning_ledger WHERE namespace = ? AND (user_id = ? OR turn_user_id = ?)', [namespace, userId, userId])
+    ).changes;
+    for (const [name, table] of USER_TABLES) {
+      deleted[name] = (await this.db.run(`DELETE FROM ${table} WHERE namespace = ? AND user_id = ?`, [namespace, userId])).changes;
+    }
+    return deleted;
+  }
+}
+
+/** The learning store over a SQL storage adapter (see the module's description). */
+export class SqlLearningStore extends TransactionalLearningStore {
+  readonly kind = 'sql' as const;
+  private readonly adapter: StorageAdapter;
+  private readonly ensureSchema: boolean;
+  /** Settles once the tables exist; unset again when making them failed, so the next call tries again. */
+  private ready: Promise<void> | undefined;
+
+  /** @throws {Error} When the adapter has no transactions: a change and its ledger row must commit together. */
+  constructor(options: SqlLearningStoreOptions) {
+    super();
+    if (!options.adapter.capabilities.has('transactions')) {
+      throw new Error(
+        `A SQL learning store needs a storage adapter with transactions, so that a change and its ledger row commit together; "${options.adapter.kind}" has none.`,
+      );
+    }
+    this.adapter = options.adapter;
+    this.ensureSchema = options.ensureSchema !== false;
+  }
+
+  /** Settles once the store's tables exist; a store that makes its own schema makes them at its first call. */
+  private whenReady(): Promise<void> {
+    if (!this.ensureSchema) return Promise.resolve();
+    this.ready ??= ensureLearningSchema(this.adapter).catch((error: unknown) => {
+      this.ready = undefined;
+      throw error;
+    });
+    return this.ready;
+  }
+
+  async transaction<T>(fn: (tx: LearningStoreTx) => Promise<T>): Promise<T> {
+    await this.whenReady();
+    return this.adapter.transaction(async (trx) => {
+      const tx = new SqlTx(trx);
+      try {
+        return await fn(tx);
+      } finally {
+        tx.end();
+      }
+    });
+  }
+
+  /** Leaves the adapter open: it is the host's. */
+  async close(): Promise<void> {}
+}

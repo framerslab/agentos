@@ -24,7 +24,9 @@ import type {
   SemanticSearchResult,
   KnowledgeGraphStats,
   KnowledgeSource,
+  MemoryCopyFilter,
 } from './IKnowledgeGraph';
+import { copiedTraceId, copyKey, filterTraceIds, isEmptyCopyFilter, isMemoryCopyOf } from './memoryCopies.js';
 import type { ILogger } from '../../../../../core/logging/ILogger';
 import type { IEmbeddingManager } from '../../../../../core/embeddings/IEmbeddingManager';
 
@@ -282,10 +284,13 @@ export class KnowledgeGraph implements IKnowledgeGraph {
     memoryInput: Omit<EpisodicMemory, 'id' | 'createdAt' | 'accessCount' | 'lastAccessedAt'>
   ): Promise<EpisodicMemory> {
     const now = new Date().toISOString();
+    const traceId = copiedTraceId(memoryInput.context);
 
     const memory: EpisodicMemory = {
       ...memoryInput,
-      id: `mem-${uuidv4()}`,
+      // A memory trace's copy is keyed by its trace: recording the trace again replaces the copy, and a delete by
+      // trace id finds it by key.
+      id: traceId === undefined ? `mem-${uuidv4()}` : copyKey(traceId),
       createdAt: now,
       accessCount: 0,
       lastAccessedAt: now,
@@ -389,6 +394,31 @@ export class KnowledgeGraph implements IKnowledgeGraph {
     });
 
     return results;
+  }
+
+  /**
+   * Delete the episodic records that copy the filter's traces or scopes: a trace's copy by its key, a scope's copies
+   * by the scope their stored context names. The relations that name a deleted record go with it, as an entity's do
+   * ({@link deleteEntity}): a host can relate a record, since `upsertRelation` takes any node id.
+   */
+  async deleteMemories(filter: MemoryCopyFilter): Promise<number> {
+    if (isEmptyCopyFilter(filter)) return 0;
+    const ids = new Set<string>();
+    for (const traceId of filterTraceIds(filter)) {
+      if (this.memories.has(copyKey(traceId))) ids.add(copyKey(traceId));
+    }
+    if (filter.scopes?.length) {
+      const byScope: MemoryCopyFilter = { scopes: filter.scopes };
+      for (const [id, memory] of this.memories) {
+        if (isMemoryCopyOf(memory.context, byScope)) ids.add(id);
+      }
+    }
+    for (const id of ids) {
+      this.memories.delete(id);
+      const named = [...(this.relationsBySource.get(id) ?? []), ...(this.relationsByTarget.get(id) ?? [])];
+      for (const relationId of named) await this.deleteRelation(relationId);
+    }
+    return ids.size;
   }
 
   // ============================================================================

@@ -32,7 +32,17 @@ import type {
   SemanticSearchOptions,
   SemanticSearchResult,
   KnowledgeGraphStats,
+  MemoryCopyFilter,
 } from './IKnowledgeGraph.js';
+import {
+  TRACE_CONTEXT_MARKER,
+  copiedTraceId,
+  filterTraceIds,
+  isEmptyCopyFilter,
+  isMemoryCopyOf,
+  scopeNeedles,
+  traceNeedles,
+} from './memoryCopies.js';
 import type { Neo4jConnectionManager } from '../neo4j/Neo4jConnectionManager.js';
 import { Neo4jCypherRunner } from '../neo4j/Neo4jCypherRunner.js';
 
@@ -80,6 +90,11 @@ export interface Neo4jKnowledgeGraphConfig {
 
 export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
   private cypher!: Neo4jCypherRunner;
+  /**
+   * This graph's pass over the trace copies an older release recorded, once it has started, and whether it ran through
+   * ({@link backfillCopyTraceIds}).
+   */
+  private copyTraceIdsBackfilled: Promise<boolean> | null = null;
   private embeddingDimension: number;
   private memoryDecayRate: number;
   private minImportanceThreshold: number;
@@ -100,6 +115,8 @@ export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
     await this.cypher.writeVoid(
       `CREATE CONSTRAINT em_unique IF NOT EXISTS FOR (n:${MEMORY_LABEL}) REQUIRE n.memoryId IS UNIQUE`,
     );
+    // A memory trace's copy carries its trace id, which a delete by trace id reads through.
+    await this.cypher.writeVoid(`CREATE INDEX em_trace_id IF NOT EXISTS FOR (n:${MEMORY_LABEL}) ON (n.traceId)`);
 
     // Create vector indexes for semantic search
     await this.cypher.writeVoid(
@@ -343,15 +360,24 @@ export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
 
   // ============ Episodic Memory Operations ============
 
+  /**
+   * Record an episodic memory. A memory trace's copy (a context that names the trace, `memoryTraceId`) carries the
+   * trace id (`traceId`, indexed) and replaces the copy recorded for the trace before.
+   */
   async recordMemory(
     memory: Omit<EpisodicMemory, 'id' | 'createdAt' | 'accessCount' | 'lastAccessedAt'>,
   ): Promise<EpisodicMemory> {
     const id = generateId();
     const now = nowIso();
+    const traceId = copiedTraceId(memory.context) ?? null;
 
+    if (traceId !== null) {
+      await this.cypher.writeVoid(`MATCH (m:${MEMORY_LABEL}) WHERE m.traceId = $traceId DETACH DELETE m`, { traceId });
+    }
     await this.cypher.writeVoid(
       `CREATE (m:${MEMORY_LABEL} {
          memoryId: $id,
+         traceId: $traceId,
          type: $type,
          summary: $summary,
          description: $description,
@@ -371,6 +397,7 @@ export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
        })`,
       {
         id,
+        traceId,
         type: memory.type,
         summary: memory.summary,
         description: memory.description ?? null,
@@ -423,6 +450,106 @@ export class Neo4jKnowledgeGraph implements IKnowledgeGraph {
     );
 
     return this.nodeToMemory(results[0].m);
+  }
+
+  /**
+   * Delete the episodic memories that copy the filter's traces or scopes. A trace's copies are read through their
+   * trace id (`traceId`, indexed); the first delete by trace id of this graph first gives the copies an older release
+   * recorded their trace id ({@link backfillCopyTraceIds}). While that pass fails, a delete by trace id also reads the
+   * copies that carry no trace id by the text their stored context JSON must hold (`"memoryTraceId":"<id>"`) and
+   * matches them exactly in code. A scope's copies are read by the text their stored context
+   * JSON must hold (`CONTAINS`) and matched exactly in code, so a malformed `context_json` is skipped rather than
+   * failing the delete.
+   */
+  async deleteMemories(filter: MemoryCopyFilter): Promise<number> {
+    if (isEmptyCopyFilter(filter)) return 0;
+    const ids = new Set<string>();
+    const traceIds = filterTraceIds(filter);
+    if (traceIds.length > 0) {
+      const backfilled = await this.backfillCopyTraceIds();
+      const rows = await this.cypher.read<{ id: string }>(
+        `MATCH (m:${MEMORY_LABEL}) WHERE m.traceId IN $traceIds RETURN m.memoryId AS id`,
+        { traceIds },
+      );
+      for (const row of rows) ids.add(row.id);
+      if (!backfilled) {
+        const byTrace: MemoryCopyFilter = { traceIds };
+        const older = await this.cypher.read<{ id: string; context: string | null }>(
+          `MATCH (m:${MEMORY_LABEL})
+           WHERE m.traceId IS NULL AND m.context_json IS NOT NULL
+             AND any(needle IN $needles WHERE m.context_json CONTAINS needle)
+           RETURN m.memoryId AS id, m.context_json AS context`,
+          { needles: traceNeedles(traceIds) },
+        );
+        for (const row of older) {
+          if (isMemoryCopyOf(this.safeParseJson(row.context, undefined), byTrace)) ids.add(row.id);
+        }
+      }
+    }
+    const scopes = filter.scopes ?? [];
+    if (scopes.length > 0) {
+      const byScope: MemoryCopyFilter = { scopes };
+      const rows = await this.cypher.read<{ id: string; context: string | null }>(
+        `MATCH (m:${MEMORY_LABEL})
+         WHERE m.context_json IS NOT NULL AND any(needle IN $needles WHERE m.context_json CONTAINS needle)
+         RETURN m.memoryId AS id, m.context_json AS context`,
+        { needles: scopeNeedles(scopes) },
+      );
+      for (const row of rows) {
+        if (isMemoryCopyOf(this.safeParseJson(row.context, undefined), byScope)) ids.add(row.id);
+      }
+    }
+    if (ids.size === 0) return 0;
+    await this.cypher.writeVoid(`MATCH (m:${MEMORY_LABEL}) WHERE m.memoryId IN $ids DETACH DELETE m`, { ids: [...ids] });
+    return ids.size;
+  }
+
+  /**
+   * Give the trace copies an older release recorded, which carry no `traceId`, the trace id their stored context
+   * names, once per graph, so a delete by trace id finds them through the index. A pass that fails (its read or one
+   * of its writes) resolves `false`, with a warning: the delete that waited for it reads the trace's copies with no
+   * trace id by their stored context, and the next delete by trace id makes the pass again. A copy an older release
+   * writes after the pass gets its trace id from the next graph's pass; until then a delete by its scope finds it.
+   *
+   * @returns Whether the pass ran through.
+   */
+  private backfillCopyTraceIds(): Promise<boolean> {
+    if (!this.copyTraceIdsBackfilled) {
+      this.copyTraceIdsBackfilled = this.writeCopyTraceIds().then(
+        () => true,
+        (error: unknown) => {
+          this.copyTraceIdsBackfilled = null;
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[Neo4jKnowledgeGraph] giving older trace copies their trace id failed; until a pass runs through, a ` +
+              `delete by trace id reads them by their stored context: ${message}`,
+          );
+          return false;
+        },
+      );
+    }
+    return this.copyTraceIdsBackfilled;
+  }
+
+  private async writeCopyTraceIds(): Promise<void> {
+    const rows = await this.cypher.read<{ id: string; context: string | null }>(
+      `MATCH (m:${MEMORY_LABEL})
+       WHERE m.traceId IS NULL AND m.context_json CONTAINS $marker
+       RETURN m.memoryId AS id, m.context_json AS context`,
+      { marker: TRACE_CONTEXT_MARKER },
+    );
+    const copies = rows.flatMap((row) => {
+      const traceId = copiedTraceId(this.safeParseJson(row.context, undefined));
+      return traceId === undefined ? [] : [{ id: row.id, traceId }];
+    });
+    for (let offset = 0; offset < copies.length; offset += 1000) {
+      await this.cypher.writeVoid(
+        `UNWIND $copies AS copy
+         MATCH (m:${MEMORY_LABEL} { memoryId: copy.id })
+         SET m.traceId = copy.traceId`,
+        { copies: copies.slice(offset, offset + 1000) },
+      );
+    }
   }
 
   async queryMemories(options?: {

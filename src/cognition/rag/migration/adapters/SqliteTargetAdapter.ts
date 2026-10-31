@@ -9,6 +9,12 @@
 
 import Database from 'better-sqlite3';
 import type { IMigrationTarget } from '../types.js';
+import {
+  readScopeIdForms,
+  SCOPE_ID_FORM_KEY,
+  scopeIdOfMetadata,
+  type BrainScopeIdForm,
+} from '../../../memory/retrieval/store/scopeIdForm.js';
 
 export class SqliteTargetAdapter implements IMigrationTarget {
   private db: Database.Database;
@@ -68,7 +74,10 @@ export class SqliteTargetAdapter implements IMigrationTarget {
   async writeBatch(table: string, rows: Record<string, unknown>[]): Promise<number> {
     if (rows.length === 0) return 0;
 
-    const columns = Object.keys(rows[0]);
+    // A row from before memory_traces.scope_id gets the column from its metadata where the target's table has it.
+    const sourceColumns = Object.keys(rows[0]);
+    const fillScopeId = table === 'memory_traces' && !sourceColumns.includes('scope_id') && this.hasColumn(table, 'scope_id');
+    const columns = fillScopeId ? [...sourceColumns, 'scope_id'] : sourceColumns;
     const quotedCols = columns.map(c => `"${c}"`).join(', ');
     const placeholders = columns.map(() => '?').join(', ');
 
@@ -81,7 +90,7 @@ export class SqliteTargetAdapter implements IMigrationTarget {
       let count = 0;
       for (const row of batch) {
         const values = columns.map(c => {
-          const v = row[c];
+          const v = c === 'scope_id' && fillScopeId ? scopeIdOfMetadata(row.metadata) : row[c];
           // Convert booleans to integers for SQLite compatibility.
           if (typeof v === 'boolean') return v ? 1 : 0;
           return v;
@@ -93,6 +102,37 @@ export class SqliteTargetAdapter implements IMigrationTarget {
     });
 
     return tx(rows);
+  }
+
+  /** These brains as this file holds them, with their scope-id forms. */
+  async scopeIdForms(brainIds: readonly string[]): Promise<Map<string, BrainScopeIdForm>> {
+    const db = this.db;
+    return readScopeIdForms(
+      {
+        get: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).get(...params) as T | undefined,
+        all: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).all(...params) as T[],
+      },
+      brainIds,
+    );
+  }
+
+  async clearScopeIdForm(brainId: string): Promise<void> {
+    try {
+      this.db.prepare('DELETE FROM brain_meta WHERE brain_id = ? AND key = ?').run(brainId, SCOPE_ID_FORM_KEY);
+    } catch {
+      // A target with no brain ids holds no record.
+    }
+  }
+
+  /** Whether the target's table has the column, read once per table. */
+  private readonly columnsOf = new Map<string, Set<string>>();
+  private hasColumn(table: string, column: string): boolean {
+    let columns = this.columnsOf.get(table);
+    if (!columns) {
+      columns = new Set((this.db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>).map((c) => c.name));
+      this.columnsOf.set(table, columns);
+    }
+    return columns.has(column);
   }
 
   /** Close the database connection. */

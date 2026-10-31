@@ -71,5 +71,7 @@ describe('resolveLaunchLimits', () => {
     expect(() => resolveLaunchLimits({ members: { tutor: { generate: async () => ({}) } as never } })).toThrow('agencies.members.tutor');
     expect(() => resolveLaunchLimits({ members: { coach: handle({ learning: { agentKey: 'tutor' } }) } })).toThrow(/agencies\.members\.coach.*tutor/);
     expect(() => resolveLaunchLimits({ members: { tutor: handle({ learning: { agentKey: 'tutor' } }), helper: handle() } })).not.toThrow();
+    // A null learning.agentKey is unset, as a JSON or YAML config writes it: the member names no key of its own.
+    expect(() => resolveLaunchLimits({ members: { coach: handle({ learning: { agentKey: null } }) } })).not.toThrow();
   });
 });

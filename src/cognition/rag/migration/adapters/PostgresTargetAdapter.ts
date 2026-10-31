@@ -8,6 +8,18 @@
  */
 
 import type { IMigrationTarget } from '../types.js';
+import {
+  readScopeIdForms,
+  SCOPE_ID_FORM_KEY,
+  scopeIdOfMetadata,
+  type BrainScopeIdForm,
+} from '../../../memory/retrieval/store/scopeIdForm.js';
+
+/** A statement with `?` placeholders in `pg`'s numbered form (`$1`, `$2`, ...); its text holds no other `?`. */
+function numbered(sql: string): string {
+  let n = 0;
+  return sql.replace(/\?/g, () => `$${(n += 1)}`);
+}
 
 export class PostgresTargetAdapter implements IMigrationTarget {
   private pool: any = null;
@@ -67,11 +79,15 @@ export class PostgresTargetAdapter implements IMigrationTarget {
   async writeBatch(table: string, rows: Record<string, unknown>[]): Promise<number> {
     if (rows.length === 0) return 0;
     const pool = await this._ensurePool();
+    // A row from before memory_traces.scope_id gets the column from its metadata where the target's table has it.
+    const sourceColumns = Object.keys(rows[0]);
+    const fillScopeId =
+      table === 'memory_traces' && !sourceColumns.includes('scope_id') && (await this.hasColumn(table, 'scope_id'));
     const client = await pool.connect();
 
     try {
       await client.query('BEGIN');
-      const columns = Object.keys(rows[0]);
+      const columns = fillScopeId ? [...sourceColumns, 'scope_id'] : sourceColumns;
       const quotedCols = columns.map(c => `"${c}"`).join(', ');
       const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
       const sql = `INSERT INTO "${table}" (${quotedCols}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`;
@@ -79,7 +95,7 @@ export class PostgresTargetAdapter implements IMigrationTarget {
       let count = 0;
       for (const row of rows) {
         const values = columns.map(c => {
-          const v = row[c];
+          const v = c === 'scope_id' && fillScopeId ? scopeIdOfMetadata(row.metadata) : row[c];
           // Convert Buffer embeddings to pgvector format: '[0.1,0.2,...]'
           if (c.includes('embedding') && v instanceof Buffer) {
             const f32 = new Float32Array(v.buffer, v.byteOffset, v.byteLength / 4);
@@ -103,6 +119,43 @@ export class PostgresTargetAdapter implements IMigrationTarget {
     } finally {
       client.release();
     }
+  }
+
+  /** These brains as this database holds them, with their scope-id forms. */
+  async scopeIdForms(brainIds: readonly string[]): Promise<Map<string, BrainScopeIdForm>> {
+    const pool = await this._ensurePool();
+    return readScopeIdForms(
+      {
+        get: async <T>(sql: string, params: unknown[] = []) => (await pool.query(numbered(sql), params)).rows[0] as T | undefined,
+        all: async <T>(sql: string, params: unknown[] = []) => (await pool.query(numbered(sql), params)).rows as T[],
+      },
+      brainIds,
+    );
+  }
+
+  async clearScopeIdForm(brainId: string): Promise<void> {
+    const pool = await this._ensurePool();
+    try {
+      await pool.query('DELETE FROM brain_meta WHERE brain_id = $1 AND key = $2', [brainId, SCOPE_ID_FORM_KEY]);
+    } catch {
+      // A target with no brain ids holds no record.
+    }
+  }
+
+  /** The columns of each target table, read once per table. */
+  private readonly columnsOf = new Map<string, Set<string>>();
+  private async hasColumn(table: string, column: string): Promise<boolean> {
+    let columns = this.columnsOf.get(table);
+    if (!columns) {
+      const pool = await this._ensurePool();
+      const result = await pool.query(
+        'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1',
+        [table],
+      );
+      columns = new Set((result.rows as Array<{ column_name: string }>).map((c) => c.column_name));
+      this.columnsOf.set(table, columns);
+    }
+    return columns.has(column);
   }
 
   /** Close the connection pool. */

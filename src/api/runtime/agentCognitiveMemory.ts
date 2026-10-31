@@ -370,6 +370,7 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     graph: { backend: 'knowledge-graph' },
     ...(opts.mechanisms ? { cognitiveMechanisms: opts.mechanisms } : {}),
     consolidation: { enabled: consolidationEnabled },
+    ...(opts.memory.persistAccessState === false ? { persistAccessState: false } : {}),
   };
   const manager = new CognitiveMemoryManager();
   await manager.initialize(config);

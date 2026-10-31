@@ -99,6 +99,13 @@ const agentos = await AgentOS.create({
 This keeps memory tools available to agents while also reusing the same store
 for long-term prompt injection and rolling-summary persistence.
 
+With the learning flag on (`learning`), the retriever reads and the sink files
+under the turn's scope ids from the GMI's learner session, and each sink upsert
+is one recorded memory write; the sink then needs a `Memory` facade that reads
+back, deletes and restores a trace by id (`brainId`, `readTrace`, `deleteTraces`,
+`restoreTrace`), as `Memory.createSqlite()` and `Memory.createWithAdapter()` give
+([GMI, Where a turn's memory is filed and read](../GMI.md#where-a-turns-memory-is-filed-and-read)).
+
 ## High-Level API: AgentMemory
 
 ```ts

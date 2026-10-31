@@ -445,7 +445,8 @@ export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgency
         throw new RangeError(`agencies.members.${key} is not a gmi() handle (an agent built by gmi() or agent({ runtime: 'gmi' }))`);
       }
       const learning = gmiOptionsOf(member)?.learning;
-      const agentKey = typeof learning === 'object' && learning !== null ? learning.agentKey : undefined;
+      // A null learning.agentKey is unset, as the learning layer reads it: the member names no key of its own.
+      const agentKey = typeof learning === 'object' && learning !== null ? (learning.agentKey ?? undefined) : undefined;
       if (agentKey !== undefined && agentKey !== key) {
         throw new RangeError(`agencies.members.${key} is the agent '${agentKey}' (its learning.agentKey); list it under that key`);
       }

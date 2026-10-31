@@ -62,6 +62,17 @@ describe('with the learning flag off', () => {
     expect(systemOf(s.seen[1])).toBe(systemOf(s.seen[0]));
     expect(tutor.learning).toBeUndefined();
   });
+
+  it('reads learning: null as unset, as a config read from JSON or YAML writes it', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Hi.'), reply.text('Hi again.')] });
+    const nulled = agent(options(k, { learning: null }));
+    await nulled.session('s1', { userId: 'ana' }).send('Hello.');
+    await gmi(options(k, { learning: null })).session('s1', { userId: 'ana' }).send('Hello.');
+    expect(systemOf(s.seen[0])).toBe(buildSystemPrompt(options(k)));
+    expect(systemOf(s.seen[1])).toBe(systemOf(s.seen[0]));
+    expect(nulled.learning).toBeUndefined();
+  });
 });
 
 describe('with the learning flag on', () => {
@@ -131,6 +142,25 @@ describe('with the learning flag on', () => {
     expect(() => gmi(options(key(), { learning: { mode: 'sideways' } }))).toThrow(/learning\.mode: unknown mode 'sideways'/);
   });
 
+  it('reads a null field of the learning option as unset, as a config read from JSON or YAML writes it', async () => {
+    quietManifest();
+    const k = key();
+    script('openai', k, { replies: [reply.text('1.')] });
+    const nulls = { mode: null, agentKey: null, namespace: null, anonymousUserIds: null, traits: null, lessons: null, skills: null };
+    const tutor = gmi(options(k, { learning: nulls }));
+    await tutor.session('s1', { userId: 'ana' }).send('Hello.');
+    const manifest = await tutor.learning!.manifest();
+    expect(manifest).toMatchObject({ surface: 'gmi', profile: 'light', mode: 'on' });
+    expect(manifest.turns).toEqual({ prepared: 1, bound: 1, none: {} });
+    expect(manifest.loops.trait_changes).toEqual({ live: false, detail: 'switched off' });
+  });
+
+  it('lists an agency member whose learning.agentKey is null under any key, as one that sets none', () => {
+    const k = key();
+    const coach = gmi(options(k, { name: 'Coach', learning: { agentKey: null } }));
+    expect(() => gmi(options(k, { agencies: { members: { helper: coach } } }))).not.toThrow();
+  });
+
   it("is ignored by the legacy runtime, whose prompt keeps agent()'s section", async () => {
     const k = key();
     const s = script('openai', k, { replies: [reply.text('Hi.')], whole: true });
@@ -168,7 +198,7 @@ describe('with the learning flag on', () => {
     expect((await tutor.learning!.manifest()).turns).toEqual({ prepared: 3, bound: 2, none: { no_user_id: 1 } });
   });
 
-  it("tells each tool call its own turn's learner and mode: a session's with a user, a call's with none", async () => {
+  it("tells each tool call its own turn's learner, mode and scope ids: a session's with a user, a call's with none", async () => {
     quietManifest();
     const k = key();
     script('openai', k, {
@@ -191,8 +221,14 @@ describe('with the learning flag on', () => {
     await tutor.session('s1', { userId: 'ana' }).send('Probe.');
     await tutor.generate('Probe.');
     expect(seen).toEqual([
-      { learner: 'bound', mode: 'on' },
-      { learner: 'none', mode: 'on' },
+      expect.objectContaining({
+        learner: 'bound',
+        mode: 'on',
+        scopes: expect.objectContaining({ learner: 'bound', mode: 'on', userScopeId: 'ana', namespace: '' }),
+        recordSelfChange: expect.any(Function),
+        frozen: expect.any(Function),
+      }),
+      expect.objectContaining({ learner: 'none', mode: 'on', scopes: expect.objectContaining({ learner: 'none', mode: 'on', namespace: '' }) }),
     ]);
   });
 });

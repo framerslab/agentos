@@ -175,6 +175,16 @@ export interface EpisodicMemory {
   lastAccessedAt: string;
 }
 
+/**
+ * Which episodic records {@link IKnowledgeGraph.deleteMemories} deletes: those whose `context.memoryTraceId` is one
+ * of `traceIds`, and those whose `context.scope` and `context.scopeId` are one of `scopes`. A pair, not a bare scope
+ * id: one id names several scopes (`user:42` and `organization:42`).
+ */
+export interface MemoryCopyFilter {
+  traceIds?: readonly string[];
+  scopes?: ReadonlyArray<{ scope: string; scopeId: string }>;
+}
+
 // ============================================================================
 // Query Types
 // ============================================================================
@@ -343,7 +353,9 @@ export interface IKnowledgeGraph {
   // ============ Episodic Memory Operations ============
   
   /**
-   * Record an episodic memory
+   * Record an episodic memory. A record whose context names a memory trace (`memoryTraceId`, as `MemoryStore.store`
+   * writes it) is the trace's copy; the in-memory, SQL and Neo4j graphs keep one copy per trace, so recording the
+   * trace again replaces it.
    */
   recordMemory(memory: Omit<EpisodicMemory, 'id' | 'createdAt' | 'accessCount' | 'lastAccessedAt'>): Promise<EpisodicMemory>;
 
@@ -367,6 +379,15 @@ export interface IKnowledgeGraph {
    * Recall relevant memories (updates access count)
    */
   recallMemories(query: string, topK?: number): Promise<EpisodicMemory[]>;
+
+  /**
+   * Delete the episodic records that copy memory traces ({@link MemoryCopyFilter}). `MemoryStore.store` records each
+   * trace here with its full text, so a deleted trace takes its record with it. Optional: a graph without it keeps
+   * its records, and `CognitiveMemoryManager.deleteScope` reports it as not reached.
+   *
+   * @returns The number of records deleted.
+   */
+  deleteMemories?(filter: MemoryCopyFilter): Promise<number>;
 
   // ============ Graph Traversal ============
   

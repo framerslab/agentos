@@ -238,7 +238,7 @@ interface AdaptPersonalityInput {
 - On every host, with a learning layer or without one, the tool refuses `honesty` and `emotionality` before it changes anything (`operator_only`): only the persona definition sets them.
 - On a host with a learning layer (its `learning` option on), the tool also refuses before it changes anything: on a turn in mode `frozen` (`frozen`) or `off` (`off`), on a turn with no learner (`no_learner`), for a `delta` above 0.02 either way (`step_bound`), and after three accepted calls in one session (`call_limit`).
 - `AGENTOS_LEARNING_FREEZE=1` refuses every call (`frozen`), with a learning layer or without one.
-- A trait it changes reaches no prompt: the full runtime sends the personality section only with a learning layer (its `learning` option, or a layer passed in `gmiManagerConfig.learningLayer`), and the section renders the persona's authored traits ([Learning](../GMI.md#learning)).
+- A trait it changes reaches no prompt: the full runtime sends the personality section only with a learning layer (its `learning` option, or a layer passed in `gmiManagerConfig.learningLayer`), and the section renders the learner's trait row, which the tool does not change ([Learning](../GMI.md#learning)).
 
 `agent()` registers no such tool, with or without `runtime: 'gmi'`: `gmi()` gives its tool orchestrator the agent's own tools and nothing else. Its traits stay as given.
 

@@ -17,13 +17,26 @@
  */
 
 import type { ITool, ToolExecutionResult, ToolExecutionContext, JSONSchemaObject } from '../../../../core/tools/ITool.js';
+import { memoryWriteRefusal } from '../../../learning/toolContext.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
 import {
   parseTraceMetadata,
   readPersistedDecayState,
   sha256Hex,
   withPersistedDecayState,
+  type TraceSnapshot,
 } from '../../retrieval/store/tracePersistence.js';
+import {
+  dropGraphCopies,
+  reachTraces,
+  recordToolWrite,
+  refusedMemoryWrite,
+  stillAsRead,
+  TraceMovedError,
+  undoToolWrite,
+  type MemoryToolWriteBack,
+} from './learningWrite.js';
+import { memoryToolTurnOf } from './scopeContext.js';
 
 // ---------------------------------------------------------------------------
 // Internal row type
@@ -38,6 +51,19 @@ interface TraceRow {
   metadata: string;
   last_accessed: number | null;
   created_at: number;
+}
+
+/** A snapshot as the merge's row shape. */
+function rowOfSnapshot(snapshot: TraceSnapshot): TraceRow {
+  return {
+    id: snapshot.id,
+    content: snapshot.content,
+    retrieval_count: snapshot.retrievalCount,
+    tags: snapshot.tags,
+    metadata: snapshot.metadata,
+    last_accessed: snapshot.lastAccessed,
+    created_at: snapshot.createdAt,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -130,12 +156,37 @@ export class MemoryMergeTool implements ITool<MemoryMergeInput, MemoryMergeOutpu
 
   /**
    * @param brain - The agent's shared SQLite brain database connection.
+   * @param writeBack - The facade that made the tool (`Memory.createTools()`): the merged-away traces'
+   *   knowledge-graph copies are deleted through it, and a merge a learning layer does not keep is taken back through
+   *   it. Without it the tool restores the rows itself.
    */
-  constructor(private readonly brain: Brain) {}
+  constructor(
+    private readonly brain: Brain,
+    private readonly writeBack?: MemoryToolWriteBack,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // execute
   // ---------------------------------------------------------------------------
+
+  /**
+   * The refusal a merge meets whatever a human would answer, read before the tool orchestrator's approval gate
+   * (`ITool.refusalBeforeApproval`), so no one is asked to approve a write that cannot act: a freeze, and, with the
+   * turn's scope ids on the call, a session that records no writes. A refusal that reads the traces (`other_user`,
+   * `conflict`) is given when the call runs, and fewer than two ids are left to `execute`, which refuses the same call
+   * itself, in the same order.
+   *
+   * @param args - The call's arguments, before the input schema is checked.
+   * @param context - The call's context.
+   * @returns The refusal, or `undefined` when the call may run.
+   */
+  refusalBeforeApproval(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<MemoryMergeOutput> | undefined {
+    const refusal = memoryWriteRefusal(context.sessionData);
+    if (refusal) return refusedMemoryWrite(this.name, refusal);
+    if (!Array.isArray(args?.traceIds) || args.traceIds.length < 2) return undefined;
+    const turn = memoryToolTurnOf(context);
+    return turn && !turn.record ? refusedMemoryWrite(this.name, 'no_recorder') : undefined;
+  }
 
   /**
    * Merge the specified traces into one survivor.
@@ -143,21 +194,29 @@ export class MemoryMergeTool implements ITool<MemoryMergeInput, MemoryMergeOutpu
    * Steps:
    * 1. Validate that at least 2 trace IDs were supplied.
    * 2. Load all matching, non-deleted traces from the database.
-   * 3. Pick survivor by highest `retrieval_count`; fallback to first found.
+   * 3. Pick survivor by highest `retrieval_count`; on a tie, the first of `traceIds`.
    * 4. Compute merged content (provided or concatenated).
    * 5. Union all tags, deduplicate.
    * 6. Update survivor: new content, cleared embedding, unioned tags.
-   * 7. Soft-delete all non-survivor traces.
+   * 7. Soft-delete all non-survivor traces, and their knowledge-graph copies through the facade that made the tool.
    *
-   * @param args     - Merge input (traceIds, optional mergedContent).
-   * @param _context - Tool execution context (not used by this tool).
+   * @param args    - Merge input (traceIds, optional mergedContent).
+   * @param context - Tool execution context; where it carries the turn's scope ids, every trace the call names must be
+   *   one the turn reaches: a live trace of the turn's own scopes that the turn's own user filed (another scope's reads
+   *   as not found; one another user filed refuses the whole merge, `other_user`). The merge then runs through the
+   *   learner session's recorder, writing each row only while it holds what was read (`conflict` otherwise). Only a
+   *   freeze stops a merge, with a layer or without one (`frozen`).
    * @returns `{ survivorId, deletedIds }` on success, or an error result.
    */
   async execute(
     args: MemoryMergeInput,
-    _context: ToolExecutionContext,
+    context: ToolExecutionContext,
   ): Promise<ToolExecutionResult<MemoryMergeOutput>> {
     try {
+      // Only a freeze stops a memory write, and it is read before anything else.
+      const refusal = memoryWriteRefusal(context.sessionData);
+      if (refusal) return refusedMemoryWrite(this.name, refusal);
+
       const { traceIds, mergedContent } = args;
 
       if (!traceIds || traceIds.length < 2) {
@@ -167,15 +226,34 @@ export class MemoryMergeTool implements ITool<MemoryMergeInput, MemoryMergeOutpu
         };
       }
 
-      // Load all matching active traces.
+      const turn = memoryToolTurnOf(context);
+      if (turn && !turn.record) return refusedMemoryWrite(this.name, 'no_recorder');
+
+      // Load all matching active traces, in the order the call names them: a tie in retrieval count goes to the first.
       const brainId = this.brain.brainId;
       const placeholders = traceIds.map(() => '?').join(', ');
-      const rows = await this.brain.all<TraceRow>(
-        `SELECT id, content, retrieval_count, tags, metadata, last_accessed, created_at
-         FROM memory_traces
-         WHERE brain_id = ? AND id IN (${placeholders}) AND deleted = 0`,
-        [brainId, ...traceIds],
-      );
+      const order = new Map<string, number>();
+      traceIds.forEach((id, index) => {
+        if (!order.has(id)) order.set(id, index);
+      });
+      let rows = (
+        await this.brain.all<TraceRow>(
+          `SELECT id, content, retrieval_count, tags, metadata, last_accessed, created_at
+           FROM memory_traces
+           WHERE brain_id = ? AND id IN (${placeholders}) AND deleted = 0`,
+          [brainId, ...traceIds],
+        )
+      ).sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+
+      // With the turn's scope ids on the call, only the traces the turn reaches count, each as it was read; one
+      // another user filed refuses the merge.
+      let before: TraceSnapshot[] = [];
+      if (turn) {
+        const reached = await reachTraces(this.brain, rows.map((row) => row.id), turn);
+        if (reached.otherUser) return refusedMemoryWrite(this.name, 'other_user');
+        before = reached.snapshots;
+        rows = before.map(rowOfSnapshot);
+      }
 
       if (rows.length < 2) {
         return {
@@ -234,35 +312,59 @@ export class MemoryMergeTool implements ITool<MemoryMergeInput, MemoryMergeOutpu
         ...rows.map((row) => row.last_accessed ?? row.created_at),
       );
 
-      // Update survivor: new content, cleared embedding, unioned tags.
-      const deletedIds: string[] = [];
-
-      await this.brain.transaction(async (trx) => {
-        await trx.run(
-          `UPDATE memory_traces
-           SET content = ?, embedding = NULL, tags = ?, metadata = ?, retrieval_count = ?, last_accessed = ?
-           WHERE brain_id = ? AND id = ?`,
-          [finalContent, finalTags, mergedMetadata, mergedRetrievalCount, mergedLastAccessed, brainId, survivor.id],
-        );
-
-        // Soft-delete all non-survivors.
-        for (const row of rows) {
-          if (row.id !== survivor.id) {
-            await trx.run(
-              `UPDATE memory_traces SET deleted = 1 WHERE brain_id = ? AND id = ?`,
-              [brainId, row.id],
-            );
-            deletedIds.push(row.id);
-          }
-        }
-
-        const rebuild = this.brain.fullTextRebuild();
-        await trx.run(rebuild.sql, rebuild.params);
-      });
-      return {
-        success: true,
-        output: { survivorId: survivor.id, deletedIds },
+      const merged = rows.filter((row) => row.id !== survivor.id).map((row) => row.id);
+      // With a turn each row is written only while it holds what was read; without one, as before.
+      const guardOf = (id: string): { sql: string; params: unknown[] } => {
+        const snapshot = before.find((s) => s.id === id);
+        return turn && snapshot ? stillAsRead(snapshot) : { sql: '', params: [] };
       };
+
+      // Update survivor: new content, cleared embedding, unioned tags; soft-delete the others.
+      const merge = async (): Promise<MemoryMergeOutput> => {
+        await this.brain.transaction(async (trx) => {
+          const survivorGuard = guardOf(survivor.id);
+          const updated = await trx.run(
+            `UPDATE memory_traces
+             SET content = ?, embedding = NULL, tags = ?, metadata = ?, retrieval_count = ?, last_accessed = ?
+             WHERE brain_id = ? AND id = ?${survivorGuard.sql}`,
+            [finalContent, finalTags, mergedMetadata, mergedRetrievalCount, mergedLastAccessed, brainId, survivor.id, ...survivorGuard.params],
+          );
+          if (turn && updated.changes === 0) throw new TraceMovedError(survivor.id);
+
+          for (const id of merged) {
+            const guard = guardOf(id);
+            const gone = await trx.run(
+              `UPDATE memory_traces SET deleted = 1 WHERE brain_id = ? AND id = ?${guard.sql}`,
+              [brainId, id, ...guard.params],
+            );
+            if (turn && gone.changes === 0) throw new TraceMovedError(id);
+          }
+
+          const rebuild = this.brain.fullTextRebuild();
+          await trx.run(rebuild.sql, rebuild.params);
+        });
+        await dropGraphCopies(this.writeBack, merged);
+        return { survivorId: survivor.id, deletedIds: [...merged] };
+      };
+
+      if (!turn?.record) {
+        return { success: true, output: await merge() };
+      }
+      return await recordToolWrite(
+        this.name,
+        turn.record,
+        {
+          kind: 'memory_write',
+          actor: `tool:${this.name}`,
+          subject: survivor.id,
+          before: { traces: before },
+          after: { created: [], changed: [{ id: survivor.id, content: finalContent }], deleted: [...merged] },
+          brainId,
+          apply: merge,
+          undo: (_output, reason) => undoToolWrite(this.brain, this.writeBack, { created: [], before }, reason),
+        },
+        (output) => output,
+      );
     } catch (err) {
       return {
         success: false,

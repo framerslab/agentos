@@ -77,6 +77,8 @@ The migration that adds the column fills it inside its transaction. On Postgres 
 
 A release before 0.13.159 has no `scope_id` column, and its `Brain.exportToSqlite` and `Brain.importFromSqlite` copy every column they read. Its export of a brain whose table has the column, and its import of a file at schema version 3 into a table without the column, fail naming `scope_id`. A release with the column migrates a database or file at schema version 2 in place at its first open, so keep a copy made before that open for any release before 0.13.159 that must still read it.
 
+`metadata.decay` holds a trace's decay state: `stability` and `reinforcementInterval` in milliseconds, `accessCount`, and `nextReinforcementAt` (Unix ms) once a retrieval has set it. `Memory` writes it at `remember()`, at each recall and at each `feedback()`, the consolidation loop and `memory_merge` merge it, and the store of `CognitiveMemoryManager` writes it at `store()` and at every access ([Access state across restarts](./COGNITIVE_MEMORY.md#access-state-across-restarts)).
+
 ### `memory_traces_fts`
 
 An FTS5 index over `content` and `tags`, with `memory_traces` as its external content table and the `porter ascii` tokenizer. When the SQLite build has no FTS5 module, the brain opens without the index and `recall()` falls back to `LIKE` matching.
@@ -86,7 +88,7 @@ An FTS5 index over `content` and `tags`, with `memory_traces` as its external co
 | Table | Holds |
 |-------|-------|
 | `brain_meta` | Key-value pairs per brain: `schema_version`, `created_at`, `embedding_dimensions` |
-| `knowledge_nodes` | Entities: `type`, `label`, JSON `properties`, optional `embedding`, `confidence`, JSON `source` |
+| `knowledge_nodes` | Entities: `type`, `label`, JSON `properties`, optional `embedding`, `confidence`, JSON `source`. Rows of type `memory` are the memory graph's node of each trace (node id: the trace id) and episodic memories; `MemoryStore.store()` records each trace's episodic copy under the node id `trace:<traceId>` ([Deleting traces](./COGNITIVE_MEMORY.md#deleting-traces) says which delete removes which) |
 | `knowledge_edges` | Typed edges between nodes: `source_id`, `target_id`, `type`, `weight`, `bidirectional`, JSON `metadata` |
 | `documents` | Ingested documents: `path`, `format`, `title`, `content_hash`, `chunk_count`, JSON `metadata`, `ingested_at` |
 | `document_chunks` | Chunks of a document: `document_id`, `trace_id`, `content`, `chunk_index`, `page_number`, `embedding` |
@@ -97,7 +99,7 @@ An FTS5 index over `content` and `tags`, with `memory_traces` as its external co
 | `prospective_items` | Reminders: trigger type, time, event or cue, importance, triggered and recurring flags |
 | `archived_traces`, `archive_access_log` | Verbatim content kept by the memory archive, and its rehydration log |
 
-The full DDL is in [`Brain.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) and, for the archive tables, [`SqlStorageMemoryArchive.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/SqlStorageMemoryArchive.ts). On Postgres, `INTEGER` columns become `BIGINT`, `BLOB` becomes `BYTEA`, and autoincrement keys become identity columns.
+The full DDL is in [`Brain.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) and, for the archive tables, [`SqlStorageMemoryArchive.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/SqlStorageMemoryArchive.ts). On Postgres, `INTEGER` columns become `BIGINT`, `BLOB` becomes `BYTEA`, and autoincrement keys become identity columns. `Memory.createPostgres()` and `Brain.openPostgres()` read `BIGINT` back as numbers, as SQLite returns its integers. A brain on a Postgres adapter you build yourself (`Memory.createWithAdapter()`, `Brain.openWithAdapter()`) reads them the same way only when the adapter is opened with `typeParsers: { int8: 'number' }` (`createPostgresAdapter` from `@framers/sql-storage-adapter`); with pg's default, a trace's retrieval count and times load as strings.
 
 ---
 
@@ -119,6 +121,16 @@ The brain has no re-embedding method. After a change of embedding model, stored 
 
 ---
 
+## Deleting and restoring traces
+
+`Memory.deleteScope(scope, scopeId, { turnUserId? })` and `Memory.deleteTraces(traceIds)` delete traces for good. The rows that name a trace go first, as the foreign keys require: its `retrieval_feedback` rows are deleted, and a `document_chunks` row it was filed from lets go of it (`trace_id` set to NULL) and keeps its text, which belongs to its document. Then the trace's row goes, with its memory-graph node and that node's edges, whichever facade on the Brain wrote them, a relation a host made to the node (`addRelation`) included, and its knowledge-graph copy. On SQLite the full-text index is rebuilt from the rows that remain. `deleteScope` takes every row filed under the scope (`scope_id`), soft-deleted rows included, and every knowledge-graph copy filed under it; with `turnUserId` it takes only the rows whose metadata names that user (`metadata.turnUserId`: a second user's trace on another user's session) and leaves the scope's other rows and copies. Before it reads, it files the brain's rows that hold `''` while their metadata names a scope id, as an open does, so a row a release older than the column wrote after the facade opened goes too. An empty scope id or `turnUserId` is refused with a `TypeError`, so a caller's missing id never deletes the traces filed under no scope id or widens a user's delete to the whole scope. Both return `{ deleted }`, the number of rows deleted, so a call made again counts none. A cognitive `MemoryStore` over the same Brain stops recalling a deleted trace at its next read of the rows, and its cache keeps the trace's words until its own `deleteScope` or `deleteTraces` runs.
+
+`Memory.restoreTrace(traceId, snapshot)` writes back the row a snapshot holds, live again: content, tags, scope, scope id and metadata. `readTraceSnapshot(brain, brainId, traceId)` in `tracePersistence.ts` reads one, every column but the embedding, with the form its row was read in (`scopeIdForm`: `'encoded'` once a learning layer re-filed the brain, else `'plain'`); it reads the brain's record before and after the row, and reads the row again when a re-file committed between them. A snapshot read before the re-file is written under the encoded id, as the re-file wrote the row, since in a re-filed brain the plain form of an id that holds a `/` names a namespaced user (`team/ana` is user `ana` of namespace `team`); a snapshot of a row whose `scope_id` holds `''` while its metadata names a scope id (a release older than the column wrote it) is written under the encoded form of the metadata's id, in the column and the metadata, as the re-file files and moves such a row. On Postgres the restore of such a snapshot reads the brain's record under the lock a re-file takes, so a re-file another process makes meanwhile comes before it or after it. A row that still holds the snapshot's content keeps its embedding, so a `forget` taken back is recalled as before; a row that holds other content is written with no embedding, and the trace gets one when it is next written. The full-text index follows the restored words: SQLite rebuilds it, and Postgres re-indexes the restored row alone. A restore writes the row only, so a trace deleted for good gets back its row, not the memory-graph node or the HNSW entry its delete removed. `Memory.brainId` names the brain the facade reads and writes.
+
+`remember(content, { metadata })` merges extra keys into the trace's stored metadata, under the keys the facade sets itself (`scopeId`, `content_hash`, `entities`, `decay`), which win. A trace whose metadata names a `turnUserId` is no duplicate of the same words filed under the same scope with another `turnUserId` or none: each user's words stay a trace of their own, so a delete of one user's traces leaves the other's. An import keeps them apart the same way, and a Markdown or Obsidian export writes the user into each such note's front matter, so the import files the note as that user's trace.
+
+---
+
 ## Export and backup
 
 ```ts
@@ -128,7 +140,7 @@ await mem.export('./notes/', { format: 'markdown' });
 await mem.export('./vault/', { format: 'obsidian' });
 ```
 
-On a SQLite brain, the `sqlite` export runs `VACUUM INTO '<path>'`, which writes a compacted copy of the whole file, including every brain it holds, while the source stays open. [`Brain.exportToSqlite(targetPath)`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) writes one brain to a new file and throws when the target exists.
+The `sqlite` export goes through [`Brain.exportToSqlite(targetPath)`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts), from a SQLite or a Postgres brain alike: it writes this brain's rows of every portable table to a new file, and throws when the target exists. A Postgres brain, and a SQLite file in WAL mode as `Brain.openSqlite` opens one, are read from one consistent view of the database; a brain on one connection, such as an in-memory SQLite database, is read statement by statement. Its `brain_meta` rows carry the brain's scope-id form record where the brain has one, read before the rows and again after them, and the export copies again when a re-file commits while it reads, so the file's record names the form its rows are in and an import of the file keeps the form ([A Brain's scope-id form](../MEMORY_OPERATIONS.md#a-brains-scope-id-form)).
 
 The facade has no backup schedule; a host that wants one calls `export()` from a timer:
 
@@ -202,6 +214,6 @@ Every count is of the brain's own rows, a number on SQLite and Postgres alike; a
 | [`retrieval/store/SqlKnowledgeGraph.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/SqlKnowledgeGraph.ts) | `IKnowledgeGraph` over the graph tables |
 | [`retrieval/store/SqlMemoryGraph.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/SqlMemoryGraph.ts) | `IMemoryGraph` with spreading activation and co-activation edges |
 | [`retrieval/store/tracePersistence.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/tracePersistence.ts) | FTS query builder, trace metadata and decay-state helpers |
-| [`io/SqliteExporter.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/SqliteExporter.ts) | `VACUUM INTO` export |
+| [`io/SqliteExporter.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/SqliteExporter.ts) | One brain's rows to a new SQLite file, through `Brain.exportToSqlite` |
 
 All paths are under `src/cognition/memory/`.

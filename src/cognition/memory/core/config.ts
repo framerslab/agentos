@@ -328,6 +328,18 @@ export interface CognitiveMemoryConfig {
   brain?: import('../retrieval/store/Brain.js').Brain;
 
   /**
+   * Keeps each trace's stability, access count, reinforcement interval and
+   * next reinforcement time across a restart: written to the Brain (with no
+   * Brain, to the vector store's metadata) at every access and read back at
+   * load (`MemoryStoreConfig.persistAccessState`).
+   * `false` writes and loads them as before, for one release of
+   * before-and-after measurement.
+   *
+   * @default true
+   */
+  persistAccessState?: boolean;
+
+  /**
    * Optional reranker service for post-retrieval quality improvement.
    *
    * When provided, retrieved memory traces are reranked after the

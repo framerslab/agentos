@@ -23,55 +23,71 @@ function processEnv(): Record<string, string | undefined> {
  * Checks a `LearningConfig` and resolves its switches.
  *
  * The `full` profile asks for trait changes, lessons and the skill library; `light` and `custom` ask for none. A
- * switch the config sets wins over the profile's.
+ * switch the config sets wins over the profile's. A field set to `null` reads as unset, as a config read from JSON or
+ * YAML writes one.
  *
- * @throws {Error} Naming the field, when a field has a value of the wrong type or `mode` is not a known mode.
+ * @throws {Error} Naming the field, when a field has a value of the wrong type, `mode` is not a known mode, or
+ *   `agentKey` or `ledgerKey` is blank.
  */
 export function resolveLearningConfig(config: LearningConfig, profile: LearningProfile): ResolvedLearning {
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw new Error('learning: use true, false or a LearningConfig.');
   }
-  const mode = config.mode ?? 'on';
+  // A field set to null reads as unset, as a config assembled from JSON or YAML writes one.
+  const field = <K extends keyof LearningConfig>(key: K): LearningConfig[K] | undefined => (config[key] === null ? undefined : config[key]);
+  const mode = field('mode') ?? 'on';
   if (!LEARNING_MODES.includes(mode)) {
     throw new Error(`learning.mode: unknown mode '${String(mode)}'; use 'on', 'frozen' or 'off'.`);
   }
   for (const key of ['traits', 'lessons', 'skills'] as const) {
-    if (config[key] !== undefined && typeof config[key] !== 'boolean') {
+    if (field(key) !== undefined && typeof field(key) !== 'boolean') {
       throw new Error(`learning.${key} must be true or false.`);
     }
   }
-  for (const key of ['agentKey', 'namespace'] as const) {
-    if (config[key] !== undefined && typeof config[key] !== 'string') {
+  for (const key of ['agentKey', 'namespace', 'ledgerKey'] as const) {
+    if (field(key) !== undefined && typeof field(key) !== 'string') {
       throw new Error(`learning.${key} must be a string.`);
     }
   }
-  if (config.agentKey !== undefined && config.agentKey.trim() === '') {
-    throw new Error('learning.agentKey must not be blank.');
+  for (const key of ['agentKey', 'ledgerKey'] as const) {
+    const value = field(key);
+    if (value !== undefined && value.trim() === '') throw new Error(`learning.${key} must not be blank.`);
   }
-  const anonymous = config.anonymousUserIds;
+  const anonymous = field('anonymousUserIds');
   if (anonymous !== undefined && (!Array.isArray(anonymous) || anonymous.some((id) => typeof id !== 'string'))) {
     throw new Error('learning.anonymousUserIds must be a list of strings.');
+  }
+  if (field('clock') !== undefined && typeof field('clock') !== 'function') {
+    throw new Error('learning.clock must be a function that returns milliseconds since the epoch.');
+  }
+  const store = field('store');
+  if (store !== undefined && (typeof store !== 'object' || typeof (store as { transaction?: unknown }).transaction !== 'function')) {
+    throw new Error('learning.store must be a LearningStore (InMemoryLearningStore or SqlLearningStore).');
+  }
+  const memoryTools = field('memoryTools');
+  if (memoryTools !== undefined && (typeof memoryTools !== 'object' || Array.isArray(memoryTools))) {
+    throw new Error('learning.memoryTools must be an object: the Memory facade the memory tools are built over.');
   }
   const asked = profile === 'full';
   return {
     mode,
-    traits: config.traits ?? asked,
-    lessons: config.lessons ?? asked,
-    skills: config.skills ?? asked,
+    traits: field('traits') ?? asked,
+    lessons: field('lessons') ?? asked,
+    skills: field('skills') ?? asked,
   };
 }
 
 /**
- * Resolves a host's `learning` option: unset or `false` is off (`undefined`), `true` takes the profile's switches,
- * and a `LearningConfig` turns learning on and overrides them switch by switch.
+ * Resolves a host's `learning` option: unset, `null` or `false` is off (`undefined`), `true` takes the profile's
+ * switches, and a `LearningConfig` turns learning on and overrides them switch by switch.
  *
  * @throws {Error} As {@link resolveLearningConfig} throws.
  */
 export function resolveLearning(
-  option: boolean | LearningConfig | undefined,
+  option: boolean | LearningConfig | null | undefined,
   profile: LearningProfile,
 ): ResolvedLearning | undefined {
-  if (option === undefined || option === false) return undefined;
+  if (option === undefined || option === null || option === false) return undefined;
   return resolveLearningConfig(option === true ? {} : option, profile);
 }
 

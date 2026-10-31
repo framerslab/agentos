@@ -35,7 +35,19 @@ import type {
   SemanticSearchResult,
   KnowledgeGraphStats,
   KnowledgeSource,
+  MemoryCopyFilter,
 } from '../graph/knowledge/IKnowledgeGraph.js';
+import {
+  COPY_KEY_PREFIX,
+  TRACE_CONTEXT_MARKER,
+  copiedTraceId,
+  copyKey,
+  filterTraceIds,
+  isEmptyCopyFilter,
+  isMemoryCopyOf,
+  scopeNeedles,
+  traceNeedles,
+} from '../graph/knowledge/memoryCopies.js';
 import type { Brain } from './Brain.js';
 import { uuid } from '../../core/util/crossPlatformCrypto.js';
 
@@ -144,6 +156,103 @@ interface MemoryNodeFields extends ExtendedNodeFields {
   _lastAccessedAt: string;
 }
 
+/** The stored context of a memory node's `properties` JSON, or `undefined` for a value that does not parse. */
+function storedContext(properties: string): unknown {
+  try {
+    return (JSON.parse(properties) as { _context?: unknown } | null)?._context;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The trace a `knowledge_nodes` row copies, read from its `properties` (the stored context names it,
+ * `memoryTraceId`), or `undefined` for a row that copies no trace or whose properties do not parse. An importer reads
+ * a file's rows with it.
+ */
+export function storedCopyTraceId(properties: string | null | undefined): string | undefined {
+  return typeof properties === 'string' ? copiedTraceId(storedContext(properties)) : undefined;
+}
+
+/** The columns `recordMemory` writes, in order. */
+const MEMORY_NODE_COLUMNS = ['brain_id', 'id', 'type', 'label', 'properties', 'embedding', 'confidence', 'source', 'created_at'];
+
+/** `text` with the characters `LIKE ... ESCAPE '!'` reads as wildcards or as its escape (`%`, `_`, `!`) escaped. */
+function likeLiteral(text: string): string {
+  return text.replace(/[!%_]/g, '!$&');
+}
+
+/**
+ * A pattern for `LIKE ? ESCAPE '!'` that matches a value holding `text` anywhere, character for character. The escape
+ * clause matters on Postgres, whose `LIKE` reads a backslash as an escape by default, so the JSON escapes of a quote
+ * or a backslash in a stored id (`\"`, `\\`) would match other text.
+ */
+function likeContaining(text: string): string {
+  return `%${likeLiteral(text)}%`;
+}
+
+/**
+ * Files under its trace's key (`trace:<traceId>`) each trace copy a brain holds under another node id, so a delete by
+ * trace id finds it by key: a copy a release older than keyed copies recorded under a random node id, and one an
+ * import writes so (from a file such a release wrote, or a JSON export's copy whose key the brain's own copy of the
+ * trace holds, which the import writes under a new id). The newest such copy of a trace takes the key when no copy
+ * holds it; a copy whose key holds a copy already is deleted, and the keyed copy stays. The relations that name a
+ * moved or deleted copy move to the key ({@link moveCopyToKey}).
+ *
+ * @param db - The brain, or the transaction an import writes in.
+ * @param brainId - The brain whose copies are keyed.
+ * @param onFailure - Called with each copy whose move fails, and the walk goes on to the next copy; without it the
+ *   first failure throws, so the transaction an import keys in rolls back.
+ */
+export async function keyTraceCopies(
+  db: { run: Brain['run']; all: Brain['all'] },
+  brainId: string,
+  onFailure?: (copy: { nodeId: string; traceId: string }, error: unknown) => void,
+): Promise<void> {
+  const rows = await db.all<{ id: string; properties: string }>(
+    `SELECT id, properties FROM knowledge_nodes
+      WHERE brain_id = ? AND type = 'memory' AND id NOT LIKE ? ESCAPE '!' AND properties LIKE ? ESCAPE '!'
+      ORDER BY created_at DESC`,
+    [brainId, `${likeLiteral(COPY_KEY_PREFIX)}%`, likeContaining(TRACE_CONTEXT_MARKER)],
+  );
+  for (const row of rows) {
+    const traceId = storedCopyTraceId(row.properties);
+    if (traceId === undefined) continue;
+    try {
+      await moveCopyToKey(db, brainId, row.id, copyKey(traceId));
+    } catch (error) {
+      if (!onFailure) throw error;
+      onFailure({ nodeId: row.id, traceId }, error);
+    }
+  }
+}
+
+/**
+ * Move one trace copy held under another node id to its trace's key. The copy is written under the key unless the
+ * trace's keyed copy exists (recorded after it, which replaces it), the relations that name the older node are moved
+ * to the key, and the older node is deleted last, once the key holds a copy. Each statement leaves the node set valid
+ * for the edges' foreign keys, so one that fails leaves the older copy for a later pass and never deletes a trace's
+ * only copy.
+ */
+async function moveCopyToKey(db: { run: Brain['run'] }, brainId: string, id: string, key: string): Promise<void> {
+  await db.run(
+    `INSERT INTO knowledge_nodes (${MEMORY_NODE_COLUMNS.join(', ')})
+     SELECT brain_id, CAST(? AS TEXT), type, label, properties, embedding, confidence, source, created_at
+       FROM knowledge_nodes
+      WHERE brain_id = ? AND id = ?
+        AND NOT EXISTS (SELECT 1 FROM knowledge_nodes WHERE brain_id = ? AND id = ?)`,
+    [key, brainId, id, brainId, key],
+  );
+  await db.run('UPDATE knowledge_edges SET source_id = ? WHERE brain_id = ? AND source_id = ?', [key, brainId, id]);
+  await db.run('UPDATE knowledge_edges SET target_id = ? WHERE brain_id = ? AND target_id = ?', [key, brainId, id]);
+  await db.run(
+    `DELETE FROM knowledge_nodes
+      WHERE brain_id = ? AND id = ?
+        AND EXISTS (SELECT 1 FROM knowledge_nodes WHERE brain_id = ? AND id = ?)`,
+    [brainId, id, brainId, key],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // SqlKnowledgeGraph
 // ---------------------------------------------------------------------------
@@ -174,6 +283,18 @@ interface MemoryNodeFields extends ExtendedNodeFields {
 export class SqlKnowledgeGraph implements IKnowledgeGraph {
   /** The shared SQLite brain instance. */
   private readonly brain: Brain;
+
+  /**
+   * This instance's pass over the trace copies an older release recorded, once it has started, and whether it ran
+   * through ({@link rekeyOlderCopies}).
+   */
+  private olderCopiesRekeyed: Promise<boolean> | null = null;
+
+  /**
+   * The node ids of the copies an older release recorded whose move to their key failed in this instance's pass, by
+   * trace id: a delete by trace id deletes them where they are ({@link deleteMemories}).
+   */
+  private readonly unmovedOlderCopies = new Map<string, Set<string>>();
 
   /**
    * @param brain - A Brain instance whose async StorageAdapter methods
@@ -509,12 +630,16 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
    *
    * Memories are stored as knowledge_nodes with `type = 'memory'`. The
    * memory-specific fields are packed into the `properties` JSON column.
+   * A memory trace's copy (a context that names the trace, `memoryTraceId`)
+   * is keyed by the trace (`trace:<traceId>`): recording the trace again
+   * replaces the copy, and a delete by trace id finds it by key.
    */
   async recordMemory(
     memory: Omit<EpisodicMemory, 'id' | 'createdAt' | 'accessCount' | 'lastAccessedAt'>,
   ): Promise<EpisodicMemory> {
     const now = new Date().toISOString();
-    const id = uuid();
+    const traceId = copiedTraceId(memory.context);
+    const id = traceId === undefined ? uuid() : copyKey(traceId);
 
     const memFields: MemoryNodeFields = {
       _props: {},
@@ -544,10 +669,11 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
       timestamp: now,
     };
 
+    const placeholders = MEMORY_NODE_COLUMNS.map(() => '?');
     await this.brain.run(
-      `INSERT INTO knowledge_nodes
-         (brain_id, id, type, label, properties, embedding, confidence, source, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      traceId === undefined
+        ? `INSERT INTO knowledge_nodes (${MEMORY_NODE_COLUMNS.join(', ')}) VALUES (${placeholders.join(', ')})`
+        : this.brain.features.dialect.insertOrReplace('knowledge_nodes', MEMORY_NODE_COLUMNS, placeholders, 'brain_id, id'),
       [
         this.brain.brainId,
         id,
@@ -596,6 +722,149 @@ export class SqlKnowledgeGraph implements IKnowledgeGraph {
 
     if (!row) return undefined;
     return this._rowToMemory(row);
+  }
+
+  /**
+   * Delete the memory nodes that copy the filter's traces or scopes, with the relations that name them, as
+   * `deleteEntity` deletes an entity's. A trace's copy is deleted by its key; the first delete by trace id of this
+   * instance first gives the copies an older release recorded their key ({@link rekeyOlderCopies}), and a copy whose
+   * move failed in that pass is deleted by its node id. While that pass fails as a whole, a delete by trace id reads
+   * the trace's copies held under another node id by the text their stored JSON holds ({@link olderCopyIds}) and
+   * deletes them too. A scope's copies are read by the text their stored JSON holds
+   * (`LIKE` with an escape clause, which on SQLite also matches the text in other letter cases) and matched exactly in
+   * code, so a malformed `properties` value is skipped rather than failing the delete.
+   */
+  async deleteMemories(filter: MemoryCopyFilter): Promise<number> {
+    if (isEmptyCopyFilter(filter)) return 0;
+    let deleted = 0;
+    const traceIds = filterTraceIds(filter);
+    if (traceIds.length > 0) {
+      const keyed = await this.rekeyOlderCopies();
+      const ids = new Set(traceIds.map(copyKey));
+      for (const traceId of traceIds) {
+        for (const id of this.unmovedOlderCopies.get(traceId) ?? []) ids.add(id);
+      }
+      if (!keyed) {
+        for (const id of await this.olderCopyIds(traceIds)) ids.add(id);
+      }
+      deleted += await this.deleteMemoryNodes([...ids]);
+      for (const traceId of traceIds) this.unmovedOlderCopies.delete(traceId);
+    }
+    const scopes = filter.scopes ?? [];
+    if (scopes.length > 0) {
+      const byScope: MemoryCopyFilter = { scopes };
+      const ids = new Set<string>();
+      for (const needle of scopeNeedles(scopes)) {
+        const rows = await this.brain.all<{ id: string; properties: string }>(
+          `SELECT id, properties FROM knowledge_nodes WHERE brain_id = ? AND type = 'memory' AND properties LIKE ? ESCAPE '!'`,
+          [this.brain.brainId, likeContaining(needle)],
+        );
+        for (const row of rows) {
+          if (isMemoryCopyOf(storedContext(row.properties), byScope)) ids.add(row.id);
+        }
+      }
+      deleted += await this.deleteMemoryNodes([...ids]);
+    }
+    return deleted;
+  }
+
+  /**
+   * The node ids of these traces' copies held under another node id than their key, read by the text their stored
+   * JSON holds (`"memoryTraceId":"<id>"`, an escaped `LIKE`, 50 traces a statement) and matched exactly in code: what
+   * a delete by trace id reads while the pass that keys such copies fails as a whole ({@link rekeyOlderCopies}).
+   */
+  private async olderCopyIds(traceIds: readonly string[]): Promise<string[]> {
+    const byTrace: MemoryCopyFilter = { traceIds };
+    const needles = traceNeedles(traceIds);
+    const ids: string[] = [];
+    for (let offset = 0; offset < needles.length; offset += 50) {
+      const chunk = needles.slice(offset, offset + 50);
+      const rows = await this.brain.all<{ id: string; properties: string }>(
+        `SELECT id, properties FROM knowledge_nodes
+          WHERE brain_id = ? AND type = 'memory' AND id NOT LIKE ? ESCAPE '!'
+            AND (${chunk.map(() => "properties LIKE ? ESCAPE '!'").join(' OR ')})`,
+        [this.brain.brainId, `${likeLiteral(COPY_KEY_PREFIX)}%`, ...chunk.map(likeContaining)],
+      );
+      for (const row of rows) {
+        if (isMemoryCopyOf(storedContext(row.properties), byTrace)) ids.push(row.id);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Delete these memory nodes and the relations that name them (a host can relate a copy, `upsertRelation`; the
+   * edges' foreign keys hold the node otherwise), 400 ids a statement. @returns How many nodes there were.
+   */
+  private async deleteMemoryNodes(ids: readonly string[]): Promise<number> {
+    const brainId = this.brain.brainId;
+    let deleted = 0;
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const chunk = ids.slice(offset, offset + 400);
+      const placeholders = chunk.map(() => '?').join(', ');
+      await this.brain.run(
+        `DELETE FROM knowledge_edges WHERE brain_id = ? AND (source_id IN (${placeholders}) OR target_id IN (${placeholders}))`,
+        [brainId, ...chunk, ...chunk],
+      );
+      const result = await this.brain.run(
+        `DELETE FROM knowledge_nodes WHERE brain_id = ? AND type = 'memory' AND id IN (${placeholders})`,
+        [brainId, ...chunk],
+      );
+      deleted += result.changes;
+    }
+    return deleted;
+  }
+
+  /**
+   * Give the trace copies an older release recorded under a random node id their trace's key, once per instance, so
+   * a delete by trace id finds them by key ({@link keyTraceCopies}). Of two copies of one trace the newer takes the
+   * key and the other is deleted, as a second record of a trace replaces the first; the relations that name either
+   * move to the key. A copy whose move fails keeps its node id, with a warning, and the next instance's pass moves it;
+   * a delete by its trace id in the meantime deletes it by that node id. A pass that fails as a whole (its read of
+   * the copies) resolves `false`, with a warning: the delete that waited for it reads the trace's older copies by
+   * their stored JSON ({@link olderCopyIds}), and the next delete by trace id makes the pass again. An import keys the
+   * copies it writes as it writes them. A copy a release older than keyed copies writes into the same Brain after the
+   * pass, while both releases run on it, gets its key from the next instance's pass; until then a delete by its scope
+   * finds it.
+   *
+   * @returns Whether the pass ran through, its copies moved or remembered by node id.
+   */
+  private rekeyOlderCopies(): Promise<boolean> {
+    if (!this.olderCopiesRekeyed) {
+      this.olderCopiesRekeyed = this.moveOlderCopies().then(
+        () => true,
+        (error: unknown) => {
+          this.olderCopiesRekeyed = null;
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[SqlKnowledgeGraph] keying the trace copies an older release recorded in brain ${this.brain.brainId} ` +
+              `failed; until a pass runs through, a delete by trace id reads them by their stored context: ${message}`,
+          );
+          return false;
+        },
+      );
+    }
+    return this.olderCopiesRekeyed;
+  }
+
+  private async moveOlderCopies(): Promise<void> {
+    let kept = 0;
+    let reason = '';
+    await keyTraceCopies(this.brain, this.brain.brainId, ({ nodeId, traceId }, error) => {
+      kept += 1;
+      reason = error instanceof Error ? error.message : String(error);
+      const unmoved = this.unmovedOlderCopies.get(traceId) ?? new Set<string>();
+      unmoved.add(nodeId);
+      this.unmovedOlderCopies.set(traceId, unmoved);
+    });
+    if (kept > 0) {
+      console.warn(
+        `[SqlKnowledgeGraph] ${kept} trace copies an older release recorded in brain ${this.brain.brainId} keep their ` +
+          `node id, where a delete by their trace id finds them, and the next instance's first delete by trace id ` +
+          `moves them: ` +
+          reason,
+      );
+    }
   }
 
   /**

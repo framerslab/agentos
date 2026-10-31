@@ -635,6 +635,25 @@ describe('MemoryMergeTool', () => {
     expect(survivor!.content).toContain('|');
   });
 
+  it('breaks a tie in retrieval count by the order of traceIds: the first survives, and the contents join in that order', async () => {
+    const brain = await openBrain();
+    const addTool = new MemoryAddTool(brain);
+    const mergeTool = new MemoryMergeTool(brain);
+    const contentOf = new Map<string, string>();
+    for (const content of ['Fact one.', 'Fact two.']) {
+      const { output } = await addTool.execute({ content }, testContext);
+      contentOf.set(output!.traceId, content);
+    }
+    // Named in the reverse of the ids' own order, so the order the database reads them in cannot pass for the call's.
+    const [low, high] = [...contentOf.keys()].sort();
+
+    const result = await mergeTool.execute({ traceIds: [high!, low!] }, testContext);
+
+    expect(result.output).toEqual({ survivorId: high, deletedIds: [low] });
+    const survivor = await brain.get<{ content: string }>('SELECT content FROM memory_traces WHERE id = ?', [high]);
+    expect(survivor!.content).toBe(`${contentOf.get(high!)} | ${contentOf.get(low!)}`);
+  });
+
   it('unions tags from all merged traces', async () => {
     const brain = await openBrain();
     const addTool = new MemoryAddTool(brain);

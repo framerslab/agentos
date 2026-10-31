@@ -32,6 +32,13 @@
  * (`liveRecordsFirst`), so a text the file holds both forgotten and live
  * arrives live.
  *
+ * A CSV file's scope ids are plain. A Brain a learning layer serves holds its
+ * plain `user` and `persona` scope ids in the encoded form (`scopeIdForm.ts`):
+ * into such a Brain each row's scope id is encoded as it is written, in the
+ * column and in the metadata. The Brain's form is read in the transaction the
+ * import writes in (on Postgres under the brain's form lock), so a re-file of
+ * the Brain that commits first is followed.
+ *
  * @module memory/io/CsvImporter
  */
 
@@ -39,8 +46,15 @@ import { sha256 } from '../core/util/crossPlatformCrypto.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ImportOptions, ImportResult } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
-import { duplicateTraceCondition, duplicateTraceParams, importedScopeId, liveRecordsFirst } from './importScope.js';
+import {
+  duplicateTraceCondition,
+  duplicateTraceParams,
+  importedScopeId,
+  importedTurnUserId,
+  liveRecordsFirst,
+} from './importScope.js';
 import { fillScopeIds } from '../retrieval/store/migrations/v2-to-v3.js';
+import { encodePlainScopeId, importScopeIdFormDecision } from '../retrieval/store/scopeIdForm.js';
 
 /**
  * Imports a flat CSV file into a `Brain`.
@@ -140,6 +154,8 @@ export class CsvImporter {
        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, '{}', ?, ?, ?)`;
 
     await this.brain.transaction(async (trx) => {
+      // A plain source: into a Brain that holds the encoded form its ids are encoded as they are written.
+      const encodePlainIds = (await importScopeIdFormDecision(trx, this.brain, { encoded: false })).action === 'encode';
       // A trace an older release wrote holds scope_id '': filed under its scope id first, it is found there.
       if (options?.dedup ?? true) await fillScopeIds(trx, brainId);
       // The live rows first, so of two rows of one text, the forgotten one is the duplicate of the live one, never the reverse.
@@ -173,11 +189,15 @@ export class CsvImporter {
             metadata = parsed as Record<string, unknown>;
           }
           // The metadata's scopeId comes first, then the scope_id cell, as for a JSON or SQLite record.
-          const scopeId = importedScopeId(metadata, this._readCell(row, scopeIdIndex));
+          let scopeId = importedScopeId(metadata, this._readCell(row, scopeIdIndex));
+          if (encodePlainIds) {
+            scopeId = encodePlainScopeId(scope, scopeId);
+            if (scopeId !== '') metadata.scopeId = scopeId;
+          }
 
           if (options?.dedup ?? true) {
             const existing = await trx.get<{ id: string }>(checkSql, [
-              brainId, scope, scopeId, ...duplicateTraceParams(hash, content),
+              brainId, scope, scopeId, ...duplicateTraceParams(hash, content, importedTurnUserId(metadata)),
             ]);
             if (existing) {
               result.skipped++;
