@@ -172,10 +172,14 @@ const SECTIONS = new Set(['article', 'section']);
 
 /**
  * What marks a form as holding a page rather than a set of controls, with the page's main content: a heading, HTML's
- * sectioning content (https://html.spec.whatwg.org/multipage/dom.html#sectioning-content), a header or a footer. A page
- * whose whole body sits in one form, as an ASP.NET Web Forms page's does, usually holds one, and `noteParts` takes the
- * body's one form as a page whatever it holds; a blog post's comment form or a search box, a set of notes, labels and
- * controls beside the page, holds none.
+ * sectioning content (https://html.spec.whatwg.org/multipage/dom.html#sectioning-content), a header or a footer. A
+ * table's header cell (https://html.spec.whatwg.org/multipage/tables.html#the-th-element) marks one too when its table
+ * holds data, as `laysOutForm` reads the table: the list of a category's articles Joomla writes in a form holds such
+ * cells. A page whose whole body sits in one form, as an ASP.NET Web Forms page's does, usually holds one, and
+ * `noteParts` takes the body's one form as a page whatever it holds; a blog post's comment form or a search box, a set
+ * of notes, labels and controls beside the page, holds none, and neither does a form laid out in a table of plain
+ * cells, as a hotel search is, or one whose table puts a label's header cell beside each control, as a contact form
+ * often does.
  */
 const PAGE_PARTS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'article', 'aside', 'nav', 'section', 'header', 'footer']);
 
@@ -348,6 +352,78 @@ function isMain(node: HtmlNodeLike, name: string): boolean {
 const HOLDS_MAIN = 1;
 const HOLDS_PAGE = 2;
 
+/** Whether a node holds words that are read: text outside the elements left out by their name and the hidden ones. */
+function holdsWords(node: HtmlNodeLike): boolean {
+  for (const child of childrenOf(node)) {
+    if (isText(child)) {
+      if ((child.textContent ?? '').replace(WHITE, '') !== '') return true;
+      continue;
+    }
+    if (child.nodeType !== ELEMENT_NODE || DROPPED.has(nameOf(child)) || hidden(child)) continue;
+    if (holdsWords(child)) return true;
+  }
+  return false;
+}
+
+/** The controls a person fills in or presses, which a form laid out in a table puts in a cell beside its label. */
+const CONTROLS = new Set(['input', 'select', 'textarea', 'button']);
+
+/**
+ * Whether a node holds a control a person fills in or presses: an `input` other than a hidden one, a `select`, a
+ * `textarea` or a `button`. The elements left out by their name and the hidden ones are not looked in.
+ */
+function holdsControl(node: HtmlNodeLike): boolean {
+  for (const child of childrenOf(node)) {
+    if (child.nodeType !== ELEMENT_NODE || hidden(child)) continue;
+    const name = nameOf(child);
+    if (CONTROLS.has(name)) {
+      if (name !== 'input' || (child.getAttribute?.('type') ?? '').trim().toLowerCase() !== 'hidden') return true;
+      continue;
+    }
+    if (!DROPPED.has(name) && holdsControl(child)) return true;
+  }
+  return false;
+}
+
+/** A table's rows that are not hidden: its own and those of its head, bodies and foot, never a nested table's. */
+function rowsOf(table: HtmlNodeLike): HtmlNodeLike[] {
+  const rows: HtmlNodeLike[] = [];
+  for (const child of childrenOf(table)) {
+    if (child.nodeType !== ELEMENT_NODE || hidden(child)) continue;
+    const name = nameOf(child);
+    if (name === 'tr') rows.push(child);
+    else if (name === 'thead' || name === 'tbody' || name === 'tfoot') {
+      for (const row of childrenOf(child)) {
+        if (row.nodeType === ELEMENT_NODE && nameOf(row) === 'tr' && !hidden(row)) rows.push(row);
+      }
+    }
+  }
+  return rows;
+}
+
+/**
+ * Whether a table lays out a form: one of its rows puts a header cell beside a data cell (`td`) that holds a control
+ * and no words, a label beside the control it names, as a contact form laid out in a table does. Its header cells mark
+ * no page, a row of a header cell alone that names a group of its fields among them. Any other table's header cells
+ * head data and mark a form that holds the table as holding a page, as the head of the list of a category's articles
+ * Joomla writes in a form does, or an item's name beside its details. Read once a table, its rows' cells once each;
+ * hidden rows and cells are not read.
+ */
+function laysOutForm(table: HtmlNodeLike): boolean {
+  for (const row of rowsOf(table)) {
+    let header = false;
+    let control = false;
+    for (const cell of childrenOf(row)) {
+      if (cell.nodeType !== ELEMENT_NODE || hidden(cell)) continue;
+      const name = nameOf(cell);
+      if (name === 'th') header = true;
+      else if (name === 'td' && !control && !holdsWords(cell) && holdsControl(cell)) control = true;
+    }
+    if (header && control) return true;
+  }
+  return false;
+}
+
 /** The forms that hold a page, and the sections that hold the page's main content and so wrap the page. */
 interface Parts {
   readonly forms: Set<HtmlNodeLike>;
@@ -357,12 +433,16 @@ interface Parts {
 /**
  * Notes, in one walk of what a node holds, the forms that hold a page and the sections that hold the page's main content,
  * and answers what the node holds as `HOLDS_MAIN` and `HOLDS_PAGE` bits. A form holds a page when it holds the page's
- * main content or an element of `PAGE_PARTS`, a `nav` among them, though a nav is never read; when it is the page's main
- * content itself, its role `main`; or when it is the one element the body holds that is read, with no words of the
- * body's own beside it, as an ASP.NET Web Forms page's form is, headings or none. A hidden element marks nothing, and
- * neither does anything inside it or inside an element left out by its name.
+ * main content, an element of `PAGE_PARTS`, a `nav` among them, though a nav is never read, or a table's header cell
+ * whose table holds data, which `laysOutForm` reads once a table; when it is the page's main content itself, its role
+ * `main`; or when it is the one element the body holds that is read, with no words of the body's own beside it, as an
+ * ASP.NET Web Forms page's form is, headings or none. A hidden element marks nothing, and neither does anything inside
+ * it or inside an element left out by its name.
+ *
+ * @param headers - Whether a header cell among what the node holds marks a page: false inside a table that lays out a
+ *   form, until a table nested in it reads its own.
  */
-function noteParts(node: HtmlNodeLike, parts: Parts): number {
+function noteParts(node: HtmlNodeLike, parts: Parts, headers = true): number {
   let holds = 0;
   // the elements the node holds that are read, and whether it holds words of its own beside them, for the body's one form
   const read: HtmlNodeLike[] = [];
@@ -381,8 +461,8 @@ function noteParts(node: HtmlNodeLike, parts: Parts): number {
     read.push(child);
     const main = isMain(child, name);
     if (main) holds |= HOLDS_MAIN | HOLDS_PAGE;
-    else if (PAGE_PARTS.has(name)) holds |= HOLDS_PAGE;
-    const inner = noteParts(child, parts);
+    else if (PAGE_PARTS.has(name) || (name === 'th' && headers)) holds |= HOLDS_PAGE;
+    const inner = noteParts(child, parts, name === 'table' ? !laysOutForm(child) : headers);
     if (name === 'form' && (main || (inner & HOLDS_PAGE) !== 0)) parts.forms.add(child);
     if (name === 'section' && (inner & HOLDS_MAIN) !== 0) parts.wrappers.add(child);
     holds |= inner;
@@ -394,14 +474,70 @@ function noteParts(node: HtmlNodeLike, parts: Parts): number {
 }
 
 /**
+ * What introduces the content a header heads: its headings and paragraphs. HTML's header holds "a group of introductory
+ * or navigational aids" (https://html.spec.whatwg.org/multipage/sections.html#the-header-element), usually a heading
+ * or an `hgroup`, and may hold a table of contents, a search form or a logo beside them.
+ */
+const INTRODUCTION = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'p']);
+
+/**
+ * Whether a node holds an `h1`, the title of the content a header inside the page's main content introduces. The parts
+ * never read, by their name or as hidden, are not looked in.
+ */
+function holdsH1(node: HtmlNodeLike): boolean {
+  for (const child of childrenOf(node)) {
+    if (child.nodeType !== ELEMENT_NODE) continue;
+    const name = nameOf(child);
+    if (DROPPED.has(name) || hidden(child)) continue;
+    if (name === 'h1' || holdsH1(child)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a part of a header holds an element of `INTRODUCTION`, with the elements under it that hold none: the
+ * header's navigational aids, each to be left out with all it holds. The words a part holds beside its elements are
+ * read with it. The parts never read, by their name or as hidden, are not looked in.
+ */
+function introductionOf(node: HtmlNodeLike): { holds: boolean; aids: HtmlNodeLike[] } {
+  let holds = false;
+  const aids: HtmlNodeLike[] = [];
+  for (const child of childrenOf(node)) {
+    if (child.nodeType !== ELEMENT_NODE) continue;
+    const name = nameOf(child);
+    if (DROPPED.has(name) || hidden(child)) continue;
+    if (INTRODUCTION.has(name)) {
+      holds = true;
+      continue;
+    }
+    if (SCOPED.has(name)) {
+      // an aside in a header, or a header or footer HTML does not allow there, is an aid whatever it holds
+      aids.push(child);
+      continue;
+    }
+    const inner = introductionOf(child);
+    if (inner.holds) {
+      holds = true;
+      for (const aid of inner.aids) aids.push(aid);
+    } else {
+      // a part that holds no introduction is an aid, left out whole with what its own walk found
+      aids.push(child);
+    }
+  }
+  return { holds, aids };
+}
+
+/**
  * The page's own header, footer and asides: those that no article or section holds, between them and the node handed
  * over, but one that wraps the page. A section that holds the page's main content wraps the page, as the Read the Docs
  * theme's section around its content column and footer does, so it holds no header, footer or aside of its own; an
  * article, and any other section, holds its own, and so does the node handed over when it is one. A header inside the
- * page's main content, a `main` element or one whose role is `main`, introduces that content, as the title of an
- * archive or of a search page does, and is read; a footer or an aside there is still the page's. The walk stops at an
- * article or a section that holds its own and at an element left out with all it holds, since nothing inside either is
- * the page's own or is read.
+ * page's main content, a `main` element or one whose role is `main`, that holds an `h1` introduces that content, as the
+ * title of an archive or of a search page does: its headings and paragraphs are read, and the rest of it, its
+ * navigational aids, is the page's own, as the menu of other languages Wikipedia's title bar holds beside an article's
+ * title is. A header there that holds no `h1` is the page's own whole, as a GitHub repository page's bar of tabs and its
+ * title bar are. A footer or an aside there is still the page's. The walk stops at an article or a section that holds
+ * its own and at an element left out with all it holds, since nothing inside either is the page's own or is read.
  *
  * @param wrappers - The sections that hold the page's main content, as `noteParts` notes them.
  */
@@ -417,8 +553,13 @@ function pageOwnOf(root: HtmlNodeLike, wrappers: ReadonlySet<HtmlNodeLike>): Set
       if (child.nodeType !== ELEMENT_NODE) continue;
       const name = nameOf(child);
       if (holdsOwn(child, name) || DROPPED.has(name) || hidden(child)) continue;
-      // a header inside the page's main content introduces it and is read with all it holds
-      if (name === 'header' && holder.inMain) continue;
+      if (name === 'header' && holder.inMain) {
+        // a header inside the page's main content that holds its title introduces it: what introduces it is read, and
+        // its aids are the page's; one that holds no h1 is the page's whole
+        if (holdsH1(child)) for (const aid of introductionOf(child).aids) found.add(aid);
+        else found.add(child);
+        continue;
+      }
       if (SCOPED.has(name)) found.add(child);
       else holders.push({ node: child, inMain: holder.inMain || isMain(child, name) });
     }
@@ -1359,15 +1500,18 @@ function writeWithin(blocks: readonly Block[], maxCharacters: number): { markdow
  * `hidden`, `aria-hidden="true"` or styled `display: none`. A `header`, `footer` or `aside` is the page's own when no
  * `article` or `section` holds it but a section that holds the page's main content, a `main` element or an element whose
  * role is `main`, and so wraps the page; inside an article or any other section, it is that part's and is read with it,
- * and an `article` or `section` handed over holds its own the same way. A `header` inside the page's main content
- * introduces that content and is read. A `form` is read as the blocks it holds when it holds a page: a heading, an
- * `article`, `aside`, `nav` or `section`, the page's main content, a `header` or a `footer`; when it is the page's main
- * content itself; or when it is the one element the body holds, as a page whose whole body sits in one form does. A
- * heading whose words all sit in its one `button`, as an accordion's
- * header's do, is read for that button's words. A form's control, an image and the rest of HTML's embedded content are
- * each a space between the words on either side of them, outside code. Comments are not read. An element handed over is
- * read as a document is, whatever its own name, but an `svg` or `math` element handed over takes no title from a
- * `<title>` in it, which is the drawing's or the formula's.
+ * and an `article` or `section` handed over holds its own the same way. A `header` inside the page's main content that
+ * holds an `h1` introduces that content: its headings, `hgroup`s and paragraphs are read, and the rest of it, a menu or
+ * a list of links beside them, is the page's own; one that holds no `h1` is the page's own whole. A `form` is read as
+ * the blocks it holds when it holds a page: a heading, an `article`, `aside`, `nav` or `section`, the page's main
+ * content, a `header`, a `footer` or a table's header cell (`th`), as a table of data holds; when it is the page's main
+ * content itself; or when it is the one element the body holds, as a page whose whole body sits in one form does. The
+ * header cells of a table with a row that puts one beside a `td` of a control and no words, as a contact form laid out
+ * in a table puts its labels, mark no page. A heading whose words all sit in its one `button`,
+ * as an accordion's header's do, is read for that button's words. A form's control, an image and the rest of HTML's
+ * embedded content are each a space between the words on either side of them, outside code. Comments are not read. An
+ * element handed over is read as a document is, whatever its own name, but an `svg` or `math` element handed over
+ * takes no title from a `<title>` in it, which is the drawing's or the formula's.
  *
  * @param document - A parsed document, or an element, as a page's `DOMParser` gives it; nothing is fetched.
  * @param options - The bounds on the Markdown and on each table.
