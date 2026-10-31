@@ -101,6 +101,37 @@ describe('LLMUtilityAI', () => {
     );
   });
 
+  // claude-haiku-4-5's answer to the sentiment prompt: the JSON inside a Markdown code fence.
+  const fencedSentiment =
+    '```json\n{\n  "score": 0.6,\n  "polarity": "positive",\n  "intensity": 0.6,\n  "positiveTokens": ["glad", "helpful"],\n  "negativeTokens": []\n}\n```';
+  const sentiment = { score: 0.6, polarity: 'positive', intensity: 0.6, positiveTokens: ['glad', 'helpful'], negativeTokens: [] };
+
+  it.each<[string, string, unknown]>([
+    ['a json fence', fencedSentiment, sentiment],
+    ['a fence with no language tag', '```\n{"ok": true}\n```', { ok: true }],
+    ['a fence with words before and after it', 'Here is the analysis:\n\n```json\n{"ok": true}\n```\n\nThe text reads as positive.', { ok: true }],
+    ['plain JSON whose string holds a fence', JSON.stringify({ note: '```json\n{"ok": true}\n```' }), { note: '```json\n{"ok": true}\n```' }],
+  ])('parseJsonSafe reads %s with no repair call', async (_name, reply, expected) => {
+    expect(await llmUtility.parseJsonSafe(reply, { attemptFixWithLLM: true })).toEqual(expected);
+    expect(mockProvider.generateCompletion).not.toHaveBeenCalled();
+  });
+
+  it('parseJsonSafe reads a repair answered inside a code fence', async () => {
+    vi.mocked(mockProvider.generateCompletion).mockResolvedValueOnce({
+      id: 'reply-1', object: 'chat.completion', created: 1, modelId: 'model-1',
+      choices: [{ index: 0, message: { role: 'assistant', content: '```json\n{"ok": true}\n```' }, finishReason: 'stop' }],
+    });
+    expect(await llmUtility.parseJsonSafe('{"ok": tr', { attemptFixWithLLM: true })).toEqual({ ok: true });
+    expect(mockProvider.generateCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('parseJsonSafe answers null at once for a reply that opens a fence and never closes it', async () => {
+    // A model that repeats itself up to its token limit. A pattern that backtracks over the run would not finish
+    // within the test's time limit.
+    const unclosed = '```json\n' + ' \n'.repeat(200_000) + 'x';
+    expect(await llmUtility.parseJsonSafe(unclosed)).toBeNull();
+  });
+
   it('keeps malformed input and repaired model text out of parsing diagnostics', async () => {
     const sentinel = 'sentinel-words-7731';
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
