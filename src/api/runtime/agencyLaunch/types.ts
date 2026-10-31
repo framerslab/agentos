@@ -144,9 +144,10 @@ export interface RuntimeAgencyLaunchOptions extends Omit<AgencyLaunchOptions, 'm
   /**
    * The route of a launched team's manager and synthesizers (they call generateText). Default: the provider and model
    * of the persona of the GMI that launched the team, else the GMIs' defaults
-   * (`gmiManagerConfig.defaultGMIBaseConfigDefaults`), with the key and base URL of the runtime's enabled entry for
-   * that provider (`modelProviderManagerConfig.providers`), where the runtime's own providers take theirs; the key
-   * generateText resolves for the provider only when that entry has none.
+   * (`gmiManagerConfig.defaultGMIBaseConfigDefaults`). A route that names neither `apiKey` nor `baseUrl` takes the key
+   * and base URL of the runtime's enabled entry for its provider (`modelProviderManagerConfig.providers`), where the
+   * runtime's own providers take theirs; what that entry leaves unset is what generateText resolves for the provider,
+   * as for any call that names none. A route that names either keeps what it names and takes nothing of the entry.
    */
   coordinator?: { provider: string; model: string; apiKey?: string; baseUrl?: string };
 }
