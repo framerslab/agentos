@@ -326,4 +326,16 @@ describe('a learner session named at its first turn', () => {
     expect(stateOf(await continued.session.prepareTurn(continuation))).toBe('bound');
     expect(stateOf(await continued.session.prepareTurn(turn()))).toBe('bound');
   });
+
+  it("names the first hand-over for a host's own session, also when a later turn is of another organization", async () => {
+    const hostSession = (inner: ILearnerSession): ILearnerSession => ({
+      prepareTurn: (input) => inner.prepareTurn(input),
+      currentTraits: () => inner.currentTraits(),
+      endSession: () => inner.endSession(),
+    });
+    const { session } = failingOpens(2, hostSession);
+    await expect(session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow('store offline');
+    await expect(session.prepareTurn(turn({ namespace: 'A', userId: 'bob' }))).rejects.toThrow('store offline');
+    expect(stateOf(await session.prepareTurn(turn({ namespace: 'B' })))).toBe('other_user');
+  });
 });
