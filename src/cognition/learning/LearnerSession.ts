@@ -77,7 +77,7 @@ export class LearnerSession implements ILearnerSession {
   /**
    * Why this turn has no learner, or `undefined` when it has one. Every turn is read against the session's user and
    * namespace first, a workflow turn included, so a turn of another user or namespace ends the session's learner
-   * whatever else it is (D3). A tool continuation carries the GMI's own user (the GMI builds its input), so only its
+   * whatever else it is. A tool continuation carries the GMI's own user (the GMI builds its input), so only its
    * namespace is read: a continuation under another organization (a resume whose host passed one) ends it too.
    */
   private noLearnerReasonFor(input: TurnInputForLearning): NoLearnerReason | undefined {

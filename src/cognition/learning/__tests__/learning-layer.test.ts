@@ -147,7 +147,7 @@ describe('a session belongs to the user of its first turn, in the namespace it w
   });
 
   it('has no learner after a workflow turn of another user, nor on any turn after it', async () => {
-    // The workflow exclusion never hides a hand-over to another user (D3).
+    // The workflow exclusion never hides a hand-over to another user.
     const session = await open();
     expect(stateOf(await session.prepareTurn(turn()))).toBe('bound');
     expect(stateOf(await session.prepareTurn(turn({ userId: 'bob', workflowSeat: true })))).toBe('other_user');
