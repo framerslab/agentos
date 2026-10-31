@@ -36,6 +36,23 @@ const TAG_INPUT = /^(?:[\p{L}\p{Nd}]\p{M}*)+(?:-(?:[\p{L}\p{Nd}]\p{M}*)+)*$/u;
 /** A stored label that is an alias: runs separated by white space, underscores or dash punctuation alone. */
 const ALIAS_LABEL = /^(?:[\p{L}\p{Nd}]\p{M}*)+(?:[\s_\p{Pd}]+(?:[\p{L}\p{Nd}]\p{M}*)+)*$/u;
 
+/** One separator of a stored label: white space, the underscore or dash punctuation. */
+const SEPARATOR = /^[\s_\p{Pd}]$/u;
+
+/**
+ * A label without the separators at either end, which are separators there too: scanned by code point once from each
+ * end, so a long run of separators inside the label is passed over once. An alternative anchored at the end of the
+ * text is tried again from each separator of such a run, and grows with the square of its length.
+ */
+function withoutEnds(label: string): string {
+  const points = Array.from(label);
+  let start = 0;
+  let end = points.length;
+  while (start < end && SEPARATOR.test(points[start] ?? '')) start += 1;
+  while (end > start && SEPARATOR.test(points[end - 1] ?? '')) end -= 1;
+  return points.slice(start, end).join('');
+}
+
 /** A text's length in code points. */
 function codePoints(text: string): number {
   return Array.from(text).length;
@@ -47,29 +64,47 @@ function folded(text: string): string {
 }
 
 /**
- * A tag without its hyphens, made a key. Lower case writes a Greek capital sigma by its place in the text: final (ς)
- * before a separator, medial (σ) inside a word. Joined runs could carry a final sigma into the middle of a key, and the
- * form a person typed would decide it, so every sigma is lower-cased again by its place in the key: `ΟΣ-Α`, `ΟΣΑ` and
- * `ος α` all give `οσα`, and `λογοσ` gives `λογος`. The key is then composed to NFC again, since joining two runs can
- * set a Hangul syllable beside a final jamo (U+AC00 and U+11A8 compose to U+AC01). So every key is itself a tag.
+ * A lower-case text with each Greek sigma written again by its place in that text. Lower case writes a capital sigma
+ * as final (ς) where a cased letter comes before it and none after it, looking past case-ignorable characters such as
+ * a combining mark, the full stop, the colon, an apostrophe or the middle dot, and as medial (σ) otherwise. So the
+ * separator a person typed would decide the letter (`ΟΣ.Α` lower-cases to `οσ.α`, `ΟΣ-Α` to `ος-α`), and so would the
+ * form of sigma typed (`λογοσ` lower-cases to itself). Each sigma is written as a capital and the text lower-cased
+ * again, so each takes the form its place in this text gives it.
  */
-function keyOf(tag: string): string {
-  return tag.replace(/-/g, '').replace(/[\u03C2\u03C3]/g, '\u03A3').toLowerCase().normalize('NFC');
-}
-
-/** Whether a text is a tag as stored or typed: NFC, lower case, runs with single hyphens between them, 1 to 40 code points. */
-export function isTag(text: string): boolean {
-  return text === text.normalize('NFC') && text === text.toLowerCase() && TAG_INPUT.test(text) && codePoints(text) <= TAG_MAX_CHARS;
+function sigmaByPlace(text: string): string {
+  return text.replace(/[\u03C2\u03C3]/g, '\u03A3').toLowerCase();
 }
 
 /**
- * Typing made a tag: NFKC, lower case and NFC, each run of other characters one hyphen and none at either end. Null
- * when nothing is left or more than 40 code points are: a tag is refused, never cut.
+ * A tag without its hyphens, made a key. Joined runs could carry a final sigma into the middle of a key, so each sigma
+ * is written again by its place in the key: `ΟΣ-Α`, `ΟΣΑ` and `ος α` all give `οσα`, and `λογοσ` gives `λογος`. The
+ * key is then composed to NFC again, since joining two runs can set a Hangul syllable beside a final jamo (U+AC00 and
+ * U+11A8 compose to U+AC01). So every key is itself a tag.
+ */
+function keyOf(tag: string): string {
+  return sigmaByPlace(tag.replace(/-/g, '')).normalize('NFC');
+}
+
+/**
+ * Whether a text is a tag as stored or typed: NFC, lower case, runs with single hyphens between them, 1 to 40 code
+ * points, and a key of its own. Folding can leave a text no run or too many code points, so the key is asked for:
+ * U+FE70, an Arabic mark's isolated form, is a letter whose compatibility form is a space and a mark, and twenty U+FB03
+ * ligatures fold to sixty letters. A text whose compatibility form keeps a run but drops a mark (Thai U+0E33) is a tag
+ * whose key differs from it.
+ */
+export function isTag(text: string): boolean {
+  return text === text.normalize('NFC') && text === text.toLowerCase() && TAG_INPUT.test(text) && codePoints(text) <= TAG_MAX_CHARS && tagKey(text) !== null;
+}
+
+/**
+ * Typing made a tag: NFKC, lower case and NFC, each run of other characters one hyphen and none at either end, and each
+ * sigma written by its place in its run, so the separator typed never changes a letter (`ΟΣ.Α` and `ΟΣ-Α` both give
+ * `ος-α`). Null when nothing is left or more than 40 code points are: a tag is refused, never cut.
  */
 export function normalizeTag(input: string): string | null {
   const runs = folded(input).match(RUN);
   if (runs === null) return null;
-  const tag = runs.join('-');
+  const tag = runs.map(sigmaByPlace).join('-');
   return codePoints(tag) <= TAG_MAX_CHARS ? tag : null;
 }
 
@@ -92,12 +127,13 @@ export interface LegacyTagClass {
 
 /**
  * A stored label read without losing it: an alias when case, Unicode normalization and separators (white space, the
- * underscore, dash punctuation) alone stand between it and its key; unresolved otherwise, its key kept as a candidate
- * (`C++` is unresolved with the key `c`, and is never merged into `c`), or null when it has none or it is too long.
+ * underscore, dash punctuation) alone stand between it and its key, between its runs or at either end (`budget_` and
+ * `-budget` are aliases of `budget`); unresolved otherwise, its key kept as a candidate (`C++` is unresolved with the
+ * key `c`, and is never merged into `c`), or null when it has none or it is too long.
  */
 export function classifyLegacyTag(label: string): LegacyTagClass {
   const key = tagKey(label);
-  return { state: key !== null && ALIAS_LABEL.test(folded(label).trim()) ? 'alias' : 'unresolved', key };
+  return { state: key !== null && ALIAS_LABEL.test(withoutEnds(folded(label))) ? 'alias' : 'unresolved', key };
 }
 
 /** Compares two texts code point by code point, the order every tie falls back to. */
