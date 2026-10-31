@@ -2207,6 +2207,55 @@ describe('launch_agency on the full runtime, as a host uses the package', () => 
     expect(s.seen).toHaveLength(3);
   });
 
+  it("a team a personaId member launches from its seat is floored on the member's own route, and its temporary seats run on that route", async () => {
+    const k = key();
+    // The lead seats a member that may launch; the member's seat turn launches a team of one under a token cap.
+    const memberLaunch = (personaId: string, maxTokens: number, ids: [string, string]) => [
+      launchStep({ goal: 'Plan the trip.', seats: [{ role: personaId, personaId, tools: [LAUNCH_AGENCY_TOOL_NAME] }] }, ids[0]),
+      launchStep({ goal: 'Draft the plan.', maxTokens, seats: [{ role: 'drafter', instructions: 'DRAFTER: draft the plan.' }] }, ids[1]),
+    ];
+    const s = script('openai', k, {
+      replies: [
+        // 4,000 covers one call of the lead's route (2,000 for the prompt, 500 for the output), not one of the planner's.
+        ...memberLaunch('planner', 4_000, ['p1', 'p2']),
+        reply.text('No team.'),
+        reply.text('Planned.'),
+        // 2,200 covers one call of the editor's route (2,000 and 100), not one of the lead's.
+        ...memberLaunch('editor', 2_200, ['e1', 'e2']),
+        reply.text('Drafted.'),
+        reply.text('Edited.'),
+        reply.text('Done.'),
+      ],
+    });
+    answerWhole(s, 'ok');
+    const os = await startRuntime(k, {
+      personas: [
+        persona('lead', { allowedCapabilities: ['agency:launch'], defaultModelCompletionOptions: { maxTokens: 500 } }),
+        persona('planner', { allowedCapabilities: ['agency:launch'], baseSystemPrompt: 'You plan trips.', defaultModelCompletionOptions: { maxTokens: 3_000 } }),
+        persona('editor', { allowedCapabilities: ['agency:launch'], baseSystemPrompt: 'You edit plans.', defaultModelCompletionOptions: { maxTokens: 100 } }),
+      ],
+    });
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-member-1' });
+    // The planner's seat turn ran as its persona (the precondition), and its launch was refused on the planner's route
+    // before a seat was built: the lead, the planner's two steps, the lead.
+    expect(systemText(s.seen[1])).toContain('You plan trips.');
+    const refusal = toolText(s.seen[2], 'p2');
+    expect(refusal).toContain('budget_unavailable');
+    expect(refusal).toContain('(5000: 2000 for the prompt and 3000 for the output)');
+    expect(launchedIn(s.seen[3], 'p1')).toMatchObject({ status: 'completed', text: 'No team.' });
+    expect(s.seen).toHaveLength(4);
+
+    await runTurn(os, { selectedPersonaId: 'lead', sessionId: 'r-member-2' });
+    // The editor's launch was admitted, and its temporary seat ran on the editor's route: its call sent with the editor's
+    // output cap, not the lead's.
+    expect(systemText(s.seen[5])).toContain('You edit plans.');
+    expect(systemText(s.seen[6])).toContain('DRAFTER: draft the plan.');
+    expect(s.seen[6].options.maxTokens).toBe(100);
+    expect(launchedIn(s.seen[7], 'e2')).toMatchObject({ status: 'completed', text: 'Drafted.' });
+    expect(launchedIn(s.seen[8], 'e1')).toMatchObject({ status: 'completed', text: 'Edited.' });
+    expect(s.seen).toHaveLength(9);
+  });
+
   it("a running team is listed by its name, its parent and its seats, each seat call with its outcome, and listAgencies hands out copies; a seat that fails is named to its team and the result by its error's name and code alone, while the logger the host gave the runtime gets the original, and a logger that throws fails no launch", async () => {
     const k = key();
     const kc = key();
