@@ -468,11 +468,9 @@ export class LearnerSession implements ILearnerSession {
       const storage = await this.host.storage();
       if (!storage) return;
       try {
-        const noted = await this.noteSession(storage.store, write, this.brainId);
+        // A forgotten learner gets no row, and a row a deletion of another process missed is deleted again.
+        await this.noteSession(storage.store, write, this.brainId);
         this.learnerRowWritten = true;
-        if (noted === 'noted' && (await this.tombstoneAfter(storage.store, write)) === 'forgotten') {
-          await this.host.purgeUserRows(key.namespace, key.userId);
-        }
       } catch (error) {
         console.warn(`[agentos] learning: a learner's session row was not written (${messageOf(error)}); the next turn writes it.`);
       }
@@ -482,7 +480,12 @@ export class LearnerSession implements ILearnerSession {
   /**
    * Adds a write's brain and conversation to its user's session row (the learner's, or the visitor's, written at that
    * user's first write on the session), in a store transaction that reads the tombstone first, so a forgotten user
-   * gets no row. A row another process wrote over in that time is read again and noted again, up to three times.
+   * gets no row. The row is written at the version this transaction read it at, so a write of it another process
+   * committed in that time is never written over: the row is read and noted again, up to three times. Once a note has
+   * committed the tombstone is read again: a `forgetUser` of another process that committed its tombstone while the
+   * note ran deleted the user's rows without this one, so the user's rows are deleted again and the write is refused.
+   *
+   * @throws {Error} When the store fails, or the row kept moving under three notes: the write is refused.
    */
   private async noteSession(store: LearningStore, write: WriteTarget, brainId: string | undefined): Promise<'noted' | 'forgotten'> {
     const user = write.user;
@@ -495,10 +498,10 @@ export class LearnerSession implements ILearnerSession {
       (!brainId || row.brainIds.includes(brainId)) &&
       (!write.conversationId || row.conversationIds.includes(write.conversationId));
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const outcome = await store.transaction(async (tx): Promise<'noted' | 'forgotten'> => {
+      const outcome = await store.transaction(async (tx): Promise<'held' | 'written' | 'forgotten'> => {
         if (await tx.isForgotten(tomb)) return 'forgotten';
         const current = await tx.sessionRow(user.namespace, agentKey, sessionId, user.userId, user.kind);
-        if (holds(current)) return 'noted';
+        if (holds(current)) return 'held';
         await tx.putSessionRow({
           namespace: user.namespace,
           agentKey,
@@ -510,14 +513,19 @@ export class LearnerSession implements ILearnerSession {
           brainIds: [...new Set([...(current?.brainIds ?? []), ...(brainId ? [brainId] : [])])],
           startedAt: current?.startedAt ?? new Date(this.host.now()).toISOString(),
           version: (current?.version ?? 0) + 1,
-        });
-        return 'noted';
+        }, current?.version ?? 0);
+        return 'written';
       });
       if (outcome === 'forgotten') return outcome;
-      // A write of the same row by another process between this read and its commit would drop this note.
+      if (outcome === 'held') return 'noted';
+      if (await store.isForgotten(tomb)) {
+        await this.host.purgeUserRows(user.namespace, user.userId);
+        return 'forgotten';
+      }
+      // A note another process committed after this one read the row left this one unwritten: it is made again.
       if (holds(await store.sessionRow(user.namespace, agentKey, sessionId, user.userId, user.kind))) return 'noted';
     }
-    return 'noted';
+    throw new Error('the session row kept moving under three notes');
   }
 
   /** The tombstone read again once a write has committed. */

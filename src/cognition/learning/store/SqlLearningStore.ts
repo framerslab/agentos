@@ -365,18 +365,37 @@ class SqlTx implements LearningStoreTx {
     return row ? toSession(row) : undefined;
   }
 
-  async putSessionRow(row: SessionRow): Promise<void> {
+  async putSessionRow(row: SessionRow, expectedVersion?: number): Promise<void> {
     assertStorableText('session row', row);
+    const conversationIds = JSON.stringify(row.conversationIds);
+    const brainIds = JSON.stringify(row.brainIds);
+    if (expectedVersion !== undefined && expectedVersion !== 0) {
+      // Over the row at the version its writer read only: a row another writer moved on is left as it is.
+      await this.db.run(
+        `UPDATE agentos_learning_sessions SET persona_id = ?, conversation_ids = ?, brain_ids = ?, version = ?
+          WHERE namespace = ? AND agent_key = ? AND session_id = ? AND user_id = ? AND kind = ? AND version = ?`,
+        [
+          row.personaId, conversationIds, brainIds, row.version,
+          row.namespace, row.agentKey, row.sessionId, row.userId, row.kind, expectedVersion,
+        ],
+      );
+      return;
+    }
+    // With version 0 the row goes in only where there is none; with no version it goes in or over the row.
+    const onConflict =
+      expectedVersion === 0
+        ? 'DO NOTHING'
+        : `DO UPDATE SET
+         persona_id = excluded.persona_id, conversation_ids = excluded.conversation_ids,
+         brain_ids = excluded.brain_ids, version = excluded.version`;
     await this.db.run(
       `INSERT INTO agentos_learning_sessions
          (namespace, agent_key, session_id, user_id, kind, persona_id, conversation_ids, brain_ids, started_at, version)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (namespace, agent_key, session_id, user_id, kind) DO UPDATE SET
-         persona_id = excluded.persona_id, conversation_ids = excluded.conversation_ids,
-         brain_ids = excluded.brain_ids, version = excluded.version`,
+       ON CONFLICT (namespace, agent_key, session_id, user_id, kind) ${onConflict}`,
       [
         row.namespace, row.agentKey, row.sessionId, row.userId, row.kind, row.personaId,
-        JSON.stringify(row.conversationIds), JSON.stringify(row.brainIds), row.startedAt, row.version,
+        conversationIds, brainIds, row.startedAt, row.version,
       ],
     );
   }
