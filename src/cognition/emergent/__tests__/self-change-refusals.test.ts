@@ -107,6 +107,29 @@ describe("adapt_personality's bounds where a learning layer exists", () => {
     expect((await tool.execute({ trait: 'extraversion', delta: 0.01, reasoning: 'Adjust.' }, learnerTurn('s-2'))).success).toBe(true);
   });
 
+  it("counts a session's accepted calls per organization and user, and counts no refused call", async () => {
+    const { tool } = make();
+    const turnOf = (organizationId: string, userId: string): ToolExecutionContext =>
+      ({
+        gmiId: 'g',
+        personaId: 'p',
+        userContext: { userId },
+        correlationId: 's-1',
+        sessionData: { sessionId: 's-1', organizationId, learning: { learner: 'bound', mode: 'on' } },
+      }) as ToolExecutionContext;
+    const adjust = (context: ToolExecutionContext, delta = 0.01) => tool.execute({ trait: 'openness', delta, reasoning: 'Adjust.' }, context);
+    // A refused call changes nothing, and counts for none.
+    expect((await adjust(turnOf('A', '42'), 0.05)).details?.reason).toBe('step_bound');
+    expect((await tool.execute({ trait: 'honesty', delta: 0.01, reasoning: 'Plainer.' }, turnOf('A', '42'))).details?.reason).toBe('operator_only');
+    for (let accepted = 0; accepted < 3; accepted += 1) {
+      expect((await adjust(turnOf('A', '42'))).success).toBe(true);
+    }
+    expect((await adjust(turnOf('A', '42'))).details?.reason).toBe('call_limit');
+    // Tenant B's user 42 and tenant A's user 7 made no call on this session id.
+    expect((await adjust(turnOf('B', '42'))).success).toBe(true);
+    expect((await adjust(turnOf('A', '7'))).success).toBe(true);
+  });
+
   it('keeps its rules without a layer: a step of 0.5 succeeds, and honesty stays operator-only', async () => {
     const { tool, traits } = make();
     expect((await tool.execute({ trait: 'honesty', delta: 0.1, reasoning: 'State uncertainty plainly.' }, noLayer())).details?.reason).toBe('operator_only');
