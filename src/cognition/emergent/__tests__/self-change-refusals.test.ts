@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdaptPersonalityTool, type AdaptPersonalityDeps } from '../AdaptPersonalityTool';
 import { SelfEvaluateTool, type SelfEvaluateDeps, type SelfEvaluateInput } from '../SelfEvaluateTool';
 import type { ForgeToolMetaTool } from '../ForgeToolMetaTool';
-import { wrapForgeTool } from '../wrapForgeTool';
+import { wrapForgeTool, type CapturedForge, type ForgeLogEvent } from '../wrapForgeTool';
 import type { ToolExecutionContext } from '../../../core/tools/ITool';
 import type { ToolCallResult, UserContext } from '../../substrate/IGMI';
 import { approvingHitl, echoTool, makeForgeHost, type ForgeHost } from './helpers/forge-host';
@@ -289,6 +289,24 @@ describe('the self-modification tools behind the approval gate', () => {
       ({ gmiId: 'g', personaId: 'p', userContext: { userId: 'u' }, sessionData: { sessionId: 'session-test', learning } }) as ToolExecutionContext;
     expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf({ learner: 'bound', mode: 'off' }))?.details).toEqual({ status: 'rejected', reason: 'off' });
     expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf(bound))).toBeUndefined();
+  });
+
+  it("record a forge the wrapper refuses before the approval gate in the wrapper's capture, once", async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    const raw = (await host.orchestrator.getTool('forge_tool')) as unknown as ForgeToolMetaTool;
+    const captured: CapturedForge[] = [];
+    const events: ForgeLogEvent[] = [];
+    const wrapped = wrapForgeTool({ raw, agentId: 'agent-1', sessionId: 'session-test', capture: (record) => captured.push(record), log: (event) => events.push(event) });
+    const contextOf = (learning: TurnLearning): ToolExecutionContext =>
+      ({ gmiId: 'g', personaId: 'p', userContext: { userId: 'u' }, sessionData: { sessionId: 'session-test', learning } }) as ToolExecutionContext;
+    expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf({ learner: 'bound', mode: 'off' }))?.details).toEqual({ status: 'rejected', reason: 'off' });
+    expect(captured).toEqual([
+      expect.objectContaining({ name: 'echo_twice', approved: false, confidence: 0, errorReason: expect.stringContaining('forge_tool refused (off)') }),
+    ]);
+    expect(events).toEqual([expect.objectContaining({ kind: 'rejected', toolName: 'echo_twice' })]);
+    // A forge the layer lets act names no refusal here, and its own run records it.
+    expect(wrapped.refusalBeforeApproval?.(FORGE, contextOf(bound))).toBeUndefined();
+    expect(captured).toHaveLength(1);
   });
 
   it('name the learning refusal, not a missing approval manager, with the gate on and no manager', async () => {
