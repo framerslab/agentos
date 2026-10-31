@@ -978,6 +978,34 @@ export const HTML_CASES: readonly HtmlCase[] = [
     cut: false,
   },
   {
+    name: "a form laid out in a table whose header row names its fields above rows that each put a label's header cell beside a control's cell is still left out with all it holds",
+    html: lines(
+      '<title>Contact | O3 Project</title>',
+      '<article><h2>Contact</h2><p>Fill in the form below and press the confirm button.</p>',
+      '<form method="post" action="/contact/mail.php"><table class="formTable"><tbody>',
+      '<tr><th colspan="2">Your details</th></tr>',
+      '<tr><th>Name (required)</th><td><input size="30" type="text" name="name"></td></tr>',
+      '<tr><th>Email (required)</th><td><input size="30" type="text" name="email"></td></tr>',
+      '</tbody></table><p align="center"><input type="submit" value="Confirm"></p></form></article>',
+    ),
+    title: 'Contact | O3 Project',
+    markdown: lines('## Contact', '', 'Fill in the form below and press the confirm button.'),
+    images: 0,
+    cut: false,
+  },
+  {
+    name: "a header inside main that holds an h1 leaves out an aside it holds, the page's own, with the paragraphs in it",
+    html: lines(
+      '<title>Lyon - Travel notes</title>',
+      '<main><header><h1>Lyon</h1><aside><p>Related links</p></aside></header>',
+      '<p>Lyon is the third-largest city of France.</p></main>',
+    ),
+    title: 'Lyon - Travel notes',
+    markdown: lines('# Lyon', '', 'Lyon is the third-largest city of France.'),
+    images: 0,
+    cut: false,
+  },
+  {
     name: "a form whose table puts a header cell beside a cell of words in each row, with no header row, as an order's details above its button are, is read as the blocks it holds",
     html: lines(
       '<title>Checkout</title>',
