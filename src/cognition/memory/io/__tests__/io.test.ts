@@ -376,6 +376,18 @@ describe('JsonExporter + JsonImporter', () => {
     expect(await importer.importFromString(payload)).toMatchObject({ imported: 0, skipped: 4, errors: [] });
   });
 
+  it("reports a trace record that is not an object as an error, and imports the file's other records", async () => {
+    const brain = await openBrain();
+    const payload = JSON.stringify({ traces: [null, { id: 'mt_kept', content: 'Kept words.', created_at: 1 }] });
+
+    const result = await new JsonImporter(brain).importFromString(payload);
+
+    expect(result).toMatchObject({ imported: 1, skipped: 0 });
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('Trace import error');
+    expect((await brain.all<{ id: string }>('SELECT id FROM memory_traces')).map((row) => row.id)).toEqual(['mt_kept']);
+  });
+
   it('returns an error for invalid JSON file', async () => {
     const dir = tempDir();
     const badPath = path.join(dir, 'bad.json');
