@@ -323,6 +323,20 @@ export interface ITool<TInput extends Record<string, any> = any, TOutput = any> 
   validateArgs?(args: Record<string, any>): { isValid: boolean; errors?: any[] };
 
   /**
+   * Optional. The refusal a call meets before it acts, whatever a human would answer: the result the tool returns
+   * without changing anything, or `undefined` when the call may run. The tool orchestrator asks it before its approval
+   * gate and returns such a refusal in place of asking for approval, so no one is asked to approve a call that cannot
+   * act. The self-modification tools answer the learning layer's refusals here (`selfChangeRefusal`); a tool that
+   * leaves it out is gated as before. The tool's `execute` refuses the same call itself.
+   *
+   * @param args - The call's arguments as the model sent them, before the input schema is checked.
+   * @param context - The call's context, its session data among it.
+   * @returns The refusal, or `undefined`.
+   * @optional
+   */
+  refusalBeforeApproval?(args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<TOutput> | undefined;
+
+  /**
    * Optional. A method to gracefully shut down the tool and release any resources it holds
    * (e.g., database connections, network listeners, file handles, child processes).
    * This is called by the system (e.g., `ToolExecutor` or `ToolOrchestrator`) during application shutdown

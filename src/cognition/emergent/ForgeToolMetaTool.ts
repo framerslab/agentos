@@ -269,6 +269,17 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
   // --------------------------------------------------------------------------
 
   /**
+   * The learning layer's refusal of a forge, before the approval gate: forging is a self-change on every call.
+   *
+   * @param _args - The forge arguments; the refusal does not depend on them.
+   * @param context - The call's context.
+   */
+  refusalBeforeApproval(_args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<ForgeResult> | undefined {
+    const refusal = selfChangeRefusal(context.sessionData);
+    return refusal ? refusedSelfChange(this.name, refusal) : undefined;
+  }
+
+  /**
    * Execute the forge pipeline via the engine.
    *
    * Extracts the agent ID and session/correlation ID from the execution context

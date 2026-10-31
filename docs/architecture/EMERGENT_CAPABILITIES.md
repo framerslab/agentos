@@ -504,7 +504,7 @@ Every forged tool undergoes review by the [`EmergentJudge`](/api/classes/Emergen
 | Review stage | When | What it checks |
 |---|---|---|
 | **Creation review** | First forge | Code safety, test correctness, schema compliance, determinism |
-| **Reuse validation** | Each invocation | Output matches declared outputSchema |
+| **Reuse validation** | Each invocation | Output matches declared outputSchema; a tool forged with none (`forge_tool` does not ask for one) is checked against none, and a stored row with no output schema loads as `{}`, so a reload checks it against none too |
 | **Promotion panel** | Tier upgrade request | Two independent reviewers: safety + correctness |
 
 If no LLM callback is configured for the judge, **creation review fails closed** — all forge requests are rejected. This is the safe default.
@@ -522,6 +522,8 @@ session ──(5 or more uses, confidence 0.8 or higher, panel approved)──�
 | **Session** | Current conversation only | Discarded on session end | Auto on creation + judge approval |
 | **Agent** | Persisted for the creating agent | Survives restarts | 5 or more uses, confidence 0.8 or higher, two-reviewer panel |
 | **Shared** | All agents in the runtime | Permanent until demoted | An explicit `promote()` call; `approvedBy` is optional and recorded when passed (null otherwise); the runtime ships no human-in-the-loop gate for it |
+
+A promotion is a self-change: a use on a turn the learning layer refuses one (`AGENTOS_LEARNING_FREEZE=1`, mode `off` or `frozen`, a turn with no learner) is recorded and checks no promotion, and the next use on a turn that allows one does.
 
 ### Stored tools: state, loading and suspension
 
@@ -869,7 +871,7 @@ Without `capabilities`, a forge request names the APIs it needs in `implementati
 - Writes, deletes and state-changing requests are granted only under a ceiling, only on an executor that declares `isolates: true`, within roots and bounds the host writes out, and never while a forge's tests run (see [Effects](#effects-writes-deletes-and-state-changing-requests))
 - Raw sandbox source is redacted at rest by default
 - If no LLM is configured, all forge requests are rejected (fail-closed)
-- Under `AGENTOS_LEARNING_FREEZE=1`, `forge_tool` and the four self-improvement tools refuse every action that changes the agent (`frozen`), with a learning layer or without one
+- Under `AGENTOS_LEARNING_FREEZE=1`, `forge_tool` and the four self-improvement tools refuse every action that changes the agent (`frozen`), with a learning layer or without one, and a forged tool used then runs and is not promoted
 
 ## Self-Improvement Tools
 
@@ -898,7 +900,9 @@ Configuration:
 
 ### Refusals where a learning layer exists
 
-On a host whose `learning` option is on ([Learning](../GMI.md#learning)), each tool call carries the turn's learner and mode in `sessionData.learning`, and `forge_tool`, `create_workflow` (`create`), `manage_skills` (`enable`, `disable`), `self_evaluate` (`adjust`) and `adapt_personality` refuse before they act: `frozen` in mode `frozen`, `off` in mode `off`, `no_learner` on a turn with no learner. A refusal is a failed tool result with `details: { status: 'rejected', reason }`, and nothing changes. `self_evaluate`'s `evaluate` on such a turn answers, stores no trace, applies no adjustment and sets `selfChangeRefused`. On every host, with a layer or without one, `adapt_personality` refuses `honesty` and `emotionality` (`operator_only`); with a layer it also refuses a delta above 0.02 (`step_bound`) and a fourth accepted call in a session (`call_limit`). `AGENTOS_LEARNING_FREEZE=1` makes all five refuse with `frozen`, with a layer or without one.
+On a host with a learning layer (the `learning` option, or a layer passed in `gmiManagerConfig.learningLayer`; [Learning](../GMI.md#learning)), each tool call carries the turn's learner and mode in `sessionData.learning`, and `forge_tool`, `create_workflow` (`create`), `manage_skills` (`enable`, `disable`), `self_evaluate` (`adjust`) and `adapt_personality` refuse before they act: `frozen` in mode `frozen`, `off` in mode `off`, `no_learner` on a turn with no learner. A refusal is a failed tool result with `details: { status: 'rejected', reason }`, and nothing changes. `self_evaluate`'s `evaluate` on such a turn answers, stores no trace, applies no adjustment and sets `selfChangeRefused`. On every host, with a layer or without one, `adapt_personality` refuses `honesty` and `emotionality` (`operator_only`); with a layer it also refuses a delta above 0.02 (`step_bound`) and a fourth accepted call in a session (`call_limit`). `AGENTOS_LEARNING_FREEZE=1` makes all five refuse with `frozen`, with a layer or without one.
+
+With the tool orchestrator's approval gate on (`toolOrchestratorConfig.hitl.enabled`), each of these refusals, and `adapt_personality`'s `operator_only`, is answered before the gate: no one is asked to approve a call that cannot act, and with no `hitlManager` the call names its refusal rather than the missing manager. The tools name such a refusal through `ITool.refusalBeforeApproval`, which `wrapForgeTool` keeps; a call the layer lets act is asked about as any tool with side effects is. With a layer, `adapt_personality` keeps a session's accepted calls and its per-trait budget per learner: the turn's organization, persona and user, as given, beside the session id, so two tenants or two users that share a session id count and spend apart. The counts and the per-trait budgets are kept in the tool's memory for the life of the process. `wrapForgeTool` records a forge it refuses before the gate in its capture, as it records every other attempt. The registered-tool helpers (`processRequestWithRegisteredTools`, `resumeExternalToolRequestWithRegisteredTools`) run a tool with the request's session, conversation and organization and no `sessionData.learning`, so a self-modification tool run through them reads as on a host with no layer; a GMI runs these tools in its own tool rounds and never pauses a turn for them, so a runtime turn hands none to the helpers.
 
 See [Self-Extension](../SELF_EXTENSION.md) for how each tool is gated.
 
