@@ -7757,7 +7757,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
     expect(left).not.toContain('A note on the session.');
   });
 
-  it("keeps a tool call's learning to its own turn while a newer turn of another user waits for its preparation", async () => {
+  it("keeps a tool call's learning to its own turn while a continuation runs and a newer turn of another user waits for its preparation", async () => {
     quiet();
     const { memory } = await memoryOnFile();
     const layer = createLearningLayer({ store: new InMemoryLearningStore() });
@@ -7772,7 +7772,7 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
         },
       },
     }) as ILearnerSession;
-    const steps = [lookupStep(), toolCallReply([{ id: 'call_b', name: 'lookup', args: { q: 'b' } }]), textReply('First done.'), textReply('Second done.')];
+    const steps = [lookupStep(), textReply('Continued.'), toolCallReply([{ id: 'call_b', name: 'lookup', args: { q: 'b' } }]), textReply('First done.'), textReply('Second done.')];
     const { gmi, processToolCall } = await createScriptedGmi({ provider: scriptedProvider(steps).provider, config: { learning: gated, cognitiveMemory: memory as never } });
     let release!: () => void;
     const held = new Promise<void>((resolve) => (release = resolve));
@@ -7786,6 +7786,8 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
 
     const first = runTurn(gmi, textTurn('u', 'First.', ACME));
     await atCall;
+    // A continuation during the call leaves the GMI ready, so the newer turn starts.
+    await gmi.handleToolResults([{ toolCallId: 'call_x', toolName: 'lookup', output: { ok: true } }], 'user-1');
     const second = runTurn(gmi, { ...textTurn('v', 'Second.', ACME), userId: 'user-2' });
     release();
     await vi.waitFor(() => expect(processToolCall).toHaveBeenCalledTimes(2));
