@@ -96,7 +96,8 @@ export class LearnerSession implements ILearnerSession {
   /**
    * Takes the loss of the learner that a deferred session saw on a turn it could not open for
    * ({@link deferLearnerSession}): no turn of this session has a learner from now on, as if the session had been open
-   * at that turn. A session with no learner keeps its own reason.
+   * at that turn, and the layer counts each such turn under the reason. A session with no learner keeps its own
+   * reason. A host's own session that has a method of this name and shape takes the loss the same way.
    *
    * @param reason - Why the turn the deferred session saw has no learner.
    */
