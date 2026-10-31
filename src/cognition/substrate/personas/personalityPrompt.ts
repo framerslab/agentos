@@ -36,6 +36,18 @@ const HIGH_HELD_ABOVE = 0.63;
 /** A trait that rendered `low` last stays `low` below this value. */
 const LOW_HELD_BELOW = 0.37;
 
+const BAND_NAMES: readonly TraitBand[] = ['low', 'moderate', 'high'];
+
+/**
+ * The band a caller passed for a trait: the map's own property when it holds one of the three band names, else
+ * nothing. A band read back from a stored row, or passed by a JavaScript caller, is not checked by the compiler.
+ */
+function passedBand(bands: Partial<Record<HexacoTraitKey, TraitBand>> | undefined, key: HexacoTraitKey): TraitBand | undefined {
+  if (!bands || typeof bands !== 'object' || !Object.prototype.hasOwnProperty.call(bands, key)) return undefined;
+  const band: unknown = bands[key];
+  return BAND_NAMES.includes(band as TraitBand) ? (band as TraitBand) : undefined;
+}
+
 /** The directive each trait renders in its high and in its low band; a moderate trait renders nothing. */
 const DIRECTIVES: Record<HexacoTraitKey, { high: string; low: string }> = {
   honesty: {
@@ -122,7 +134,8 @@ export function bandOf(value: number, previous?: TraitBand): TraitBand {
  *
  * @param traits - A trait map under any accepted spelling; anything else renders nothing.
  * @param options.bands - The band to render per trait, in place of the one its value gives (the band a learner's
- *   trait rendered last). A trait with no entry takes the band of its value.
+ *   trait rendered last). A trait with no entry takes the band of its value, and so does a trait whose entry is not
+ *   the map's own property or not one of `high`, `low` and `moderate`.
  * @param options.register - Conversation when left out; writing prepends the grounding directive.
  * @returns The section, or `null` when every trait is moderate in either register.
  * @throws {TypeError} When `options.register` is given and is neither `conversation` nor `writing`.
@@ -145,7 +158,7 @@ export function renderPersonalitySection(
   const directives = writing ? WRITING_DIRECTIVES : DIRECTIVES;
   const lines: string[] = [];
   for (const key of HEXACO_TRAIT_KEYS) {
-    const band = options.bands?.[key] ?? bandOf(values[key] ?? 0.5);
+    const band = passedBand(options.bands, key) ?? bandOf(values[key] ?? 0.5);
     if (band !== 'moderate') lines.push(directives[key][band]);
   }
   if (lines.length === 0) return null;
