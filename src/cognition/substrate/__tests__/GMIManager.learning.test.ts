@@ -197,6 +197,19 @@ describe('a runtime with a learning layer', () => {
     expect(endSession).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls.some((call) => String(call[0]).includes('did not end within 200 ms'))).toBe(true);
   }, 10_000);
+
+  it('treats an answer of the layer that is not a learner session as a failed open, so each turn has no learner', async () => {
+    // A GMI with no session would tell its tools nothing, and they would act as on a host with no layer.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const layer = recordingLayer(async () => undefined as unknown as ILearnerSession);
+    const manager = await managerWith(layer);
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('no learner session'))).toBe(true);
+    const session = gmi.getLearnerSession!()!;
+    expect(session).toBeDefined();
+    await expect(session.prepareTurn(turn({ namespace: 'A' }))).rejects.toThrow(/no learner session/);
+    expect(layer.forLearner).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('a runtime without a learning layer', () => {
