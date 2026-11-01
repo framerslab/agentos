@@ -369,6 +369,28 @@ describe('what a call reaches by id', () => {
     expect(await liveContents(brain)).toEqual(['Thread note of 42.']);
   });
 
+  it("refuses an anonymous turn on a learner's session a thread note the learner filed, and the learner one the anonymous turn filed", async () => {
+    quiet();
+    const { brain, layer, tools } = await setUp();
+    const session = await layer.forLearner(LEARNER_A, contextOf('s-1'));
+    const learner = await turnOf(session, { userId: '42', namespace: 'A', sessionId: 's-1' });
+    const ofLearner = traceIdOf(await tools.memory_add!.execute({ content: 'Thread note of 42.', scope: 'thread' }, learner));
+    // An anonymous id names no second user: the turn has no learner and no turnUserId, on the learner's own thread.
+    const anonymous = await turnOf(session, { userId: 'anonymous', namespace: 'A', sessionId: 's-1' });
+    const ofAnonymous = traceIdOf(await tools.memory_add!.execute({ content: 'Thread note of a guest.', scope: 'thread' }, anonymous));
+
+    expect(await tools.memory_update!.execute({ traceId: ofLearner, content: 'A guest was here.' }, anonymous)).toMatchObject({
+      success: false,
+      details: { reason: 'other_user' },
+    });
+    expect((await tools.memory_delete!.execute({ traceId: ofLearner }, anonymous)).details?.reason).toBe('other_user');
+    expect((await tools.memory_delete!.execute({ traceId: ofAnonymous }, learner)).details?.reason).toBe('other_user');
+    expect(await liveContents(brain)).toEqual(['Thread note of 42.', 'Thread note of a guest.']);
+    // The anonymous turn keeps reaching the note it filed itself.
+    expect(await tools.memory_delete!.execute({ traceId: ofAnonymous }, anonymous)).toMatchObject({ success: true, output: { deleted: true } });
+    expect(await liveContents(brain)).toEqual(['Thread note of 42.']);
+  });
+
   it('keeps a user id holding a / apart from a namespaced learner, and two session ids that differ only by their encoding apart', async () => {
     quiet();
     const { brain, layer, tools } = await setUp();
