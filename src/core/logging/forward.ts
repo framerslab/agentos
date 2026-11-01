@@ -76,7 +76,7 @@ export function checkFields(events: EventMap, context: ContextSchema, event: str
   if (!Object.prototype.hasOwnProperty.call(events, event)) throw new LogValidationError('unknown_event');
   for (const [key, value] of Object.entries(fields)) {
     if (Object.prototype.hasOwnProperty.call(context, key) || !Object.prototype.hasOwnProperty.call(events[event], key)) throw new LogValidationError('unknown_key');
-    if (!valid(events[event][key], value)) throw new LogValidationError('bad_value');
+    if (!valid(events[event][key], value, key)) throw new LogValidationError('bad_value');
   }
 }
 

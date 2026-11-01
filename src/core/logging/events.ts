@@ -112,19 +112,29 @@ function keyShape(value: string): boolean {
     || /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
 }
 
+// A class name ending in Error or Exception, and an upper-case constant code of two or more parts joined by
+// underscores, each part at most 16 characters. Either may be 20 characters or more, which the long-segment
+// credential rule alone would refuse; the other credential shapes still refuse them.
+const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,54}(?:Error|Exception)$/;
+const CONSTANT_CODE = /^[A-Z][A-Z0-9]{0,15}(?:_[A-Z0-9]{1,16})+$/;
+
 /**
  * Whether a value fits a field kind. A word or a path also fails when it has the shape of a
- * credential, and the `requestId` context key takes only letters, digits and dashes.
+ * credential, and the `requestId` context key takes only letters, digits and dashes. A word
+ * field named `type` also takes a class name ending in `Error` or `Exception`, and one named
+ * `code` an upper-case constant code such as `STREAM_PARSING_ERROR`, up to 64 characters and
+ * free of the other credential shapes, so that what {@link errorFields} writes passes.
  *
  * @param kind - The field's kind.
  * @param value - The value, of any type, since JavaScript callers are checked too.
- * @param key - The field's or the context key's name, which selects the `requestId` form.
+ * @param key - The field's or the context key's name, which selects the `requestId`, `type` and `code` forms.
  * @returns `true` when the value may be written.
  */
 export function valid(kind: FieldKind, value: unknown, key = ''): boolean {
   if (kind === 'int') return typeof value === 'number' && Number.isInteger(value);
   if (typeof value !== 'string') return false;
   if (typeof kind === 'object') return kind.enum.includes(value);
+  if (kind === 'word' && value.length <= 64 && ((key === 'type' && CLASS_NAME.test(value)) || (key === 'code' && CONSTANT_CODE.test(value)))) return !keyShape(value);
   if (credential(value)) return false;
   if (key === 'requestId') return /^[A-Za-z0-9-]{1,64}$/.test(value);
   return kind === 'path' ? /^[A-Za-z0-9_.:/-]{1,128}$/.test(value) : /^[A-Za-z0-9_.:-]{1,64}$/.test(value);
@@ -138,21 +148,14 @@ export function valid(kind: FieldKind, value: unknown, key = ''): boolean {
  */
 export function safeWord(value: unknown): string { return valid('word', value) ? value as string : 'unknown'; }
 
-// A class name ending in Error or Exception, and an upper-case constant code of two or more parts joined by
-// underscores, each part at most 16 characters. Either may be 20 characters or more, which the long-segment
-// credential rule alone would refuse; the other credential shapes still refuse them.
-const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,54}(?:Error|Exception)$/;
-const CONSTANT_CODE = /^[A-Z][A-Z0-9]{0,15}(?:_[A-Z0-9]{1,16})+$/;
-
 // A value read from a caught error, or undefined when reading it throws.
 function read(get: () => unknown): unknown {
   try { return get(); } catch { return undefined; }
 }
 
-// A value as a word when it has `form` and no key shape, otherwise as `safeWord` writes it.
-function formWord(value: unknown, form: RegExp): string {
-  if (typeof value === 'string' && value.length <= 64 && form.test(value) && !keyShape(value)) return value;
-  return safeWord(value);
+// A value as the word field named `key`, or `unknown` when it does not fit.
+function fieldWord(value: unknown, key: 'type' | 'code'): string {
+  return valid('word', value, key) ? value as string : 'unknown';
 }
 
 /**
@@ -174,7 +177,7 @@ function formWord(value: unknown, form: RegExp): string {
 export function errorFields(error: unknown): { type: string; code: string } {
   const type = read(() => (error instanceof Error ? error.name : typeof error));
   const code = read(() => (typeof error === 'object' && error !== null ? (error as Record<string, unknown>).code : undefined));
-  return { type: formWord(type, CLASS_NAME), code: formWord(code, CONSTANT_CODE) };
+  return { type: fieldWord(type, 'type'), code: fieldWord(code, 'code') };
 }
 
 /**
