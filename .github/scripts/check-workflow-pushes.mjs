@@ -19,11 +19,14 @@
  * - a git push with no refspec that git sends there by its settings, given with git -c or set by an earlier git
  *   config in the job: push.default=matching (every branch both sides have), push.default=upstream (the branch the
  *   checked-out one tracks, which this check does not follow, so it is reported whatever it is) and a refspec set
- *   in remote.<name>.push. git config sets them in the checkout it runs in, or with --global or --system in the
- *   global or the system settings, which every checkout reads beneath its own; --unset (git config unset) removes
- *   the one value its pattern matches and none where more than one does, and --unset-all (unset --all) every value
- *   it matches, as git does: the pattern is an extended regular expression found anywhere in the value, one that
- *   begins with ! matches the values it does not, and with --fixed-value it is the value itself. A form git refuses
+ *   in remote.<name>.push for the remote it pushes to (the first operand, else --repo; with neither, origin or any
+ *   remote with refspecs, as the settings that choose it are not followed; held in a variable or an expression, any
+ *   remote), else push.default for a remote with none. git config sets them in the checkout it runs in, or with
+ *   --global or --system in the global or the system settings, which every checkout reads beneath its own; --unset
+ *   (git config unset) removes the one value of the key it names that its pattern matches (remote.origin.push and
+ *   remote.backup.push are two keys) and none where more than one does, and --unset-all (unset --all) every value of that key it matches, as
+ *   git does: the pattern is an extended regular expression found anywhere in the value, one that begins with !
+ *   matches the values it does not, and with --fixed-value it is the value itself. A form git refuses
  *   (an operand too many, --all or --value without the unset subcommand) and an unset in a file named with --file
  *   or --blob change nothing;
  * - a git push of the checked-out branch (no destination, HEAD) while that branch can be the default branch, and a
@@ -39,17 +42,26 @@
  *   returns to the one checked out before it. Each checkout has a branch of its own: actions/checkout with a path
  *   makes one in that directory (on another repository's default branch when it names no ref) and leaves the
  *   root's as it was, and a checkout of another repository where one was starts with no settings and no earlier
- *   branches. A git command runs in the checkout its directory is in: the step's working-directory, then where the
- *   script's cd and pushd go (a subshell, a substitution, a command of a pipeline, a background job and a script fed
- *   to a shell change directory for themselves alone, and a function's body where the function is called), env -C,
- *   sudo -D and git -C, and from there --git-dir, else GIT_DIR: one before the command, else the one in the env: of
+ *   branches. A step of actions/checkout removes the checkouts beneath its directory, which a directory made there
+ *   again then holds as its own: it empties a directory that is not a checkout of the same repository, and cleans one
+ *   that is with git clean -ffdx, which removes nested repositories, unless clean is false. A git command runs in
+ *   the checkout its directory is in: the step's working-directory, then where the
+ *   script's cd and pushd go (a subshell, a substitution, a command of a pipeline, a background job, which is the
+ *   whole and-or list an & ends, and a script fed to a shell change directory for themselves alone, and a function's
+ *   body where the function is called), env -C (the last one each env is given), sudo -D and git -C (a script a
+ *   shell reads from its standard input, piped to it, a here-string or a heredoc, runs where that shell runs, in
+ *   the directory env -C or sudo -D gives it, with its GIT_DIR, after the substitutions of an unquoted heredoc's
+ *   body, which run where the heredoc's command runs, before it), and from there
+ *   --git-dir, else GIT_DIR: one before the command, else the one in the env: of
  *   its step, its job or its workflow (the nearest), which env -i and env -u GIT_DIR remove and which sudo's
  *   env_reset may drop unless -E or --preserve-env keeps it (through sudo the repository is then one this check
  *   cannot tell); an action pushes from its directory input (git-auto-commit-action's repository, add-and-commit's
  *   cwd, github-push-action's directory), with the GIT_DIR of the env: from there. A command whose directory this
- *   check cannot tell (after cd $DIR, cd -, popd, a compound command that ends a pipeline, which shopt -s lastpipe
- *   runs in the script's own shell, a call of a function the script defines or a script it sources, and within a
- *   function's body) is read in each checkout, and each checkout is then as it leaves it there or as it was. A
+ *   check cannot tell (after cd $DIR, cd -, popd, a compound command that ends a pipeline or a command that ends one
+ *   and changes directory, which shopt -s lastpipe runs in the script's own shell, a call of a function the script
+ *   defines or a script it sources, and within a function's body) is read in each checkout, and each checkout is
+ *   then as it leaves it there or as it was, while
+ *   the --global and --system settings, one file whichever checkout it runs in, are as it leaves them. A
  *   command after && or ||, a branch of an if or a case and a loop's
  *   body may not run, so after them the checked-out branch is any branch they can leave checked out
  *   (git checkout master; false && git checkout feature can leave master); a command that runs is taken to do
@@ -77,7 +89,8 @@
  * exec, sudo, nohup, time, nice and timeout, inside $( ) and backticks (also within double quotes), in an sh -c or
  * bash -c string, an eval, a heredoc or a here-string fed to a shell or to a cat piped into one, the words an echo or
  * a printf pipes into a shell, and the substitutions in a ${ } (${CACHE:-$(...)}) and in an unquoted heredoc's body,
- * which run whatever program reads it. git push's options are read as git reads them: --no-<option> undoes an
+ * which the calling shell runs before the program that reads it, a shell among them, starts. git push's options are
+ * read as git reads them: --no-<option> undoes an
  * option (--dry-run --no-dry-run pushes) and a long option can be cut to a prefix only it has (--mir is --mirror).
  * A word that is only printed (echo git push ...), a quoted heredoc fed to another program, a comment and a dry run
  * are not pushes. Not read: a branch held in a shell variable, a job's if: condition and what a step's if:
@@ -118,7 +131,8 @@ import { pathToFileURL } from 'node:url';
  * @property {boolean[]} prev the same for each branch checked out before it, the newest last: git switch - and
  *   @{-N} return to them
  * @property {string} pushDefault push.default as git config set it in the checkout, lowercased; '' when unset
- * @property {string[]} pushRefspecs the refspecs git config set in remote.<name>.push in the checkout
+ * @property {Refspec[]} pushRefspecs the values git config set in remote.<name>.push in the checkout, each with
+ *   its remote
  * @property {Settings} global the push settings git config --global set in the job, which every checkout reads
  *   beneath its own
  * @property {Settings} system the same for git config --system
@@ -135,7 +149,8 @@ import { pathToFileURL } from 'node:url';
  * @property {string | undefined} gitDir the GIT_DIR the env: of the job, else of its workflow, gives its steps (a
  *   local composite action's steps, the calling step's), held; undefined when none does
  */
-/** @typedef {{ pushDefault: string, pushRefspecs: string[] }} Settings */
+/** @typedef {{ remote: string, value: string }} Refspec a value of remote.<name>.push and the remote it is set for */
+/** @typedef {{ pushDefault: string, pushRefspecs: Refspec[] }} Settings */
 /** @typedef {Settings & { head: boolean, prev: boolean[] }} Checkout a checkout's branches and push settings, as in State */
 /**
  * @typedef {object} Step
@@ -246,10 +261,10 @@ const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
  * The program a simple command runs and its arguments, past assignments and wrappers, or null when it runs none;
- * with the directories env -C and sudo -D run it in, in turn, and the GIT_DIR it runs with: an assignment's, null
- * when env -i or env -u GIT_DIR removed it, or undefined for the one it would have from its shell, which reset says
- * sudo's env_reset may have dropped. An assignment before sudo may be dropped too: its GIT_DIR is $GIT_DIR, a
- * repository this check cannot tell.
+ * with the directories env -C (the last one each env is given) and sudo -D run it in, in turn, and the GIT_DIR it
+ * runs with: an assignment's, null when env -i or env -u GIT_DIR removed it, or undefined for the one it would have
+ * from its shell, which reset says sudo's env_reset may have dropped. An assignment before sudo may be dropped too:
+ * its GIT_DIR is $GIT_DIR, a repository this check cannot tell.
  * @param {string[]} words
  * @returns {{ name: string, args: string[], dirs: string[], gitDir?: string | null, reset: boolean } | null}
  */
@@ -267,8 +282,15 @@ export function invoked(words) {
     const name = base(words[i]);
     if (!Object.hasOwn(WRAPPERS, name)) return { name, args: words.slice(i + 1), dirs, gitDir, reset };
     const valued = new Set(WRAPPERS[name]);
-    // env -C <dir> and sudo -D <dir> (--chdir both) run the command in a directory.
+    // env -C <dir> and sudo -D <dir> (--chdir both) run the command in a directory. env changes to the last one it
+    // is given alone, from where it starts (coreutils' env.c keeps one newdir), so env -C base -C . runs it there.
     const chdir = name === 'env' ? 'C' : name === 'sudo' ? 'D' : '';
+    const from = dirs.length;
+    /** @param {string} dir */
+    const chdirTo = (dir) => {
+      if (name === 'env') dirs.length = from;
+      dirs.push(dir);
+    };
     // sudo runs the command in an environment of its own (env_reset) unless -E or --preserve-env keeps the caller's.
     let keeps = false;
     i++;
@@ -280,9 +302,9 @@ export function invoked(words) {
       }
       // command -v and -V print what would run instead of running it.
       if (name === 'command' && /^-[pvV]+$/.test(option) && /[vV]/.test(option)) return null;
-      if (chdir !== '' && (option === `-${chdir}` || option === '--chdir') && i + 1 < words.length) dirs.push(words[i + 1]);
-      else if (chdir !== '' && option.startsWith('--chdir=')) dirs.push(option.slice('--chdir='.length));
-      else if (chdir !== '' && option.startsWith(`-${chdir}`) && option.length > 2) dirs.push(option.slice(2));
+      if (chdir !== '' && (option === `-${chdir}` || option === '--chdir') && i + 1 < words.length) chdirTo(words[i + 1]);
+      else if (chdir !== '' && option.startsWith('--chdir=')) chdirTo(option.slice('--chdir='.length));
+      else if (chdir !== '' && option.startsWith(`-${chdir}`) && option.length > 2) chdirTo(option.slice(2));
       // env -i (-, --ignore-environment) starts from an empty environment; env -u GIT_DIR (--unset) removes it.
       if (name === 'env' && (option === '-' || option === '-i' || option === '--ignore-environment' || option === '-uGIT_DIR' || option === '--unset=GIT_DIR' || ((option === '-u' || option === '--unset') && words[i + 1] === 'GIT_DIR'))) gitDir = null;
       if (name === 'sudo' && (option === '-E' || option === '--preserve-env' || (option.startsWith('--preserve-env=') && option.slice('--preserve-env='.length).split(',').includes('GIT_DIR')))) keeps = true;
@@ -298,8 +320,19 @@ export function invoked(words) {
 
 /**
  * A heredoc waiting for its body: the delimiter, whether <<- strips tabs, the words of its command, whether the
- * delimiter was quoted (which keeps the body from being expanded) and whether a shell reads it as a script.
- * @typedef {{ delimiter: string, tabs: boolean, words: string[], quoted: boolean, script: boolean }} Heredoc
+ * delimiter was quoted (which keeps the body from being expanded), the command of the shell a cat pipes it to,
+ * which reads it as a script, its place before its command, where the substitutions of its body go once it is
+ * read, and its place past its command, where the script a shell reads from it goes.
+ * @typedef {{ delimiter: string, tabs: boolean, words: string[], quoted: boolean, shell: string[] | null,
+ *   expand?: Place, place?: Place }} Heredoc
+ */
+
+/**
+ * Where the substitutions of a heredoc's body run, before the heredoc's command, since the calling shell expands
+ * the body before it runs the command (cd base <<EOF runs a $(git push) of the body where the script was), or the
+ * script a shell reads from it, past the command; both are read only after the line (bash <<'EOF'; cd base runs
+ * the script before the cd).
+ * @typedef {{ place: (string[] | Branch | Mark)[] }} Place
  */
 
 /**
@@ -309,8 +342,9 @@ export function invoked(words) {
  * mode where a case stands.
  * @typedef {{ kind: 'list' | 'group' | 'subshell' | 'if' | 'loop' | 'case', open: number, begun?: boolean,
  *   otherwise?: boolean, head?: boolean, mode?: 'subject' | 'pattern' | 'arm', own?: boolean, body?: boolean,
- *   at?: number }} Frame own says a | feeds the compound command, body that it is a function's body, and at where
- *   its items begin in the reading
+ *   at?: number, listAt?: number }} Frame own says a | feeds the compound command, body that it is a function's
+ *   body, at where its items begin in the reading and listAt where the and-or list being read in it begins, which an
+ *   & runs in a shell of its own as a whole
  */
 
 /**
@@ -322,32 +356,41 @@ export function invoked(words) {
  */
 
 /**
- * Where a shell of its own begins and ends (open, close: a subshell, a substitution, a command of a pipeline or a
- * background job, a script fed to a shell), or past which the directory is one this check cannot tell (unknown); or
- * the name of a function the script defines.
- * @typedef {{ scope: 'open' | 'close' | 'unknown' } | { define: string }} Mark
+ * Where a shell of its own begins and ends (open, close: a subshell, a substitution, a command of a pipeline, a
+ * background job (the whole and-or list an & ends), a script fed to a shell, whose open names that shell's command
+ * in shell), or past which the directory is one this check cannot tell (unknown); or the name of a function the
+ * script defines. The close of the last command of a pipeline says so in last: shopt -s lastpipe runs that command
+ * in the script's own shell, so a directory it changes to is one this check cannot tell past it.
+ * @typedef {{ scope: 'open' | 'close' | 'unknown', shell?: string[], last?: boolean } | { define: string }} Mark
  */
 
 /**
  * The simple commands of a shell script, each as its words with quotes and escapes removed, in the order they end,
  * with the branch points of the lists and compound commands around them. A command substitution's commands come out
- * on their own and its text stays in its word; a heredoc's body is read as a script when it feeds a shell, directly
- * or through a cat piped into one, and otherwise its substitutions are read when its delimiter is unquoted. A
- * here-string fed so, and what an echo or a printf pipes into a shell, is read as a script too.
+ * on their own and its text stays in its word. When a heredoc's delimiter is unquoted, the calling shell runs the
+ * substitutions of its body where the heredoc's command runs, before the program reads the body; a body that feeds
+ * a shell, directly or through a cat piped into one, is then read as that shell's script, as the substitutions
+ * leave it. A here-string fed so, and what an echo or a printf pipes into a shell, is read as a script too. With
+ * body, src is the body of a heredoc whose delimiter is unquoted: the commands of its substitutions come out, then a
+ * ':' command whose one word is the body as the program reads it.
  * @param {string} src
+ * @param {boolean} [body]
  * @returns {(string[] | Branch | Mark)[]}
  */
-export function shellCommands(src) {
-  /** @type {(string[] | Branch | Mark)[]} */
+export function shellCommands(src, body = false) {
+  /** @type {(string[] | Branch | Mark | Place)[]} */
   const out = [];
   /**
-   * Reads commands that run in a shell of their own, whose directory changes do not last past them.
+   * Reads commands that run in a shell of their own, whose directory changes do not last past them. shell is the
+   * command of the shell that reads them as its script from its standard input, whose directory (env -C, sudo -D)
+   * and GIT_DIR they run with.
    * @template T
    * @param {() => T} read
+   * @param {string[]} [shell]
    * @returns {T}
    */
-  const apart = (read) => {
-    out.push({ scope: 'open' });
+  const apart = (read, shell) => {
+    out.push(shell ? { scope: 'open', shell } : { scope: 'open' });
     const result = read();
     out.push({ scope: 'close' });
     return result;
@@ -477,15 +520,24 @@ export function shellCommands(src) {
       if (line.replace(/\r$/, '') === heredoc.delimiter) break;
       lines.push(line);
     }
-    const body = lines.join('\n');
+    const text = lines.join('\n');
     const run = invoked(heredoc.words);
-    if (heredoc.script || readsScript(run)) {
-      apart(() => out.push(...shellCommands(body)));
-    } else if (!heredoc.quoted) {
-      // An unquoted delimiter leaves the body's $( ) and backticks to run before the program reads it, as within
-      // double quotes. The body is read as one double-quoted word of a ':' command, which is dropped.
-      out.push(...shellCommands(`: "${body.replace(/"/g, "'")}"`).slice(0, -1));
-    }
+    // An unquoted delimiter leaves the body's substitutions to the calling shell, which runs them where the heredoc's
+    // command runs, in its directory, before it runs the command: cd base <<EOF runs a $(git push) of the body where
+    // the script was, and a shell that reads the body as its script starts after them (env -C base bash <<EOF runs a
+    // $(git push) of the body in the caller's directory).
+    /** @type {(string[] | Branch | Mark)[]} */
+    const expanded = heredoc.quoted ? [[':', text]] : shellCommands(text, true);
+    const script = /** @type {string[]} */ (expanded[expanded.length - 1])[1];
+    const substitutions = expanded.slice(0, -1);
+    /** @type {(string[] | Branch | Mark)[]} */
+    const runs = heredoc.shell || readsScript(run) ? [{ scope: 'open', shell: heredoc.shell ?? heredoc.words }, ...shellCommands(script), { scope: 'close' }] : [];
+    // They run where the heredoc's command runs, the substitutions before it and the script past it, before what
+    // follows that command on its line.
+    if (heredoc.expand && heredoc.place) {
+      heredoc.expand.place.push(...substitutions);
+      heredoc.place.place.push(...runs);
+    } else out.push(...substitutions, ...runs);
   };
 
   /**
@@ -521,13 +573,14 @@ export function shellCommands(src) {
     let compoundEnded = false;
     let compoundAt = 0;
     /** @type {Frame[]} the lists being read, the innermost last */
-    const frames = [{ kind: 'list', open: 0 }];
+    const frames = [{ kind: 'list', open: 0, listAt: out.length }];
     const top = () => frames[frames.length - 1];
     const inPattern = () => top().kind === 'case' && top().mode === 'pattern';
-    /** Ends the and-or list being read: the parts its && and || began end with it. */
+    /** Ends the and-or list being read: the parts its && and || began end with it, and the next one begins. */
     const endList = () => {
       const f = top();
       for (; f.open > 0; f.open--) out.push({ branch: 'close', skip: true });
+      f.listAt = out.length;
     };
     /** Ends the innermost group or compound command, with its list and its branches. */
     const closeFrame = () => {
@@ -560,11 +613,12 @@ export function shellCommands(src) {
       functionBody = false;
       if (frame.kind !== 'subshell') frame.own = pipeNext;
       pipeNext = false;
+      frame.listAt = out.length;
       frames.push(frame);
     };
     /**
-     * Reads the compound command that has just ended as one that ran in a shell of its own (a | after it, or an &),
-     * so that its directory changes end with it.
+     * Reads the compound command that has just ended as one that ran in a shell of its own (a | after it), so that
+     * its directory changes end with it.
      */
     const apartCompound = () => {
       out.splice(compoundAt, 0, { scope: 'open' });
@@ -596,11 +650,13 @@ export function shellCommands(src) {
         else if (text !== 'then' && f.begun) out.push({ branch: 'or' });
         if (text === 'then') f.begun = true;
         if (text === 'else') f.otherwise = true;
+        f.listAt = out.length;
       } else if (text === 'do' && f.kind === 'loop') {
         endList();
         f.head = false;
         if (!f.begun) out.push({ branch: 'open' });
         f.begun = true;
+        f.listAt = out.length;
       } else {
         return false;
       }
@@ -641,7 +697,8 @@ export function shellCommands(src) {
     };
     /**
      * A shell that reads its script from its standard input runs what the command before it writes there: the
-     * heredoc of a cat (cat <<'EOF' | bash), or the words of an echo or a printf.
+     * heredoc of a cat (cat <<'EOF' | bash), or the words of an echo or a printf. The script runs in the shell's
+     * directory, with its GIT_DIR (echo 'git push' | env -C base bash pushes from base).
      * @param {string[]} source
      * @param {string[]} sink
      */
@@ -650,12 +707,12 @@ export function shellCommands(src) {
       const from = invoked(source);
       if (!from) return;
       if (from.name === 'cat' && from.args.every((a) => a.startsWith('-'))) {
-        for (const heredoc of heredocs) if (heredoc.words === source) heredoc.script = true;
-        for (const s of strings) if (s.words === source) apart(() => out.push(...shellCommands(s.text)));
+        for (const heredoc of heredocs) if (heredoc.words === source) heredoc.shell = sink;
+        for (const s of strings) if (s.words === source) apart(() => out.push(...shellCommands(s.text)), sink);
       } else if (from.name === 'echo' || from.name === 'printf') {
         let k = 0;
         if (from.name === 'echo') while (k < from.args.length && /^-[neE]+$/.test(from.args[k])) k++;
-        apart(() => out.push(...shellCommands(from.args.slice(k).join(from.name === 'echo' ? ' ' : '\n').replace(/\\n/g, '\n'))));
+        apart(() => out.push(...shellCommands(from.args.slice(k).join(from.name === 'echo' ? ' ' : '\n').replace(/\\n/g, '\n'))), sink);
       }
     };
     /**
@@ -673,13 +730,20 @@ export function shellCommands(src) {
       }
       // An empty command (the & of |&, a line break after |) leaves a pipe as it is.
       if (words.length > 0) {
-        // A command of a pipeline or a background job runs in a shell of its own.
-        const own = pipe || background || pipeNext;
+        // A command of a pipeline runs in a shell of its own, but shopt -s lastpipe runs the last command of a
+        // pipeline in the script's own shell (shopt -s lastpipe; true | cd base moves the script), unless an & ends
+        // the pipeline: the & runs the whole and-or list it ends in a shell of its own.
+        const own = pipe || pipeNext;
         if (own) out.push({ scope: 'open' });
+        // The substitutions of a heredoc's body take their place before the command, which runs after the calling
+        // shell expands the body, and the script a shell reads from it past the command, once the body is read.
+        const fed = heredocs.filter((heredoc) => heredoc.words === words);
+        for (const heredoc of fed) out.push((heredoc.expand = { place: [] }));
         out.push(words);
-        if (own) out.push({ scope: 'close' });
-        // A here-string fed to a shell is its script: bash <<< "git push ...".
-        if (readsScript(invoked(words))) for (const s of strings) if (s.words === words) apart(() => out.push(...shellCommands(s.text)));
+        for (const heredoc of fed) out.push((heredoc.place = { place: [] }));
+        if (own) out.push(pipeNext && !pipe && !background ? { scope: 'close', last: true } : { scope: 'close' });
+        // A here-string fed to a shell is its script, run in the shell's directory: bash <<< "git push ...".
+        if (readsScript(invoked(words))) for (const s of strings) if (s.words === words) apart(() => out.push(...shellCommands(s.text)), words);
         if (piped) feed(piped, words);
         piped = pipe ? words : null;
         pipeNext = false;
@@ -750,7 +814,7 @@ export function shellCommands(src) {
           if (tabs) i++;
           const from = i;
           const delimiter = target();
-          heredocs.push({ delimiter, tabs, words, quoted: /['"\\]/.test(src.slice(from, i)), script: false });
+          heredocs.push({ delimiter, tabs, words, quoted: /['"\\]/.test(src.slice(from, i)), shell: null });
         } else {
           i++;
           while (i < n && '<>&|'.includes(src[i])) i++;
@@ -785,13 +849,20 @@ export function shellCommands(src) {
         top().mode = 'pattern';
         i += src.startsWith(';;&', i) ? 3 : 2;
       } else if (c === ';' || c === '&') {
-        // A background job runs in a shell of its own; the word before it may close it (}&).
+        // An & runs the whole and-or list it ends in a shell of its own, its compound commands (}&) among them: cd
+        // base; cd .. && true & leaves the script in base.
         endWord();
-        if (c === '&' && words.length === 0 && compoundEnded) apartCompound();
         compoundEnded = false;
         endCommand(false, c === '&');
         pipeNext = false;
+        const f = top();
+        const at = f.listAt ?? out.length;
         endList();
+        if (c === '&' && at < out.length) {
+          out.splice(at, 0, { scope: 'open' });
+          out.push({ scope: 'close' });
+          f.listAt = out.length;
+        }
         i++;
       } else if (c === '(') {
         // A ( before a case's pattern is only punctuation, and <name>() begins a function's definition.
@@ -811,6 +882,7 @@ export function shellCommands(src) {
             endCommand();
             openFrame({ kind: 'subshell', open: 0 });
             out.push({ scope: 'open' });
+            top().listAt = out.length;
             depth++;
           }
           i++;
@@ -824,6 +896,7 @@ export function shellCommands(src) {
           out.push({ branch: f.begun ? 'or' : 'open' });
           f.begun = true;
           f.mode = 'arm';
+          f.listAt = out.length;
         } else {
           endCommand();
           if (depth > 0) {
@@ -842,8 +915,38 @@ export function shellCommands(src) {
     return src.slice(start, i);
   }
 
-  commandsUntil('');
-  return out;
+  /**
+   * Reads the body of a heredoc whose delimiter is unquoted as the calling shell expands it, as within double quotes
+   * but with the quotes as plain characters: its $( ), its backticks and a ${ } that holds one run, each in a shell
+   * of its own, and the body the program reads has an empty $() in their place, since what they print is not known
+   * here. A \ before $, ` or \ is dropped, and one before a line break joins the lines.
+   */
+  const expandBody = () => {
+    let text = '';
+    while (i < n) {
+      const c = src[i];
+      if (c === '\\' && i + 1 < n && '$`\\\n'.includes(src[i + 1])) {
+        if (src[i + 1] !== '\n') text += src[i + 1];
+        i += 2;
+      } else if (c === '`') {
+        i++;
+        apart(() => commandsUntil('`'));
+        text += '$()';
+      } else if (c === '$' && (src[i + 1] === '(' || src[i + 1] === '{')) {
+        const word = dollar();
+        const arithmetic = word.startsWith('$((');
+        text += !arithmetic && (word.startsWith('$(') || /\$\(|`/.test(word)) ? '$()' : word;
+      } else {
+        text += c;
+        i++;
+      }
+    }
+    out.push([':', text]);
+  };
+
+  if (body) expandBody();
+  else commandsUntil('');
+  return out.flatMap((item) => ('place' in item ? item.place : [item]));
 }
 
 /**
@@ -1001,7 +1104,7 @@ function pushOption(word) {
  * Reports a git push (its arguments after push) that reaches the default branch.
  * @param {string[]} args
  * @param {Step} step
- * @param {{ pushDefault?: string, pushRefspecs?: string[] }} [given] the settings given with git -c on this command
+ * @param {{ pushDefault?: string, pushRefspecs?: Refspec[] }} [given] the settings given with git -c on this command
  */
 function checkPush(args, { state, ctx, report }, given = {}) {
   const command = `git push ${args.map(unhold).join(' ')}`.trim();
@@ -1011,6 +1114,8 @@ function checkPush(args, { state, ctx, report }, given = {}) {
   let mirror = false;
   let tags = false;
   let remove = false;
+  /** @type {string | undefined} */
+  let repo;
   /** @type {string[]} */
   const positional = [];
   for (let k = 0; k < args.length; k++) {
@@ -1025,6 +1130,7 @@ function checkPush(args, { state, ctx, report }, given = {}) {
       // The options are read in order, so a later --no-dry-run undoes a --dry-run.
       const { name, negated, value } = pushOption(a.slice(2));
       const kind = PUSH_OPTIONS.get(name) ?? '';
+      if (name === 'repo') repo = negated ? undefined : value ?? args[k + 1];
       if (kind === 'value' && !negated && value === undefined) k++;
       else if (kind === 'dry-run') dryRun = !negated;
       else if (kind === 'all') all = !negated;
@@ -1063,22 +1169,35 @@ function checkPush(args, { state, ctx, report }, given = {}) {
   let via = '';
   if (refspecs.length === 0) {
     if (tags) return;
-    const configured = [...state.system.pushRefspecs, ...state.global.pushRefspecs, ...state.pushRefspecs, ...(given.pushRefspecs ?? [])];
+    // git pushes the refspecs remote.<name>.push sets for the remote it pushes to alone (remote.c keeps them per
+    // remote), and to a remote with none what push.default names. The remote is the first operand, else --repo, else
+    // one its settings choose (branch.<name>.pushRemote, remote.pushDefault, branch.<name>.remote), origin when none
+    // does. This check does not follow those settings, so a push that names no remote may reach origin or any remote
+    // with refspecs; a remote held in a variable or an expression, in the push or in the key, may be any remote.
+    const unresolved = (/** @type {string} */ name) => unhold(name) !== name || name.includes('$') || name.includes('`');
+    const settings = [...state.system.pushRefspecs, ...state.global.pushRefspecs, ...state.pushRefspecs, ...(given.pushRefspecs ?? [])];
+    const named = positional[0] ?? repo;
+    /** @type {string[] | null} the remotes the push may reach, null for any */
+    const remotes = named === undefined ? [...new Set(['origin', ...settings.map((r) => r.remote).filter((name) => !unresolved(name))])] : unresolved(named) ? null : [named];
+    const configured = settings.filter((r) => remotes === null || unresolved(r.remote) || remotes.includes(r.remote)).map((r) => r.value);
+    // A remote with no refspec of its own, told apart from the rest, pushes as push.default says.
+    const bare = remotes === null || remotes.some((name) => !settings.some((r) => r.remote === name));
     // The checkout's own push.default overrides the global one, which overrides the system one; git -c all three.
     const mode = given.pushDefault ?? pushMode(state, state);
     if (configured.length > 0) {
       refspecs.push(...configured);
       via = ' (remote.<name>.push)';
-    } else if (mode === 'matching') {
-      report(`"${command}" with push.default=matching pushes every branch the remote also has, ${branch} among them`);
-      return;
-    } else if (mode === 'upstream' || mode === 'tracking') {
-      report(`"${command}" with push.default=${mode} pushes the checked-out branch to the branch it tracks, which can be ${branch}; give the push its destination`);
-      return;
-    } else {
-      // push.default=nothing pushes nothing; current and simple (the default) push the checked-out branch.
-      if (mode !== 'nothing' && state.head) report(`"${command}" pushes the checked-out branch, ${branch} on a run on ${branch}`);
-      return;
+    }
+    if (bare) {
+      if (mode === 'matching') {
+        report(`"${command}" with push.default=matching pushes every branch the remote also has, ${branch} among them`);
+      } else if (mode === 'upstream' || mode === 'tracking') {
+        report(`"${command}" with push.default=${mode} pushes the checked-out branch to the branch it tracks, which can be ${branch}; give the push its destination`);
+      } else if (mode !== 'nothing' && state.head) {
+        // push.default=nothing pushes nothing; current and simple (the default) push the checked-out branch.
+        report(`"${command}" pushes the checked-out branch, ${branch} on a run on ${branch}`);
+      }
+      if (configured.length === 0) return;
     }
   }
   for (const refspec of refspecs) {
@@ -1253,6 +1372,8 @@ function gitConfig(args, state) {
   }
   const setting = pushSetting(positional[0] ?? '');
   if (setting === '') return;
+  // The remote of remote.<name>.push is its subsection, which keeps its case where the section and the key do not.
+  const remote = positional[0].slice(positional[0].indexOf('.') + 1, positional[0].lastIndexOf('.'));
   if (unset) {
     // git config --unset <name> [<value-pattern>]; git config unset [--all] [--value=<pattern>] <name>. git refuses
     // an operand more, and --fixed-value with no pattern.
@@ -1262,13 +1383,13 @@ function gitConfig(args, state) {
       if (valueMatches(settings.pushDefault, pattern, fixed)) settings.pushDefault = '';
       return;
     }
-    // git unsets the one value that matches, and none where more than one does unless it is told all (config.c:
-    // "if nothing to unset, or too many matches, error out").
-    const matched = settings.pushRefspecs.filter((value) => valueMatches(value, pattern, fixed));
-    if (all || matched.length === 1) settings.pushRefspecs = settings.pushRefspecs.filter((value) => !matched.includes(value));
+    // git unsets the one value of the key it names that matches, and none where more than one does unless it is told
+    // all (config.c: "if nothing to unset, or too many matches, error out"); another remote's values are another key.
+    const matched = settings.pushRefspecs.filter((r) => r.remote === remote && valueMatches(r.value, pattern, fixed));
+    if (all || matched.length === 1) settings.pushRefspecs = settings.pushRefspecs.filter((r) => !matched.includes(r));
   } else if (positional.length >= 2) {
     if (setting === 'default') settings.pushDefault = positional[1].toLowerCase();
-    else settings.pushRefspecs.push(positional[1]);
+    else settings.pushRefspecs.push({ remote, value: positional[1] });
   }
 }
 
@@ -1514,6 +1635,14 @@ const reach = (mode) => PUSH_DEFAULT_REACH.get(mode) ?? 1;
 const pushMode = (c, s) => c.pushDefault || s.global.pushDefault || s.system.pushDefault;
 
 /**
+ * The refspecs of two sides, each remote's value once.
+ * @param {Refspec[]} a
+ * @param {Refspec[]} b
+ * @returns {Refspec[]}
+ */
+const unionRefspecs = (a, b) => [...new Map([...a, ...b].map((r) => /** @type {[string, Refspec]} */ ([JSON.stringify([r.remote, r.value]), r]))).values()];
+
+/**
  * Push settings that cover two: a push with no refspec reaches as far as it does under either. An unset push.default
  * reads the one beneath it (the system one beneath a global one), so each side is compared by what it reads.
  * @param {Settings} a
@@ -1525,7 +1654,7 @@ const pushMode = (c, s) => c.pushDefault || s.global.pushDefault || s.system.pus
 function mergeSettings(a, b, beneathA = '', beneathB = '') {
   return {
     pushDefault: reach(b.pushDefault || beneathB) > reach(a.pushDefault || beneathA) ? b.pushDefault : a.pushDefault,
-    pushRefspecs: [...new Set([...a.pushRefspecs, ...b.pushRefspecs])],
+    pushRefspecs: unionRefspecs(a.pushRefspecs, b.pushRefspecs),
   };
 }
 
@@ -1547,14 +1676,14 @@ function mergeCheckouts(a, b, sa, sb) {
     head: a.head || b.head,
     prev,
     pushDefault: reach(pushMode(b, sb)) > reach(pushMode(a, sa)) ? b.pushDefault : a.pushDefault,
-    pushRefspecs: [...new Set([...a.pushRefspecs, ...b.pushRefspecs])],
+    pushRefspecs: unionRefspecs(a.pushRefspecs, b.pushRefspecs),
   };
 }
 
 /**
  * The state that covers two: a branch can be the default branch after them when it can after either, and a push with
  * no refspec reaches as far as it does after either. A checkout one has and the other lacks (a step that may not run
- * made it) is, on the side that lacks it, a directory of the root's checkout.
+ * made it) is, on the side that lacks it, a directory of the deepest other checkout that holds it, else the root's.
  * @param {State | null} a
  * @param {State} b
  * @returns {State}
@@ -1563,7 +1692,12 @@ function mergeStates(a, b) {
   if (a === null) return copyState(b);
   /** @type {Record<string, Checkout>} */
   const trees = {};
-  for (const path of new Set([...Object.keys(a.trees), ...Object.keys(b.trees)])) trees[path] = mergeCheckouts(a.trees[path] ?? a, b.trees[path] ?? b, a, b);
+  // On the side that lacks a checkout, its directory is in the deepest other checkout that holds it, else the root's.
+  const holder = (/** @type {State} */ s, /** @type {string} */ path) => {
+    const at = checkoutAt(s, path);
+    return at ? s.trees[at] : s;
+  };
+  for (const path of new Set([...Object.keys(a.trees), ...Object.keys(b.trees)])) trees[path] = mergeCheckouts(a.trees[path] ?? holder(a, path), b.trees[path] ?? holder(b, path), a, b);
   /** @type {Record<string, string | null>} */
   const repos = {};
   for (const path of new Set([...Object.keys(a.repos), ...Object.keys(b.repos)])) repos[path] = a.repos[path] === b.repos[path] ? a.repos[path] : null;
@@ -1697,23 +1831,34 @@ function inCheckoutAt(step, dir, fn) {
       if (path === '') Object.assign(state, mergeCheckouts(state, end, state, sim));
       else state.trees[path] = mergeCheckouts(state.trees[path], end, state, sim);
     }
-    for (const [, , sim] of ends) {
-      state.global = mergeSettings(state.global, sim.global, state.system.pushDefault, sim.system.pushDefault);
-      state.system = mergeSettings(state.system, sim.system);
+    // A --global or a --system setting is one file whichever checkout the command runs in, and each reading ran the
+    // command, so the settings after it are those the readings leave, merged with each other alone: the settings
+    // before it are not one of the ways it ends (a --global unset read in every checkout holds in every checkout).
+    let { global, system } = ends[0][2];
+    for (const [, , sim] of ends.slice(1)) {
+      global = mergeSettings(global, sim.global, system.pushDefault, sim.system.pushDefault);
+      system = mergeSettings(system, sim.system);
     }
+    state.global = global;
+    state.system = system;
   }
 }
 
 /**
- * The directory cd or pushd leaves the shell in: its operand, from the one before; null for one this check cannot
- * tell (none, which is $HOME, - for the one before, a place in pushd's stack, an expression or a variable).
+ * The directory cd or pushd leaves the shell in: its operand, from the one before; the one before for pushd -n, which
+ * adds its operand to the stack alone; null for one this check cannot tell (none, which is $HOME, - for the one before,
+ * a place in pushd's stack, an expression or a variable).
  * @param {string | null} cwd
  * @param {string[]} args
  * @returns {string | null}
  */
 function changeDirectory(cwd, args) {
   let k = 0;
-  while (k < args.length && /^-[LPe@n]+$/.test(args[k])) k++;
+  while (k < args.length && /^-[LPe@n]+$/.test(args[k])) {
+    // pushd -n adds to the directory stack and leaves the shell where it is.
+    if (args[k].includes('n')) return cwd;
+    k++;
+  }
   if (args[k] === '--') k++;
   const to = args[k];
   if (to === undefined || to === '-' || /^[+-]\d+$/.test(to)) return null;
@@ -1784,14 +1929,33 @@ function runCommands(items, step, depth) {
   const parts = [];
   /** @type {(string | null)[]} the directories each shell of its own began in */
   const dirs = [];
+  /** @type {(string | undefined)[]} the GIT_DIR each shell of its own began with */
+  const gitDirs = [];
   for (const item of items) {
     if (Array.isArray(item)) {
       checkCommand(item, step, depth);
     } else if ('define' in item) {
       step.defined.add(item.define);
     } else if ('scope' in item) {
-      if (item.scope === 'open') dirs.push(state.cwd);
-      else state.cwd = item.scope === 'close' && dirs.length > 0 ? /** @type {string | null} */ (dirs.pop()) : null;
+      if (item.scope === 'open') {
+        dirs.push(state.cwd);
+        gitDirs.push(step.gitDir);
+        // A script a shell reads from its standard input runs in the directory env -C or sudo -D gives that shell,
+        // with the GIT_DIR it runs with.
+        const run = item.shell ? invoked(item.shell) : null;
+        if (run) {
+          state.cwd = run.dirs.reduce((/** @type {string | null} */ at, dir) => within(at, unhold(dir)), state.cwd);
+          step.gitDir = commandGitDir(run, step);
+        }
+      } else if (item.scope === 'close') {
+        // A directory the last command of a pipeline changed to may stay (shopt -s lastpipe), so past it the
+        // directory is one this check cannot tell, unless the command left it as it was.
+        const before = dirs.length > 0 ? /** @type {string | null} */ (dirs.pop()) : null;
+        state.cwd = item.last && state.cwd !== before ? null : before;
+        if (gitDirs.length > 0) step.gitDir = gitDirs.pop();
+      } else {
+        state.cwd = null;
+      }
     } else if (item.branch === 'open') {
       parts.push({ start: copyState(state), end: null });
     } else if (parts.length > 0) {
@@ -1851,7 +2015,7 @@ function checkCommand(words, step, depth) {
     state.cwd = null;
   } else if (name === 'git') {
     let k = 0;
-    /** @type {{ pushDefault?: string, pushRefspecs: string[] }} */
+    /** @type {{ pushDefault?: string, pushRefspecs: Refspec[] }} */
     const given = { pushRefspecs: [] };
     // git -C <path> runs as if started there, each from where the one before it left (-C '' stays); --git-dir, or
     // the GIT_DIR it runs with, names the repository from the directory every -C leaves, whatever their order.
@@ -1861,10 +2025,11 @@ function checkCommand(words, step, depth) {
       if (args[k] === '-c' && k + 1 < args.length) {
         const pair = args[k + 1];
         const eq = pair.indexOf('=');
-        const setting = pushSetting(eq < 0 ? pair : pair.slice(0, eq));
+        const key = eq < 0 ? pair : pair.slice(0, eq);
+        const setting = pushSetting(key);
         const value = eq < 0 ? '' : pair.slice(eq + 1);
         if (setting === 'default') given.pushDefault = value.toLowerCase();
-        else if (setting === 'refspec' && value !== '') given.pushRefspecs.push(value);
+        else if (setting === 'refspec' && value !== '') given.pushRefspecs.push({ remote: key.slice(key.indexOf('.') + 1, key.lastIndexOf('.')), value });
       } else if (args[k] === '-C' && k + 1 < args.length) {
         at = within(at, unhold(args[k + 1]));
       } else if (args[k] === '--git-dir' || args[k].startsWith('--git-dir=')) {
@@ -1958,19 +2123,61 @@ function checkAction(uses, inputs, step) {
       if (before === undefined || (before === repo && repo !== null)) return kept;
       return before !== null && repo !== null ? fresh : mergeCheckouts(kept, fresh, state, state);
     };
+    // clean defaults to true; an expression may give either.
+    const clean = input('clean').toLowerCase();
+    const cleans = clean === '' || clean === 'true' ? true : clean === 'false' ? false : null;
+    /**
+     * Whether a step of actions/checkout removes the checkouts beneath its directory: it empties a directory that is
+     * not a checkout of the same repository, and cleans one that is with git clean -ffdx, which removes nested
+     * repositories, unless clean is false. True, false, or null for maybe.
+     * @param {string | null | undefined} before the repository there, undefined for none
+     */
+    const removesBeneath = (before) => {
+      if (before !== undefined && before !== null && repo !== null) return before === repo ? cleans : true;
+      // No checkout there, or a repository this check cannot tell: emptied, or cleaned as the same repository.
+      return cleans === true ? true : null;
+    };
+    /**
+     * Applies a checkout at a directory to the checkouts beneath it: one it removes is gone, so the directory, made
+     * again, is the checkout's at `at`; one it may remove may now be either.
+     * @param {string} at the directory checked out, '.' for the root
+     * @param {boolean | null} removes
+     */
+    const beneath = (at, removes) => {
+      if (removes === false) return;
+      const now = at === '.' ? copyCheckout(state) : state.trees[at];
+      for (const key of Object.keys(state.trees)) {
+        if (key === at || (at !== '.' && !key.startsWith(`${at}/`))) continue;
+        if (removes === true) {
+          delete state.trees[key];
+          delete state.repos[key];
+        } else {
+          state.trees[key] = mergeCheckouts(state.trees[key], now, state, state);
+          state.repos[key] = null;
+        }
+      }
+    };
     if (path !== null) {
       const before = Object.hasOwn(state.repos, path) ? state.repos[path] : undefined;
       if (path === '.') Object.assign(state, checkedOut(state, before));
       else state.trees[path] = state.trees[path] ? checkedOut(state.trees[path], before) : { head, prev: [], pushDefault: '', pushRefspecs: [] };
       state.repos[path] = repo;
+      beneath(path, removesBeneath(before));
     } else {
-      // A path this check cannot tell may be the root's, or another checkout's.
+      // A path this check cannot tell may be the root's, or another checkout's: each may be checked out again, and
+      // each checkout beneath another may be removed, its directory then the other's.
       for (const key of ['.', ...Object.keys(state.trees)]) {
         const was = key === '.' ? copyCheckout(state) : state.trees[key];
         const moved = mergeCheckouts(was, checkedOut(was, Object.hasOwn(state.repos, key) ? state.repos[key] : undefined), state, state);
         if (key === '.') Object.assign(state, moved);
         else state.trees[key] = moved;
         state.repos[key] = null;
+      }
+      for (const key of Object.keys(state.trees)) {
+        // The deepest other checkout that holds it, '' for the root's.
+        let holder = '';
+        for (const other of Object.keys(state.trees)) if (key.startsWith(`${other}/`) && other.length > holder.length) holder = other;
+        state.trees[key] = mergeCheckouts(state.trees[key], holder === '' ? copyCheckout(state) : state.trees[holder], state, state);
       }
     }
   } else if (action === 'peaceiris/actions-gh-pages') {
