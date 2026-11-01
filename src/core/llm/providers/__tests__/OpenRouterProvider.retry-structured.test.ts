@@ -250,3 +250,75 @@ describe('mid-stream upstream error surfacing', () => {
     expect(errChunk!.isFinal).toBe(true);
   });
 });
+
+describe('the json_object retry draws on the call\'s maxAttempts', () => {
+  const schemaFormat = {
+    type: 'json_schema',
+    json_schema: {
+      name: 'verdict',
+      strict: true,
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
+    },
+  };
+  const noEndpoints = () => axiosError(404, 'No endpoints found that support the requested parameters.');
+  const bodyOfCall = (request: ReturnType<typeof vi.fn>, callIdx: number) =>
+    (request.mock.calls[callIdx][0] as { data: Record<string, unknown> }).data;
+  const drain = async (stream: AsyncIterable<unknown>) => {
+    for await (const _chunk of stream) {
+      // read and dropped
+    }
+  };
+
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  it('with maxAttempts 1, the no-endpoints 404 ends the call and the request is not sent again without its schema', async () => {
+    const request = vi.fn().mockRejectedValueOnce(noEndpoints()).mockResolvedValue({ data: okResponse() });
+    const provider = makeProvider(request, 'key-a');
+    await expect(
+      provider.generateCompletion('m', messages, { responseFormat: schemaFormat, maxAttempts: 1 } as never),
+    ).rejects.toMatchObject({ httpStatus: 404 });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('with maxAttempts 2, the 404 leaves one attempt, and the request without its schema answers', async () => {
+    const request = vi.fn().mockRejectedValueOnce(noEndpoints()).mockResolvedValue({ data: okResponse() });
+    const provider = makeProvider(request, 'key-a');
+    const result = await provider.generateCompletion('m', messages, { responseFormat: schemaFormat, maxAttempts: 2 } as never);
+    expect(result.id).toBe('gen-1');
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(bodyOfCall(request, 1).response_format).toEqual({ type: 'json_object' });
+  });
+
+  it('with maxAttempts 2, a 503 and then the 404 spend both attempts; no request goes without the schema', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(axiosError(503, 'upstream down'))
+      .mockRejectedValueOnce(noEndpoints())
+      .mockResolvedValue({ data: okResponse() });
+    const provider = makeProvider(request, 'key-a');
+    await expect(
+      provider.generateCompletion('m', messages, { responseFormat: schemaFormat, maxAttempts: 2 } as never),
+    ).rejects.toMatchObject({ httpStatus: 404 });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it('streamed, with maxAttempts 1, the no-endpoints 404 ends the stream and the request is not sent again', async () => {
+    const request = vi.fn().mockRejectedValueOnce(noEndpoints()).mockResolvedValue({ data: Readable.from(['data: [DONE]\n']) });
+    const provider = makeProvider(request, 'key-a');
+    await expect(
+      drain(provider.generateCompletionStream('m', messages, { responseFormat: schemaFormat, maxAttempts: 1 } as never)),
+    ).rejects.toMatchObject({ httpStatus: 404 });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('left out, the request is sent again without its schema', async () => {
+    const request = vi.fn().mockRejectedValueOnce(noEndpoints()).mockResolvedValue({ data: okResponse() });
+    const provider = makeProvider(request, 'key-a');
+    await provider.generateCompletion('m', messages, { responseFormat: schemaFormat } as never);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(bodyOfCall(request, 1).response_format).toEqual({ type: 'json_object' });
+  });
+});

@@ -162,6 +162,11 @@ export interface ModelCompletionOptions {
    * The most attempts this call makes, a first and its retries together; the provider's configured count when left
    * out. Within one attempt, a key-scoped failure (a rejected, unpaid or throttled key) on a pool of several keys
    * re-sends the same request with the next usable key, at most once per key, and those sends are not counted.
+   * The OpenAI, Anthropic, Gemini and OpenRouter providers read it, wait no backoff after the last attempt, and
+   * refuse a count that is not a whole number of 1 or more with a `RangeError` before anything is sent, streamed
+   * or not; the Anthropic and Gemini streams send one request and retry nothing but key hops. A request sent
+   * again on another route after a 404 (a retired Gemini id on its alias, an OpenRouter request without its
+   * schema) draws on the same count. Other providers keep their configured retries.
    */
   maxAttempts?: number;
   /**
