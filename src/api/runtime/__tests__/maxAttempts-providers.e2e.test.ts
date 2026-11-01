@@ -53,6 +53,7 @@ vi.mock('axios', () => {
 
 import { generateText } from '../../generateText.js';
 import { AnthropicProvider } from '../../../core/llm/providers/implementations/AnthropicProvider.js';
+import { GeminiProvider } from '../../../core/llm/providers/implementations/GeminiProvider.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 
 type Reply = () => Response;
@@ -85,6 +86,15 @@ const anthropicText = (text: string): Reply => () => {
 const anthropicMessage = (text: string): Reply => () =>
   json({ id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-haiku-5-5', content: [{ type: 'text', text }], stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 10, output_tokens: 3 } });
 
+/** Anthropic's rate-limit answer: HTTP 429 with a `rate_limit_error`, no Retry-After. */
+const anthropicRateLimited: Reply = () => json({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limited' } }, 429);
+
+/** A transport failure: fetch rejects before any answer arrives. */
+const networkFailure: Reply = () => {
+  throw new TypeError('fetch failed');
+};
+
+const geminiRateLimited: Reply = () => json({ error: { code: 429, message: 'Resource has been exhausted.', status: 'RESOURCE_EXHAUSTED' } }, 429);
 const geminiUnavailable: Reply = () => json({ error: { code: 503, message: 'The model is overloaded.', status: 'UNAVAILABLE' } }, 503);
 const geminiText = (text: string): Reply => () =>
   json({ candidates: [{ content: { role: 'model', parts: [{ text }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3, totalTokenCount: 13 } });
@@ -198,6 +208,84 @@ describe('maxAttempts on the Anthropic provider', () => {
     const result = await provider.generateCompletion('claude-haiku-5-5', [{ role: 'user', content: 'Say ok.' }], { maxAttempts: 2 });
     expect(result.choices[0]?.message?.content).toBe('ok');
     expect(posts(ANTHROPIC)).toHaveLength(2);
+  });
+});
+
+describe('maxAttempts on the Anthropic provider: 429s and transport failures', () => {
+  const provider = async () => {
+    const p = new AnthropicProvider();
+    await p.initialize({ apiKey: 'sk-ant-attempts', streamCompletions: false });
+    return p;
+  };
+  const ask = async (maxAttempts: number) =>
+    (await provider()).generateCompletion('claude-haiku-5-5', [{ role: 'user', content: 'Say ok.' }], { maxAttempts });
+
+  it('with maxAttempts 1, a 429 sends one request and waits no backoff after it', async () => {
+    route([[ANTHROPIC, [anthropicRateLimited, anthropicMessage('ok')]]]);
+    expect(await rejectionOf(ask(1))).toMatchObject({ code: 'RATE_LIMIT_EXCEEDED' });
+    expect(posts(ANTHROPIC)).toHaveLength(1);
+    expect(backoff.calls).toBe(0);
+  });
+
+  it('with maxAttempts 2, a 429 waits one backoff and the second request answers', async () => {
+    route([[ANTHROPIC, [anthropicRateLimited, anthropicMessage('ok')]]]);
+    const result = await ask(2);
+    expect(result.choices[0]?.message?.content).toBe('ok');
+    expect(posts(ANTHROPIC)).toHaveLength(2);
+    expect(backoff.calls).toBe(1);
+  });
+
+  it('with maxAttempts 1, a transport failure sends one request and the call fails', async () => {
+    route([[ANTHROPIC, [networkFailure, anthropicMessage('ok')]]]);
+    expect(await rejectionOf(ask(1))).toMatchObject({ code: 'NETWORK_ERROR' });
+    expect(posts(ANTHROPIC)).toHaveLength(1);
+    expect(backoff.calls).toBe(0);
+  });
+
+  it('with maxAttempts 2, a transport failure is retried once and the second request answers', async () => {
+    route([[ANTHROPIC, [networkFailure, anthropicMessage('ok')]]]);
+    const result = await ask(2);
+    expect(result.choices[0]?.message?.content).toBe('ok');
+    expect(posts(ANTHROPIC)).toHaveLength(2);
+    expect(backoff.calls).toBe(1);
+  });
+});
+
+describe('maxAttempts on the Gemini provider: 429s and transport failures', () => {
+  const ask = async (maxAttempts: number) => {
+    const p = new GeminiProvider();
+    await p.initialize({ apiKey: 'gem-attempts' });
+    return p.generateCompletion('gemini-2.5-flash', [{ role: 'user', content: 'Say ok.' }], { maxAttempts });
+  };
+
+  it('with maxAttempts 1, a 429 sends one request and waits no backoff after it', async () => {
+    route([[GEMINI, [geminiRateLimited, geminiText('ok')]]]);
+    expect(await rejectionOf(ask(1))).toMatchObject({ code: 'RATE_LIMIT_EXCEEDED' });
+    expect(posts(GEMINI)).toHaveLength(1);
+    expect(backoff.calls).toBe(0);
+  });
+
+  it('with maxAttempts 2, a 429 waits one backoff and the second request answers', async () => {
+    route([[GEMINI, [geminiRateLimited, geminiText('ok')]]]);
+    const result = await ask(2);
+    expect(result.choices[0]?.message?.content).toBe('ok');
+    expect(posts(GEMINI)).toHaveLength(2);
+    expect(backoff.calls).toBe(1);
+  });
+
+  it('with maxAttempts 1, a transport failure sends one request and the call fails', async () => {
+    route([[GEMINI, [networkFailure, geminiText('ok')]]]);
+    expect(await rejectionOf(ask(1))).toMatchObject({ code: 'NETWORK_ERROR' });
+    expect(posts(GEMINI)).toHaveLength(1);
+    expect(backoff.calls).toBe(0);
+  });
+
+  it('with maxAttempts 2, a transport failure is retried once and the second request answers', async () => {
+    route([[GEMINI, [networkFailure, geminiText('ok')]]]);
+    const result = await ask(2);
+    expect(result.choices[0]?.message?.content).toBe('ok');
+    expect(posts(GEMINI)).toHaveLength(2);
+    expect(backoff.calls).toBe(1);
   });
 });
 
