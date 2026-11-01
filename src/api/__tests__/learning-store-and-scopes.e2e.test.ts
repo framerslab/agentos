@@ -123,7 +123,13 @@
  * naming it, until the next send opens it. The host calls fill in the agent's key and namespace, `forgetUser` opens
  * the agent's memory after `close()` and refuses before the tombstone when it does not build, and a call that names a
  * learner on an agent with no key rejects naming `learning.agentKey`; on Postgres a second process recalls and renders
- * what the first filed and set.
+ * what the first filed and set. A session id's generation: an anonymous id, or one opened with a placeholder user,
+ * handed to a new person after `session.close()` recalls nothing the closed session filed, across a restart, through
+ * `agent({ runtime: 'gmi' })` too, and in another process live beside it (Postgres), and the thread notes a host's memory
+ * tools filed for it stay behind the close as well; a learner's session recalls what its user filed whatever generation
+ * its id is at; and `forgetUser` deletes what a user filed in each generation of an id, the memory tools' thread notes
+ * included, and keeps what an anonymous session filed on the id between them. On the full runtime, which has no
+ * `session.close()`, `forgetUser` on a runtime started again deletes a learner's thread notes of each of its sessions.
  *
  * The full runtime's own layer (`AgentOS.create({ learning })`). It keeps its learning store on the host's
  * `storageAdapter` (SQL when the adapter has transactions, so a runtime started again on it renders what an operator set
@@ -9959,6 +9965,280 @@ describe("gmi(): durable memory (memory.store) with its learning store on the sa
     expect(tracesIn(file, 'tutor').map((row) => row.content)).toContain('The deploy key lives in the vault under ops/deploy.');
   });
 
+  /** What person A tells a session id, what person B tells it once it is handed over, and what either asks. */
+  const A_TOLD = 'The deploy key lives in the vault under ops/deploy.';
+  const B_TOLD = 'The deploy key lives in the locker under ops/keys.';
+  const WHERE = 'Where does the deploy key live?';
+  /** The generation record a SQLite file's brain keeps of session id `id` (no namespace), parsed; none before a close. */
+  const generationsIn = (file: string, brainId: string, id: string) =>
+    rowsIn<{ value: string }>(file, 'SELECT value FROM brain_meta WHERE brain_id = ? AND key = ?', [brainId, `session_generation:${taggedScopeId(id, '')}`]).map(
+      (row) => JSON.parse(row.value) as { generation: number; suffix: string },
+    );
+  /** The live traces of a brain in a SQLite file that hold `word`. */
+  const holding = (file: string, brainId: string, word: string) => tracesIn(file, brainId).filter((row) => row.content.includes(word));
+  /** The text of the last tool result the model was sent. */
+  const lastToolResult = (played: ReturnType<typeof script>): string => {
+    const message = (played.seen.filter((call) => call.streamed).at(-1)?.messages ?? []).filter((each) => each.role === 'tool').at(-1);
+    return typeof message?.content === 'string' ? message.content : JSON.stringify(message?.content ?? null);
+  };
+  /** A `Memory` facade on a SQLite file of its own (brain `tools-brain`), closed after the test, whose memory tools a host hands gmi(). */
+  async function toolsFacade(): Promise<{ memory: Memory; file: string }> {
+    const file = brainFile();
+    const memory = await Memory.createSqlite(file, { brainId: 'tools-brain', selfImprove: false });
+    facades.push(memory);
+    return { memory, file };
+  }
+  /** One model step that calls `memory_add` with a `thread` note. */
+  const threadNote = (id: string, content: string) => reply.tools([{ id, name: 'memory_add', args: { content, scope: 'thread' } }]);
+
+  it("hands an anonymous id to a new person across a restart: B, on agent({ runtime: 'gmi' }) started again after A's session.close(), recalls nothing A filed, and a process started after B's stops without a close recalls B's words and never A's", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Noted.'), reply.text('Noted.')] });
+    const file = storeFile();
+    const options = { learning: { agentKey: 'tutor' } };
+
+    const first = tutorOn(k, { path: file }, options);
+    const a = first.session('x');
+    await a.send(A_TOLD);
+    await a.close();
+    await first.close();
+
+    // B's process builds the agent through agent(); it stops without closing its session or itself, as a crash leaves it.
+    const second = agent({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: k,
+      fallbackProviders: [],
+      name: 'Tutor',
+      instructions: 'You teach networking.',
+      personality: TUTOR_PERSONA,
+      cognition: { mechanisms: false },
+      memory: { embedding: { provider: 'openai' }, store: { path: file } },
+      ...options,
+    } as never);
+    let third: ReturnType<typeof tutorOn> | undefined;
+    try {
+      await second.session('x').send(B_TOLD);
+      expect(asked(played)).not.toContain('vault');
+
+      third = tutorOn(k, { path: file }, options);
+      await third.session('x').send(WHERE);
+      expect(asked(played)).toContain('locker');
+      expect(asked(played)).not.toContain('vault');
+    } finally {
+      await third?.close();
+      await second.close();
+    }
+    const [record] = generationsIn(file, 'tutor', 'x');
+    expect(record).toMatchObject({ generation: 1 });
+    const userRows = tracesIn(file, 'tutor').filter((row) => row.scope === 'user');
+    expect(userRows.filter((row) => row.content === A_TOLD).map((row) => row.scope_id)).toEqual([sessionScopeIds('x', '', 'tutor').userScopeId]);
+    expect(userRows.filter((row) => row.content === B_TOLD).map((row) => row.scope_id)).toEqual([sessionScopeIds(`x:${record!.suffix}`, '', 'tutor').userScopeId]);
+  });
+
+  it('ends an id opened with a placeholder user, on durable memory with learning off, as it ends an anonymous one: its memory survives a restart, and once its session.close() is recorded the next person on the id recalls nothing it filed', async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Noted.'), reply.text('Noted.')] });
+    const file = storeFile();
+    const options = { learning: { agentKey: 'tutor', mode: 'off' } };
+
+    const first = tutorOn(k, { path: file }, options);
+    await first.session('kiosk', { userId: 'guest' }).send(A_TOLD);
+    await first.close();
+
+    const second = tutorOn(k, { path: file }, options);
+    try {
+      const resumed = second.session('kiosk', { userId: 'guest' });
+      await resumed.send(WHERE);
+      expect(asked(played)).toContain('vault');
+      await resumed.close();
+    } finally {
+      await second.close();
+    }
+
+    const third = tutorOn(k, { path: file }, options);
+    try {
+      await third.session('kiosk', { userId: 'guest' }).send(WHERE);
+      expect(asked(played)).not.toContain('vault');
+    } finally {
+      await third.close();
+    }
+    // A placeholder names no learner: the line is under the session's own form, never under 'guest'.
+    expect(tracesIn(file, 'tutor').filter((row) => row.scope === 'user' && row.content === A_TOLD).map((row) => row.scope_id)).toEqual([
+      sessionScopeIds('kiosk', '', 'tutor').userScopeId,
+    ]);
+    expect(generationsIn(file, 'tutor', 'kiosk')).toEqual([expect.objectContaining({ generation: 1 })]);
+  });
+
+  it("leaves a learner session to its user: an id the user's session.close() ended recalls what the user filed when it is opened for the user again, on the same agent, after a restart and on another id, and an anonymous session on the id recalls none of it", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: Array.from({ length: 5 }, () => reply.text('Noted.')) });
+    const file = storeFile();
+    const options = { learning: { agentKey: 'tutor' } };
+
+    const first = tutorOn(k, { path: file }, options);
+    try {
+      const told = first.session('x', { userId: 'ana' });
+      await told.send(A_TOLD);
+      await told.close();
+      const again = first.session('x', { userId: 'ana' });
+      await again.send(WHERE);
+      expect(asked(played)).toContain('vault');
+      await again.close();
+    } finally {
+      await first.close();
+    }
+    // Each close moved the id on; the user's line stays under the user's own scope id, which no generation changes.
+    expect(generationsIn(file, 'tutor', 'x')).toEqual([expect.objectContaining({ generation: 2 })]);
+    expect(tracesIn(file, 'tutor').filter((row) => row.scope === 'user' && row.content === A_TOLD).map((row) => row.scope_id)).toEqual([
+      learnerUserScopeId({ namespace: '', userId: 'ana' }),
+    ]);
+
+    const second = tutorOn(k, { path: file }, options);
+    try {
+      const restarted = second.session('x', { userId: 'ana' });
+      await restarted.send(WHERE);
+      expect(asked(played)).toContain('vault');
+      await restarted.close();
+      await second.session('y', { userId: 'ana' }).send(WHERE);
+      expect(asked(played)).toContain('vault');
+      await second.session('x').send(WHERE);
+      expect(asked(played)).not.toContain('vault');
+    } finally {
+      await second.close();
+    }
+  });
+
+  it("deletes with forgetUser, from a process that never opened them, what a user's sessions filed under each generation of one id, and keeps what an anonymous session filed on the id between them", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    // The replies repeat the user's words, so each generation's exchange holds them beside the user's line.
+    script('openai', k, { replies: [reply.text('It is in the vault.'), reply.text('Noted.'), reply.text('It is in the locker.')] });
+    const file = storeFile();
+    const options = { learning: { agentKey: 'tutor' } };
+    const VISITOR = 'Canary WREN-5 is the visitor note.';
+
+    const first = tutorOn(k, { path: file }, options);
+    try {
+      const g0 = first.session('x', { userId: 'ana' });
+      await g0.send(A_TOLD);
+      await g0.close();
+      const g1 = first.session('x');
+      await g1.send(VISITOR);
+      await g1.close();
+      const g2 = first.session('x', { userId: 'ana' });
+      await g2.send(B_TOLD);
+      await g2.close();
+    } finally {
+      await first.close();
+    }
+    expect(generationsIn(file, 'tutor', 'x')).toEqual([expect.objectContaining({ generation: 3 })]);
+    expect(holding(file, 'tutor', 'vault').map((row) => row.content)).toContain(A_TOLD);
+    expect(holding(file, 'tutor', 'locker').map((row) => row.content)).toContain(B_TOLD);
+
+    const second = tutorOn(k, { path: file }, options);
+    try {
+      const report = await second.learning!.forgetUser!('ana');
+      expect(report.stores).toContainEqual(expect.objectContaining({ store: 'memory manager of brain tutor', reached: true }));
+    } finally {
+      await second.close();
+    }
+    expect(holding(file, 'tutor', 'vault')).toEqual([]);
+    expect(holding(file, 'tutor', 'locker')).toEqual([]);
+    expect(holding(file, 'tutor', 'WREN-5').map((row) => row.content)).toContain(VISITOR);
+  });
+
+  it("keeps the thread notes a host's memory tools filed for an anonymous session behind its session.close(): the next person on the id, after a restart, finds their own with memory_search and none of the closed session's", async () => {
+    quiet();
+    embeddings();
+    const tools = await toolsFacade();
+    const VAULT_NOTE = 'The deploy key lives in the vault.';
+    const LOCKER_NOTE = 'The deploy key lives in the locker.';
+    const k = key();
+    const played = script('openai', k, {
+      replies: [
+        threadNote('a1', VAULT_NOTE),
+        reply.text('Noted.'),
+        threadNote('b1', LOCKER_NOTE),
+        reply.text('Noted.'),
+        reply.tools([{ id: 'b2', name: 'memory_search', args: { query: 'deploy' } }]),
+        reply.text('It is in the locker.'),
+      ],
+    });
+    const file = storeFile();
+    const withTools = () => ({ learning: { agentKey: 'tutor', memoryTools: tools.memory }, tools: tools.memory.createTools({ includeReflect: false }) });
+
+    const first = tutorOn(k, { path: file }, withTools());
+    const a = first.session('x');
+    await a.send('Note where the deploy key is.');
+    await a.close();
+    await first.close();
+
+    const second = tutorOn(k, { path: file }, withTools());
+    try {
+      const b = second.session('x');
+      await b.send('Note where the deploy key is now.');
+      await b.send('Where is the deploy key?');
+      expect(lastToolResult(played)).toContain(LOCKER_NOTE);
+      expect(lastToolResult(played)).not.toContain('vault');
+    } finally {
+      await second.close();
+    }
+    // Each note is in the thread of the generation that filed it.
+    const [record] = generationsIn(file, 'tutor', 'x');
+    const threads = tracesIn(tools.file, 'tools-brain').filter((row) => row.scope === 'thread');
+    expect(threads.filter((row) => row.content === VAULT_NOTE).map((row) => row.scope_id)).toEqual([taggedScopeId('x', '')]);
+    expect(threads.filter((row) => row.content === LOCKER_NOTE).map((row) => row.scope_id)).toEqual([taggedScopeId(`x:${record!.suffix}`, '')]);
+  });
+
+  it("deletes with forgetUser a user's memory-tool thread notes of each generation of one id, and keeps the note an anonymous session filed on the id between them", async () => {
+    quiet();
+    embeddings();
+    const tools = await toolsFacade();
+    const k = key();
+    script('openai', k, {
+      replies: [
+        threadNote('g0', 'Ana parks in bay HERON-2.'),
+        reply.text('Noted.'),
+        threadNote('g1', 'A visitor parks in bay WREN-5.'),
+        reply.text('Noted.'),
+        threadNote('g2', 'Ana parks in bay OTTER-8.'),
+        reply.text('Noted.'),
+      ],
+    });
+    const file = storeFile();
+    const withTools = () => ({ learning: { agentKey: 'tutor', memoryTools: tools.memory }, tools: tools.memory.createTools({ includeReflect: false }) });
+
+    const first = tutorOn(k, { path: file }, withTools());
+    try {
+      for (const userId of ['ana', undefined, 'ana']) {
+        const opened = first.session('x', userId ? { userId } : undefined);
+        await opened.send('Note where I park.');
+        await opened.close();
+      }
+    } finally {
+      await first.close();
+    }
+    expect(tracesIn(tools.file, 'tools-brain').map((row) => row.content)).toEqual(['A visitor parks in bay WREN-5.', 'Ana parks in bay HERON-2.', 'Ana parks in bay OTTER-8.']);
+
+    const second = tutorOn(k, { path: file }, withTools());
+    try {
+      const report = await second.learning!.forgetUser!('ana');
+      expect(report.stores).toContainEqual(expect.objectContaining({ store: 'memory tools facade of brain tools-brain', reached: true }));
+    } finally {
+      await second.close();
+    }
+    expect(tracesIn(tools.file, 'tools-brain').map((row) => row.content)).toEqual(['A visitor parks in bay WREN-5.']);
+  });
+
   it("fills in the agent's key and namespace for a freeze and a suspension of a learner or of the whole agent, each a row in the file that sets the mode of the turns it covers", async () => {
     quiet();
     embeddings();
@@ -10217,6 +10497,85 @@ describe.skipIf(!POSTGRES_URL)('gmi(): durable memory (memory.store) on a Postgr
       for (const table of LEARNING_TABLES) await one.run(`DELETE FROM ${table} WHERE namespace = ?`, [run]).catch(() => undefined);
       await one.close();
       await two.close();
+    }
+  });
+
+  it("hands an anonymous id from one live process to a person in another after session.close(): B recalls nothing A filed, the first process's next opening of the id recalls B's, and forgetUser from a third process deletes what a user filed in each generation of an id", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const brainId = `qa-gen-${run}`;
+    const agentKey = `qa-gen-tutor-${run}`;
+    const embeddingKey = `k-qa-pg-gen-emb-${run}`;
+    script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    const k = `k-qa-pg-gen-${run}`;
+    const played = script('openai', k, {
+      replies: [reply.text('Noted.'), reply.text('Noted.'), reply.text('Noted.'), reply.text('It is under the heron statue.'), reply.text('It is in the otter planter.')],
+    });
+    const asked = () => JSON.stringify(played.seen.at(-1)?.messages ?? []);
+    const open = async () => {
+      const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, typeParsers: { int8: 'number' } });
+      await adapter.open();
+      return adapter;
+    };
+    const [one, two, three] = [await open(), await open(), await open()];
+    const build = (adapter: StorageAdapter) =>
+      gmi({
+        runtime: 'gmi',
+        provider: 'openai',
+        model: 'stub-model',
+        apiKey: k,
+        fallbackProviders: [],
+        name: 'Tutor',
+        instructions: 'You teach networking.',
+        personality: TUTOR_PERSONA,
+        cognition: { mechanisms: false },
+        memory: { embedding: { provider: 'openai' }, store: { adapter, brainId } },
+        learning: { agentKey, namespace: run },
+      } as never);
+    const A_TOLD = 'The deploy key lives in the vault under ops/deploy.';
+    const B_TOLD = 'The deploy key lives in the locker under ops/keys.';
+    const first = build(one);
+    const second = build(two);
+    let third: ReturnType<typeof build> | undefined;
+    const liveTexts = async () => (await one.all<{ content: string }>('SELECT content FROM memory_traces WHERE brain_id = ? AND deleted = 0', [brainId])).map((row) => row.content);
+    try {
+      const a = first.session('x');
+      await a.send(A_TOLD);
+      await a.close();
+      await second.session('x').send(B_TOLD);
+      expect(asked()).not.toContain('vault');
+      // The id's current generation is B's open session's, which the first process opens too.
+      await first.session('x').send('Where does the deploy key live?');
+      expect(asked()).toContain('locker');
+      expect(asked()).not.toContain('vault');
+
+      // A user's two generations of y, one in each process.
+      const y0 = first.session('y', { userId: 'ana' });
+      await y0.send('Ana keeps the spare key under the heron statue.');
+      await y0.close();
+      const y1 = second.session('y', { userId: 'ana' });
+      await y1.send('Ana moved the spare key to the otter planter.');
+      await y1.close();
+      const records = await one.all<{ key: string; value: string }>("SELECT key, value FROM brain_meta WHERE brain_id = ? AND key LIKE 'session_generation:%' ORDER BY key", [brainId]);
+      expect(records.map((row) => [row.key, (JSON.parse(row.value) as { generation: number }).generation])).toEqual([
+        [`session_generation:${taggedScopeId('x', run)}`, 1],
+        [`session_generation:${taggedScopeId('y', run)}`, 2],
+      ]);
+
+      third = build(three);
+      await third.learning!.forgetUser!('ana');
+      const live = await liveTexts();
+      expect(live.filter((text) => text.includes('heron') || text.includes('otter'))).toEqual([]);
+      expect(live).toEqual(expect.arrayContaining([A_TOLD, B_TOLD]));
+    } finally {
+      await first.close();
+      await second.close();
+      await third?.close();
+      for (const table of ['memory_traces', 'brain_meta']) await one.run(`DELETE FROM ${table} WHERE brain_id = ?`, [brainId]).catch(() => undefined);
+      for (const table of LEARNING_TABLES) await one.run(`DELETE FROM ${table} WHERE namespace = ?`, [run]).catch(() => undefined);
+      for (const adapter of [one, two, three]) await adapter.close().catch(() => undefined);
     }
   });
 });
@@ -10821,6 +11180,52 @@ describe("the full runtime's own learning layer: its store on the host's storage
     });
     expect((await loopsOf({ turnPlanning: { enabled: true, discovery: { enabled: false } } })).tool_policy).toEqual({ live: true });
   }, 60_000);
+
+  it("deletes with forgetUser, on a runtime started again, the thread notes a learner's memory_add filed in each of its sessions across restarts, and keeps a placeholder visitor's and another learner's", async () => {
+    quiet();
+    const adapter = await hostDatabase();
+    const tools = await Memory.createWithAdapter(adapter, { brainId: 'tools-brain', selfImprove: false });
+    const threadNote = (id: string, content: string) => reply.tools([{ id, name: 'memory_add', args: { content, scope: 'thread' } }]);
+    const k = key();
+    const played = script('openai', k, { replies: [threadNote('t1', 'Canary THREAD-1 of ana.'), reply.text('Noted.')] });
+    // The facade's Brain has a conversations table of its own: the runtime keeps its conversations under a prefix.
+    const config = { storageAdapter: adapter, conversationManagerConfig: { tablePrefix: 'agentos_' }, memoryTools: { memory: tools }, learning: true };
+
+    const first = await runtime(k, config);
+    await turn(first, { userId: 'ana', sessionId: 's-1', conversationId: 'c-1', organizationId: 'A', textInput: 'Note this.' });
+    await stopRuntime(first);
+
+    played.replies.push(
+      threadNote('t2', 'Canary THREAD-2 of ana.'),
+      reply.text('Noted.'),
+      threadNote('t3', 'Canary THREAD-3 of a visitor.'),
+      reply.text('Noted.'),
+      threadNote('t4', 'Canary THREAD-4 of bo.'),
+      reply.text('Noted.'),
+    );
+    const second = await runtime(k, config);
+    await turn(second, { userId: 'ana', sessionId: 's-2', conversationId: 'c-2', organizationId: 'A', textInput: 'Note this.' });
+    await turn(second, { userId: 'anonymous', sessionId: 's-9', conversationId: 'c-9', organizationId: 'A', textInput: 'Note this.' });
+    await turn(second, { userId: 'bo', sessionId: 's-4', conversationId: 'c-4', organizationId: 'A', textInput: 'Note this.' });
+    await stopRuntime(second);
+
+    const notes = async () =>
+      (await liveIn(adapter, 'tools-brain')).filter((trace) => trace.content.startsWith('Canary THREAD-')).map((trace) => [trace.content, trace.scope, trace.scopeId]);
+    expect(await notes()).toEqual([
+      ['Canary THREAD-1 of ana.', 'thread', taggedScopeId('c-1', 'A')],
+      ['Canary THREAD-2 of ana.', 'thread', taggedScopeId('c-2', 'A')],
+      ['Canary THREAD-3 of a visitor.', 'thread', taggedScopeId('c-9', 'A')],
+      ['Canary THREAD-4 of bo.', 'thread', taggedScopeId('c-4', 'A')],
+    ]);
+
+    const third = await runtime(k, config);
+    const report = await third.getLearningLayer()!.forgetUser!('ana', { namespace: 'A' });
+    expect(report.stores).toContainEqual(expect.objectContaining({ store: 'memory tools facade of brain tools-brain', reached: true }));
+    expect(await notes()).toEqual([
+      ['Canary THREAD-3 of a visitor.', 'thread', taggedScopeId('c-9', 'A')],
+      ['Canary THREAD-4 of bo.', 'thread', taggedScopeId('c-4', 'A')],
+    ]);
+  }, 30_000);
 
   it('refuses learning.namespace, learning beside a layer the host passes, and an unknown mode at construction, naming each', async () => {
     quiet();
