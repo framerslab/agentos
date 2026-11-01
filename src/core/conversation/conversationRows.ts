@@ -66,6 +66,18 @@ export function selectMessagesSql(table: string): string {
   return `SELECT * FROM ${table} WHERE conversation_id = ? ORDER BY timestamp ASC, seq ASC`;
 }
 
+/** {@link insertMessageSql} for the messages table under its default name, `conversation_messages`. */
+export const INSERT_MESSAGE_SQL = insertMessageSql('conversation_messages');
+
+/** {@link replaceMessageSql} for the messages table under its default name, `conversation_messages`. */
+export const REPLACE_MESSAGE_SQL = replaceMessageSql('conversation_messages');
+
+/** {@link updateMessageSql} for the messages table under its default name, `conversation_messages`. */
+export const UPDATE_MESSAGE_SQL = updateMessageSql('conversation_messages');
+
+/** {@link selectMessagesSql} for the messages table under its default name, `conversation_messages`. */
+export const SELECT_MESSAGES_SQL = selectMessagesSql('conversation_messages');
+
 /** How a row's `content` reads back: `text` as it is, `json` parsed. */
 export type StoredContentType = 'text' | 'json';
 
@@ -216,7 +228,7 @@ export function messageRowValues(
 }
 
 /**
- * The values {@link UPDATE_MESSAGE_SQL} takes: every column but the id, then
+ * The values {@link updateMessageSql}'s statement takes: every column but the id, then
  * the id.
  */
 export function updateMessageValues(rowValues: unknown[]): unknown[] {
