@@ -151,6 +151,26 @@ async function reads(adapter: StorageAdapter, table: string, columns: readonly s
 }
 
 /**
+ * Whether the table that CREATE TABLE IF NOT EXISTS would keep exists without
+ * one of `own`'s columns. On PostgreSQL that is the table of the schema the
+ * connection creates in (`current_schema()`), never one of a later schema of
+ * the search path, which an unqualified read would find in its place.
+ */
+async function isOtherComponentsTable(adapter: StorageAdapter, table: string, own: readonly string[]): Promise<boolean> {
+  if (isPostgresAdapter(adapter)) {
+    // An unquoted name is folded to lower case, which is how information_schema lists it.
+    const rows = await adapter.all<{ column_name: string }>(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ?',
+      [table.toLowerCase()],
+    );
+    if (rows.length === 0) return false;
+    const columns = new Set(rows.map((row) => row.column_name));
+    return own.some((column) => !columns.has(column));
+  }
+  return (await reads(adapter, table, '*')) && !(await reads(adapter, table, own));
+}
+
+/**
  * Refuses a table of either name that exists without the columns every version
  * of the manager's table has: the CREATE TABLE IF NOT EXISTS would keep it, and
  * every read and write after it would fail.
@@ -159,9 +179,8 @@ async function reads(adapter: StorageAdapter, table: string, columns: readonly s
  */
 async function assertOwnTables(adapter: StorageAdapter, names: ConversationTableNames): Promise<void> {
   for (const kind of ['conversations', 'messages'] as const) {
-    const table = names[kind];
-    if ((await reads(adapter, table, '*')) && !(await reads(adapter, table, OWN_COLUMNS[kind]))) {
-      throw new ConversationTableConflictError(table);
+    if (await isOtherComponentsTable(adapter, names[kind], OWN_COLUMNS[kind])) {
+      throw new ConversationTableConflictError(names[kind]);
     }
   }
 }
