@@ -761,10 +761,11 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       await until(() => server.sent('response.create').length === 2, 'the second response');
       server.dropConnection();
       await until(() => vi.mocked(next.startSession).mock.calls.length === 1, 'the failover');
-      const taken = await vi.mocked(next.startSession).mock.results[0]!.value;
-      await until(() => vi.mocked(taken.pushTokens).mock.calls.length > 0, 'the replay');
+      const taken = (await vi.mocked(next.startSession).mock.results[0]!.value) as StreamingTTSSession;
+      const replay = vi.mocked(taken.pushTokens).mock.calls;
+      await until(() => replay.length > 0, 'the replay');
 
-      expect(vi.mocked(taken.pushTokens).mock.calls.map(([text]) => text).join('')).toContain('Second.');
+      expect(replay.map(([text]) => text).join('')).toContain('Second.');
     });
 
     it('a session the server refuses fails over at the start', async () => {
