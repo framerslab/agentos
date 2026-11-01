@@ -9904,6 +9904,48 @@ describe("gmi(): durable memory (memory.store) with its learning store on the sa
     expect(scopeIdsOf('The second visit.')).toEqual([reopened]);
   });
 
+  it('a session opened with no user recalls what it filed under its id after agent.close(), in an agent built again on the file', async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('Noted.'), reply.text('It is in the vault.')] });
+    const file = storeFile();
+    const options = { learning: { agentKey: 'tutor' } };
+
+    const first = tutorOn(k, { path: file }, options);
+    await first.session('x').send('The deploy key lives in the vault under ops/deploy.');
+    await first.close();
+
+    const second = tutorOn(k, { path: file }, options);
+    try {
+      await second.session('x').send('Where does the deploy key live?');
+      expect(asked(played)).toContain('vault');
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('a session opened with no user and closed with session.close() recalls nothing it filed when the same agent opens its id again', async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('Noted.'), reply.text('I do not know.')] });
+    const file = storeFile();
+    const tutor = tutorOn(k, { path: file }, { learning: { agentKey: 'tutor' } });
+
+    try {
+      const first = tutor.session('x');
+      await first.send('The deploy key lives in the vault under ops/deploy.');
+      await first.close();
+      await tutor.session('x').send('Where does the deploy key live?');
+      expect(asked(played)).not.toContain('vault');
+    } finally {
+      await tutor.close();
+    }
+    // The closed session's trace is in the file: the reopened id did not reach it.
+    expect(tracesIn(file, 'tutor').map((row) => row.content)).toContain('The deploy key lives in the vault under ops/deploy.');
+  });
+
   it("fills in the agent's key and namespace for a freeze and a suspension of a learner or of the whole agent, each a row in the file that sets the mode of the turns it covers", async () => {
     quiet();
     embeddings();
