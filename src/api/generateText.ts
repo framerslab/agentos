@@ -618,7 +618,13 @@ export interface GenerateTextOptions {
    * ```
    *
    * Keys collide last-wins with the typed fields at the provider layer, so
-   * only pass params the target provider understands.
+   * only pass params the target provider understands. The Anthropic provider
+   * reconciles three keys with the model: with `thinking: false` on a model
+   * that turns thinking off only at effort `high` or below (Opus 5, Sonnet
+   * 5.5, Haiku 5.5), an `output_config.effort` of `xhigh` or `max` passed here
+   * is sent as `high`; a `temperature` or `top_p` passed here for a model that
+   * rejects them is dropped (and `top_k` on Claude Haiku 5.5); and a `model`
+   * passed here is the one the request is shaped for.
    *
    * With `planning` on, the planning call takes OpenRouter's routing controls
    * (`provider`, `models`, `route`, `transforms`) and `plugins` from this
