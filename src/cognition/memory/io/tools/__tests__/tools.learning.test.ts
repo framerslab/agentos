@@ -144,6 +144,19 @@ function beforeNextTransaction(brain: Brain, before: () => Promise<void>): void 
   });
 }
 
+/** Runs `before` once, just before the brain's first `run` whose statement matches `statement`. */
+function beforeNextRun(brain: Brain, statement: RegExp, before: () => Promise<void>): void {
+  const run = brain.run.bind(brain);
+  let fired = false;
+  vi.spyOn(brain, 'run').mockImplementation(async (sql: string, params?: Parameters<Brain['run']>[1]) => {
+    if (!fired && statement.test(sql)) {
+      fired = true;
+      await before();
+    }
+    return run(sql, params);
+  });
+}
+
 /** A layer over an in-process store, its facade on a SQLite file of its own. */
 async function setUp() {
   const store = new InMemoryLearningStore();
@@ -406,6 +419,45 @@ describe('a write that reads its trace first', () => {
     });
     expect(await liveContents(brain)).toEqual(['A42 keeps wasps.']);
     expect((await memoryWrites(store, chainKeyOf(LEARNER_A))).slice(2)).toEqual([['candidate', 'pending'], ['verdict', 'rejected']]);
+  });
+
+  it('changes nothing and answers conflict when the trace moved to another scope id after the call read it', async () => {
+    quiet();
+    const { store, brain, layer, tools } = await setUp();
+    const ofA = await turnOf(await layer.forLearner(LEARNER_A, contextOf('s-a')), { userId: '42', namespace: 'A', sessionId: 's-a' });
+    const bees = traceIdOf(await tools.memory_add!.execute({ content: 'A42 keeps bees.' }, ofA));
+    const goats = traceIdOf(await tools.memory_add!.execute({ content: 'A42 keeps goats.' }, ofA));
+    // A move of the trace (a host's refileScope, a Brain's re-file) commits between the tool's read of it and its write.
+    const move = (id: string) => brain.run('UPDATE memory_traces SET scope_id = ? WHERE id = ?', ['A/43', id]).then(() => undefined);
+
+    beforeNextRun(brain, /SET deleted = 1/, () => move(bees));
+    expect(await tools.memory_delete!.execute({ traceId: bees }, ofA)).toMatchObject({
+      success: false,
+      details: { status: 'rejected', reason: 'conflict' },
+    });
+    vi.mocked(brain.run).mockRestore();
+    beforeNextTransaction(brain, () => move(goats));
+    expect(await tools.memory_update!.execute({ traceId: goats, content: 'A42 keeps sheep.' }, ofA)).toMatchObject({
+      success: false,
+      details: { status: 'rejected', reason: 'conflict' },
+    });
+
+    // Both traces stay live as the move left them, under the scope id it gave them, with the words they held.
+    expect(
+      await brain.all<{ content: string; scope_id: string; deleted: number }>(
+        'SELECT content, scope_id, deleted FROM memory_traces WHERE brain_id = ? ORDER BY content',
+        [brain.brainId],
+      ),
+    ).toEqual([
+      { content: 'A42 keeps bees.', scope_id: 'A/43', deleted: 0 },
+      { content: 'A42 keeps goats.', scope_id: 'A/43', deleted: 0 },
+    ]);
+    expect((await memoryWrites(store, chainKeyOf(LEARNER_A))).slice(4)).toEqual([
+      ['candidate', 'pending'],
+      ['verdict', 'rejected'],
+      ['candidate', 'pending'],
+      ['verdict', 'rejected'],
+    ]);
   });
 });
 
