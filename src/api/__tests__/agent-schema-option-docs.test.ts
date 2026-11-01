@@ -125,6 +125,16 @@ describe('the agent() example scan', () => {
     expect(outputOffenders('guide.md', text)).toEqual(['guide.md: agent({ provider, output })']);
   });
 
+  it('finds a quoted `output` key', () => {
+    const text = "```ts\nagent({ name: 'A', \"output\": schema });\nagent({ 'output': schema });\n```\n";
+    expect(outputOffenders('guide.md', text)).toEqual(['guide.md: agent({ name, output })', 'guide.md: agent({ output })']);
+  });
+
+  it('finds a shorthand `output` property', () => {
+    const text = '```ts\nagent({ model, output });\nagent({\n  model,\n  output,\n});\n```\n';
+    expect(outputOffenders('guide.md', text)).toEqual(['guide.md: agent({ model, output })', 'guide.md: agent({ model, output })']);
+  });
+
   it('passes examples that name responseSchema', () => {
     const text = [
       '```ts',
