@@ -6,12 +6,14 @@
  * chain; a memory_search on the turn of another tenant's user of the same id finds none of it, while the learner's
  * own next session finds it. The rolling-summary sink files a learner's compaction under the learner's scope ids with
  * its row, and the standalone retriever reads it back in the learner's next session and in none of another tenant's
- * user of the same id.
+ * user of the same id. With the learning flag alone, the runtime hands its layer the standalone facade and its own
+ * storage adapter, and leaves memory_reflect out of the memory tools pack.
  */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 
 const provider = vi.hoisted(() => ({
   replies: [] as Array<Array<Record<string, unknown>>>,
@@ -75,9 +77,11 @@ const toolMessages = (messages: Array<{ role: string; content: unknown }> | unde
 let booted: AgentOS | undefined;
 let memory: Memory | undefined;
 let dir: string | undefined;
+const adapters: StorageAdapter[] = [];
 afterEach(async () => {
   if (booted) await booted.shutdown();
   if (memory) await memory.close();
+  while (adapters.length) await adapters.pop()!.close();
   if (dir) fs.rmSync(dir, { recursive: true, force: true });
   booted = undefined;
   memory = undefined;
@@ -133,6 +137,26 @@ async function bootStandalone(): Promise<{ os: AgentOS; brain: Brain; store: InM
     learning: { store, memoryTools: memory },
   } as any);
   return { os: booted, brain: (memory as unknown as { _brain: Brain })._brain, store };
+}
+/**
+ * AgentOS with the learning flag alone: the runtime hands its layer the standalone facade, whose memory tools it
+ * registers (memory_reflect included, as the host asked), and its storage adapter itself.
+ */
+async function bootHandedOver(): Promise<{ os: AgentOS; brain: Brain; adapter: StorageAdapter }> {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'learning-memory-e2e-'));
+  // Self-improvement on, so the facade has memory_reflect to offer.
+  memory = await Memory.createSqlite(path.join(dir, 'standalone.sqlite'), { brainId: 'standalone-brain', selfImprove: true });
+  const adapter = await resolveStorageAdapter({ filePath: path.join(dir, 'runtime.sqlite'), priority: ['better-sqlite3', 'sqljs'], quiet: true });
+  adapters.push(adapter);
+  booted = await AgentOS.create({
+    modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'test' } }] },
+    turnPlanning: { enabled: false },
+    personas: [tutor],
+    storageAdapter: adapter,
+    standaloneMemory: { memory, tools: { includeReflect: true }, longTermRetriever: true, rollingSummarySink: true },
+    learning: true,
+  } as any);
+  return { os: booted, brain: (memory as unknown as { _brain: Brain })._brain, adapter };
 }
 async function send(agentos: AgentOS, input: Record<string, unknown>): Promise<void> {
   for await (const _chunk of agentos.processRequest({ textInput: 'Remember this.', selectedPersonaId: 'tutor', ...input } as any)) { /* drain */ }
@@ -192,5 +216,22 @@ describe('the memory tools on the full runtime with the learning flag on', () =>
     // The main call of the second turn, tenant B's, holds none of it; that of the third, tenant A's next session, does.
     expect(JSON.stringify(provider.seenMessages[1])).not.toContain('STORK-4');
     expect(JSON.stringify(provider.seenMessages[2])).toContain('STORK-4');
+  });
+
+  it("hands its layer the standalone facade and its storage adapter, leaves memory_reflect out of the pack, and forgetUser reaches the facade's Brain", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { os: agentos, brain } = await bootHandedOver();
+    expect(await agentos.getToolOrchestrator().getTool('memory_reflect')).toBeUndefined();
+    expect(await agentos.getToolOrchestrator().getTool('memory_add')).toBeDefined();
+
+    provider.replies.push(toolCall('memory_add', { content: 'Canary OWL-9.' }));
+    await send(agentos, { userId: 'ana', sessionId: 's-a', organizationId: 'A' });
+    expect(await brain.all('SELECT scope_id FROM memory_traces WHERE deleted = 0')).toEqual([{ scope_id: 'A/ana' }]);
+
+    const layer = agentos.getLearningLayer()!;
+    expect((await layer.manifest()).loops.ledger).toMatchObject({ live: true, detail: expect.stringContaining("sql store over the host's storage adapter") });
+    const report = await layer.forgetUser!('ana', { namespace: 'A' });
+    expect(report.stores).toEqual(expect.arrayContaining([expect.objectContaining({ store: 'memory tools facade of brain standalone-brain', reached: true })]));
+    expect(await brain.all('SELECT id FROM memory_traces WHERE deleted = 0')).toEqual([]);
   });
 });

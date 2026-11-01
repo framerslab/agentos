@@ -16,6 +16,7 @@ import { renderPersonalitySection } from '../personas/personalityPrompt';
 import type { IUtilityAI } from '../../nlp/ai_utilities/IUtilityAI';
 import { createLearningLayer } from '../../learning/LearningLayer';
 import type { ILearnerSession, ILearningLayer, TurnInputForLearning, TurnPreparation } from '../../learning/types';
+import type { ICognitiveMemoryManager } from '../../memory/CognitiveMemoryManager';
 import { ConversationContext } from '../../../core/conversation/ConversationContext';
 import type { ConversationManager } from '../../../core/conversation/ConversationManager';
 import type { IPromptEngine } from '../../../core/llm/IPromptEngine';
@@ -299,6 +300,75 @@ describe('a runtime with a learning layer', () => {
     expect(stateOf(await gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' })))).toBe('bound');
     expect(layer.forLearner).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => expect(lateEnd).toHaveBeenCalledTimes(1));
+  }, 10_000);
+
+  it("hands the learner session the GMI's memory manager, which the layer re-files, hydrates and reaches in forgetUser", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const memory = { getStore: () => undefined, shutdown: async () => undefined } as unknown as ICognitiveMemoryManager;
+    const layer = recordingLayer(async () => ({ prepareTurn: vi.fn(), endSession: vi.fn(async () => undefined), currentTraits: () => ({}) }) as unknown as ILearnerSession);
+    const manager = await managerWith(layer, { cognitiveMemoryFactory: async () => memory });
+    // The GMI's own initialization is not what this case reads: what the manager hands the layer is.
+    vi.spyOn(GMI.prototype, 'initialize').mockRejectedValueOnce(new Error('initialize failed'));
+    await expect(
+      manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, ''),
+    ).rejects.toThrow(/Failed to initialize new GMI instance/);
+    expect(layer.forLearner).toHaveBeenCalledWith(
+      { namespace: '', agentKey: 'reviewer', userId: 'user-1' },
+      expect.objectContaining({ sessionId: 'session-1', memory }),
+    );
+  });
+
+  it("names a turn's scope ids by the session's own form, with no learner, before the GMI's first prepared turn opens its session", async () => {
+    // The pipeline asks for the turn's scope ids before the GMI prepares the turn; a session with no answer would let
+    // the retriever and the sink read and file under the ids a host with no layer uses.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const manager = await managerWith(createLearningLayer());
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id);
+    const session = gmi.getLearnerSession!()!;
+    expect(session.scopesFor!({ userId: 'user-1', namespace: 'A', workflowSeat: false })).toEqual({
+      learner: 'none',
+      mode: 'on',
+      userScopeId: 'A//session-1',
+      personaScopeId: 'A//session-1::reviewer',
+      namespace: 'A',
+    });
+    expect(stateOf(await session.prepareTurn(turn({ namespace: 'A' })))).toBe('bound');
+    expect(session.scopesFor!({ userId: 'user-1', namespace: 'A', workflowSeat: false })).toMatchObject({ learner: 'bound', userScopeId: 'A/user-1' });
+  });
+
+  it("answers a turn's scope ids, its recorder and its guard through the session an open past the 2,000 ms budget gives, and the session's own form before it", async () => {
+    // A GMI whose open ran late would otherwise give its tools no recorder and the pipeline no scope ids for its life.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let answer: ((session: ILearnerSession) => void) | undefined;
+    const layer = recordingLayer(() => new Promise<ILearnerSession>((resolve) => {
+      answer = resolve;
+    }));
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 5_000 });
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, '');
+    const session = gmi.getLearnerSession!()!;
+    // Before it opens, the deferred session names the session's own form, with no learner.
+    expect(session.scopesFor!({ userId: 'user-1', namespace: '', workflowSeat: false })).toMatchObject({
+      learner: 'none',
+      userScopeId: '/session-1',
+      personaScopeId: '/session-1::reviewer',
+    });
+    const prepared = session.prepareTurn(turn());
+    answer!(
+      await createLearningLayer().forLearner(
+        { namespace: '', agentKey: 'reviewer', userId: 'user-1' },
+        { sessionId: 'session-1', personaId: 'reviewer', authoredTraits: { honesty: 0.9, extraversion: 0.5 } },
+      ),
+    );
+    expect(stateOf(await prepared)).toBe('bound');
+    expect(session.scopesFor!({ userId: 'user-1', namespace: '', workflowSeat: false })).toMatchObject({ learner: 'bound', userScopeId: 'user-1' });
+    expect(typeof session.recordSelfChange).toBe('function');
+    expect(session.isFrozen!()).toBe(false);
+    expect(await session.guardMemoryWrite!({ apply: async () => 'filed', undo: async () => undefined }, { learner: 'bound', namespace: '' })).toEqual({
+      status: 'written',
+      result: 'filed',
+    });
+    expect(layer.forLearner).toHaveBeenCalledTimes(1);
   }, 10_000);
 });
 
