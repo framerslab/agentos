@@ -64,7 +64,7 @@ const lead = gmi({
 
 An argument or a seat key the table does not name is refused.
 
-The bounds are `agencies` on the agent (or `AgentOSConfig.agencies`), checked when it is built, `launch` on or off: a value outside its range throws a `RangeError` naming the field (on the full runtime, initialization fails with `CONFIGURATION_ERROR`), and a field set to `null` takes its default.
+The bounds are `agencies` on the agent (or `AgentOSConfig.agencies`), checked when it is built, `launch` on or off: a value outside its range throws a `RangeError` naming the field (on the full runtime, initialization fails with the code `SYS_CONFIGURATION_ERROR`), and a field set to `null` takes its default.
 
 | Option | Default | Range |
 |---|---|---|
