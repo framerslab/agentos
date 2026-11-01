@@ -859,8 +859,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * again after its close() is given a memory scope of its own. Only an agent
    * with cognitive memory keeps them, since only memory reads the scope, and it
    * never keeps a seat session's id. An id stays after session.close(), so that
-   * its next opening does not reach the closed session's memory; agent.close()
-   * starts a new memory and empties the set. One entry per id, kept while the
+   * its next opening on this agent does not reach the closed session's memory;
+   * agent.close() starts a new memory and empties the set, so an id's next
+   * opening, as after a process restart, recalls what that id filed. One entry per id, kept while the
    * memory keeps that session's traces.
    */
   const openedSessionIds = new Set<string>();
@@ -962,9 +963,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
       }
       // Each session's memory scope is its own unless the caller names the user:
       // sessions are often different people, and one person's facts must not
-      // reach another's replies. An id opened again after close() is a new
-      // session, so its scope is a new id: it recalls nothing the closed one
-      // filed under its scope, and only a user id the caller names again is shared.
+      // reach another's replies. A session id's memory survives agent.close()
+      // and a process restart; session.close() ends it: an id opened again on
+      // this agent after session.close() gets a new scope id, recalls nothing the
+      // closed session filed, and shares only a user id the caller names again.
+      // A host that hands an anonymous id to a new person must close the old
+      // session first or mint a new id.
       // A seat session's memory scope is its own, new at each opening: it recalls nothing of the user it runs as.
       const memoryScopeId = seat?.memoryScope === 'session' || openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
       // A seat session's id never enters the list agent.close() empties: a long-lived member does not grow by one id
