@@ -1160,6 +1160,11 @@ export class AnthropicProvider implements IProvider {
    * This method normalizes all of the above into the IProvider streaming
    * contract with `responseTextDelta`, `toolCallsDeltas`, and `isFinal`.
    *
+   * `options.requestTimeout`, when set, replaces the configured `requestTimeout`
+   * for this stream's connection: the request and its response headers. Once
+   * the headers have arrived, the gap between streamed events is bounded by
+   * the configured `streamIdleTimeoutMs`.
+   *
    * @param {string} modelId - The Anthropic model to use.
    * @param {ChatMessage[]} messages - Conversation messages.
    * @param {ModelCompletionOptions} options - Completion options.
@@ -1225,7 +1230,8 @@ export class AnthropicProvider implements IProvider {
     while (stream === undefined) {
       try {
         // The caller's signal ends a draw that waits on the pool's probes, the connection and the body's reads.
-        stream = await this.makeStreamRequest('/v1/messages', payload, undefined, abortSignal, streamAttempt);
+        // The per-call requestTimeout bounds the connection (the request and its headers), as on the generate path.
+        stream = await this.makeStreamRequest('/v1/messages', payload, options.requestTimeout, abortSignal, streamAttempt);
       } catch (error: unknown) {
         // An abort before the first event, while the draw waited on the probes or the connection was opening,
         // ends the stream with the abort chunk, as an abort before the request does.
