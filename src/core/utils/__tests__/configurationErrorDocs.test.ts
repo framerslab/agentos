@@ -56,12 +56,12 @@ function bareIn(file: string, keep: (line: string) => boolean = () => true): str
     .flatMap((line, index) => (keep(line) ? [...line.matchAll(BARE_MEMBER)].map(() => `${path.relative(ROOT, file)} line ${index + 1}`) : []));
 }
 
-/** Each page that describes a configuration refusal, with the words that name the string a host reads. */
+/** Each page that describes a configuration refusal, with the clause that names the string a host reads beside the call that refuses. */
 const REFUSALS: Array<[page: string, words: string]> = [
-  ['docs/AGENCIES.md', 'on the full runtime, initialization fails with the code `SYS_CONFIGURATION_ERROR`'],
-  ['docs/GMI.md', 'from `AgentOS.initialize()` with the code `SYS_CONFIGURATION_ERROR` before any service starts'],
-  ['docs/PERSONAS.md', '`create()` rejects with the code `SYS_CONFIGURATION_ERROR`, naming the index or id'],
-  ['docs/getting-started/SQL_STORAGE_QUICKSTART.md', "with an error whose `code` is `'SYS_CONFIGURATION_ERROR'` and whose message names `conversationManagerConfig.tablePrefix`"],
+  ['docs/AGENCIES.md', 'initialization fails with the code `SYS_CONFIGURATION_ERROR`'],
+  ['docs/GMI.md', 'from `AgentOS.initialize()` with the code `SYS_CONFIGURATION_ERROR`'],
+  ['docs/PERSONAS.md', '`create()` rejects with the code `SYS_CONFIGURATION_ERROR` when the value is not an array'],
+  ['docs/getting-started/SQL_STORAGE_QUICKSTART.md', "with an error whose `code` is `'SYS_CONFIGURATION_ERROR'`"],
   ['docs/safety/PROVENANCE.md', "`AgentOS.initialize()` refuses to start with an error whose `code` is `'SYS_CONFIGURATION_ERROR'`"],
   ['docs/safety/GUARDRAILS_USAGE.md', '`initialize()` throws `SYS_CONFIGURATION_ERROR`'],
 ];

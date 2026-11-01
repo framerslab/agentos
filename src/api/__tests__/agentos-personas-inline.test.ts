@@ -5,9 +5,10 @@
  * like file personas, and rejected before any provider initialises when malformed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { fileURLToPath } from 'url';
 
 const providerInitialize = vi.fn(async () => undefined);
 
@@ -74,9 +75,30 @@ describe('AgentOS.create({ personas })', () => {
   it('rejects contradictory or malformed persona sources before any provider initialises', async () => {
     const loader = { initialize: async () => undefined, loadPersonaById: async () => undefined, loadAllPersonaDefinitions: async () => [] };
     await expect(boot({ personas: [persona], personaLoader: loader })).rejects.toMatchObject({ code: GMIErrorCode.CONFIGURATION_ERROR });
-    await expect(boot({ personas: [persona, { ...persona }] })).rejects.toMatchObject({ code: GMIErrorCode.CONFIGURATION_ERROR });
-    await expect(boot({ personas: 'nope' })).rejects.toMatchObject({ code: GMIErrorCode.CONFIGURATION_ERROR });
+    await expect(boot({ personas: [persona, { ...persona }] })).rejects.toMatchObject({
+      code: GMIErrorCode.CONFIGURATION_ERROR,
+      message: expect.stringContaining("personas[1] repeats the persona id 'inline-helper'"),
+      details: { index: 1, id: 'inline-helper' },
+    });
+    await expect(boot({ personas: [persona, { name: 'No Id' }] })).rejects.toMatchObject({
+      code: GMIErrorCode.CONFIGURATION_ERROR,
+      message: expect.stringContaining('personas[1] must be an object with a non-empty string `id`'),
+      details: { index: 1 },
+    });
+    await expect(boot({ personas: 'nope' })).rejects.toMatchObject({
+      code: GMIErrorCode.CONFIGURATION_ERROR,
+      message: '`personas` must be an array of persona definitions.',
+      details: { received: 'string' },
+    });
     expect(providerInitialize).not.toHaveBeenCalled();
+  });
+
+  it('is described on the personas page as it refuses: an entry by its index and id, a value that is not an array by the type received', async () => {
+    const page = await readFile(fileURLToPath(new URL('../../../docs/PERSONAS.md', import.meta.url)), 'utf8');
+    expect(page).toContain(
+      'The refusal of an entry names its index, and its id where the entry has one; the refusal of a value that is not an array gives the type it received in its details.',
+    );
+    expect(page).not.toContain('naming the index or id');
   });
 
   it('lists an inline persona and serves it through a real GMI turn', async () => {
