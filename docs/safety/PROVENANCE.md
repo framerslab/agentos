@@ -68,7 +68,18 @@ The four presets ([`PolicyProfiles.ts`](https://github.com/framerslab/agentos/bl
 
 ## Storage policies
 
-The write hooks read each statement's operation and table. `CREATE`, `ALTER` and `DROP` always pass, as do writes to the pack's own tables. `storagePolicy.protectedTables` limits the policy to the tables it names; without it every other table is protected, less those in `exemptTables`.
+The write hooks read each statement's operation and table. `CREATE`, `ALTER` and `DROP` always pass, as do writes to the pack's own tables. `storagePolicy.protectedTables` limits the policy to the tables it names, by their exact names; without it every other table is protected, less those in `exemptTables`.
+
+A runtime that keeps its conversations under `conversationManagerConfig.tablePrefix` writes them to `<prefix>conversations` and `<prefix>conversation_messages`, so a policy that lists tables lists those names. When a `revisioned` or `sealed` policy protects `conversations` or `conversation_messages` and not the prefixed name (the sealed profiles list the default names), `AgentOS.initialize()` refuses to start with a `CONFIGURATION_ERROR` that names the tables to add:
+
+```typescript
+const config = profiles.custom(profiles.sealedAutonomous(), {
+  storagePolicy: {
+    mode: 'sealed',
+    protectedTables: ['agentos_conversations', 'agentos_conversation_messages', 'messages'],
+  },
+});
+```
 
 ### `mutable`
 

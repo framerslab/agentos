@@ -17,7 +17,11 @@ export interface ConversationTableNames {
   messages: string;
 }
 
-/** The longest table prefix: every name built from it stays within PostgreSQL's 63-byte identifiers. */
+/**
+ * The longest table prefix: the two table names built from it stay within PostgreSQL's 63-byte identifiers. An index
+ * name past 63 bytes (`idx_<prefix>conversation_messages_conversation_id` from a prefix over 22 characters) is
+ * shortened to 63 bytes by PostgreSQL, the same way at every start, and the four index names stay distinct.
+ */
 const MAX_TABLE_PREFIX_LENGTH = 32;
 
 /**
