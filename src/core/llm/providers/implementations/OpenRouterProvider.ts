@@ -31,7 +31,7 @@ import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
-import { resolveAttemptCount } from './retry-backoff.js';
+import { resolveAttemptCount, type AttemptTally } from './retry-backoff.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
@@ -711,6 +711,9 @@ export class OpenRouterProvider implements IProvider {
     this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
 
+    // The call's count bounds the schema request and its json_object retry together.
+    const attempts = resolveAttemptCount(options.maxAttempts, OpenRouterProvider.MAX_REQUEST_ATTEMPTS);
+    const tally: AttemptTally = { sent: 0 };
     let apiResponseData: OpenRouterChatCompletionAPIResponse;
     try {
       apiResponseData = await this.makeApiRequest<OpenRouterChatCompletionAPIResponse>(
@@ -722,9 +725,11 @@ export class OpenRouterProvider implements IProvider {
         false,
         options.abortSignal,
         options.maxAttempts,
+        tally,
       );
     } catch (error: unknown) {
-      const degraded = this.degradeSchemaPayloadOnNoEndpoints(payload, error);
+      const remaining = attempts - tally.sent;
+      const degraded = remaining > 0 && this.degradeSchemaPayloadOnNoEndpoints(payload, error);
       if (!degraded) throw error;
       apiResponseData = await this.makeApiRequest<OpenRouterChatCompletionAPIResponse>(
         '/chat/completions',
@@ -733,7 +738,7 @@ export class OpenRouterProvider implements IProvider {
         payload,
         false,
         options.abortSignal,
-        options.maxAttempts,
+        remaining,
       );
     }
     this.throwOnInBodyError(apiResponseData, modelId);
@@ -912,6 +917,9 @@ export class OpenRouterProvider implements IProvider {
     // json_object retry below); the answer's chunks then say so.
     let schemaLeftPayload = false;
     try {
+      // The call's count bounds the schema request and its json_object retry together.
+      const attempts = resolveAttemptCount(options.maxAttempts, OpenRouterProvider.MAX_REQUEST_ATTEMPTS);
+      const tally: AttemptTally = { sent: 0 };
       try {
         stream = await this.makeApiRequest<NodeJS.ReadableStream>(
           '/chat/completions',
@@ -922,9 +930,11 @@ export class OpenRouterProvider implements IProvider {
           true,
           abortSignal,
           options.maxAttempts,
+          tally,
         );
       } catch (error: unknown) {
-        const degraded = !abortSignal?.aborted && this.degradeSchemaPayloadOnNoEndpoints(payload, error);
+        const remaining = attempts - tally.sent;
+        const degraded = !abortSignal?.aborted && remaining > 0 && this.degradeSchemaPayloadOnNoEndpoints(payload, error);
         if (!degraded) throw error;
         schemaLeftPayload = true;
         stream = await this.makeApiRequest<NodeJS.ReadableStream>(
@@ -934,7 +944,7 @@ export class OpenRouterProvider implements IProvider {
           payload,
           true,
           abortSignal,
-          options.maxAttempts,
+          remaining,
         );
       }
     } catch (error: unknown) {
@@ -1521,7 +1531,9 @@ export class OpenRouterProvider implements IProvider {
    * `maxAttempts` is the call's count of attempts, a first and its retries
    * together, over the provider's own 3; key hops are not counted.
    * A count that is not a whole number of 1 or more throws a `RangeError`
-   * before anything is sent.
+   * before anything is sent. `tally` is filled with the attempts this
+   * request sent, so a caller that sends it again without its schema spends
+   * only what is left of the call's count.
    */
   private async makeApiRequest<T = unknown>(
     endpoint: string,
@@ -1531,6 +1543,7 @@ export class OpenRouterProvider implements IProvider {
     expectStream: boolean = false,
     signal?: AbortSignal,
     maxAttempts?: number,
+    tally?: AttemptTally,
   ): Promise<T> {
     let lastError: OpenRouterProviderError | null = null;
     const attempts = resolveAttemptCount(maxAttempts, OpenRouterProvider.MAX_REQUEST_ATTEMPTS);
@@ -1549,6 +1562,8 @@ export class OpenRouterProvider implements IProvider {
       }
       if (apiKey === '') throw this.allKeysFailedError();
       const attemptStartedAt = Date.now();
+      // A key hop re-sends within the same attempt, so the count stays.
+      if (tally) tally.sent = attempt + 1;
       try {
         const response = await this.client.request<T>({
           url: endpoint,

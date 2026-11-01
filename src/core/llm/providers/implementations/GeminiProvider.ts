@@ -37,7 +37,7 @@ import { redactUrlSecrets } from '../url-secrets';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
-import { computeRetryBackoffMs, resolveAttemptCount } from './retry-backoff.js';
+import { computeRetryBackoffMs, resolveAttemptCount, type AttemptTally } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 
@@ -899,15 +899,20 @@ export class GeminiProvider implements IProvider {
     const payload = this.buildRequestPayload(modelId, messages, options);
     // Gemini uses model-scoped endpoints: /models/{model}:generateContent
     const endpoint = `/models/${modelId}:generateContent`;
+    // The call's count bounds the pinned request and an alias request together.
+    const attempts = resolveAttemptCount(options.maxAttempts, this.config.maxRetries!);
+    const tally: AttemptTally = { sent: 0 };
     let apiResponse: GeminiResponse;
     try {
-      apiResponse = await this.makeApiRequest<GeminiResponse>(endpoint, payload, options.requestTimeout, options.abortSignal, options.maxAttempts);
+      apiResponse = await this.makeApiRequest<GeminiResponse>(endpoint, payload, options.requestTimeout, options.abortSignal, options.maxAttempts, tally);
     } catch (error: unknown) {
       // A retired pinned id: serve the call from its alias, whose response
-      // reports the alias as the model that answered.
-      const alias = this.retiredModelAlias(modelId, error);
+      // reports the alias as the model that answered, on the attempts the
+      // pinned request left; with none left the 404 ends the call.
+      const remaining = attempts - tally.sent;
+      const alias = remaining > 0 ? this.retiredModelAlias(modelId, error) : undefined;
       if (!alias) throw error;
-      return this.generateCompletion(alias, messages, options);
+      return this.generateCompletion(alias, messages, { ...options, maxAttempts: remaining });
     }
 
     return this.mapResponseToCompletion(apiResponse, modelId);
@@ -952,6 +957,8 @@ export class GeminiProvider implements IProvider {
    * @param {ModelCompletionOptions} options - Completion options.
    * @returns {AsyncGenerator<ModelCompletionResponse>} Incremental response chunks.
    * @throws {GeminiProviderError} On connection or stream errors.
+   * @throws {RangeError} When `options.maxAttempts` is not a whole number of 1
+   *   or more; nothing is sent.
    */
   public async *generateCompletionStream(
     modelId: string,
@@ -959,6 +966,10 @@ export class GeminiProvider implements IProvider {
     options: ModelCompletionOptions,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
+    // The stream sends one request (key hops aside) and retries nothing, but
+    // a count that is not a whole number of 1 or more is still refused before
+    // anything is sent.
+    resolveAttemptCount(options.maxAttempts, 1);
 
     const payload = this.buildRequestPayload(modelId, messages, options);
     const responseId = `gemini-${modelId}-${Date.now()}`;
@@ -997,10 +1008,13 @@ export class GeminiProvider implements IProvider {
           }
         }
         // A retired pinned id fails here, before any chunk: serve the whole
-        // stream from its alias (its chunks carry the alias as modelId).
-        const alias = this.retiredModelAlias(modelId, error);
+        // stream from its alias (its chunks carry the alias as modelId). The
+        // pinned request spent one of the call's attempts; with none left
+        // the 404 ends the stream.
+        const remaining = options.maxAttempts === undefined ? undefined : options.maxAttempts - 1;
+        const alias = remaining === undefined || remaining > 0 ? this.retiredModelAlias(modelId, error) : undefined;
         if (!alias) throw error;
-        yield* this.generateCompletionStream(alias, messages, options);
+        yield* this.generateCompletionStream(alias, messages, remaining === undefined ? options : { ...options, maxAttempts: remaining });
         return;
       }
     }
@@ -2030,6 +2044,8 @@ export class GeminiProvider implements IProvider {
    *   it has fired no further attempt is sent.
    * @param {number} [maxAttempts] - The call's attempt count, a first and its retries together, over
    *   `config.maxRetries`; key hops are not counted, and no backoff is waited after the last attempt.
+   * @param {AttemptTally} [tally] - Filled with the attempts this request sent, so a caller that sends
+   *   it again on another route spends only what is left of the call's count.
    * @returns {Promise<T>} Parsed JSON response.
    * @throws {GeminiProviderError} On authentication, validation, rate-limit, or network errors;
    *   `REQUEST_ABORTED` when the caller's signal ends the request.
@@ -2042,6 +2058,7 @@ export class GeminiProvider implements IProvider {
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
     maxAttempts?: number,
+    tally?: AttemptTally,
   ): Promise<T> {
     const url = `${this.config.baseURL}${endpoint}`;
     const attempts = resolveAttemptCount(maxAttempts, this.config.maxRetries!);
@@ -2074,6 +2091,8 @@ export class GeminiProvider implements IProvider {
       const attemptStartedAt = Date.now();
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
+      // A key hop re-sends within the same attempt, so the count stays.
+      if (tally) tally.sent = attempt + 1;
 
       try {
         const response = await fetch(url, {

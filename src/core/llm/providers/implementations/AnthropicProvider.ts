@@ -1168,6 +1168,8 @@ export class AnthropicProvider implements IProvider {
    *   `content_filter` when the model refuses (`stop_reason: 'refusal'`),
    *   before or after text has streamed. Other stream errors end the stream
    *   with an error chunk.
+   * @throws {RangeError} When `options.maxAttempts` is not a whole number of 1
+   *   or more; nothing is sent.
    */
   public async *generateCompletionStream(
     modelId: string,
@@ -1175,6 +1177,10 @@ export class AnthropicProvider implements IProvider {
     options: ModelCompletionOptions,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
+    // The stream sends one request (key hops aside) and retries nothing, but
+    // a count that is not a whole number of 1 or more is still refused before
+    // anything is sent.
+    resolveAttemptCount(options.maxAttempts, 1);
 
     const payload = this.buildRequestPayload(modelId, messages, options, true);
     if (!schemaRouteOfPayload.has(payload)) {

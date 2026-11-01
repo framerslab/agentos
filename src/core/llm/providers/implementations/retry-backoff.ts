@@ -81,3 +81,15 @@ export function resolveAttemptCount(requested: number | undefined, configured: n
   if (!Number.isInteger(requested) || requested < 1) throw new RangeError('maxAttempts is a whole number, 1 or more');
   return requested;
 }
+
+/**
+ * The attempts one request has sent, filled in by a provider's request loop
+ * (key hops inside an attempt are not counted). A call that sends a request
+ * again on another route after it failed (a retired model id's alias, a
+ * request without its schema) gives that request only what is left of the
+ * call's count.
+ */
+export interface AttemptTally {
+  /** Attempts sent so far, a first and its retries together. */
+  sent: number;
+}
