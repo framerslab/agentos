@@ -197,7 +197,12 @@ interface KeyFailureDetails {
  * match the existing `opus-5`, `sonnet-5` and `fable-5` alternatives on
  * purpose, because `\b` matches at the hyphen before their trailing version
  * digit.
- * Every earlier Claude model (Opus ≤ 4.6, Sonnet 4.6 and earlier, Haiku) still accepts it.
+ * Claude Haiku 5.5 rejects any non-default `temperature`, `top_p` or `top_k`
+ * with HTTP 400 (Anthropic's Haiku 5.5 migration guide says to remove all
+ * three), so it is in the family too, though it is not a reasoning-default
+ * model in the Opus sense.
+ * Every earlier Claude model (Opus ≤ 4.6, Sonnet 4.6 and earlier, Haiku 4.5
+ * and earlier) still accepts it.
  * The same family also rejects `top_p` / `top_k`, so {@link buildRequestPayload}
  * gates `top_p` on this predicate too.
  *
@@ -213,11 +218,10 @@ interface KeyFailureDetails {
  *   model, `true` otherwise.
  */
 export function modelSupportsTemperature(modelId: string): boolean {
-  // Reasoning-default models that reject `temperature` (and `top_p` / `top_k`):
-  // Claude Opus 4.7 / 4.8 / 5 / 5.5, Sonnet 5 / 5.5, Fable 5 / 5.1, and any
-  // dated variant. Future reasoning-first siblings get added here as Anthropic
-  // releases them, in lockstep with modelSupportsThinking.
-  return !/^claude-(opus-4-(7|8)|opus-5|sonnet-5|fable-5)\b/i.test(modelId);
+  // Models that reject `temperature` (and `top_p` / `top_k`): Claude Opus
+  // 4.7 / 4.8 / 5 / 5.5, Sonnet 5 / 5.5, Fable 5 / 5.1, Haiku 5.5, and any
+  // dated variant. Future siblings get added here as Anthropic releases them.
+  return !/^claude-(opus-4-(7|8)|opus-5|sonnet-5|fable-5|haiku-5-5)\b/i.test(modelId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1806,8 +1810,8 @@ export class AnthropicProvider implements IProvider {
     }
 
     // --- Optional parameters ---
-    // Guard temperature behind modelSupportsTemperature: Opus 4.7 (and
-    // future reasoning-first Claude models) reject it with HTTP 400.
+    // Guard temperature behind modelSupportsTemperature: Opus 4.7 and later,
+    // Sonnet 5+, Fable and Haiku 5.5 reject it with HTTP 400.
     // Older models still accept it. See modelSupportsTemperature() above.
     if (
       options.temperature !== undefined &&
