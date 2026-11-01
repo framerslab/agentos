@@ -1025,8 +1025,9 @@ export class GMIManager {
    * seat being built, as it waits for a session's GMI, and the build then fails with its GMI shut down.
    *
    * @throws {GMIManagerError} `PERSONA_NOT_FOUND` for an unknown persona; `PERMISSION_DENIED` for one the user's tier or
-   *   strict validation refuses; `INVALID_STATE` for a session that already has a GMI; `CONFIGURATION_ERROR` without
-   *   `agencySeatPromptEngineConfig`; `NOT_INITIALIZED` when the manager is not, or shuts down while the seat is built.
+   *   strict validation refuses; `INVALID_STATE` for a session that already has a GMI;
+   *   `CONFIGURATION_ERROR` (`SYS_CONFIGURATION_ERROR`) without `agencySeatPromptEngineConfig`; `NOT_INITIALIZED` when
+   *   the manager is not, or shuts down while the seat is built.
    * @throws {GMIError} `GMI_INITIALIZATION_ERROR` when the GMI does not initialize.
    */
   public async createAgencySeat(spec: AgencySeatSpec): Promise<{ gmi: IGMI; personaId: string; release(): Promise<void> }> {

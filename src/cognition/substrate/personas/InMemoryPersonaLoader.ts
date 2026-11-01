@@ -18,7 +18,7 @@ export const INLINE_PERSONA_LOADER_CONFIG: PersonaLoaderConfig = { personaSource
  * `activationKeywords`, when present, an array of strings; `sentimentTracking.presets`, when present,
  * an array. Semantic validation (required fields,
  * semver, prompt length) still runs in GMIManager through `validatePersonas`.
- * @throws GMIError CONFIGURATION_ERROR naming the offending index or id.
+ * @throws GMIError `CONFIGURATION_ERROR` (`SYS_CONFIGURATION_ERROR`) naming the offending index or id.
  */
 export function assertInlinePersonaDefinitions(definitions: unknown): asserts definitions is IPersonaDefinition[] {
   if (!Array.isArray(definitions)) {
