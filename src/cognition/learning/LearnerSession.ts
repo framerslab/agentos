@@ -208,12 +208,20 @@ export class LearnerSession implements ILearnerSession {
    * What the layer does when it opens the session: re-files the memory manager's Brain once and, for a learner,
    * hydrates the learner's two scopes and writes the learner's session row, in every mode, loads the trait row where
    * the mode reads learned state (`on` and `frozen`), and decides the learner's pending memory writes a crash left, in
-   * every mode, since a crash's row was written in a mode that recorded it. Never throws: what fails is traced and tried
-   * again at the next turn.
+   * every mode, since a crash's row was written in a mode that recorded it. A session with no learner, a workflow seat
+   * aside, hydrates the two scopes of its own form in the agent's namespace (`learning.namespace`), where its turns file
+   * when they name none. Never throws: what fails is traced and tried again at the next turn.
    */
   async open(): Promise<void> {
     if (this.context.memory) await this.host.adoptMemory(this.context.memory);
-    if (!this.key) return;
+    if (!this.key) {
+      // A seat's session form is new at each opening: nothing an earlier opening filed is under it.
+      if ('reason' in this.binding && this.binding.reason !== 'workflow_seat') {
+        const { userScopeId, personaScopeId } = sessionScopeIds(this.context.sessionId, this.host.defaultNamespace, this.context.personaId);
+        await this.hydrateScopes(userScopeId, personaScopeId, 'a session');
+      }
+      return;
+    }
     await this.hydrate(this.key);
     await this.writeLearnerRow();
     if (this.host.modeFor(this.targetFor(true)) !== 'off') {
@@ -466,6 +474,12 @@ export class LearnerSession implements ILearnerSession {
 
   /** Loads the learner's two scopes into the memory manager, past the whole Brain's newest 1,000 traces. */
   private async hydrate(key: LearnerKey): Promise<void> {
+    const { userScopeId, personaScopeId } = learnerScopeIds(key, this.context.personaId);
+    await this.hydrateScopes(userScopeId, personaScopeId, 'a learner');
+  }
+
+  /** Loads a `user` and a `persona` scope into the memory manager, past the whole Brain's newest 1,000 traces. */
+  private async hydrateScopes(userScopeId: string, personaScopeId: string, whose: string): Promise<void> {
     let store: { hydrateScope?: (scope: 'user' | 'persona', scopeId: string) => Promise<number> } | undefined;
     try {
       store = this.context.memory?.getStore?.() as typeof store;
@@ -473,12 +487,11 @@ export class LearnerSession implements ILearnerSession {
       return;
     }
     if (typeof store?.hydrateScope !== 'function') return;
-    const { userScopeId, personaScopeId } = learnerScopeIds(key, this.context.personaId);
     try {
       await store.hydrateScope('user', userScopeId);
       await store.hydrateScope('persona', personaScopeId);
     } catch (error) {
-      console.warn(`[agentos] learning: a learner's memory did not hydrate (${messageOf(error)}); the turn proceeds with what is loaded.`);
+      console.warn(`[agentos] learning: ${whose}'s memory did not hydrate (${messageOf(error)}); the turn proceeds with what is loaded.`);
     }
   }
 

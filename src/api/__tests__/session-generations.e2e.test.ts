@@ -21,7 +21,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (import
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { gmi, type Agent } from '@framers/agentos';
+import { gmi, type Agent, type AgentSession } from '@framers/agentos';
 import { LEARNING_TABLES, taggedScopeId } from '@framers/agentos/cognition/learning/index';
 import { createPostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import Database from 'better-sqlite3';
@@ -223,10 +223,15 @@ function sessionGenerationCases(openStore: () => Promise<SharedStore>): void {
     const store = await setUp();
     const { apiKey, asked } = model(5);
 
-    // Three processes open x before anyone closes it, and each files on it.
-    const [one, two, three] = [await processOn(store, apiKey), await processOn(store, apiKey), await processOn(store, apiKey)];
-    const [s1, s2, s3] = [one.session('x'), two.session('x'), three.session('x')];
-    for (const session of [s1, s2, s3]) await session.send(A_LINE);
+    // Three processes open x before anyone closes it, and each files on it. Each opens its store in turn, as three
+    // processes started one after another do: two SQLite connections in one Node process cannot wait on each other.
+    const sessions: AgentSession[] = [];
+    for (let started = 0; started < 3; started += 1) {
+      const session = (await processOn(store, apiKey)).session('x');
+      await session.send(A_LINE);
+      sessions.push(session);
+    }
+    const [s1, s2, s3] = sessions as [AgentSession, AgentSession, AgentSession];
 
     await Promise.all([s1.close(), s2.close()]);
     const records = await store.generationRecords();

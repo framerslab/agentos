@@ -124,6 +124,18 @@
  * the agent's memory after `close()` and refuses before the tombstone when it does not build, and a call that names a
  * learner on an agent with no key rejects naming `learning.agentKey`; on Postgres a second process recalls and renders
  * what the first filed and set.
+ *
+ * The full runtime's own layer (`AgentOS.create({ learning })`). It keeps its learning store on the host's
+ * `storageAdapter` (SQL when the adapter has transactions, so a runtime started again on it renders what an operator set
+ * and `forgetUser` reaches a brain on it that no live facade holds; in process otherwise; a `learning.store` the host
+ * passes wins). It is handed the memory tools' facade and the standalone memory's after any `learning.memoryTools`, each
+ * once, and each GMI's memory manager, which it re-files at the learner's first session, hydrates with a returning
+ * learner's older traces and reaches in `forgetUser`; a layer the host passes in `gmiManagerConfig.learningLayer` is
+ * handed none of them. Wherever the runtime has a layer, its memory tools pack leaves `memory_reflect` out, with one
+ * warning on the host's logger when the host asked for it. A learner session that does not open within the 2,000 ms a
+ * GMI's acquisition gives it opens at the GMI's first turn, the layer asked once, and names the session's own form until
+ * then; a layer that never answers or answers with no session leaves each turn without a learner, within its budgets.
+ * The manifest reports the approval gate and the tool-policy switch as the configuration sets them.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -187,6 +199,7 @@ import {
   type BrainRefileResult,
   type ScopeIdRefile,
 } from '@framers/agentos/cognition/memory/retrieval/store/scopeIdForm';
+import type { IAgentOS } from '@framers/agentos/api/interfaces/IAgentOS';
 import { JsonExporter, MarkdownExporter, ObsidianImporter } from '@framers/agentos/cognition/memory';
 import { MigrationEngine } from '@framers/agentos/cognition/rag';
 import {
@@ -10260,6 +10273,566 @@ describe("gmi(): memory.persistAccessState", () => {
   });
 });
 
+describe("the full runtime's own learning layer: its store on the host's storage adapter, the memory facades and managers it is handed, memory_reflect out of the pack, and a learner session opened within its budget", () => {
+  let keys = 0;
+  const key = () => `k-qa-runtime-layer-${++keys}`;
+  const TUTOR_DEF = { id: 'tutor', name: 'Tutor', description: 'A tutor.', version: '1.0.0', baseSystemPrompt: 'You teach networking.', personalityTraits: TUTOR_PERSONA };
+  /** A request's own long-term memory scopes: the user's and the persona's on, beside the conversation's. */
+  const SCOPES = { memoryControl: { longTermMemory: { scopes: { user: true, persona: true } } } };
+  /** The chain of learner `ana` of tenant A, of the runtime's persona `tutor`. */
+  const ANA_A = chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: 'ana' });
+  const ALL_LEARNING_TABLES = [...LEARNING_TABLES].sort();
+  const runtimes: AgentOS[] = [];
+  const adapters: StorageAdapter[] = [];
+
+  afterEach(async () => {
+    for (const os of runtimes.splice(0)) await os.shutdown().catch(() => undefined);
+    for (const adapter of adapters.splice(0)) await adapter.close().catch(() => undefined);
+  });
+
+  const quiet = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    return vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  };
+  /** The calls of a console spy whose first argument holds `text`. */
+  const callsWith = (spy: ReturnType<typeof quiet>, text: string) => spy.mock.calls.filter((call) => String(call[0]).includes(text));
+
+  type HostLogger = NonNullable<Parameters<typeof AgentOS.create>[1]>;
+  interface LoggedLine {
+    level: string;
+    message: string;
+    meta?: Record<string, unknown>;
+  }
+  /** The logger a host hands `AgentOS.create`, keeping every line it is given. */
+  function hostLogger(): { logger: HostLogger; lines: LoggedLine[] } {
+    const lines: LoggedLine[] = [];
+    const at = (level: string) => (message: string, meta?: Record<string, unknown>) => {
+      lines.push({ level, message, ...(meta ? { meta } : {}) });
+    };
+    const logger: HostLogger = { info: at('info'), warn: at('warn'), error: at('error'), debug: at('debug'), child: () => logger };
+    return { logger, lines };
+  }
+
+  /** The full runtime from the package root over persona `tutor`, its provider the stub, with no turn planner unless `config` sets one. */
+  async function runtime(apiKey: string, config: Record<string, unknown>, logger?: HostLogger): Promise<AgentOS> {
+    const os = await AgentOS.create(
+      {
+        modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey } }] },
+        turnPlanning: { enabled: false },
+        personas: [TUTOR_DEF],
+        ...config,
+      } as never,
+      logger,
+    );
+    runtimes.push(os);
+    return os;
+  }
+  /** Shuts a runtime down, as a process that exits does. */
+  async function stopRuntime(os: AgentOS): Promise<void> {
+    const at = runtimes.indexOf(os);
+    if (at >= 0) runtimes.splice(at, 1);
+    await os.shutdown();
+  }
+  /** The GMI manager's config a host passes: the test config's, with the host's own fields. */
+  const gmiManagerWith = async (fields: Record<string, unknown>) => ({ ...(await createTestAgentOSConfig()).gmiManagerConfig, ...fields });
+
+  /** One turn of the full runtime, with the request's user and persona scopes on; an error chunk fails it. */
+  async function turn(os: AgentOS, input: Record<string, unknown>): Promise<void> {
+    for await (const chunk of os.processRequest({ textInput: 'Hello.', selectedPersonaId: 'tutor', ...SCOPES, ...input } as never)) {
+      if ((chunk as { type?: unknown }).type === 'error') throw new Error(`the turn failed: ${JSON.stringify(chunk)}`);
+    }
+  }
+  /** The main (streamed) model calls the stub saw. */
+  const mainCalls = (played: ReturnType<typeof script>) => played.seen.filter((call) => call.streamed);
+  /** All the text a list of model calls was sent. */
+  const sentIn = (calls: ReturnType<typeof mainCalls>) => JSON.stringify(calls.map((call) => call.messages));
+
+  /** A host's SQLite database, opened through the storage library and closed after the case. */
+  async function hostDatabase(): Promise<StorageAdapter> {
+    const adapter = await openSqliteAt(learningFile());
+    adapters.push(adapter);
+    return adapter;
+  }
+  /** The learning store's tables a host's database holds. */
+  const learningTablesIn = async (adapter: StorageAdapter): Promise<string[]> =>
+    (await adapter.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'agentos_learning_%' ORDER BY name")).map(
+      (row) => row.name,
+    );
+  /** A host's database that reports no transactions, every call still reaching it. */
+  function withoutTransactions(adapter: StorageAdapter): StorageAdapter {
+    return new Proxy(adapter, {
+      get(target, property) {
+        if (property === 'capabilities') return new Set([...target.capabilities].filter((capability) => capability !== 'transactions'));
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+  }
+  /** A `Memory` facade on a SQLite file of its own, its Brain re-filed as a layer-era writer's is, closed after the case. */
+  async function facadeOn(brainId: string, selfImprove = false): Promise<{ memory: Memory; file: string }> {
+    const file = brainFile();
+    const memory = await Memory.createSqlite(file, { brainId, selfImprove });
+    facades.push(memory);
+    await memory.ensureEncodedScopeIds();
+    return { memory, file };
+  }
+  interface LiveTrace {
+    id: string;
+    scope: string;
+    scopeId: string;
+    content: string;
+  }
+  /** The live traces of one brain, as a host's own reader of its SQLite file or its database sees them. */
+  async function liveIn(source: string | StorageAdapter, brainId: string): Promise<LiveTrace[]> {
+    const sql = 'SELECT id, scope, scope_id AS scopeId, content FROM memory_traces WHERE brain_id = ? AND deleted = 0 ORDER BY content';
+    if (typeof source !== 'string') return source.all<LiveTrace>(sql, [brainId]);
+    const db = new Database(source, { readonly: true });
+    try {
+      return db.prepare(sql).all(brainId) as LiveTrace[];
+    } finally {
+      db.close();
+    }
+  }
+  /** One chain's memory_write rows: row type, subject and verdict. */
+  const writesOf = async (store: LearningStore, chainKey: string) =>
+    (await store.chainRows(chainKey)).filter((row) => row.kind === 'memory_write').map((row) => [row.rowType, row.subject, row.verdict]);
+  /** What a memory tool call reached the model with: a call of `memory_add`. */
+  const addCall = (id: string, content: string) => reply.tools([{ id, name: 'memory_add', args: { content } }]);
+
+  /** A host's layer over `inner` whose forLearner answers through `answer`, each call counted. */
+  function answeringLayer(inner: ILearningLayer, answer: (learner: LearnerKey | null, context: LearnerContext) => Promise<unknown>) {
+    const asked: Array<LearnerKey | null> = [];
+    const layer = new Proxy(inner, {
+      get(target, property) {
+        if (property === 'forLearner') {
+          return (learner: LearnerKey | null, context: LearnerContext) => {
+            asked.push(learner);
+            return answer(learner, context);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    return { layer, asked };
+  }
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  it("keeps its learning store on the host's storageAdapter, beside the memory a host keeps there, and a runtime started again on the adapter renders what an operator set and forgetUser deletes a learner's memory_add through the adapter", async () => {
+    quiet();
+    const adapter = await hostDatabase();
+    // The memory tools' facade on the same database, as a host keeps one; closing its Brain would close the adapter.
+    const tools = await Memory.createWithAdapter(adapter, { brainId: 'tools-brain', selfImprove: false });
+    const k = key();
+    const played = script('openai', k, { replies: [addCall('r1', 'Canary HERON-2.'), reply.text('Noted.')] });
+    const first = await runtime(k, { storageAdapter: adapter, memoryTools: { memory: tools }, learning: true });
+    expect((await first.getLearningLayer()!.manifest()).loops.ledger).toEqual({ live: true, detail: "sql store over the host's storage adapter; unkeyed" });
+
+    await turn(first, { userId: 'ana', sessionId: 's-1', organizationId: 'A', textInput: 'Remember my canary.' });
+    const heron = (await liveIn(adapter, 'tools-brain')).filter((trace) => trace.content === 'Canary HERON-2.');
+    expect(heron).toEqual([expect.objectContaining({ scope: 'user', scopeId: 'A/ana' })]);
+    expect(await learningTablesIn(adapter)).toEqual(ALL_LEARNING_TABLES);
+    const store = new SqlLearningStore({ adapter });
+    expect(await writesOf(store, ANA_A)).toEqual([
+      ['candidate', heron[0]!.id, 'pending'],
+      ['verdict', heron[0]!.id, 'kept'],
+    ]);
+    await first.getLearningLayer()!.operatorSet!({ learner: { namespace: 'A', agentKey: 'tutor', userId: 'ana' }, traits: { openness: 0.7 }, by: 'ops' });
+    await stopRuntime(first);
+
+    // A runtime started again on the database, with no memory tools of its own.
+    played.replies.push(reply.text('Noted.'), reply.text('Noted.'));
+    const second = await runtime(k, { storageAdapter: adapter, learning: true });
+    await turn(second, { userId: 'ana', sessionId: 's-2', organizationId: 'A' });
+    expect(systemTextOf(mainCalls(played).at(-1))).toContain(directiveFor('openness', 0.7));
+    await turn(second, { userId: 'bo', sessionId: 's-3', organizationId: 'A' });
+    expect(systemTextOf(mainCalls(played).at(-1))).not.toContain(directiveFor('openness', 0.7));
+
+    const report = await second.getLearningLayer()!.forgetUser!('ana', { namespace: 'A' });
+    expect(report.stores).toEqual(expect.arrayContaining([expect.objectContaining({ store: "brain tools-brain on the host's storage adapter", reached: true, deleted: 1 })]));
+    expect((await liveIn(adapter, 'tools-brain')).map((trace) => trace.content)).not.toContain('Canary HERON-2.');
+    expect(await store.chainRows(ANA_A)).toEqual([]);
+  }, 30_000);
+
+  it('keeps its learning store in process on a storageAdapter without transactions, and a learning.store the host passes wins over the storageAdapter', async () => {
+    quiet();
+    const adapter = await hostDatabase();
+    const k = key();
+    script('openai', k, { replies: [reply.text('Noted.'), reply.text('Noted.')] });
+    const inProcess = await runtime(k, { storageAdapter: withoutTransactions(adapter), learning: true });
+    expect((await inProcess.getLearningLayer()!.manifest()).loops.ledger).toEqual({
+      live: true,
+      detail: 'in process: the storage adapter has no transactions; the ledger and the state it records end with the process; unkeyed',
+    });
+    await turn(inProcess, { userId: 'ana', sessionId: 's-1', organizationId: 'A' });
+    expect(await learningTablesIn(adapter)).toEqual([]);
+
+    const hosts = await hostDatabase();
+    const passed = await runtime(k, { storageAdapter: adapter, learning: { store: new SqlLearningStore({ adapter: hosts }) } });
+    expect((await passed.getLearningLayer()!.manifest()).loops.ledger).toEqual({ live: true, detail: 'sql store the host passed; unkeyed' });
+    await turn(passed, { userId: 'ana', sessionId: 's-2', organizationId: 'A' });
+    expect(await learningTablesIn(hosts)).toEqual(ALL_LEARNING_TABLES);
+    expect(await learningTablesIn(adapter)).toEqual([]);
+  }, 30_000);
+
+  it("hands its layer the memory tools' facade and the standalone memory's after the host's own learning.memoryTools, each once, so forgetUser deletes a learner's traces in every one of them, and hands it neither when they are off", async () => {
+    quiet();
+    const own = await facadeOn('own-brain');
+    const tools = await facadeOn('tools-brain');
+    const standalone = await facadeOn('standalone-brain');
+    for (const [facade, word] of [
+      [own, 'OWN-1'],
+      [tools, 'TOOLS-1'],
+      [standalone, 'STANDALONE-1'],
+    ] as const) {
+      await facade.memory.remember(`Canary ${word} of ana.`, { scope: 'user', scopeId: 'A/ana' });
+      await facade.memory.remember(`Canary ${word} of bo.`, { scope: 'user', scopeId: 'A/bo' });
+    }
+    const k = key();
+    script('openai', k, { replies: [reply.text('Noted.'), reply.text('Noted.'), reply.text('Noted.')] });
+    const os = await runtime(k, {
+      memoryTools: { memory: tools.memory },
+      standaloneMemory: { memory: standalone.memory, longTermRetriever: true },
+      learning: { memoryTools: own.memory },
+    });
+    await turn(os, { userId: 'ana', sessionId: 's-1', organizationId: 'A' });
+    const report = await os.getLearningLayer()!.forgetUser!('ana', { namespace: 'A' });
+    const facadesNamed = report.stores.filter((entry) => entry.store.startsWith('memory tools facade'));
+    expect(facadesNamed.map((entry) => [entry.store, entry.reached])).toEqual([
+      ['memory tools facade of brain own-brain', true],
+      ['memory tools facade of brain tools-brain', true],
+      ['memory tools facade of brain standalone-brain', true],
+    ]);
+    for (const [facade, word] of [
+      [own, 'OWN-1'],
+      [tools, 'TOOLS-1'],
+      [standalone, 'STANDALONE-1'],
+    ] as const) {
+      const brainId = `${word === 'OWN-1' ? 'own' : word === 'TOOLS-1' ? 'tools' : 'standalone'}-brain`;
+      expect((await liveIn(facade.file, brainId)).map((trace) => trace.content)).toEqual([`Canary ${word} of bo.`]);
+    }
+
+    // One facade in every place is handed once.
+    const shared = await facadeOn('shared-brain');
+    await shared.memory.remember('Canary SHARED-1 of cy.', { scope: 'user', scopeId: 'A/cy' });
+    const once = await runtime(k, {
+      memoryTools: { memory: shared.memory },
+      standaloneMemory: { memory: shared.memory, longTermRetriever: true },
+      learning: { memoryTools: shared.memory },
+    });
+    await turn(once, { userId: 'cy', sessionId: 's-2', organizationId: 'A' });
+    const sharedReport = await once.getLearningLayer()!.forgetUser!('cy', { namespace: 'A' });
+    expect(sharedReport.stores.filter((entry) => entry.store.startsWith('memory tools facade')).map((entry) => entry.store)).toEqual([
+      'memory tools facade of brain shared-brain',
+    ]);
+    expect(await liveIn(shared.file, 'shared-brain')).toEqual([]);
+
+    // Memory tools and a standalone memory that are off are handed nothing.
+    const offTools = await facadeOn('off-tools-brain');
+    const offStandalone = await facadeOn('off-standalone-brain');
+    await offTools.memory.remember('Canary OFF-1 of dee.', { scope: 'user', scopeId: 'A/dee' });
+    await offStandalone.memory.remember('Canary OFF-2 of dee.', { scope: 'user', scopeId: 'A/dee' });
+    const off = await runtime(k, {
+      memoryTools: { memory: offTools.memory, enabled: false },
+      standaloneMemory: { memory: offStandalone.memory, enabled: false, longTermRetriever: true },
+      learning: true,
+    });
+    await turn(off, { userId: 'dee', sessionId: 's-3', organizationId: 'A' });
+    const offReport = await off.getLearningLayer()!.forgetUser!('dee', { namespace: 'A' });
+    expect(offReport.stores.filter((entry) => entry.store.startsWith('memory tools facade'))).toEqual([]);
+    expect((await liveIn(offTools.file, 'off-tools-brain')).map((trace) => trace.content)).toEqual(['Canary OFF-1 of dee.']);
+    expect((await liveIn(offStandalone.file, 'off-standalone-brain')).map((trace) => trace.content)).toEqual(['Canary OFF-2 of dee.']);
+  }, 30_000);
+
+  it('hands a layer the host passes in gmiManagerConfig.learningLayer none of its facades and none of its storage, and leaves memory_reflect out of the pack for it too, with one warning', async () => {
+    quiet();
+    const adapter = await hostDatabase();
+    const tools = await facadeOn('tools-brain', true);
+    const layer = createLearningLayer({});
+    const { logger, lines } = hostLogger();
+    const k = key();
+    script('openai', k, { replies: [addCall('r1', 'Canary WREN-4.'), reply.text('Noted.')] });
+    const os = await runtime(
+      k,
+      {
+        storageAdapter: adapter,
+        memoryTools: { memory: tools.memory, includeReflect: true },
+        gmiManagerConfig: await gmiManagerWith({ learningLayer: layer }),
+      },
+      logger,
+    );
+    try {
+      expect(os.getLearningLayer()).toBe(layer);
+      expect(await os.getToolOrchestrator().getTool('memory_reflect')).toBeUndefined();
+      expect(await os.getToolOrchestrator().getTool('memory_add')).toBeDefined();
+      expect(lines.filter((line) => line.level === 'warn' && line.message.includes('memory_reflect is withdrawn where a learning layer runs'))).toHaveLength(1);
+      expect((await layer.manifest()).loops.ledger).toEqual({ live: true, detail: `${IN_PROCESS_STORE}; unkeyed` });
+
+      await turn(os, { userId: 'ana', sessionId: 's-1', organizationId: 'A', textInput: 'Remember my canary.' });
+      expect((await liveIn(tools.file, 'tools-brain')).filter((trace) => trace.content === 'Canary WREN-4.')).toEqual([
+        expect.objectContaining({ scope: 'user', scopeId: 'A/ana' }),
+      ]);
+      const report = await layer.forgetUser('ana', { namespace: 'A' });
+      expect(report.stores).toEqual(
+        expect.arrayContaining([
+          {
+            store: 'brain tools-brain',
+            reached: false,
+            reason: 'no memory manager or facade of it is alive here, and the layer has no storage adapter to open it on',
+          },
+        ]),
+      );
+      expect(report.stores.filter((entry) => entry.store.startsWith('memory tools facade'))).toEqual([]);
+      expect((await liveIn(tools.file, 'tools-brain')).map((trace) => trace.content)).toContain('Canary WREN-4.');
+      expect(await learningTablesIn(adapter)).toEqual([]);
+    } finally {
+      await stopRuntime(os);
+      await layer.close();
+    }
+  }, 30_000);
+
+  it('leaves memory_reflect out of the pack it registers wherever learning is on, through memoryTools or standaloneMemory.tools and in mode off, with one warning only where the host asked for it, and keeps it with learning unset, false or null', async () => {
+    quiet();
+    const k = key();
+    script('openai', k, { replies: [] });
+    const cases: Array<{ name: string; config: (memory: Memory) => Record<string, unknown>; reflect: boolean; warned: number }> = [
+      { name: 'memoryTools, includeReflect', config: (memory) => ({ memoryTools: { memory, includeReflect: true }, learning: true }), reflect: false, warned: 1 },
+      { name: 'standaloneMemory.tools, includeReflect, mode off', config: (memory) => ({ standaloneMemory: { memory, tools: { includeReflect: true } }, learning: { mode: 'off' } }), reflect: false, warned: 1 },
+      { name: 'memoryTools, includeReflect unset', config: (memory) => ({ memoryTools: { memory }, learning: true }), reflect: false, warned: 0 },
+      { name: 'learning unset', config: (memory) => ({ memoryTools: { memory, includeReflect: true } }), reflect: true, warned: 0 },
+      { name: 'learning false', config: (memory) => ({ memoryTools: { memory, includeReflect: true }, learning: false }), reflect: true, warned: 0 },
+      { name: 'learning null', config: (memory) => ({ memoryTools: { memory, includeReflect: true }, learning: null }), reflect: true, warned: 0 },
+    ];
+    for (const { name, config, reflect, warned } of cases) {
+      const { memory } = await facadeOn(`reflect-${runtimes.length}`, true);
+      const { logger, lines } = hostLogger();
+      const os = await runtime(k, config(memory), logger);
+      const orchestrator = os.getToolOrchestrator();
+      expect({ name, reflect: Boolean(await orchestrator.getTool('memory_reflect')) }).toEqual({ name, reflect });
+      expect({ name, add: Boolean(await orchestrator.getTool('memory_add')), search: Boolean(await orchestrator.getTool('memory_search')) }).toEqual({ name, add: true, search: true });
+      const warnings = lines.filter((line) => line.level === 'warn' && line.message.includes('memory_reflect is withdrawn'));
+      expect({ name, warned: warnings.length }).toEqual({ name, warned });
+      if (warned) {
+        expect(warnings[0]!.message).toBe(
+          '[AgentOS] memory_reflect is withdrawn where a learning layer runs; the memory tools pack leaves it out (consolidate with Memory.consolidate()).',
+        );
+      }
+      const enabled = lines.find((line) => line.message === '[AgentOS] Config memory tools enabled');
+      expect({ name, memoryReflect: enabled?.meta?.memoryReflect }).toEqual({ name, memoryReflect: reflect ? undefined : 'withdrawn' });
+      await stopRuntime(os);
+    }
+  }, 60_000);
+
+  it("takes a learner session that opens past the 2,000 ms a GMI's acquisition gives it at the GMI's first turn: the layer is asked once, the turn reads by the session's own form until it opens and by the learner's after, never by the plain ids, and its memory_add files under the learner's scope ids through the recorder", async () => {
+    const warn = quiet();
+    const tools = await facadeOn('late-brain');
+    // A trace a host with no layer filed under the plain user id, and one under the learner's id.
+    await tools.memory.remember('Canary PLAIN-5.', { scope: 'user', scopeId: 'ana' });
+    await tools.memory.remember('Canary LEARNER-9.', { scope: 'user', scopeId: 'A/ana' });
+    const store = new InMemoryLearningStore();
+    const inner = createLearningLayer({ store, memoryTools: tools.memory });
+    const { layer, asked } = answeringLayer(inner, async (learner, context) => {
+      await sleep(2_800);
+      return inner.forLearner(learner, context);
+    });
+    const k = key();
+    const played = script('openai', k, { replies: [addCall('r1', 'Canary LATE-7.'), reply.text('Noted.'), reply.text('Noted.')] });
+    const os = await runtime(k, {
+      memoryTools: { memory: tools.memory },
+      standaloneMemory: { memory: tools.memory, longTermRetriever: true },
+      gmiManagerConfig: await gmiManagerWith({ learningLayer: layer }),
+    });
+    try {
+      const startedAt = Date.now();
+      await turn(os, { userId: 'ana', sessionId: 's-late', organizationId: 'A', textInput: 'Remember my canary.' });
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(2_000);
+      expect(callsWith(warn, 'opened no learner session for GMI')).toHaveLength(1);
+      expect(asked).toEqual([{ namespace: 'A', agentKey: 'tutor', userId: 'ana' }]);
+      const firstTurn = sentIn(mainCalls(played));
+      expect(firstTurn).not.toContain('PLAIN-5');
+      expect(firstTurn).not.toContain('LEARNER-9');
+      expect(callsWith(warn, "did not name this turn's scope ids")).toEqual([]);
+      const late = (await liveIn(tools.file, 'late-brain')).filter((trace) => trace.content === 'Canary LATE-7.');
+      expect(late).toEqual([expect.objectContaining({ scope: 'user', scopeId: 'A/ana' })]);
+      expect(await writesOf(store, ANA_A)).toEqual([
+        ['candidate', late[0]!.id, 'pending'],
+        ['verdict', late[0]!.id, 'kept'],
+      ]);
+
+      const before = mainCalls(played).length;
+      await turn(os, { userId: 'ana', sessionId: 's-late', organizationId: 'A', textInput: 'What is my canary?' });
+      const secondTurn = sentIn(mainCalls(played).slice(before));
+      expect(secondTurn).toContain('LEARNER-9');
+      expect(secondTurn).not.toContain('PLAIN-5');
+      expect(asked).toHaveLength(1);
+    } finally {
+      await stopRuntime(os);
+      await inner.close();
+    }
+  }, 30_000);
+
+  it('runs each turn without a learner, within its budgets, when the layer never answers or answers with no learner session, renders the persona itself, and asks again at the next turn', async () => {
+    const warn = quiet();
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('First.'), reply.text('Second.'), reply.text('Third.'), reply.text('Fourth.')] });
+    const persona = directiveFor('extraversion', 0.8);
+
+    const silentInner = createLearningLayer({});
+    const silent = answeringLayer(silentInner, () => new Promise(() => undefined));
+    const silentOs = await runtime(k, { gmiManagerConfig: await gmiManagerWith({ learningLayer: silent.layer, shutdownTimeoutMs: 3_000 }) });
+    try {
+      let startedAt = Date.now();
+      await turn(silentOs, { userId: 'ana', sessionId: 's-1', organizationId: 'A' });
+      const first = Date.now() - startedAt;
+      expect(first).toBeGreaterThanOrEqual(2_000);
+      expect(first).toBeLessThan(8_000);
+      expect(callsWith(warn, 'opened no learner session for GMI')).toHaveLength(1);
+      expect(silent.asked).toHaveLength(1);
+      expect(systemTextOf(mainCalls(played).at(-1))).toContain(persona);
+      startedAt = Date.now();
+      await turn(silentOs, { userId: 'ana', sessionId: 's-1', organizationId: 'A' });
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect(silent.asked).toHaveLength(2);
+    } finally {
+      await stopRuntime(silentOs);
+      await silentInner.close();
+    }
+
+    const emptyInner = createLearningLayer({});
+    const empty = answeringLayer(emptyInner, async () => ({}));
+    const emptyOs = await runtime(k, { gmiManagerConfig: await gmiManagerWith({ learningLayer: empty.layer }) });
+    try {
+      const startedAt = Date.now();
+      await turn(emptyOs, { userId: 'ana', sessionId: 's-2', organizationId: 'A' });
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      const refused = callsWith(warn, 'no learner session; each turn asks again');
+      expect(refused).toHaveLength(1);
+      expect(String(refused[0]![1])).toBe('the learning layer answered with no learner session');
+      expect(systemTextOf(mainCalls(played).at(-1))).toContain(persona);
+      const afterFirst = empty.asked.length;
+      expect(afterFirst).toBeGreaterThanOrEqual(2);
+      await turn(emptyOs, { userId: 'ana', sessionId: 's-2', organizationId: 'A' });
+      expect(empty.asked.length).toBeGreaterThan(afterFirst);
+    } finally {
+      await stopRuntime(emptyOs);
+      await emptyInner.close();
+    }
+  }, 45_000);
+
+  it("hands each GMI's memory manager to its learner session: the layer re-files the manager's Brain at the learner's first session, and forgetUser deletes the learner's traces there", async () => {
+    quiet();
+    const file = brainFile();
+    const brain = await openBrain(file);
+    const memory = await manager({ brain });
+    // An older release's plain id that holds a '/', in a Brain no layer has opened.
+    await memory.encode('Probe OLDER-1.', NEUTRAL, 'neutral', { scope: 'user', scopeId: 'old/user' });
+    expect((await formOf(file)).record ?? undefined).toBeUndefined();
+    const k = key();
+    script('openai', k, { replies: Array.from({ length: 4 }, () => reply.text('Noted.')), whole: true });
+    const os = await runtime(k, {
+      gmiManagerConfig: await gmiManagerWith({ cognitiveMemoryFactory: () => memory.forSession() }),
+      learning: { store: new InMemoryLearningStore() },
+    });
+    await turn(os, { userId: 'ana', sessionId: 's-1', organizationId: 'acme', textInput: 'My canary is KITE-3.' });
+    const refiled = await formOf(file);
+    expect(refiled.record).toBe(ENCODED_SCOPE_ID_FORM);
+    expect(refiled.ids).toContain(`user:${encodePlainId('old/user')}`);
+    expect(refiled.ids).not.toContain('user:old/user');
+    expect(refiled.ids).toContain('user:acme/ana');
+
+    const report = await os.getLearningLayer()!.forgetUser!('ana', { namespace: 'acme' });
+    expect(report.stores).toEqual(expect.arrayContaining([expect.objectContaining({ store: 'memory manager of brain qa', reached: true })]));
+    const left = (await formOf(file)).ids;
+    expect(left.filter((id) => id.includes('acme/ana'))).toEqual([]);
+    expect(left).toContain(`user:${encodePlainId('old/user')}`);
+  }, 30_000);
+
+  it("hydrates a returning learner's oldest trace into each GMI's memory manager at the learner's session, past the brain's newest 1,000 traces", async () => {
+    quiet();
+    const brain = await openBrain(brainFile());
+    const seed = await manager({ brain });
+    await seed.ensureEncodedScopeIds();
+    await seed.encode('The deploy key lives in the vault under ops/deploy.', NEUTRAL, 'neutral', { scope: 'user', scopeId: 'acme/ana' });
+    await stop(seed);
+    // A thousand newer traces of other users, as a busy brain holds: a manager's whole-brain load reads these and not ana's.
+    const newest = await brain.get<{ created_at: number }>("SELECT max(created_at) AS created_at FROM memory_traces WHERE brain_id = 'qa'");
+    await brain.transaction(async (trx) => {
+      for (let i = 0; i < 1_000; i += 1) {
+        await trx.run(
+          `INSERT INTO memory_traces (brain_id, id, type, scope, scope_id, content, embedding, strength, created_at,
+             last_accessed, retrieval_count, tags, emotions, metadata, deleted)
+           VALUES ('qa', ?, 'episodic', 'user', ?, ?, NULL, 0.5, ?, NULL, 0, '[]', '{}', ?, 0)`,
+          [`qa-filler-${i}`, `other-${i}`, `Filler note ${i}.`, Number(newest!.created_at) + 1 + i, JSON.stringify({ scopeId: `other-${i}` })],
+        );
+      }
+    });
+    const memory = await manager({ brain });
+    const k = key();
+    const played = script('openai', k, { replies: Array.from({ length: 4 }, () => reply.text('Noted.')), whole: true });
+    const os = await runtime(k, {
+      gmiManagerConfig: await gmiManagerWith({ cognitiveMemoryFactory: () => memory.forSession() }),
+      learning: { store: new InMemoryLearningStore() },
+    });
+    await turn(os, { userId: 'ana', sessionId: 's-1', organizationId: 'acme', textInput: 'Where does the deploy key live?' });
+    expect(sentIn(mainCalls(played))).toContain('vault under ops/deploy');
+  }, 60_000);
+
+  it('reports in the manifest the approval gate and the tool-policy switch as its configuration sets them', async () => {
+    quiet();
+    const k = key();
+    script('openai', k, { replies: [] });
+    const orchestrator = (await createTestAgentOSConfig()).orchestratorConfig;
+    const loopsOf = async (config: Record<string, unknown>) => {
+      const os = await runtime(k, { learning: true, ...config });
+      const { loops } = await os.getLearningLayer()!.manifest();
+      await stopRuntime(os);
+      return { hitl: loops.hitl, tool_policy: loops.tool_policy };
+    };
+    expect(await loopsOf({})).toEqual({
+      hitl: { live: false, detail: 'toolOrchestratorConfig.hitl.enabled is off' },
+      tool_policy: { live: false, detail: 'no turn planner: the switch has no turn plan to change' },
+    });
+    expect((await loopsOf({ toolOrchestratorConfig: { hitl: { enabled: true, requireApprovalForSideEffects: false } } })).hitl).toEqual({
+      live: false,
+      detail: 'toolOrchestratorConfig.hitl.requireApprovalForSideEffects is off: the gate asks for no tool',
+    });
+    expect((await loopsOf({ toolOrchestratorConfig: { hitl: { enabled: true } } })).hitl).toEqual({ live: true, detail: 'no hitlManager: side-effect tools are refused' });
+    expect((await loopsOf({ toolOrchestratorConfig: { hitl: { enabled: true, autoApproveWhenNoManager: true } } })).hitl).toEqual({
+      live: false,
+      detail: 'no hitlManager, and hitl.autoApproveWhenNoManager approves every call',
+    });
+    const hitlManager = { requestApproval: async () => ({ approved: true }) };
+    expect((await loopsOf({ toolOrchestratorConfig: { hitl: { enabled: true } }, hitlManager })).hitl).toEqual({ live: true });
+    expect((await loopsOf({ orchestratorConfig: { ...orchestrator, adaptiveExecution: { enabled: false } } })).tool_policy).toEqual({
+      live: false,
+      detail: 'orchestratorConfig.adaptiveExecution is off',
+    });
+    expect((await loopsOf({ orchestratorConfig: { ...orchestrator, taskOutcomeTelemetry: { enabled: false } } })).tool_policy).toEqual({
+      live: false,
+      detail: 'orchestratorConfig.taskOutcomeTelemetry is off: the switch reads no success rate',
+    });
+    expect((await loopsOf({ turnPlanning: { enabled: true, discovery: { enabled: false } } })).tool_policy).toEqual({ live: true });
+  }, 60_000);
+
+  it('refuses learning.namespace, learning beside a layer the host passes, and an unknown mode at construction, naming each', async () => {
+    quiet();
+    const k = key();
+    script('openai', k, { replies: [] });
+    await expect(runtime(k, { learning: { namespace: 'acme' } })).rejects.toThrow(/learning\.namespace/);
+    await expect(runtime(k, { learning: true, gmiManagerConfig: await gmiManagerWith({ learningLayer: createLearningLayer() }) })).rejects.toThrow(
+      /gmiManagerConfig\.learningLayer/,
+    );
+    await expect(runtime(k, { learning: { mode: 'sideways' } })).rejects.toThrow(/learning\.mode: unknown mode 'sideways'/);
+    expect(runtimes).toEqual([]);
+  });
+
+  it('types getLearningLayer on the runtime interface as optional, so an implementation written before the layer still compiles', () => {
+    expectTypeOf<NonNullable<IAgentOS['getLearningLayer']>>().returns.toEqualTypeOf<ILearningLayer | undefined>();
+    expectTypeOf<undefined>().toMatchTypeOf<IAgentOS['getLearningLayer']>();
+    expectTypeOf<AgentOS['getLearningLayer']>().returns.toEqualTypeOf<ILearningLayer | undefined>();
+  });
+});
+
 describe('the docs a host reads about it', () => {
   /** A file of the package, by its path from the package root. */
   const doc = (relative: string) => fs.readFileSync(new URL(`../../../${relative}`, import.meta.url), 'utf8');
@@ -10434,5 +11007,29 @@ describe('the docs a host reads about it', () => {
     const guide = doc('docs/getting-started/HIGH_LEVEL_API.md');
     expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation`, `persistAccessState` and `store`');
     expect(guide).toContain("`memory.store` (`{ path }`, a SQLite file, or `{ adapter, brainId? }`, a host's storage adapter) keeps the agent's memory and its learning store there");
+  });
+
+  it("describe where the full runtime's own layer keeps its store, the facades and memory managers it reaches, and memory_reflect left out of its pack", () => {
+    const gmiDoc = doc('docs/GMI.md');
+    expect(gmiDoc).toContain('on the full runtime, SQL over `AgentOSConfig.storageAdapter` when it has transactions; otherwise in process, so the ledger and the state it records end with the process');
+    expect(gmiDoc).toContain(
+      "The full runtime hands its layer the facade of `AgentOSConfig.memoryTools` and that of `standaloneMemory` (its retriever's and its sink's) after this one, each once",
+    );
+    expect(gmiDoc).toContain(
+      "The full runtime's layer, built from its `learning` option, runs it on the host's own `AgentOSConfig.storageAdapter` (never the provenance-wrapped copy the runtime builds for its conversations, whose write hooks can turn a write into a no-op)",
+    );
+    expect(gmiDoc).toContain('A layer the host passes in `gmiManagerConfig.learningLayer` keeps the store and the facades it was built with.');
+    expect(gmiDoc).toContain(
+      'Where the full runtime has a layer, built from `learning` or passed in `gmiManagerConfig.learningLayer`, the memory tools pack it registers leaves `memory_reflect` out, and a `WARNING` says so once when the host asked for it (`includeReflect: true`); the host consolidates with `Memory.consolidate()`.',
+    );
+    expect(gmiDoc).toContain(
+      "With a learning layer, the manager also goes to the GMI's learner session: the layer re-files its Brain once, hydrates the learner's two scopes into it and deletes the user's scopes there in `forgetUser`, while the GMI lives.",
+    );
+    expect(doc('docs/MEMORY_OPERATIONS.md')).toContain(
+      "the full runtime's pack (`memoryTools`, or `standaloneMemory.tools`) leaves it out wherever the runtime has a layer, and says so once when `includeReflect: true` asked for it.",
+    );
+    expect(doc('docs/memory/RAG_MEMORY_CONFIGURATION.md')).toMatch(
+      /The runtime hands its layer this facade and the one `memoryTools` names, so\s+`forgetUser` deletes a user's scopes in their Brains, and keeps the layer's\s+learning store on `storageAdapter` when it has transactions\. Wherever the\s+runtime has a layer, the memory tools pack leaves `memory_reflect` out, even\s+with `includeReflect: true`, and logs a warning saying so; consolidate with\s+`memory\.consolidate\(\)`\./,
+    );
   });
 });
