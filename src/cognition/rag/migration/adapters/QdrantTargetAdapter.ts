@@ -9,6 +9,9 @@
 
 import type { IMigrationTarget } from '../types.js';
 import Database from 'better-sqlite3';
+import { SCOPE_ID_FORM_KEY, type BrainScopeIdForm } from '../../../memory/retrieval/store/scopeIdForm.js';
+import { isMissingTableError } from './missingTable.js';
+import { sidecarScopeIdForms } from './sidecarScopeIdForms.js';
 
 /** Tables that go into Qdrant as point collections. */
 const QDRANT_COLLECTIONS = new Set(['memory_traces', 'document_chunks']);
@@ -19,8 +22,18 @@ export class QdrantTargetAdapter implements IMigrationTarget {
   private sidecarDb: Database.Database | null = null; // For non-vector tables
 
   /**
+   * These brains as the sidecar holds them, with their scope-id forms ({@link sidecarScopeIdForms}); set only with a
+   * sidecar, since a target with none cannot report the form of what it holds.
+   */
+  readonly scopeIdForms?: (brainIds?: readonly string[]) => Promise<Map<string, BrainScopeIdForm>>;
+
+  /** Removes one brain's scope-id form record from the sidecar; set only with a sidecar. */
+  readonly clearScopeIdForm?: (brainId: string) => Promise<void>;
+
+  /**
    * @param url    - Qdrant base URL.
    * @param apiKey - Optional API key for cloud instances.
+   * @param sidecarPath - The SQLite file that takes the tables other than the vectors.
    */
   constructor(
     private readonly url: string,
@@ -28,9 +41,19 @@ export class QdrantTargetAdapter implements IMigrationTarget {
     sidecarPath?: string,
   ) {
     if (sidecarPath) {
-      this.sidecarDb = new Database(sidecarPath);
-      this.sidecarDb.pragma('journal_mode = WAL');
-      this.sidecarDb.pragma('foreign_keys = ON');
+      const sidecar = new Database(sidecarPath);
+      sidecar.pragma('journal_mode = WAL');
+      sidecar.pragma('foreign_keys = ON');
+      this.sidecarDb = sidecar;
+      this.scopeIdForms = (brainIds) => sidecarScopeIdForms(sidecar, brainIds);
+      this.clearScopeIdForm = async (brainId) => {
+        try {
+          sidecar.prepare('DELETE FROM brain_meta WHERE brain_id = ? AND key = ?').run(brainId, SCOPE_ID_FORM_KEY);
+        } catch (error) {
+          // A sidecar with no brain_meta holds no record; any other failure leaves the record and fails the migration.
+          if (!isMissingTableError(error)) throw error;
+        }
+      };
     }
   }
 

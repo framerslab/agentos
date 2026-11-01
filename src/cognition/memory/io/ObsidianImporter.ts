@@ -244,7 +244,8 @@ export class ObsidianImporter extends MarkdownImporter {
    * the tag line, a blank line and the list. Each link of the list is a line
    * `- [[label]]`, or runs over the line breaks of a label the brain's graph
    * holds, as the export writes a label that holds a line break; the graph is
-   * read for such labels once, when a list does not read as one line a link.
+   * read for such labels once, when a list does not read as one line a link,
+   * through `db`, the note's transaction.
    * The text is read whole, so a trace whose own text ends in a line of hashtags,
    * and a trace with no text, are the duplicates of their own notes too, and
    * a vault exported from a brain and imported into it adds nothing. A note
@@ -255,9 +256,10 @@ export class ObsidianImporter extends MarkdownImporter {
    *
    * @param text - The text of the trace the note's `id` names.
    * @param body - The note's body, without its leading and trailing whitespace.
+   * @param db   - What the graph is read through: the note's transaction, or the brain.
    * @returns A promise of `true` when the note holds the trace's text.
    */
-  protected override async holdsTraceText(text: string, body: string): Promise<boolean> {
+  protected override async holdsTraceText(text: string, body: string, db: Pick<Brain, 'all'> = this.brain): Promise<boolean> {
     if (await super.holdsTraceText(text, body)) return true;
     const own = withLfLineBreaks(text).trim();
     const note = withLfLineBreaks(body);
@@ -265,7 +267,7 @@ export class ObsidianImporter extends MarkdownImporter {
     const rest = note.slice(own.length);
     // The export writes a blank line between the text and what it adds; a trace with no text keeps none past the trim.
     if (own !== '' && !/^\s/.test(rest)) return false;
-    return (await this._readAdditions(rest.trim())) !== undefined;
+    return (await this._readAdditions(rest.trim(), db)) !== undefined;
   }
 
   /**
@@ -358,13 +360,15 @@ export class ObsidianImporter extends MarkdownImporter {
    * read once an import first needs them.
    *
    * @param additions - What the note holds after the trace's text, without the whitespace around it.
+   * @param db        - What the graph's labels are read through, the first time: a note's transaction, which holds a
+   *   connection of the brain's own, or the brain.
    * @returns The tags and links, or `undefined` when the note holds anything else there.
    */
-  private async _readAdditions(additions: string): Promise<ExportedAdditions | undefined> {
+  private async _readAdditions(additions: string, db: Pick<Brain, 'all'> = this.brain): Promise<ExportedAdditions | undefined> {
     const read = readExportedAdditions(additions, NO_LABELS);
     if (read || !additions.includes(RELATED_HEADING)) return read;
     // A link to a label that holds a line break runs over more than one line.
-    this._labelsWithLineBreaks ??= this._readLabelsWithLineBreaks();
+    this._labelsWithLineBreaks ??= this._readLabelsWithLineBreaks(db);
     return readExportedAdditions(additions, await this._labelsWithLineBreaks);
   }
 
@@ -462,10 +466,11 @@ export class ObsidianImporter extends MarkdownImporter {
   /**
    * Read the labels of the brain's graph that hold a line break.
    *
+   * @param db - What they are read through: a note's transaction, or the brain.
    * @returns The labels, each line break in them as `\n`.
    */
-  private async _readLabelsWithLineBreaks(): Promise<ReadonlySet<string>> {
-    const rows = await this.brain.all<{ label: string }>(
+  private async _readLabelsWithLineBreaks(db: Pick<Brain, 'all'>): Promise<ReadonlySet<string>> {
+    const rows = await db.all<{ label: string }>(
       'SELECT DISTINCT label FROM knowledge_nodes WHERE brain_id = ? AND (label LIKE ? OR label LIKE ?)',
       [this.brain.brainId, '%\n%', '%\r%'],
     );

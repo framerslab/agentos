@@ -36,6 +36,9 @@ export type { MemorySearchInput, MemorySearchOutput, MemorySearchResult } from '
 export { MemoryReflectTool } from './MemoryReflectTool.js';
 export type { MemoryReflectInput } from './MemoryReflectTool.js';
 
+/** What the tools that write take a write back through: the `Memory` facade that made them. */
+export type { MemoryToolWriteBack } from './learningWrite.js';
+
 /** Opt-in tool for rehydrating gisted/archived memory traces. */
 export { RehydrateMemoryTool } from './RehydrateMemoryTool.js';
 export type { RehydrateMemoryInput, RehydrateMemoryOutput } from './RehydrateMemoryTool.js';

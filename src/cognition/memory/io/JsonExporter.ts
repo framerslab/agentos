@@ -21,12 +21,18 @@
  * }
  * ```
  *
+ * A Brain a learning layer serves writes its record of the encoded scope-id
+ * form into `meta` (`scope_id_form`), which an import reads as the export's
+ * form. The record and the rows come from one form: when a re-file commits
+ * while the export reads, the export reads again.
+ *
  * @module memory/io/JsonExporter
  */
 
 import type { ExportOptions } from './facade/types.js';
 import type { Brain } from '../retrieval/store/Brain.js';
 import { asBinaryBytes, bytesToBase64 } from './base64.js';
+import { brainHoldsScopeIdFormRecord, readInOneScopeIdForm } from '../retrieval/store/scopeIdForm.js';
 
 // ---------------------------------------------------------------------------
 // Row types (internal — matched to Brain DDL)
@@ -183,6 +189,17 @@ export class JsonExporter {
    * @returns The structured payload object ready for serialisation.
    */
   private async _buildPayload(options?: ExportOptions): Promise<Record<string, unknown>> {
+    // The record of the brain's scope-id form, in `meta`, names the form its rows are in: a re-file that commits while
+    // the export reads is wholly in what it reads or wholly out of it.
+    const { value } = await readInOneScopeIdForm(
+      () => brainHoldsScopeIdFormRecord(this.brain),
+      () => this._readPayload(options),
+    );
+    return value;
+  }
+
+  /** Reads the payload's rows, {@link _buildPayload}'s one pass. */
+  private async _readPayload(options?: ExportOptions): Promise<Record<string, unknown>> {
     const includeEmbeddings = options?.includeEmbeddings ?? false;
     const includeConversations = options?.includeConversations ?? true;
 

@@ -1,6 +1,6 @@
 /**
  * @file gmiSession.ts
- * One agent session served by one GMI (`agent({ runtime: 'gmi' })`, spec D10).
+ * One agent session served by one GMI (`agent({ runtime: 'gmi' })`).
  *
  * The session store is the source of truth: before every turn the GMI's history
  * is replaced with the store's messages, and as the turn runs each finished
@@ -141,6 +141,11 @@ export interface GmiForTurn {
   prepare?(context: GmiTurnContext): void;
   /** Releases a GMI made for this turn alone; called once the turn has ended. */
   release?(): Promise<void>;
+  /**
+   * The ids the turn's cognitive memory files and recalls under, when the session learns them only as it serves the
+   * turn (a gmi() session id's generation, which `memory.store` holds); in place of {@link GmiSessionDeps.memoryScope}.
+   */
+  memoryScope?: { userId: string; sessionId: string };
 }
 
 /** What a session hands the turn runner. */
@@ -370,6 +375,7 @@ export async function* runGmiTurn(
     const served = await deps.gmiFor();
     releaseGmi = served.release;
     const gmi = served.gmi;
+    const memoryScope = served.memoryScope ?? deps.memoryScope;
     gmi.replaceHistory?.(transcriptToConversation(priorMessages));
     const memoryContext = deps.useMemoryProviderContext ? await memoryProviderContext(deps.opts, userText) : undefined;
     // When the model call in progress started: the turn's start, the end of the
@@ -415,7 +421,8 @@ export async function* runGmiTurn(
       content: input as GMITurnInput['content'],
       metadata: {
         providerUserId: deps.providerUserId ?? null,
-        ...(deps.memoryScope ? { memoryScope: deps.memoryScope } : {}),
+        ...(deps.providerUserId === undefined ? { noTurnUser: true } : {}),
+        ...(memoryScope ? { memoryScope } : {}),
         ...(turn.launchFrame ? { agencyLaunch: turn.launchFrame } : {}),
         options: {
           ...(turn.options ?? {}),

@@ -330,6 +330,20 @@ export interface RememberOptions {
    * When omitted the encoding engine derives one automatically.
    */
   importance?: number;
+
+  /**
+   * The new trace's id, when the caller names it before the write: a write the learning ledger records names its new
+   * traces in its `pending` row first. A text the scope already holds is not stored again, and the trace that holds
+   * it is returned under its own id.
+   */
+  id?: string;
+
+  /**
+   * Extra keys for the trace's stored metadata, merged under the keys the facade sets itself (`scopeId`,
+   * `content_hash`, `entities`, `decay`), which win. The rolling-summary sink records `contributorIds` here, and a
+   * memory write on a turn with no learner records `turnUserId` (`MemoryTrace.turnUserId`).
+   */
+  metadata?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -575,14 +589,15 @@ export interface ImportOptions {
   format?: 'auto' | 'sqlite' | 'json' | 'markdown' | 'obsidian' | 'chatgpt' | 'csv';
 
   /**
-   * Whether a record is skipped as a duplicate when a trace of the same scope and scope id holds its text, or names
-   * that text's SHA-256 as `import_hash` or `content_hash`; a Markdown or Obsidian note is also skipped when it is
-   * the own note of the trace its front-matter `id` names. A trace of another scope id is not a duplicate, and a trace
-   * the brain forgot counts as any other. A JSON, SQLite or CSV import reads a file's live records before its forgotten
-   * ones, so a text the file holds both forgotten and live arrives live. A SQLite import merges a skipped record's
-   * tags, and the later creation time, into the trace it matches, and an Obsidian note adds the tags and links that
-   * trace lacks. With `false`, no trace record is skipped as a duplicate and nothing is merged into a trace the brain
-   * holds.
+   * Whether a record is skipped as a duplicate when a trace of the same scope, scope id and user holds its text, or
+   * names that text's SHA-256 as `import_hash` or `content_hash`; a Markdown or Obsidian note is also skipped when it
+   * is the own note of the trace its front-matter `id` names. A trace of another scope id is not a duplicate, nor is
+   * one another user filed: a record's user is its metadata's `turnUserId` (a note's front-matter `turnUserId`), or
+   * the session owner's when it names none. A trace the brain forgot counts as any other. A JSON, SQLite or CSV import
+   * reads a file's live records before its forgotten ones, so a text the file holds both forgotten and live arrives
+   * live. A SQLite import merges a skipped record's tags, and the later creation time, into the trace it matches, and
+   * an Obsidian note adds the tags and links that trace lacks. With `false`, no trace record is skipped as a duplicate
+   * and nothing is merged into a trace the brain holds.
    * @default true
    */
   dedup?: boolean;
@@ -614,7 +629,8 @@ export interface ImportResult {
 
   /**
    * Human-readable messages for the records that failed to import, for an Obsidian note's link or tag the import
-   * could not write, and for a source that could not be read or parsed.
+   * could not write, for a source that could not be read or parsed, and for a source, or a Markdown or Obsidian note,
+   * that the brain's scope-id form refuses (the message names `scope_id_form`).
    */
   errors: string[];
 }

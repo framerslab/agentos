@@ -3,7 +3,8 @@
  * What GMIManager gives each GMI of a runtime with a learning layer: a learner session bound to the user the GMI is
  * created for, under the turn's resolved organization when the caller passes it and under the organization of the
  * GMI's first prepared turn when it does not; a workflow seat's GMI with no learner, whose role overlay renders for
- * that session only, honesty excepted; and a learner session ended once its GMI shuts down or fails to initialize. A layer that fails never
+ * that session only, honesty excepted; a learner session ended once its GMI shuts down or fails to initialize, and the
+ * GMI's memory manager let go of once the GMI has shut it down. A layer that fails never
  * fails the GMI. Without a layer GMIs are built as before. Real GMIManager and GMIs; the persona loader, the
  * conversation manager and the prompt engine are stubs.
  */
@@ -16,9 +17,10 @@ import { renderPersonalitySection } from '../personas/personalityPrompt';
 import type { IUtilityAI } from '../../nlp/ai_utilities/IUtilityAI';
 import { createLearningLayer } from '../../learning/LearningLayer';
 import type { ILearnerSession, ILearningLayer, TurnInputForLearning, TurnPreparation } from '../../learning/types';
+import type { ICognitiveMemoryManager } from '../../memory/CognitiveMemoryManager';
 import { ConversationContext } from '../../../core/conversation/ConversationContext';
 import type { ConversationManager } from '../../../core/conversation/ConversationManager';
-import type { IPromptEngine } from '../../../core/llm/IPromptEngine';
+import type { IPromptEngine, PromptEngineConfig } from '../../../core/llm/IPromptEngine';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator';
 
@@ -299,6 +301,126 @@ describe('a runtime with a learning layer', () => {
     expect(stateOf(await gmi.getLearnerSession!()!.prepareTurn(turn({ namespace: 'A' })))).toBe('bound');
     expect(layer.forLearner).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => expect(lateEnd).toHaveBeenCalledTimes(1));
+  }, 10_000);
+
+  it("hands the learner session the GMI's memory manager, which the layer re-files, hydrates and reaches in forgetUser", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const memory = { getStore: () => undefined, shutdown: async () => undefined } as unknown as ICognitiveMemoryManager;
+    const layer = recordingLayer(async () => ({ prepareTurn: vi.fn(), endSession: vi.fn(async () => undefined), currentTraits: () => ({}) }) as unknown as ILearnerSession);
+    const manager = await managerWith(layer, { cognitiveMemoryFactory: async () => memory });
+    // The GMI's own initialization is not what this case reads: what the manager hands the layer is.
+    vi.spyOn(GMI.prototype, 'initialize').mockRejectedValueOnce(new Error('initialize failed'));
+    await expect(
+      manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, ''),
+    ).rejects.toThrow(/Failed to initialize new GMI instance/);
+    expect(layer.forLearner).toHaveBeenCalledWith(
+      { namespace: '', agentKey: 'reviewer', userId: 'user-1' },
+      expect.objectContaining({ sessionId: 'session-1', memory }),
+    );
+  });
+
+  it("lets go of a GMI's memory manager once the GMI has shut it down, so forgetUser asks no manager that can no longer answer", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let shut = false;
+    // A manager of the GMI's own, which the GMI's shutdown shuts down: from then on every call fails, as a real one does.
+    const memory = {
+      getStore: () => undefined,
+      deleteScope: vi.fn(async () => {
+        if (shut) throw new Error('CognitiveMemoryManager not initialized. Call initialize() first.');
+        return { deleted: 0, graph: 'reached' };
+      }),
+      shutdown: async () => {
+        shut = true;
+      },
+    } as unknown as ICognitiveMemoryManager;
+    const layer = createLearningLayer();
+    const manager = await managerWith(layer, { cognitiveMemoryFactory: async () => memory });
+    await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    await manager.deactivateGMIForSession('session-1');
+    expect(shut).toBe(true);
+
+    const report = await layer.forgetUser('user-1', { namespace: 'A' });
+    expect(report.stores.filter((entry) => /memory manager/.test(entry.store) && !entry.reached)).toEqual([]);
+    expect(report.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
+  });
+
+  it("names a turn's scope ids by the session's own form, with no learner, before the GMI's first prepared turn opens its session", async () => {
+    // The pipeline asks for the turn's scope ids before the GMI prepares the turn; a session with no answer would let
+    // the retriever and the sink read and file under the ids a host with no layer uses.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const manager = await managerWith(createLearningLayer());
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id);
+    const session = gmi.getLearnerSession!()!;
+    expect(session.scopesFor!({ userId: 'user-1', namespace: 'A', workflowSeat: false })).toEqual({
+      learner: 'none',
+      mode: 'on',
+      userScopeId: 'A//session-1',
+      personaScopeId: 'A//session-1::reviewer',
+      namespace: 'A',
+    });
+    expect(stateOf(await session.prepareTurn(turn({ namespace: 'A' })))).toBe('bound');
+    expect(session.scopesFor!({ userId: 'user-1', namespace: 'A', workflowSeat: false })).toMatchObject({ learner: 'bound', userScopeId: 'A/user-1' });
+  });
+
+  it("answers a turn's scope ids, its recorder and its guard through the session an open past the 2,000 ms budget gives, and the session's own form before it", async () => {
+    // A GMI whose open ran late would otherwise give its tools no recorder and the pipeline no scope ids for its life.
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let answer: ((session: ILearnerSession) => void) | undefined;
+    const layer = recordingLayer(() => new Promise<ILearnerSession>((resolve) => {
+      answer = resolve;
+    }));
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 5_000 });
+    const { gmi } = await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, '');
+    const session = gmi.getLearnerSession!()!;
+    // Before it opens, the deferred session names the session's own form, with no learner.
+    expect(session.scopesFor!({ userId: 'user-1', namespace: '', workflowSeat: false })).toMatchObject({
+      learner: 'none',
+      userScopeId: '/session-1',
+      personaScopeId: '/session-1::reviewer',
+    });
+    const prepared = session.prepareTurn(turn());
+    answer!(
+      await createLearningLayer().forLearner(
+        { namespace: '', agentKey: 'reviewer', userId: 'user-1' },
+        { sessionId: 'session-1', personaId: 'reviewer', authoredTraits: { honesty: 0.9, extraversion: 0.5 } },
+      ),
+    );
+    expect(stateOf(await prepared)).toBe('bound');
+    expect(session.scopesFor!({ userId: 'user-1', namespace: '', workflowSeat: false })).toMatchObject({ learner: 'bound', userScopeId: 'user-1' });
+    expect(typeof session.recordSelfChange).toBe('function');
+    expect(session.isFrozen!()).toBe(false);
+    expect(await session.guardMemoryWrite!({ apply: async () => 'filed', undo: async () => undefined }, { learner: 'bound', namespace: '' })).toEqual({
+      status: 'written',
+      result: 'filed',
+    });
+    expect(layer.forLearner).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
+  it('ends the learner session of a seat GMI that fails to initialize within shutdownTimeoutMs, when the session does not end', async () => {
+    // A launch waits on the seat's creation; a session that never ends would hold the launch for good.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const endSession = vi.fn(() => new Promise<void>(() => undefined));
+    const layer = recordingLayer(async () => ({ prepareTurn: vi.fn(), endSession, currentTraits: () => ({}) }) as unknown as ILearnerSession);
+    const agencySeatPromptEngineConfig = {
+      defaultTemplateName: 'openai_chat',
+      availableTemplates: {},
+      tokenCounting: { strategy: 'estimated', estimationModel: 'gpt-3.5-turbo' },
+      historyManagement: { defaultMaxMessages: 100, maxTokensForHistory: 8_000, summarizationTriggerRatio: 0, preserveImportantMessages: true },
+      contextManagement: { maxRAGContextTokens: 1_500, summarizationQualityTier: 'balanced', preserveSourceAttributionInSummary: true },
+      contextualElementSelection: { maxElementsPerType: {}, defaultMaxElementsPerType: 3, priorityResolutionStrategy: 'highest_first', conflictResolutionStrategy: 'skip_conflicting' },
+      performance: { enableCaching: false, cacheTimeoutSeconds: 60 },
+    } as unknown as PromptEngineConfig;
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 200, agencySeatPromptEngineConfig });
+    vi.spyOn(GMI.prototype, 'initialize').mockRejectedValueOnce(new Error('initialize failed'));
+    const startedAt = Date.now();
+    await expect(
+      manager.createAgencySeat({ seatSessionId: 'seat:launch-1:writer', userId: 'user-1', persona: { personaId: persona.id }, toolView: (base) => base }),
+    ).rejects.toThrow(/Failed to initialize the agency seat GMI/);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(endSession).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('did not end within 200 ms'))).toBe(true);
   }, 10_000);
 });
 
