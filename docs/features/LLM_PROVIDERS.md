@@ -231,6 +231,11 @@ another vendor accepts: OpenRouter's routing controls (`provider`, `models`,
 `route`, `transforms`) reach only OpenRouter, and Gemini's request fields
 (`thinkingConfig`, `topK`, `safetySettings` and the rest of
 [`GEMINI_ONLY_PARAM_KEYS`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/openrouter-only-params.ts)) reach only Gemini.
+The structured-output fields follow the same rule: OpenAI's `response_format`
+does not reach Anthropic or Gemini, and Anthropic's `output_config` does not
+reach OpenAI or Gemini, so an OpenAI call that fails over to Claude (or the
+reverse) sends the leg only fields its API defines; the leg's own structured
+output is built for it by its provider.
 
 With `planning` on, the planning call carries the caller's messages, so it
 takes OpenRouter's routing controls and `plugins` from `customModelParams`: a

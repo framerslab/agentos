@@ -33,7 +33,7 @@ import {
   ProviderEmbeddingResponse,
   AttemptOutcome,
 } from '../IProvider';
-import { stripForeignVendorParams } from '../openrouter-only-params';
+import { stripParamsForOpenAI } from '../openrouter-only-params';
 import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../openai-cache-params';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
@@ -1745,8 +1745,8 @@ export class OpenAIProvider implements IProvider {
         // For now, customModelParams is the way for non-standard things.
     }
     {
-      // Strip OpenRouter routing controls and Gemini request fields; see openrouter-only-params.
-      const passthrough = stripForeignVendorParams(options?.customModelParams);
+      // Strip OpenRouter routing controls, Gemini request fields and Anthropic's output_config; see openrouter-only-params.
+      const passthrough = stripParamsForOpenAI(options?.customModelParams);
       if (passthrough) {
         Object.assign(payload, passthrough);
       }
@@ -1944,8 +1944,8 @@ export class OpenAIProvider implements IProvider {
     this.applyCacheAndTierParams(payload, modelId, options);
 
     {
-      // Strip OpenRouter routing controls and Gemini request fields; see openrouter-only-params.
-      const passthrough = stripForeignVendorParams(options.customModelParams);
+      // Strip OpenRouter routing controls, Gemini request fields and Anthropic's output_config; see openrouter-only-params.
+      const passthrough = stripParamsForOpenAI(options.customModelParams);
       if (passthrough) {
         Object.assign(payload, passthrough);
       }
@@ -2115,10 +2115,10 @@ export class OpenAIProvider implements IProvider {
     this.applyCacheAndTierParams(payload, modelId, options);
 
     {
-      // Strip OpenRouter routing controls and Gemini request fields; see openrouter-only-params.
+      // Strip OpenRouter routing controls, Gemini request fields and Anthropic's output_config; see openrouter-only-params.
       // The /responses body rejects unknown top-level fields just like
       // /chat/completions.
-      const passthrough = stripForeignVendorParams(options.customModelParams);
+      const passthrough = stripParamsForOpenAI(options.customModelParams);
       if (passthrough) {
         Object.assign(payload, passthrough);
       }
