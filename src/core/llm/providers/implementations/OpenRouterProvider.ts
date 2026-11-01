@@ -31,13 +31,10 @@ import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { errorFields } from '../../../logging/events.js';
-import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
+/** This module's events, under its fixed diagnostic origin; no runtime name enters telemetry. */
 const log = moduleLogger('llm', 'openrouter_provider');
-
-/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
-const console = createContentSafeConsole('openrouter_provider');
 
 /**
  * OpenRouter's API base URL, which requests go to when the config names no `baseURL`. `embedText` posts OpenRouter
@@ -431,7 +428,7 @@ export class OpenRouterProvider implements IProvider {
     if (keyPool.size > 1 && keyPool.usable() === 0) {
       this.isInitialized = true;
       keyPool.startRechecks();
-      console.warn('OpenRouterProvider: every API key of the pool is out of rotation; initialized without the model listing, and the keys are probed at their recheck.');
+      log.warn('llm.key_pool_out', { provider: 'openrouter', count: keyPool.size });
       return;
     }
 

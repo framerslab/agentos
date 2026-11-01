@@ -46,11 +46,9 @@ import { redactUrlSecrets } from '../url-secrets.js';
 import { OPENAI_MODEL_PRICING, openAIModelPricing } from './openaiPricing.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { errorFields } from '../../../logging/events.js';
-import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 import { AttemptBudgetExhaustedError, CountingAttemptBudget } from '../../../../safety/runtime/ModelAttemptBudget.js';
 
-/** This module's fixed diagnostic origin; no runtime name enters telemetry. */
-const console = createContentSafeConsole('openai_provider');
+/** This module's events, under its fixed diagnostic origin; no runtime name enters telemetry. */
 const log = moduleLogger('llm', 'openai_provider');
 
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
@@ -988,7 +986,7 @@ export class OpenAIProvider implements IProvider {
     if (keyPool.size > 1 && keyPool.usable() === 0) {
       this.isInitialized = true;
       keyPool.startRechecks();
-      console.warn('OpenAIProvider: every API key of the pool is out of rotation; initialized without the model listing, and the keys are probed at their recheck.');
+      log.warn('llm.key_pool_out', { provider: 'openai', count: keyPool.size });
       return;
     }
 

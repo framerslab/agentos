@@ -55,13 +55,17 @@ export default tseslint.config(
   },
   {
     // These files write their diagnostics as logging events: no console call, and no direct write to standard
-    // output or standard error, which only src/core/utils/terminal.ts makes.
+    // output or standard error, which only src/core/utils/terminal.ts makes. no-console reports the global console
+    // alone, so a binding of their own named console, which would hide its calls from it, is refused too.
     files: ['src/core/logging/**/*.ts', 'src/core/llm/providers/implementations/OpenAIProvider.ts', 'src/core/llm/providers/implementations/OpenRouterProvider.ts'],
     rules: {
       'no-console': 'error',
       'no-restricted-syntax': ['error', {
         selector: "CallExpression[callee.object.object.name='process'][callee.object.property.name=/^(stdout|stderr)$/][callee.property.name='write']",
         message: 'Write standard streams only through src/core/utils/terminal.ts.',
+      }, {
+        selector: "VariableDeclarator[id.name='console'], ImportSpecifier[local.name='console'], ImportDefaultSpecifier[local.name='console'], ImportNamespaceSpecifier[local.name='console']",
+        message: 'Write a logging event; a binding named console hides its calls from no-console.',
       }],
     },
   }

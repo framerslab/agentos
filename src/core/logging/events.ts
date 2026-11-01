@@ -69,6 +69,8 @@ export const AGENTOS_EVENTS = {
   'llm.models_refresh': { provider },
   'llm.models_failed': { provider, type: 'word', code: 'word' },
   'llm.models_empty': { provider },
+  // Every key of a pool of several is out of rotation at start: the provider starts without its model listing.
+  'llm.key_pool_out': { provider, count: 'int' },
   'llm.option_ignored': { provider, reason: { enum: ['provider_sort', 'cache_retention', 'embedding_capability'] } },
   'llm.output_mismatch': { provider, reason: { enum: ['tool_arguments', 'text'] } },
   'llm.output_empty': { provider, count: 'int' },
