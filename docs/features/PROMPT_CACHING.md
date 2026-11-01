@@ -153,7 +153,9 @@ await generateText({
   `'24h'` or `'in_memory'` (`prompt_cache_retention`, enumerated allow-list).
   Unsupported model/value combinations are omitted with a debug log — never
   a hard error.
-- `serviceTier`: emitted verbatim as `service_tier`.
+- `serviceTier`: emitted verbatim as `service_tier`. `streamText()`,
+  `generateObject()` and `streamObject()` take it too; `generateObject()`
+  sends it on every attempt, a validation retry included.
 
 ## Usage normalization and telemetry
 

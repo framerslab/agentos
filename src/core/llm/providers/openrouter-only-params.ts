@@ -15,9 +15,19 @@
  * `topK`, `safetySettings`, ...) are the mirror case: GeminiProvider consumes
  * them, and every other provider strips them, so a Gemini call that fails
  * over does not hand them to OpenAI or Anthropic, which reject unknown
- * top-level fields with HTTP 400. Vendor-specific extras a caller
- * legitimately aims at a native vendor (e.g. Anthropic `metadata`) pass
- * through untouched.
+ * top-level fields with HTTP 400. The structured-output fields are the same
+ * case between OpenAI and Anthropic: OpenAI's `response_format` is not a
+ * Messages field, and Anthropic's `output_config` is not a Chat Completions or
+ * Responses field, so an OpenAI call that fails over to Claude, or a Claude
+ * call that fails over to OpenAI, does not carry the other vendor's field
+ * (each leg's own structured output is built for it by its provider). Other
+ * vendor-specific extras a caller aims at a native vendor (e.g. Anthropic
+ * `metadata`) pass through untouched.
+ *
+ * Messages request fields: https://platform.claude.com/docs/en/api/messages/create
+ * Chat Completions request fields:
+ * https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+ * generateContent request fields: https://ai.google.dev/api/generate-content
  */
 
 /**
@@ -51,6 +61,19 @@ export const GEMINI_ONLY_PARAM_KEYS = [
   'speechConfig',
   'mediaResolution',
 ] as const;
+
+/**
+ * OpenAI's structured-output request field. OpenAI-compatible APIs
+ * (OpenRouter, Ollama's `/v1`) accept it too; Anthropic's Messages API and
+ * Gemini's generateContent do not.
+ */
+export const OPENAI_FORMAT_PARAM_KEYS = ['response_format'] as const;
+
+/**
+ * Anthropic's output configuration (`format`, `effort`), a Messages request
+ * field no OpenAI or Gemini request defines.
+ */
+export const ANTHROPIC_ONLY_PARAM_KEYS = ['output_config'] as const;
 
 /** Keys no native provider other than their own vendor accepts. */
 const FOREIGN_VENDOR_PARAM_KEYS: readonly string[] = [
@@ -105,4 +128,39 @@ export function stripForeignVendorParams(
   params: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   return withoutKeys(params, FOREIGN_VENDOR_PARAM_KEYS);
+}
+
+/**
+ * A copy of `params` for AnthropicProvider: without OpenRouter's routing
+ * controls, Gemini's request fields and OpenAI's `response_format`.
+ */
+export function stripParamsForAnthropic(
+  params: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  return withoutKeys(params, [...FOREIGN_VENDOR_PARAM_KEYS, ...OPENAI_FORMAT_PARAM_KEYS]);
+}
+
+/**
+ * A copy of `params` for OpenAIProvider: without OpenRouter's routing
+ * controls, Gemini's request fields and Anthropic's `output_config`.
+ */
+export function stripParamsForOpenAI(
+  params: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  return withoutKeys(params, [...FOREIGN_VENDOR_PARAM_KEYS, ...ANTHROPIC_ONLY_PARAM_KEYS]);
+}
+
+/**
+ * A copy of `params` for GeminiProvider's request root: without OpenRouter's
+ * routing controls, OpenAI's `response_format` and Anthropic's
+ * `output_config` (GeminiProvider handles its own Gemini fields).
+ */
+export function stripParamsForGemini(
+  params: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  return withoutKeys(params, [
+    ...OPENROUTER_ONLY_PARAM_KEYS,
+    ...OPENAI_FORMAT_PARAM_KEYS,
+    ...ANTHROPIC_ONLY_PARAM_KEYS,
+  ]);
 }
