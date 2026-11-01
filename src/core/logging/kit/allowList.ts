@@ -16,7 +16,7 @@
  */
 
 import type { EventLogger, Level, Logger, LogMethod } from '../Logger.js';
-import { AGENTOS_CONTEXT, AGENTOS_EVENTS, errorFields, safeWord, valid, type AgentOSEvents, type ContextSchema, type EventMap, type Fields } from '../events.js';
+import { AGENTOS_CONTEXT, AGENTOS_EVENTS, errorFields, safeWord, valid, type AgentOSEvents, type ContextSchema, type EventMap, type FieldKind, type Fields } from '../events.js';
 import { checkContext, checkFields, isValidationError, LogValidationError, sinkCall, type RefusalReason } from '../forward.js';
 import { admit, burstOwner, closeOwner } from './burst.js';
 
@@ -41,10 +41,24 @@ export type AllowListLogger<E extends EventMap, C extends ContextSchema> = Event
 };
 const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
 
+// Whether two field kinds are the same: the same word, or enums of the same values in any order.
+function sameKind(a: FieldKind, b: FieldKind): boolean {
+  if (typeof a === 'string' || typeof b === 'string') return a === b;
+  if (!a || !b || !Array.isArray(a.enum) || !Array.isArray(b.enum)) return false;
+  return a.enum.length === b.enum.length && a.enum.every(value => b.enum.includes(value));
+}
+
+// Whether two event declarations name the same fields with the same kinds.
+function sameFields(a: Readonly<Record<string, FieldKind>>, b: Readonly<Record<string, FieldKind>>): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every(key => own(b, key) && sameKind(a[key], b[key]));
+}
+
 /**
  * Creates an allow-list logger over a product's event map. AgentOS's own events are always
- * declared; the product's map adds its own and those of the packs it uses. No process
- * listener is installed by importing or creating a kit.
+ * declared; the product's map adds its own and those of the packs it uses, and may name one of
+ * AgentOS's events again only with the same fields. No process listener is installed by
+ * importing or creating a kit.
  *
  * @param options - The kit's settings.
  * @param options.logger - The pino logger, or pino child, the kit writes through.
@@ -53,7 +67,7 @@ const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call
  * @param options.burst - Lines a minute for each event and each refusal reason, 30 unless set. Every kit in the process shares the budgets, at the smallest bound asked for.
  * @returns The kit, typed over AgentOS's events and the product's map, so it also takes the
  * `console_line` and `process.*` lines `captureConsole` and `installProcessHandlers` write.
- * @throws {TypeError} When `burst` is not a positive integer, an event's name is not a word of at most 64 characters or is `log_refused` or `log_held`, or an event declares a context key, `event`, `level` or `time` as a field.
+ * @throws {TypeError} When `burst` is not a positive integer, an event's name is not a word of at most 64 characters or is `log_refused` or `log_held`, an event declares a context key, `event`, `level` or `time` as a field, or the product's map declares one of AgentOS's events with other fields than AgentOS gives it.
  *
  * @example
  * ```ts
@@ -71,7 +85,9 @@ export function createAllowListLogger<E extends EventMap, C extends ContextSchem
   const limit = options.burst ?? 30;
   if (!Number.isInteger(limit) || limit < 1) throw new TypeError('burst must be a positive integer');
   // The refusal and held-lines records are the kit's own, so a product map can neither declare nor overwrite them.
+  // An AgentOS event the product's map names again keeps AgentOS's fields, so AgentOS's own lines are never refused.
   for (const [name, fields] of Object.entries(events)) {
+    if (own(AGENTOS_EVENTS, name) && !sameFields(fields, (AGENTOS_EVENTS as EventMap)[name])) throw new TypeError('event redeclared with other fields');
     if (name === 'log_refused' || name === 'log_held' || !/^[A-Za-z0-9_.:-]{1,64}$/.test(name)) throw new TypeError('invalid event declaration');
     for (const key of Object.keys(fields)) if (own(schema, key) || key === 'event' || key === 'level' || key === 'time') throw new TypeError('reserved field declaration');
   }
