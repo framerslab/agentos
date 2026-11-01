@@ -3077,14 +3077,14 @@ export class MemoryStore {
   }
 
   /**
-   * Deletes the given traces for good: each is soft-deleted in this process (cache, vector index, sibling stores
-   * and its knowledge-graph copy), then its Brain row is deleted, so no reload, in this process or another, brings
-   * it back (a store that finds a row gone reads it as deleted). The rows that name a trace go first, as the Brain's
-   * foreign keys require: its retrieval feedback (with the query that recalled it) is deleted, and the document chunk
-   * it was filed from lets go of it and keeps its text, which belongs to the document. On SQLite the full-text index
-   * is rebuilt from the rows that remain, as every hard delete must; a rebuild that fails is repaired when the Brain
-   * next opens. Last, every store on the backing resource in this process, this one included, keeps of each trace
-   * only where it was filed, none of its words ({@link withoutWords}).
+   * Deletes the given traces for good: their knowledge-graph copies go first, then each is soft-deleted in this
+   * process (cache, vector index, sibling stores), then its Brain row is deleted, so no reload, in this process or
+   * another, brings it back (a store that finds a row gone reads it as deleted). The rows that name a trace go
+   * first, as the Brain's foreign keys require: its retrieval feedback (with the query that recalled it) is deleted,
+   * and the document chunk it was filed from lets go of it and keeps its text, which belongs to the document. On
+   * SQLite the full-text index is rebuilt from the rows that remain, as every hard delete must; a rebuild that fails
+   * is repaired when the Brain next opens. Last, every store on the backing resource in this process, this one
+   * included, keeps of each trace only where it was filed, none of its words ({@link withoutWords}).
    *
    * A trace this store holds under another scope than its Brain row names (a move another process made, which this
    * store has not followed) also leaves the collection its row names, where that process filed its document.
@@ -3097,7 +3097,8 @@ export class MemoryStore {
    *   before any of them is deleted, and not at all when none is found. The memory manager removes what it keeps of
    *   each trace there, so a call that fails part way finds the same traces again.
    * @returns How many of them had a Brain row or a live cached trace, so a second call for the same ids counts none.
-   * @throws When the Brain cannot be read or a row cannot be deleted, or what `beforeDelete` throws.
+   * @throws When the Brain cannot be read, the knowledge graph cannot delete the traces' copies (no trace is deleted
+   *   then), or a row cannot be deleted, or what `beforeDelete` throws.
    */
   async deleteTraces(
     traceIds: readonly string[],
@@ -3136,6 +3137,18 @@ export class MemoryStore {
     }
     if (known.size === 0) return 0;
     await options.beforeDelete?.([...known]);
+    // A trace's knowledge-graph copy holds its full text, and once the trace's row is gone nothing finds the copy
+    // again: the copies go before anything of the traces does, and a graph that cannot delete them fails the call with
+    // every row kept, so a later call finds the same traces.
+    try {
+      await this.config.knowledgeGraph.deleteMemories?.({ traceIds: [...known] });
+    } catch (error) {
+      throw new Error(
+        `MemoryStore.deleteTraces: the knowledge graph did not delete the traces' copies, so no trace was deleted: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     for (const id of known) {
       try {
         await this.softDelete(id);

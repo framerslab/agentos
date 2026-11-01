@@ -922,15 +922,19 @@ export class Memory {
    * Deletes the given traces for good, as {@link deleteScope} does for a scope. The rows that name a trace go first,
    * as the Brain's foreign keys require: its `retrieval_feedback` rows are deleted, and a `document_chunks` row it was
    * filed from lets go of it and keeps its text. Each trace's memory-graph node goes with its edges, whichever facade
-   * on the Brain wrote them, a relation a host made to the node ({@link addRelation}) included. Unknown ids are
-   * skipped.
+   * on the Brain wrote them, a relation a host made to the node ({@link addRelation}) included. Each trace's
+   * knowledge-graph copy goes before its row. Unknown ids are skipped.
    *
    * @returns How many trace rows it deleted, so a call made again counts none.
+   * @throws When the knowledge graph cannot delete the copies: no row is deleted, so a later call deletes them.
    */
   async deleteTraces(traceIds: readonly string[]): Promise<{ deleted: number }> {
     await this._initPromise;
     const ids = [...new Set(traceIds)];
     if (ids.length === 0) return { deleted: 0 };
+    // A trace's knowledge-graph copy holds its full text, and once the row is gone nothing finds the copy again: the
+    // copies go first, and a failure fails the call with every row kept, so a later call deletes them.
+    await this._knowledgeGraph.deleteMemories({ traceIds: ids });
     const deleted = await deleteTraceRows(this._brain, this._brain.brainId, ids);
     for (const id of ids) {
       try {
@@ -939,11 +943,6 @@ export class Memory {
         // A node whose delete fails stays, holding no words of the trace; its trace is gone.
       }
       this._hnswSidecar?.remove(id);
-    }
-    try {
-      await this._knowledgeGraph.deleteMemories({ traceIds: ids });
-    } catch {
-      // Non-critical, as for the store's deletes.
     }
     // Postgres keeps the index in each row's own column, which went with the row.
     if (this._brain.features.dialect.name !== 'postgres') await this._rebuildFtsIndex();
