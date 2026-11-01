@@ -151,9 +151,17 @@ export async function reachTraces(
   return { snapshots, otherUser };
 }
 
-/** What a compare-and-set write appends to its `WHERE`: the row is live and holds the content and tags it was read with. */
+/**
+ * What a compare-and-set write appends to its `WHERE`: the row is live, is filed where it was read (its scope and scope
+ * id), and holds the content and tags it was read with. A move that commits between the read and the write (a host's
+ * `refileScope`, a Brain's re-file) changes the scope id alone, and the write then finds no row, as it does for a
+ * changed text.
+ */
 export function stillAsRead(snapshot: TraceSnapshot): { sql: string; params: unknown[] } {
-  return { sql: ' AND deleted = 0 AND content = ? AND tags = ?', params: [snapshot.content, snapshot.tags] };
+  return {
+    sql: ' AND deleted = 0 AND scope = ? AND scope_id = ? AND content = ? AND tags = ?',
+    params: [snapshot.scope, snapshot.scopeId, snapshot.content, snapshot.tags],
+  };
 }
 
 /**
