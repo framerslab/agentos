@@ -1,7 +1,7 @@
 /**
  * @file agentCognitiveMemory.ts
- * Cognitive memory for GMIs built from agent options (`agent({ runtime: 'gmi' })`,
- * spec D7): a {@link CognitiveMemoryManager} over an in-memory vector store, the
+ * Cognitive memory for GMIs built from agent options (`agent({ runtime: 'gmi' })`):
+ * a {@link CognitiveMemoryManager} over an in-memory vector store, the
  * in-memory knowledge graph, an embedding manager for `memory.embedding`, a
  * working memory of its own and the persona's HEXACO traits.
  *
@@ -122,7 +122,7 @@ function defaultEmbeddingModelOf(providerId: string): string | undefined {
   return providerId === 'gemini' ? GEMINI_DEFAULT_EMBEDDING_MODEL : PROVIDER_DEFAULTS[providerId]?.embedding;
 }
 
-/** The providers memory picks by itself, OpenAI first (spec D7), each with the variable that configures it. */
+/** The providers memory picks by itself, OpenAI first, each with the variable that configures it. */
 const EMBEDDING_DETECTION_ORDER: ReadonlyArray<{ provider: string; envKey: string }> = [
   { provider: 'openai', envKey: 'OPENAI_API_KEY' },
   { provider: 'gemini', envKey: 'GEMINI_API_KEY' },

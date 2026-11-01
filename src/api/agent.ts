@@ -289,7 +289,7 @@ export interface AgentOptions extends BaseAgentConfig {
    */
   cache?: import('./generateText.js').GenerateTextOptions['cache'];
   /**
-   * Session conversation-history policy (spec 2026-07-20 §1a/§1c). Sessions
+   * Session conversation-history policy. Sessions
    * maintain a lossless transcript by default — independent of the memory
    * subsystem — bounded past `maxTokens` (default 120K estimated) by
    * chunk-amortized whole-block eviction. `false` restores stateless
@@ -432,14 +432,14 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
   /** Extra schema-validation attempts on the default runtime. Defaults to 0. */
   maxValidationRetries?: number;
   /**
-   * Telemetry + eviction-boundary label for this send's transcript block
-   * (spec §1c(iv)). Labels are markers, not pins.
+   * Telemetry + eviction-boundary label for this send's transcript block.
+   * Labels are markers, not pins.
    */
   blockLabel?: string;
   /**
    * Per-send generation overrides, merged over the agent's baseOpts with
    * send-level precedence — the same contract `generate(prompt, extra)`
-   * gives `extra` (spec §1f). Long tool-driving loops rely on these
+   * gives `extra`. Long tool-driving loops rely on these
    * (toolChoice, requestTimeout, cacheDiagnostics); without send-level
    * carriage a caller migrating from generate() silently loses them.
    */
@@ -532,7 +532,7 @@ export interface AgentSession {
   messages(): SessionTranscriptMessage[];
   /**
    * Atomically replaces the session history with a caller-built compact
-   * snapshot — the divergence-reset primitive (spec §1d). Bumps the
+   * snapshot — the divergence-reset primitive. Bumps the
    * history epoch: an in-flight send that began under an older epoch
    * still returns to its caller, but its history append is discarded.
    * Throws when the snapshot violates tool_use/tool_result pairing.
@@ -785,7 +785,7 @@ export function loadSoulFromOption(
 
 /**
  * Copies only the defined per-send generation overrides off SessionSendOptions
- * (spec §1f) so undefined keys never clobber agent-level baseOpts via spread.
+ * so undefined keys never clobber agent-level baseOpts via spread.
  */
 function pickSendGenerationOverrides(
   sendOpts?: SessionSendOptions<ZodType>,
@@ -1137,7 +1137,7 @@ export function agent(opts: AgentOptions): Agent {
     session(id?: string): AgentSession {
       const sessionId = id ?? crypto.randomUUID();
       if (!sessionBuffers.has(sessionId)) {
-        // History is independent of the memory subsystem (spec §1a): every
+        // History is independent of the memory subsystem: every
         // session keeps a lossless transcript unless the agent opts out via
         // `history: false`. Bounded by default — unbounded growth was the
         // latent failure mode for every long-lived consumer.

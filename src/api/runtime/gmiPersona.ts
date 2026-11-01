@@ -24,7 +24,7 @@ import type { ITool } from '../../core/tools/ITool.js';
 import type { ModelCompletionOptions } from '../../core/llm/providers/IProvider.js';
 import type { ResolvedCognition } from './gmiCognition.js';
 
-/** The session store bounds history (spec D10), so the GMI's own count window stays out of the way. */
+/** The session store bounds history, so the GMI's own count window stays out of the way. */
 export const GMI_SESSION_MAX_HISTORY_MESSAGES = 100_000;
 
 /**
@@ -83,7 +83,7 @@ function basePrompt(opts: AgentOptions, learningOn: boolean): string {
 }
 
 /**
- * Builds the persona of a GMI from agent options (spec D6).
+ * Builds the persona of a GMI from agent options.
  *
  * @param opts - The agent's options.
  * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, and whether learning is on.
