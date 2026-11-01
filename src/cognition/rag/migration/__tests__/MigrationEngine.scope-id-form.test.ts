@@ -6,7 +6,11 @@
  * existed is copied into a target table that has the column with the column filled from each row's metadata. A
  * persona id is read part by part, so the `::` between its user id and its persona id is no reserved character, and a
  * target that holds a knowledge-graph copy keeps its record. A source with the record whose user and persona scope ids
- * read the same in both forms is copied as a plain one, so a target without the record keeps its plain form. Where
+ * read the same in both forms is copied as a plain one, so a target without the record keeps its plain form. A Qdrant
+ * sidecar takes part through its `brain_meta`: the traces live in Qdrant, where the handshake reads no scope id, so a
+ * brain a sidecar names counts as holding ids the two forms read apart, and a Qdrant source with the record is refused
+ * into a target with such plain ids, as a source with the record is into a Qdrant target whose sidecar holds the brain.
+ * A source that names no brain (a Pinecone index) is refused into a target that holds the encoded form. Where
  * AGENTOS_TEST_POSTGRES_URL is set, the same refusal and the same fill into a Postgres Brain.
  */
 import { afterEach, describe, expect, it } from 'vitest';
@@ -175,6 +179,49 @@ describe('MigrationEngine scope-id form handshake', () => {
 
     expect(result.errors).toEqual([]);
     expect(rowsOf(to).traces).toEqual([{ id: 't-old', scope_id: 'ana' }]);
+  });
+});
+
+describe('MigrationEngine scope-id form handshake with a Qdrant sidecar or a vector index alone', () => {
+  // No Qdrant or Pinecone server answers here: each refusal is decided before any collection or index is read.
+  const NO_SERVER = 'http://127.0.0.1:1';
+
+  it("refuses a Qdrant source whose sidecar holds the record into a target whose plain ids it would change, before any table", async () => {
+    const sidecar = tempPath('sidecar.sqlite');
+    const to = tempPath('target.sqlite');
+    await brainFile(sidecar, [['t-a', 'user', 'team%2Fana']], true);
+    await brainFile(to, [['t-t', 'user', 'team/bo']], false);
+
+    const result = await MigrationEngine.migrate({ from: { type: 'qdrant', url: NO_SERVER, sidecarPath: sidecar }, to: { type: 'sqlite', path: to } });
+
+    expect(result.tablesProcessed).toEqual([]);
+    expect(result.errors.join('\n')).toMatch(/scope_id_form/);
+    expect(rowsOf(to)).toEqual({ traces: [{ id: 't-t', scope_id: 'team/bo' }], record: undefined });
+  });
+
+  it('refuses a source with the record into a Qdrant target whose sidecar holds the brain, before any table', async () => {
+    const from = tempPath('source.sqlite');
+    const sidecar = tempPath('sidecar.sqlite');
+    await brainFile(from, [['t-a', 'user', 'team%2Fana']], true);
+    // The target's traces live in Qdrant, where the handshake cannot read their scope ids.
+    await brainFile(sidecar, [], false);
+
+    const result = await MigrationEngine.migrate({ from: { type: 'sqlite', path: from }, to: { type: 'qdrant', url: NO_SERVER, sidecarPath: sidecar } });
+
+    expect(result.tablesProcessed).toEqual([]);
+    expect(result.errors.join('\n')).toMatch(/scope_id_form/);
+    expect(rowsOf(sidecar).record).toBeUndefined();
+  });
+
+  it('refuses a source that names no brain (a Pinecone index) into a target that holds the encoded form, before any table', async () => {
+    const to = tempPath('target.sqlite');
+    await brainFile(to, [['t-t', 'user', 'team%2Fbo']], true);
+
+    const result = await MigrationEngine.migrate({ from: { type: 'pinecone', url: NO_SERVER, apiKey: 'key' }, to: { type: 'sqlite', path: to } });
+
+    expect(result.tablesProcessed).toEqual([]);
+    expect(result.errors.join('\n')).toMatch(/scope_id_form/);
+    expect(rowsOf(to)).toEqual({ traces: [{ id: 't-t', scope_id: 'team%2Fbo' }], record: 'encoded' });
   });
 });
 
