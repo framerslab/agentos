@@ -65,8 +65,8 @@ Costs and floors (Anthropic pricing rules):
   **silently ignored** (no error, `cache_creation_input_tokens: 0`). The
   floors AgentOS applies
   ([`model-cache-capabilities.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/model-cache-capabilities.ts)):
-  512 tokens on Fable 5 and 5.1, Mythos 5 and 5.1, Opus 5 and 5.5, and
-  Sonnet 5.5; 1024 on Opus 4.8, Sonnet 5, Sonnet 4.6, Sonnet 4.5 and older
+  512 tokens on Fable 5 and 5.1, Mythos 5 and 5.1, Opus 5 and 5.5, Sonnet
+  5.5 and Haiku 5.5; 1024 on Opus 4.8, Sonnet 5, Sonnet 4.6, Sonnet 4.5 and older
   Sonnets, Opus 4.0 and 4.1, and Opus 3; 2048 on Opus 4.7, Mythos Preview and
   Haiku 3.x; 4096 on Opus 4.5 and 4.6 and Haiku 4.5. Marking a sub-floor
   prefix is safe: it does nothing.
