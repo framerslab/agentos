@@ -203,6 +203,8 @@ import {
   type TraceSnapshot,
   type TurnInputForLearning,
 } from '@framers/agentos';
+import * as packageRoot from '@framers/agentos';
+import * as learningSubpath from '@framers/agentos/cognition/learning/index';
 import {
   ENCODED_SCOPE_ID_FORM,
   SCOPE_ID_FORM_KEY,
@@ -11895,6 +11897,97 @@ describe("two tenants with one user id on a host's one database, and the same ru
   });
 });
 
+describe("the learning layer at the package root, as a product's own turn loop reaches it", () => {
+  it("builds a layer over the root's SqlLearningStore on the host's database, gives a tool call the root's tool context, and the memory_add it makes is filed under the learner's scope, recorded, and taken by forgetUser", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const adapter = await openSqliteAt(learningFile());
+    const memory = await packageRoot.Memory.createWithAdapter(adapter, { brainId: 'loop-brain', selfImprove: false });
+    const store = new packageRoot.SqlLearningStore({ adapter });
+    const layer = packageRoot.createLearningLayer({ store, memoryTools: memory });
+    const learner: packageRoot.LearnerKey = { namespace: 'A', agentKey: 'tutor', userId: '42' };
+    try {
+      const session: packageRoot.ILearnerSession = await layer.forLearner(learner, { sessionId: 's-1', personaId: 'tutor', authoredTraits: TUTOR_PERSONA });
+      const prepared: packageRoot.TurnPreparation = await session.prepareTurn(productTurn());
+      expect(prepared).toMatchObject({ learner: 'bound', mode: 'on' });
+      const { tools, writeTurn } = packageRoot.toolLearningContextFor(session, { learner: 'bound', mode: prepared.mode, scopes: prepared.scopes!, conversationId: 'c-1' });
+      expect(writeTurn).toEqual({ learner: 'bound', namespace: 'A', conversationId: 'c-1' });
+      const context: packageRoot.ToolLearningContext = tools;
+
+      const add = memory.createTools({ includeReflect: false }).find((tool) => tool.name === 'memory_add')!;
+      const answer = await add.execute({ content: 'Canary ROOT-1: the loop files this.' } as never, {
+        gmiId: 'host-loop',
+        personaId: 'tutor',
+        userContext: { userId: '42' },
+        sessionData: { sessionId: 's-1', conversationId: 'c-1', organizationId: 'A', learning: context },
+      } as never);
+      expect(answer).toMatchObject({ success: true });
+      const filed = await adapter.all<{ scope_id: string }>("SELECT scope_id FROM memory_traces WHERE brain_id = 'loop-brain' AND deleted = 0 AND content LIKE '%ROOT-1%'");
+      expect(filed).toEqual([{ scope_id: 'A/42' }]);
+      const writes = (await store.chainRows(chainKeyOf(learner))).filter((row) => row.kind === 'memory_write');
+      expect(writes.map((row) => [row.rowType, row.verdict])).toEqual([
+        ['candidate', 'pending'],
+        ['verdict', 'kept'],
+      ]);
+
+      const report: packageRoot.ForgetReport = await layer.forgetUser('42', { namespace: 'A' });
+      expect(report.stores).toEqual(expect.arrayContaining([expect.objectContaining({ store: 'memory tools facade of brain loop-brain', reached: true })]));
+      expect(await adapter.all("SELECT id FROM memory_traces WHERE brain_id = 'loop-brain' AND deleted = 0 AND content LIKE '%ROOT-1%'")).toEqual([]);
+      expect(await store.chainRows(chainKeyOf(learner))).toEqual([]);
+    } finally {
+      await layer.close();
+      await adapter.close();
+    }
+  });
+
+  it("exports the learning subpath's own values and types at the root, the persona trait map with them, and leaves the module's internals to the subpath", () => {
+    expect(packageRoot.createLearningLayer).toBe(learningSubpath.createLearningLayer);
+    expect(packageRoot.InMemoryLearningStore).toBe(learningSubpath.InMemoryLearningStore);
+    expect(packageRoot.SqlLearningStore).toBe(learningSubpath.SqlLearningStore);
+    expect(packageRoot.toolLearningContextFor).toBe(learningSubpath.toolLearningContextFor);
+    for (const internal of ['Ledger', 'deferLearnerSession', 'ensureLearningSchema', 'resolveLearning']) {
+      expect(internal in packageRoot, internal).toBe(false);
+      expect(internal in learningSubpath, internal).toBe(true);
+    }
+
+    expectTypeOf<packageRoot.ForgetReport>().toEqualTypeOf<learningSubpath.ForgetReport>();
+    expectTypeOf<packageRoot.FreezeScope>().toEqualTypeOf<learningSubpath.FreezeScope>();
+    expectTypeOf<packageRoot.HostLoopName>().toEqualTypeOf<learningSubpath.HostLoopName>();
+    expectTypeOf<packageRoot.ILearnerSession>().toEqualTypeOf<learningSubpath.ILearnerSession>();
+    expectTypeOf<packageRoot.ILearningLayer>().toEqualTypeOf<learningSubpath.ILearningLayer>();
+    expectTypeOf<packageRoot.ImportReport>().toEqualTypeOf<learningSubpath.ImportReport>();
+    expectTypeOf<packageRoot.LearnedStateDocument>().toEqualTypeOf<learningSubpath.LearnedStateDocument>();
+    expectTypeOf<packageRoot.LearnerContext>().toEqualTypeOf<learningSubpath.LearnerContext>();
+    expectTypeOf<packageRoot.LearnerKey>().toEqualTypeOf<learningSubpath.LearnerKey>();
+    expectTypeOf<packageRoot.LearningConfig>().toEqualTypeOf<learningSubpath.LearningConfig>();
+    expectTypeOf<packageRoot.LearningLayerHandle>().toEqualTypeOf<learningSubpath.LearningLayerHandle>();
+    expectTypeOf<packageRoot.LearningLayerOptions>().toEqualTypeOf<learningSubpath.LearningLayerOptions>();
+    expectTypeOf<packageRoot.LearningLoopName>().toEqualTypeOf<learningSubpath.LearningLoopName>();
+    expectTypeOf<packageRoot.LearningMemoryTools>().toEqualTypeOf<learningSubpath.LearningMemoryTools>();
+    expectTypeOf<packageRoot.LearningMode>().toEqualTypeOf<learningSubpath.LearningMode>();
+    expectTypeOf<packageRoot.LearningProfile>().toEqualTypeOf<learningSubpath.LearningProfile>();
+    expectTypeOf<packageRoot.LearningStore>().toEqualTypeOf<learningSubpath.LearningStore>();
+    expectTypeOf<packageRoot.LedgerEntry>().toEqualTypeOf<learningSubpath.LedgerEntry>();
+    expectTypeOf<packageRoot.LoopManifest>().toEqualTypeOf<learningSubpath.LoopManifest>();
+    expectTypeOf<packageRoot.LoopName>().toEqualTypeOf<learningSubpath.LoopName>();
+    expectTypeOf<packageRoot.LoopState>().toEqualTypeOf<learningSubpath.LoopState>();
+    expectTypeOf<packageRoot.NoLearnerReason>().toEqualTypeOf<learningSubpath.NoLearnerReason>();
+    expectTypeOf<packageRoot.OperatorSetInput>().toEqualTypeOf<learningSubpath.OperatorSetInput>();
+    expectTypeOf<packageRoot.ProposalResult>().toEqualTypeOf<learningSubpath.ProposalResult>();
+    expectTypeOf<packageRoot.ResolvedLearning>().toEqualTypeOf<learningSubpath.ResolvedLearning>();
+    expectTypeOf<packageRoot.SelfChangeTurn>().toEqualTypeOf<learningSubpath.SelfChangeTurn>();
+    expectTypeOf<packageRoot.SessionSelfChange>().toEqualTypeOf<learningSubpath.SessionSelfChange>();
+    expectTypeOf<packageRoot.SqlLearningStoreOptions>().toEqualTypeOf<learningSubpath.SqlLearningStoreOptions>();
+    expectTypeOf<packageRoot.ToolLearningContext>().toEqualTypeOf<learningSubpath.ToolLearningContext>();
+    expectTypeOf<packageRoot.TurnInputForLearning>().toEqualTypeOf<learningSubpath.TurnInputForLearning>();
+    expectTypeOf<packageRoot.TurnPreparation>().toEqualTypeOf<learningSubpath.TurnPreparation>();
+    expectTypeOf<packageRoot.TurnScopes>().toEqualTypeOf<learningSubpath.TurnScopes>();
+    expectTypeOf<packageRoot.HexacoTraitValues>().not.toBeAny();
+    expectTypeOf<packageRoot.HexacoTraitValues>().toHaveProperty('honesty');
+    expectTypeOf<packageRoot.TraceSnapshot>().not.toBeAny();
+  });
+});
+
 describe('the docs a host reads about it', () => {
   /** A file of the package, by its path from the package root. */
   const doc = (relative: string) => fs.readFileSync(new URL(`../../../${relative}`, import.meta.url), 'utf8');
@@ -12100,5 +12193,18 @@ describe('the docs a host reads about it', () => {
     expect(doc('docs/memory/RAG_MEMORY_CONFIGURATION.md')).toMatch(
       /The runtime hands its layer this facade and the one `memoryTools` names, so\s+`forgetUser` deletes a user's scopes in their Brains, and keeps the layer's\s+learning store on `storageAdapter` when it has transactions\. Wherever the\s+runtime has a layer, the memory tools pack leaves `memory_reflect` out, even\s+with `includeReflect: true`, and logs a warning saying so; consolidate with\s+`memory\.consolidate\(\)`\./,
     );
+  });
+
+  it("describe the conversation table prefix beside a Brain, the history forgetUser leaves, the flag that turns learning on, and the root's learning exports", () => {
+    const quickstart = doc('docs/getting-started/SQL_STORAGE_QUICKSTART.md');
+    expect(quickstart).toContain('`tablePrefix` (`conversationManagerConfig.tablePrefix` on the runtime)');
+    expect(quickstart).toContain("with a `CONFIGURATION_ERROR` that names `tablePrefix`, before it changes anything");
+    expect(quickstart).toContain('a Brain opened later beside the unprefixed tables finds a `conversations` table that is not its own, and its conversation export and import fail there');
+    expect(doc('docs/memory/CLIENT_SIDE_STORAGE.md')).toContain('the runtime refuses such an adapter without a prefix, naming the option');
+    const guide = doc('docs/GMI.md');
+    expect(guide).toContain("a conversation's own history (the full runtime's conversation store and a `gmi()` session's history keep its messages until the host deletes them");
+    expect(guide).toContain('It is off unless the host turns it on');
+    expect(guide).toContain('The root exports the layer, both learning stores (`InMemoryLearningStore`, `SqlLearningStore`), `toolLearningContextFor`');
+    expect(doc('docs/memory/MEMORY_STORAGE.md')).toContain('exported with its `TraceSnapshot` type from the package root and `@framers/agentos/cognition/memory`');
   });
 });
