@@ -108,6 +108,24 @@ describe('the kit', () => {
 });
 
 describe('event handles', () => {
+  it('write the fields errorFields gives for a long class name and constant code, as a failover line does', () => {
+    const lines: Array<Record<string, unknown>> = [];
+    setLogger(pino({ base: undefined, level: 'debug' }, { write(line: string) { lines.push(JSON.parse(line)); } }));
+    cleanup.push(() => resetLoggerFactory());
+    lazyLogger('fixture').warn('llm.fallback_fired', { api: 'generateText', primaryProvider: 'openrouter', fallbackProvider: 'openai', attempt: 1, ...errorFields(named('OpenRouterProviderError', 'STREAM_PARSING_ERROR')) });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ event: 'llm.fallback_fired', type: 'OpenRouterProviderError', code: 'STREAM_PARSING_ERROR' });
+  });
+
+  it('refuse a long value in a type or code field that is not a class name or a constant code', () => {
+    setLogger(pino({ base: undefined, level: 'debug' }, { write: () => undefined }));
+    cleanup.push(() => resetLoggerFactory());
+    const handle = lazyLogger('fixture');
+    for (const fields of [{ type: 'abcdef0123456789abcdef0123' }, { code: 'abcdef0123456789abcdef0123' }, { type: 'STREAM_PARSING_ERROR_CODES', code: 'OpenRouterProviderError' }, { code: 'SK_FIXTURE_NOT_A_KEY' }, { type: 'SkBearerTokenExceptionError' }]) {
+      expect(() => handle.warn('llm.stream_failed', { provider: 'openai', ...fields }), JSON.stringify(fields)).toThrow(LogValidationError);
+    }
+  });
+
   it('refuse an event AgentOS does not declare, as a JavaScript caller could write one', () => {
     const lines: Array<Record<string, unknown>> = [];
     setLogger(pino({ base: undefined, level: 'debug' }, { write(line: string) { lines.push(JSON.parse(line)); } }));
