@@ -66,3 +66,18 @@ export function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
+
+/**
+ * The most requests one call may send, a first and its retries together: the
+ * call's own `maxAttempts` when it names one, else the provider's configured
+ * count. Key hops inside an attempt are not counted here.
+ *
+ * @param requested The call's `ModelCompletionOptions.maxAttempts`.
+ * @param configured The provider's own count, used when `requested` is left out.
+ * @throws {RangeError} When `requested` is not a whole number of 1 or more; nothing is sent.
+ */
+export function resolveAttemptCount(requested: number | undefined, configured: number): number {
+  if (requested === undefined) return configured;
+  if (!Number.isInteger(requested) || requested < 1) throw new RangeError('maxAttempts is a whole number, 1 or more');
+  return requested;
+}

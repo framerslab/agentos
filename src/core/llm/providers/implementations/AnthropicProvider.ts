@@ -57,7 +57,7 @@ import {
   type AnthropicUsageForCost,
 } from './anthropicCatalog.js';
 import { resolveAnthropicEffort } from '../model-effort.js';
-import { computeRetryBackoffMs } from './retry-backoff.js';
+import { computeRetryBackoffMs, resolveAttemptCount } from './retry-backoff.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
 import { redactUrlSecrets } from '../url-secrets';
@@ -736,6 +736,7 @@ export class AnthropicProvider implements IProvider {
         payload,
         options.requestTimeout,
         options.abortSignal,
+        options.maxAttempts,
       );
       this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
       return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
@@ -755,6 +756,7 @@ export class AnthropicProvider implements IProvider {
       options.requestTimeout,
       options.abortSignal,
       structuredOutputName,
+      options.maxAttempts,
     );
     this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
     return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
@@ -807,8 +809,9 @@ export class AnthropicProvider implements IProvider {
   /**
    * Runs a `/v1/messages` request over the SSE transport and accumulates the
    * event stream into a complete {@link AnthropicMessagesResponse}, retrying
-   * retryable failures (idle stalls, 429s, 5xx, network errors) up to
-   * `config.maxRetries` attempts with exponential backoff.
+   * retryable failures (idle stalls, 429s, 5xx, network errors) up to the
+   * call's `maxAttempts`, or `config.maxRetries` when it names none, with
+   * exponential backoff.
    *
    * @param payload Request body (must include `stream: true`).
    * @param requestTimeoutOverride Per-call override for the CONNECTION
@@ -819,8 +822,11 @@ export class AnthropicProvider implements IProvider {
    *   body read included, and once it has fired no further attempt is sent.
    * @param schemaToolName The forced schema tool's name when the payload sent
    *   the schema as that tool ({@link accumulateMessagesStream}).
+   * @param maxAttempts The call's attempt count, a first and its retries
+   *   together; key hops are not counted.
    * @throws {AnthropicProviderError} `REQUEST_ABORTED` when the caller's signal
    *   ends the request.
+   * @throws {RangeError} When `maxAttempts` is not a whole number of 1 or more.
    * @private
    */
   private async streamMessagesToResponse(
@@ -828,13 +834,14 @@ export class AnthropicProvider implements IProvider {
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
     schemaToolName?: string,
+    maxAttempts?: number,
   ): Promise<AnthropicMessagesResponse> {
     let lastError: AnthropicProviderError = new AnthropicProviderError(
       'Streaming completion failed after all retries.',
       'MAX_RETRIES_REACHED',
     );
 
-    const attempts = Math.max(1, this.config.maxRetries ?? 1);
+    const attempts = resolveAttemptCount(maxAttempts, Math.max(1, this.config.maxRetries ?? 1));
     // Key hops this request has made: a key-scoped failure hops to the next
     // usable key at once without spending a transient attempt, at most once
     // per key of the pool.
@@ -3037,9 +3044,12 @@ export class AnthropicProvider implements IProvider {
    * @param {number} [requestTimeoutOverride] - Per-call timeout in ms, over the configured default.
    * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, and once
    *   it has fired no further attempt is sent.
+   * @param {number} [maxAttempts] - The call's attempt count, a first and its retries together, over
+   *   `config.maxRetries`; key hops are not counted, and no backoff is waited after the last attempt.
    * @returns {Promise<T>} Parsed JSON response.
    * @throws {AnthropicProviderError} On authentication, validation, rate-limit, or network errors;
    *   `REQUEST_ABORTED` when the caller's signal ends the request.
+   * @throws {RangeError} When `maxAttempts` is not a whole number of 1 or more.
    * @private
    */
   private async makeApiRequest<T>(
@@ -3048,8 +3058,10 @@ export class AnthropicProvider implements IProvider {
     body: Record<string, unknown>,
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
+    maxAttempts?: number,
   ): Promise<T> {
     const url = `${this.config.baseURL}${endpoint}`;
+    const attempts = resolveAttemptCount(maxAttempts, this.config.maxRetries!);
 
     // Per-call request-timeout override. Large-output callers (e.g. codegen
     // structured-output that emits long TSX) pass a longer requestTimeout so
@@ -3069,7 +3081,7 @@ export class AnthropicProvider implements IProvider {
     // usable key at once (at most one hop per key) without spending a transient
     // attempt; the attempt counter bounds the 429, 5xx and network retries.
     let keyHops = 0;
-    for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       if (abortSignal?.aborted) {
         throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
       }
@@ -3150,16 +3162,18 @@ export class AnthropicProvider implements IProvider {
           if (response.status === 429) {
             lastError = new AnthropicProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', 429, errorType, errorData);
             if (!(this.keyPool && this.keyPool.size > 1)) this.keyPool?.markExhausted(apiKey);
-            // Retry-After is authoritative when present; otherwise jittered backoff.
-            const waitMs = serverRetryAfterMs ?? computeRetryBackoffMs(attempt);
-            await new Promise(resolve => setTimeout(resolve, waitMs));
+            // Retry-After is authoritative when present; otherwise jittered backoff. No wait after the last attempt.
+            if (attempt < attempts - 1) {
+              const waitMs = serverRetryAfterMs ?? computeRetryBackoffMs(attempt);
+              await new Promise(resolve => setTimeout(resolve, waitMs));
+            }
             continue;
           }
 
           // Retryable server errors (5xx)
           if (response.status >= 500) {
             lastError = new AnthropicProviderError(errorMessage, 'API_SERVER_ERROR', response.status, errorType, errorData);
-            await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt)));
+            if (attempt < attempts - 1) await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt)));
             continue;
           }
 
@@ -3223,9 +3237,9 @@ export class AnthropicProvider implements IProvider {
           );
         }
 
-        if (attempt === this.config.maxRetries! - 1) break;
+        if (attempt === attempts - 1) break;
         const delay = computeRetryBackoffMs(attempt);
-        console.warn(`[AnthropicProvider] Retry ${attempt + 1}/${this.config.maxRetries! - 1} in ${(delay / 1000).toFixed(1)}s`);
+        console.warn(`[AnthropicProvider] Retry ${attempt + 1}/${attempts - 1} in ${(delay / 1000).toFixed(1)}s`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
