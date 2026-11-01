@@ -42,6 +42,16 @@ function personaIdFor(name: string): string {
 }
 
 /**
+ * The persona id of a named agent, which is the same at every build (the slug of its name); `undefined` for an agent
+ * with no name, whose persona id is new at each build. `gmi()` names the agent's learners by it when `learning.agentKey`
+ * is unset.
+ */
+export function stablePersonaIdOf(opts: Pick<AgentOptions, 'name'>): string | undefined {
+  const name = opts.name?.trim();
+  return name ? personaIdFor(name) : undefined;
+}
+
+/**
  * The output cap each model call of an agent built from these options is sent with, as `agent()` forwards it:
  * `maxTokens`, else `controls.maxTotalTokens`; undefined when neither is set. A launch's one-call floor counts a
  * member's call with it.
@@ -90,7 +100,7 @@ export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedC
   const completion = completionOptionsOf(opts);
   const presets: SentimentTrackingConfig['presets'] = cognition.metaprompts === 'all' ? ['all'] : cognition.metaprompts || [];
   const persona: IPersonaDefinition = {
-    id: opts.name?.trim() ? personaIdFor(opts.name.trim()) : `agent-${randomUUID()}`,
+    id: stablePersonaIdOf(opts) ?? `agent-${randomUUID()}`,
     name,
     description: firstLine ?? name,
     version: '1.0.0',

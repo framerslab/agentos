@@ -17,11 +17,16 @@
  * `memory.consolidation.enabled` is true. The build embeds one test text through
  * the embedding model it sets up, so a model that cannot answer, or answers with
  * another size than memory expects, fails the build instead of leaving memory empty.
+ *
+ * With `memory.store` the manager files into a Brain there and keeps an archive over the Brain's adapter; the caller
+ * opens the Brain ({@link openAgentMemoryBrain}) and closes it once the manager has closed.
  */
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
 import type { CognitiveMemoryConfig, HexacoTraits, PADState } from '../../cognition/memory/core/config.js';
 import type { CognitiveMechanismsConfig } from '../../cognition/memory/mechanisms/types.js';
+import { SqlStorageMemoryArchive } from '../../cognition/memory/archive/SqlStorageMemoryArchive.js';
 import { KnowledgeGraph } from '../../cognition/memory/retrieval/graph/knowledge/KnowledgeGraph.js';
+import { Brain } from '../../cognition/memory/retrieval/store/Brain.js';
 import { EmbeddingManager } from '../../cognition/rag/EmbeddingManager.js';
 import { InMemoryVectorStore } from '../../cognition/rag/vector_stores/InMemoryVectorStore.js';
 import { InMemoryWorkingMemory } from '../../cognition/substrate/memory/InMemoryWorkingMemory.js';
@@ -216,6 +221,71 @@ export function assertEmbeddingConfig(memory: MemoryConfig): void {
   checkedDimension(memory);
 }
 
+/**
+ * Checks `memory.store` at construction: `{ path }` with a non-blank path, or `{ adapter, brainId? }` with a storage
+ * adapter and a non-blank brain id when it names one; the learning option on; and `learning.agentKey`.
+ *
+ * @param store - `memory.store` as the agent's options give it.
+ * @param learningOn - Whether the agent's `learning` option is on.
+ * @param agentKey - `learning.agentKey`.
+ * @throws {Error} Naming the option.
+ */
+export function assertMemoryStore(store: unknown, learningOn: boolean, agentKey: string | null | undefined): void {
+  const isObject = !!store && typeof store === 'object';
+  const hasPath = isObject && 'path' in (store as object);
+  const hasAdapter = isObject && 'adapter' in (store as object);
+  if (hasPath === hasAdapter) throw new Error('gmi(): memory.store must be { path } or { adapter, brainId? }.');
+  if (hasPath) {
+    const { path: filePath } = store as { path: unknown };
+    if (typeof filePath !== 'string' || filePath.trim() === '') throw new Error('gmi(): memory.store.path must be a non-blank file path.');
+  } else {
+    const { adapter, brainId } = store as { adapter: unknown; brainId?: unknown };
+    const methods = ['run', 'get', 'all', 'exec', 'transaction'];
+    if (!adapter || typeof adapter !== 'object' || methods.some((name) => typeof (adapter as Record<string, unknown>)[name] !== 'function')) {
+      throw new Error('gmi(): memory.store.adapter must be a StorageAdapter of @framers/sql-storage-adapter.');
+    }
+    if (brainId !== undefined && (typeof brainId !== 'string' || brainId.trim() === '')) {
+      throw new Error('gmi(): memory.store.brainId must be a non-blank string.');
+    }
+  }
+  if (!learningOn) {
+    throw new Error("gmi(): memory.store needs the learning option on; for durable memory without learning, set learning: { agentKey, mode: 'off' }.");
+  }
+  if (typeof agentKey !== 'string' || agentKey.trim() === '') {
+    throw new Error(
+      "gmi(): memory.store needs learning.agentKey, the stable id of the agent's brain and its learners; two agents on one store would otherwise be one agent to the learning layer.",
+    );
+  }
+}
+
+/** The Brain behind `memory.store`, and how to let go of it. */
+export interface AgentMemoryBrain {
+  brain: Brain;
+  /** Closes a Brain agentos opened on a file; a host's adapter is left open. */
+  close(): Promise<void>;
+}
+
+/**
+ * Opens the Brain behind `memory.store`: on a SQLite file, a Brain agentos closes; on a host's adapter, one it never
+ * closes, since closing a Brain closes its adapter. The brain id is the store's `brainId`, else the agent's key.
+ *
+ * @param store - `memory.store`, checked by {@link assertMemoryStore}.
+ * @param agentKey - `learning.agentKey`.
+ * @throws {Error} Naming `memory.store`, when the store does not open.
+ */
+export async function openAgentMemoryBrain(store: NonNullable<MemoryConfig['store']>, agentKey: string): Promise<AgentMemoryBrain> {
+  try {
+    if ('path' in store) {
+      const brain = await Brain.openSqlite(store.path, { brainId: agentKey });
+      return { brain, close: () => brain.close() };
+    }
+    const brain = await Brain.openWithAdapter(store.adapter, { brainId: store.brainId?.trim() || agentKey });
+    return { brain, close: async () => undefined };
+  } catch (error) {
+    throw errorWithCause(`gmi(): memory.store did not open: ${messageOf(error)}`, error);
+  }
+}
+
 export interface AgentCognitiveMemoryOptions {
   /** The agent's persona: its id is the memory's owner (`agentId`), its traits shape encoding. */
   persona: IPersonaDefinition;
@@ -227,6 +297,12 @@ export interface AgentCognitiveMemoryOptions {
    * (tests, and hosts that own one). The caller keeps ownership: `close()` does not shut it down.
    */
   embeddingManager?: IEmbeddingManager;
+  /**
+   * The Brain memory files into (`memory.store`, from {@link openAgentMemoryBrain}): the memory hydrates from it and
+   * writes each trace to it, and an archive over its adapter keeps a gist's original. The caller closes it, after the
+   * memory's `close()`.
+   */
+  brain?: Brain;
 }
 
 export interface AgentCognitiveMemory {
@@ -327,6 +403,10 @@ async function buildEmbeddingManager(memory: MemoryConfig): Promise<{ manager: I
  *   caller passes), or when the manager fails to initialise.
  */
 export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptions): Promise<AgentCognitiveMemory> {
+  // The archive shares the Brain's adapter and its brain id, as a Brain-backed archive does. Its tables are made first,
+  // so a store that cannot take them fails the build before anything else starts.
+  const archive = opts.brain ? new SqlStorageMemoryArchive(opts.brain.adapter, opts.brain.features, opts.brain.brainId) : undefined;
+  await archive?.initialize();
   const owned = opts.embeddingManager === undefined;
   const embedding = opts.embeddingManager
     ? { manager: opts.embeddingManager, dimension: await opts.embeddingManager.getEmbeddingDimension() }
@@ -370,6 +450,7 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     graph: { backend: 'knowledge-graph' },
     ...(opts.mechanisms ? { cognitiveMechanisms: opts.mechanisms } : {}),
     consolidation: { enabled: consolidationEnabled },
+    ...(opts.brain ? { brain: opts.brain, archive } : {}),
     ...(opts.memory.persistAccessState === false ? { persistAccessState: false } : {}),
   };
   const manager = new CognitiveMemoryManager();

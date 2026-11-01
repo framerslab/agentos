@@ -10,6 +10,7 @@
 import type { AdaptableToolInput } from './runtime/toolAdapter.js';
 import type { FallbackProviderEntry, FallbackSignal } from './generateText.js';
 import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
 
 // ---------------------------------------------------------------------------
 // Scalar union literals
@@ -110,6 +111,17 @@ export interface MemoryConfig {
    * dimension agentos does not know.
    */
   embedding?: { provider: string; model?: string; dimension?: number };
+  /**
+   * Durable memory on the GMI path (`gmi()`, `agent({ runtime: 'gmi' })`): a SQLite file agentos opens, or a host's
+   * storage adapter, which agentos never closes. The agent's memory files into a Brain there, under the brain id
+   * `brainId` or `learning.agentKey`, an archive over the same adapter keeps a gist's original, and the agent's
+   * learning store runs on the same adapter. A file is closed by `agent.close()` and opened again by the next session
+   * or host call that needs it. One process serves a SQLite file; several processes share a Postgres database, each
+   * through an adapter of its own.
+   * Needs the learning option on and `learning.agentKey`, which names the agent's brain and its learners; for durable
+   * memory without learning, set `learning: { agentKey, mode: 'off' }`. Without it, memory lives in the process.
+   */
+  store?: { path: string } | { adapter: StorageAdapter; brainId?: string };
   /**
    * On the GMI path, whether the memory manager keeps each trace's stability,
    * access count, reinforcement interval and next reinforcement time across a
