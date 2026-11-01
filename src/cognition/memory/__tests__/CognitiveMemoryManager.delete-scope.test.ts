@@ -20,7 +20,7 @@
  * because its id names another trace, comes with no copy, so a delete of the trace the brain files it as leaves none
  * of its words.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -226,6 +226,24 @@ describe('deleting traces other rows name', () => {
 
     expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 2, graph: 'reached' });
     expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 0, graph: 'reached' });
+  });
+});
+
+describe('a knowledge graph that fails to delete the copies', () => {
+  it('fails the delete with the trace rows kept, so a later call deletes the traces and their copies', async () => {
+    const { manager, brain, graph: knowledgeGraph } = await managerOver(tempFile(), (brainOf) => new SqlKnowledgeGraph(brainOf));
+    const walnuts = await manager.encode('Ana is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
+    const offline = vi.spyOn(knowledgeGraph, 'deleteMemories').mockRejectedValue(new Error('graph offline'));
+
+    await expect(manager.deleteScope('user', 'ana')).rejects.toThrow(/graph offline/);
+    // The copy holds the trace's words, so the row a later call finds it by stays.
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([{ id: walnuts.id }]);
+    expect((await copiesOf(knowledgeGraph)).map((copy) => copy.text)).toEqual(['Ana is allergic to walnuts.']);
+
+    offline.mockRestore();
+    expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 1, graph: 'reached' });
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([]);
+    expect(await copiesOf(knowledgeGraph)).toEqual([]);
   });
 });
 

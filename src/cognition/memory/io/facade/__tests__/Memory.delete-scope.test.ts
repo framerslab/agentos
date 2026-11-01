@@ -14,7 +14,7 @@
  * real SQLite facade, and on Postgres (when `AGENTOS_TEST_POSTGRES_URL` is set, as CI's Test & Lint job sets it) a
  * restore re-indexes the restored row alone, and a trace deleted for good comes back under the encoded id.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -225,6 +225,20 @@ describe('Memory.deleteTraces and restoreTrace', () => {
     await memory.restoreTrace(kept.id, before!);
     expect(await contents(brain)).toEqual(['Ana keeps bees.']);
     await expect(memory.restoreTrace('other-id', before!)).rejects.toThrow(/snapshot of trace/);
+  });
+
+  it('fails with the rows kept when the knowledge graph cannot delete the copies, so a later call deletes them', async () => {
+    const { memory, brain } = await facade();
+    const gone = await memory.remember('Ana is allergic to walnuts.', { scope: 'user', scopeId: 'ana' });
+    const graph = (memory as unknown as { _knowledgeGraph: { deleteMemories: (input: { traceIds?: readonly string[] }) => Promise<number> } })
+      ._knowledgeGraph;
+    const offline = vi.spyOn(graph, 'deleteMemories').mockRejectedValueOnce(new Error('graph offline'));
+
+    await expect(memory.deleteTraces([gone.id])).rejects.toThrow(/graph offline/);
+    expect(await contents(brain)).toEqual(['Ana is allergic to walnuts.']);
+    await expect(memory.deleteScope('user', 'ana')).resolves.toEqual({ deleted: 1 });
+    expect(await brain.all('SELECT id FROM memory_traces')).toEqual([]);
+    expect(offline.mock.calls[1]?.[0]).toEqual({ traceIds: [gone.id] });
   });
 
   it("keeps the vector of a trace it restores to the content its row holds, and drops it for other content", async () => {
