@@ -742,9 +742,9 @@ describe('AgentOS tool-result continuations', () => {
      * Runs the user's turn on the host's GMI and waits for the pause it saves for READ_CALL: a turn saves its pause
      * after it streams the call.
      */
-    async function pauseOnRead(host: ReturnType<typeof hostToolGmi>, request: Partial<AgentOSInput> = {}) {
+    async function pauseOnRead(host: ReturnType<typeof hostToolGmi>, turnInput: Partial<AgentOSInput> = {}) {
       sessionGmi = host;
-      const responses = await collect(agentos.processRequest({ ...input, ...request }));
+      const responses = await collect(agentos.processRequest({ ...input, ...turnInput }));
       const request = responses.find((r) => isActionableToolCallRequestChunk(r));
       expect(request?.toolCalls).toEqual([READ_CALL]);
       await vi.waitFor(() => expect(context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY)).toBeDefined());
