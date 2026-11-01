@@ -323,7 +323,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * Provider-specific top-level request fields, forwarded to {@link GenerateTextOptions.customModelParams} and
    * spread onto every attempt's request body, a validation retry included, with the same rules as there: a fallback
    * leg gets them minus the fields only another vendor accepts (OpenRouter's routing controls, Gemini's request
-   * fields), and keys collide last-wins with the typed fields at the provider layer. A passthrough `tool_choice`, `tools` or `response_format` here can change the
+   * fields, OpenAI's `response_format`, Anthropic's `output_config`), and keys collide last-wins with the typed fields at the provider layer. A passthrough `tool_choice`, `tools` or `response_format` here can change the
    * structured-output route this call takes ({@link generateObject}).
    */
   customModelParams?: Record<string, unknown>;

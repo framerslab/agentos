@@ -167,4 +167,21 @@ describe('native providers strip OpenRouter-only params from their payloads', ()
     expect(payload.transforms).toBeUndefined();
     expect(payload.metadata).toEqual({ user_id: 'u1' });
   });
+
+  it("GeminiProvider sends neither OpenAI's response_format nor Anthropic's output_config", () => {
+    const payload = (gemini as any).buildRequestPayload('gemini-2.5-flash', MESSAGES, {
+      customModelParams: { response_format: { type: 'json_object' }, output_config: { effort: 'low' }, metadata: { user_id: 'u1' } },
+    }) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('response_format');
+    expect(payload).not.toHaveProperty('output_config');
+    expect(payload.metadata).toEqual({ user_id: 'u1' });
+  });
+
+  it("OpenAIProvider's /responses builder sends no output_config", () => {
+    const payload = (openai as any).buildResponsesPayload('gpt-5.5', MESSAGES, {
+      customModelParams: { output_config: { effort: 'low' }, metadata: { user_id: 'u1' } },
+    }) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('output_config');
+    expect(payload.metadata).toEqual({ user_id: 'u1' });
+  });
 });

@@ -33,7 +33,7 @@ import {
   ProviderEmbeddingResponse,
   CacheDiagnostics,
 } from '../IProvider';
-import { stripForeignVendorParams } from '../openrouter-only-params';
+import { stripParamsForAnthropic } from '../openrouter-only-params';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
@@ -2006,7 +2006,7 @@ export class AnthropicProvider implements IProvider {
     let customToolsOverride = false;
     let customToolChoiceOverride = false;
     {
-      const passthrough = stripForeignVendorParams(options.customModelParams);
+      const passthrough = stripParamsForAnthropic(options.customModelParams);
       if (passthrough) {
         customSystemOverride = Object.prototype.hasOwnProperty.call(passthrough, 'system');
         customMessagesOverride = Object.prototype.hasOwnProperty.call(passthrough, 'messages');

@@ -14,7 +14,7 @@ import type { ZodType, ZodError } from 'zod';
 
 import { streamText } from './streamText.js';
 import type { StreamPart, StreamTextResult } from './streamText.js';
-import type { Message, TokenUsage } from './generateText.js';
+import type { GenerateTextOptions, Message, TokenUsage } from './generateText.js';
 import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
@@ -192,6 +192,20 @@ export interface StreamObjectOptions<T extends ZodType, K extends string = strin
 
   /** Called after each request the stream's call sent, so a caller can settle the attempts it paid for. */
   onAttempt?: (outcome: AttemptOutcome) => void;
+
+  /**
+   * OpenAI service tier, forwarded to {@link GenerateTextOptions.serviceTier} and sent as `service_tier` verbatim on
+   * the streamed request. No default: OpenAI then serves the request at the project's configured tier. Other
+   * providers ignore it.
+   */
+  serviceTier?: GenerateTextOptions['serviceTier'];
+
+  /**
+   * Provider-specific top-level request fields, forwarded to {@link GenerateTextOptions.customModelParams} and
+   * spread onto the streamed request body with the same rules as there: a fallback leg gets them minus the fields
+   * only another vendor accepts.
+   */
+  customModelParams?: Record<string, unknown>;
 }
 
 /**
@@ -824,6 +838,8 @@ export function streamObject<T extends ZodType, K extends string = never>(
           ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
           ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
           ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
+          ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+          ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
           __onUsageReport: () => {
             usageReported = true;
           },
