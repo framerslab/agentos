@@ -142,6 +142,15 @@
  * GMI's acquisition gives it opens at the GMI's first turn, the layer asked once, and names the session's own form until
  * then; a layer that never answers or answers with no session leaves each turn without a learner, within its budgets.
  * The manifest reports the approval gate and the tool-policy switch as the configuration sets them.
+ *
+ * Two tenants with one user id on one database and one Brain (a SQLite file, and CI's Postgres), on the full runtime:
+ * what tenant A's user 42 said, what A's agent stored and what A's compaction filed reach A's next session and no request
+ * of B's 42, whose search and by-id tool calls find none of it; `forgetUser` for A's 42 deletes all of it with its copies
+ * and keeps B's; a JSON export reads the same in a fresh Brain; and anonymous sessions file and search under their own
+ * forms, one session id under two organizations apart. The runtime's conversations go under
+ * `conversationManagerConfig.tablePrefix` beside a Brain, and without one it refuses such a database, naming the option.
+ * With the learning flag false, null or unset, each runtime files and reads under the plain ids, keeps `memory_reflect`,
+ * tells a tool nothing of a turn's learning and makes no table of the layer.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -11243,6 +11252,646 @@ describe("the full runtime's own learning layer: its store on the host's storage
     expectTypeOf<NonNullable<IAgentOS['getLearningLayer']>>().returns.toEqualTypeOf<ILearningLayer | undefined>();
     expectTypeOf<undefined>().toMatchTypeOf<IAgentOS['getLearningLayer']>();
     expectTypeOf<AgentOS['getLearningLayer']>().returns.toEqualTypeOf<ILearningLayer | undefined>();
+  });
+});
+
+describe("two tenants with one user id on a host's one database, and the same runtime with the learning flag off", () => {
+  let keys = 0;
+  const key = () => `k-qa-tenants-${++keys}`;
+  const TUTOR_DEF = { id: 'tutor', name: 'Tutor', description: 'A tutor.', version: '1.0.0', baseSystemPrompt: 'You teach networking.', personalityTraits: TUTOR_PERSONA };
+  /** A request's own long-term memory scopes: the user's and the persona's on, beside the conversation's. */
+  const SCOPES = { memoryControl: { longTermMemory: { scopes: { user: true, persona: true } } } };
+  const PREFIX = 'agentos_';
+  /** This run's own mark, in the names of the schemas its Postgres cases make and drop. */
+  const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const schemas: string[] = [];
+  const runtimes: AgentOS[] = [];
+  const databases: StorageAdapter[] = [];
+
+  /** The two databases a host runs the runtime on: a SQLite file, and on CI's Postgres a new schema of this run's own. */
+  const ENGINES = [
+    { name: 'a SQLite file', available: true, open: (): Promise<StorageAdapter> => openSqliteAt(learningFile()) },
+    {
+      name: "CI's Postgres",
+      available: Boolean(POSTGRES_URL),
+      open: async (): Promise<StorageAdapter> => {
+        const segment = `qa_tenants_${run}_${schemas.length}`;
+        schemas.push(segment);
+        const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, segment, max: 5, typeParsers: { int8: 'number' } });
+        await adapter.open();
+        return adapter;
+      },
+    },
+  ];
+
+  afterEach(async () => {
+    for (const os of runtimes.splice(0)) await os.shutdown().catch(() => undefined);
+    for (const built of managers.splice(0)) await built.shutdown().catch(() => undefined);
+    for (const adapter of databases.splice(0)) await adapter.close().catch(() => undefined);
+  });
+  afterAll(async () => {
+    if (schemas.length === 0) return;
+    const admin = createPostgresAdapter({ connectionString: POSTGRES_URL! });
+    await admin.open();
+    try {
+      for (const segment of schemas) await admin.exec(`DROP SCHEMA IF EXISTS "${segment}" CASCADE`);
+    } finally {
+      await admin.close();
+    }
+  });
+
+  const quiet = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  };
+  async function database(engine: (typeof ENGINES)[number]): Promise<StorageAdapter> {
+    const adapter = await engine.open();
+    databases.push(adapter);
+    return adapter;
+  }
+
+  /** The compactor's answer: the summary and the facts it keeps. */
+  const compaction = (summary: string, facts: string[] = []) =>
+    reply.text(JSON.stringify({ summary_markdown: summary, memory_json: { facts: facts.map((text) => ({ text })) } }));
+
+  /**
+   * The stub provider of a full runtime that compacts every turn: a call of the rolling-summary compactor (not streamed,
+   * its prompt names `summary_markdown`) takes the next of `compactions`, and with none left the turn files no summary;
+   * a streamed call takes the next of `replies`, or `Noted.`.
+   */
+  function tenantProvider(apiKey: string) {
+    const played = script('openai', apiKey, { whole: true });
+    const compactions: Array<ReturnType<typeof reply.text>> = [];
+    const replies: unknown[] = [];
+    let last: (typeof played.seen)[number] | undefined;
+    const record = played.seen.push.bind(played.seen);
+    played.seen.push = (...calls) => {
+      last = calls[calls.length - 1];
+      return record(...calls);
+    };
+    (played as { replies: unknown }).replies = {
+      shift: () => {
+        if (!last) return undefined;
+        if (last.streamed) return replies.shift() ?? reply.text('Noted.');
+        return JSON.stringify(last.messages).includes('summary_markdown') ? compactions.shift() : undefined;
+      },
+    };
+    const mainCalls = () => played.seen.filter((call) => call.streamed);
+    return { played, compactions, replies, mainCalls };
+  }
+  /** All the text a list of model calls was sent. */
+  const sentIn = (calls: Array<{ messages: unknown }>) => JSON.stringify(calls.map((call) => call.messages));
+  /** The answer a model call was given for its tool call `id`. */
+  const answerTo = (call: { messages: Array<{ role: string; content: unknown; tool_call_id?: string | null }> } | undefined, id: string): string =>
+    (call?.messages ?? []).filter((message) => message.role === 'tool' && message.tool_call_id === id).map((message) => String(message.content)).join('\n');
+
+  /**
+   * The full runtime from the package root on one database: the learning store, the conversations under a table prefix,
+   * and on one brain, `tutor`, each GMI's memory manager and the standalone facade with its tools, its long-term
+   * retriever and its rolling-summary sink. It compacts every turn: one message is enough and none is kept back.
+   */
+  async function oneBrain(
+    db: StorageAdapter,
+    apiKey: string,
+    options: { flag?: Record<string, unknown>; tablePrefix?: string | null; selfImprove?: boolean; facadeOver?: () => Promise<Memory> } = {},
+  ): Promise<{ os: AgentOS; brain: Brain; facade: Memory }> {
+    // Neither Brain is closed by a case: closing a Brain closes the adapter, which the case's afterEach closes last.
+    const brain = await Brain.openWithAdapter(db, { brainId: 'tutor' });
+    const shared = await manager({ brain, knowledgeGraph: new SqlKnowledgeGraph(brain) });
+    const facade = options.facadeOver ? await options.facadeOver() : await Memory.createWithAdapter(db, { brainId: 'tutor', selfImprove: options.selfImprove ?? false });
+    const tablePrefix = options.tablePrefix === undefined ? PREFIX : options.tablePrefix;
+    const os = await AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey } }] },
+      turnPlanning: { enabled: false },
+      personas: [TUTOR_DEF],
+      storageAdapter: db,
+      ...(tablePrefix === null ? {} : { conversationManagerConfig: { tablePrefix } }),
+      gmiManagerConfig: { ...(await createTestAgentOSConfig()).gmiManagerConfig, cognitiveMemoryFactory: () => shared.forSession() },
+      standaloneMemory: { memory: facade, tools: true, longTermRetriever: true, rollingSummarySink: true },
+      orchestratorConfig: {
+        maxToolCallIterations: 5,
+        defaultAgentTurnTimeoutMs: 120000,
+        enableConversationalPersistence: true,
+        rollingSummaryCompactionConfig: {
+          enabled: true,
+          modelId: 'gpt-4o-mini',
+          cooldownMs: 0,
+          headMessagesToKeep: 0,
+          tailMessagesToKeep: 0,
+          minMessagesToSummarize: 1,
+          maxMessagesToSummarizePerPass: 48,
+          maxOutputTokens: 900,
+        },
+      },
+      ...(options.flag ?? { learning: true }),
+    } as never);
+    runtimes.push(os);
+    return { os, brain, facade };
+  }
+  /** The full runtime on `db` with no memory of its own: only its conversations and, with the flag on, its learning store. */
+  async function plainRuntime(db: StorageAdapter, apiKey: string, config: Record<string, unknown> = {}): Promise<AgentOS> {
+    const os = await AgentOS.create({
+      modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey } }] },
+      turnPlanning: { enabled: false },
+      personas: [TUTOR_DEF],
+      storageAdapter: db,
+      ...config,
+    } as never);
+    runtimes.push(os);
+    return os;
+  }
+  /** Shuts a runtime down, as a process that exits does. */
+  async function stopRuntime(os: AgentOS): Promise<void> {
+    const at = runtimes.indexOf(os);
+    if (at >= 0) runtimes.splice(at, 1);
+    await os.shutdown();
+  }
+  /** One turn of the full runtime, with the request's user and persona scopes on; an error chunk fails it. */
+  async function turn(os: AgentOS, input: Record<string, unknown>): Promise<void> {
+    for await (const chunk of os.processRequest({ textInput: 'Hello.', selectedPersonaId: 'tutor', ...SCOPES, ...input } as never)) {
+      if ((chunk as { type?: unknown }).type === 'error') throw new Error(`the turn failed: ${JSON.stringify(chunk)}`);
+    }
+  }
+
+  /** The live traces of brain `tutor`, as a host's own reader of its database sees them. */
+  const liveOf = (db: StorageAdapter) =>
+    db.all<{ id: string; scope: string; scope_id: string; content: string }>("SELECT id, scope, scope_id, content FROM memory_traces WHERE brain_id = 'tutor' AND deleted = 0");
+  /** The scope ids of the live traces that hold `canary`, each once, in order. */
+  const scopeIdsOf = async (db: StorageAdapter, canary: string): Promise<string[]> =>
+    [...new Set((await liveOf(db)).filter((row) => row.content.includes(canary)).map((row) => row.scope_id))].sort();
+  /** The text of every knowledge-graph copy of brain `tutor`. */
+  const copiesOf = async (db: StorageAdapter): Promise<string[]> =>
+    (await db.all<{ label: string }>("SELECT label FROM knowledge_nodes WHERE brain_id = 'tutor' AND type = 'memory'")).map((row) => row.label);
+  /** The tables of this database whose names start with `start`, from its own catalog. */
+  const tablesStarting = async (db: StorageAdapter, start: string): Promise<string[]> => {
+    const rows = String(db.kind ?? '').includes('postgres')
+      ? await db.all<{ name: string }>('SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema()')
+      : await db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'");
+    return rows.map((row) => row.name).filter((name) => name.startsWith(start)).sort();
+  };
+
+  for (const engine of ENGINES) {
+    describe.skipIf(!engine.available)(`on ${engine.name}`, () => {
+      it("keeps what tenant A's user 42 said, what A's agent stored and what A's compaction filed from every request of tenant B's 42, reads them in A's next session, and forgetUser for A's 42 deletes them, with their copies, and keeps B's", async () => {
+        quiet();
+        const k = key();
+        const { compactions, replies, mainCalls } = tenantProvider(k);
+        const db = await database(engine);
+        const { os } = await oneBrain(db, k);
+        const A = { userId: '42', organizationId: 'A' };
+        const B = { userId: '42', organizationId: 'B' };
+        const CANARIES = ['BRIDGE-1', 'TOOL-2', 'SINK-3'];
+
+        // A's 42: the user's own words (the GMI's filing), a memory_add, and a compaction (the sink's).
+        replies.push(reply.tools([{ id: 'add-a', name: 'memory_add', args: { content: 'Canary TOOL-2: prefers green tea.' } }]));
+        compactions.push(compaction('Canary SINK-3: flies kites on Sundays.', ['Canary SINK-3 flies kites.']));
+        await turn(os, { ...A, sessionId: 's-a1', textInput: 'Canary BRIDGE-1: my locker code is 4411.' });
+        // The pipeline hands the sink its upsert without waiting for it.
+        await vi.waitFor(async () => expect(await scopeIdsOf(db, 'SINK-3')).toEqual(['A//s-a1', 'A/42', 'A/42::tutor']), { timeout: 15_000 });
+        expect(await scopeIdsOf(db, 'BRIDGE-1')).toEqual(['A/42']);
+        expect(await scopeIdsOf(db, 'TOOL-2')).toEqual(['A/42']);
+        expect((await copiesOf(db)).some((label) => label.includes('BRIDGE-1'))).toBe(true);
+
+        // A's 42 in a new session: the words, the tool's trace and the summary reach the request, under the retriever's headings.
+        let before = mainCalls().length;
+        await turn(os, { ...A, sessionId: 's-a2', textInput: 'What about the canary kites and the tea?' });
+        const toA = sentIn(mainCalls().slice(before));
+        for (const canary of CANARIES) expect(toA, canary).toContain(canary);
+        expect(toA).toContain('### User Memory');
+        expect(toA).toContain('### Persona Memory');
+
+        // B's 42 files words of its own, then recalls and searches: its own come back, none of A's.
+        before = mainCalls().length;
+        await turn(os, { ...B, sessionId: 's-b1', textInput: 'Canary WREN-5: my canary is yellow.' });
+        await vi.waitFor(async () => expect(await scopeIdsOf(db, 'WREN-5')).toEqual(['B/42']), { timeout: 15_000 });
+        replies.push(reply.tools([{ id: 'search-b', name: 'memory_search', args: { query: 'canary' } }]));
+        await turn(os, { ...B, sessionId: 's-b2', textInput: 'What do you know about the canary?' });
+        const toB = mainCalls().slice(before);
+        expect(toB).toHaveLength(3);
+        for (const canary of CANARIES) expect(sentIn(toB), canary).not.toContain(canary);
+        expect(sentIn(toB.slice(1))).toContain('WREN-5');
+        const found = answerTo(toB.at(-1), 'search-b');
+        expect(found).toContain('{"results":[');
+        expect(found).toContain('WREN-5');
+
+        // forgetUser for A's 42: every store it holds is reached, and it says what it left.
+        const report = await os.getLearningLayer()!.forgetUser!('42', { namespace: 'A' });
+        expect(report.stores).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ store: 'memory manager of brain tutor', reached: true }),
+            expect.objectContaining({ store: 'memory tools facade of brain tutor', reached: true }),
+            expect.objectContaining({ store: "a conversation's own history", reached: false }),
+          ]),
+        );
+        const left = await liveOf(db);
+        for (const canary of CANARIES) expect(left.some((row) => row.content.includes(canary)), canary).toBe(false);
+        expect(left.filter((row) => row.scope_id.startsWith('A/'))).toEqual([]);
+        expect(await scopeIdsOf(db, 'WREN-5')).toEqual(['B/42']);
+        const copies = await copiesOf(db);
+        for (const canary of CANARIES) expect(copies.some((label) => label.includes(canary)), canary).toBe(false);
+        expect(copies.some((label) => label.includes('WREN-5'))).toBe(true);
+        expect(await db.all("SELECT id FROM agentos_learning_ledger WHERE namespace = 'A' AND user_id = '42'")).toEqual([]);
+
+        // A's 42 comes back in a new session: nothing is read for it and nothing it says is filed. B's 42 still recalls its own.
+        before = mainCalls().length;
+        await turn(os, { ...A, sessionId: 's-a3', textInput: 'What about the canary kites and the tea? Canary LATE-6.' });
+        const afterForget = sentIn(mainCalls().slice(before));
+        for (const canary of CANARIES) expect(afterForget, canary).not.toContain(canary);
+        expect((await liveOf(db)).filter((row) => row.scope_id.startsWith('A/'))).toEqual([]);
+        before = mainCalls().length;
+        await turn(os, { ...B, sessionId: 's-b3', textInput: 'What do you know about the canary?' });
+        expect(sentIn(mainCalls().slice(before))).toContain('WREN-5');
+      }, 120_000);
+
+      it("reads a JSON export of both tenants, imported into a fresh Brain, each for its own 42 alone, and forgetUser for A's 42 deletes A's and keeps B's", async () => {
+        quiet();
+        const k = key();
+        const { replies, mainCalls } = tenantProvider(k);
+        const firstDb = await database(engine);
+        const first = await oneBrain(firstDb, k);
+        replies.push(reply.tools([{ id: 'add-a', name: 'memory_add', args: { content: 'Canary EXPORT-4: keeps bees.' } }]));
+        await turn(first.os, { userId: '42', organizationId: 'A', sessionId: 's-a1' });
+        replies.push(reply.tools([{ id: 'add-b', name: 'memory_add', args: { content: 'Canary EXPORT-5: keeps bees too.' } }]));
+        await turn(first.os, { userId: '42', organizationId: 'B', sessionId: 's-b1' });
+        const exported = await first.facade.exportToString();
+        await stopRuntime(first.os);
+
+        const db = await database(engine);
+        const { os } = await oneBrain(db, k, {
+          facadeOver: async () => {
+            const facade = await Memory.createWithAdapter(db, { brainId: 'tutor', selfImprove: false });
+            await facade.importFromString(exported, 'json');
+            return facade;
+          },
+        });
+        expect(await scopeIdsOf(db, 'EXPORT-4')).toEqual(['A/42']);
+        expect(await scopeIdsOf(db, 'EXPORT-5')).toEqual(['B/42']);
+
+        let before = mainCalls().length;
+        await turn(os, { userId: '42', organizationId: 'A', sessionId: 's-a2', textInput: 'Do I keep bees?' });
+        const toA = sentIn(mainCalls().slice(before));
+        expect(toA).toContain('EXPORT-4');
+        expect(toA).not.toContain('EXPORT-5');
+
+        before = mainCalls().length;
+        replies.push(reply.tools([{ id: 'search-b', name: 'memory_search', args: { query: 'bees' } }]));
+        await turn(os, { userId: '42', organizationId: 'B', sessionId: 's-b2', textInput: 'Do I keep bees?' });
+        const toB = mainCalls().slice(before);
+        expect(sentIn(toB)).not.toContain('EXPORT-4');
+        expect(answerTo(toB.at(-1), 'search-b')).toContain('EXPORT-5');
+
+        await os.getLearningLayer()!.forgetUser!('42', { namespace: 'A' });
+        expect(await scopeIdsOf(db, 'EXPORT-4')).toEqual([]);
+        expect(await scopeIdsOf(db, 'EXPORT-5')).toEqual(['B/42']);
+      }, 120_000);
+
+      it("answers a memory_update, a memory_delete and a memory_merge of tenant B's 42 on tenant A's trace id as not found, leaving the trace and its copy, and A's own memory_delete takes both", async () => {
+        quiet();
+        const k = key();
+        const { replies, mainCalls } = tenantProvider(k);
+        const db = await database(engine);
+        const { os } = await oneBrain(db, k);
+        await turn(os, { userId: '42', organizationId: 'A', sessionId: 's-a1', textInput: 'Canary MOTH-5: my bike is blue.' });
+        await turn(os, { userId: '42', organizationId: 'B', sessionId: 's-b1', textInput: 'Canary MOTH-6: my bike is green.' });
+        const traces = await liveOf(db);
+        const ofA = traces.find((row) => row.content.includes('MOTH-5'))!;
+        const ofB = traces.find((row) => row.content.includes('MOTH-6'))!;
+        const copyOf = (id: string) => db.get("SELECT id FROM knowledge_nodes WHERE brain_id = 'tutor' AND id = ?", [`trace:${id}`]);
+        expect(await copyOf(ofA.id)).toBeTruthy();
+
+        replies.push(
+          reply.tools([
+            { id: 'update-b', name: 'memory_update', args: { traceId: ofA.id, content: 'Changed by another tenant.' } },
+            { id: 'delete-b', name: 'memory_delete', args: { traceId: ofA.id } },
+            { id: 'merge-b', name: 'memory_merge', args: { traceIds: [ofA.id, ofB.id] } },
+          ]),
+        );
+        await turn(os, { userId: '42', organizationId: 'B', sessionId: 's-b2', textInput: 'Tidy my notes.' });
+        const answered = mainCalls().at(-1);
+        expect(answerTo(answered, 'update-b')).toContain('"updated":false');
+        expect(answerTo(answered, 'delete-b')).toContain('"deleted":false');
+        expect(answerTo(answered, 'merge-b')).not.toContain('survivorId');
+        const still = await liveOf(db);
+        expect(still.find((row) => row.id === ofA.id)?.content).toBe(ofA.content);
+        expect(still.find((row) => row.id === ofB.id)?.content).toBe(ofB.content);
+        expect(await copyOf(ofA.id)).toBeTruthy();
+
+        replies.push(reply.tools([{ id: 'delete-a', name: 'memory_delete', args: { traceId: ofA.id } }]));
+        await turn(os, { userId: '42', organizationId: 'A', sessionId: 's-a2', textInput: 'Forget my bike.' });
+        expect(answerTo(mainCalls().at(-1), 'delete-a')).toContain('"deleted":true');
+        expect((await liveOf(db)).some((row) => row.id === ofA.id)).toBe(false);
+        expect(await copyOf(ofA.id)).toBeFalsy();
+      }, 120_000);
+
+      it('refuses a database that holds a Brain with no table prefix, naming the option, before it makes a table, and starts on the same database with one', async () => {
+        quiet();
+        const k = key();
+        tenantProvider(k);
+        const db = await database(engine);
+        await expect(oneBrain(db, k, { tablePrefix: null })).rejects.toMatchObject({
+          code: 'SYS_CONFIGURATION_ERROR',
+          message: expect.stringContaining('conversationManagerConfig.tablePrefix'),
+        });
+        expect(await tablesStarting(db, 'conversation_messages')).toEqual([]);
+        expect(await tablesStarting(db, PREFIX + 'conv')).toEqual([]);
+        // The Brain's own conversations table keeps its columns.
+        expect(await db.all("SELECT brain_id, id FROM conversations WHERE brain_id = 'tutor'")).toEqual([]);
+
+        const { os } = await oneBrain(db, k);
+        await turn(os, { userId: '42', organizationId: 'A', sessionId: 's-a1', textInput: 'Canary WREN-8: I row on Tuesdays.' });
+        await stopRuntime(os);
+        const kept = await db.all<{ content: string }>(`SELECT content FROM ${PREFIX}conversation_messages`);
+        expect(kept.some((row) => row.content.includes('WREN-8'))).toBe(true);
+      }, 120_000);
+
+      it("keeps a conversation under the longest table prefix, beside a Brain, and a runtime started again on the database carries it into the next request", async () => {
+        quiet();
+        const k = key();
+        const { mainCalls } = tenantProvider(k);
+        const db = await database(engine);
+        await Brain.openWithAdapter(db, { brainId: 'tutor' });
+        const tablePrefix = `QA_${'x'.repeat(29)}`;
+        const conversationManagerConfig = { tablePrefix };
+        const ana = { userId: 'ana', organizationId: 'A', sessionId: 's-1', conversationId: 'c-1' };
+
+        const first = await plainRuntime(db, k, { conversationManagerConfig, learning: true });
+        await turn(first, { ...ana, textInput: 'Canary OWL-1: the gate code is 7.' });
+        await stopRuntime(first);
+        expect((await db.all<{ content: string }>(`SELECT content FROM ${tablePrefix}conversation_messages`)).some((row) => row.content.includes('OWL-1'))).toBe(true);
+        expect(await db.all("SELECT brain_id, id FROM conversations WHERE brain_id = 'tutor'")).toEqual([]);
+
+        const second = await plainRuntime(db, k, { conversationManagerConfig, learning: true });
+        await turn(second, { ...ana, textInput: 'What did I tell you?' });
+        expect(sentIn(mainCalls().slice(-1))).toContain('OWL-1');
+      }, 120_000);
+
+      it('keeps the plain table names with no prefix, and a Brain opened later on that database files and recalls, and fails only its conversation export, as the docs say', async () => {
+        quiet();
+        const k = key();
+        tenantProvider(k);
+        const db = await database(engine);
+        const os = await plainRuntime(db, k);
+        await turn(os, { userId: 'ana', sessionId: 's-1', textInput: 'Canary OWL-2.' });
+        await stopRuntime(os);
+        expect(await tablesStarting(db, 'conversation')).toEqual(['conversation_messages', 'conversations']);
+        expect((await db.all<{ content: string }>('SELECT content FROM conversation_messages')).some((row) => row.content.includes('OWL-2'))).toBe(true);
+
+        const later = await Memory.createWithAdapter(db, { brainId: 'late', selfImprove: false });
+        await later.remember('Canary OWL-3: the later Brain holds this.', { scope: 'user', scopeId: 'ana' });
+        expect((await later.recall('later Brain')).map((hit) => hit.trace.content)).toEqual(['Canary OWL-3: the later Brain holds this.']);
+        await expect(later.exportToString()).rejects.toThrow();
+      }, 120_000);
+
+      it("takes a database an earlier version made, under the plain names, as its own: its conversations stay, and the columns added since join them", async () => {
+        quiet();
+        const k = key();
+        tenantProvider(k);
+        const db = await database(engine);
+        await db.exec(`
+          CREATE TABLE conversations (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, gmi_instance_id TEXT, title TEXT, language TEXT, session_details TEXT DEFAULT '{}',
+            is_archived INTEGER DEFAULT 0, tags TEXT DEFAULT '[]', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
+          CREATE TABLE conversation_messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, timestamp BIGINT NOT NULL,
+            tool_calls TEXT, tool_call_id TEXT, multimodal_data TEXT, audio_url TEXT, audio_transcript TEXT, voice_settings TEXT, metadata TEXT DEFAULT '{}',
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
+        `);
+        const os = await plainRuntime(db, k);
+        await turn(os, { userId: 'ana', sessionId: 's-1', textInput: 'Canary OWL-4.' });
+        await stopRuntime(os);
+        const kept = await db.all<{ content: string; seq: number | null }>('SELECT content, seq FROM conversation_messages');
+        expect(kept.some((row) => row.content.includes('OWL-4') && row.seq !== null)).toBe(true);
+      }, 120_000);
+
+      it.each([
+        ['false', { learning: false }],
+        ['null', { learning: null }],
+        ['unset', {}],
+      ])('with learning %s, files and reads under the plain ids, a reserved character included, keeps memory_reflect, and builds nothing of the layer', async (_name, flag) => {
+        quiet();
+        const k = key();
+        const { compactions, replies, mainCalls } = tenantProvider(k);
+        const db = await database(engine);
+        // Self-improvement on, so the facade has memory_reflect to offer.
+        const { os, brain } = await oneBrain(db, k, { flag, selfImprove: true });
+        expect(os.getLearningLayer()).toBeUndefined();
+        expect(await os.getToolOrchestrator().getTool('memory_reflect')).toBeDefined();
+
+        const ana = { userId: 'a/b', organizationId: 'A' };
+        replies.push(reply.tools([{ id: 'add', name: 'memory_add', args: { content: 'Canary PLAIN-8: rides a bike.' } }]));
+        compactions.push(compaction('Canary PLAIN-9: likes rain.', ['Canary PLAIN-9 likes rain.']));
+        await turn(os, { ...ana, sessionId: 's-1', textInput: 'Canary PLAIN-7: my bike is red.' });
+        await vi.waitFor(async () => expect(await scopeIdsOf(db, 'PLAIN-9')).toEqual(['a/b', 'a/b::tutor', 's-1']), { timeout: 15_000 });
+        expect(await scopeIdsOf(db, 'PLAIN-7')).toEqual(['a/b']);
+        expect(await scopeIdsOf(db, 'PLAIN-8')).toEqual(['a/b']);
+
+        // The user's next session: the retriever reads the summary, and a search of the user scope the tool's trace.
+        replies.push(reply.tools([{ id: 'own', name: 'memory_search', args: { query: 'bike', scope: 'user' } }]));
+        let before = mainCalls().length;
+        await turn(os, { ...ana, sessionId: 's-2', textInput: 'Does it rain where I ride my bike?' });
+        expect(sentIn(mainCalls().slice(before))).toContain('### User Memory');
+        expect(sentIn(mainCalls().slice(before))).toContain('PLAIN-9');
+        expect(answerTo(mainCalls().at(-1), 'own')).toContain('PLAIN-8');
+
+        // No scope id carries an organization with the flag off: the same id under another organization reads the same scope.
+        replies.push(reply.tools([{ id: 'other-org', name: 'memory_search', args: { query: 'bike', scope: 'user' } }]));
+        await turn(os, { userId: 'a/b', organizationId: 'B', sessionId: 's-3', textInput: 'Where do I ride?' });
+        expect(answerTo(mainCalls().at(-1), 'other-org')).toContain('PLAIN-8');
+
+        // Another user finds none of it in the user scope, and a search that names no scope reads the whole brain.
+        replies.push(reply.tools([{ id: 'other-user', name: 'memory_search', args: { query: 'bike', scope: 'user' } }]));
+        before = mainCalls().length;
+        await turn(os, { userId: 'bo', organizationId: 'A', sessionId: 's-4', textInput: 'Where do I ride?' });
+        expect(answerTo(mainCalls().at(-1), 'other-user')).not.toContain('PLAIN-8');
+        expect(sentIn(mainCalls().slice(before))).not.toContain('PLAIN-9');
+        replies.push(reply.tools([{ id: 'any-scope', name: 'memory_search', args: { query: 'bike' } }]));
+        await turn(os, { userId: 'bo', organizationId: 'A', sessionId: 's-5', textInput: 'Where does anyone ride?' });
+        expect(answerTo(mainCalls().at(-1), 'any-scope')).toContain('PLAIN-8');
+
+        expect(await tablesStarting(db, 'agentos_learning_')).toEqual([]);
+        expect(await brain.getMeta(SCOPE_ID_FORM_KEY)).toBeUndefined();
+      }, 120_000);
+    });
+  }
+
+  describe('a turn with no learner on the full runtime', () => {
+    it("files each anonymous session's memory_add under its own form with a row of no user, one session id under two organizations apart, and the sessions find nothing of each other", async () => {
+      quiet();
+      const k = key();
+      const { replies, mainCalls } = tenantProvider(k);
+      const db = await database(ENGINES[0]!);
+      const { os } = await oneBrain(db, k);
+
+      replies.push(reply.tools([{ id: 'add-x', name: 'memory_add', args: { content: 'Canary ANON-6: parks by the river.' } }]));
+      await turn(os, { userId: 'anonymous_user', sessionId: 's-x' });
+      expect(await scopeIdsOf(db, 'ANON-6')).toEqual(['/s-x']);
+      const noUser = await db.all<{ chain_key: string; user_id: string | null; turn_user_id: string | null; row_type: string }>(
+        "SELECT chain_key, user_id, turn_user_id, row_type FROM agentos_learning_ledger WHERE kind = 'memory_write' AND subject NOT LIKE 'rolling_summary:%' ORDER BY seq",
+      );
+      const agentChain = chainKeyOf({ namespace: '', agentKey: 'tutor', userId: null });
+      expect(noUser).toEqual([
+        { chain_key: agentChain, user_id: null, turn_user_id: null, row_type: 'candidate' },
+        { chain_key: agentChain, user_id: null, turn_user_id: null, row_type: 'verdict' },
+      ]);
+
+      replies.push(reply.tools([{ id: 'search-y', name: 'memory_search', args: { query: 'river' } }]));
+      const before = mainCalls().length;
+      await turn(os, { userId: 'anonymous_user', sessionId: 's-y', textInput: 'Where do I park?' });
+      expect(sentIn(mainCalls().slice(before))).not.toContain('ANON-6');
+      expect(answerTo(mainCalls().at(-1), 'search-y')).toContain('{"results":[');
+
+      // One session id under two organizations: each files under its own organization's form, and searches only that.
+      replies.push(reply.tools([{ id: 'add-a', name: 'memory_add', args: { content: 'Canary ANON-7: parks by the river in town A.' } }]));
+      await turn(os, { userId: 'anonymous_user', organizationId: 'A', sessionId: 's-z' });
+      replies.push(reply.tools([{ id: 'add-b', name: 'memory_add', args: { content: 'Canary ANON-8: parks by the river in town B.' } }]));
+      await turn(os, { userId: 'anonymous_user', organizationId: 'B', sessionId: 's-z' });
+      expect(await scopeIdsOf(db, 'ANON-7')).toEqual(['A//s-z']);
+      expect(await scopeIdsOf(db, 'ANON-8')).toEqual(['B//s-z']);
+      replies.push(reply.tools([{ id: 'search-b', name: 'memory_search', args: { query: 'river' } }]));
+      await turn(os, { userId: 'anonymous_user', organizationId: 'B', sessionId: 's-z', textInput: 'Where do I park?' });
+      const found = answerTo(mainCalls().at(-1), 'search-b');
+      expect(found).toContain('ANON-8');
+      expect(found).not.toContain('ANON-7');
+      expect(found).not.toContain('ANON-6');
+    }, 120_000);
+  });
+
+  it('refuses a table prefix that is not a plain name at construction, naming the option', async () => {
+    quiet();
+    const k = key();
+    tenantProvider(k);
+    const db = await database(ENGINES[0]!);
+    for (const tablePrefix of ['bad-prefix', '1a_', 'a b', `a${'x'.repeat(32)}`]) {
+      await expect(plainRuntime(db, k, { conversationManagerConfig: { tablePrefix } }), tablePrefix).rejects.toMatchObject({
+        code: 'SYS_CONFIGURATION_ERROR',
+        message: expect.stringContaining('conversationManagerConfig.tablePrefix'),
+      });
+    }
+    expect(await tablesStarting(db, 'conversation')).toEqual([]);
+  }, 60_000);
+
+  describe('gmi() and agent() with the learning flag off', () => {
+    /** The live traces of one brain in a SQLite file, as a host's own reader sees them. */
+    function liveIn(file: string, brainId: string): Array<{ scope: string; scopeId: string; content: string }> {
+      const db = new Database(file, { readonly: true });
+      try {
+        return db.prepare('SELECT scope, scope_id AS scopeId, content FROM memory_traces WHERE brain_id = ? AND deleted = 0 ORDER BY content').all(brainId) as Array<{ scope: string; scopeId: string; content: string }>;
+      } finally {
+        db.close();
+      }
+    }
+    /** A host tool that records what its call was told of a turn's learning. */
+    const probe = (seen: unknown[]) => ({
+      id: 'probe-v1',
+      name: 'probe',
+      displayName: 'Probe',
+      description: 'Records the learning its call carries.',
+      inputSchema: { type: 'object', properties: {} },
+      hasSideEffects: false,
+      async execute(_args: unknown, context: { sessionData?: Record<string, unknown> }) {
+        seen.push(readToolLearningContext(context.sessionData), context.sessionData?.learning);
+        return { success: true, output: 'ok' };
+      },
+    });
+
+    it.each([
+      ['gmi()', gmi],
+      ["agent({ runtime: 'gmi' })", agent],
+    ])('%s files a memory_add under the plain ids, offers memory_reflect and runs it, tells a tool no learning, and has no learning member', async (_name, build) => {
+      quiet();
+      const k = key();
+      const played = script('openai', k, {
+        replies: [
+          reply.tools([{ id: 'c1', name: 'memory_add', args: { content: 'Canary OFF-1.' } }]),
+          reply.tools([{ id: 'p1', name: 'probe', args: {} }]),
+          reply.text('Saved.'),
+          reply.tools([{ id: 'c2', name: 'memory_add', args: { content: 'Canary OFF-2.' } }]),
+          reply.text('Saved.'),
+          reply.tools([{ id: 'c3', name: 'memory_reflect', args: {} }]),
+          reply.text('Tidied.'),
+        ],
+      });
+      const file = brainFile();
+      // Self-improvement on (the facade's default), so the facade has memory_reflect to offer.
+      const memory = await Memory.createSqlite(file, { brainId: 'tools-brain' });
+      facades.push(memory);
+      const seen: unknown[] = [];
+      const tools = Object.fromEntries([...memory.createTools(), probe(seen)].map((tool) => [tool.name, tool]));
+      const tutor = build({
+        runtime: 'gmi',
+        provider: 'openai',
+        model: 'stub-model',
+        apiKey: k,
+        fallbackProviders: [],
+        name: 'Tutor',
+        instructions: 'You teach networking.',
+        tools,
+      } as never);
+      expect(tutor.learning).toBeUndefined();
+      const session = tutor.session('s1', { userId: 'a/b' });
+      await session.send('Remember this.');
+      // With no user the session runs as its own id, which is filed plain.
+      await tutor.session('s/2').send('Remember this too.');
+
+      const filed = liveIn(file, 'tools-brain');
+      expect(filed.find((row) => row.content === 'Canary OFF-1.')).toMatchObject({ scope: 'user', scopeId: 'a/b' });
+      expect(filed.find((row) => row.content === 'Canary OFF-2.')).toMatchObject({ scope: 'user', scopeId: 's/2' });
+      expect(seen).toEqual([undefined, undefined]);
+      const offered = ((played.seen[0]!.options.tools as Array<{ function: { name: string } }> | undefined) ?? []).map((tool) => tool.function.name);
+      expect(offered).toContain('memory_reflect');
+
+      await session.send('Tidy your memory.');
+      const reflected = String(played.seen.at(-1)!.messages.filter((message) => message.role === 'tool').at(-1)?.content);
+      expect(reflected).toContain('"pruned"');
+      expect(reflected).not.toContain('withdrawn');
+      await tutor.close();
+      const db = new Database(file, { readonly: true });
+      try {
+        expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'agentos_learning_*'").all()).toEqual([]);
+      } finally {
+        db.close();
+      }
+    }, 60_000);
+
+    it("a gmi() session opened with no user, in a namespace, files a memory_add under its session's form with a row of no user, and another session finds nothing of it", async () => {
+      quiet();
+      const k = key();
+      const played = script('openai', k, {
+        replies: [
+          reply.tools([{ id: 'c1', name: 'memory_add', args: { content: 'Canary GMI-7: parks by the river.' } }]),
+          reply.text('Saved.'),
+          reply.tools([{ id: 'c2', name: 'memory_search', args: { query: 'river' } }]),
+          reply.text('Nothing.'),
+        ],
+      });
+      const file = brainFile();
+      const memory = await Memory.createSqlite(file, { brainId: 'tools-brain', selfImprove: false });
+      facades.push(memory);
+      const store = new InMemoryLearningStore();
+      const tools = Object.fromEntries(memory.createTools({ includeReflect: false }).map((tool) => [tool.name, tool]));
+      const tutor = gmi({
+        runtime: 'gmi',
+        provider: 'openai',
+        model: 'stub-model',
+        apiKey: k,
+        fallbackProviders: [],
+        name: 'Tutor',
+        instructions: 'You teach networking.',
+        tools,
+        learning: { agentKey: 'tutor', namespace: 'A', store, memoryTools: memory },
+      } as never);
+      await tutor.session('s1').send('Remember this.');
+      expect(liveIn(file, 'tools-brain').map((row) => row.scopeId)).toEqual(['A//s1']);
+      const rows = (await store.chainRows(chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }))).filter((row) => row.kind === 'memory_write');
+      expect(rows.map((row) => [row.rowType, row.verdict, row.userId, row.turnUserId])).toEqual([
+        ['candidate', 'pending', null, null],
+        ['verdict', 'kept', null, null],
+      ]);
+      await tutor.session('s2').send('Where do I park?');
+      const answered = String(played.seen.at(-1)!.messages.filter((message) => message.role === 'tool').at(-1)?.content);
+      expect(answered).toContain('{"results":[');
+      expect(answered).not.toContain('GMI-7');
+      await tutor.close();
+    }, 60_000);
   });
 });
 
