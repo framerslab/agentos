@@ -3,8 +3,7 @@
  * Matrix tests for the per-provider structured-output payload builder used
  * by generateObject's primary path and by generateText's fallback legs.
  * Covers providers × {plain object schema, record-bearing schema, top-level
- * array envelope, Fable model} and the shape describer that feeds the
- * `fallback_fired` log's `rebuiltResponseFormatType` field.
+ * array envelope, Fable model} and the shape describer.
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
