@@ -133,7 +133,13 @@ export interface AgentOSInput {
 export interface ProcessingOptions {
   streamUICommands?: boolean;
   maxToolCallIterations?: number;
+  /** The model for this turn's model calls, over the persona's `defaultModelId` and the config's default model. */
   preferredModelId?: string;
+  /**
+   * The provider for this turn's model calls, over the persona's `defaultProviderId` and the config's default
+   * provider. Name it with a `preferredModelId` of another provider than the persona's. The tool results that continue
+   * the turn (`handleToolResult()`, `handleToolResults()`, `resumeExternalToolRequest()`) keep both.
+   */
   preferredProviderId?: string;
   temperature?: number;
   topP?: number;

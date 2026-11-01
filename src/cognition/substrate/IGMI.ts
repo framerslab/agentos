@@ -161,6 +161,14 @@ export type GMIToolCallGate = (call: ToolCallRequest, context?: GMIToolCallGateC
 export interface GMIToolResultOptions {
   /** Asked before each call of the continuation's own tool round. Unset, the continuation asks the gate of the turn it continues. */
   toolCallGate?: GMIToolCallGate;
+  /**
+   * The model the continuation's model calls go to, with `preferredProviderId`, as the turn named them
+   * (`AgentOSInput.options`). Unset with `preferredProviderId`, the continuation calls the model and the provider of
+   * the turn it continues, which a GMI that did not run that turn does not hold.
+   */
+  preferredModelId?: string;
+  /** The provider the continuation's model calls go to, with `preferredModelId`. */
+  preferredProviderId?: string;
 }
 
 /**
