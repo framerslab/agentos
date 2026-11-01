@@ -816,6 +816,19 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
       expect(f.errors).not.toHaveBeenCalled();
     });
 
+    it('passes over a backup that reports its failure within a replayed write that never settles', async () => {
+      const b = pullSession();
+      b.writeTokens.mockImplementation(() => {
+        b.emit('close');
+        return parked();
+      });
+      const c = pullSession();
+      const f = await switchingFacade(b, c);
+      await vi.waitFor(() => expect(b.writeTokens).toHaveBeenCalledWith('Hello world.'));
+      expect(await settled(f.session.flush())).toBe('settled');
+      expect(f.failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'c' });
+    });
+
     it('ends a flush() and a writeTokens() that wait on a replay parked on a backup when close() comes', async () => {
       const b = pullSession();
       b.writeTokens.mockImplementation(parked);
