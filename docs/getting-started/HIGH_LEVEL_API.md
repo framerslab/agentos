@@ -965,7 +965,7 @@ stream of its continuation or resume has ended: a turn that starts while one
 runs finds no pause to end, and its input lands among the continuation's
 messages.
 
-`AgentOSConfig.learning` turns on the runtime's learning layer: every GMI sends its persona's personality section as a system prompt of its own on every turn, each session is bound to its user under the turn's resolved organization, and `AgentOS.getLearningLayer()` returns the layer (`undefined` while learning is off). [Learning](../GMI.md#learning) has the rules.
+`AgentOSConfig.learning` turns on the runtime's learning layer: every GMI sends its persona's personality section as a system prompt of its own on every turn, each session is bound to its user under the turn's resolved organization, and `AgentOS.getLearningLayer()` returns the layer (`undefined` while learning is off), which carries the operator's calls (`freeze`, `unfreeze`, `suspend`, `unsuspend`, `operatorSet`, `revert`, `exportLearnedState`, `importLearnedState` and `forgetUser`). [Learning](../GMI.md#learning) has the rules.
 
 ## Guidance
 
