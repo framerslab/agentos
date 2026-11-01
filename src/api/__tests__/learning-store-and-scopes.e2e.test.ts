@@ -5099,7 +5099,10 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
     return { adapter, store: new SqlLearningStore({ adapter }) };
   }
 
-  /** A gmi() agent named `Tutor` (persona id `tutor`), its provider the stub played under `apiKey`. */
+  /**
+   * A gmi() agent named `Tutor` (persona id `tutor`) with `learning.agentKey` `tutor`, the key a SQL learning store
+   * needs, its provider the stub played under `apiKey`.
+   */
   const tutorAgent = (apiKey: string, personality: Record<string, number>, learning: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
     gmi({
       runtime: 'gmi',
@@ -5110,7 +5113,7 @@ describe("a learner's trait row and its ledger, on gmi(), the full runtime and a
       name: 'Tutor',
       instructions: 'You teach networking.',
       personality,
-      learning,
+      learning: { agentKey: 'tutor', ...learning },
       ...extra,
     } as never);
 
@@ -6102,7 +6105,10 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
     return { memory, file };
   }
 
-  /** A gmi() agent named `Tutor` (persona id `tutor`), its provider the stub played under `apiKey`. */
+  /**
+   * A gmi() agent named `Tutor` (persona id `tutor`) with `learning.agentKey` `tutor`, the key a SQL learning store
+   * needs, its provider the stub played under `apiKey`.
+   */
   const tutorAgent = (apiKey: string, personality: Record<string, number>, learning: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
     gmi({
       runtime: 'gmi',
@@ -6113,7 +6119,7 @@ describe("an operator's calls on a learner: freezes and suspensions, operatorSet
       name: 'Tutor',
       instructions: 'You teach networking.',
       personality,
-      learning,
+      learning: { agentKey: 'tutor', ...learning },
       ...extra,
     } as never);
 
