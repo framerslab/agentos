@@ -1670,14 +1670,7 @@ export class OpenRouterProvider implements IProvider {
             : 300 * 2 ** attempt + Math.floor(Math.random() * 200),
           OpenRouterProvider.MAX_RETRY_SLEEP_MS,
         );
-<<<<<<< HEAD
-        console.warn(
-          `OpenRouterProvider: attempt ${attempt + 1}/${attempts} ` +
-            `failed (${decoratedMessage.substring(0, 160)}); retrying in ${sleepMs}ms.`,
-        );
-=======
         log.warn('llm.retry', { provider: 'openrouter', status: statusCode ?? 0, attempt: attempt + 1, waitMs: sleepMs });
->>>>>>> origin/master
         await new Promise((resolve) => setTimeout(resolve, sleepMs));
       }
     }
