@@ -111,6 +111,8 @@
  * one filed, its kept verdict naming what it wrote and forgot, which a revert takes back. A write that fails leaves
  * nothing, a forget that fails is made at the next upsert, a freeze stops the sink, an upsert the layer cannot record
  * files nothing, `forgetUser` takes every summary of a user's words, and with no layer both run under the plain ids.
+ * An upsert admitted before another process's `forgetUser` and written after it leaves nothing, and a crash's pending
+ * upsert is decided at the learner's next session by what its traces hold.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -9337,6 +9339,148 @@ describe("the standalone retriever and the rolling-summary sink, by a turn's sco
     await memory.remember('Summary without bo PEAR-6.', { scope: 'user', scopeId: 'A//s-1', metadata: { contributorIds: ['42'] } });
     expect(await memory.deleteScope('user', 'A//s-1', { turnUserId: 'bo' })).toEqual({ deleted: 2 });
     expect(canaries('PEAR-6').map((trace) => trace.content)).toEqual(['Summary without bo PEAR-6.']);
+  });
+
+  it("leaves nothing of a host's upsert admitted before another process's forgetUser and written after it, restores after a forget that failed only what the upsert forgot, and decides a crash's pending upsert at the learner's next session by what its traces hold", async () => {
+    quiet();
+    const { file, memory } = await sinkFacade();
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, memoryTools: memory });
+    /** The host's facade over `memory`, with its remember or forget replaced. */
+    const facadeWith = (over: Partial<Pick<Memory, 'remember' | 'forget'>> = {}) => ({
+      brainId: memory.brainId,
+      remember: memory.remember.bind(memory),
+      forget: memory.forget.bind(memory),
+      readTrace: memory.readTrace.bind(memory),
+      deleteTraces: memory.deleteTraces.bind(memory),
+      restoreTrace: memory.restoreTrace.bind(memory),
+      ...over,
+    });
+    /** Learner `userId` of tenant A on `onLayer`: its upserts through `sink`, the lines of its user scope, and its chain. */
+    async function learnerOn(onLayer: typeof layer, sink: ReturnType<typeof createStandaloneMemoryRollingSummarySink>, userId: string) {
+      const session = await onLayer.forLearner({ ...LEARNER_A, userId }, productContext(`s-${userId}`));
+      const upsert = (summaryText: string, facts: string[] = []) =>
+        sink.upsertRollingSummaryMemory(
+          updateOf(learningOf(session, userId, 'A', `c-${userId}`), { userId, organizationId: 'A', conversationId: `c-${userId}`, summaryText, facts }),
+        );
+      const lines = () =>
+        liveIn(file)
+          .filter((trace) => trace.scopeId === `A/${userId}`)
+          .map((trace) => lineOf(trace.content))
+          .sort();
+      return { upsert, lines, chain: chainKeyOf({ ...LEARNER_A, userId }) };
+    }
+    /** The rows of the brain file holding `text`, deleted ones included. */
+    const rowsHolding = (text: string): number => {
+      const db = new Database(file);
+      try {
+        return (db.prepare('SELECT COUNT(*) AS n FROM memory_traces WHERE content LIKE ?').get(`%${text}%`) as { n: number }).n;
+      } finally {
+        db.close();
+      }
+    };
+
+    // An upsert admitted (its pending row written) before another process's forgetUser ran, its first write held until
+    // that forgetUser is done: it resolves, and nothing of it stays, no trace, no row and no session row.
+    {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const atWrite = new Promise<void>((resolve) => (reached = resolve));
+      let holds = 1;
+      const remember: Memory['remember'] = async (...args) => {
+        if (holds-- === 1) {
+          reached();
+          await held;
+        }
+        return memory.remember(...args);
+      };
+      const late = await learnerOn(layer, createStandaloneMemoryRollingSummarySink(facadeWith({ remember })), '50');
+      const upserting = late.upsert('- Canary LATE-1: rows at dawn', ['Ed rows boats.']);
+      await atWrite;
+      await createLearningLayer({ store, memoryTools: memory }).forgetUser('50', { namespace: 'A' });
+      release();
+      await upserting;
+      expect([rowsHolding('LATE-1'), rowsHolding('Ed rows boats.')]).toEqual([0, 0]);
+      expect(await store.chainRows(late.chain)).toEqual([]);
+      expect(await store.sessionRowsOf('A', '50')).toEqual([]);
+    }
+
+    // A forget that failed, and the host's own forget of that trace after it: a revert of the upsert takes back what it
+    // wrote and restores the fact it forgot, and never the summary the host forgot since.
+    {
+      const forgetFails = new Set<string>();
+      const forget: Memory['forget'] = async (traceId) => {
+        if (forgetFails.delete(traceId)) throw new Error('row locked');
+        return memory.forget(traceId);
+      };
+      const ash = await learnerOn(layer, createStandaloneMemoryRollingSummarySink(facadeWith({ forget })), '51');
+      await ash.upsert('- Canary ASH-2: splits ash', ['Fy splits ash.']);
+      const ownTraces = () => liveIn(file).filter((trace) => trace.scopeId === 'A/51');
+      const oldSummary = ownTraces().find((trace) => trace.content.includes('ASH-2'))!.id;
+      const ashFact = ownTraces().find((trace) => trace.content === 'Fact: Fy splits ash.')!.id;
+      forgetFails.add(oldSummary);
+      await ash.upsert('- Canary ASH-2: splits ash and birch', ['Fy splits birch.']);
+      expect(ash.lines()).toEqual(['- Canary ASH-2: splits ash', '- Canary ASH-2: splits ash and birch', 'Fact: Fy splits birch.']);
+      const [, , second, kept] = await sinkRows(store, ash.chain);
+      expect(kept).toMatchObject({ verdict: 'kept', after: { deleted: [ashFact] } });
+      await memory.forget(oldSummary);
+      await layer.revert(second!.id, 'ops');
+      expect(ash.lines()).toEqual(['Fact: Fy splits ash.']);
+    }
+
+    // A crash: the process stops with an upsert's pending row written and its verdict never written. The learner's next
+    // session, in another process 16 minutes on, decides it by what its traces hold.
+    const nextSession = (userId: string) =>
+      createLearningLayer({ store, memoryTools: memory, clock: () => Date.now() + 16 * 60_000 }).forLearner(
+        { ...LEARNER_A, userId },
+        productContext(`s-${userId}-next`),
+      );
+    const decisions = async (chain: string) => (await sinkRows(store, chain)).map((row) => [row.verdict, row.reason]);
+
+    // Both writes made, then the stop: no call of the crashed process's store returns. Kept, as recovered, traces and all.
+    {
+      let stopped = false;
+      const stopping = new Proxy(store, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target) as unknown;
+          if (typeof value !== 'function') return value;
+          return (...args: unknown[]) => (stopped ? new Promise(() => undefined) : (value as (...a: unknown[]) => unknown).apply(target, args));
+        },
+      });
+      let writes = 2;
+      const remember: Memory['remember'] = async (...args) => {
+        const trace = await memory.remember(...args);
+        if (--writes === 0) stopped = true;
+        return trace;
+      };
+      const kiln = await learnerOn(createLearningLayer({ store: stopping, memoryTools: memory }), createStandaloneMemoryRollingSummarySink(facadeWith({ remember })), '52');
+      void kiln.upsert('- Canary KILN-3: fires a kiln', ['Gu fires a kiln.']);
+      await settled(() => expect(kiln.lines()).toEqual(['- Canary KILN-3: fires a kiln', 'Fact: Gu fires a kiln.']));
+      expect(await verdicts(store, kiln.chain)).toEqual(['pending']);
+      await nextSession('52');
+      expect(await decisions(kiln.chain)).toEqual([
+        ['pending', 'pending'],
+        ['kept', 'recovered'],
+      ]);
+      expect(kiln.lines()).toEqual(['- Canary KILN-3: fires a kiln', 'Fact: Gu fires a kiln.']);
+    }
+
+    // The summary written, then the stop inside the second write, which never returns: rejected, and the summary it
+    // wrote is taken back.
+    {
+      let writes = 0;
+      const remember: Memory['remember'] = async (...args) => (++writes === 2 ? new Promise<never>(() => undefined) : memory.remember(...args));
+      const loom = await learnerOn(createLearningLayer({ store, memoryTools: memory }), createStandaloneMemoryRollingSummarySink(facadeWith({ remember })), '53');
+      void loom.upsert('- Canary LOOM-4: works a loom', ['Ha works a loom.']);
+      await settled(() => expect(loom.lines()).toEqual(['- Canary LOOM-4: works a loom']));
+      await nextSession('53');
+      expect(await decisions(loom.chain)).toEqual([
+        ['pending', 'pending'],
+        ['rejected', 'write_failed'],
+      ]);
+      expect(loom.lines()).toEqual([]);
+    }
   });
 });
 
