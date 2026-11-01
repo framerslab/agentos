@@ -7,14 +7,17 @@
  * store: an agent built again on the file recalls what a user said, a returning user's oldest trace among it past the
  * brain's newest 1,000, and renders the traits an operator set, and a closed agent opens the file again on its next
  * use, a forgetUser after agent.close() included. A host's own adapter is never closed. A turn with no learner files
- * under its session's memory scope, a reopened session's own. The agent's host calls fill in its key and namespace,
- * and reach the memory tools a host registers itself through learning.memoryTools.
+ * under its session's memory scope, a reopened session's own, and its memory_add writes one row of no user. The agent's
+ * host calls fill in its key and namespace, and reach the memory tools a host registers itself through
+ * learning.memoryTools.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import type { AgentOptions } from '../agent';
 import { gmi } from '../gmi';
+import { InMemoryLearningStore } from '../../cognition/learning/index';
+import { chainKeyOf } from '../../cognition/learning/ledger/Ledger';
 import { SqlLearningStore } from '../../cognition/learning/store/SqlLearningStore';
 import { closeMemory, facadeAt, liveContents, tempFile } from '../../cognition/learning/__tests__/helpers/memoryFixtures';
 import { Brain } from '../../cognition/memory/retrieval/store/Brain';
@@ -268,6 +271,25 @@ describe('a turn with no learner', () => {
 
     expect(seen[0]).toMatchObject({ learner: 'none', scopes: { learner: 'none', userScopeId: '/s1' } });
     expect((seen[1]?.scopes as { userScopeId: string }).userScopeId).toMatch(/^\/s1%3A[0-9a-f-]{36}$/);
+    await tutor.close();
+  });
+
+  it("files a memory_add on a session opened without a user id under the session's form, with a row of no user", async () => {
+    quietManifest();
+    const k = key();
+    script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'memory_add', args: { content: 'Canary GMI-7.' } }]), reply.text('Saved.')] });
+    const { memory, brain } = await facadeAt(tempFile(), 'tools-brain');
+    const store = new InMemoryLearningStore();
+    const tools = Object.fromEntries(memory.createTools({ includeReflect: false }).map((tool) => [tool.name, tool]));
+    const tutor = gmi(options(k, { tools, learning: { agentKey: 'tutor', store, memoryTools: memory } }));
+    await tutor.session('s1').send('Remember this.');
+
+    expect(await brain.all('SELECT scope_id, content FROM memory_traces WHERE deleted = 0')).toEqual([{ scope_id: '/s1', content: 'Canary GMI-7.' }]);
+    const rows = (await store.chainRows(chainKeyOf({ namespace: '', agentKey: 'tutor', userId: null }))).filter((row) => row.kind === 'memory_write');
+    expect(rows.map((row) => [row.rowType, row.verdict, row.userId, row.turnUserId])).toEqual([
+      ['candidate', 'pending', null, null],
+      ['verdict', 'kept', null, null],
+    ]);
     await tutor.close();
   });
 });
