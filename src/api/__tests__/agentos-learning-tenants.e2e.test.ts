@@ -220,6 +220,8 @@ describe('two tenants with one user id on one adapter and one Brain', () => {
     await send(agentos, { userId: '42', organizationId: 'B', sessionId: 's-b1', textInput: 'What do you know about the canary?' });
     const ofB = JSON.stringify(provider.seenMessages.slice(before));
     expect(provider.seenMessages.length - before).toBe(2);
+    // The search ran: its result is a list, not a tool error.
+    expect(toolMessagesOf(provider.seenMessages[before + 1])).toContain('{"results":[');
     for (const canary of CANARIES) expect(ofB).not.toContain(canary);
     expect((await tracesOf(db)).some((row) => row.scope_id === 'B/42')).toBe(true);
 
@@ -252,12 +254,14 @@ describe('two tenants with one user id on one adapter and one Brain', () => {
     // B's 42 names A's trace by its id: it reads as not found, and the trace and its copy stay.
     provider.replies.push(toolCall('memory_delete', { traceId }));
     await send(agentos, { userId: '42', organizationId: 'B', sessionId: 's-b1', textInput: 'Forget my bike.' });
+    expect(toolMessagesOf(provider.seenMessages.at(-1))).toContain('"deleted":false');
     expect((await tracesOf(db)).some((row) => row.id === traceId)).toBe(true);
     expect(await hasCopy(db, traceId)).toBe(true);
 
     // A's 42 deletes it: the row is soft-deleted and its knowledge-graph copy goes.
     provider.replies.push(toolCall('memory_delete', { traceId }));
     await send(agentos, { userId: '42', organizationId: 'A', sessionId: 's-a2', textInput: 'Forget my bike.' });
+    expect(toolMessagesOf(provider.seenMessages.at(-1))).toContain('"deleted":true');
     expect(await db.get("SELECT deleted FROM memory_traces WHERE brain_id = 'tutor' AND id = ?", [traceId])).toEqual({ deleted: 1 });
     expect(await hasCopy(db, traceId)).toBe(false);
   });
@@ -290,6 +294,7 @@ describe('two tenants with one user id on one adapter and one Brain', () => {
     provider.replies.push(toolCall('memory_search', { query: 'bees' }));
     await send(agentos, { userId: '42', organizationId: 'B', sessionId: 's-b1', textInput: 'Do I keep bees?' });
     expect(provider.seenMessages.length - before).toBe(2);
+    expect(toolMessagesOf(provider.seenMessages[before + 1])).toContain('{"results":[');
     expect(JSON.stringify(provider.seenMessages.slice(before))).not.toContain('EXPORT-4');
 
     await agentos.getLearningLayer()!.forgetUser!('42', { namespace: 'A' });
@@ -318,6 +323,7 @@ describe('a turn with no learner on the full runtime', () => {
     provider.replies.push(toolCall('memory_search', { query: 'river' }));
     await send(agentos, { userId: 'anonymous_user', sessionId: 's-y', textInput: 'Where do I park?' });
     expect(provider.seenMessages.length - before).toBe(2);
+    expect(toolMessagesOf(provider.seenMessages[before + 1])).toContain('{"results":[');
     expect(JSON.stringify(provider.seenMessages.slice(before))).not.toContain('ANON-6');
   });
 });
