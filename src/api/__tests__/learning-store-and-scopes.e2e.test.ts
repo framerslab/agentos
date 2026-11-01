@@ -113,6 +113,17 @@
  * files nothing, `forgetUser` takes every summary of a user's words, and with no layer both run under the plain ids.
  * An upsert admitted before another process's `forgetUser` and written after it leaves nothing, and a crash's pending
  * upsert is decided at the learner's next session by what its traces hold.
+ *
+ * Durable memory on gmi() (`memory.store`) and `agent.learning`'s host calls. A SQLite file (`{ path }`) or a host's
+ * storage adapter (`{ adapter, brainId? }`) holds the agent's memory, a gist archive and the learning store; it needs
+ * the learning option and `learning.agentKey`, is checked at construction and opened at first use. An agent built
+ * again on the file recalls a returning user's oldest trace and renders the traits an operator set, a closed agent
+ * opens the file again, a host's adapter is never closed and two agents on it keep their own brains and learners, an
+ * adapter without transactions keeps the learning store in process, and a store that does not open fails the send
+ * naming it, until the next send opens it. The host calls fill in the agent's key and namespace, `forgetUser` opens
+ * the agent's memory after `close()` and refuses before the tombstone when it does not build, and a call that names a
+ * learner on an agent with no key rejects naming `learning.agentKey`; on Postgres a second process recalls and renders
+ * what the first filed and set.
  */
 import { afterAll, afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 // The stub replaces the provider class alone: the package root also reads the module's other exports (its base URL).
@@ -136,6 +147,8 @@ import {
   ReasoningEntryType,
   SqlKnowledgeGraph,
   agent,
+  type AgentLearning,
+  type AgentOptions,
   createLearningLayer,
   createStandaloneMemoryLongTermRetriever,
   createStandaloneMemoryRollingSummarySink,
@@ -9484,6 +9497,671 @@ describe("the standalone retriever and the rolling-summary sink, by a turn's sco
   });
 });
 
+describe("gmi(): durable memory (memory.store) with its learning store on the same adapter, and agent.learning's host calls", () => {
+  let keys = 0;
+  const key = () => `k-qa-store-${++keys}`;
+  const opened: StorageAdapter[] = [];
+
+  afterEach(async () => {
+    for (const adapter of opened.splice(0)) await adapter.close().catch(() => undefined);
+  });
+
+  const quiet = () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  };
+  /** Memory's embeddings go to a stub key of their own, set as the environment's OpenAI key. */
+  const embeddings = () => {
+    const embeddingKey = key();
+    script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+  };
+  /** A SQLite file in a directory of its own, removed after the test; nothing creates it. */
+  const storeFile = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-store-'));
+    dirs.push(dir);
+    return path.join(dir, 'agent.sqlite');
+  };
+  /** A host's SQLite adapter, closed after the test. */
+  const hostAdapter = async (file = learningFile()): Promise<StorageAdapter> => {
+    const adapter = await openSqliteAt(file);
+    opened.push(adapter);
+    return adapter;
+  };
+  /** Rows of a SQLite file, read by a connection of the host's own. */
+  function rowsIn<T>(file: string, sql: string, params: unknown[] = []): T[] {
+    const db = new Database(file, { readonly: true, fileMustExist: true });
+    try {
+      return db.prepare(sql).all(...params) as T[];
+    } finally {
+      db.close();
+    }
+  }
+  /** The live traces of a brain in a SQLite file: scope, scope id and text. */
+  const tracesIn = (file: string, brainId: string) =>
+    rowsIn<{ scope: string; scope_id: string; content: string }>(
+      file,
+      'SELECT scope, scope_id, content FROM memory_traces WHERE brain_id = ? AND deleted = 0 ORDER BY content',
+      [brainId],
+    );
+  /** The system text of one model call. */
+  const systemOf = (call: { messages: Array<{ role: string; content: unknown }> } | undefined): string =>
+    (call?.messages ?? [])
+      .filter((message) => message.role === 'system')
+      .map((message) => (typeof message.content === 'string' ? message.content : JSON.stringify(message.content)))
+      .join('\n');
+  const asked = (played: ReturnType<typeof script>) => JSON.stringify(played.seen.at(-1)?.messages ?? []);
+
+  /** gmi() named `Tutor` (persona id `tutor`), memory with no mechanisms embedding through OpenAI, on `store` when one is given. */
+  function tutorOn(apiKey: string, store: unknown, extra: Record<string, unknown> = {}) {
+    return gmi({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey,
+      fallbackProviders: [],
+      name: 'Tutor',
+      instructions: 'You teach networking.',
+      personality: TUTOR_PERSONA,
+      cognition: { mechanisms: false },
+      memory: { embedding: { provider: 'openai' }, ...(store === undefined ? {} : { store }) },
+      ...extra,
+    } as never);
+  }
+
+  /** A host tool that keeps what each call is told about its turn, and what a memory write would be refused for. */
+  function probe() {
+    const told: Array<{ context: ToolLearningContext | undefined; memoryWrite: string | undefined }> = [];
+    const tool = {
+      name: 'probe_learning',
+      description: 'Reads what the turn tells its tools about learning.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async (_args: Record<string, unknown>, context: { sessionData?: Record<string, unknown> }) => {
+        told.push({ context: readToolLearningContext(context.sessionData), memoryWrite: memoryWriteRefusal(context.sessionData) });
+        return { success: true, output: 'read' };
+      },
+    };
+    return { tool, told };
+  }
+  /** `count` turns, each calling the probe once and then answering. */
+  const probedTurns = (count: number) =>
+    Array.from({ length: count }, (_, turn) => [reply.tools([{ id: `p${turn}`, name: 'probe_learning', args: {} }]), reply.text('Done.')]).flat();
+
+  /** A host's adapter that fails every statement while `down.on` is true, as a database that is not reachable does. */
+  function failingWhileDown(adapter: StorageAdapter): { adapter: StorageAdapter; down: { on: boolean } } {
+    const down = { on: true };
+    const statements = new Set(['run', 'get', 'all', 'exec', 'transaction']);
+    const wrapped = new Proxy(adapter, {
+      get(target, property) {
+        const value: unknown = Reflect.get(target, property, target);
+        if (typeof value !== 'function') return value;
+        if (!statements.has(String(property))) return value.bind(target);
+        return async (...args: unknown[]) => {
+          if (down.on) throw new Error('disk gone');
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    });
+    return { adapter: wrapped, down };
+  }
+
+  /** A host's adapter that reports no transactions (as a store without them does), every call still reaching the file. */
+  function withoutTransactions(adapter: StorageAdapter): StorageAdapter {
+    return new Proxy(adapter, {
+      get(target, property) {
+        if (property === 'capabilities') return new Set([...target.capabilities].filter((capability) => capability !== 'transactions'));
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  }
+
+  it("is checked at construction on gmi() and agent({ runtime: 'gmi' }): it needs the learning option and learning.agentKey, a SQL learning.store needs the key, each shape error names its field, and nothing is opened until first use", async () => {
+    const file = storeFile();
+    const build = (store: unknown, learning?: unknown, extra: Record<string, unknown> = {}) => () =>
+      tutorOn(key(), store, { ...(learning === undefined ? {} : { learning }), ...extra });
+
+    const noLearning = /memory\.store needs the learning option on; for durable memory without learning, set learning: \{ agentKey, mode: 'off' \}/;
+    expect(build({ path: file })).toThrow(noLearning);
+    expect(build({ path: file }, null)).toThrow(noLearning);
+    expect(build({ path: file }, false)).toThrow(noLearning);
+    expect(() =>
+      agent({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: key(), fallbackProviders: [], memory: { store: { path: file } } } as never),
+    ).toThrow(noLearning);
+    // A named agent's persona id is not enough: the brain and its learners are named by learning.agentKey alone.
+    const noKey = /memory\.store needs learning\.agentKey, the stable id of the agent's brain and its learners/;
+    expect(build({ path: file }, true)).toThrow(noKey);
+    expect(build({ path: file }, { agentKey: '  ' })).toThrow(/learning\.agentKey/);
+    expect(build({ path: file }, { agentKey: null })).toThrow(noKey);
+
+    const learning = { agentKey: 'tutor' };
+    const shape = /memory\.store must be \{ path \} or \{ adapter, brainId\? \}/;
+    expect(build({ path: ' ' }, learning)).toThrow(/memory\.store\.path must be a non-blank file path/);
+    expect(build({ path: 7 }, learning)).toThrow(/memory\.store\.path must be a non-blank file path/);
+    expect(build({ url: file }, learning)).toThrow(shape);
+    expect(build('file.sqlite', learning)).toThrow(shape);
+    const adapter = await hostAdapter();
+    expect(build({ path: file, adapter }, learning)).toThrow(shape);
+    expect(build({ adapter: { run: () => undefined } }, learning)).toThrow(/memory\.store\.adapter must be a StorageAdapter of @framers\/sql-storage-adapter/);
+    expect(build({ adapter, brainId: ' ' }, learning)).toThrow(/memory\.store\.brainId must be a non-blank string/);
+
+    const sqlKey = /a SQL learning\.store needs learning\.agentKey, the stable id of the agent's learners/;
+    expect(build(undefined, { store: new SqlLearningStore({ adapter }) })).toThrow(sqlKey);
+    expect(build(undefined, { store: new SqlLearningStore({ adapter }), agentKey: ' ' })).toThrow(/learning\.agentKey/);
+    await build(undefined, { store: new InMemoryLearningStore() })().close();
+    await build(undefined, { store: new SqlLearningStore({ adapter }), agentKey: 'tutor' })().close();
+
+    // A store that passes the checks is opened on first use, not at construction.
+    const tutor = build({ path: file }, learning)();
+    const viaAgent = agent({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: key(),
+      fallbackProviders: [],
+      memory: { store: { path: file } },
+      learning: { agentKey: 'tutor', mode: 'off' },
+    } as never);
+    expect(fs.existsSync(file)).toBe(false);
+    await tutor.close();
+    await viaAgent.close();
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it("fails a session's first send naming memory.store when the store does not open, before any model call, tries again at the next send, and never closes a host's adapter", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('Noted.'), reply.text('It is LARK-7.')] });
+    const real = await hostAdapter();
+    const { adapter, down } = failingWhileDown(real);
+    const tutor = tutorOn(k, { adapter, brainId: 'tutor-brain' }, { learning: { agentKey: 'tutor' } });
+
+    const s1 = tutor.session('s1', { userId: 'ana' });
+    await expect(s1.send('My canary is LARK-7.')).rejects.toThrow(/memory\.store did not open: .*disk gone/);
+    expect(played.seen).toEqual([]);
+
+    down.on = false;
+    await s1.send('My canary is LARK-7.');
+    await tutor.session('s2', { userId: 'ana' }).send('What is my canary?');
+    expect(asked(played)).toContain('LARK-7');
+    const manifest = await tutor.learning!.manifest();
+    expect(manifest.loops.memory_store).toEqual({ live: true, detail: "the host's storage adapter (memory.store.adapter)" });
+    expect(manifest.loops.ledger).toMatchObject({ live: true, detail: expect.stringContaining("sql store over the agent's memory store") });
+    await tutor.close();
+
+    // The host's adapter is open after close(), and holds the agent's memory under its brain id and its learning store.
+    expect(await real.all("SELECT DISTINCT scope_id FROM memory_traces WHERE brain_id = 'tutor-brain' AND scope = 'user' AND deleted = 0")).toEqual([{ scope_id: 'ana' }]);
+    expect(await real.all("SELECT count(*) AS n FROM memory_traces WHERE brain_id <> 'tutor-brain'")).toEqual([{ n: 0 }]);
+    expect(await real.all('SELECT session_id, agent_key, user_id FROM agentos_learning_sessions ORDER BY session_id')).toEqual([
+      { session_id: 's1', agent_key: 'tutor', user_id: 'ana' },
+      { session_id: 's2', agent_key: 'tutor', user_id: 'ana' },
+    ]);
+  });
+
+  it("keeps a learner's memory and the traits an operator set in one SQLite file: the agent recalls and renders them after close() and an agent built again on the file does too, for that learner alone", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: Array.from({ length: 5 }, () => reply.text('Noted.')) });
+    const file = storeFile();
+    const options = { learning: { agentKey: 'tutor' } };
+    const first = tutorOn(k, { path: file }, options);
+
+    await first.session('s1', { userId: 'ana' }).send('The deploy key lives in the vault under ops/deploy.');
+    const set = await first.learning!.operatorSet!({ userId: 'ana', traits: { openness: 0.7 }, by: 'ops' });
+    expect(set).toMatchObject({ kind: 'operator_set', learner: { namespace: '', agentKey: 'tutor', userId: 'ana' } });
+    const manifest = await first.learning!.manifest();
+    expect(manifest.loops.memory_store).toEqual({ live: true, detail: 'a SQLite file (memory.store.path)' });
+    expect(manifest.loops.ledger).toMatchObject({ live: true, detail: expect.stringContaining("sql store over the agent's memory store") });
+    await first.close();
+
+    // One file: the brain `tutor` (learning.agentKey) with the learner's traces, the archive's tables beside it, and
+    // the learning store's rows, read by a connection of the host's own once the agent let go of the file.
+    expect(tracesIn(file, 'tutor').map((row) => [row.scope, row.scope_id, row.content])).toContainEqual([
+      'user',
+      'ana',
+      'The deploy key lives in the vault under ops/deploy.',
+    ]);
+    const tables = rowsIn<{ name: string }>(file, "SELECT name FROM sqlite_master WHERE type = 'table'").map((row) => row.name);
+    expect(tables).toEqual(expect.arrayContaining(['memory_traces', 'archived_traces', 'agentos_learning_traits', 'agentos_learning_ledger']));
+    expect(rowsIn(file, 'SELECT namespace, agent_key, user_id FROM agentos_learning_traits')).toEqual([{ namespace: '', agent_key: 'tutor', user_id: 'ana' }]);
+
+    // The closed agent opens the file again for its next session, which recalls and renders what the file holds.
+    await first.session('s2', { userId: 'ana' }).send('Where does the deploy key live?');
+    expect(asked(played)).toContain('vault');
+    expect(systemOf(played.seen.at(-1))).toContain(renderPersonalitySection({ ...TUTOR_PERSONA, openness: 0.7 })!);
+    expect((await first.learning!.manifest()).turns.bound).toBe(2);
+    await first.close();
+
+    const second = tutorOn(k, { path: file }, options);
+    await second.session('s3', { userId: 'ana' }).send('Where does the deploy key live?');
+    expect(asked(played)).toContain('vault');
+    expect(systemOf(played.seen.at(-1))).toContain(renderPersonalitySection({ ...TUTOR_PERSONA, openness: 0.7 })!);
+    await second.session('s4', { userId: 'bo' }).send('Where does the deploy key live?');
+    expect(asked(played)).not.toContain('vault');
+    expect(systemOf(played.seen.at(-1))).toContain(renderPersonalitySection(TUTOR_PERSONA)!);
+    await second.close();
+  });
+
+  it("recalls a returning user's oldest trace in an agent built again on the file, past the brain's newest 1,000 traces", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('Noted.'), reply.text('It is in the vault.')] });
+    const file = storeFile();
+    const options = { learning: { agentKey: 'tutor' } };
+    const first = tutorOn(k, { path: file }, options);
+    await first.session('s1', { userId: 'ana' }).send('The deploy key lives in the vault under ops/deploy.');
+    await first.close();
+
+    // A thousand newer traces of other users, as a busy brain holds: its whole-brain load reads these and not ana's.
+    const brain = await Brain.openSqlite(file, { brainId: 'tutor' });
+    try {
+      const newest = await brain.get<{ created_at: number }>("SELECT max(created_at) AS created_at FROM memory_traces WHERE brain_id = 'tutor'");
+      await brain.transaction(async (trx) => {
+        for (let i = 0; i < 1_000; i += 1) {
+          await trx.run(
+            `INSERT INTO memory_traces (brain_id, id, type, scope, scope_id, content, embedding, strength, created_at,
+               last_accessed, retrieval_count, tags, emotions, metadata, deleted)
+             VALUES ('tutor', ?, 'episodic', 'user', ?, ?, NULL, 0.5, ?, NULL, 0, '[]', '{}', ?, 0)`,
+            [`qa-filler-${i}`, `other-${i}`, `Filler note ${i}.`, Number(newest!.created_at) + 1 + i, JSON.stringify({ scopeId: `other-${i}` })],
+          );
+        }
+      });
+    } finally {
+      await brain.close();
+    }
+
+    const second = tutorOn(k, { path: file }, options);
+    await second.session('s2', { userId: 'ana' }).send('Where does the deploy key live?');
+    expect(asked(played)).toContain('vault');
+    await second.close();
+  });
+
+  it("runs on a host's adapter that two agents share, each under its own brain id and learners, and never closes it", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: Array.from({ length: 5 }, () => reply.text('Noted.')) });
+    const adapter = await hostAdapter();
+    const tutor = tutorOn(k, { adapter, brainId: 'tutor-brain' }, { learning: { agentKey: 'tutor' } });
+    const coach = tutorOn(k, { adapter }, { name: 'Coach', learning: { agentKey: 'coach' } });
+
+    await tutor.session('t1', { userId: 'ana' }).send('My canary is LARK-7.');
+    await coach.session('c1', { userId: 'ana' }).send('What is my canary?');
+    expect(asked(played)).not.toContain('LARK-7');
+    await tutor.learning!.operatorSet!({ userId: 'ana', traits: { openness: 0.7 }, by: 'ops' });
+    expect((await tutor.learning!.exportLearnedState!('ana')).learner).toEqual({ namespace: '', agentKey: 'tutor', userId: 'ana' });
+    expect((await coach.learning!.exportLearnedState!('ana')).learner).toEqual({ namespace: '', agentKey: 'coach', userId: 'ana' });
+    await coach.session('c2', { userId: 'ana' }).send('Hello again.');
+    expect(systemOf(played.seen.at(-1))).toContain(renderPersonalitySection(TUTOR_PERSONA)!);
+    await tutor.close();
+    await coach.close();
+
+    // Both closed: the adapter is open, and a session after close() runs on the same Brain over it.
+    expect(await adapter.all('SELECT DISTINCT brain_id FROM memory_traces ORDER BY brain_id')).toEqual([{ brain_id: 'coach' }, { brain_id: 'tutor-brain' }]);
+    expect(await adapter.all('SELECT agent_key, user_id FROM agentos_learning_traits ORDER BY agent_key')).toEqual([
+      { agent_key: 'coach', user_id: 'ana' },
+      { agent_key: 'tutor', user_id: 'ana' },
+    ]);
+    await tutor.session('t2', { userId: 'ana' }).send('What is my canary?');
+    expect(asked(played)).toContain('LARK-7');
+    expect(systemOf(played.seen.at(-1))).toContain(renderPersonalitySection({ ...TUTOR_PERSONA, openness: 0.7 })!);
+    await tutor.close();
+    expect(await adapter.get('SELECT 1 AS one')).toEqual({ one: 1 });
+  });
+
+  it("keeps the learning store in process for the agent's life on a host's adapter without transactions, and a learning.store the host passes wins over memory.store's", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: Array.from({ length: 4 }, () => reply.text('Noted.')) });
+    const file = learningFile();
+    const plain = withoutTransactions(await hostAdapter(file));
+    const tutor = tutorOn(k, { adapter: plain }, { learning: { agentKey: 'tutor' } });
+    await tutor.session('s1', { userId: 'ana' }).send('My canary is LARK-7.');
+    expect((await tutor.learning!.manifest()).loops.ledger).toMatchObject({ detail: expect.stringContaining('in process') });
+    await tutor.learning!.operatorSet!({ userId: 'ana', traits: { openness: 0.7 }, by: 'ops' });
+    await tutor.close();
+    await tutor.session('s2', { userId: 'ana' }).send('What is my canary?');
+    expect(asked(played)).toContain('LARK-7');
+    expect(systemOf(played.seen.at(-1))).toContain(renderPersonalitySection({ ...TUTOR_PERSONA, openness: 0.7 })!);
+    await tutor.close();
+    expect(await plain.all("SELECT name FROM sqlite_master WHERE name LIKE 'agentos_learning_%'")).toEqual([]);
+
+    const otherFile = learningFile();
+    const theirs = new SqlLearningStore({ adapter: await hostAdapter(otherFile) });
+    const memoryFile = storeFile();
+    const passed = tutorOn(k, { path: memoryFile }, { learning: { agentKey: 'tutor', store: theirs } });
+    await passed.session('s3', { userId: 'ana' }).send('My canary is OWL-3.');
+    expect((await passed.learning!.manifest()).loops.ledger).toMatchObject({ detail: expect.stringContaining('sql store the host passed') });
+    expect(await theirs.traitRow('', 'tutor', 'ana')).toBeDefined();
+    await passed.close();
+    expect(rowsIn(memoryFile, "SELECT name FROM sqlite_master WHERE name LIKE 'agentos_learning_%'")).toEqual([]);
+    expect(tracesIn(memoryFile, 'tutor').map((row) => row.content)).toContain('My canary is OWL-3.');
+  });
+
+  it("keeps memory on agent({ runtime: 'gmi' }) with learning mode off, which an agent built again on the file recalls", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: [reply.text('Noted.'), reply.text('It is in the vault.')] });
+    const file = storeFile();
+    const build = () =>
+      agent({
+        runtime: 'gmi',
+        provider: 'openai',
+        model: 'stub-model',
+        apiKey: k,
+        fallbackProviders: [],
+        name: 'Tutor',
+        instructions: 'You teach networking.',
+        cognition: { mechanisms: false },
+        memory: { embedding: { provider: 'openai' }, store: { path: file } },
+        learning: { agentKey: 'tutor', mode: 'off' },
+      } as never);
+    const first = build();
+    await first.session('s1', { userId: 'ana' }).send('The deploy key lives in the vault under ops/deploy.');
+    expect((await first.learning!.manifest()).mode).toBe('off');
+    await first.close();
+
+    const second = build();
+    await second.session('s2', { userId: 'ana' }).send('Where does the deploy key live?');
+    expect(asked(played)).toContain('vault');
+    await second.close();
+    expect(tracesIn(file, 'tutor').map((row) => row.scope_id)).toContain('ana');
+  });
+
+  it("files a turn with no learner under its session's memory scope id in the file, a session opened again after session.close() under its own, and tells a generate() call its own", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    script('openai', k, { replies: probedTurns(3) });
+    const { tool, told } = probe();
+    const file = storeFile();
+    const tutor = tutorOn(k, { path: file }, { learning: { agentKey: 'tutor' }, tools: [tool] });
+
+    const first = tutor.session('s1');
+    await first.send('The first visit.');
+    await first.close();
+    await tutor.session('s1').send('The second visit.');
+    await tutor.generate('Read it.');
+    expect(told.map((call) => call.context?.learner)).toEqual(['none', 'none', 'none']);
+    expect(told[0]!.context?.scopes).toMatchObject({ userScopeId: '/s1', personaScopeId: '/s1::tutor' });
+    const reopened = told[1]!.context?.scopes?.userScopeId;
+    expect(reopened).toMatch(/^\/s1%3A[0-9a-f-]{36}$/);
+    expect(told[2]!.context?.scopes?.userScopeId).toMatch(/^\/generate-/);
+    await tutor.close();
+
+    const filed = tracesIn(file, 'tutor').filter((row) => row.scope === 'user');
+    const scopeIdsOf = (text: string) => [...new Set(filed.filter((row) => row.content === text).map((row) => row.scope_id))];
+    expect(scopeIdsOf('The first visit.')).toEqual(['/s1']);
+    expect(scopeIdsOf('The second visit.')).toEqual([reopened]);
+  });
+
+  it("fills in the agent's key and namespace for a freeze and a suspension of a learner or of the whole agent, each a row in the file that sets the mode of the turns it covers", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    script('openai', k, { replies: probedTurns(9) });
+    const { tool, told } = probe();
+    const file = storeFile();
+    // learning.agentKey names the agent; its name gives it another persona id.
+    const tutor = tutorOn(k, { path: file }, { learning: { agentKey: 'coach', namespace: 'A' }, tools: [tool] });
+    const ana = tutor.session('s-ana', { userId: 'ana' });
+    const bo = tutor.session('s-bo', { userId: 'bo' });
+    const read = async (session: typeof ana) => {
+      await session.send('Read it.');
+      return told.at(-1)!;
+    };
+    const freezes = () => rowsIn<{ scope_key: string; mode: string; set_by: string }>(file, 'SELECT scope_key, mode, set_by FROM agentos_learning_freezes ORDER BY scope_key');
+    const ANA_KEY = { namespace: 'A', agentKey: 'coach', userId: 'ana' };
+    try {
+      expect(await read(ana)).toMatchObject({ context: { learner: 'bound', mode: 'on', scopes: { userScopeId: 'A/ana', namespace: 'A' } }, memoryWrite: undefined });
+
+      await tutor.learning!.freeze!({ userId: 'ana' }, 'ops');
+      expect(freezes()).toEqual([{ scope_key: freezeScopeKey({ learner: ANA_KEY }), mode: 'frozen', set_by: 'operator:ops' }]);
+      expect(await read(ana)).toMatchObject({ context: { learner: 'bound', mode: 'frozen' }, memoryWrite: 'frozen' });
+      expect(await read(bo)).toMatchObject({ context: { learner: 'bound', mode: 'on' }, memoryWrite: undefined });
+      await tutor.learning!.unfreeze!({ userId: 'ana' });
+      expect(freezes()).toEqual([]);
+
+      await tutor.learning!.freeze!();
+      expect(freezes()).toEqual([{ scope_key: freezeScopeKey({ agentKey: 'coach' }), mode: 'frozen', set_by: 'operator:unnamed' }]);
+      expect(await read(bo)).toMatchObject({ context: { mode: 'frozen' }, memoryWrite: 'frozen' });
+      expect(await read(tutor.session('s-anon'))).toMatchObject({ context: { learner: 'none', mode: 'frozen' }, memoryWrite: 'frozen' });
+      await tutor.learning!.unfreeze!();
+
+      await tutor.learning!.suspend!({ userId: 'ana' }, 'ops');
+      expect(freezes()).toEqual([{ scope_key: freezeScopeKey({ learner: ANA_KEY }), mode: 'off', set_by: 'operator:ops' }]);
+      expect(await read(ana)).toMatchObject({ context: { mode: 'off' }, memoryWrite: undefined });
+      await tutor.learning!.unsuspend!({ userId: 'ana' });
+      await tutor.learning!.suspend!();
+      expect(freezes()).toEqual([{ scope_key: freezeScopeKey({ agentKey: 'coach' }), mode: 'off', set_by: 'operator:unnamed' }]);
+      expect(await read(bo)).toMatchObject({ context: { mode: 'off' } });
+      await tutor.learning!.unsuspend!();
+      expect(freezes()).toEqual([]);
+      expect(await read(ana)).toMatchObject({ context: { learner: 'bound', mode: 'on' }, memoryWrite: undefined });
+    } finally {
+      await tutor.close();
+    }
+  });
+
+  it("fills in the agent's key and namespace for operatorSet, revert, export, import and forgetUser, and forgetUser after close() reaches the file", async () => {
+    quiet();
+    embeddings();
+    const k = key();
+    const played = script('openai', k, { replies: Array.from({ length: 5 }, () => reply.text('Noted.')) });
+    const file = storeFile();
+    const tutor = tutorOn(k, { path: file }, { learning: { agentKey: 'coach', namespace: 'A' } });
+    const learned = renderPersonalitySection({ ...TUTOR_PERSONA, openness: 0.7 })!;
+    try {
+      await tutor.session('s1', { userId: 'ana' }).send('My canary is LARK-7.');
+      const set = await tutor.learning!.operatorSet!({ userId: 'ana', traits: { openness: 0.7 }, by: 'ops', note: 'calmer' });
+      expect(set).toMatchObject({ kind: 'operator_set', actor: 'operator:ops', learner: { namespace: 'A', agentKey: 'coach', userId: 'ana' }, evidence: { note: 'calmer' } });
+      await tutor.session('s2', { userId: 'ana' }).send('Hello.');
+      expect(systemOf(played.seen.at(-1))).toContain(learned);
+
+      const doc = await tutor.learning!.exportLearnedState!('ana');
+      expect(doc.learner).toEqual({ namespace: 'A', agentKey: 'coach', userId: 'ana' });
+      const imported = await tutor.learning!.importLearnedState!(doc, { userId: 'cy' });
+      expect(imported.target).toEqual({ namespace: 'A', agentKey: 'coach', userId: 'cy' });
+      await tutor.session('s3', { userId: 'cy' }).send('Hello.');
+      expect(systemOf(played.seen.at(-1))).toContain(learned);
+
+      const reverted = await tutor.learning!.revert!(set.id, 'ops');
+      expect(reverted).toMatchObject({ reason: 'revert', learner: { namespace: 'A', agentKey: 'coach', userId: 'ana' } });
+      await tutor.session('s4', { userId: 'ana' }).send('Hello.');
+      expect(systemOf(played.seen.at(-1))).toContain(renderPersonalitySection(TUTOR_PERSONA)!);
+      expect((await tutor.learning!.importLearnedState!(doc)).target).toEqual({ namespace: 'A', agentKey: 'coach', userId: 'ana' });
+    } finally {
+      await tutor.close();
+    }
+    expect(tracesIn(file, 'coach').map((row) => row.scope_id)).toContain('A/ana');
+
+    // No session holds the agent's memory now: forgetUser opens it, deletes the user's traces in the file and their
+    // rows, and writes the tombstone, in the agent's namespace.
+    const report = await tutor.learning!.forgetUser!('ana');
+    expect(report).toMatchObject({ userId: 'ana', namespace: 'A' });
+    expect(report.stores).toContainEqual(expect.objectContaining({ store: 'memory manager of brain coach', reached: true }));
+    await tutor.close();
+    expect(tracesIn(file, 'coach').filter((row) => row.scope_id.startsWith('A/ana'))).toEqual([]);
+    expect(tracesIn(file, 'coach').map((row) => row.scope_id)).toContain('A/cy');
+    expect(rowsIn(file, "SELECT user_id FROM agentos_learning_traits WHERE namespace = 'A' ORDER BY user_id")).toEqual([{ user_id: 'cy' }]);
+    expect(rowsIn(file, 'SELECT hash FROM agentos_learning_forgotten')).toEqual([{ hash: await tombstoneHash('A', 'ana') }]);
+  });
+
+  it("refuses forgetUser before the tombstone when the agent's memory does not build, so a deletion that could not reach the store is never reported done", async () => {
+    quiet();
+    embeddings();
+    const file = storeFile();
+    // The stub's model answers 1,536 values: memory built for 768 fails its test call.
+    const tutor = gmi({
+      runtime: 'gmi',
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: key(),
+      fallbackProviders: [],
+      name: 'Tutor',
+      cognition: { mechanisms: false },
+      memory: { embedding: { provider: 'openai', dimension: 768 }, store: { path: file } },
+      learning: { agentKey: 'tutor' },
+    } as never);
+    await expect(tutor.learning!.forgetUser!('ana')).rejects.toThrow(/memory\.embedding/);
+    await tutor.close();
+    const store = new SqlLearningStore({ adapter: await hostAdapter(file) });
+    expect(await store.isForgotten(await tombstoneHash('', 'ana'))).toBe(false);
+  });
+
+  it("refuses a call that names a learner on an agent with no key, naming learning.agentKey, covers every learner with one that names none, and keys a named agent by its persona id", async () => {
+    quiet();
+    const k = key();
+    script('openai', k, { replies: probedTurns(2) });
+    const { tool, told } = probe();
+    const unkeyed = gmi({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], learning: true, tools: [tool] } as never);
+    const agentKeyNamed = /learning\.agentKey/;
+    const read = async () => {
+      await unkeyed.session('s-ana', { userId: 'ana' }).send('Read it.');
+      return told.at(-1)!;
+    };
+    const calls: Array<[string, () => Promise<unknown>]> = [
+      ['exportLearnedState', () => unkeyed.learning!.exportLearnedState!('ana')],
+      ['operatorSet', () => unkeyed.learning!.operatorSet!({ userId: 'ana', traits: 'baseline', by: 'ops' })],
+      ['freeze', () => unkeyed.learning!.freeze!({ userId: 'ana' })],
+      ['unfreeze', () => unkeyed.learning!.unfreeze!({ userId: 'ana' })],
+      ['suspend', () => unkeyed.learning!.suspend!({ userId: 'ana' })],
+      ['unsuspend', () => unkeyed.learning!.unsuspend!({ userId: 'ana' })],
+      ['importLearnedState', () => unkeyed.learning!.importLearnedState!({ version: 1 } as never, { userId: 'ana' })],
+    ];
+    for (const [name, call] of calls) {
+      // Each call rejects; none throws at the call.
+      let pending: Promise<unknown> | undefined;
+      expect(() => {
+        pending = call();
+      }).not.toThrow();
+      await expect(pending, name).rejects.toThrow(agentKeyNamed);
+    }
+    try {
+      await unkeyed.learning!.freeze!(undefined, 'ops');
+      expect(await read()).toMatchObject({ context: { mode: 'frozen' }, memoryWrite: 'frozen' });
+      await unkeyed.learning!.unfreeze!();
+      expect(await read()).toMatchObject({ context: { mode: 'on' }, memoryWrite: undefined });
+      expect(await unkeyed.learning!.forgetUser!('ana')).toMatchObject({ userId: 'ana', namespace: '' });
+    } finally {
+      await unkeyed.close();
+    }
+
+    const named = gmi({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: key(), fallbackProviders: [], name: 'Tutor', learning: true } as never);
+    expect((await named.learning!.exportLearnedState!('ana')).learner).toEqual({ namespace: '', agentKey: 'tutor', userId: 'ana' });
+    await named.close();
+  });
+
+  it("reports in the manifest where memory lives and an empty metaprompt list as off, and hands onBeforeGeneration the base prompt without the personality section the turn's system text carries", async () => {
+    quiet();
+    const base = { runtime: 'gmi', provider: 'openai', model: 'stub-model', fallbackProviders: [], learning: true };
+    const noPresets = gmi({ ...base, apiKey: key(), cognition: { memory: false, sentiment: true, metaprompts: [] } } as never);
+    expect((await noPresets.learning!.manifest()).loops).toMatchObject({
+      metaprompts: { live: false, detail: 'no metaprompt preset' },
+      memory_store: { live: false, detail: 'memory is off' },
+    });
+    await noPresets.close();
+    const inProcess = gmi({ ...base, apiKey: key(), cognition: 'full', memory: { embedding: { provider: 'openai' } } } as never);
+    const full = (await inProcess.learning!.manifest()).loops;
+    expect(full.memory_store).toEqual({ live: false, detail: 'memory lives in process memory' });
+    expect(full.metaprompts).toEqual({ live: true });
+    await inProcess.close();
+
+    const k = key();
+    script('openai', k, { replies: [reply.text('Hi.')] });
+    const hooked: Array<{ system: string | undefined; messages: string }> = [];
+    const tutor = gmi({
+      ...base,
+      apiKey: k,
+      name: 'Tutor',
+      instructions: 'You teach networking.',
+      personality: TUTOR_PERSONA,
+      cognition: { memory: false },
+      onBeforeGeneration: async (context: { system?: string; messages: Array<{ role: string; content: unknown }> }) => {
+        hooked.push({ system: context.system, messages: systemOf(context) });
+      },
+    } as never);
+    await tutor.session('s1', { userId: 'ana' }).send('Hello.');
+    const section = renderPersonalitySection(TUTOR_PERSONA)!;
+    expect(hooked).toHaveLength(1);
+    expect(hooked[0]!.system).toContain('You teach networking.');
+    expect(hooked[0]!.system).not.toContain(section);
+    expect(hooked[0]!.messages).toContain(section);
+    await tutor.close();
+  });
+
+  it('types memory.store and the host calls on the package root', () => {
+    type Store = NonNullable<Exclude<NonNullable<AgentOptions['memory']>, boolean>['store']>;
+    expectTypeOf<{ path: string }>().toMatchTypeOf<Store>();
+    expectTypeOf<{ adapter: StorageAdapter; brainId: string }>().toMatchTypeOf<Store>();
+    expectTypeOf<NonNullable<AgentLearning['forgetUser']>>().returns.toEqualTypeOf<Promise<ForgetReport>>();
+    expectTypeOf<NonNullable<AgentLearning['operatorSet']>>().returns.toEqualTypeOf<Promise<LedgerEntry>>();
+    expectTypeOf<NonNullable<AgentLearning['exportLearnedState']>>().returns.toEqualTypeOf<Promise<LearnedStateDocument>>();
+    expectTypeOf<NonNullable<AgentLearning['importLearnedState']>>().returns.toEqualTypeOf<Promise<ImportReport>>();
+    expectTypeOf<NonNullable<AgentLearning['freeze']>>().parameters.toEqualTypeOf<[target?: { userId?: string }, by?: string]>();
+  });
+});
+
+describe.skipIf(!POSTGRES_URL)('gmi(): durable memory (memory.store) on a Postgres adapter', () => {
+  it('keeps what one process filed and set for a learner, which an agent in a second process over an adapter of its own recalls and renders', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const brainId = `qa-store-${run}`;
+    const agentKey = `qa-tutor-${run}`;
+    const embeddingKey = `k-qa-pg-emb-${run}`;
+    script('openai', embeddingKey, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', embeddingKey);
+    const k = `k-qa-pg-${run}`;
+    const played = script('openai', k, { replies: [reply.text('Noted.'), reply.text('It is in the vault.')] });
+    const open = async () => {
+      const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, typeParsers: { int8: 'number' } });
+      await adapter.open();
+      return adapter;
+    };
+    const one = await open();
+    const two = await open();
+    const build = (adapter: StorageAdapter) =>
+      gmi({
+        runtime: 'gmi',
+        provider: 'openai',
+        model: 'stub-model',
+        apiKey: k,
+        fallbackProviders: [],
+        name: 'Tutor',
+        instructions: 'You teach networking.',
+        personality: TUTOR_PERSONA,
+        cognition: { mechanisms: false },
+        memory: { embedding: { provider: 'openai' }, store: { adapter, brainId } },
+        learning: { agentKey, namespace: run },
+      } as never);
+    const first = build(one);
+    const second = build(two);
+    try {
+      await first.session('s1', { userId: 'ana' }).send('The deploy key lives in the vault under ops/deploy.');
+      await first.learning!.operatorSet!({ userId: 'ana', traits: { openness: 0.7 }, by: 'ops' });
+      expect((await first.learning!.manifest()).loops.ledger).toMatchObject({ detail: expect.stringContaining("sql store over the agent's memory store") });
+
+      await second.session('s2', { userId: 'ana' }).send('Where does the deploy key live?');
+      expect(JSON.stringify(played.seen.at(-1)?.messages ?? [])).toContain('vault');
+      const system = (played.seen.at(-1)?.messages ?? []).filter((message) => message.role === 'system').map((message) => String(message.content)).join('\n');
+      expect(system).toContain(renderPersonalitySection({ ...TUTOR_PERSONA, openness: 0.7 })!);
+    } finally {
+      await first.close();
+      await second.close();
+      await one.run('DELETE FROM memory_traces WHERE brain_id = ?', [brainId]).catch(() => undefined);
+      for (const table of LEARNING_TABLES) await one.run(`DELETE FROM ${table} WHERE namespace = ?`, [run]).catch(() => undefined);
+      await one.close();
+      await two.close();
+    }
+  });
+});
+
 describe("gmi(): memory.persistAccessState", () => {
   let keys = 0;
   const key = () => `k-qa-scopes-${++keys}`;
@@ -9688,5 +10366,27 @@ describe('the docs a host reads about it', () => {
     expect(gmiDoc).toContain('A GMI with no learner session, or with a session that names no scope ids, hands the retriever and the sink what it handed them before: they read and file under the plain ids.');
     expect(gmiDoc).toContain("a conversation's own history (the full runtime's conversation store and a `gmi()` session's history keep its messages until the host deletes them, and a later compaction summarizes them again)");
     expect(doc('docs/memory/RAG_MEMORY_CONFIGURATION.md')).toMatch(/back, deletes and restores a trace by id \(`brainId`, `readTrace`, `deleteTraces`,\s+`restoreTrace`\), as `Memory\.createSqlite\(\)` and `Memory\.createWithAdapter\(\)` give/);
+  });
+
+  it("describe memory.store on gmi(), the learning store on its adapter, and agent.learning's host calls", () => {
+    const gmiDoc = doc('docs/GMI.md');
+    expect(gmiDoc).toContain('- **`memory.store`.** Durable memory: `{ path }`, a SQLite file agentos opens, or `{ adapter, brainId? }`');
+    expect(gmiDoc).toContain('It needs the learning option and `learning.agentKey`, which names the brain and the learners');
+    expect(gmiDoc).toContain("A store that does not open fails the session's first send naming `memory.store`, before any model call, and the next send tries again.");
+    expect(gmiDoc).toContain('One process serves a SQLite file; several processes share a Postgres database instead, each through an adapter of its own.');
+    expect(gmiDoc).toContain('The manifest\'s `memory_store` loop names the store.');
+    expect(gmiDoc).toContain("With `memory.store` on a file, `close()` then lets the learning store go and closes the file, and the next session or host call opens it again; a host's adapter stays open.");
+    expect(gmiDoc).toContain('On `gmi()` a `SqlLearningStore` needs `agentKey`.');
+    expect(gmiDoc).toContain(
+      "A `gmi()` agent with `memory.store` runs it on the adapter of that store's Brain, opened with the agent's memory or at the first call that needs it (in process when the adapter has no transactions).",
+    );
+    expect(gmiDoc).toContain(
+      "On a `gmi()` agent, `agent.learning` carries the same calls with the agent's key (`learning.agentKey`, else a named agent's persona id) and namespace (`learning.namespace`, else `''`) filled in",
+    );
+    expect(gmiDoc).toContain('A call that names a learner on an agent with neither `learning.agentKey` nor a name rejects, naming `learning.agentKey`.');
+    expect(gmiDoc).toContain('a memory that does not open fails the call before the tombstone is written');
+    const guide = doc('docs/getting-started/HIGH_LEVEL_API.md');
+    expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation`, `persistAccessState` and `store`');
+    expect(guide).toContain("`memory.store` (`{ path }`, a SQLite file, or `{ adapter, brainId? }`, a host's storage adapter) keeps the agent's memory and its learning store there");
   });
 });
