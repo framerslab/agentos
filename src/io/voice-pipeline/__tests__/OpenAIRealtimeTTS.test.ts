@@ -450,6 +450,14 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       await expect(tts.startSession()).rejects.toThrow('timed out');
     });
 
+    it('leaves no timer behind when the socket cannot be built', async () => {
+      tts = new OpenAIRealtimeTTS({ apiKey: 'test-key', baseUrl: 'not a url', connectTimeoutMs: 20 });
+
+      await expect(tts.startSession()).rejects.toThrow();
+      // A timer left behind would fire here and throw outside any test.
+      await delay(60);
+    });
+
     it('asks for each reply as one out-of-band response that reads its text', async () => {
       const session = await start();
       record(session);
@@ -524,11 +532,11 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       expect(log.flushes).toBe(1);
     });
 
-    it('runs replies one at a time, in order', async () => {
+    it('runs replies one at a time, in order, and completes once all of them have ended', async () => {
       const session = await start();
       const log = record(session);
       session.pushTokens('First.');
-      const first = session.flush();
+      const first = watch(session.flush());
       session.pushTokens('Second.');
       const second = watch(session.flush());
       await until(() => server.running.size === 1, 'the first response');
@@ -536,10 +544,36 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       expect(server.sent('response.create')).toHaveLength(1);
 
       server.finish(server.responseId(0));
-      await first;
       await until(() => server.running.size === 1, 'the second response');
+      await delay(SOCKET_TURN_MS);
       expect(server.sent('response.create')[1]!.response.instructions).toContain('Second.');
+      expect(log.flushes).toBe(0);
+      expect(first.settled).toBe(false);
       expect(second.settled).toBe(false);
+
+      server.finish(server.responseId(1));
+      await until(() => second.settled && first.settled, 'both flushes to settle');
+      expect(log.flushes).toBe(1);
+    });
+
+    it('does not complete while text waits for its flush', async () => {
+      const session = await start();
+      const log = record(session);
+      session.pushTokens('First.');
+      const first = session.flush();
+      await until(() => server.running.size === 1, 'the first response');
+      await delay(SOCKET_TURN_MS);
+      session.pushTokens('Second.');
+
+      server.finish(server.responseId(0));
+      await first;
+      expect(log.flushes).toBe(0);
+
+      const second = session.flush();
+      await until(() => server.running.size === 1, 'the second response');
+      await delay(SOCKET_TURN_MS);
+      server.finish(server.responseId(1));
+      await second;
       expect(log.flushes).toBe(1);
     });
 
@@ -708,6 +742,29 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       expect(next.startSession).not.toHaveBeenCalled();
       expect(chain.currentProviderId).toBe('openai-realtime');
       expect(log.errors).toEqual([]);
+    });
+
+    it('a reply queued behind one that ended is still replayed when the socket then drops', async () => {
+      const next = backup();
+      const chain = new StreamingTTSChain([tts, next], { enableMidSynthesisFailover: true });
+      const session = await chain.startSession();
+      open.push(session);
+      record(session);
+      session.pushTokens('First.');
+      void session.flush();
+      session.pushTokens('Second.');
+      void session.flush();
+      await until(() => server.running.size === 1, 'the first response');
+      await delay(SOCKET_TURN_MS);
+
+      server.finish(server.responseId(0));
+      await until(() => server.sent('response.create').length === 2, 'the second response');
+      server.dropConnection();
+      await until(() => vi.mocked(next.startSession).mock.calls.length === 1, 'the failover');
+      const taken = await vi.mocked(next.startSession).mock.results[0]!.value;
+      await until(() => vi.mocked(taken.pushTokens).mock.calls.length > 0, 'the replay');
+
+      expect(vi.mocked(taken.pushTokens).mock.calls.map(([text]) => text).join('')).toContain('Second.');
     });
 
     it('a session the server refuses fails over at the start', async () => {
