@@ -15,6 +15,15 @@ import { ConversationContext } from '../ConversationContext.js';
 import { ConversationManager, type ConversationManagerConfig } from '../ConversationManager.js';
 import { MessageRole, createConversationMessage, type ConversationMessage } from '../ConversationMessage.js';
 import { ensureConversationTables } from '../conversationTables.js';
+import {
+  INSERT_MESSAGE_SQL,
+  REPLACE_MESSAGE_SQL,
+  SELECT_MESSAGES_SQL,
+  UPDATE_MESSAGE_SQL,
+  insertMessageSql,
+  replaceMessageSql,
+  updateMessageSql,
+} from '../conversationRows.js';
 import { GMIErrorCode } from '../../utils/errors.js';
 import { Brain } from '../../../cognition/memory/retrieval/store/Brain.js';
 
@@ -289,6 +298,21 @@ function runPersistenceSuite(label: string, openDatabase: OpenDatabase): void {
         });
       }
       await expect(managerOn(db, { tablePrefix: '' })).resolves.toBeInstanceOf(ConversationManager);
+    });
+
+    it("keeps the statements of the default tables exported, and they read the messages a manager with no prefix saved", async () => {
+      const { db } = await open();
+      const writer = await managerOn(db);
+      const context = await writer.getOrCreateConversationContext('conv-default', 'u-1');
+      context.addMessage({ role: MessageRole.USER, content: 'first' });
+      context.addMessage({ role: MessageRole.ASSISTANT, content: 'second' });
+      await writer.saveConversation(context);
+
+      expect(INSERT_MESSAGE_SQL).toBe(insertMessageSql('conversation_messages'));
+      expect(REPLACE_MESSAGE_SQL).toBe(replaceMessageSql('conversation_messages'));
+      expect(UPDATE_MESSAGE_SQL).toBe(updateMessageSql('conversation_messages'));
+      const rows = await db.all<{ content: string }>(SELECT_MESSAGES_SQL, ['conv-default']);
+      expect(rows.map((row) => row.content)).toEqual(['first', 'second']);
     });
 
     it('brings tables the first version made up to date and reads their rows as that version did', async () => {
