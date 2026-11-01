@@ -105,7 +105,7 @@ export class SqliteTargetAdapter implements IMigrationTarget {
   }
 
   /** These brains as this file holds them, with their scope-id forms. */
-  async scopeIdForms(brainIds: readonly string[]): Promise<Map<string, BrainScopeIdForm>> {
+  async scopeIdForms(brainIds?: readonly string[]): Promise<Map<string, BrainScopeIdForm>> {
     const db = this.db;
     return readScopeIdForms(
       {

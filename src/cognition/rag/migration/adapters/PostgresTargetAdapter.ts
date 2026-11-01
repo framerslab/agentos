@@ -122,7 +122,7 @@ export class PostgresTargetAdapter implements IMigrationTarget {
   }
 
   /** These brains as this database holds them, with their scope-id forms. */
-  async scopeIdForms(brainIds: readonly string[]): Promise<Map<string, BrainScopeIdForm>> {
+  async scopeIdForms(brainIds?: readonly string[]): Promise<Map<string, BrainScopeIdForm>> {
     const pool = await this._ensurePool();
     return readScopeIdForms(
       {

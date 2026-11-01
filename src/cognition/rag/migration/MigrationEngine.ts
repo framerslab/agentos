@@ -25,7 +25,30 @@ import type {
   IMigrationTarget,
   BackendConfig,
 } from './types.js';
-import { ABSENT_BRAIN, scopeIdFormHandshake } from '../../memory/retrieval/store/scopeIdForm.js';
+import {
+  ABSENT_BRAIN,
+  ENCODED_SCOPE_ID_FORM,
+  SCOPE_ID_FORM_KEY,
+  scopeIdFormHandshake,
+} from '../../memory/retrieval/store/scopeIdForm.js';
+
+/** Why a source that names no brain is refused into a target brain that holds the encoded form and traces. */
+function unreadSourceRefusal(brainId: string): string {
+  return (
+    `brain '${brainId}': the target holds the encoded scope-id form ('${SCOPE_ID_FORM_KEY}' = '${ENCODED_SCOPE_ID_FORM}' in ` +
+    `brain_meta) and traces, and the source names no brain whose scope ids the handshake can read. Copy it into a ` +
+    `target without the record, then open that target under a learning layer, which re-files it.`
+  );
+}
+
+/** Why a source brain that holds the record is refused into a target that cannot report its forms. */
+function unreadTargetRefusal(brainId: string): string {
+  return (
+    `brain '${brainId}': the source holds the encoded scope-id form ('${SCOPE_ID_FORM_KEY}' = '${ENCODED_SCOPE_ID_FORM}' in ` +
+    `brain_meta), and the target cannot report the form of what it holds. Copy it into a SQLite or Postgres target, or ` +
+    `a Qdrant target with a sidecar.`
+  );
+}
 
 // ---------------------------------------------------------------------------
 // MigrationEngine
@@ -145,17 +168,39 @@ export class MigrationEngine {
   }
 
   /**
-   * Runs the scope-id form handshake for every brain the source holds; backends without Brain tables skip it. A source
-   * brain with the record whose `user` and `persona` scope ids read the same in both forms (none holds a `/`, a `%` or
-   * a `:`) is copied as a plain one: the copy of `brain_meta` brings its record, which is removed from a target that
-   * did not hold one, so a target a host with no learning layer serves keeps its plain form.
+   * Runs the scope-id form handshake for every brain the source holds. A source brain with the record whose `user` and
+   * `persona` scope ids read the same in both forms (none holds a `/`, a `%` or a `:`) is copied as a plain one: the
+   * copy of `brain_meta` brings its record, which is removed from a target that did not hold one, so a target a host
+   * with no learning layer serves keeps its plain form.
+   *
+   * A side that cannot report its forms takes part as far as it can. A source that names no brain (a Pinecone index,
+   * a Qdrant source with no sidecar) copies scope ids the handshake cannot read: it is refused into a target that holds
+   * the encoded form and traces, and a target that holds the record and no trace loses the record, as it does from a
+   * plain source. A target that cannot report its forms (a Qdrant target with no sidecar) takes no source brain that
+   * holds the record.
    */
   private static async _scopeIdFormHandshake(
     source: IMigrationSource,
     target: IMigrationTarget,
   ): Promise<{ refused: string[]; clear: string[] }> {
-    if (!source.scopeIdForms || !target.scopeIdForms) return { refused: [], clear: [] };
+    if (!source.scopeIdForms) {
+      if (!target.scopeIdForms) return { refused: [], clear: [] };
+      const refused: string[] = [];
+      const clear: string[] = [];
+      for (const [brainId, held] of await target.scopeIdForms()) {
+        if (!held.encoded) continue;
+        if (!held.rows) clear.push(brainId);
+        else refused.push(`scope_id_form: ${unreadSourceRefusal(brainId)}`);
+      }
+      return { refused, clear };
+    }
     const from = await source.scopeIdForms();
+    if (!target.scopeIdForms) {
+      const refused = [...from]
+        .filter(([, form]) => form.encoded)
+        .map(([brainId]) => `scope_id_form: ${unreadTargetRefusal(brainId)}`);
+      return { refused, clear: [] };
+    }
     const to = await target.scopeIdForms([...from.keys()]);
     const refused: string[] = [];
     const clear: string[] = [];

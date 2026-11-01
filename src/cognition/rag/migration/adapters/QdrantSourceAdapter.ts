@@ -9,6 +9,8 @@
 
 import type { IMigrationSource } from '../types.js';
 import Database from 'better-sqlite3';
+import type { BrainScopeIdForm } from '../../../memory/retrieval/store/scopeIdForm.js';
+import { sidecarScopeIdForms } from './sidecarScopeIdForms.js';
 
 /** Tables stored as Qdrant collections (vector data). */
 const QDRANT_COLLECTIONS = ['memory_traces', 'document_chunks'];
@@ -24,8 +26,15 @@ export class QdrantSourceAdapter implements IMigrationSource {
   private sidecarDb: any = null; // better-sqlite3 Database for non-vector tables
 
   /**
+   * The brains the sidecar names, with their scope-id forms ({@link sidecarScopeIdForms}); set only with a sidecar,
+   * since a source with none names no brain.
+   */
+  readonly scopeIdForms?: () => Promise<Map<string, BrainScopeIdForm>>;
+
+  /**
    * @param url    - Qdrant base URL (e.g. 'http://localhost:6333').
    * @param apiKey - Optional API key for cloud instances.
+   * @param sidecarPath - The SQLite file that holds the deployment's tables other than its vectors.
    */
   constructor(
     private readonly url: string,
@@ -33,7 +42,9 @@ export class QdrantSourceAdapter implements IMigrationSource {
     sidecarPath?: string,
   ) {
     if (sidecarPath) {
-      this.sidecarDb = new Database(sidecarPath, { readonly: true });
+      const sidecar = new Database(sidecarPath, { readonly: true });
+      this.sidecarDb = sidecar;
+      this.scopeIdForms = () => sidecarScopeIdForms(sidecar);
     }
   }
 
