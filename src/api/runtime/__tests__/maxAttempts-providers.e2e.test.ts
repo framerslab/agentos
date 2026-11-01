@@ -363,3 +363,101 @@ describe('maxAttempts on the OpenRouter provider', () => {
     expect(posts(OR_CHAT)).toHaveLength(0);
   });
 });
+
+const GEMINI_STREAM = /generativelanguage\.googleapis\.com\/.*:streamGenerateContent/;
+const GEMINI_RETIRED = /\/models\/gemini-3\.1-pro-preview:generateContent/;
+const GEMINI_ALIAS = /\/models\/gemini-pro-latest:generateContent/;
+const GEMINI_RETIRED_STREAM = /\/models\/gemini-3\.1-pro-preview:streamGenerateContent/;
+const GEMINI_ALIAS_STREAM = /\/models\/gemini-pro-latest:streamGenerateContent/;
+
+/** Google's answer for a model id it no longer serves. */
+const geminiNotFound: Reply = () => json({ error: { code: 404, message: 'models/gemini-3.1-pro-preview is not found.', status: 'NOT_FOUND' } }, 404);
+
+/** A streamed Gemini text reply (`alt=sse`). */
+const geminiStreamText = (text: string): Reply => () =>
+  new Response(
+    `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3, totalTokenCount: 13 } })}\r\n\r\n`,
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+
+/** Reads a stream to its end. */
+async function drain(stream: AsyncIterable<unknown>): Promise<void> {
+  for await (const _chunk of stream) {
+    // read and dropped
+  }
+}
+
+const geminiProvider = async () => {
+  const p = new GeminiProvider();
+  await p.initialize({ apiKey: 'gem-attempts' });
+  return p;
+};
+
+describe('maxAttempts on the Gemini provider: a retired pin served from its alias', () => {
+  const ask = async (maxAttempts?: number) =>
+    (await geminiProvider()).generateCompletion('gemini-3.1-pro-preview', [{ role: 'user', content: 'Say ok.' }], maxAttempts !== undefined ? { maxAttempts } : {});
+
+  it('with maxAttempts 1, the 404 ends the call and the alias is not asked', async () => {
+    route([[GEMINI_RETIRED, [geminiNotFound]], [GEMINI_ALIAS, [geminiText('ok')]]]);
+    expect(await rejectionOf(ask(1))).toMatchObject({ httpStatus: 404 });
+    expect(posts(GEMINI_RETIRED)).toHaveLength(1);
+    expect(posts(GEMINI_ALIAS)).toHaveLength(0);
+  });
+
+  it('with maxAttempts 2, a 503 and then the 404 spend both attempts and the alias is not asked', async () => {
+    route([[GEMINI_RETIRED, [geminiUnavailable, geminiNotFound]], [GEMINI_ALIAS, [geminiText('ok')]]]);
+    expect(await rejectionOf(ask(2))).toMatchObject({ httpStatus: 404 });
+    expect(posts(GEMINI_RETIRED)).toHaveLength(2);
+    expect(posts(GEMINI_ALIAS)).toHaveLength(0);
+  });
+
+  it('with maxAttempts 2, the 404 leaves one attempt for the alias, which is not retried', async () => {
+    route([[GEMINI_RETIRED, [geminiNotFound]], [GEMINI_ALIAS, [geminiUnavailable, geminiText('ok')]]]);
+    expect(await rejectionOf(ask(2))).toMatchObject({ httpStatus: 503 });
+    expect(posts(GEMINI_RETIRED)).toHaveLength(1);
+    expect(posts(GEMINI_ALIAS)).toHaveLength(1);
+  });
+
+  it('left out, the alias answers', async () => {
+    route([[GEMINI_RETIRED, [geminiNotFound]], [GEMINI_ALIAS, [geminiText('ok')]]]);
+    const result = await ask();
+    expect(result.choices[0]?.message?.content).toBe('ok');
+    expect(posts(GEMINI_ALIAS)).toHaveLength(1);
+  });
+});
+
+describe('maxAttempts on the Anthropic and Gemini streams', () => {
+  const anthropicStream = async (maxAttempts: number) => {
+    const p = new AnthropicProvider();
+    await p.initialize({ apiKey: 'sk-ant-attempts' });
+    return p.generateCompletionStream('claude-haiku-5-5', [{ role: 'user', content: 'Say ok.' }], { maxAttempts });
+  };
+  const geminiStream = async (modelId: string, maxAttempts?: number) =>
+    (await geminiProvider()).generateCompletionStream(modelId, [{ role: 'user', content: 'Say ok.' }], maxAttempts !== undefined ? { maxAttempts } : {});
+
+  it('Anthropic: a count that is not a whole number of 1 or more is refused before anything is sent', async () => {
+    route([[ANTHROPIC, [anthropicText('ok')]]]);
+    expect(await rejectionOf(drain(await anthropicStream(0)))).toBeInstanceOf(RangeError);
+    expect(await rejectionOf(drain(await anthropicStream(1.5)))).toBeInstanceOf(RangeError);
+    expect(posts(ANTHROPIC)).toHaveLength(0);
+  });
+
+  it('Gemini: a count that is not a whole number of 1 or more is refused before anything is sent', async () => {
+    route([[GEMINI_STREAM, [geminiStreamText('ok')]]]);
+    expect(await rejectionOf(drain(await geminiStream('gemini-2.5-flash', 0)))).toBeInstanceOf(RangeError);
+    expect(await rejectionOf(drain(await geminiStream('gemini-2.5-flash', 1.5)))).toBeInstanceOf(RangeError);
+    expect(posts(GEMINI_STREAM)).toHaveLength(0);
+  });
+
+  it('Gemini: with maxAttempts 1, a retired pin\'s 404 ends the stream and the alias is not asked', async () => {
+    route([[GEMINI_RETIRED_STREAM, [geminiNotFound]], [GEMINI_ALIAS_STREAM, [geminiStreamText('ok')]]]);
+    expect(await rejectionOf(drain(await geminiStream('gemini-3.1-pro-preview', 1)))).toMatchObject({ httpStatus: 404 });
+    expect(posts(GEMINI_ALIAS_STREAM)).toHaveLength(0);
+  });
+
+  it('Gemini: with maxAttempts 2, a retired pin streams from its alias', async () => {
+    route([[GEMINI_RETIRED_STREAM, [geminiNotFound]], [GEMINI_ALIAS_STREAM, [geminiStreamText('ok')]]]);
+    await drain(await geminiStream('gemini-3.1-pro-preview', 2));
+    expect(posts(GEMINI_ALIAS_STREAM)).toHaveLength(1);
+  });
+});
