@@ -86,6 +86,13 @@ function chatCompletionStream(content: string): Response {
   return new Response(text, { status: 200, headers: { 'content-type': 'text/event-stream' } });
 }
 
+/** Reads a stream to its end (streamObject sends its request only while it is read). */
+async function drain(stream: AsyncIterable<unknown>): Promise<void> {
+  for await (const _part of stream) {
+    // read and dropped
+  }
+}
+
 /** A streamed Claude reply whose text is `text`. */
 function claudeTurn(text: string): Response {
   const events = [
@@ -266,6 +273,7 @@ describe('streamObject sends serviceTier and customModelParams to the provider',
     };
 
     const result = streamObject(options);
+    await drain(result.partialObjectStream);
 
     expect(await result.object).toEqual({ planet: 'Jupiter' });
     expect(posted()).toHaveLength(1);
@@ -283,6 +291,7 @@ describe('streamObject sends serviceTier and customModelParams to the provider',
       schema: z.object({ planet: z.string() }),
       prompt: 'Which planet in the solar system is the largest?',
     });
+    await drain(result.partialObjectStream);
 
     expect(await result.object).toEqual({ planet: 'Jupiter' });
     expect(posted()).toHaveLength(1);
