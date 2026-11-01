@@ -19,7 +19,7 @@ import type { ILearnerSession, ILearningLayer, TurnInputForLearning, TurnPrepara
 import type { ICognitiveMemoryManager } from '../../memory/CognitiveMemoryManager';
 import { ConversationContext } from '../../../core/conversation/ConversationContext';
 import type { ConversationManager } from '../../../core/conversation/ConversationManager';
-import type { IPromptEngine } from '../../../core/llm/IPromptEngine';
+import type { IPromptEngine, PromptEngineConfig } from '../../../core/llm/IPromptEngine';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator';
 
@@ -369,6 +369,31 @@ describe('a runtime with a learning layer', () => {
       result: 'filed',
     });
     expect(layer.forLearner).toHaveBeenCalledTimes(1);
+  }, 10_000);
+
+  it('ends the learner session of a seat GMI that fails to initialize within shutdownTimeoutMs, when the session does not end', async () => {
+    // A launch waits on the seat's creation; a session that never ends would hold the launch for good.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const endSession = vi.fn(() => new Promise<void>(() => undefined));
+    const layer = recordingLayer(async () => ({ prepareTurn: vi.fn(), endSession, currentTraits: () => ({}) }) as unknown as ILearnerSession);
+    const agencySeatPromptEngineConfig = {
+      defaultTemplateName: 'openai_chat',
+      availableTemplates: {},
+      tokenCounting: { strategy: 'estimated', estimationModel: 'gpt-3.5-turbo' },
+      historyManagement: { defaultMaxMessages: 100, maxTokensForHistory: 8_000, summarizationTriggerRatio: 0, preserveImportantMessages: true },
+      contextManagement: { maxRAGContextTokens: 1_500, summarizationQualityTier: 'balanced', preserveSourceAttributionInSummary: true },
+      contextualElementSelection: { maxElementsPerType: {}, defaultMaxElementsPerType: 3, priorityResolutionStrategy: 'highest_first', conflictResolutionStrategy: 'skip_conflicting' },
+      performance: { enableCaching: false, cacheTimeoutSeconds: 60 },
+    } as unknown as PromptEngineConfig;
+    const manager = await managerWith(layer, { shutdownTimeoutMs: 200, agencySeatPromptEngineConfig });
+    vi.spyOn(GMI.prototype, 'initialize').mockRejectedValueOnce(new Error('initialize failed'));
+    const startedAt = Date.now();
+    await expect(
+      manager.createAgencySeat({ seatSessionId: 'seat:launch-1:writer', userId: 'user-1', persona: { personaId: persona.id }, toolView: (base) => base }),
+    ).rejects.toThrow(/Failed to initialize the agency seat GMI/);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(endSession).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('did not end within 200 ms'))).toBe(true);
   }, 10_000);
 });
 
