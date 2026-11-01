@@ -14,12 +14,12 @@ export const INLINE_PERSONA_LOADER_CONFIG: PersonaLoaderConfig = { personaSource
 
 /**
  * Structural rules for an inline persona list, cheap enough to run before any subsystem
- * starts: an array; every entry an object with a non-empty string `id`; no duplicate `id`;
+ * starts: an array; every entry an object with a string `id` that is not blank (empty or whitespace only); no duplicate `id`;
  * `activationKeywords`, when present, an array of strings; `sentimentTracking.presets`, when present,
  * an array. Semantic validation (required fields,
  * semver, prompt length) still runs in GMIManager through `validatePersonas`.
  * @throws GMIError `CONFIGURATION_ERROR` (`SYS_CONFIGURATION_ERROR`): for an entry, naming its index, and its id where
- *   that id is a non-empty string (`details.index`, `details.id`); for a value that is not an array, with the type
+ *   that id is a string that is not blank (`details.index`, `details.id`); for a value that is not an array, with the type
  *   received (`details.received`).
  */
 export function assertInlinePersonaDefinitions(definitions: unknown): asserts definitions is IPersonaDefinition[] {
@@ -32,7 +32,7 @@ export function assertInlinePersonaDefinitions(definitions: unknown): asserts de
   definitions.forEach((definition, index) => {
     const id = definition && typeof definition === 'object' ? (definition as { id?: unknown }).id : undefined;
     if (typeof id !== 'string' || id.trim() === '') {
-      throw new GMIError(`personas[${index}] must be an object with a non-empty string \`id\`.`, GMIErrorCode.CONFIGURATION_ERROR, { index });
+      throw new GMIError(`personas[${index}] must be an object with a string \`id\` that is not blank.`, GMIErrorCode.CONFIGURATION_ERROR, { index });
     }
     if (seen.has(id)) {
       throw new GMIError(`personas[${index}] repeats the persona id '${id}'.`, GMIErrorCode.CONFIGURATION_ERROR, { index, id });

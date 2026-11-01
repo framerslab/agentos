@@ -65,7 +65,7 @@ const fromCode = await AgentOS.create({
 });
 ```
 
-`personas` replaces the file-system source: when it is set, no directory is read. The list is checked before any subsystem starts; `create()` rejects with the code `SYS_CONFIGURATION_ERROR` when the value is not an array, an entry is not an object with a non-empty string `id`, an id repeats, or one of two optional fields is present with the wrong shape: `activationKeywords` must be an array of strings and `sentimentTracking.presets` an array. The refusal of an entry names its index, and its id where that id is a non-empty string; the refusal of a value that is not an array gives the type it received in its details. `personas` and `personaLoader` cannot both be set.
+`personas` replaces the file-system source: when it is set, no directory is read. The list is checked before any subsystem starts; `create()` rejects with the code `SYS_CONFIGURATION_ERROR` when the value is not an array, an entry is not an object with a string `id` that is not blank (empty or whitespace only), an id repeats, or one of two optional fields is present with the wrong shape: `activationKeywords` must be an array of strings and `sentimentTracking.presets` an array. The refusal of an entry names its index, and its id where that id is a string that is not blank; the refusal of a value that is not an array gives the type it received in its details. `personas` and `personaLoader` cannot both be set.
 
 ## Loading from anywhere: write a loader
 
