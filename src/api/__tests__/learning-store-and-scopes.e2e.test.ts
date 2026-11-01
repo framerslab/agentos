@@ -10628,8 +10628,10 @@ describe("the full runtime's own learning layer: its store on the host's storage
   it("takes a learner session that opens past the 2,000 ms a GMI's acquisition gives it at the GMI's first turn: the layer is asked once, the turn reads by the session's own form until it opens and by the learner's after, never by the plain ids, and its memory_add files under the learner's scope ids through the recorder", async () => {
     const warn = quiet();
     const tools = await facadeOn('late-brain');
-    // A trace a host with no layer filed under the plain user id, and one under the learner's id.
+    // A trace a host with no layer filed under the plain user id, one under the session's own form, and one under the
+    // learner's id.
     await tools.memory.remember('Canary PLAIN-5.', { scope: 'user', scopeId: 'ana' });
+    await tools.memory.remember('Canary FORM-3.', { scope: 'user', scopeId: 'A//s-late' });
     await tools.memory.remember('Canary LEARNER-9.', { scope: 'user', scopeId: 'A/ana' });
     const store = new InMemoryLearningStore();
     const inner = createLearningLayer({ store, memoryTools: tools.memory });
@@ -10646,11 +10648,13 @@ describe("the full runtime's own learning layer: its store on the host's storage
     });
     try {
       const startedAt = Date.now();
-      await turn(os, { userId: 'ana', sessionId: 's-late', organizationId: 'A', textInput: 'Remember my canary.' });
+      await turn(os, { userId: 'ana', sessionId: 's-late', conversationId: 'c-1', organizationId: 'A', textInput: 'Remember my canary.' });
       expect(Date.now() - startedAt).toBeGreaterThanOrEqual(2_000);
       expect(callsWith(warn, 'opened no learner session for GMI')).toHaveLength(1);
       expect(asked).toEqual([{ namespace: 'A', agentKey: 'tutor', userId: 'ana' }]);
+      // The retriever reads once per conversation, before the GMI prepares the turn: by the session's form here.
       const firstTurn = sentIn(mainCalls(played));
+      expect(firstTurn).toContain('FORM-3');
       expect(firstTurn).not.toContain('PLAIN-5');
       expect(firstTurn).not.toContain('LEARNER-9');
       expect(callsWith(warn, "did not name this turn's scope ids")).toEqual([]);
@@ -10661,11 +10665,13 @@ describe("the full runtime's own learning layer: its store on the host's storage
         ['verdict', late[0]!.id, 'kept'],
       ]);
 
+      // A new conversation on the same session, so the retriever reads again, once the session has opened.
       const before = mainCalls(played).length;
-      await turn(os, { userId: 'ana', sessionId: 's-late', organizationId: 'A', textInput: 'What is my canary?' });
+      await turn(os, { userId: 'ana', sessionId: 's-late', conversationId: 'c-2', organizationId: 'A', textInput: 'What is my canary?' });
       const secondTurn = sentIn(mainCalls(played).slice(before));
       expect(secondTurn).toContain('LEARNER-9');
       expect(secondTurn).not.toContain('PLAIN-5');
+      expect(secondTurn).not.toContain('FORM-3');
       expect(asked).toHaveLength(1);
     } finally {
       await stopRuntime(os);
