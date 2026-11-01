@@ -317,8 +317,9 @@ describe.each([
   ['on a SQLite file of its own', 'own'],
   ["on the learning store's adapter", 'shared'],
 ] as const)("the user's tombstone, with the GMI's Brain %s", (_name, layout) => {
-  it('takes back a filing that commits after another process forgot its user, and leaves no learning row of the user', async () => {
+  it('takes back a filing that commits after another process forgot its user, feeds the observer none of it, and leaves no learning row of the user', async () => {
     const { manager, brain, store } = await bridgeLayoutOf(layout);
+    const observed = vi.spyOn(manager, 'observe');
     const layer = createLearningLayer({ store });
     // A second layer over the same store stands for another process: its write chains do not order this one's.
     const otherProcess = createLearningLayer({ store });
@@ -343,6 +344,8 @@ describe.each([
     await turn;
 
     expect(await filed(brain)).toEqual([]);
+    // The memory observer buffers what it is fed, which forgetUser does not reach: a filing taken back feeds it nothing.
+    expect(observed.mock.calls.map(([, text]) => text)).not.toContain('My canary is LARK-7.');
     expect(await store.sessionRowsOf('A', 'user-1')).toEqual([]);
     expect(await store.chainRows(chainKeyOf(KEY_A))).toEqual([]);
   });
