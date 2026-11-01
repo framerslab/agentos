@@ -447,11 +447,14 @@ function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName,
  * Each member is `async`, so a key it lacks rejects the call rather than throwing at it.
  *
  * @param beforeForget - Runs before `forgetUser`: with `memory.store`, it hands the layer the agent's memory.
+ * @param running - Holds each call until it settles: `agent.close()` lets the calls already running finish before it
+ *   closes the memory and the Brain they run on.
  */
 function learningHostCalls(
   layer: LearningLayerHandle,
   agent: { agentKey: string | undefined; namespace: string },
   beforeForget?: () => Promise<void>,
+  running?: Set<Promise<unknown>>,
 ): AgentLearning {
   const learnerOf = (userId: string, call: string): LearnerKey => {
     if (!agent.agentKey) {
@@ -461,7 +464,7 @@ function learningHostCalls(
   };
   const scopeOf = (target: { userId?: string } | undefined, call: string): FreezeScope =>
     target?.userId !== undefined ? { learner: learnerOf(target.userId, call) } : agent.agentKey ? { agentKey: agent.agentKey } : { scope: 'all' };
-  return {
+  const calls: AgentLearning = {
     manifest: () => layer.manifest(),
     freeze: async (target, by) => layer.freeze(scopeOf(target, 'freeze'), by),
     unfreeze: async (target) => layer.unfreeze(scopeOf(target, 'unfreeze')),
@@ -477,6 +480,20 @@ function learningHostCalls(
       return layer.forgetUser(userId, { namespace: agent.namespace });
     },
   };
+  if (!running) return calls;
+  const held: Record<string, unknown> = {};
+  for (const [name, call] of Object.entries(calls) as Array<[string, (...args: unknown[]) => Promise<unknown>]>) {
+    held[name] = (...args: unknown[]): Promise<unknown> => {
+      const run = call(...args);
+      running.add(run);
+      void run.then(
+        () => running.delete(run),
+        () => running.delete(run),
+      );
+      return run;
+    };
+  }
+  return held as unknown as AgentLearning;
 }
 
 /**
@@ -530,6 +547,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
    */
   const openStoreBrain = () => retryingOnce<AgentMemoryBrain>(() => openAgentMemoryBrain(memoryStore!, learningConfig!.agentKey!.trim()));
   let storeBrain = memoryStore ? openStoreBrain() : undefined;
+  /** The host calls of `agent.learning` still running: `agent.close()` lets them finish before it closes what they use. */
+  const runningHostCalls = new Set<Promise<unknown>>();
   /** The in-process learning store of a `memory.store` whose adapter has no transactions: one for the agent's life. */
   let inProcessStore: InMemoryLearningStore | undefined;
   // One learning layer for the agent, only when its `learning` option is on. With it off nothing below builds or
@@ -1172,12 +1191,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
      * Closes every session (each stops its running turn first, see
      * `session.close()`), then the cognitive memory they shared, including one
      * that a turn still setting up built while the sessions closed; a session
-     * opened from now on builds a new one, in which its id is new. With
-     * `memory.store` on a file, the Brain is closed last, after the learning
-     * store lets go of it; the next session or host call opens the file again.
-     * A host's adapter is never closed. The tools stay as the caller passed
-     * them: the orchestrator is not shut down, because shutting it down would
-     * shut down the caller's tools.
+     * opened from now on builds a new one, in which its id is new. A host
+     * call of `agent.learning` already running finishes before the memory
+     * closes. With `memory.store` on a file, the Brain is closed last, after
+     * the learning store lets go of it; the next session or host call opens
+     * the file again. A host's adapter is never closed. The tools stay as the
+     * caller passed them: the orchestrator is not shut down, because shutting
+     * it down would shut down the caller's tools.
      */
     async close(): Promise<void> {
       const closingMemory = memory;
@@ -1188,6 +1208,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // Together with the memory, so a session opened while this closes the others is recorded in the new one.
       openedSessionIds.clear();
       await Promise.all([...sessions.values()].map(({ session }) => session.close()));
+      // A host call already running (a freeze, an operatorSet, a forgetUser) finishes on the memory and the Brain it
+      // holds before they close; one that fails keeps its own error.
+      await Promise.allSettled([...runningHostCalls]);
       const mem = await closingMemory.close()?.catch(() => undefined);
       try {
         await mem?.close();
@@ -1218,7 +1241,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
     // With learning on: the layer as the agent's host reads it and the operator's calls, with the agent's key and
     // namespace filled in. agent.close() ends every session's learner session through session.close() and leaves the
     // layer open, because the agent serves sessions opened after close().
-    ...(layer ? { learning: learningHostCalls(layer, { agentKey, namespace: learningConfig?.namespace ?? '' }, memoryForForget) } : {}),
+    ...(layer ? { learning: learningHostCalls(layer, { agentKey, namespace: learningConfig?.namespace ?? '' }, memoryForForget, runningHostCalls) } : {}),
   };
   Object.defineProperty(handle, '__config', { value: opts, enumerable: false, configurable: true });
   // The mark sessionSeat() and agencies.members read: this handle is a gmi() agent.

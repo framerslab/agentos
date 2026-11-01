@@ -41,6 +41,7 @@ import { normalizeHexacoTraits } from './personas/hexaco';
 import { normalizePersonaDefinition } from './personas/personaNormalization';
 import { traitOverlayPatch } from './personas/personalityPrompt';
 import { deferLearnerSession } from '../learning/LearnerSession.js';
+import { releaseLearningMemory } from '../learning/LearningLayer.js';
 import type { ILearnerSession, ILearningLayer, LearnerContext } from '../learning/types.js';
 
 /**
@@ -1195,7 +1196,8 @@ export class GMIManager {
     try {
       // A GMI with a learner session ends it once it has shut down, inside the same bound.
       const learnerSession = typeof gmi.getLearnerSession === 'function' ? gmi.getLearnerSession() : undefined;
-      const gmiShutdown = Promise.resolve(gmi.shutdown());
+      // The layer lets go of the GMI's memory manager once the GMI has shut it down, so forgetUser asks it no more.
+      const gmiShutdown = Promise.resolve(gmi.shutdown()).finally(() => this.releaseGMIMemory(gmi));
       const shutdown = learnerSession
         ? gmiShutdown.finally(() =>
             Promise.resolve()
@@ -1213,6 +1215,24 @@ export class GMIManager {
       shutdown.catch(logFailure);
     } catch (error: any) {
       logFailure(error);
+    }
+  }
+
+  /**
+   * Lets the learning layer go of a GMI's cognitive memory manager, which the GMI's learner session handed it and the
+   * GMI's shutdown shut down: a manager that has shut down answers no deletion, so `forgetUser` would name it unreached
+   * and keep the user's learning rows until the manager is collected. A layer of another implementation is left as it is.
+   *
+   * @param gmi - A GMI that has shut down.
+   */
+  private releaseGMIMemory(gmi: IGMI): void {
+    const layer = this.config.learningLayer;
+    if (!layer) return;
+    try {
+      const memory = typeof gmi.getCognitiveMemoryManager === 'function' ? gmi.getCognitiveMemoryManager() : undefined;
+      if (memory) releaseLearningMemory(layer, memory);
+    } catch (error: any) {
+      console.warn(`GMIManager (ID: ${this.managerId}): The learning layer kept a shut-down GMI's memory manager: ${error?.message ?? error}`);
     }
   }
 
