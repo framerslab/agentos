@@ -13,6 +13,8 @@ import { Readable } from 'node:stream';
 import { inspect } from 'node:util';
 import axios, { AxiosError, type AxiosAdapter, type CreateAxiosDefaults } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pino from 'pino';
+import { setLogger, resetLoggerFactory } from '../../../logging/loggerFactory.js';
 import { OpenRouterProvider } from '../implementations/OpenRouterProvider';
 import type { ChatMessage } from '../IProvider';
 
@@ -37,13 +39,22 @@ function expectNoKeys(value: unknown): void {
   expect(text).not.toContain(KEY_B);
 }
 
-/** Silences console.error and console.warn and returns their spies. */
+/**
+ * Silences console.error and returns its spy, for a case that prints a caught error itself, as a caller does. The
+ * provider writes its own diagnostics to the handed-over logger, never to the console.
+ */
 function quietConsole() {
   return {
     errorLog: vi.spyOn(console, 'error').mockImplementation(() => {}),
-    warnLog: vi.spyOn(console, 'warn').mockImplementation(() => {}),
   };
 }
+
+const logged: Record<string, unknown>[] = [];
+beforeEach(() => {
+  logged.length = 0;
+  setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { logged.push(JSON.parse(line)); } }));
+});
+afterEach(() => resetLoggerFactory());
 
 /** The Authorization header of the most recent request. */
 function lastAuthorization(sent: string[]): string | undefined {
@@ -61,7 +72,6 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
 
   beforeEach(() => {
     sentAuthorization.length = 0;
-    vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -80,7 +90,7 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
     });
     const provider = new OpenRouterProvider();
     await provider.initialize({ apiKey: 'test-key' });
-    const { errorLog, warnLog } = quietConsole();
+    const { errorLog } = quietConsole();
     const modelId = kind === 'completion' ? 'openai/gpt-4o' : 'openai/text-embedding-3-small';
     const failure = await (kind === 'completion'
       ? provider.generateCompletion(modelId, [{ role: 'user', content: sentinel }], {})
@@ -97,32 +107,32 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
     console.error('Request failed', failure);
     expect(renderings(failure)).not.toContain(sentinel);
     expect(renderings(errorLog.mock.calls)).not.toContain(sentinel);
-    expect(renderings(warnLog.mock.calls)).not.toContain(sentinel);
+    expect(renderings(logged)).not.toContain(sentinel);
+    expectNoKeys(logged);
   });
 
   it.each([
-    { raw: 'sentinel-words-7731-é', diagnostic: 'Invalid stream JSON.', label: 'Failed to parse stream chunk JSON, skipping chunk:' },
-    { raw: JSON.stringify('sentinel-words-7731-é'), diagnostic: 'Expected a JSON object.', label: 'Stream chunk is not a JSON object, skipping chunk:' },
-    { raw: JSON.stringify({ content: 'sentinel-words-7731-é' }), diagnostic: 'Invalid stream event shape.', label: 'Failed to map stream chunk, skipping chunk:' },
-  ])('logs only stream metadata for $diagnostic', async ({ raw, diagnostic, label }) => {
+    { raw: 'sentinel-words-7731-é', reason: 'json' },
+    { raw: JSON.stringify('sentinel-words-7731-é'), reason: 'shape' },
+    { raw: JSON.stringify({ content: 'sentinel-words-7731-é' }), reason: 'mapping' },
+  ])('logs only stream metadata for a skipped chunk ($reason)', async ({ raw, reason }) => {
     useAdapter(async (config) => ({
       status: 200, statusText: 'OK', headers: {}, config,
       data: config.url === '/models' ? { data: [] } : Readable.from([Buffer.from(`data: ${raw}\n\ndata: [DONE]\n\n`)]),
     }));
     const provider = new OpenRouterProvider();
     await provider.initialize({ apiKey: 'test-key' });
-    const { warnLog } = quietConsole();
     const events = [];
     for await (const event of provider.generateCompletionStream('openai/gpt-4o', messages, {})) events.push(event);
     expect(events).toEqual([]);
-    expect(warnLog).toHaveBeenCalledExactlyOnceWith(`OpenRouterProvider: ${label}`, {
-      eventBytes: Buffer.byteLength(raw), error: diagnostic,
-    });
-    expect(renderings(warnLog.mock.calls)).not.toContain('sentinel-words-7731');
+    expect(logged.filter((line) => line.event === 'llm.stream_invalid')).toEqual([
+      expect.objectContaining({ provider: 'openrouter', bytes: Buffer.byteLength(raw), reason }),
+    ]);
+    expect(renderings(logged)).not.toContain('sentinel-words-7731');
+    expectNoKeys(logged);
   });
 
   it('when initialize() gets a 401, as with a revoked key', async () => {
-    const { errorLog } = quietConsole();
     useAdapter(async (config) => {
       sentAuthorization.push(String(config.headers.Authorization));
       throw new AxiosError('Request failed with status code 401', AxiosError.ERR_BAD_REQUEST, config, {}, {
@@ -142,9 +152,11 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
     expect(sentAuthorization[0]).toMatch(/^Bearer sk-or-v1-secret-key-/);
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toContain('[401] User not found.');
-    expect(errorLog).toHaveBeenCalled();
+    expect(logged.filter((line) => line.event === 'llm.provider_start_failed')).toEqual([
+      expect.objectContaining({ provider: 'openrouter' }),
+    ]);
     expectNoKeys(failure);
-    expectNoKeys(errorLog.mock.calls);
+    expectNoKeys(logged);
   });
 
   describe('after initialization', () => {
@@ -179,7 +191,6 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
     });
 
     it('in the error a failed completion throws', async () => {
-      const { errorLog, warnLog } = quietConsole();
       const failure = await provider
         .generateCompletion('openai/gpt-4o', messages, {})
         .catch((error: unknown) => error);
@@ -187,8 +198,7 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
       expect(lastAuthorization(sentAuthorization)).toMatch(/^Bearer sk-or-v1-secret-key-/);
       expect((failure as Error).message).toBe('[400] rejected header Authorization: Bearer [redacted]');
       expectNoKeys(failure);
-      expectNoKeys(warnLog.mock.calls);
-      expectNoKeys(errorLog.mock.calls);
+      expectNoKeys(logged);
     });
 
     it('in a failed health check', async () => {
@@ -198,6 +208,7 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
       expect(lastAuthorization(sentAuthorization)).toMatch(/^Bearer sk-or-v1-secret-key-/);
       expect(renderings(health)).toContain('[redacted]');
       expectNoKeys(health);
+      expectNoKeys(logged);
     });
 
     it('in the details when the error body is JSON that quotes the key', async () => {
@@ -211,6 +222,7 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
       expect(renderings((failure as { details?: unknown }).details)).toContain('Bearer [redacted]');
       expectNoKeys(failure);
       expectNoKeys(health);
+      expectNoKeys(logged);
     });
   });
 
@@ -250,6 +262,7 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
     expect(lastAuthorization(sentAuthorization)).toMatch(/^Bearer sk-or-v1-secret-key-/);
     expect((failure as Error).message).toBe('[402] Insufficient credits');
     expectNoKeys(failure);
+    expectNoKeys(logged);
     // Both keys answered 402, so two requests went out before ALL_KEYS_FAILED; each
     // stream was read and released, not kept in the error.
     expect(bodies).toHaveLength(2);
@@ -288,6 +301,8 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
     expect((failure as Error).message.endsWith('[redacted]')).toBe(true);
     expect(renderings(failure)).not.toContain(cutKey.slice(0, -5));
     expectNoKeys(failure);
+    expect(renderings(logged)).not.toContain(cutKey.slice(0, -5));
+    expectNoKeys(logged);
   });
 
   it('when a cut-off streamed error body ends with a whole key that ends with its own first character', async () => {
@@ -318,6 +333,8 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
 
     expect((failure as Error).message.endsWith('[redacted]')).toBe(true);
     expect(renderings(failure)).not.toContain('sk-gw-1234');
+    expect(renderings(logged)).not.toContain('sk-gw-1234');
+    expectNoKeys(logged);
   });
 
   it("keeps the error's own message when a streamed error body is empty", async () => {
@@ -343,5 +360,6 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
 
     expect((failure as Error).message).toBe('[400] Request failed with status code 400');
     expectNoKeys(failure);
+    expectNoKeys(logged);
   });
 });

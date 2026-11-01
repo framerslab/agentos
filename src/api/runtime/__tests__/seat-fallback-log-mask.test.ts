@@ -1,13 +1,14 @@
 /**
  * @file seat-fallback-log-mask.test.ts
  * What both failover walkers write about a failed attempt of an agency seat's
- * call: the `fallback` logger's `fallback_fired` and `fallback_exhausted`
- * lines and the error `onFallback` receives carry the provider's message
- * through the seat's mask, so a key the provider echoed reaches no log line
- * and no callback. Only the provider transport and the logger factory are
- * stubbed.
+ * call: the `fallback` handle's `llm.fallback_fired` and
+ * `llm.fallback_exhausted` events carry the error's type and code and never
+ * its message, and the error `onFallback` receives carries the provider's
+ * message through the seat's mask, so a key the provider echoed reaches no
+ * log line and no callback. Only the provider transport is stubbed; a host
+ * logger factory set with `setLoggerFactory` records every line.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => {
   const generateCompletionStream = vi.fn();
@@ -27,17 +28,7 @@ vi.mock('../../model.js', () => ({
   createProviderManager: hoisted.createProviderManager,
 }));
 
-// Every line any logger writes, with its fields.
-vi.mock('../../../core/logging/loggerFactory.js', () => {
-  const makeLogger = (): unknown => {
-    const write = (level: string) => (message: unknown, meta?: unknown) => {
-      hoisted.lines.push({ level, message, meta });
-    };
-    return { info: write('info'), warn: write('warn'), error: write('error'), debug: write('debug'), child: () => makeLogger() };
-  };
-  return { createLogger: () => makeLogger(), setLoggerFactory: () => {}, resetLoggerFactory: () => {} };
-});
-
+import { setLoggerFactory, resetLoggerFactory } from '../../../core/logging/loggerFactory.js';
 import { generateText } from '../../generateText.js';
 import { streamText } from '../../streamText.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
@@ -70,25 +61,41 @@ const CALL = {
   __maskError: mask,
   fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }],
 };
-const events = (): unknown[] => hoisted.lines.map((l) => (l.meta as { event?: unknown } | undefined)?.event);
+/** Every line any logger writes, with its fields: an event handle writes `(event, fields)`. */
+const makeLogger = (): unknown => {
+  const write = (level: string) => (message: unknown, meta?: unknown) => {
+    hoisted.lines.push({ level, message, meta });
+  };
+  return { info: write('info'), warn: write('warn'), error: write('error'), debug: write('debug'), child: () => makeLogger() };
+};
+const events = (): unknown[] => hoisted.lines.map((l) => l.message);
 const logged = (): string => JSON.stringify(hoisted.lines);
+/** The fallback handle's events alone. */
+const fallbackLines = (): string =>
+  JSON.stringify(hoisted.lines.filter((l) => typeof l.message === 'string' && l.message.startsWith('llm.fallback_')));
 
 beforeEach(() => {
   hoisted.generateCompletion.mockReset();
   hoisted.generateCompletionStream.mockReset();
   hoisted.lines.length = 0;
   globalLLMProviderHealth.reset();
+  setLoggerFactory(() => makeLogger() as never);
+});
+
+afterEach(() => {
+  resetLoggerFactory();
 });
 
 describe("a seat's failover writes no echoed key to the fallback logger or to onFallback", () => {
-  it('in generateText: fallback_fired, fallback_exhausted and the onFallback error are masked', async () => {
+  it('in generateText: llm.fallback_fired and llm.fallback_exhausted carry no message and the onFallback error is masked', async () => {
     const onFallback = vi.fn();
     hoisted.generateCompletion.mockRejectedValueOnce(echo(503)).mockResolvedValueOnce(reply('served'));
     const served = await generateText({ ...CALL, onFallback });
     expect(served.text).toBe('served');
-    expect(events()).toContain('fallback_fired');
+    expect(events()).toContain('llm.fallback_fired');
     expect(logged()).not.toContain(SECRET);
-    expect(logged()).toContain('upstream rejected [redacted]');
+    // The events name the error's type and code; its message is not written, masked or not.
+    expect(fallbackLines()).not.toContain('upstream rejected');
     expect(onFallback).toHaveBeenCalledTimes(1);
     expect((onFallback.mock.calls[0][0] as Error).message).toBe('[503] upstream rejected [redacted]');
 
@@ -96,11 +103,11 @@ describe("a seat's failover writes no echoed key to the fallback logger or to on
     globalLLMProviderHealth.reset();
     hoisted.generateCompletion.mockRejectedValueOnce(echo(503)).mockRejectedValueOnce(echo(529));
     await expect(generateText(CALL)).rejects.toThrow();
-    expect(events()).toContain('fallback_exhausted');
+    expect(events()).toContain('llm.fallback_exhausted');
     expect(logged()).not.toContain(SECRET);
   });
 
-  it('in streamText: fallback_fired, fallback_exhausted and the onFallback error are masked', async () => {
+  it('in streamText: llm.fallback_fired and llm.fallback_exhausted carry no message and the onFallback error is masked', async () => {
     const onFallback = vi.fn();
     hoisted.generateCompletionStream
       .mockImplementationOnce(async function* () { throw echo(503); })
@@ -108,9 +115,10 @@ describe("a seat's failover writes no echoed key to the fallback logger or to on
     const served = streamText({ ...CALL, onFallback });
     for await (const _part of served.fullStream) { /* drain */ }
     expect(await served.text).toBe('served');
-    expect(events()).toContain('fallback_fired');
+    expect(events()).toContain('llm.fallback_fired');
     expect(logged()).not.toContain(SECRET);
-    expect(logged()).toContain('upstream rejected [redacted]');
+    // The events name the error's type and code; its message is not written, masked or not.
+    expect(fallbackLines()).not.toContain('upstream rejected');
     expect(onFallback).toHaveBeenCalledTimes(1);
     expect((onFallback.mock.calls[0][0] as Error).message).toBe('[503] upstream rejected [redacted]');
 
@@ -122,7 +130,7 @@ describe("a seat's failover writes no echoed key to the fallback logger or to on
     const exhausted = streamText(CALL);
     for await (const _part of exhausted.fullStream) { /* drain */ }
     expect(await exhausted.finishReason).toBe('error');
-    expect(events()).toContain('fallback_exhausted');
+    expect(events()).toContain('llm.fallback_exhausted');
     expect(logged()).not.toContain(SECRET);
   });
 });
