@@ -767,7 +767,14 @@ export class GMI implements IGMI {
     const namesUser = turnInput.metadata?.noTurnUser !== true && typeof turnInput.userId === 'string' && turnInput.userId !== '';
     const userId = namesUser ? (turnInput.userId as string) : null;
     const workflowSeat = Boolean(turnInput.metadata?.workflowId);
-    const conversationId = this.getConversationIdForTurn(turnInput);
+    // The turn's conversation as its memory files it: a memory scope session the turn names (a gmi() session id's
+    // generation) stands in for the session, so the memory tools file and read the turn's thread there and the session
+    // row names that thread, never the one of the id the caller opened, which an earlier generation filed under.
+    const memoryTurn = this.memoryTurnScope(turnInput);
+    const conversationId = memoryTurn.conversationId;
+    const threadIds = this.turnMemoryScope?.sessionId
+      ? [...new Set([memoryTurn.conversationId, memoryTurn.sessionId].filter((id): id is string => typeof id === 'string' && id.trim() !== ''))]
+      : undefined;
     const preferredModelId = turnInput.metadata?.options?.preferredModelId;
     const modelId =
       (typeof preferredModelId === 'string' && preferredModelId) ||
@@ -807,6 +814,7 @@ export class GMI implements IGMI {
         scopes,
         turnUserId,
         conversationId,
+        threadIds,
       });
     }
     if (prepared.learner !== 'bound') {
@@ -823,6 +831,7 @@ export class GMI implements IGMI {
       scopes,
       turnUserId,
       conversationId,
+      threadIds,
     });
   }
 
@@ -847,8 +856,9 @@ export class GMI implements IGMI {
 
   /**
    * A turn's learning from its parts: the tools' context, with the scopes, a recorder bound to the turn (the
-   * turn's conversation id goes to the session row), the second user and the freeze read at the call; and the
-   * memory's, with a guard bound to the same turn.
+   * turn's conversation id goes to the session row), the second user, the freeze read at the call and, where the
+   * turn's memory names a session of its own, the thread ids its memory files under; and the memory's, with a guard
+   * bound to the same turn.
    */
   private turnLearningOf(
     session: ILearnerSession,
@@ -861,6 +871,7 @@ export class GMI implements IGMI {
       scopes: TurnScopes | undefined;
       turnUserId: string | undefined;
       conversationId: string | undefined;
+      threadIds: string[] | undefined;
     },
   ): TurnLearning {
     const { scopes, turnUserId } = parts;
@@ -870,6 +881,7 @@ export class GMI implements IGMI {
       ...(scopes ? { scopes } : {}),
       ...(turnUserId ? { turnUserId } : {}),
       ...(parts.conversationId ? { conversationId: parts.conversationId } : {}),
+      ...(parts.threadIds?.length ? { threadIds: parts.threadIds } : {}),
     });
     // The guard is called on the session (a LearnerSession method reads `this`), only where the session has it.
     const memory: CognitiveMemoryTurnLearning | undefined = scopes

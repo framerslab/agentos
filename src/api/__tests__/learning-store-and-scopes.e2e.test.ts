@@ -11379,6 +11379,13 @@ describe('the docs a host reads about it', () => {
     expect(operations).toContain('a trace another writer changed in between fails the write (`conflict`, its row `rejected`) and nothing changes.');
     expect(operations).toContain("Only a freeze stops a write: `AGENTOS_LEARNING_FREEZE=1`, a turn in mode `frozen`, or a run-time freeze of the turn's scope, read at the call (`frozen`).");
     expect(operations).toContain('**`memory_reflect`** refuses every call that carries `sessionData.learning` (`withdrawn`), after the freeze');
+    // A gmi() session id's generation names the thread the memory tools file and read under.
+    expect(operations).toContain(
+      "Where the turn's memory names a session of its own, a `gmi()` session id's generation, the call carries that session's ids (`sessionData.learning.threadIds`) and the `thread` trace goes under the first of them in the same form",
+    );
+    expect(doc('docs/GMI.md')).toContain(
+      "The thread notes a host's memory tools file for a session go under its generation too, so the id's next opening finds none of the closed session's with `memory_search`.",
+    );
     expect(operations).toContain('On a tie the first of `traceIds` survives, and joined contents follow the order of `traceIds`.');
     expect(operations).toContain("Deletes the trace's knowledge-graph copy, the episodic record a memory manager on the same Brain writes of each trace it stores, when the tool was made by `Memory.createTools()`; `Memory.forget()` does the same.");
     expect(doc('docs/GMI.md')).toContain('The memory tools file, read and write by that context ([With a learning layer](./MEMORY_OPERATIONS.md#with-a-learning-layer))');

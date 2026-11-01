@@ -7,7 +7,10 @@
  * organization id. Where the GMI put the turn's scope ids on the call (`sessionData.learning.scopes`), `user` and
  * `persona` are the turn's own (the learner's, or its session's in a form no user id takes), `thread` is the call's
  * conversation, else its session, in the session's form, and `organization` is the turn's own organization; a call
- * reaches by id only the traces of those scopes that its own user filed.
+ * reaches by id only the traces of those scopes that its own user filed. Where the turn's memory names a session of its
+ * own (`sessionData.learning.threadIds`: a `gmi()` session id's generation), `thread` is those ids, in the session's
+ * form, in place of the call's conversation and session, so the next generation of an id finds no thread note an
+ * earlier one filed.
  */
 import type { ToolExecutionContext } from '../../../../core/tools/ITool.js';
 import { taggedScopeId } from '../../../learning/scopes.js';
@@ -31,6 +34,17 @@ function buildPersonaScopeId(userId: string, personaId: string): string {
 /** The call's conversation id, else its session id. */
 function threadIdOf(context: ToolExecutionContext): string | undefined {
   return nonEmptyString(context.sessionData?.conversationId) ?? nonEmptyString(context.sessionData?.sessionId);
+}
+
+/**
+ * The ids of a call's own `thread` where it carries the turn's scope ids: the turn's memory's (`threadIds`) where the
+ * GMI put them there, else the call's conversation id and its session id.
+ */
+function turnThreadIdsOf(context: ToolExecutionContext): string[] {
+  const named = readToolLearningContext(context.sessionData)?.threadIds;
+  if (named) return [...named];
+  const ids = [nonEmptyString(context.sessionData?.conversationId), nonEmptyString(context.sessionData?.sessionId)];
+  return ids.filter((id): id is string => id !== undefined);
 }
 
 /** The call's organization id: the turn's (`sessionData.organizationId`), else the user context's. */
@@ -62,8 +76,9 @@ export function turnScopesOf(context: ToolExecutionContext): TurnScopes | undefi
  * Without the turn's scope ids, `user` and `persona` are always resolvable in normal AgentOS tool execution because
  * `userContext.userId` and `personaId` are required; `thread` and `organization` additionally rely on optional
  * `sessionData`. With them, `user` and `persona` are the turn's own scope ids, `thread` is the call's conversation,
- * else its session, in the session's form (`taggedScopeId`), and `organization` is the turn's own organization id
- * (the user context's only when it is the namespace of the turn's scope ids).
+ * else its session, in the session's form (`taggedScopeId`), or the first of the turn's memory's thread ids where the
+ * GMI put them on the call, and `organization` is the turn's own organization id (the user context's only when it is
+ * the namespace of the turn's scope ids).
  */
 export function resolveMemoryToolScopeId(
   scope: string | undefined,
@@ -82,7 +97,7 @@ export function resolveMemoryToolScopeId(
       case 'persona':
         return turn.personaScopeId;
       case 'thread': {
-        const threadId = threadIdOf(context);
+        const [threadId] = turnThreadIdsOf(context);
         return threadId ? taggedScopeId(threadId, turn.namespace) : undefined;
       }
       case 'organization':
@@ -126,8 +141,8 @@ export interface MemoryToolTurn {
   scopes: TurnScopes;
   /**
    * The turn's own scopes: its `user` and `persona` scope ids, and its conversation's and its session's `thread` ids
-   * in the session's form. A write files under one of them, and a call reaches by id only their traces of its own
-   * user.
+   * in the session's form (its memory's thread ids, where the GMI put them on the call). A write files under one of
+   * them, and a call reaches by id only their traces of its own user.
    */
   own: MemoryScopePair[];
   /** What `memory_search` reads besides the unscoped traces: the turn's own scopes and its organization's id. */
@@ -154,9 +169,7 @@ export function memoryToolTurnOf(context: ToolExecutionContext): MemoryToolTurn 
   };
   add(own, 'user', scopes.userScopeId);
   add(own, 'persona', scopes.personaScopeId);
-  for (const id of [nonEmptyString(context.sessionData?.conversationId), nonEmptyString(context.sessionData?.sessionId)]) {
-    if (id) add(own, 'thread', taggedScopeId(id, scopes.namespace));
-  }
+  for (const id of turnThreadIdsOf(context)) add(own, 'thread', taggedScopeId(id, scopes.namespace));
   for (const pair of own) add(readable, pair.scope, pair.scopeId);
   add(readable, 'organization', turnOrganizationIdOf(context, scopes));
   return {

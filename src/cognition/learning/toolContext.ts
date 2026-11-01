@@ -44,8 +44,8 @@ export function isTurnScopes(value: unknown): value is TurnScopes {
  *
  * @returns `undefined` when the call carries none: the host has no learning layer. Otherwise the turn's learner and
  *   mode (a learner value that is not `'bound'` reads as no learner, a mode it does not know as `'off'`), and, where
- *   the GMI put them there and they are well formed, the turn's scopes, the session's recorder, a second user's id
- *   and the freeze to read at the call.
+ *   the GMI put them there and they are well formed, the turn's scopes, the session's recorder, a second user's id,
+ *   the freeze to read at the call and the turn's own thread ids (a list of non-blank ids).
  */
 export function readToolLearningContext(
   sessionData: Record<string, unknown> | undefined,
@@ -53,7 +53,7 @@ export function readToolLearningContext(
   const raw = sessionData?.learning;
   if (raw === undefined || raw === null) return undefined;
   const fields = (typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-  const { learner, mode, scopes, recordSelfChange, turnUserId, frozen } = fields;
+  const { learner, mode, scopes, recordSelfChange, turnUserId, frozen, threadIds } = fields;
   return {
     learner: learner === 'bound' ? 'bound' : 'none',
     mode: LEARNING_MODES.includes(mode as LearningMode) ? (mode as LearningMode) : 'off',
@@ -61,7 +61,13 @@ export function readToolLearningContext(
     ...(typeof recordSelfChange === 'function' ? { recordSelfChange: recordSelfChange as ToolLearningContext['recordSelfChange'] } : {}),
     ...(typeof turnUserId === 'string' && turnUserId !== '' ? { turnUserId } : {}),
     ...(typeof frozen === 'function' ? { frozen: frozen as () => boolean } : {}),
+    ...(isThreadIds(threadIds) ? { threadIds } : {}),
   };
+}
+
+/** Whether a value is a turn's own thread ids: a list of one or more non-blank ids. */
+function isThreadIds(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((id) => typeof id === 'string' && id.trim() !== '');
 }
 
 /** Why a self-modification tool refused before it acted. */
@@ -137,13 +143,21 @@ export function refusedSelfChange<T = never>(toolName: string, reason: string, w
  *
  * @param session - The learner session the turn was prepared by.
  * @param turn - The turn's learner and mode, its scope ids where the session gives them, the explicit id of a second
- *   user on a turn with no learner, and the turn's conversation id.
+ *   user on a turn with no learner, the turn's conversation id, and the ids its own `thread` is filed under where its
+ *   memory names a session of its own (`threadIds`; the conversation id is then the first of them).
  * @returns `tools`, what each tool call of the turn is told; `writeTurn`, what the session's recorder and guard are told
  *   about the turn, `undefined` when the turn has no scope ids.
  */
 export function toolLearningContextFor(
   session: ILearnerSession,
-  turn: { learner: 'bound' | 'none'; mode: LearningMode; scopes?: TurnScopes; turnUserId?: string; conversationId?: string },
+  turn: {
+    learner: 'bound' | 'none';
+    mode: LearningMode;
+    scopes?: TurnScopes;
+    turnUserId?: string;
+    conversationId?: string;
+    threadIds?: readonly string[];
+  },
 ): { tools: ToolLearningContext; writeTurn: SelfChangeTurn | undefined } {
   const { scopes, turnUserId } = turn;
   const writeTurn: SelfChangeTurn | undefined = scopes
@@ -163,6 +177,7 @@ export function toolLearningContextFor(
       : {}),
     ...(turnUserId ? { turnUserId } : {}),
     ...(typeof session.isFrozen === 'function' ? { frozen: () => session.isFrozen!(writeTurn) } : {}),
+    ...(isThreadIds(turn.threadIds) ? { threadIds: [...turn.threadIds] } : {}),
   };
   return { tools, writeTurn };
 }
