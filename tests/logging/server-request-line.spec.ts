@@ -26,10 +26,10 @@ function capture(): Line[] {
 }
 
 /** A server over a stub AgentOS whose extension handlers are `handlers`. */
-function makeServer(handlers: Handler[]): AgentOSServer {
+function makeServer(handlers: Handler[], options: { enableCors?: boolean } = {}): AgentOSServer {
   const server = new AgentOSServer(
     { skipDefaultInitialization: true } as never,
-    createAgentOSConfig({ port: 0, host: '127.0.0.1' }),
+    createAgentOSConfig({ port: 0, host: '127.0.0.1', ...options }),
   );
   server.setAgentOSForTesting({
     getHttpHandlers: () => handlers,
@@ -98,6 +98,17 @@ describe('AgentOSServer request lines', () => {
     }
     expect(new Set(ids).size).toBe(6);
     expect(JSON.stringify(lines).includes(MARKER)).toBe(false);
+  });
+
+  it('lets a cross-origin browser read the request id when CORS is on', async () => {
+    capture();
+    let exposed: string | null = null;
+    await serve(makeServer([], { enableCors: true }), async (base) => {
+      const response = await fetch(`${base}/health`);
+      await response.text();
+      exposed = response.headers.get('access-control-expose-headers');
+    });
+    expect(exposed).toBe('x-request-id');
   });
 
   it('tags each AgentOS event line written during the request with its id', async () => {

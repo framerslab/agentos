@@ -107,6 +107,28 @@ describe('the kit', () => {
   });
 });
 
+describe('a kit with its own context keys', () => {
+  it('takes AgentOS lines with their component and request id beside the host keys', () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const logger = pino({ base: undefined, level: 'debug' }, { write(line: string) { lines.push(JSON.parse(line)); } });
+    const kit = createAllowListLogger({ logger, events: {}, context: { tenant: 'word' } as const });
+    cleanup.push(() => kit.close());
+    setLogger(kit.asLogger());
+    cleanup.push(() => resetLoggerFactory());
+    lazyLogger('fixture').child({ requestId: 'abc-1' }).info('llm.models_refresh', { provider: 'openai' });
+    expect(lines.at(-1)).toMatchObject({ event: 'llm.models_refresh', component: 'fixture', requestId: 'abc-1', provider: 'openai' });
+    kit.child({ tenant: 'acme', component: 'jobs' }).info('llm.models_empty', { provider: 'openai' });
+    expect(lines.at(-1)).toMatchObject({ event: 'llm.models_empty', component: 'jobs', tenant: 'acme', provider: 'openai' });
+  });
+
+  it('refuses a context map that gives an AgentOS key another kind, and takes the same kind', () => {
+    const logger = pino({ base: undefined, level: 'debug' }, { write: () => undefined });
+    expect(() => createAllowListLogger({ logger, events: {}, context: { component: { enum: ['jobs'] } } as const })).toThrow(TypeError);
+    const same = createAllowListLogger({ logger, events: {}, context: { component: 'word' } as const });
+    same.close();
+  });
+});
+
 describe('event handles', () => {
   it('write the fields errorFields gives for a long class name and constant code, as a failover line does', () => {
     const lines: Array<Record<string, unknown>> = [];
