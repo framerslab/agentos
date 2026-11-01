@@ -861,8 +861,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * never keeps a seat session's id. An id stays after session.close(), so that
    * its next opening on this agent does not reach the closed session's memory;
    * agent.close() starts a new memory and empties the set, so an id's next
-   * opening, as after a process restart, recalls what that id filed. One entry per id, kept while the
-   * memory keeps that session's traces.
+   * opening, as after a process restart, recalls what that id filed. One entry
+   * per id, kept while the memory keeps that session's traces.
    */
   const openedSessionIds = new Set<string>();
   const agentTally = createEmptyUsageAggregate();
