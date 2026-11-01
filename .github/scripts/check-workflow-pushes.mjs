@@ -19,11 +19,12 @@
  * - a git push with no refspec that git sends there by its settings, given with git -c or set by an earlier git
  *   config in the job: push.default=matching (every branch both sides have), push.default=upstream (the branch the
  *   checked-out one tracks, which this check does not follow, so it is reported whatever it is) and a refspec set
- *   in remote.<name>.push for the remote the push names (any remote's when it names none, or one held in a variable
- *   or an expression). git config sets them in the checkout it runs in, or with --global or --system in the
- *   global or the system settings, which every checkout reads beneath its own; --unset (git config unset) removes
- *   the one value of the key it names that its pattern matches (remote.origin.push and remote.backup.push are two
- *   keys) and none where more than one does, and --unset-all (unset --all) every value of that key it matches, as
+ *   in remote.<name>.push for the remote it pushes to (the first operand, else --repo; with neither, origin or any
+ *   remote with refspecs, as the settings that choose it are not followed; held in a variable or an expression, any
+ *   remote), else push.default for a remote with none. git config sets them in the checkout it runs in, or with
+ *   --global or --system in the global or the system settings, which every checkout reads beneath its own; --unset
+ *   (git config unset) removes the one value of the key it names that its pattern matches (remote.origin.push and
+ *   remote.backup.push are two keys) and none where more than one does, and --unset-all (unset --all) every value of that key it matches, as
  *   git does: the pattern is an extended regular expression found anywhere in the value, one that begins with !
  *   matches the values it does not, and with --fixed-value it is the value itself. A form git refuses
  *   (an operand too many, --all or --value without the unset subcommand) and an unset in a file named with --file
@@ -1113,6 +1114,8 @@ function checkPush(args, { state, ctx, report }, given = {}) {
   let mirror = false;
   let tags = false;
   let remove = false;
+  /** @type {string | undefined} */
+  let repo;
   /** @type {string[]} */
   const positional = [];
   for (let k = 0; k < args.length; k++) {
@@ -1127,6 +1130,7 @@ function checkPush(args, { state, ctx, report }, given = {}) {
       // The options are read in order, so a later --no-dry-run undoes a --dry-run.
       const { name, negated, value } = pushOption(a.slice(2));
       const kind = PUSH_OPTIONS.get(name) ?? '';
+      if (name === 'repo') repo = negated ? undefined : value ?? args[k + 1];
       if (kind === 'value' && !negated && value === undefined) k++;
       else if (kind === 'dry-run') dryRun = !negated;
       else if (kind === 'all') all = !negated;
@@ -1165,30 +1169,35 @@ function checkPush(args, { state, ctx, report }, given = {}) {
   let via = '';
   if (refspecs.length === 0) {
     if (tags) return;
-    // git reads remote.<name>.push for the remote it pushes to alone (remote.c keeps the refspecs per remote): the
-    // first operand, else one its settings choose (branch.<name>.pushRemote, remote.pushDefault, branch.<name>.remote,
-    // origin), which this check does not follow. With no operand, or one held in a variable or an expression, the
-    // remote may be any of them.
-    const named = positional[0];
-    const told = named !== undefined && unhold(named) === named && !named.includes('$') && !named.includes('`');
-    const configured = [...state.system.pushRefspecs, ...state.global.pushRefspecs, ...state.pushRefspecs, ...(given.pushRefspecs ?? [])]
-      .filter((r) => !told || r.remote === named)
-      .map((r) => r.value);
+    // git pushes the refspecs remote.<name>.push sets for the remote it pushes to alone (remote.c keeps them per
+    // remote), and to a remote with none what push.default names. The remote is the first operand, else --repo, else
+    // one its settings choose (branch.<name>.pushRemote, remote.pushDefault, branch.<name>.remote), origin when none
+    // does. This check does not follow those settings, so a push that names no remote may reach origin or any remote
+    // with refspecs; a remote held in a variable or an expression, in the push or in the key, may be any remote.
+    const unresolved = (/** @type {string} */ name) => unhold(name) !== name || name.includes('$') || name.includes('`');
+    const settings = [...state.system.pushRefspecs, ...state.global.pushRefspecs, ...state.pushRefspecs, ...(given.pushRefspecs ?? [])];
+    const named = positional[0] ?? repo;
+    /** @type {string[] | null} the remotes the push may reach, null for any */
+    const remotes = named === undefined ? [...new Set(['origin', ...settings.map((r) => r.remote).filter((name) => !unresolved(name))])] : unresolved(named) ? null : [named];
+    const configured = settings.filter((r) => remotes === null || unresolved(r.remote) || remotes.includes(r.remote)).map((r) => r.value);
+    // A remote with no refspec of its own, told apart from the rest, pushes as push.default says.
+    const bare = remotes === null || remotes.some((name) => !settings.some((r) => r.remote === name));
     // The checkout's own push.default overrides the global one, which overrides the system one; git -c all three.
     const mode = given.pushDefault ?? pushMode(state, state);
     if (configured.length > 0) {
       refspecs.push(...configured);
       via = ' (remote.<name>.push)';
-    } else if (mode === 'matching') {
-      report(`"${command}" with push.default=matching pushes every branch the remote also has, ${branch} among them`);
-      return;
-    } else if (mode === 'upstream' || mode === 'tracking') {
-      report(`"${command}" with push.default=${mode} pushes the checked-out branch to the branch it tracks, which can be ${branch}; give the push its destination`);
-      return;
-    } else {
-      // push.default=nothing pushes nothing; current and simple (the default) push the checked-out branch.
-      if (mode !== 'nothing' && state.head) report(`"${command}" pushes the checked-out branch, ${branch} on a run on ${branch}`);
-      return;
+    }
+    if (bare) {
+      if (mode === 'matching') {
+        report(`"${command}" with push.default=matching pushes every branch the remote also has, ${branch} among them`);
+      } else if (mode === 'upstream' || mode === 'tracking') {
+        report(`"${command}" with push.default=${mode} pushes the checked-out branch to the branch it tracks, which can be ${branch}; give the push its destination`);
+      } else if (mode !== 'nothing' && state.head) {
+        // push.default=nothing pushes nothing; current and simple (the default) push the checked-out branch.
+        report(`"${command}" pushes the checked-out branch, ${branch} on a run on ${branch}`);
+      }
+      if (configured.length === 0) return;
     }
   }
   for (const refspec of refspecs) {
