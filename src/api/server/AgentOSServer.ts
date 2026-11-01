@@ -114,6 +114,7 @@ export class AgentOSServer {
       res.setHeader('Access-Control-Allow-Origin', this.config.corsOrigin ?? '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Expose-Headers', 'x-request-id');
     }
 
     if (req.method === 'OPTIONS') {
