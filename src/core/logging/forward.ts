@@ -104,9 +104,10 @@ export function defaultRoot(): PinoLogger {
  * Writes one line to a target.
  *
  * The line's context is the handle's bindings plus the current request's id. With `strict`
- * the context is checked, and so are the fields of an event `AGENTOS_EVENTS` declares; a
- * pack's events are declared in the pack's own map, so they pass on to the host's checks. A
- * failed check is thrown under `NODE_ENV=test` and otherwise written as `log_refused`.
+ * the context, the event and its fields are checked against `AGENTOS_CONTEXT` and
+ * `AGENTOS_EVENTS`, the map a strict handle is typed over, so an event it does not declare,
+ * which only a JavaScript caller or a cast can write, is refused as `unknown_event`. A failed
+ * check is thrown under `NODE_ENV=test` and otherwise written as `log_refused`.
  *
  * A logger gets `logger[level]({ ...context, ...fields, event })`, with no message, and the
  * default root writes the same object. A factory's logger gets `(event, fields)`: at `error`
@@ -133,7 +134,7 @@ export function forward(target: Target, level: Level, event: string, fields: Rec
   if (strict) {
     try {
       checkContext(AGENTOS_CONTEXT, merged);
-      if (Object.prototype.hasOwnProperty.call(AGENTOS_EVENTS, event)) checkFields(AGENTOS_EVENTS, AGENTOS_CONTEXT, event, fields);
+      checkFields(AGENTOS_EVENTS, AGENTOS_CONTEXT, event, fields);
     } catch (error) {
       if (!isValidationError(error)) return;
       if (process.env.NODE_ENV === 'test') throw error;
