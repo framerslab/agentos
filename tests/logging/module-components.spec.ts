@@ -25,8 +25,6 @@ const origins = {
   'src/core/llm/providers/implementations/LiteLLMProvider.ts': 'litellm_provider',
   'src/core/llm/providers/implementations/MistralProvider.ts': 'mistral_provider',
   'src/core/llm/providers/implementations/OllamaProvider.ts': 'ollama_provider',
-  'src/core/llm/providers/implementations/OpenAIProvider.ts': 'openai_provider',
-  'src/core/llm/providers/implementations/OpenRouterProvider.ts': 'openrouter_provider',
   'src/core/llm/providers/implementations/RequestyProvider.ts': 'requesty_provider',
   'src/core/llm/providers/implementations/TogetherProvider.ts': 'together_provider',
   'src/core/llm/providers/implementations/XAIProvider.ts': 'xai_provider',
