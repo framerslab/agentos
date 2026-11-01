@@ -231,7 +231,13 @@ export class MemoryAddTool implements ITool<MemoryAddInput, MemoryAddOutput> {
       const tags = JSON.stringify(args.tags ?? []);
       const metadata = JSON.stringify(
         buildInitialTraceMetadata(
-          turn?.turnUserId ? { turnUserId: turn.turnUserId } : {},
+          {
+            ...(turn?.turnUserId ? { turnUserId: turn.turnUserId } : {}),
+            // A thread is shared by every turn of the conversation: the note names whose turn filed it (the learner's
+            // user scope id, or the session's form on a turn with no learner), so a call reaches it by id from the
+            // same filer's turns alone.
+            ...(turn && scope === 'thread' ? { threadFiler: turn.scopes.userScopeId } : {}),
+          },
           {
             contentHash: await sha256Hex(args.content),
             ...(scopeId ? { scopeId } : {}),

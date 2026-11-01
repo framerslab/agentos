@@ -119,14 +119,21 @@ export async function recordToolWrite<T, O>(
 export type TraceReach = 'own' | 'other_user' | 'out';
 
 /**
- * Whether a call's turn reaches a trace by id: the trace's scope and scope id are one of the turn's own, and the
- * second user it names (`turnUserId`) is the turn's own, both absent or equal.
+ * Whether a call's turn reaches a trace by id: the trace's scope and scope id are one of the turn's own, the second
+ * user it names (`turnUserId`) is the turn's own, both absent or equal, and a `thread` note `memory_add` filed names
+ * the turn's own filer (`threadFiler`, the user scope id of the turn that filed it). A thread is shared by every turn
+ * of the conversation, so an anonymous turn on a learner's session, which names no second user, reaches no note the
+ * learner filed there, and the learner none it filed.
  */
 export function reachOf(snapshot: Pick<TraceSnapshot, 'scope' | 'scopeId' | 'metadata'>, turn: MemoryToolTurn): TraceReach {
   if (!turn.own.some((pair) => pair.scope === snapshot.scope && pair.scopeId === snapshot.scopeId)) return 'out';
-  const named = parseTraceMetadata(snapshot.metadata).turnUserId;
+  const metadata = parseTraceMetadata(snapshot.metadata);
+  const named = metadata.turnUserId;
   const traceUser = typeof named === 'string' && named !== '' ? named : undefined;
-  return traceUser === turn.turnUserId ? 'own' : 'other_user';
+  if (traceUser !== turn.turnUserId) return 'other_user';
+  const filer = metadata.threadFiler;
+  if (snapshot.scope === 'thread' && typeof filer === 'string' && filer !== turn.scopes.userScopeId) return 'other_user';
+  return 'own';
 }
 
 /**
