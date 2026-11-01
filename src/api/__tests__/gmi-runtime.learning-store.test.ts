@@ -1,15 +1,15 @@
 /**
  * @file gmi-runtime.learning-store.test.ts
- * gmi() with durable memory and its learning store, end to end over the real provider manager, completion gateway,
- * GMI, memory manager, Brain and learning layer; only the provider class is stubbed (helpers/stubProviders.ts).
- * memory.store needs the learning flag and learning.agentKey, and so does a SQL learning store; a store that does not
- * open fails a session's first send naming memory.store. One SQLite file holds the agent's memory and its learning
- * store: an agent built again on the file recalls what a user said, a returning user's oldest trace among it past the
- * brain's newest 1,000, and renders the traits an operator set, and a closed agent opens the file again on its next
- * use, a forgetUser after agent.close() included. A host's own adapter is never closed. A turn with no learner files
- * under its session's memory scope, a reopened session's own, and its memory_add writes one row of no user. The agent's
- * host calls fill in its key and namespace, and reach the memory tools a host registers itself through
- * learning.memoryTools.
+ * gmi() with durable memory and its learning store, end to end over the real provider manager, completion gateway, GMI,
+ * memory manager, Brain and learning layer; only the provider class is stubbed (helpers/stubProviders.ts). memory.store
+ * needs the learning flag and learning.agentKey, and so does a SQL learning store; a store that does not open fails a
+ * session's first send naming memory.store. One SQLite file holds the agent's memory and its learning store: an agent
+ * built again on the file recalls what a user said, a returning user's oldest trace among it past the brain's newest
+ * 1,000 and what a session with no user filed past them, and renders the traits an operator set, and a closed agent
+ * opens the file again on its next use, a forgetUser after agent.close() included, once a host call already running has
+ * finished on the file. A host's own adapter is never closed. A turn with no learner files under its session's memory
+ * scope, a reopened session's own, and its memory_add writes one row of no user. The agent's host calls fill in its key
+ * and namespace, and reach the memory tools a host registers itself through learning.memoryTools.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -80,6 +80,29 @@ async function liveUnder(file: string, scopeId: string): Promise<number> {
   try {
     const row = await brain.get<{ n: number | string }>("SELECT count(*) AS n FROM memory_traces WHERE brain_id = 'tutor' AND scope_id = ? AND deleted = 0", [scopeId]);
     return Number(row?.n ?? 0);
+  } finally {
+    await brain.close();
+  }
+}
+
+/**
+ * Files a thousand traces of other users in the brain `tutor`, each newer than every trace there: the brain's whole-brain
+ * hydration loads these and no older one. Hydration skips a row with no embedding, so they never compete in recall.
+ */
+async function fileNewerTraces(file: string): Promise<void> {
+  const brain = await Brain.openSqlite(file, { brainId: 'tutor' });
+  try {
+    const newest = await brain.get<{ created_at: number }>("SELECT max(created_at) AS created_at FROM memory_traces WHERE brain_id = 'tutor'");
+    await brain.transaction(async (trx) => {
+      for (let i = 0; i < 1_000; i += 1) {
+        await trx.run(
+          `INSERT INTO memory_traces (brain_id, id, type, scope, scope_id, content, embedding, strength, created_at,
+             last_accessed, retrieval_count, tags, emotions, metadata, deleted)
+           VALUES ('tutor', ?, 'episodic', 'user', ?, ?, NULL, 0.5, ?, NULL, 0, '[]', '{}', ?, 0)`,
+          [`filler-${i}`, `other-${i}`, `Filler note ${i}.`, Number(newest!.created_at) + 1 + i, JSON.stringify({ scopeId: `other-${i}` })],
+        );
+      }
+    });
   } finally {
     await brain.close();
   }
@@ -171,22 +194,29 @@ describe("an agent's memory and learned state in one SQLite file", () => {
     await first.close();
 
     // A thousand newer traces of other users: the brain's whole-brain hydration loads these and leaves out ana's.
-    const brain = await Brain.openSqlite(file, { brainId: 'tutor' });
-    const newest = await brain.get<{ created_at: number }>("SELECT max(created_at) AS created_at FROM memory_traces WHERE brain_id = 'tutor'");
-    await brain.transaction(async (trx) => {
-      for (let i = 0; i < 1_000; i += 1) {
-        await trx.run(
-          `INSERT INTO memory_traces (brain_id, id, type, scope, scope_id, content, embedding, strength, created_at,
-             last_accessed, retrieval_count, tags, emotions, metadata, deleted)
-           VALUES ('tutor', ?, 'episodic', 'user', ?, ?, NULL, 0.5, ?, NULL, 0, '[]', '{}', ?, 0)`,
-          [`filler-${i}`, `other-${i}`, `Filler note ${i}.`, Number(newest!.created_at) + 1 + i, JSON.stringify({ scopeId: `other-${i}` })],
-        );
-      }
-    });
-    await brain.close();
+    await fileNewerTraces(file);
 
     const second = gmi(opts);
     await second.session('s2', { userId: 'ana' }).send('Where does the deploy key live?');
+    expect(JSON.stringify(s.seen[1].messages)).toContain('vault');
+    await second.close();
+  });
+
+  it("recall what a session with no user filed past the brain's newest 1,000, when its id opens in an agent built again on the file", async () => {
+    quietManifest();
+    embeddings();
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('It is in the vault.')] });
+    const file = tempFile();
+    const opts = options(k, { ...memoryOn({ path: file }), learning: { agentKey: 'tutor' } });
+    const first = gmi(opts);
+    await first.session('x').send('The deploy key lives in the vault under ops/deploy.');
+    await first.close();
+
+    await fileNewerTraces(file);
+
+    const second = gmi(opts);
+    await second.session('x').send('Where does the deploy key live?');
     expect(JSON.stringify(s.seen[1].messages)).toContain('vault');
     await second.close();
   });
@@ -232,6 +262,37 @@ describe("an agent's memory and learned state in one SQLite file", () => {
     const brain = await Brain.openSqlite(file, { brainId: 'tutor' });
     try {
       expect(await brain.all('SELECT mode FROM agentos_learning_freezes')).toEqual([{ mode: 'frozen' }]);
+    } finally {
+      await brain.close();
+    }
+  });
+
+  it('let a host call that holds the learning store finish on the file before agent.close() closes it', async () => {
+    quietManifest();
+    const file = tempFile();
+    const tutor = gmi(options(key(), { ...memoryOn({ path: file }), learning: { agentKey: 'tutor' } }));
+    // The first call opens the file's Brain and the learning store on it.
+    await tutor.learning!.freeze!({ userId: 'ana' }, 'ops');
+    // The next transaction waits until the test lets it go: the unfreeze holds the store while close() runs.
+    let letGo!: () => void;
+    const held = new Promise<void>((resolve) => {
+      letGo = resolve;
+    });
+    const transaction = SqlLearningStore.prototype.transaction;
+    vi.spyOn(SqlLearningStore.prototype, 'transaction').mockImplementationOnce(async function (this: SqlLearningStore, ...args: Parameters<SqlLearningStore['transaction']>) {
+      await held;
+      return transaction.apply(this, args);
+    } as SqlLearningStore['transaction']);
+    const unfreezing = tutor.learning!.unfreeze!({ userId: 'ana' });
+    const closing = tutor.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    letGo();
+
+    await expect(unfreezing).resolves.toBeUndefined();
+    await closing;
+    const brain = await Brain.openSqlite(file, { brainId: 'tutor' });
+    try {
+      expect(await brain.all('SELECT mode FROM agentos_learning_freezes')).toEqual([]);
     } finally {
       await brain.close();
     }

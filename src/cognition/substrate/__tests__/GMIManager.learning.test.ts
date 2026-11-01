@@ -3,7 +3,8 @@
  * What GMIManager gives each GMI of a runtime with a learning layer: a learner session bound to the user the GMI is
  * created for, under the turn's resolved organization when the caller passes it and under the organization of the
  * GMI's first prepared turn when it does not; a workflow seat's GMI with no learner, whose role overlay renders for
- * that session only, honesty excepted; and a learner session ended once its GMI shuts down or fails to initialize. A layer that fails never
+ * that session only, honesty excepted; a learner session ended once its GMI shuts down or fails to initialize, and the
+ * GMI's memory manager let go of once the GMI has shut it down. A layer that fails never
  * fails the GMI. Without a layer GMIs are built as before. Real GMIManager and GMIs; the persona loader, the
  * conversation manager and the prompt engine are stubs.
  */
@@ -316,6 +317,32 @@ describe('a runtime with a learning layer', () => {
       { namespace: '', agentKey: 'reviewer', userId: 'user-1' },
       expect.objectContaining({ sessionId: 'session-1', memory }),
     );
+  });
+
+  it("lets go of a GMI's memory manager once the GMI has shut it down, so forgetUser asks no manager that can no longer answer", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let shut = false;
+    // A manager of the GMI's own, which the GMI's shutdown shuts down: from then on every call fails, as a real one does.
+    const memory = {
+      getStore: () => undefined,
+      deleteScope: vi.fn(async () => {
+        if (shut) throw new Error('CognitiveMemoryManager not initialized. Call initialize() first.');
+        return { deleted: 0, graph: 'reached' };
+      }),
+      shutdown: async () => {
+        shut = true;
+      },
+    } as unknown as ICognitiveMemoryManager;
+    const layer = createLearningLayer();
+    const manager = await managerWith(layer, { cognitiveMemoryFactory: async () => memory });
+    await manager.getOrCreateGMIForSession('user-1', 'session-1', persona.id, undefined, undefined, undefined, undefined, undefined, 'A');
+    await manager.deactivateGMIForSession('session-1');
+    expect(shut).toBe(true);
+
+    const report = await layer.forgetUser('user-1', { namespace: 'A' });
+    expect(report.stores.filter((entry) => /memory manager/.test(entry.store) && !entry.reached)).toEqual([]);
+    expect(report.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: true }));
   });
 
   it("names a turn's scope ids by the session's own form, with no learner, before the GMI's first prepared turn opens its session", async () => {
