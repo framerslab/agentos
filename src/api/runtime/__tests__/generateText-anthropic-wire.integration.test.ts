@@ -948,6 +948,67 @@ describe('Claude Haiku 5.5 through the public API', () => {
     expect(body.output_config).toEqual({ effort: 'high' });
     warn.mockRestore();
   });
+
+  it('caps an effort passed through customModelParams when thinking is off', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', '{"answer":"done"}')] });
+    const answerSchema = {
+      type: 'object',
+      properties: { answer: { type: 'string' } },
+      required: ['answer'],
+      additionalProperties: false,
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'Be quick.',
+      thinking: false,
+      customModelParams: { output_config: { effort: 'max', format: { type: 'json_schema', schema: answerSchema } } },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    // The cap lowers the effort and keeps the rest of the passthrough output_config.
+    expect(body.output_config).toEqual({ effort: 'high', format: { type: 'json_schema', schema: answerSchema } });
+    warn.mockRestore();
+  });
+
+  it('caps a passthrough effort on Claude Opus 5 with thinking off as well', async () => {
+    route({ 'claude-opus-5': [textTurn('claude-opus-5', 'Done.')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      prompt: 'Be quick.',
+      thinking: false,
+      customModelParams: { output_config: { effort: 'xhigh' } },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    expect(body.output_config).toEqual({ effort: 'high' });
+    warn.mockRestore();
+  });
+
+  it('leaves a passthrough effort alone when thinking stays on', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'Done.')] });
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'Think hard.',
+      customModelParams: { output_config: { effort: 'max' } },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body).not.toHaveProperty('thinking');
+    expect(body.output_config).toEqual({ effort: 'max' });
+  });
 });
 
 describe('structured calls carry thinking and effort to the wire', () => {
