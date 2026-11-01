@@ -15,7 +15,8 @@
  *
  * With `memory.store` (which needs the learning option and `learning.agentKey`)
  * the agent's memory and its learning store share one Brain's adapter, opened on
- * first use.
+ * first use, and the Brain keeps each session id's generation, so an id that
+ * session.close() ended stays ended across a restart.
  */
 import { randomUUID } from 'node:crypto';
 import type { Agent, AgentLearning, AgentOptions, AgentSession, AgentSessionOptions, SessionSendOptions } from './agent.js';
@@ -57,6 +58,7 @@ import {
   type AgentMemoryBrain,
 } from './runtime/agentCognitiveMemory.js';
 import { sendGmiTurn, streamGmiTurn, TurnLock, type GmiForTurn, type GmiSessionDeps, type GmiTurnContext, type GmiTurnOptions } from './runtime/gmiSession.js';
+import { endSessionGeneration, readSessionGeneration, sessionGenerationKey, type SessionGeneration } from './runtime/sessionGenerations.js';
 import { transcriptToConversation } from './runtime/gmiTranscript.js';
 import { SessionHistoryBuffer, SESSION_HISTORY_DEFAULTS } from './sessionHistory.js';
 import type { SessionTranscriptMessage } from './sessionTranscript.js';
@@ -349,6 +351,14 @@ interface BuiltGmi {
 interface SessionEntry {
   session: AgentSession;
   userId: string;
+  /** Closes the session as `close()` does, without ending its id's memory: `agent.close()` closes its sessions so. */
+  shutdown(): Promise<void>;
+}
+
+/** A session's end of its id's generation, recorded once: `get()` records it (again after a failure), `peek()` is the attempt under way. */
+interface GenerationEnd {
+  get(): Promise<void>;
+  peek(): Promise<void> | undefined;
 }
 
 /** The session options gmi() reads beside the public ones: `__seat`, set only by a seat (sessionSeat(), launch_agency). */
@@ -855,16 +865,25 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const sessions = new Map<string, SessionEntry>();
   const sessionTallies = new Map<string, AgentOSUsageAggregate>();
   /**
-   * The session ids opened since the sessions' memory was built: an id opened
-   * again after its close() is given a memory scope of its own. Only an agent
-   * with cognitive memory keeps them, since only memory reads the scope, and it
-   * never keeps a seat session's id. An id stays after session.close(), so that
-   * its next opening on this agent does not reach the closed session's memory;
-   * agent.close() starts a new memory and empties the set, so an id's next
-   * opening, as after a process restart, recalls what that id filed. One entry
-   * per id, kept while the memory keeps that session's traces.
+   * In process memory (no `memory.store`), the session ids opened since the
+   * sessions' memory was built: an id opened again after its close() is given a
+   * memory scope of its own. Only an agent with cognitive memory keeps them,
+   * since only memory reads the scope, and it never keeps a seat session's id.
+   * An id stays after session.close(), so that its next opening on this agent
+   * does not reach the closed session's memory; agent.close() starts a new,
+   * empty memory and empties the set. One entry per id, kept while the memory
+   * keeps that session's traces. With `memory.store` the store keeps each id's
+   * generation instead (runtime/sessionGenerations.ts), and nothing here.
    */
   const openedSessionIds = new Set<string>();
+  /**
+   * With `memory.store`, the ends `session.close()` asked the store to record, by the id's record key, until each is
+   * recorded: the id's next opening on this agent records the end before it reads its generation, so a session opened
+   * while a close is under way, or after one the store refused, never files under the closed generation. Kept across
+   * `agent.close()`, which ends no session's memory: an end the store refused is tried again at the id's next opening.
+   * `agent.close()` waits for the ends under way before it closes a file's Brain.
+   */
+  const unrecordedEnds = new Map<string, GenerationEnd>();
   const agentTally = createEmptyUsageAggregate();
 
   /** The per-call overrides as completion options; throws naming an override the GMI path does not take. */
@@ -963,17 +982,45 @@ export function gmi(opts: GmiOptions): GmiHandle {
       }
       // Each session's memory scope is its own unless the caller names the user:
       // sessions are often different people, and one person's facts must not
-      // reach another's replies. A session id's memory survives agent.close()
-      // and a process restart; session.close() ends it: an id opened again on
-      // this agent after session.close() gets a new scope id, recalls nothing the
-      // closed session filed, and shares only a user id the caller names again.
-      // A host that hands an anonymous id to a new person must close the old
-      // session first or mint a new id.
+      // reach another's replies. With memory.store a session id's memory
+      // survives a restart, and agent.close(); session.close() ends it for good,
+      // across restarts: the id's next opening, in this process or another, gets
+      // a new scope id, recalls nothing the closed session filed, and shares
+      // only a user id the caller names again. The store's Brain keeps the id's
+      // generation (runtime/sessionGenerations.ts), which the session reads as
+      // it opens and its close() moves on; an id no close has ended is at
+      // generation 0, its plain id. In process memory the ending holds on this
+      // agent, whose agent.close() starts an empty memory. A host hands an
+      // anonymous id to a new person by closing the old session or minting a
+      // new id.
       // A seat session's memory scope is its own, new at each opening: it recalls nothing of the user it runs as.
-      const memoryScopeId = seat?.memoryScope === 'session' || openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
+      const namespace = learningConfig?.namespace ?? '';
+      const generationKey = memoryStore && !seat ? sessionGenerationKey(sessionId, namespace) : undefined;
+      // An end of this id that an earlier session's close() asked for and the store has not recorded: recorded first.
+      const endBefore = generationKey ? unrecordedEnds.get(generationKey) : undefined;
+      const generation = generationKey
+        ? retryingOnce<SessionGeneration>(async () => {
+            // The Brain current as the attempt starts: the read made as the session opens uses the one agent.close()
+            // closes, never one it opens after it.
+            const current = storeBrain!;
+            await endBefore?.get();
+            const { brain } = await current.get();
+            return readSessionGeneration(brain, sessionId, namespace);
+          })
+        : undefined;
+      // Read as the session opens, so it holds the generation current then; a read that fails is made again by the
+      // session's first turn, which fails naming the store while it cannot, and by its close().
+      void generation?.get().catch(() => undefined);
+      const inProcessScopeId = generation
+        ? undefined
+        : seat?.memoryScope === 'session' || openedSessionIds.has(sessionId)
+          ? `${sessionId}:${randomUUID()}`
+          : sessionId;
       // A seat session's id never enters the list agent.close() empties: a long-lived member does not grow by one id
       // per seat.
-      if (cognition.memory && !seat) openedSessionIds.add(sessionId);
+      if (cognition.memory && !seat && !generation) openedSessionIds.add(sessionId);
+      /** The id the session's memory files and recalls under: its generation's, read from the store, or the one above. */
+      const memoryScopeIdOf = async (): Promise<string> => (generation ? (await generation.get()).memoryScopeId : inProcessScopeId!);
       const userId = sessionOptions?.userId ?? sessionId;
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
       // A tally the agent's own earlier session of this id left is kept: a seat session adds to it and leaves it at close.
@@ -992,6 +1039,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // It is told the session's memory scope id and its memory, which the build of its first turn builds anyway.
       const learner = retryingOnce<ILearnerSession | undefined>(async () => {
         const { persona } = await shared.get();
+        const memoryScopeId = await memoryScopeIdOf();
         const manager = (await sessionMemory.get())?.manager;
         return learnerSessionFor(memoryScopeId, persona.id, sessionOptions?.userId, { noLearner: seat?.learner === 'none', ...(manager ? { manager } : {}) });
       });
@@ -1000,15 +1048,26 @@ export function gmi(opts: GmiOptions): GmiHandle {
         return buildGmi(gmiId, persona, await sessionMemory.get(), maxSteps, undefined, await learner.get());
       };
       // The session's own GMI, when it keeps history; a GMI per turn otherwise.
-      const own = retryingOnce(() => buildSessionGmi(`gmi-${memoryScopeId}`));
+      const own = retryingOnce(async () => buildSessionGmi(`gmi-${await memoryScopeIdOf()}`));
       let ownBuilt: BuiltGmi | undefined;
 
-      // A send made after close() fails; one made before it runs, and close() waits for it.
+      // Cognitive memory files the replies under the memory scope's session and
+      // the user's messages under its user: the session's own scope, a new one
+      // for an id opened again after close(). A seat session's user is its own
+      // scope too, so nothing it is told is filed under the user it runs as.
+      const turnMemoryScope = (memoryScopeId: string): { sessionId: string; userId: string } => ({
+        sessionId: memoryScopeId,
+        userId: seat?.memoryScope === 'session' ? memoryScopeId : (sessionOptions?.userId ?? memoryScopeId),
+      });
+
+      // A send made after close() fails; one made before it runs, and close() waits for it. The turn's memory scope
+      // is read first: with memory.store, a store that does not open fails the turn before any model call.
       const gmiFor = (closedAtCall: boolean) => async (): Promise<GmiForTurn> => {
         if (closedAtCall) throw new Error(`gmi(): session '${sessionId}' is closed; agent.session('${sessionId}') opens a new one.`);
-        if (!history) return forOneTurn(await buildSessionGmi(`gmi-${memoryScopeId}-${randomUUID()}`));
+        const memoryScope = turnMemoryScope(await memoryScopeIdOf());
+        if (!history) return { ...forOneTurn(await buildSessionGmi(`gmi-${memoryScope.sessionId}-${randomUUID()}`)), memoryScope };
         ownBuilt = await own.get();
-        return ownBuilt;
+        return { ...ownBuilt, memoryScope };
       };
 
       /** Brings the session GMI's own history in line with the store once the running turn ends, so a cleared fact never reaches its sentiment tracker or metaprompts. */
@@ -1031,11 +1090,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         sessionId,
         opts,
         userId,
-        // Cognitive memory files the replies under the memory scope's session and
-        // the user's messages under its user: the session's own scope, a new one
-        // for an id opened again after close(). A seat session's user is its own
-        // scope too, so nothing it is told is filed under the user it runs as.
-        memoryScope: { sessionId: memoryScopeId, userId: seat?.memoryScope === 'session' ? memoryScopeId : (sessionOptions?.userId ?? memoryScopeId) },
+        // The turn's memory scope comes with its GMI (gmiFor), once the session has read it.
         // Only a user id the caller passed reaches the provider's end-user field.
         providerUserId: sessionOptions?.userId,
         history,
@@ -1077,6 +1132,51 @@ export function gmi(opts: GmiOptions): GmiHandle {
         if (!budget) return agentBudget;
         return seat && agentBudget ? bothBudgets(budget, agentBudget) : budget;
       };
+
+      /** Stops the running turn and shuts the session's GMI down, once; it ends no memory (see close()). */
+      const shutdown = (): Promise<void> =>
+        (closing ??= (async () => {
+          if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
+          // A seat session's tally goes with it: the agent's tally holds its usage (each turn adds to both). One the
+          // agent's own earlier session of this id left stays.
+          if (seat && ownsTally && sessionTallies.get(sessionId) === tally) sessionTallies.delete(sessionId);
+          stopTurns.abort();
+          const release = await lock.acquire();
+          try {
+            const built = await own.peek()?.catch(() => undefined);
+            try {
+              await built?.gmi.shutdown();
+            } finally {
+              await endLearnerSession(await learner.peek()?.catch(() => undefined));
+            }
+          } finally {
+            release();
+          }
+        })());
+      /**
+       * With memory.store, ends the generation the session opened, once it is recorded: the id's next opening, in this
+       * process or another, reads the next one. A failure is the close()'s error and is tried again by the next
+       * close() and by the id's next opening on this agent.
+       */
+      const end: GenerationEnd | undefined = generation
+        ? retryingOnce<void>(async () => {
+            const current = storeBrain!;
+            try {
+              const opened = await generation.get();
+              const { brain } = await current.get();
+              await endSessionGeneration(brain, sessionId, namespace, opened);
+            } catch (error) {
+              throw Object.assign(
+                new Error(
+                  `gmi(): memory.store did not record that session '${sessionId}' ended (${error instanceof Error ? error.message : String(error)}); the id's next opening on this agent records it before its first turn, and close() tries again.`,
+                ),
+                { cause: error },
+              );
+            }
+            if (unrecordedEnds.get(generationKey!) === end) unrecordedEnds.delete(generationKey!);
+          })
+        : undefined;
+      let endRegistered = false;
 
       const session = {
         id: sessionId,
@@ -1136,28 +1236,23 @@ export function gmi(opts: GmiOptions): GmiHandle {
         // A turn still running is stopped: its model call is aborted, its caller
         // gets the abort error, and the steps it finished stay in this session's
         // history, marked partial. Once it has ended, the session's GMI is shut
-        // down. The next agent.session(id) builds a new session, which starts empty.
-        close: () =>
-          (closing ??= (async () => {
-            if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
-            // A seat session's tally goes with it: the agent's tally holds its usage (each turn adds to both). One the
-            // agent's own earlier session of this id left stays.
-            if (seat && ownsTally && sessionTallies.get(sessionId) === tally) sessionTallies.delete(sessionId);
-            stopTurns.abort();
-            const release = await lock.acquire();
-            try {
-              const built = await own.peek()?.catch(() => undefined);
-              try {
-                await built?.gmi.shutdown();
-              } finally {
-                await endLearnerSession(await learner.peek()?.catch(() => undefined));
-              }
-            } finally {
-              release();
-            }
-          })()),
+        // down. The next agent.session(id) builds a new session, which starts
+        // empty. With memory.store, close() also records in the store that the
+        // id's generation ended, and rejects when the store does not record it.
+        close: async (): Promise<void> => {
+          if (!end) return shutdown();
+          // Registered before the session leaves the agent's list, so an opening of the id made while this closes, or
+          // after the store refused the end, records it first.
+          if (!endRegistered) {
+            endRegistered = true;
+            unrecordedEnds.set(generationKey!, end);
+          }
+          const [shut, ended] = await Promise.allSettled([shutdown(), end.get()]);
+          if (shut.status === 'rejected') throw shut.reason;
+          if (ended.status === 'rejected') throw ended.reason;
+        },
       } as unknown as AgentSession;
-      const entry: SessionEntry = { session, userId };
+      const entry: SessionEntry = { session, userId, shutdown };
       sessions.set(sessionId, entry);
       return session;
     },
@@ -1172,12 +1267,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
      * Closes every session (each stops its running turn first, see
      * `session.close()`), then the cognitive memory they shared, including one
      * that a turn still setting up built while the sessions closed; a session
-     * opened from now on builds a new one, in which its id is new. With
+     * opened from now on builds a new one. It ends no session id's memory, as a
+     * restart ends none: with `memory.store` an id opened again recalls what it
+     * filed, and in process memory the new memory starts empty. With
      * `memory.store` on a file, the Brain is closed last, after the learning
-     * store lets go of it; the next session or host call opens the file again.
-     * A host's adapter is never closed. The tools stay as the caller passed
-     * them: the orchestrator is not shut down, because shutting it down would
-     * shut down the caller's tools.
+     * store lets go of it and the ends a session's close() is recording finish;
+     * the next session or host call opens the file again. A host's adapter is
+     * never closed. The tools stay as the caller passed them: the orchestrator
+     * is not shut down, because shutting it down would shut down the caller's
+     * tools.
      */
     async close(): Promise<void> {
       const closingMemory = memory;
@@ -1187,7 +1285,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
       memory = memoryForSessions(storeBrain);
       // Together with the memory, so a session opened while this closes the others is recorded in the new one.
       openedSessionIds.clear();
-      await Promise.all([...sessions.values()].map(({ session }) => session.close()));
+      // Each session closes without ending its id's memory, which a restart keeps too.
+      await Promise.all([...sessions.values()].map((entry) => entry.shutdown()));
+      // An end a session's close() is recording finishes on the Brain it started on before that Brain closes.
+      await Promise.allSettled([...unrecordedEnds.values()].map((end) => end.peek()));
       const mem = await closingMemory.close()?.catch(() => undefined);
       try {
         await mem?.close();
