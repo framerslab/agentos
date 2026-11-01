@@ -857,8 +857,9 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
    * Deletes a user: takes the user's write chain, so every write this process admitted for the user reaches
    * its verdict first; commits the tombstone that every later write for the user in the namespace reads; marks the
    * user's chain heads forgotten; then deletes, one transaction per store: the user's traces in every memory manager
-   * still alive and every facade the layer holds (a second user's traces on another user's session by `turnUserId`,
-   * and the traces its ledger rows name), the brains its session rows name that neither holds, through the host's
+   * still alive and every facade the layer holds (on another user's session, the traces that name the user by
+   * `turnUserId` or among a summary's contributors, in that session's scopes and in its learner's own, and the traces
+   * the user's ledger rows name), the brains its session rows name that neither holds, through the host's
    * storage adapter, and last every learning-store row of the user. Names every store it did not reach. While a store it
    * must reach fails, the user's learning-store rows stay: they are the index of what the call deletes (the user's
    * sessions, their forms and threads, the traces a second user's rows name), and a second call reads them to delete
@@ -880,7 +881,8 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     await store.markHeadsForgotten(namespace, userId);
     const rows = await store.sessionRowsOf(namespace, userId);
     const named = await this.tracesNamedForVisitor(store, namespace, userId, rows);
-    const targets = forgetTargets(namespace, userId, rows);
+    const learners = await this.learnersOfVisitedSessions(store, namespace, userId, rows);
+    const targets = forgetTargets(namespace, userId, rows, learners ?? []);
     const stores: ForgetReport['stores'] = [];
     const reached = new Set<string>();
     /** The brains whose delete failed here; a failure in a store with no brain id is `failedElsewhere`. */
@@ -955,6 +957,13 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     } else {
       stores.push({ store: 'learning store', reached: true, deleted: await store.deleteUserRows(namespace, userId) });
     }
+    if (learners === undefined) {
+      stores.push({
+        store: "the learners' own scopes of the sessions the user spoke on as a second user",
+        reached: false,
+        reason: "the learning store reads no session's rows by session (sessionRowsIn), so the summaries a learner's turn filed there of the user's words stay",
+      });
+    }
     for (const { store: unreached, reason } of this.unreachedStores()) stores.push({ store: unreached, reached: false, reason });
 
     let plainFormLeft = 0;
@@ -977,6 +986,29 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
       this.bumpTraitEpoch(key);
     }
     return { userId, namespace, stores, plainFormLeft };
+  }
+
+  /**
+   * The learner rows of the sessions a user spoke on as a second user, read before the rows go: a summary a learner's
+   * turn filed of a conversation the user spoke in sits in the learner's own scopes and names the user among its
+   * contributors. `undefined` when the user has such a session and the store reads no rows by session.
+   */
+  private async learnersOfVisitedSessions(
+    store: LearningStore,
+    namespace: string,
+    userId: string,
+    rows: readonly SessionRow[],
+  ): Promise<SessionRow[] | undefined> {
+    const visited = rows.filter((row) => row.kind === 'visitor');
+    if (visited.length === 0) return [];
+    if (typeof store.sessionRowsIn !== 'function') return undefined;
+    const learners: SessionRow[] = [];
+    for (const row of visited) {
+      for (const other of await store.sessionRowsIn(namespace, row.agentKey, row.sessionId)) {
+        if (other.kind === 'learner' && other.userId !== userId) learners.push(other);
+      }
+    }
+    return learners;
   }
 
   /** The traces a user's rows as a second user name (`turnUserId` chains), by brain id, read before the rows go. */

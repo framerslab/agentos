@@ -47,7 +47,8 @@ export interface RollingSummaryMemoryUpdate {
   recordSelfChange?: <T>(input: SessionSelfChange<T>) => Promise<ProposalResult<T>>;
   /**
    * With `turnScopes`: the explicit user ids whose messages this compaction and the conversation's earlier ones
-   * summarized. Each trace the sink files records them, so `forgetUser` for any of them finds it.
+   * summarized. Each trace the sink files records them, and the recorder notes a session row for each with the write,
+   * so `forgetUser` for any of them finds the trace, in the session's scopes and in its learner's own.
    */
   contributorIds?: string[];
 }

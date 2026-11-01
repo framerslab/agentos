@@ -78,7 +78,8 @@ export interface FreezeRow {
 
 /**
  * A session a layer served: the learner's own (`learner`), or one in which a user other than its first spoke with an
- * explicit id (`visitor`, written at that user's first turn there). `forgetUser` reads both kinds.
+ * explicit id (`visitor`, written at that user's first write there, or at a write that names them among its
+ * contributors). `forgetUser` reads both kinds.
  */
 export interface SessionRow {
   namespace: string;
@@ -173,6 +174,12 @@ export interface LearningStoreTx {
   putSessionRow(row: SessionRow, expectedVersion?: number): Promise<void>;
   /** One user's session rows of both kinds in one namespace, every agent's, ordered by session id and kind. */
   sessionRowsOf(namespace: string, userId: string): Promise<SessionRow[]>;
+  /**
+   * One session's rows of every user and both kinds, ordered by user id and kind: `forgetUser` reads the learner of a
+   * session the user spoke on as a second user, whose own scopes can hold a summary of the user's words. Optional, so a
+   * host's own store written against an earlier release still opens; `forgetUser` names those scopes unreached on it.
+   */
+  sessionRowsIn?(namespace: string, agentKey: string, sessionId: string): Promise<SessionRow[]>;
 
   isForgotten(hash: string): Promise<boolean>;
   /** Idempotent. */

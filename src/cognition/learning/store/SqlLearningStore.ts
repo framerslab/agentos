@@ -426,6 +426,19 @@ class SqlTx implements LearningStoreTx {
       .sort((a, b) => compareText(a.sessionId, b.sessionId) || compareText(a.kind, b.kind));
   }
 
+  async sessionRowsIn(namespace: string, agentKey: string, sessionId: string): Promise<SessionRow[]> {
+    if (holdsLoneSurrogate(namespace, agentKey, sessionId)) return this.none([]);
+    return (
+      await this.db.all<Row>('SELECT * FROM agentos_learning_sessions WHERE namespace = ? AND agent_key = ? AND session_id = ?', [
+        namespace,
+        agentKey,
+        sessionId,
+      ])
+    )
+      .map(toSession)
+      .sort((a, b) => compareText(a.userId, b.userId) || compareText(a.kind, b.kind));
+  }
+
   async isForgotten(hash: string): Promise<boolean> {
     if (holdsLoneSurrogate(hash)) return this.none(false);
     return Boolean(await this.db.get<Row>('SELECT hash FROM agentos_learning_forgotten WHERE hash = ?', [hash]));
@@ -505,6 +518,10 @@ export class SqlLearningStore extends TransactionalLearningStore {
         tx.end();
       }
     });
+  }
+
+  sessionRowsIn(namespace: string, agentKey: string, sessionId: string): Promise<SessionRow[]> {
+    return this.transaction((tx) => tx.sessionRowsIn!(namespace, agentKey, sessionId));
   }
 
   /** Leaves the adapter open: it is the host's. */

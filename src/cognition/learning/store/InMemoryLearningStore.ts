@@ -264,6 +264,13 @@ class MemoryTx implements LearningStoreTx {
       .map(copySession);
   }
 
+  async sessionRowsIn(namespace: string, agentKey: string, sessionId: string): Promise<SessionRow[]> {
+    return [...this.open().sessions.values()]
+      .filter((row) => row.namespace === namespace && row.agentKey === agentKey && row.sessionId === sessionId)
+      .sort((a, b) => compare(a.userId, b.userId) || compare(a.kind, b.kind))
+      .map(copySession);
+  }
+
   async isForgotten(hash: string): Promise<boolean> {
     return this.open().forgotten.has(hash);
   }
@@ -352,6 +359,10 @@ export class InMemoryLearningStore extends TransactionalLearningStore {
     });
     this.queue = run.catch(() => undefined);
     return run;
+  }
+
+  sessionRowsIn(namespace: string, agentKey: string, sessionId: string): Promise<SessionRow[]> {
+    return this.transaction((tx) => tx.sessionRowsIn!(namespace, agentKey, sessionId));
   }
 
   /** Releases nothing: the rows stay with the store until the process ends. */

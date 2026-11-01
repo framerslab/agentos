@@ -232,6 +232,14 @@ export interface SessionSelfChange<T = unknown> {
    * both.
    */
   keptAfter?(result: T): Omit<MemoryWriteChange, 'brainId'>;
+  /**
+   * The users whose words the write files besides the turn's own: a rolling summary's contributors. Before the write
+   * runs, the session notes each one's session row (the learner's for the session's learner, a visitor's for anyone
+   * else) with the write's brain and conversation, so `forgetUser` for any of them finds the session, whether or not
+   * they wrote there themselves. An anonymous id names no one; a contributor already forgotten gets no row, and the
+   * write goes ahead, since the conversation's own history, which `forgetUser` does not reach, still holds their words.
+   */
+  contributorIds?: readonly string[];
 }
 
 /**

@@ -333,7 +333,7 @@ export async function leftByCrash(
   return { change: { ...change, created }, before: { traces } };
 }
 
-/** A scope `forgetUser` deletes; with `turnUserId`, only that user's traces of it. */
+/** A scope `forgetUser` deletes; with `turnUserId`, only the traces of it that name that user. */
 export interface ForgetTarget {
   scope: 'user' | 'persona' | 'thread';
   scopeId: string;
@@ -343,10 +343,18 @@ export interface ForgetTarget {
 /**
  * The scopes `forgetUser` deletes for one user in one namespace: the learner's `user`
  * scope and, for each persona of the user's own sessions, its `persona` scope; each of the user's own sessions' scopes
- * and the threads of its conversations and of the session itself, in the session's form; and, on each session the user
- * spoke on as a second user, that user's traces of the same scopes, by `turnUserId`. Exact ids, never a prefix.
+ * and the threads of its conversations and of the session itself, in the session's form; on each session the user
+ * spoke on as a second user, the traces of the same scopes that name the user (their `turnUserId`, or a summary's
+ * contributors); and in the `user` and `persona` scopes of those sessions' learners (`learners`, their learner rows),
+ * the traces that name the user, as a summary a learner's turn filed of a conversation the user spoke in does. Exact
+ * ids, never a prefix.
  */
-export function forgetTargets(namespace: string, userId: string, rows: readonly SessionRow[]): ForgetTarget[] {
+export function forgetTargets(
+  namespace: string,
+  userId: string,
+  rows: readonly SessionRow[],
+  learners: readonly SessionRow[] = [],
+): ForgetTarget[] {
   const targets = new Map<string, ForgetTarget>();
   const add = (target: ForgetTarget): void => {
     targets.set(`${target.scope}\u0000${target.scopeId}\u0000${target.turnUserId ?? ''}`, target);
@@ -360,6 +368,12 @@ export function forgetTargets(namespace: string, userId: string, rows: readonly 
     add({ scope: 'user', scopeId: session.userScopeId, ...whose });
     add({ scope: 'persona', scopeId: session.personaScopeId, ...whose });
     for (const id of [...row.conversationIds, row.sessionId]) add({ scope: 'thread', scopeId: taggedScopeId(id, namespace), ...whose });
+  }
+  for (const row of learners) {
+    if (row.kind !== 'learner' || row.userId === userId) continue;
+    const learner = learnerScopeIds({ namespace, userId: row.userId }, row.personaId);
+    add({ scope: 'user', scopeId: learner.userScopeId, turnUserId: userId });
+    add({ scope: 'persona', scopeId: learner.personaScopeId, turnUserId: userId });
   }
   return [...targets.values()];
 }

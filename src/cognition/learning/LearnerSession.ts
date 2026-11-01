@@ -551,6 +551,26 @@ export class LearnerSession implements ILearnerSession {
     throw new Error('the session row kept moving under three notes');
   }
 
+  /**
+   * Notes the session row of each user whose words a write files besides its own user (`contributorIds`), with the
+   * write's brain and conversation: the learner's row for the session's learner in the learner's namespace, a visitor's
+   * for anyone else. `forgetUser` reads those rows, so it finds a summary of a user's words on a session the user spoke
+   * on and wrote nothing at. An anonymous id names no one, and a contributor already forgotten gets no row.
+   *
+   * @throws {Error} When the store fails: the write is refused.
+   */
+  private async noteContributors(store: LearningStore, write: WriteTarget, input: SessionSelfChange<unknown>): Promise<void> {
+    const ids = input.contributorIds;
+    if (!Array.isArray(ids) || ids.length === 0) return;
+    const namespace = write.user?.namespace ?? write.learner.namespace;
+    for (const userId of new Set(ids)) {
+      if (typeof userId !== 'string' || this.host.isAnonymous(userId)) continue;
+      if (write.user && write.user.userId === userId) continue;
+      const kind = this.key && this.key.userId === userId && this.key.namespace === namespace ? 'learner' : 'visitor';
+      await this.noteSession(store, { ...write, user: { namespace, userId, kind } }, input.brainId);
+    }
+  }
+
   /** The tombstone read again once a write has committed. */
   private async tombstoneAfter(store: LearningStore, write: WriteTarget): Promise<'clear' | 'forgotten' | 'unreadable'> {
     if (!write.user) return 'clear';
@@ -622,6 +642,7 @@ export class LearnerSession implements ILearnerSession {
     const { store, ledger } = storage;
     try {
       if ((await this.noteSession(store, write, input.brainId)) === 'forgotten') return { status: 'rejected', reason: 'forgotten' };
+      await this.noteContributors(store, write, input);
     } catch (error) {
       return { status: 'rejected', reason: 'store_unavailable', error };
     }

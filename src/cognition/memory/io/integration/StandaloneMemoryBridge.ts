@@ -578,8 +578,9 @@ function extractAtomicDocs(
  *
  * Where a learning layer runs (an update with `turnScopes`), the targets take the turn's scope ids and each upsert is
  * one memory write recorded through the turn's recorder: its candidate names the traces it will insert (their ids
- * named before the write) and forget (with their snapshots); every new trace is written before any old one is
- * forgotten; a failure before the forgets takes back what the upsert wrote, a failure among them keeps the upsert with
+ * named before the write) and forget (with their snapshots), and the recorder notes a session row for each of the
+ * compaction's contributors, so `forgetUser` for any of them finds the session; every new trace is written before any
+ * old one is forgotten; a failure before the forgets takes back what the upsert wrote, a failure among them keeps the upsert with
  * what it did forget, and its kept verdict names what it inserted and forgot. A text that did not change keeps its
  * trace while that trace is live (one deleted since is filed again), an upsert that changes nothing writes nothing and
  * no row, and one sink's recorded upserts run one at a time. A freeze and a forgotten user resolve with nothing
@@ -816,6 +817,8 @@ export function createStandaloneMemoryRollingSummarySink(
         applyPlan(facade, plans, forgettable, { summaryTags: args.summaryTags, summaryEntities: args.summaryEntities, metadata }),
       undo: (result, reason) => undoUpsert(facade, result, snapshots, reason),
       keptAfter: (result) => ({ created: result.created, changed: [], deleted: result.forgotten }),
+      // Each contributor's session row is noted with the write, so forgetUser for any of them finds this session.
+      ...(contributorIds.length > 0 ? { contributorIds } : {}),
     });
     if (outcome.status === 'kept' || outcome.status === 'written') {
       for (const plan of plans) {
