@@ -47,7 +47,8 @@ const DEPENDENCY_DECLARATION_ERRORS = [
 
 test('the built declarations resolve their own relative imports under NodeNext', () => {
   // A relative import without its file's extension does not resolve under NodeNext: a consumer that checks the
-  // declarations it reads (no skipLibCheck) gets TS2834 or TS2835 for each one. The consumer sits inside the repository,
+  // declarations it reads (no skipLibCheck) gets TS2834 or TS2835 for each one. The consumer also reads the learning
+  // layer's types at the root and at its subpath, which must be typed and one. The consumer sits inside the repository,
   // so @framers/agentos resolves to this checkout's build through its exports, as an installed copy does. Every other
   // compiler error fails the check too (a compiler that cannot run, a missing type library, an unresolved import),
   // except the errors listed in DEPENDENCY_DECLARATION_ERRORS, which sit in a dependency's own declarations.
@@ -59,9 +60,15 @@ test('the built declarations resolve their own relative imports under NodeNext',
       [
         "import type { ToolExecutionContext } from '@framers/agentos';",
         "import type { EmergentConfig } from '@framers/agentos/cognition/emergent';",
+        "import type { LearningLayerHandle, LearningStore } from '@framers/agentos';",
+        "import type { LearningStore as LearningStoreAtSubpath, LedgerEntry } from '@framers/agentos/cognition/learning';",
         'type IsAny<T> = 0 extends 1 & T ? true : false;',
         "export const userContextIsTyped: IsAny<ToolExecutionContext['userContext']> = false;",
         'export type Config = EmergentConfig;',
+        // The learning layer's types at the root are the subpath's own.
+        'export const storeIsTyped: IsAny<LearningStore> = false;',
+        'export const sameStore: [LearningStore] extends [LearningStoreAtSubpath] ? true : false = true;',
+        "export const operatorSetIsTyped: [Awaited<ReturnType<LearningLayerHandle['operatorSet']>>] extends [LedgerEntry] ? true : false = true;",
         '',
       ].join('\n'),
     );

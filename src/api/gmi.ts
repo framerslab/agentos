@@ -1,7 +1,7 @@
 /**
  * @file gmi.ts
  * gmi(): an agent whose sessions are Generalized Mind Instances, built
- * in-process from agent options (spec D5-D12). `agent({ runtime: 'gmi' })`
+ * in-process from agent options (docs/GMI.md, "GMIs from agent()"). `agent({ runtime: 'gmi' })`
  * returns the same handle.
  *
  * Construction checks what needs no environment: options the GMI path cannot
@@ -92,7 +92,7 @@ export type GmiHandle = Agent;
 /** Options with no GMI-path implementation yet; set, they throw at construction. */
 const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
 /**
- * Per-call overrides generate() and stream() accept on the GMI path (spec D10): the completion options, the route,
+ * Per-call overrides generate() and stream() accept on the GMI path: the completion options, the route,
  * the step limit, the ledger, the call's stop and budget, and the tool-approval gate `agency()` passes with every
  * call to a member.
  */
@@ -152,7 +152,7 @@ function withLeadingSystemText(messages: ChatMessage[], text: string): ChatMessa
 /**
  * A tool registry that leaves out the tools ToolExecutor registers from its own
  * constructor (the built-in getCurrentDateTime), so a tool-less agent offers the
- * model no tools (spec D4j) and an agent tool of the same name is the only one.
+ * model no tools and an agent tool of the same name is the only one.
  * The constructor starts that registration without waiting for it, so skipping
  * it here needs no wait for it before the agent's tools register.
  */
@@ -927,7 +927,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       ledger: mergeLedger(ledger, extra?.usageLedger, { source: extra?.usageLedger?.source ?? source }),
       onUsage: (u) => accumulateUsage(agentTally, u),
       lock: new TurnLock(),
-      // generate() and stream() keep no history and run the light profile whatever the agent's (spec D10).
+      // generate() and stream() keep no history and run the light profile whatever the agent's.
       gmiFor: async () => {
         const s = await shared.get();
         // A call whose model's `provider:` prefix names another provider does not inherit the agent's.

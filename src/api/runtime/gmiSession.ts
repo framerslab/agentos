@@ -1,6 +1,6 @@
 /**
  * @file gmiSession.ts
- * One agent session served by one GMI (`agent({ runtime: 'gmi' })`, spec D10).
+ * One agent session served by one GMI (`agent({ runtime: 'gmi' })`).
  *
  * The session store is the source of truth: before every turn the GMI's history
  * is replaced with the store's messages, and as the turn runs each finished

@@ -83,7 +83,7 @@ const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
 /** How long a turn waits for its learner session's preparation before it goes on without it, in milliseconds. */
 const LEARNING_PREPARE_BUDGET_MS = 2_000;
 
-/** The completion options a persona's defaults and a turn's `metadata.options` may set (design D4b). */
+/** The completion options a persona's defaults and a turn's `metadata.options` may set. */
 const FORWARDED_COMPLETION_OPTION_KEYS = [
   'temperature', 'maxTokens', 'topP', 'frequencyPenalty', 'presencePenalty', 'thinking', 'effort', 'cache',
   'promptCacheKey', 'promptCacheRetention', 'serviceTier', 'requestTimeout', 'customModelParams',
@@ -1810,7 +1810,7 @@ export class GMI implements IGMI {
           }
         }
 
-        // Every completion option the persona and the turn set (D4b), the turn's
+        // Every completion option the persona and the turn set, the turn's
         // over the persona's; one neither sets is not sent, so the provider's
         // default applies. Tools, user and streaming are the GMI's.
         const turnOptions = (turnInput.metadata?.options ?? {}) as Record<string, unknown>;
@@ -1837,7 +1837,7 @@ export class GMI implements IGMI {
           ...(providerUserId ? { userId: providerUserId } : {}),
           stream: true,
         };
-        // A schema travels to the gateway, which lowers it per hop (D9); it is not a provider option.
+        // A schema travels to the gateway, which lowers it per hop; it is not a provider option.
         const responseSchema = (turnOptions.responseSchema as ZodType | undefined) ?? structuredReply?.zod;
         const schemaName = (turnOptions.schemaName as string | undefined) ?? (structuredReply && responseSchema === structuredReply.zod ? structuredReply.name : undefined);
         // The structured reply's instruction is in the system prompt already; the gateway adds none for its schema.
@@ -1872,7 +1872,7 @@ export class GMI implements IGMI {
 
         // The hop that serves this step: the one that served the turn's last
         // step, else the route's first hop that can start. Resolved before the
-        // prompt is built, so the prompt is budgeted for the serving model (D1).
+        // prompt is built, so the prompt is budgeted for the serving model.
         let resolution: CompletionResolution | null = null;
         if (gateway && route) {
           try {
@@ -1917,7 +1917,7 @@ export class GMI implements IGMI {
         let modelTargetInfo!: ModelTargetInfo;
 
         // One attempt per hop. A failure before any output moves to the next
-        // hop and rebuilds the prompt for that hop's model (D3); after output
+        // hop and rebuilds the prompt for that hop's model; after output
         // there is no fallback for the step. Without a gateway the loop runs once.
         hopLoop: for (;;) {
           if (resolution) {
@@ -2038,7 +2038,7 @@ export class GMI implements IGMI {
               if (choice?.message?.thinkingBlocks?.length) {
                 currentIterationThinkingBlocks = choice.message.thinkingBlocks;
               }
-              // The gateway lifts a streamed schema tool call into `structuredOutput` (D9).
+              // The gateway lifts a streamed schema tool call into `structuredOutput`.
               const structured = (chunk as { structuredOutput?: unknown }).structuredOutput;
               if (structured !== undefined) stepStructuredOutput = structured;
 
@@ -2066,7 +2066,7 @@ export class GMI implements IGMI {
                 this.addTraceEntry(ReasoningEntryType.TOOL_CALL_REQUESTED, `LLM requested tool(s).`, { requests: currentIterationToolCallRequests });
               }
 
-              // A provider that sends no deltas: its final content is the step's text, emitted once (D4d).
+              // A provider that sends no deltas: its final content is the step's text, emitted once.
               if (chunk.isFinal && !textDeltaEmitted && typeof choice?.message?.content === 'string' && choice.message.content.length > 0) {
                 currentIterationTextResponse = choice.message.content;
                 aggregatedResponseText += choice.message.content;
@@ -2081,7 +2081,7 @@ export class GMI implements IGMI {
                 this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
               }
               if (chunk.isFinal) stepFinalChunk = chunk;
-              // Usage on every chunk that carries it, choice or not (D4c). Providers report
+              // Usage on every chunk that carries it, choice or not. Providers report
               // the request's running total, so the turn total takes the step's last value once.
               if (chunk.usage) {
                 stepUsage = chunk.usage;
@@ -2153,7 +2153,7 @@ export class GMI implements IGMI {
         }
         if (resolution) this.turnResolution = resolution;
 
-        // The step's usage, counted once (D4c).
+        // The step's usage, counted once.
         if (stepUsage) addUsage(aggregatedUsage, stepUsage);
 
         // The next step's diagnostics compare against this step's response.
@@ -2162,7 +2162,7 @@ export class GMI implements IGMI {
           stepCacheDiagnostics = { previousMessageId: typeof responseId === 'string' && responseId.length > 0 ? responseId : null };
         }
 
-        // The step boundary (D4d): the step's own text, finish reason, hop and usage.
+        // The step boundary: the step's own text, finish reason, hop and usage.
         const stepPayload: StepFinishedChunkPayload = {
           stepIndex: safetyBreak - 1,
           text: currentIterationTextResponse,
@@ -2307,7 +2307,7 @@ export class GMI implements IGMI {
           }
           // Recorded on success and failure alike, so the history this turn
           // leaves answers every call its assistant message declared. Each
-          // recorded result is also published as a TOOL_RESULT chunk (D4e).
+          // recorded result is also published as a TOOL_RESULT chunk.
           for (const tcResult of toolExecutionResults) {
             turnMessages.push(this.conversationHistoryManager.updateWithToolResult(tcResult));
             const toolResultPayload: ToolResultChunkPayload = {
@@ -2375,7 +2375,7 @@ export class GMI implements IGMI {
 
     } catch (error: any) {
       // A GMIError keeps its code (an in-band provider error stays
-      // LLM_PROVIDER_ERROR); anything else is a processing error (D4f).
+      // LLM_PROVIDER_ERROR); anything else is a processing error.
       const gmiError = createGMIErrorFromError(
         error,
         error instanceof GMIError ? error.code : GMIErrorCode.GMI_PROCESSING_ERROR,
