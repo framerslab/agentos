@@ -27,7 +27,7 @@
  * @module memory/retrieval/store/migrations/v2-to-v3
  */
 import type { StorageAdapter, StorageFeatures } from '@framers/sql-storage-adapter';
-import { parseTraceMetadata } from '../tracePersistence.js';
+import { scopeIdOfMetadata } from '../tracePersistence.js';
 import type { Migration } from './types.js';
 
 /** The index a per-scope read uses. */
@@ -85,12 +85,6 @@ async function hasColumn(adapter: StorageAdapter, table: string, column: string)
   return rows.some((row) => row.name === column);
 }
 
-/** The scope id a row's metadata JSON holds, or `''`. */
-function scopeIdOfMetadata(metadata: string | null | undefined): string {
-  const scopeId = parseTraceMetadata(metadata).scopeId;
-  return typeof scopeId === 'string' ? scopeId : '';
-}
-
 /**
  * Matches a row whose metadata text can name a scope id other than `''`. Either it holds `"scopeId"`, and not only once
  * with the value `""`, as `JSON.stringify` writes the metadata of a trace `remember()` files under no scope id; or it
@@ -101,10 +95,20 @@ function scopeIdOfMetadata(metadata: string | null | undefined): string {
  * top-level scope id is then `''` or missing. SQLite's `LIKE` ignores ASCII case, which counts more occurrences and so
  * excludes no further row. `ESCAPE '!'` makes the backslash a plain character for Postgres, whose `LIKE` otherwise
  * reads it as the escape character; SQLite's `LIKE` has none unless one is named.
+ *
+ * @param column - The metadata column, as the query names it (`metadata`, or `mt.metadata` in a join).
+ * @returns The predicate's SQL, binding no values. A search on a turn's scope ids leaves out the rows that hold `''`
+ *   and match it: until a fill files them, they are some scope's, not traces filed under no scope id.
  */
-const NAMES_SCOPE_ID =
-  `(metadata LIKE '%"scopeId"%' AND NOT (metadata LIKE '%"scopeId":""%' AND metadata NOT LIKE '%"scopeId"%"scopeId"%'))` +
-  ` OR metadata LIKE '%\\u%' ESCAPE '!'`;
+export function namesScopeId(column: string): string {
+  return (
+    `(${column} LIKE '%"scopeId"%' AND NOT (${column} LIKE '%"scopeId":""%' AND ${column} NOT LIKE '%"scopeId"%"scopeId"%'))` +
+    ` OR ${column} LIKE '%\\u%' ESCAPE '!'`
+  );
+}
+
+/** {@link namesScopeId} over the table's own `metadata` column, as the fill and its partial index read it. */
+const NAMES_SCOPE_ID = namesScopeId('metadata');
 
 /**
  * The partial index the fill that runs at every open and before every import reads through, so it walks none of a

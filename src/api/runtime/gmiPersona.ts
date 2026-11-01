@@ -24,7 +24,7 @@ import type { ITool } from '../../core/tools/ITool.js';
 import type { ModelCompletionOptions } from '../../core/llm/providers/IProvider.js';
 import type { ResolvedCognition } from './gmiCognition.js';
 
-/** The session store bounds history (spec D10), so the GMI's own count window stays out of the way. */
+/** The session store bounds history, so the GMI's own count window stays out of the way. */
 export const GMI_SESSION_MAX_HISTORY_MESSAGES = 100_000;
 
 /**
@@ -39,6 +39,16 @@ function personaIdFor(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
   return slug || `agent-${createHash('sha256').update(name).digest('hex').slice(0, 12)}`;
+}
+
+/**
+ * The persona id of a named agent, which is the same at every build (the slug of its name); `undefined` for an agent
+ * with no name, whose persona id is new at each build. `gmi()` names the agent's learners by it when `learning.agentKey`
+ * is unset.
+ */
+export function stablePersonaIdOf(opts: Pick<AgentOptions, 'name'>): string | undefined {
+  const name = opts.name?.trim();
+  return name ? personaIdFor(name) : undefined;
 }
 
 /**
@@ -73,7 +83,7 @@ function basePrompt(opts: AgentOptions, learningOn: boolean): string {
 }
 
 /**
- * Builds the persona of a GMI from agent options (spec D6).
+ * Builds the persona of a GMI from agent options.
  *
  * @param opts - The agent's options.
  * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking, metaprompts, and whether learning is on.
@@ -90,7 +100,7 @@ export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedC
   const completion = completionOptionsOf(opts);
   const presets: SentimentTrackingConfig['presets'] = cognition.metaprompts === 'all' ? ['all'] : cognition.metaprompts || [];
   const persona: IPersonaDefinition = {
-    id: opts.name?.trim() ? personaIdFor(opts.name.trim()) : `agent-${randomUUID()}`,
+    id: stablePersonaIdOf(opts) ?? `agent-${randomUUID()}`,
     name,
     description: firstLine ?? name,
     version: '1.0.0',

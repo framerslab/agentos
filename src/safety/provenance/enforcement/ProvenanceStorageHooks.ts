@@ -122,7 +122,14 @@ function inferWhereParameters(whereClause: string, parameters?: unknown): unknow
 // isTableProtected
 // =============================================================================
 
-function isTableProtected(
+/**
+ * Whether the storage policy enforces its mode on a table. Provenance's own tables never; a table in `exemptTables`
+ * never; with `protectedTables` set, exactly the tables it names (by their exact names); otherwise every table.
+ *
+ * @param tableName - The table a statement writes to.
+ * @param config - The storage policy.
+ */
+export function isTableProtected(
   tableName: string,
   config: ProvenanceSystemConfig['storagePolicy'],
 ): boolean {

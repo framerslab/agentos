@@ -344,27 +344,42 @@ export type {
   RuntimeAgencyLaunchOptions,
   ToolCallHook,
 } from './api/runtime/agencyLaunch/index.js';
-// The learning layer (docs/GMI.md, "Learning"): off unless a host sets its `learning` option.
-export { createLearningLayer } from './cognition/learning/index.js';
+// The learning layer (docs/GMI.md, "Learning"): off unless a host sets its `learning` option. Everything else of the
+// module is on the `@framers/agentos/cognition/learning` subpath.
+export { createLearningLayer, InMemoryLearningStore, SqlLearningStore, toolLearningContextFor } from './cognition/learning/index.js';
 export type {
+  ForgetReport,
+  FreezeScope,
   HostLoopName,
   ILearnerSession,
   ILearningLayer,
+  ImportReport,
+  LearnedStateDocument,
   LearnerContext,
   LearnerKey,
   LearningConfig,
+  LearningLayerHandle,
   LearningLayerOptions,
   LearningLoopName,
+  LearningMemoryTools,
   LearningMode,
   LearningProfile,
+  LearningStore,
+  LedgerEntry,
   LoopManifest,
   LoopName,
   LoopState,
   NoLearnerReason,
+  OperatorSetInput,
+  ProposalResult,
   ResolvedLearning,
+  SelfChangeTurn,
+  SessionSelfChange,
+  SqlLearningStoreOptions,
   ToolLearningContext,
   TurnInputForLearning,
   TurnPreparation,
+  TurnScopes,
 } from './cognition/learning/index.js';
 // The trait map a learner context carries (`LearnerContext.authoredTraits`) and a learner session answers
 // (`currentTraits()`).

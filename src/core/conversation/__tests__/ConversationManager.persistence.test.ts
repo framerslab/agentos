@@ -4,7 +4,9 @@
  * load) and, when `AGENTOS_TEST_POSTGRES_URL` names a database (CI's Test & Lint
  * job sets it), PostgreSQL, where each test gets a schema of its own (the
  * library's `segment`), dropped when the suite ends. A second manager on the
- * same database stands for a restarted process.
+ * same database stands for a restarted process. Beside a memory Brain, whose
+ * own `conversations` table has other columns, the manager keeps its tables
+ * under `tablePrefix`, and without one it refuses the database.
  */
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
@@ -13,7 +15,17 @@ import { ConversationContext } from '../ConversationContext.js';
 import { ConversationManager, type ConversationManagerConfig } from '../ConversationManager.js';
 import { MessageRole, createConversationMessage, type ConversationMessage } from '../ConversationMessage.js';
 import { ensureConversationTables } from '../conversationTables.js';
+import {
+  INSERT_MESSAGE_SQL,
+  REPLACE_MESSAGE_SQL,
+  SELECT_MESSAGES_SQL,
+  UPDATE_MESSAGE_SQL,
+  insertMessageSql,
+  replaceMessageSql,
+  updateMessageSql,
+} from '../conversationRows.js';
 import { GMIErrorCode } from '../../utils/errors.js';
+import { Brain } from '../../../cognition/memory/retrieval/store/Brain.js';
 
 /** A millisecond time past PostgreSQL's INTEGER limit of 2147483647. */
 const T = 1_760_000_000_000;
@@ -243,6 +255,64 @@ function runPersistenceSuite(label: string, openDatabase: OpenDatabase): void {
       // A conversation found on disk is cached: the second call is answered from memory.
       const cached = await reader.getOrCreateConversationContext('conv-evicted', 'u-1');
       expect(await reader.getOrCreateConversationContext('conv-evicted')).toBe(cached);
+    });
+
+    it("keeps its tables under tablePrefix beside a memory Brain's own conversations table, and without one refuses the database, naming the option", async () => {
+      const { db } = await open();
+      // The Brain makes a conversations table of its own, with other columns. Closing it would close the database,
+      // which afterEach closes.
+      await Brain.openWithAdapter(db, { brainId: 'notes' });
+      await expect(managerOn(db)).rejects.toMatchObject({
+        code: GMIErrorCode.CONFIGURATION_ERROR,
+        message: expect.stringContaining('conversationManagerConfig.tablePrefix'),
+      });
+
+      const writer = await managerOn(db, { tablePrefix: 'agentos_' });
+      const context = await writer.getOrCreateConversationContext('conv-beside', 'u-1');
+      context.addMessage({ role: MessageRole.USER, content: 'kept apart' });
+      context.addMessage({ role: MessageRole.ASSISTANT, content: 'noted' });
+      await writer.saveConversation(context);
+
+      const reader = await managerOn(db, { tablePrefix: 'agentos_' });
+      const loaded = await reader.getConversation('conv-beside');
+      expect(loaded!.getAllMessages().map((message) => message.content)).toEqual(['kept apart', 'noted']);
+      expect(loaded!.userId).toBe('u-1');
+      expect(await reader.getConversationInfo('conv-beside')).toEqual([{ sessionId: 'conv-beside', createdAt: context.createdAt }]);
+      const stored = await db.get<{ n: number | string }>('SELECT COUNT(*) AS n FROM agentos_conversation_messages WHERE conversation_id = ?', [
+        'conv-beside',
+      ]);
+      expect(Number(stored?.n)).toBe(2);
+      // The Brain's table keeps its columns and holds none of it.
+      expect(await db.all('SELECT brain_id, id FROM conversations')).toEqual([]);
+
+      await reader.deleteConversation('conv-beside');
+      expect(await (await managerOn(db, { tablePrefix: 'agentos_' })).getConversation('conv-beside')).toBeNull();
+    });
+
+    it('refuses a tablePrefix that is not a plain name, naming the option', async () => {
+      const { db } = await open();
+      for (const tablePrefix of ['agentos-', '1st_', 'a b', 'x'.repeat(33)]) {
+        await expect(managerOn(db, { tablePrefix })).rejects.toMatchObject({
+          code: GMIErrorCode.CONFIGURATION_ERROR,
+          message: expect.stringContaining('conversationManagerConfig.tablePrefix'),
+        });
+      }
+      await expect(managerOn(db, { tablePrefix: '' })).resolves.toBeInstanceOf(ConversationManager);
+    });
+
+    it("keeps the statements of the default tables exported, and they read the messages a manager with no prefix saved", async () => {
+      const { db } = await open();
+      const writer = await managerOn(db);
+      const context = await writer.getOrCreateConversationContext('conv-default', 'u-1');
+      context.addMessage({ role: MessageRole.USER, content: 'first' });
+      context.addMessage({ role: MessageRole.ASSISTANT, content: 'second' });
+      await writer.saveConversation(context);
+
+      expect(INSERT_MESSAGE_SQL).toBe(insertMessageSql('conversation_messages'));
+      expect(REPLACE_MESSAGE_SQL).toBe(replaceMessageSql('conversation_messages'));
+      expect(UPDATE_MESSAGE_SQL).toBe(updateMessageSql('conversation_messages'));
+      const rows = await db.all<{ content: string }>(SELECT_MESSAGES_SQL, ['conv-default']);
+      expect(rows.map((row) => row.content)).toEqual(['first', 'second']);
     });
 
     it('brings tables the first version made up to date and reads their rows as that version did', async () => {

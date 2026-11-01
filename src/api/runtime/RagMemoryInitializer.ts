@@ -176,14 +176,19 @@ export class RagMemoryInitializer {
   // ---------------------------------------------------------------------------
 
   /**
-   * Load configured memory tools as an extension pack.
+   * Load configured memory tools as an extension pack. Where the runtime has a learning layer the pack leaves
+   * `memory_reflect` out: it consolidates across every scope of the Brain, a change no learner owns, and the host
+   * consolidates through `Memory.consolidate()` instead. A host that asked for it (`includeReflect: true`) is told
+   * once, at registration.
    *
-   * @param memoryToolsConfig - The memory tools config block from AgentOSConfig.
-   * @param context           - Extension lifecycle context.
+   * @param memoryToolsConfig     - The memory tools config block from AgentOSConfig.
+   * @param context               - Extension lifecycle context.
+   * @param options.learningLayer - Whether the runtime has a learning layer, built or passed.
    */
   public async registerMemoryTools(
     memoryToolsConfig: AgentOSMemoryToolsConfig | undefined,
     context: ExtensionLifecycleContext,
+    options: { learningLayer?: boolean } = {},
   ): Promise<void> {
     if (!memoryToolsConfig || memoryToolsConfig.enabled === false) {
       return;
@@ -197,7 +202,12 @@ export class RagMemoryInitializer {
       ...packOptions
     } = memoryToolsConfig;
 
-    const pack = createMemoryToolsPack(memory, packOptions);
+    if (options.learningLayer && packOptions.includeReflect === true) {
+      this.deps.logger.warn(
+        '[AgentOS] memory_reflect is withdrawn where a learning layer runs; the memory tools pack leaves it out (consolidate with Memory.consolidate()).',
+      );
+    }
+    const pack = createMemoryToolsPack(memory, options.learningLayer ? { ...packOptions, includeReflect: false } : packOptions);
     const packIdentifier = identifier ?? 'config-memory-tools';
     if (manageLifecycle) {
       const existingOnDeactivate = pack.onDeactivate;
@@ -218,6 +228,7 @@ export class RagMemoryInitializer {
       identifier: packIdentifier,
       packName: pack.name,
       toolCount: pack.descriptors.length,
+      ...(options.learningLayer ? { memoryReflect: 'withdrawn' } : {}),
     });
   }
 

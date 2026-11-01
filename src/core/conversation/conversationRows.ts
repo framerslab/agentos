@@ -1,7 +1,8 @@
 /**
  * @file conversationRows.ts
- * @description How `ConversationManager` writes a message to a
- * `conversation_messages` row and reads it back, field for field and with each
+ * @description How `ConversationManager` writes a message to a row of its
+ * messages table (`conversation_messages`, under the manager's table prefix)
+ * and reads it back, field for field and with each
  * field's type, on every backend the storage adapter opens.
  *
  * @license Apache-2.0
@@ -40,23 +41,42 @@ export const MESSAGE_ROW_COLUMNS = [
 
 const PLACEHOLDERS = MESSAGE_ROW_COLUMNS.map(() => '?').join(', ');
 
-/** Inserts a message row; the values are {@link messageRowValues}. */
-export const INSERT_MESSAGE_SQL = `INSERT INTO conversation_messages (${MESSAGE_ROW_COLUMNS.join(', ')}) VALUES (${PLACEHOLDERS})`;
+/** Inserts a message row into `table`; the values are {@link messageRowValues}. */
+export function insertMessageSql(table: string): string {
+  return `INSERT INTO ${table} (${MESSAGE_ROW_COLUMNS.join(', ')}) VALUES (${PLACEHOLDERS})`;
+}
 
-/** Inserts a message row or replaces the one with its id, on SQLite; the values are {@link messageRowValues}. */
-export const REPLACE_MESSAGE_SQL = `INSERT OR REPLACE INTO conversation_messages (${MESSAGE_ROW_COLUMNS.join(', ')}) VALUES (${PLACEHOLDERS})`;
+/** Inserts a message row into `table` or replaces the one with its id, on SQLite; the values are {@link messageRowValues}. */
+export function replaceMessageSql(table: string): string {
+  return `INSERT OR REPLACE INTO ${table} (${MESSAGE_ROW_COLUMNS.join(', ')}) VALUES (${PLACEHOLDERS})`;
+}
 
-/** Rewrites a message row; the values are {@link updateMessageValues}. */
-export const UPDATE_MESSAGE_SQL = `UPDATE conversation_messages SET ${MESSAGE_ROW_COLUMNS.slice(1)
-  .map((column) => `${column} = ?`)
-  .join(', ')} WHERE id = ?`;
+/** Rewrites a message row of `table`; the values are {@link updateMessageValues}. */
+export function updateMessageSql(table: string): string {
+  return `UPDATE ${table} SET ${MESSAGE_ROW_COLUMNS.slice(1)
+    .map((column) => `${column} = ?`)
+    .join(', ')} WHERE id = ?`;
+}
 
 /**
- * A conversation's messages, oldest first; messages that share a timestamp come
- * in the order they had when saved.
+ * A conversation's messages in `table`, oldest first; messages that share a
+ * timestamp come in the order they had when saved.
  */
-export const SELECT_MESSAGES_SQL =
-  'SELECT * FROM conversation_messages WHERE conversation_id = ? ORDER BY timestamp ASC, seq ASC';
+export function selectMessagesSql(table: string): string {
+  return `SELECT * FROM ${table} WHERE conversation_id = ? ORDER BY timestamp ASC, seq ASC`;
+}
+
+/** {@link insertMessageSql} for the messages table under its default name, `conversation_messages`. */
+export const INSERT_MESSAGE_SQL = insertMessageSql('conversation_messages');
+
+/** {@link replaceMessageSql} for the messages table under its default name, `conversation_messages`. */
+export const REPLACE_MESSAGE_SQL = replaceMessageSql('conversation_messages');
+
+/** {@link updateMessageSql} for the messages table under its default name, `conversation_messages`. */
+export const UPDATE_MESSAGE_SQL = updateMessageSql('conversation_messages');
+
+/** {@link selectMessagesSql} for the messages table under its default name, `conversation_messages`. */
+export const SELECT_MESSAGES_SQL = selectMessagesSql('conversation_messages');
 
 /** How a row's `content` reads back: `text` as it is, `json` parsed. */
 export type StoredContentType = 'text' | 'json';
@@ -208,7 +228,7 @@ export function messageRowValues(
 }
 
 /**
- * The values {@link UPDATE_MESSAGE_SQL} takes: every column but the id, then
+ * The values {@link updateMessageSql}'s statement takes: every column but the id, then
  * the id.
  */
 export function updateMessageValues(rowValues: unknown[]): unknown[] {

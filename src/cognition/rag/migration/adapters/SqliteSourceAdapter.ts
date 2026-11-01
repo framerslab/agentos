@@ -8,6 +8,7 @@
 
 import Database from 'better-sqlite3';
 import type { IMigrationSource } from '../types.js';
+import { readScopeIdForms, type BrainScopeIdForm } from '../../../memory/retrieval/store/scopeIdForm.js';
 
 /**
  * Tables that are part of the AgentOS memory schema and should
@@ -72,6 +73,15 @@ export class SqliteSourceAdapter implements IMigrationSource {
     return this.db
       .prepare(`SELECT * FROM "${table}" LIMIT ? OFFSET ?`)
       .all(limit, offset) as Record<string, unknown>[];
+  }
+
+  /** Every brain this file holds, with its scope-id form. */
+  async scopeIdForms(): Promise<Map<string, BrainScopeIdForm>> {
+    const db = this.db;
+    return readScopeIdForms({
+      get: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).get(...params) as T | undefined,
+      all: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).all(...params) as T[],
+    });
   }
 
   /** Close the read-only database connection. */

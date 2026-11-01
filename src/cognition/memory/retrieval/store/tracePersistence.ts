@@ -94,6 +94,41 @@ export function parseTraceMetadata(raw: string | null | undefined): Record<strin
 }
 
 /**
+ * The scope id a row's metadata names: its `scopeId` when that is a string, else `''`. Text is parsed first, and text
+ * that is not a JSON object reads as naming none; an object (a JSON column a driver hands back parsed) is read as it
+ * is. What `memory_traces.scope_id` is filled with where a row holds none.
+ */
+export function scopeIdOfMetadata(metadata: unknown): string {
+  const record = typeof metadata === 'string' ? parseTraceMetadata(metadata) : metadata;
+  if (!isRecord(record)) return '';
+  return typeof record.scopeId === 'string' ? record.scopeId : '';
+}
+
+/**
+ * Read the decay fields persisted under `metadata.decay`, each one only where
+ * it holds a finite number, so a reader with defaults of its own fills the
+ * rest (`MemoryStore` loads an absent access count as 0 and an absent
+ * interval as one hour, where {@link readPersistedDecayState} gives the
+ * retrieval count and one day).
+ */
+export function readPersistedDecayFields(
+  metadata: Record<string, unknown>,
+): Partial<PersistedDecayState> {
+  const decay = isRecord(metadata.decay) ? metadata.decay : {};
+  const stability = finiteNumber(decay.stability);
+  const accessCount = finiteNumber(decay.accessCount);
+  const reinforcementInterval = finiteNumber(decay.reinforcementInterval);
+  const nextReinforcementAt = finiteNumber(decay.nextReinforcementAt);
+
+  return {
+    ...(stability !== undefined ? { stability } : {}),
+    ...(accessCount !== undefined ? { accessCount } : {}),
+    ...(reinforcementInterval !== undefined ? { reinforcementInterval } : {}),
+    ...(nextReinforcementAt !== undefined ? { nextReinforcementAt } : {}),
+  };
+}
+
+/**
  * Read the persisted decay state from a metadata object, applying defaults
  * when fields are absent.
  */
@@ -101,15 +136,16 @@ export function readPersistedDecayState(
   metadata: Record<string, unknown>,
   retrievalCount = 0,
 ): PersistedDecayState {
-  const decay = isRecord(metadata.decay) ? metadata.decay : {};
-  const nextReinforcementAt = finiteNumber(decay.nextReinforcementAt);
+  const fields = readPersistedDecayFields(metadata);
 
   return {
-    stability: finiteNumber(decay.stability) ?? DEFAULT_TRACE_STABILITY_MS,
-    accessCount: finiteNumber(decay.accessCount) ?? retrievalCount,
+    stability: fields.stability ?? DEFAULT_TRACE_STABILITY_MS,
+    accessCount: fields.accessCount ?? retrievalCount,
     reinforcementInterval:
-      finiteNumber(decay.reinforcementInterval) ?? DEFAULT_TRACE_REINFORCEMENT_INTERVAL_MS,
-    ...(nextReinforcementAt !== undefined ? { nextReinforcementAt } : {}),
+      fields.reinforcementInterval ?? DEFAULT_TRACE_REINFORCEMENT_INTERVAL_MS,
+    ...(fields.nextReinforcementAt !== undefined
+      ? { nextReinforcementAt: fields.nextReinforcementAt }
+      : {}),
   };
 }
 
@@ -220,4 +256,168 @@ export function buildNaturalLanguageFtsQuery(query: string): string {
  */
 export function bindingsFor(fragment: string, value: unknown): unknown[] {
   return Array.from({ length: (fragment.match(/\?/g) ?? []).length }, () => value);
+}
+
+/**
+ * The `brain_meta` key of the record of a brain's scope-id form, which a brain's re-file writes
+ * (`scopeIdForm.ts`, `refileBrainScopeIds`).
+ */
+export const SCOPE_ID_FORM_KEY = 'scope_id_form';
+
+/** The record's value for a brain whose `user` and `persona` scope ids hold the encoded form. */
+export const ENCODED_SCOPE_ID_FORM = 'encoded';
+
+/** Whether a brain holds the record of the encoded scope-id form ({@link SCOPE_ID_FORM_KEY} in `brain_meta`). */
+export async function holdsEncodedScopeIdForm(db: Pick<SnapshotDb, 'get'>, brainId: string): Promise<boolean> {
+  const record = await db.get<{ value: string }>('SELECT value FROM brain_meta WHERE brain_id = ? AND key = ?', [
+    brainId,
+    SCOPE_ID_FORM_KEY,
+  ]);
+  return record?.value === ENCODED_SCOPE_ID_FORM;
+}
+
+/**
+ * A `memory_traces` row as a ledger row's before-state holds it: every column but the embedding. A restore keeps the
+ * row's embedding where the row holds the snapshot's content ({@link writeTraceSnapshot}); a trace restored to other
+ * content regains a vector when it is next written (as `memory_update` clears it when the content changes).
+ */
+export interface TraceSnapshot {
+  id: string;
+  type: string;
+  scope: string;
+  scopeId: string;
+  content: string;
+  strength: number;
+  createdAt: number;
+  lastAccessed: number | null;
+  retrievalCount: number;
+  tags: string;
+  emotions: string;
+  metadata: string;
+  deleted: 0 | 1;
+  /**
+   * The form of the brain's `user` and `persona` scope ids when the snapshot was read: `'encoded'` once a learning
+   * layer re-filed the brain ({@link SCOPE_ID_FORM_KEY}), else `'plain'`. `Memory.restoreTrace` writes a plain
+   * snapshot into a brain re-filed since under the encoded id, as the re-file wrote the row: there a plain id that
+   * holds a `/` reads as a namespaced user's (`team/ana` names user `ana` of namespace `team`). Unset, a restore writes
+   * the scope id as the snapshot holds it.
+   */
+  scopeIdForm?: 'plain' | 'encoded';
+}
+
+/** The two calls of a storage adapter, a Brain or a transaction the snapshot helpers use. */
+export interface SnapshotDb {
+  get<T>(sql: string, params?: unknown[]): Promise<T | null | undefined>;
+  run(sql: string, params?: unknown[]): Promise<{ changes: number }>;
+}
+
+/**
+ * Deletes trace rows of one brain for good, 400 ids a statement, with the rows that name them first, as the Brain's
+ * foreign keys require: a trace's `retrieval_feedback` rows, each holding the query that recalled it, are deleted, and
+ * a `document_chunks` row the trace was filed from lets go of it (`trace_id` set to NULL) and keeps its text, which
+ * belongs to its document.
+ *
+ * @returns How many trace rows it deleted.
+ */
+export async function deleteTraceRows(db: Pick<SnapshotDb, 'run'>, brainId: string, traceIds: readonly string[]): Promise<number> {
+  const ids = [...new Set(traceIds)];
+  let deleted = 0;
+  for (let offset = 0; offset < ids.length; offset += 400) {
+    const chunk = ids.slice(offset, offset + 400);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const params = [brainId, ...chunk];
+    await db.run(`DELETE FROM retrieval_feedback WHERE brain_id = ? AND trace_id IN (${placeholders})`, params);
+    await db.run(`UPDATE document_chunks SET trace_id = NULL WHERE brain_id = ? AND trace_id IN (${placeholders})`, params);
+    deleted += (await db.run(`DELETE FROM memory_traces WHERE brain_id = ? AND id IN (${placeholders})`, params)).changes;
+  }
+  return deleted;
+}
+
+/** How many times {@link readTraceSnapshot} reads a row while a re-file changes the brain's form under it. */
+const SNAPSHOT_FORM_READS = 3;
+
+/**
+ * Reads one row of a brain as a snapshot, with the form its scope id was read in ({@link TraceSnapshot.scopeIdForm});
+ * `undefined` when there is no such row. The record is read before the row and, while it names the plain form, after
+ * it: a re-file writes the record in the transaction that moves the rows, once, so when both reads find the plain form
+ * the row was read in it. A re-file that commits between them leaves the row read in either form, and the row is read
+ * again.
+ *
+ * @throws When the brain's form changed under each of three reads of the row.
+ */
+export async function readTraceSnapshot(db: SnapshotDb, brainId: string, traceId: string): Promise<TraceSnapshot | undefined> {
+  for (let read = 0; read < SNAPSHOT_FORM_READS; read += 1) {
+    const encoded = await holdsEncodedScopeIdForm(db, brainId);
+    const row = await db.get<{
+      id: string; type: string; scope: string; scope_id: string | null; content: string; strength: number;
+      created_at: number; last_accessed: number | null; retrieval_count: number; tags: string; emotions: string;
+      metadata: string; deleted: number;
+    }>(
+      `SELECT id, type, scope, scope_id, content, strength, created_at, last_accessed, retrieval_count, tags, emotions, metadata, deleted
+         FROM memory_traces WHERE brain_id = ? AND id = ?`,
+      [brainId, traceId],
+    );
+    if (!row) return undefined;
+    if (!encoded && (await holdsEncodedScopeIdForm(db, brainId))) continue;
+    return {
+      id: row.id,
+      type: row.type,
+      scope: row.scope,
+      scopeId: row.scope_id ?? '',
+      content: row.content,
+      strength: row.strength,
+      createdAt: row.created_at,
+      lastAccessed: row.last_accessed ?? null,
+      retrievalCount: row.retrieval_count ?? 0,
+      tags: row.tags,
+      emotions: row.emotions,
+      metadata: row.metadata,
+      deleted: row.deleted === 1 ? 1 : 0,
+      scopeIdForm: encoded ? 'encoded' : 'plain',
+    };
+  }
+  throw new Error(
+    `readTraceSnapshot: the scope-id form of brain ${brainId} changed under each of ${SNAPSHOT_FORM_READS} reads of trace ${traceId}`,
+  );
+}
+
+/**
+ * Writes a snapshot back as the row's whole state, live (`deleted = 0`). The row keeps its embedding when it holds
+ * the snapshot's content (a delete taken back), so a store over the Brain loads and recalls the trace again; any other
+ * row is written with no embedding, since its vector is of other text. The scope id is written as the snapshot holds
+ * it; `Memory.restoreTrace` first puts a snapshot read before the brain's re-file in the encoded form
+ * (`snapshotInEncodedForm` in `scopeIdForm.ts`).
+ *
+ * @param insertOrReplace - The dialect's `insertOrReplace` (`brain.features.dialect.insertOrReplace`).
+ */
+export async function writeTraceSnapshot(
+  db: SnapshotDb,
+  insertOrReplace: (table: string, columns: string[], values: string[], conflict: string) => string,
+  brainId: string,
+  snapshot: TraceSnapshot,
+): Promise<void> {
+  const current = await db.get<{ content: string; embedding: unknown }>(
+    'SELECT content, embedding FROM memory_traces WHERE brain_id = ? AND id = ?',
+    [brainId, snapshot.id],
+  );
+  const embedding = current && current.content === snapshot.content ? current.embedding ?? null : null;
+  const columns = ['brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed', 'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted', 'scope_id'];
+  const sql = insertOrReplace('memory_traces', columns, columns.map((column) => (column === 'deleted' ? '0' : '?')), 'brain_id, id');
+  await db.run(sql, [
+    brainId, snapshot.id, snapshot.type, snapshot.scope, snapshot.content, embedding, snapshot.strength,
+    snapshot.createdAt, snapshot.lastAccessed, snapshot.retrievalCount, snapshot.tags, snapshot.emotions,
+    snapshot.metadata, snapshot.scopeId,
+  ]);
+}
+
+/**
+ * Whether a trace's stored metadata names a user: as the second user a turn with no learner filed it for
+ * (`turnUserId`), or among the users whose words a derivation summarizes (`contributorIds`). A scope delete for one
+ * user takes the traces that name that user.
+ */
+export function traceNamesUser(raw: string | null | undefined, userId: string): boolean {
+  const metadata = parseTraceMetadata(raw);
+  if (metadata.turnUserId === userId) return true;
+  const contributors = metadata.contributorIds;
+  return Array.isArray(contributors) && contributors.includes(userId);
 }

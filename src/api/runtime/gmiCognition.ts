@@ -59,7 +59,7 @@ export interface CognitionInputs {
   cognition?: CognitionProfile | CognitionConfig;
   memory?: boolean | MemoryConfig;
   cognitiveMechanisms?: CognitiveMechanismsConfig;
-  learning?: boolean | LearningConfig;
+  learning?: boolean | LearningConfig | null;
 }
 
 function memoryOf(value: boolean | MemoryConfig | undefined): MemoryConfig | false {

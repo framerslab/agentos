@@ -24,7 +24,7 @@ const agentos = await AgentOS.create({ storageAdapter });
 
 With a `storageAdapter`, the runtime:
 
-- persists conversations in the tables `conversations` and `conversation_messages`, which `ConversationManager` creates, unless `conversationManagerConfig.persistenceEnabled` is `false`;
+- persists conversations in the tables `conversations` and `conversation_messages`, which `ConversationManager` creates, unless `conversationManagerConfig.persistenceEnabled` is `false`; with `conversationManagerConfig.tablePrefix` the tables are `<prefix>conversations` and `<prefix>conversation_messages`, which a host sets before the runtime first starts on an adapter that also holds a memory Brain (whose own `conversations` table has other columns; the runtime refuses an adapter where the Brain made that table first, naming the option);
 - hands the adapter to SQL vector-store providers that name no adapter of their own, unless `ragConfig.bindToStorageAdapter` is `false`;
 - wraps it so its writes go through the provenance hooks, when the provenance extension is active;
 - uses it for the self-improvement tools' storage.

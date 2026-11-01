@@ -47,7 +47,8 @@ import {
 } from './personas/IPersonaDefinition';
 import { hardLimitsBlock, HARD_LIMITS_PRIORITY } from './personas/hardLimits';
 import { applyTraitOverlay, droppedTraitPatchWarning, PERSONALITY_PROMPT_PRIORITY, renderPersonalitySection } from './personas/personalityPrompt';
-import type { ILearnerSession, ToolLearningContext } from '../learning/types.js';
+import type { GuardedMemoryWrite, ILearnerSession, ToolLearningContext, TurnScopes } from '../learning/types.js';
+import { explicitTurnUserOf, isTurnScopes, toolLearningContextFor } from '../learning/toolContext.js';
 import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
@@ -69,7 +70,7 @@ import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/util
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';
-import { CognitiveMemoryBridge, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
+import { CognitiveMemoryBridge, type CognitiveMemoryTurnLearning, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
 import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
@@ -82,7 +83,7 @@ const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
 /** How long a turn waits for its learner session's preparation before it goes on without it, in milliseconds. */
 const LEARNING_PREPARE_BUDGET_MS = 2_000;
 
-/** The completion options a persona's defaults and a turn's `metadata.options` may set (design D4b). */
+/** The completion options a persona's defaults and a turn's `metadata.options` may set. */
 const FORWARDED_COMPLETION_OPTION_KEYS = [
   'temperature', 'maxTokens', 'topP', 'frequencyPenalty', 'presencePenalty', 'thinking', 'effort', 'cache',
   'promptCacheKey', 'promptCacheRetention', 'serviceTier', 'requestTimeout', 'customModelParams',
@@ -154,7 +155,7 @@ async function answerWithin<T>(work: Promise<T>, ms: number): Promise<{ value: T
   }
 }
 
-/** What a turn's model steps and tool calls take from the learning layer. */
+/** What a turn's model steps, tool calls and memory take from the learning layer. */
 interface TurnLearning {
   /** The personality section: the learner session's, or the GMI's own. Empty when the traits render none. */
   systemPrompts: Array<{ content: string; priority: number; source: string }>;
@@ -162,6 +163,13 @@ interface TurnLearning {
   tools: ToolLearningContext | undefined;
   /** The organization the learner session was asked under; a tool continuation under another asks again. */
   namespace?: string;
+  /** The turn's own user id, `null` when it named none: that user's feedback is filed with this turn's memory. */
+  userId?: string | null;
+  /**
+   * Where the turn's memory is filed and read, and how each filing is guarded, when the learner session gives scope
+   * ids (`TurnPreparation.scopes`, `scopesFor`); undefined otherwise, and the bridge files and reads as before.
+   */
+  memory?: CognitiveMemoryTurnLearning;
 }
 
 /** A message's content as a string two equal contents share: the text itself, or the JSON of its parts. */
@@ -370,9 +378,9 @@ export class GMI implements IGMI {
   private ownPersonalitySection: string | null = null;
 
   /**
-   * What the learning layer prepared for the latest turn. Set once per user turn, before the tool loop; a tool
-   * continuation reuses the preparation of the turn it continues. A turn's tool calls read the turn's own preparation,
-   * not this field, which a newer turn replaces.
+   * What the learning layer prepared for the latest user turn. Set once per user turn, before the tool loop. A turn's
+   * model steps, tool calls and filing use the preparation the turn holds itself; this field is what a tool
+   * continuation reuses and what feedback and a metaprompt's imprint between turns are filed with.
    */
   private turnLearning: TurnLearning | undefined;
 
@@ -507,11 +515,18 @@ export class GMI implements IGMI {
         this.workingMemory.set('currentTaskContext', this.currentTaskContext);
       },
       onMemoryImprint: async (content, tags) => {
+        // With a learning layer's scope ids, an imprint is filed with the last prepared turn's; before any, nowhere.
+        const learning = this.memoryLearningOfLastTurn();
+        if (learning === null) {
+          this.addTraceEntry(ReasoningEntryType.DEBUG, 'A metaprompt imprint was not filed: no turn of this session has scope ids yet.');
+          return;
+        }
         await this.memoryBridge?.encode(content, {
           type: 'semantic',
           sourceType: 'agent_inference',
           role: 'system',
           tags,
+          ...(learning ? { learning } : {}),
         });
       },
       getPendingEvents: () => this.sentimentTracker.pendingEvents,
@@ -667,6 +682,17 @@ export class GMI implements IGMI {
 
     // An empty user id falls back to the bridge's default scope (the current user).
     const scopeId = typeof userId === 'string' && userId.trim() ? userId.trim() : undefined;
+    // With a learning layer's scope ids, feedback is filed where its user's last turn here filed, and only for
+    // that turn's user: another user's feedback would land in a scope that is not theirs.
+    const learning = this.memoryLearningOfLastTurn(scopeId);
+    if (learning === null) {
+      this.addTraceEntry(
+        ReasoningEntryType.DEBUG,
+        'Feedback was not filed in memory: it does not come from the user of the last turn this session prepared.',
+      );
+      return;
+    }
+    const filing = learning ? { learning } : {};
     const scoreLabel = score !== undefined ? `, score ${score}` : '';
     await this.memoryBridge?.encode(`User feedback (${polarity}${scoreLabel})${text ? `: ${text}` : ''}`, {
       type: 'episodic',
@@ -674,6 +700,7 @@ export class GMI implements IGMI {
       role: 'user',
       scopeId,
       tags: ['user_feedback', `feedback_${polarity}`, ...(tags ?? [])],
+      ...filing,
     });
 
     if (correctedContent) {
@@ -684,6 +711,7 @@ export class GMI implements IGMI {
         role: 'user',
         scopeId,
         tags: ['user_feedback', 'user_correction'],
+        ...filing,
       });
     }
   }
@@ -713,6 +741,22 @@ export class GMI implements IGMI {
   }
 
   /**
+   * The memory learning that feedback or a metaprompt's imprint is filed with between turns: `undefined` on a
+   * GMI whose learner session gives no scope ids, neither through `scopesFor` nor in the last turn's preparation (the
+   * bridge files as before); otherwise the last prepared turn's, and `null` (not filed) before any turn was prepared,
+   * or for feedback from another user than that turn's.
+   *
+   * @param forUser - The feedback's user, trimmed; `undefined` when it names none.
+   */
+  private memoryLearningOfLastTurn(forUser?: string): CognitiveMemoryTurnLearning | undefined | null {
+    const last = this.turnLearning;
+    if (!this.learnerSession || (typeof this.learnerSession.scopesFor !== 'function' && !last?.memory)) return undefined;
+    if (!last?.memory) return null;
+    if (forUser !== undefined && (last.userId ?? '').trim() !== forUser) return null;
+    return last.memory;
+  }
+
+  /**
    * The turn's learning. With a learner session, its preparation: the personality section, and the learner and
    * mode each tool call is told. The session is asked once per user turn, and a tool continuation reuses the
    * preparation of the turn it continues (a GMI built again for the continuation, or a continuation under another
@@ -720,6 +764,11 @@ export class GMI implements IGMI {
    * or does not answer within its budget never fails the turn: the turn then has no learner, and the GMI sends its
    * own section. Without a learner session the GMI sends its own section, when it was given the persona's traits,
    * and tells the tools nothing.
+   *
+   * The preparation's scope ids, or the session's `scopesFor` where it gives none or the preparation failed, go to the
+   * turn's tools and memory with a recorder and a guard bound to the turn; a turn whose preparation failed keeps them,
+   * and, when they have no learner, names its explicit user as the turn's second user, so `forgetUser` for that user
+   * finds what the turn filed.
    *
    * @param turnInput - The turn's input.
    * @param turnId - The turn's id.
@@ -737,6 +786,17 @@ export class GMI implements IGMI {
     // whose host passed one): the session is asked again and reads it as a turn of that organization.
     if (continuation && this.turnLearning && this.turnLearning.namespace === namespace) return this.turnLearning;
 
+    const namesUser = turnInput.metadata?.noTurnUser !== true && typeof turnInput.userId === 'string' && turnInput.userId !== '';
+    const userId = namesUser ? (turnInput.userId as string) : null;
+    const workflowSeat = Boolean(turnInput.metadata?.workflowId);
+    // The turn's conversation as its memory files it: a memory scope session the turn names (a gmi() session id's
+    // generation) stands in for the session, so the memory tools file and read the turn's thread there and the session
+    // row names that thread, never the one of the id the caller opened, which an earlier generation filed under.
+    const memoryTurn = this.memoryTurnScope(turnInput);
+    const conversationId = memoryTurn.conversationId;
+    const threadIds = this.turnMemoryScope?.sessionId
+      ? [...new Set([memoryTurn.conversationId, memoryTurn.sessionId].filter((id): id is string => typeof id === 'string' && id.trim() !== ''))]
+      : undefined;
     const modelId =
       this.modelSelectionFor(turnInput).modelId ||
       this.activePersona.defaultModelId ||
@@ -745,11 +805,11 @@ export class GMI implements IGMI {
       Promise.resolve().then(() =>
         session.prepareTurn({
           turnId,
-          userId: typeof turnInput.userId === 'string' && turnInput.userId ? turnInput.userId : null,
+          userId,
           namespace,
           text: continuation ? null : userText,
           modelIds: modelId ? [modelId] : [],
-          workflowSeat: Boolean(turnInput.metadata?.workflowId),
+          workflowSeat,
           ...(continuation ? { continuation: true } : {}),
         }),
       ),
@@ -763,16 +823,98 @@ export class GMI implements IGMI {
         `The learning layer did not prepare this turn (${why}); the turn runs on the persona's authored traits and has no learner.`,
         { degraded: true },
       );
-      return { systemPrompts: own, tools: { learner: 'none', mode: 'on' }, namespace };
+      // The turn keeps the scope ids the session names without its store; its tools are told it has no learner.
+      const scopes = this.scopesOfSession(session, { userId, namespace, workflowSeat });
+      const turnUserId = scopes?.learner === 'none' && !continuation ? explicitTurnUserOf(userId) : undefined;
+      return this.turnLearningOf(session, {
+        systemPrompts: own,
+        learner: 'none',
+        mode: 'on',
+        namespace,
+        userId,
+        scopes,
+        turnUserId,
+        conversationId,
+        threadIds,
+      });
     }
     if (prepared.learner !== 'bound') {
       this.addTraceEntry(ReasoningEntryType.DEBUG, `This turn has no learner (${prepared.noLearnerReason ?? 'no reason given'}).`, { mode: prepared.mode });
     }
-    return {
+    const scopes = isTurnScopes(prepared.scopes) ? prepared.scopes : this.scopesOfSession(session, { userId, namespace, workflowSeat });
+    const turnUserId = typeof prepared.turnUserId === 'string' && prepared.turnUserId !== '' ? prepared.turnUserId : undefined;
+    return this.turnLearningOf(session, {
       systemPrompts: prepared.systemPrompts,
-      tools: { learner: prepared.learner === 'bound' ? 'bound' : 'none', mode: prepared.mode },
+      learner: prepared.learner === 'bound' ? 'bound' : 'none',
+      mode: prepared.mode,
       namespace,
-    };
+      userId,
+      scopes,
+      turnUserId,
+      conversationId,
+      threadIds,
+    });
+  }
+
+  /** The turn's scope ids from the session's `scopesFor`, which reads no store; undefined when it has none or throws. */
+  private scopesOfSession(
+    session: ILearnerSession,
+    turn: { userId: string | null; namespace: string; workflowSeat: boolean },
+  ): TurnScopes | undefined {
+    if (typeof session.scopesFor !== 'function') return undefined;
+    try {
+      const scopes = session.scopesFor(turn);
+      return isTurnScopes(scopes) ? scopes : undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.addTraceEntry(
+        ReasoningEntryType.WARNING,
+        `The learner session did not name the turn's scope ids (${message}); its memory is filed as on a GMI with no learning layer.`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * A turn's learning from its parts: the tools' context, with the scopes, a recorder bound to the turn (the
+   * turn's conversation id goes to the session row), the second user, the freeze read at the call and, where the
+   * turn's memory names a session of its own, the thread ids its memory files under; and the memory's, with a guard
+   * bound to the same turn.
+   */
+  private turnLearningOf(
+    session: ILearnerSession,
+    parts: {
+      systemPrompts: TurnLearning['systemPrompts'];
+      learner: 'bound' | 'none';
+      mode: ToolLearningContext['mode'];
+      namespace: string;
+      userId: string | null;
+      scopes: TurnScopes | undefined;
+      turnUserId: string | undefined;
+      conversationId: string | undefined;
+      threadIds: string[] | undefined;
+    },
+  ): TurnLearning {
+    const { scopes, turnUserId } = parts;
+    const { tools, writeTurn } = toolLearningContextFor(session, {
+      learner: parts.learner,
+      mode: parts.mode,
+      ...(scopes ? { scopes } : {}),
+      ...(turnUserId ? { turnUserId } : {}),
+      ...(parts.conversationId ? { conversationId: parts.conversationId } : {}),
+      ...(parts.threadIds?.length ? { threadIds: parts.threadIds } : {}),
+    });
+    // The guard is called on the session (a LearnerSession method reads `this`), only where the session has it.
+    const memory: CognitiveMemoryTurnLearning | undefined = scopes
+      ? {
+          scopes,
+          ...(turnUserId ? { turnUserId } : {}),
+          ...(writeTurn && typeof session.guardMemoryWrite === 'function'
+            ? { guard: <T>(write: GuardedMemoryWrite<T>) => session.guardMemoryWrite!(write, writeTurn) }
+            : {}),
+        }
+      : undefined;
+    return { systemPrompts: parts.systemPrompts, tools, namespace: parts.namespace, userId: parts.userId, ...(memory ? { memory } : {}) };
   }
 
   /**
@@ -1006,9 +1148,9 @@ export class GMI implements IGMI {
       sessionData.agencyLaunch = Object.freeze({ launchId: launchFrame.launchId, role: launchFrame.role, depth: launchFrame.depth });
     }
 
-    // The turn's learner and mode, on a GMI with a learner session: a self-modification tool reads them before it acts.
-    // They come from the turn's own preparation, so a newer turn or a continuation that ran during this turn's tool
-    // call never changes them.
+    // The turn's learner, mode, scopes and recorder, on a GMI with a learner session: a self-modification tool reads
+    // the learner and mode before it acts, and a memory tool files and reads by the scopes. They come from the turn's
+    // own preparation, so a newer turn or a continuation that ran during this turn's tool call never changes them.
     if (learning?.tools) {
       sessionData.learning = { ...learning.tools };
     }
@@ -1589,8 +1731,12 @@ export class GMI implements IGMI {
         }
 
         if (isUserInitiatedTurn && currentTurnText) {
-          // Recall is limited to this turn's user, session and conversation scopes.
-          assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, this.memoryTurnScope(turnInput)) ?? null;
+          // Recall is limited to this turn's user, session and conversation scopes; with a learning layer's scope ids, to
+          // the turn's own.
+          assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, {
+            ...this.memoryTurnScope(turnInput),
+            ...(turnLearning.memory ? { learning: turnLearning.memory } : {}),
+          }) ?? null;
         }
 
         const promptExecContext = this.buildPromptExecutionContext();
@@ -1719,7 +1865,7 @@ export class GMI implements IGMI {
           }
         }
 
-        // Every completion option the persona and the turn set (D4b), the turn's
+        // Every completion option the persona and the turn set, the turn's
         // over the persona's; one neither sets is not sent, so the provider's
         // default applies. Tools, user and streaming are the GMI's.
         const turnOptions = (turnInput.metadata?.options ?? {}) as Record<string, unknown>;
@@ -1746,7 +1892,7 @@ export class GMI implements IGMI {
           ...(providerUserId ? { userId: providerUserId } : {}),
           stream: true,
         };
-        // A schema travels to the gateway, which lowers it per hop (D9); it is not a provider option.
+        // A schema travels to the gateway, which lowers it per hop; it is not a provider option.
         const responseSchema = (turnOptions.responseSchema as ZodType | undefined) ?? structuredReply?.zod;
         const schemaName = (turnOptions.schemaName as string | undefined) ?? (structuredReply && responseSchema === structuredReply.zod ? structuredReply.name : undefined);
         // The structured reply's instruction is in the system prompt already; the gateway adds none for its schema.
@@ -1783,7 +1929,7 @@ export class GMI implements IGMI {
         // step, else, while this stream is the GMI's newest, the one that served
         // the turn's last step, else the route's first hop that can start.
         // Resolved before the prompt is built, so the prompt is budgeted for the
-        // serving model (D1).
+        // serving model.
         let resolution: CompletionResolution | null = null;
         if (gateway && route) {
           try {
@@ -1829,7 +1975,7 @@ export class GMI implements IGMI {
         let modelTargetInfo!: ModelTargetInfo;
 
         // One attempt per hop. A failure before any output moves to the next
-        // hop and rebuilds the prompt for that hop's model (D3); after output
+        // hop and rebuilds the prompt for that hop's model; after output
         // there is no fallback for the step. Without a gateway the loop runs once.
         hopLoop: for (;;) {
           if (resolution) {
@@ -1950,7 +2096,7 @@ export class GMI implements IGMI {
               if (choice?.message?.thinkingBlocks?.length) {
                 currentIterationThinkingBlocks = choice.message.thinkingBlocks;
               }
-              // The gateway lifts a streamed schema tool call into `structuredOutput` (D9).
+              // The gateway lifts a streamed schema tool call into `structuredOutput`.
               const structured = (chunk as { structuredOutput?: unknown }).structuredOutput;
               if (structured !== undefined) stepStructuredOutput = structured;
 
@@ -1978,7 +2124,7 @@ export class GMI implements IGMI {
                 this.addTraceEntry(ReasoningEntryType.TOOL_CALL_REQUESTED, `LLM requested tool(s).`, { requests: currentIterationToolCallRequests });
               }
 
-              // A provider that sends no deltas: its final content is the step's text, emitted once (D4d).
+              // A provider that sends no deltas: its final content is the step's text, emitted once.
               if (chunk.isFinal && !textDeltaEmitted && typeof choice?.message?.content === 'string' && choice.message.content.length > 0) {
                 currentIterationTextResponse = choice.message.content;
                 aggregatedResponseText += choice.message.content;
@@ -1993,7 +2139,7 @@ export class GMI implements IGMI {
                 this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
               }
               if (chunk.isFinal) stepFinalChunk = chunk;
-              // Usage on every chunk that carries it, choice or not (D4c). Providers report
+              // Usage on every chunk that carries it, choice or not. Providers report
               // the request's running total, so the turn total takes the step's last value once.
               if (chunk.usage) {
                 stepUsage = chunk.usage;
@@ -2069,7 +2215,7 @@ export class GMI implements IGMI {
           if (ownsState()) this.turnResolution = resolution;
         }
 
-        // The step's usage, counted once (D4c).
+        // The step's usage, counted once.
         if (stepUsage) addUsage(aggregatedUsage, stepUsage);
 
         // The next step's diagnostics compare against this step's response.
@@ -2078,7 +2224,7 @@ export class GMI implements IGMI {
           stepCacheDiagnostics = { previousMessageId: typeof responseId === 'string' && responseId.length > 0 ? responseId : null };
         }
 
-        // The step boundary (D4d): the step's own text, finish reason, hop and usage.
+        // The step boundary: the step's own text, finish reason, hop and usage.
         const stepPayload: StepFinishedChunkPayload = {
           stepIndex: safetyBreak - 1,
           text: currentIterationTextResponse,
@@ -2223,7 +2369,7 @@ export class GMI implements IGMI {
           }
           // Recorded on success and failure alike, so the history this turn
           // leaves answers every call its assistant message declared. Each
-          // recorded result is also published as a TOOL_RESULT chunk (D4e).
+          // recorded result is also published as a TOOL_RESULT chunk.
           for (const tcResult of toolExecutionResults) {
             turnMessages.push(this.conversationHistoryManager.updateWithToolResult(tcResult));
             const toolResultPayload: ToolResultChunkPayload = {
@@ -2251,9 +2397,14 @@ export class GMI implements IGMI {
         break main_processing_loop; // Break if no tool calls
       }
 
-      // The exchange is filed under the turn's memory scope session, when it named one.
+      // The exchange is filed under the turn's memory scope session, when it named one, and, with a learning layer's
+      // scope ids, under the turn's own through its guard.
       const memorySessionId = this.turnMemoryScope?.sessionId;
-      await this.memoryBridge?.syncForTurn(memorySessionId ? { ...turnInput, sessionId: memorySessionId } : turnInput, aggregatedResponseText);
+      await this.memoryBridge?.syncForTurn(
+        memorySessionId ? { ...turnInput, sessionId: memorySessionId } : turnInput,
+        aggregatedResponseText,
+        turnLearning.memory,
+      );
 
       await this.performPostTurnIngestion(
         this.stringifyTurnContent(turnInput.content) ?? '',
@@ -2286,7 +2437,7 @@ export class GMI implements IGMI {
 
     } catch (error: any) {
       // A GMIError keeps its code (an in-band provider error stays
-      // LLM_PROVIDER_ERROR); anything else is a processing error (D4f).
+      // LLM_PROVIDER_ERROR); anything else is a processing error.
       const gmiError = createGMIErrorFromError(
         error,
         error instanceof GMIError ? error.code : GMIErrorCode.GMI_PROCESSING_ERROR,
