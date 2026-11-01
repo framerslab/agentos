@@ -38,15 +38,15 @@ describe('OpenRouterProvider — per-call requestTimeout override (CR8)', () => 
     // provider's expected SSE-parse failure goes to the logger set above.
   });
 
-  it('passes the per-call override as the makeApiRequest timeout (3rd arg), and the caller\'s signal last', async () => {
+  it('passes the per-call override as the makeApiRequest timeout (3rd arg), and the caller\'s signal 6th', async () => {
     const signal = new AbortController().signal;
     await provider.generateCompletion('anthropic/claude-3', messages, { requestTimeout: 456789, abortSignal: signal } as never);
-    expect(makeApiRequest).toHaveBeenCalledWith('/chat/completions', 'POST', 456789, expect.anything(), false, signal);
+    expect(makeApiRequest.mock.calls[0].slice(0, 6)).toEqual(['/chat/completions', 'POST', 456789, expect.anything(), false, signal]);
   });
 
   it('falls back to the config default timeout when no override is given', async () => {
     await provider.generateCompletion('anthropic/claude-3', messages, {} as never);
-    expect(makeApiRequest).toHaveBeenCalledWith('/chat/completions', 'POST', 60000, expect.anything(), false, undefined);
+    expect(makeApiRequest.mock.calls[0].slice(0, 6)).toEqual(['/chat/completions', 'POST', 60000, expect.anything(), false, undefined]);
   });
 
   // Streaming uses streamRequestTimeout as its default (not requestTimeout). The
