@@ -21,6 +21,7 @@ import type {
 } from '../../../../core/tools/ITool.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
 import { bindingsFor, buildNaturalLanguageFtsQuery } from '../../retrieval/store/tracePersistence.js';
+import { namesScopeId } from '../../retrieval/store/migrations/v2-to-v3.js';
 import { memoryToolTurnOf, resolveMemoryToolScopeId } from './scopeContext.js';
 
 /**
@@ -186,7 +187,8 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
    *   AND mt.deleted = 0
    *   [AND mt.type = ?]    -- when type filter provided
    *   [AND mt.scope = ?]   -- when scope filter provided
-   *   [AND ((mt.scope = ? AND mt.scope_id = ?) OR ... OR mt.scope_id = '')]  -- with the turn's scope ids
+   *   [AND ((mt.scope = ? AND mt.scope_id = ?) OR ... OR (mt.scope_id = '' AND NOT (<metadata names a scope id>)))]
+   *                        -- with the turn's scope ids
    * ORDER BY memory_traces_fts.rank  -- FTS5 BM25 relevance (lower = more relevant);
    *                                  -- FTS4 orders by length(offsets(memory_traces_fts)) DESC
    * LIMIT ?
@@ -197,7 +199,10 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
    *
    * Where a learning layer put the turn's scope ids on the call, the search reads the indexed `scope_id` column: the
    * turn's own `user`, `persona` and `thread` scope ids, its organization's id, and the traces filed under no scope
-   * id (an ingested document's); a `scope` filter narrows that list to the scope's own ids and its unscoped traces.
+   * id (an ingested document's); a `scope` filter narrows that list to the scope's own ids and its unscoped traces. A
+   * row that holds `''` while its metadata names a scope id (`namesScopeId`) is some scope's, not unscoped: a release
+   * older than the column writes such rows to a Brain this process holds open, and no turn reads one until the Brain's
+   * next open files it under that id.
    *
    * @param args    - Search input (query, optional type/scope/limit).
    * @param context - Tool execution context used to resolve scoped searches.
@@ -228,16 +233,19 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
 
       // With the turn's scope ids on the call the search reads the turn's own scopes, its organization's id and the
       // traces filed under no scope id (an ingested document's), by the indexed column; a `scope` narrows that list
-      // to the scope's own ids and its unscoped traces. Without them, as before.
+      // to the scope's own ids and its unscoped traces. A row that holds '' while its metadata names a scope id is an
+      // older release's write of some scope's trace, which the Brain's next open files: it is not read as unscoped.
+      // Without them, as before.
       const turn = memoryToolTurnOf(context);
       if (turn) {
         const pairs = turn.readable.filter((pair) => args.scope === undefined || pair.scope === args.scope);
         const anyOf = pairs.map(() => '(mt.scope = ? AND mt.scope_id = ?)');
         const anyParams: unknown[] = pairs.flatMap((pair) => [pair.scope, pair.scopeId]);
+        const unscoped = `mt.scope_id = '' AND NOT (${namesScopeId('mt.metadata')})`;
         if (args.scope === undefined) {
-          anyOf.push("mt.scope_id = ''");
+          anyOf.push(`(${unscoped})`);
         } else {
-          anyOf.push("(mt.scope = ? AND mt.scope_id = '')");
+          anyOf.push(`(mt.scope = ? AND ${unscoped})`);
           anyParams.push(args.scope);
         }
         extraClauses.push(`(${anyOf.join(' OR ')})`);
