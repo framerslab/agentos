@@ -239,6 +239,9 @@ describe('modelSupportsTemperature', () => {
       'claude-sonnet-5-5-20261001',
       'claude-fable-5',
       'claude-fable-5-1',
+      // Claude Haiku 5.5 rejects any non-default temperature, top_p or top_k.
+      'claude-haiku-5-5',
+      'CLAUDE-HAIKU-5-5',
     ]) {
       expect(modelSupportsTemperature(id)).toBe(false);
     }

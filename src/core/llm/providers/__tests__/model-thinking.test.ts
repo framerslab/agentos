@@ -92,6 +92,12 @@ describe('resolveThinkingOff', () => {
     }
   });
 
+  it('turns Haiku 5.5 off with disabled at effort high or below', () => {
+    for (const id of ['claude-haiku-5-5', 'CLAUDE-HAIKU-5-5']) {
+      expect(resolveThinkingOff(id)).toEqual({ kind: 'send', thinking: { type: 'disabled' }, maxEffort: 'high' });
+    }
+  });
+
   it('reports Opus 5.5, Fable and Mythos as always thinking', () => {
     for (const id of ['claude-opus-5-5', 'claude-opus-5-5-20260901', 'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
       expect(resolveThinkingOff(id)).toEqual({ kind: 'always_on' });

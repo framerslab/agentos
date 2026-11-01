@@ -867,6 +867,221 @@ describe('Claude thinking off and effort through the public API', () => {
   });
 });
 
+describe('Claude Haiku 5.5 through the public API', () => {
+  // Claude Haiku 5.5 answers a non-default temperature, top_p or top_k with a 400, takes all five effort
+  // levels, and turns thinking off with { type: 'disabled' } only at effort high or below.
+  it('generateText sends no temperature or top_p, so the call is not refused', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'positive')] });
+
+    const result = await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'Classify: I loved it.',
+      temperature: 0,
+      topP: 0.5,
+      fallbackProviders: [],
+    });
+
+    expect(result.text).toBe('positive');
+    const [body] = postedBodies();
+    expect(body.model).toBe('claude-haiku-5-5');
+    expect(body).not.toHaveProperty('temperature');
+    expect(body).not.toHaveProperty('top_p');
+    expect(body).not.toHaveProperty('top_k');
+  });
+
+  it('streamText sends no temperature either', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'Hi.')] });
+
+    const { textStream } = streamText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'Say hi.',
+      temperature: 0.3,
+      fallbackProviders: [],
+    });
+    let text = '';
+    for await (const chunk of textStream) text += chunk;
+
+    expect(text).toBe('Hi.');
+    const [body] = postedBodies();
+    expect(body).not.toHaveProperty('temperature');
+  });
+
+  it('still sends temperature to Claude Haiku 4.5, which accepts it', async () => {
+    route({ 'claude-haiku-4-5-20251001': [textTurn('claude-haiku-4-5-20251001', 'ok')] });
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001',
+      prompt: 'x',
+      temperature: 0,
+      fallbackProviders: [],
+    });
+
+    expect(postedBodies()[0].temperature).toBe(0);
+  });
+
+  it('sends the effort level the caller set', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'a')] });
+
+    await generateText({ provider: 'anthropic', model: 'claude-haiku-5-5', prompt: 'x', effort: 'low', fallbackProviders: [] });
+
+    expect(postedBodies()[0].output_config).toEqual({ effort: 'low' });
+  });
+
+  it('turns thinking off with disabled and caps effort at high', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'Done.')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'Be quick.',
+      thinking: false,
+      effort: 'max',
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    expect(body.output_config).toEqual({ effort: 'high' });
+    warn.mockRestore();
+  });
+
+  it('caps an effort passed through customModelParams when thinking is off', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', '{"answer":"done"}')] });
+    const answerSchema = {
+      type: 'object',
+      properties: { answer: { type: 'string' } },
+      required: ['answer'],
+      additionalProperties: false,
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'Be quick.',
+      thinking: false,
+      customModelParams: { output_config: { effort: 'max', format: { type: 'json_schema', schema: answerSchema } } },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    // The cap lowers the effort and keeps the rest of the passthrough output_config.
+    expect(body.output_config).toEqual({ effort: 'high', format: { type: 'json_schema', schema: answerSchema } });
+    warn.mockRestore();
+  });
+
+  it('caps a passthrough effort on Claude Opus 5 with thinking off as well', async () => {
+    route({ 'claude-opus-5': [textTurn('claude-opus-5', 'Done.')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      prompt: 'Be quick.',
+      thinking: false,
+      customModelParams: { output_config: { effort: 'xhigh' } },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    expect(body.output_config).toEqual({ effort: 'high' });
+    warn.mockRestore();
+  });
+
+  it('leaves a passthrough effort alone when thinking stays on', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'Done.')] });
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'Think hard.',
+      customModelParams: { output_config: { effort: 'max' } },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body).not.toHaveProperty('thinking');
+    expect(body.output_config).toEqual({ effort: 'max' });
+  });
+
+  it('drops sampling parameters passed through customModelParams', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'ok')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'x',
+      customModelParams: { temperature: 0.2, top_p: 0.9, top_k: 40 },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body).not.toHaveProperty('temperature');
+    expect(body).not.toHaveProperty('top_p');
+    expect(body).not.toHaveProperty('top_k');
+    warn.mockRestore();
+  });
+
+  it('still sends a passthrough top_k to Claude Haiku 4.5', async () => {
+    route({ 'claude-haiku-4-5-20251001': [textTurn('claude-haiku-4-5-20251001', 'ok')] });
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001',
+      prompt: 'x',
+      customModelParams: { top_k: 40 },
+      fallbackProviders: [],
+    });
+
+    expect(postedBodies()[0].top_k).toBe(40);
+  });
+
+  it('shapes the request for a passthrough model: Haiku 5.5 overridden to Haiku 4.5 sends no effort', async () => {
+    route({ 'claude-haiku-4-5-20251001': [textTurn('claude-haiku-4-5-20251001', 'ok')] });
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'x',
+      effort: 'low',
+      temperature: 0,
+      customModelParams: { model: 'claude-haiku-4-5-20251001' },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body.model).toBe('claude-haiku-4-5-20251001');
+    expect(body).not.toHaveProperty('output_config');
+    expect(body.temperature).toBe(0);
+  });
+
+  it('shapes the request for a passthrough model: Haiku 4.5 overridden to Haiku 5.5 sends no temperature', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'ok')] });
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001',
+      prompt: 'x',
+      temperature: 0,
+      effort: 'low',
+      customModelParams: { model: 'claude-haiku-5-5' },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body.model).toBe('claude-haiku-5-5');
+    expect(body).not.toHaveProperty('temperature');
+    expect(body.output_config).toEqual({ effort: 'low' });
+  });
+});
+
 describe('structured calls carry thinking and effort to the wire', () => {
   it('generateObject on Sonnet 5.5 with thinking off sends between_tools at the given effort', async () => {
     route({ 'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', '{"answer":"ok"}')] });

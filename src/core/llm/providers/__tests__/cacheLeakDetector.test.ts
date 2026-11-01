@@ -76,6 +76,17 @@ describe('cacheLeakDetector', () => {
     expect(warns).toHaveLength(0);
   });
 
+  it('flags uncached Claude Haiku 5.5 prompts above its 512-token floor and stays silent below it', () => {
+    for (let i = 0; i < T.minCalls + 2; i++) {
+      recordCacheUsage(sample({ model: 'claude-haiku-5-5', systemPrefix: 'judge prompt', uncachedInputTokens: 1_500 }), warn);
+      recordCacheUsage(sample({ model: 'claude-haiku-5-5', systemPrefix: 'router prompt', uncachedInputTokens: 400 }), warn);
+    }
+    const unmarked = warns.filter((w) => w.includes('unmarked'));
+    expect(unmarked).toHaveLength(1);
+    expect(unmarked[0]).toContain('model=claude-haiku-5-5');
+    expect(unmarked[0]).toContain('avgUncachedTokens=1500');
+  });
+
   it('tracks callsites independently (different system prefixes never pool)', () => {
     for (let i = 0; i < T.minCalls - 1; i++) {
       recordCacheUsage(sample({ systemPrefix: 'narrator prompt', uncachedInputTokens: 9_000 }), warn);

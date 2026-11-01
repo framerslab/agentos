@@ -32,6 +32,9 @@ describe('modelSupportsEffort', () => {
       'claude-opus-5-5',
       'anthropic/claude-opus-5-5',
       'claude-fable-5-1',
+      // Claude Haiku 5.5 takes all five levels; Haiku 4.5 still takes none.
+      'claude-haiku-5-5',
+      'anthropic/claude-haiku-5-5',
     ]) {
       expect(modelSupportsEffort(m)).toBe(true);
     }
