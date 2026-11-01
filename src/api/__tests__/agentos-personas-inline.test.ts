@@ -85,6 +85,12 @@ describe('AgentOS.create({ personas })', () => {
       message: expect.stringContaining('personas[1] must be an object with a non-empty string `id`'),
       details: { index: 1 },
     });
+    const numericId = await boot({ personas: [persona, { ...persona, id: 42 }] }).catch((error: unknown) => error);
+    expect(numericId).toMatchObject({
+      code: GMIErrorCode.CONFIGURATION_ERROR,
+      message: 'personas[1] must be an object with a non-empty string `id`.',
+    });
+    expect((numericId as { details?: unknown }).details).toEqual({ index: 1 });
     await expect(boot({ personas: 'nope' })).rejects.toMatchObject({
       code: GMIErrorCode.CONFIGURATION_ERROR,
       message: '`personas` must be an array of persona definitions.',
@@ -93,10 +99,10 @@ describe('AgentOS.create({ personas })', () => {
     expect(providerInitialize).not.toHaveBeenCalled();
   });
 
-  it('is described on the personas page as it refuses: an entry by its index and id, a value that is not an array by the type received', async () => {
+  it('is described on the personas page as it refuses: an entry by its index and its string id, a value that is not an array by the type received', async () => {
     const page = await readFile(fileURLToPath(new URL('../../../docs/PERSONAS.md', import.meta.url)), 'utf8');
     expect(page).toContain(
-      'The refusal of an entry names its index, and its id where the entry has one; the refusal of a value that is not an array gives the type it received in its details.',
+      'The refusal of an entry names its index, and its id where that id is a non-empty string; the refusal of a value that is not an array gives the type it received in its details.',
     );
     expect(page).not.toContain('naming the index or id');
   });
