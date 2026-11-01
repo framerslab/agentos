@@ -9,6 +9,7 @@
 
 import Database from 'better-sqlite3';
 import type { IMigrationTarget } from '../types.js';
+import { isMissingTableError } from './missingTable.js';
 import {
   readScopeIdForms,
   SCOPE_ID_FORM_KEY,
@@ -119,8 +120,10 @@ export class SqliteTargetAdapter implements IMigrationTarget {
   async clearScopeIdForm(brainId: string): Promise<void> {
     try {
       this.db.prepare('DELETE FROM brain_meta WHERE brain_id = ? AND key = ?').run(brainId, SCOPE_ID_FORM_KEY);
-    } catch {
-      // A target with no brain ids holds no record.
+    } catch (error) {
+      // A target with no brain_meta, or none with brain ids, holds no record; any other failure leaves the record and
+      // fails the migration.
+      if (!isMissingTableError(error)) throw error;
     }
   }
 

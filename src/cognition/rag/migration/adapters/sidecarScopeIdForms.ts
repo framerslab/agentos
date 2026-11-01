@@ -13,6 +13,7 @@ import {
   readScopeIdForms,
   type BrainScopeIdForm,
 } from '../../../memory/retrieval/store/scopeIdForm.js';
+import { isMissingTableError } from './missingTable.js';
 
 /**
  * The forms of the brains a sidecar names, or of the brains given.
@@ -43,11 +44,17 @@ export async function sidecarScopeIdForms(
   return forms;
 }
 
-/** Whether the sidecar's `brain_meta` holds a row of the brain; a sidecar without the table holds none. */
+/**
+ * Whether the sidecar's `brain_meta` holds a row of the brain; a sidecar without the table, or one from before brain
+ * ids, holds none.
+ *
+ * @throws What the read threw for any other reason (a locked file): the migration stops before it copies a table.
+ */
 function holdsBrain(sidecar: Database.Database, brainId: string): boolean {
   try {
     return Boolean(sidecar.prepare('SELECT 1 AS held FROM brain_meta WHERE brain_id = ? LIMIT 1').get(brainId));
-  } catch {
-    return false;
+  } catch (error) {
+    if (isMissingTableError(error)) return false;
+    throw error;
   }
 }

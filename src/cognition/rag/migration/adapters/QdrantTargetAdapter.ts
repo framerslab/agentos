@@ -10,6 +10,7 @@
 import type { IMigrationTarget } from '../types.js';
 import Database from 'better-sqlite3';
 import { SCOPE_ID_FORM_KEY, type BrainScopeIdForm } from '../../../memory/retrieval/store/scopeIdForm.js';
+import { isMissingTableError } from './missingTable.js';
 import { sidecarScopeIdForms } from './sidecarScopeIdForms.js';
 
 /** Tables that go into Qdrant as point collections. */
@@ -48,8 +49,9 @@ export class QdrantTargetAdapter implements IMigrationTarget {
       this.clearScopeIdForm = async (brainId) => {
         try {
           sidecar.prepare('DELETE FROM brain_meta WHERE brain_id = ? AND key = ?').run(brainId, SCOPE_ID_FORM_KEY);
-        } catch {
-          // A sidecar with no brain_meta holds no record.
+        } catch (error) {
+          // A sidecar with no brain_meta holds no record; any other failure leaves the record and fails the migration.
+          if (!isMissingTableError(error)) throw error;
         }
       };
     }
