@@ -9,7 +9,9 @@
  * opens the file again on its next use, a forgetUser after agent.close() included, once a host call already running has
  * finished on the file. A host's own adapter is never closed. A turn with no learner files under its session's memory
  * scope, a reopened session's own, and its memory_add writes one row of no user. The agent's host calls fill in its key
- * and namespace, and reach the memory tools a host registers itself through learning.memoryTools.
+ * and namespace, and reach the memory tools a host registers itself through learning.memoryTools. With the learning
+ * flag off a memory_add files under the plain user id, memory_reflect is offered and runs, a tool call carries no
+ * learning, and the agent has no learning member.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -398,5 +400,44 @@ describe("the agent's host calls", () => {
     await tutor.learning!.freeze!();
     expect((await tutor.learning!.manifest()).mode).toBe('on');
     await tutor.learning!.unfreeze!();
+  });
+});
+
+describe('with the learning flag off', () => {
+  it('files a memory_add under the plain user id, offers memory_reflect and runs it, and builds nothing of the layer', async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([{ id: 'c1', name: 'memory_add', args: { content: 'Canary OFF-1.' } }]),
+        reply.tools([{ id: 'p1', name: 'probe', args: {} }]),
+        reply.text('Saved.'),
+        reply.tools([{ id: 'c2', name: 'memory_reflect', args: {} }]),
+        reply.text('Tidied.'),
+      ],
+    });
+    // Self-improvement on (the facade's default), so the facade has memory_reflect to offer.
+    const { memory, brain } = await facadeAt(tempFile(), 'tools-brain');
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const tools = Object.fromEntries([...memory.createTools(), probeTool(seen)].map((tool) => [tool.name, tool]));
+    const tutor = gmi(options(k, { tools }));
+    expect(tutor.learning).toBeUndefined();
+    const session = tutor.session('s1', { userId: 'ana' });
+    await session.send('Remember this.');
+
+    expect(await brain.all('SELECT scope_id, content FROM memory_traces WHERE deleted = 0')).toEqual([{ scope_id: 'ana', content: 'Canary OFF-1.' }]);
+    // The GMI puts no learning on a tool call.
+    expect(seen).toEqual([undefined]);
+    const offered = ((s.seen[0].options.tools as Array<{ function: { name: string } }> | undefined) ?? []).map((tool) => tool.function.name);
+    expect(offered).toContain('memory_reflect');
+
+    // A call to memory_reflect runs a consolidation and returns its counts.
+    await session.send('Tidy your memory.');
+    const reflected = s.seen[4].messages.filter((message) => message.role === 'tool' && message.name === 'memory_reflect');
+    expect(reflected).toHaveLength(1);
+    expect(String(reflected[0]!.content)).toContain('"pruned"');
+    expect(String(reflected[0]!.content)).not.toContain('withdrawn');
+    // SQLite's own catalog: no table of the learning store. GLOB reads `_` as itself.
+    expect(await brain.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'agentos_learning_*'")).toEqual([]);
+    await tutor.close();
   });
 });

@@ -10,7 +10,9 @@
  * traces. A memory_delete reaches by id only its own tenant's trace, and takes the copy of a trace the GMI filed with
  * it. A JSON export of A's 42 imported into a fresh Brain is read for A's 42 only and goes with forgetUser. Two
  * anonymous sessions file their memory tools' writes under their own forms, each with a row of no user, and find
- * nothing of each other. AgentOS.create(); only the OpenAI provider class is stubbed.
+ * nothing of each other. With the learning flag off the same runtime files and reads under the plain ids, keeps
+ * memory_reflect in the memory tools pack and makes no table of the learning store. AgentOS.create(); only the OpenAI
+ * provider class is stubbed.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -102,13 +104,15 @@ afterEach(async () => {
 /**
  * The full runtime on one SQLite adapter: the learning store, the GMIs' memory and a standalone facade, the last two
  * on brain `tutor`, and the runtime's conversations under the table prefix `agentos_` (the Brain has a
- * `conversations` table of its own); compaction on every turn (one message is enough, none is kept back).
+ * `conversations` table of its own); compaction on every turn (one message is enough, none is kept back). The
+ * learning flag is on unless `options.learning` is `false`.
  */
 async function bootOneBrain(
   facadeOver?: (adapter: StorageAdapter) => Promise<Memory>,
-  // `null` leaves the conversation tables under their plain names.
-  tablePrefix: string | null = 'agentos_',
+  // `tablePrefix: null` leaves the conversation tables under their plain names.
+  options: { tablePrefix?: string | null; learning?: boolean } = {},
 ): Promise<{ os: AgentOS; db: StorageAdapter; facade: Memory }> {
+  const tablePrefix = options.tablePrefix === undefined ? 'agentos_' : options.tablePrefix;
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'learning-tenants-e2e-'));
   const db = await resolveStorageAdapter({ filePath: path.join(dir, 'one.sqlite'), priority: ['better-sqlite3', 'sqljs'], quiet: true });
   adapter = db;
@@ -139,7 +143,7 @@ async function bootOneBrain(
         maxOutputTokens: 900,
       },
     },
-    learning: true,
+    learning: options.learning ?? true,
   } as any);
   return { os: booted, db, facade };
 }
@@ -154,6 +158,9 @@ const tracesOf = (db: StorageAdapter) =>
 /** The text of every knowledge-graph copy of brain `tutor` on the adapter. */
 const copiesOf = async (db: StorageAdapter): Promise<string[]> =>
   (await db.all<{ label: string }>("SELECT label FROM knowledge_nodes WHERE brain_id = 'tutor' AND type = 'memory'")).map((row) => row.label);
+/** The content of the tool messages one model call received. */
+const toolMessagesOf = (messages: Array<{ role: string; content: unknown }> | undefined): string =>
+  (messages ?? []).filter((m) => m.role === 'tool').map((m) => String(m.content)).join('\n');
 /** Whether brain `tutor` holds the knowledge-graph copy of a trace. */
 const hasCopy = async (db: StorageAdapter, traceId: string): Promise<boolean> =>
   (await db.get("SELECT id FROM knowledge_nodes WHERE brain_id = 'tutor' AND id = ?", [copyKey(traceId)])) != null;
@@ -162,7 +169,7 @@ describe("the runtime's conversations on the adapter of a memory Brain", () => {
   it("are kept under conversationManagerConfig.tablePrefix, and without one the runtime refuses to start, naming the option", async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    await expect(bootOneBrain(undefined, null)).rejects.toThrow(/conversationManagerConfig\.tablePrefix/);
+    await expect(bootOneBrain(undefined, { tablePrefix: null })).rejects.toThrow(/conversationManagerConfig\.tablePrefix/);
     await closeMemory();
     await adapter!.close();
     adapter = undefined;
@@ -312,5 +319,49 @@ describe('a turn with no learner on the full runtime', () => {
     await send(agentos, { userId: 'anonymous_user', sessionId: 's-y', textInput: 'Where do I park?' });
     expect(provider.seenMessages.length - before).toBe(2);
     expect(JSON.stringify(provider.seenMessages.slice(before))).not.toContain('ANON-6');
+  });
+});
+
+describe('the same runtime with the learning flag off', () => {
+  it('files and reads under the plain ids, keeps memory_reflect in the pack, and makes no table of the learning store', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    // Self-improvement on, so the facade has memory_reflect to offer.
+    const { os: agentos, db } = await bootOneBrain((shared) => Memory.createWithAdapter(shared, { brainId: 'tutor' }), { learning: false });
+    expect(agentos.getLearningLayer()).toBeUndefined();
+    expect(await agentos.getToolOrchestrator().getTool('memory_reflect')).toBeDefined();
+
+    // The user's words (filed by the GMI), a memory_add, and a compaction (filed by the sink).
+    provider.replies.push(toolCall('memory_add', { content: 'Canary PLAIN-8: rides a bike.' }));
+    provider.completion = compactorAnswer('Canary PLAIN-9: likes rain.');
+    await send(agentos, { userId: 'ana', organizationId: 'A', sessionId: 's-1', textInput: 'Canary PLAIN-7: my bike is red.' });
+    const scopeIdsOf = async (canary: string): Promise<string[]> =>
+      (await tracesOf(db)).filter((row) => row.content.includes(canary)).map((row) => row.scope_id).sort();
+    // The sink files the summary and its fact under the conversation (the session, as the request names none), the
+    // user and persona, and the user, one target after another, and the pipeline does not wait for it.
+    await vi.waitFor(async () => expect(await scopeIdsOf('PLAIN-9')).toEqual(['ana', 'ana', 'ana::tutor', 'ana::tutor', 's-1', 's-1']));
+    provider.completion = 'ok';
+    // The GMI files the user's words under the plain user id, and memory_add files there too.
+    expect(await scopeIdsOf('PLAIN-7')).toEqual(['ana']);
+    expect(await scopeIdsOf('PLAIN-8')).toEqual(['ana']);
+
+    // The user's next session: the retriever reads the sink's summary, and memory_search reads the tool's trace under
+    // the user scope.
+    let before = provider.seenMessages.length;
+    provider.replies.push(toolCall('memory_search', { query: 'bike', scope: 'user' }));
+    await send(agentos, { userId: 'ana', organizationId: 'A', sessionId: 's-2', textInput: 'Does it rain where I ride my bike?' });
+    expect(provider.seenMessages.length - before).toBe(2);
+    expect(JSON.stringify(provider.seenMessages[before])).toContain('PLAIN-9');
+    expect(toolMessagesOf(provider.seenMessages[before + 1])).toContain('PLAIN-8');
+
+    // Another user of the same organization finds none of it.
+    before = provider.seenMessages.length;
+    provider.replies.push(toolCall('memory_search', { query: 'bike', scope: 'user' }));
+    await send(agentos, { userId: 'bo', organizationId: 'A', sessionId: 's-3', textInput: 'Does it rain where I ride my bike?' });
+    expect(provider.seenMessages.length - before).toBe(2);
+    const ofBo = JSON.stringify(provider.seenMessages.slice(before));
+    for (const canary of ['PLAIN-7', 'PLAIN-8', 'PLAIN-9']) expect(ofBo, canary).not.toContain(canary);
+
+    // SQLite's own catalog: no table of the learning store, its ledger included. GLOB reads `_` as itself.
+    expect(await db.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'agentos_learning_*'")).toEqual([]);
   });
 });
