@@ -2,13 +2,16 @@
  * @file review-hardening.spec.ts
  * @description An error's class name and constant code survive onto a line while a credential shape still does not,
  * reading an error never throws, every provider the manager starts is named, a kit refuses a product map that
- * redeclares one of AgentOS's events with other fields, and console capture prints only bounded stack frames.
+ * redeclares one of AgentOS's events with other fields, console capture prints only bounded stack frames, and an event
+ * handle refuses an event AgentOS does not declare.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import pino from 'pino';
 import { createAllowListLogger, captureConsole } from '../../src/core/logging/kit/index.js';
 import { AGENTOS_EVENTS, errorFields, providerName } from '../../src/core/logging/events.js';
+import { lazyLogger, resetLoggerFactory, setLogger } from '../../src/core/logging/loggerFactory.js';
+import { LogValidationError } from '../../src/core/logging/forward.js';
 
 /** An error whose name is set as AgentOS's provider errors set theirs. */
 function named(name: string, code?: unknown): Error {
@@ -100,6 +103,24 @@ describe('the kit', () => {
     }
     expect(() => console.warn(hostile)).not.toThrow();
     expect(lines.at(-1)).toMatchObject({ event: 'console_line', method: 'warn', type: 'unknown', code: 'unknown' });
+    expect(JSON.stringify(lines).includes('private-words-5520')).toBe(false);
+  });
+});
+
+describe('event handles', () => {
+  it('refuse an event AgentOS does not declare, as a JavaScript caller could write one', () => {
+    const lines: Array<Record<string, unknown>> = [];
+    setLogger(pino({ base: undefined, level: 'debug' }, { write(line: string) { lines.push(JSON.parse(line)); } }));
+    cleanup.push(() => resetLoggerFactory());
+    const handle = lazyLogger('fixture') as unknown as { info(event: string, fields: Record<string, unknown>): void };
+    expect(() => handle.info('pack.custom', { text: 'private-words-5520' })).toThrow(LogValidationError);
+    expect(lines).toEqual([]);
+    vi.stubEnv('NODE_ENV', 'production');
+    cleanup.push(() => vi.unstubAllEnvs());
+    handle.info('pack.custom', { text: 'private-words-5520' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ event: 'log_refused', reason: 'unknown_event', level: 40 });
+    expect(lines[0]).not.toHaveProperty('name');
     expect(JSON.stringify(lines).includes('private-words-5520')).toBe(false);
   });
 });
