@@ -824,7 +824,7 @@ export interface AgentOSConfig {
    * the layer.
    * @default false
    */
-  learning?: boolean | LearningConfig;
+  learning?: boolean | LearningConfig | null;
 
   /**
    * Teams a persona's GMI may launch from a turn (`launch_agency`). With `launch: true` the runtime registers the

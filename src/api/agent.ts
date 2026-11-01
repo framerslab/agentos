@@ -346,7 +346,7 @@ export interface AgentOptions extends BaseAgentConfig {
    * personality section as a system prompt of its own on every turn, and each session opened with a user id is
    * bound to a learner. The legacy runtime ignores it.
    */
-  learning?: boolean | LearningConfig;
+  learning?: boolean | LearningConfig | null;
   /**
    * Temporary teams this agent launches from a turn, with `runtime: 'gmi'`: `launch: true` registers the
    * `launch_agency` tool, which runs an `agency()` team on one goal and returns its answer as the call's result, and
