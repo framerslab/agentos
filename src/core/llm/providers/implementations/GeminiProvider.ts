@@ -966,10 +966,11 @@ export class GeminiProvider implements IProvider {
     options: ModelCompletionOptions,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
-    // The stream sends one request (key hops aside) and retries nothing, but
-    // a count that is not a whole number of 1 or more is still refused before
-    // anything is sent.
-    resolveAttemptCount(options.maxAttempts, 1);
+    // The stream sends one request (key hops aside) and retries nothing; the
+    // call's count (or the configured one) bounds it and a retired id's alias
+    // request together, and a count that is not a whole number of 1 or more is
+    // refused before anything is sent.
+    const attempts = resolveAttemptCount(options.maxAttempts, this.config.maxRetries ?? 3);
 
     const payload = this.buildRequestPayload(modelId, messages, options);
     const responseId = `gemini-${modelId}-${Date.now()}`;
@@ -1011,10 +1012,10 @@ export class GeminiProvider implements IProvider {
         // stream from its alias (its chunks carry the alias as modelId). The
         // pinned request spent one of the call's attempts; with none left
         // the 404 ends the stream.
-        const remaining = options.maxAttempts === undefined ? undefined : options.maxAttempts - 1;
-        const alias = remaining === undefined || remaining > 0 ? this.retiredModelAlias(modelId, error) : undefined;
+        const remaining = attempts - 1;
+        const alias = remaining > 0 ? this.retiredModelAlias(modelId, error) : undefined;
         if (!alias) throw error;
-        yield* this.generateCompletionStream(alias, messages, remaining === undefined ? options : { ...options, maxAttempts: remaining });
+        yield* this.generateCompletionStream(alias, messages, { ...options, maxAttempts: remaining });
         return;
       }
     }
