@@ -596,17 +596,22 @@ export class GMIManager {
    * turn's preparation has, 2,000 ms. A layer that fails to open the session, answers with something that is not a
    * session, or has not answered by then never fails the GMI: the GMI gets a session that asks again at each turn
    * (its first turn takes an open that answers late), and until one opens each turn has no learner and the GMI
-   * renders the persona's traits itself, so its tools refuse rather than act as on a host with no layer. Without a
-   * layer the result is empty, and the GMI is built as before the layer existed.
+   * renders the persona's traits itself, so its tools refuse rather than act as on a host with no layer. Until a
+   * session opens, that session names a turn's scope ids by the session's own form, with no learner, and its recorder
+   * and guard try the open; once one opens, every call reaches it. The GMI's memory manager goes to the learner
+   * session, so the layer re-files its Brain, hydrates the learner's scopes into it and reaches it in `forgetUser`.
+   * Without a layer the result is empty, and the GMI is built as before the layer existed.
    *
    * @param effectivePersona - The persona the GMI is initialized with: the registry persona, overlay applied.
    * @param runtimeContext - The GMI's id, its session and the user it is created for.
    * @param source - The registry persona, whether the GMI is a workflow seat, and the turn's organization.
+   * @param memory - The GMI's cognitive memory, when the manager built one.
    */
   private async assembleLearning(
     effectivePersona: IPersonaDefinition,
     runtimeContext: { gmiInstanceId: string; sessionId: string; userId: string },
     source: LearningSource | undefined,
+    memory?: ICognitiveMemoryManager,
   ): Promise<Pick<GMIBaseConfig, 'learning' | 'personaTraits'>> {
     const layer = this.config.learningLayer;
     if (!layer || !source) return {};
@@ -619,7 +624,10 @@ export class GMIManager {
       personaId: source.registryPersona.id,
       authoredTraits: authored,
       ...(overlay ? { overlayTraits: overlay } : {}),
+      ...(memory ? { memory } : {}),
     };
+    // A session that opens later answers a turn's scope ids before it opens by the session's own form.
+    const form = { sessionId: runtimeContext.sessionId, personaId: source.registryPersona.id };
     // Each open lives at most shutdownTimeoutMs, as every wait of the manager on a GMI's session does: a layer that
     // stalls is asked again at a later turn, and never holds a turn or a shutdown past the bound.
     const lifetime = this.config.shutdownTimeoutMs;
@@ -630,7 +638,7 @@ export class GMIManager {
       );
     // Without the turn's organization the session opens at the GMI's first prepared turn, under that turn's.
     if (!source.workflowSeat && source.organizationId === undefined) {
-      return { learning: deferLearnerSession({ traits: authored, open }), personaTraits };
+      return { learning: deferLearnerSession({ traits: authored, open, ...form }), personaTraits };
     }
     const organizationId = (source.organizationId ?? '').trim();
     const openNow = (): Promise<ILearnerSession> =>
@@ -673,10 +681,11 @@ export class GMIManager {
     };
     // Fail closed: the deferred session rejects while the layer cannot open one, so each such turn runs degraded
     // and tells its tools it has no learner.
-    const deferred = deferLearnerSession({ traits: authored, open: () => takeLate() ?? openNow() });
+    const deferred = deferLearnerSession({ traits: authored, open: () => takeLate() ?? openNow(), ...form });
+    // Every call of the deferred session reaches the GMI (a turn's scope ids, its recorder, its guard, the freeze
+    // read): a GMI told none of them would give its tools no recorder and the pipeline no scope ids for its life.
     const learning: ILearnerSession = {
-      prepareTurn: (input) => deferred.prepareTurn(input),
-      currentTraits: () => deferred.currentTraits(),
+      ...deferred,
       endSession: async () => {
         void takeLate()?.then((session) => session.endSession()).catch(() => undefined);
         await deferred.endSession();
@@ -727,7 +736,7 @@ export class GMIManager {
       customSettings: persona.customFields,
       // A GMI waits as long for the turns its shutdown stops as the manager waits for the GMI.
       shutdownTimeoutMs: this.config.shutdownTimeoutMs,
-      ...(await this.assembleLearning(persona, runtimeContext, learningSource)),
+      ...(await this.assembleLearning(persona, runtimeContext, learningSource, cognitiveMemory)),
     };
   }
 
@@ -1067,10 +1076,16 @@ export class GMIManager {
     try {
       await gmi.initialize(persona, config);
     } catch (error: any) {
-      // The GMI never runs, so the learner session made for it ends here; a failure to end it is not the error.
-      await Promise.resolve()
-        .then(() => config.learning?.endSession())
-        .catch(() => undefined);
+      // The GMI never runs, so the learner session made for it ends here, within shutdownTimeoutMs as a shutdown waits
+      // for it; a failure to end it is not the error.
+      const ending = Promise.resolve().then(() => config.learning?.endSession());
+      ending.catch(() => undefined);
+      const bound = this.config.shutdownTimeoutMs;
+      if (!(await settlesWithin(ending, bound).catch(() => true))) {
+        console.warn(
+          `GMIManager (ID: ${this.managerId}): The learner session of the agency seat GMI ${gmiInstanceId}, which failed to initialize, did not end within ${bound} ms; going on without it.`,
+        );
+      }
       throw createGMIErrorFromError(error, GMIErrorCode.GMI_INITIALIZATION_ERROR, { gmiInstanceId }, `Failed to initialize the agency seat GMI ${gmiInstanceId}.`);
     }
     if (!this.isInitialized) {

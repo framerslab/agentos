@@ -7506,6 +7506,10 @@ describe("a turn's memory, filed and read by its scopes, on gmi(), the full runt
   it("recalls only the turn's own scopes on the full runtime: a host's traces under them reach the model, and those under every neighbouring id do not", async () => {
     quiet();
     const { memory } = await memoryOnFile();
+    // A trace under a learner's namespaced id is one a layer-era writer filed, after the Brain's re-file: in a Brain
+    // with no re-file record an id that holds a '/' is a plain one an earlier release wrote, which the runtime's first
+    // learner session re-files into the encoded form.
+    await memory.ensureEncodedScopeIds();
     const fileUnder = (scope: 'user' | 'thread' | 'persona' | 'organization', scopeId: string, word: string) =>
       memory.encode(`Probe ${word}.`, NEUTRAL, 'neutral', { scope, scopeId });
     await fileUnder('user', 'acme/user-1', 'LEARNER-USER');

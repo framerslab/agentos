@@ -63,7 +63,7 @@ import {
 import { GMIManager, GMIManagerConfig } from '../cognition/substrate/GMIManager';
 import { createLearningLayer } from '../cognition/learning/LearningLayer.js';
 import { resolveLearningConfig } from '../cognition/learning/config.js';
-import type { HostLoopName, ILearningLayer, LearningConfig, LoopState } from '../cognition/learning/types.js';
+import type { HostLoopName, ILearningLayer, LearningConfig, LearningMemoryTools, LoopState } from '../cognition/learning/types.js';
 import {
   AIModelProviderManager,
   AIModelProviderManagerConfig,
@@ -783,9 +783,13 @@ export interface AgentOSConfig {
    * did before the layer existed. `true` or a {@link LearningConfig}: every GMI sends its persona's personality section
    * as a system prompt of its own on every turn, and each session is bound to a learner: its persona with the user
    * and the resolved organization of its first turn. `namespace` is refused here, because the runtime takes the
-   * organization from each turn. A host that built a layer itself passes it in `gmiManagerConfig.learningLayer`
-   * instead: a layer passed there turns learning on whatever this option says, and `true` or a config beside one is
-   * refused. {@link AgentOS.getLearningLayer} returns the layer.
+   * organization from each turn. The layer the runtime builds keeps its learning store on `storageAdapter` (SQL when the
+   * adapter has transactions; else in the process), reaches the memory tools' facade and the standalone memory's (its
+   * retriever's and its sink's) for `forgetUser` and `revert`, after any `learning.memoryTools` the host sets, and the
+   * memory tools pack leaves `memory_reflect` out. A host that built a layer itself passes it in
+   * `gmiManagerConfig.learningLayer` instead, with its own store and facades: a layer passed there turns learning on
+   * whatever this option says, and `true` or a config beside one is refused. {@link AgentOS.getLearningLayer} returns
+   * the layer.
    * @default false
    */
   learning?: boolean | LearningConfig;
@@ -1119,6 +1123,8 @@ export class AgentOS implements IAgentOS {
     await this.ragMemoryInitializer.registerMemoryTools(
       this.config.memoryTools,
       extensionLifecycleContext,
+      // The layer is built later, from the same config: whether it will exist is decided here already.
+      { learningLayer: this.learningConfigured() },
     );
 
     let storageAdapter = this.config.storageAdapter;
@@ -1822,6 +1828,12 @@ export class AgentOS implements IAgentOS {
     return this.learningLayer;
   }
 
+  /** Whether the runtime has a learning layer: `learning` on, or a layer passed in `gmiManagerConfig.learningLayer`. */
+  private learningConfigured(): boolean {
+    const option = this.config.learning as boolean | LearningConfig | null | undefined;
+    return (option !== undefined && option !== null && option !== false) || Boolean(this.config.gmiManagerConfig?.learningLayer);
+  }
+
   /**
    * Checks the `learning` option before any service starts: a `LearningConfig` must be valid, `learning.namespace`
    * is refused (the runtime takes each turn's resolved organization), and `learning` and
@@ -1853,15 +1865,31 @@ export class AgentOS implements IAgentOS {
   /**
    * The layer the GMI manager is built with: one built from `learning` (profile `custom`: the runtime has no
    * cognition profile, so rendering is on and the self-change kinds are off unless the config asks for them), or
-   * the one the host passed in `gmiManagerConfig.learningLayer`, or none.
+   * the one the host passed in `gmiManagerConfig.learningLayer`, or none. A layer the runtime builds keeps its store
+   * on the host's own `storageAdapter`, never the provenance-wrapped one, whose write hooks can turn a run() into a
+   * no-op, and reaches the facade of `memoryTools` and the standalone memory's after any `learning.memoryTools`.
    */
   private resolveLearningLayer(): ILearningLayer | undefined {
     const option = this.config.learning as boolean | LearningConfig | null | undefined;
     this.ownsLearningLayer = false;
     // Unset, null or false: no layer of the runtime's own.
     if (option === undefined || option === null || option === false) return this.config.gmiManagerConfig.learningLayer;
+    const config: LearningConfig = option === true ? {} : option;
+    const tools = this.config.memoryTools && this.config.memoryTools.enabled !== false ? this.config.memoryTools.memory : undefined;
+    const standalone =
+      this.config.standaloneMemory && this.config.standaloneMemory.enabled !== false ? this.config.standaloneMemory.memory : undefined;
+    // The host's own facade first, then the memory tools' and the standalone memory's, each once. The layer checks a
+    // facade member by member at run time, so the config's facade types are read through `unknown`.
+    const facades = ([config.memoryTools, tools, standalone] as unknown[]).filter(
+      (facade, index, all) => !!facade && typeof facade === 'object' && all.indexOf(facade) === index,
+    ) as LearningMemoryTools[];
+    const [memoryTools, ...memoryFacades] = facades;
     const layer = createLearningLayer({
-      ...(option === true ? {} : option),
+      ...config,
+      ...(memoryTools ? { memoryTools } : {}),
+      ...(memoryFacades.length > 0 ? { memoryFacades } : {}),
+      // The host's own adapter: the provenance wrap is a local of initialize() and never on the config.
+      ...(this.config.storageAdapter ? { storageAdapter: this.config.storageAdapter } : {}),
       profile: 'custom',
       surface: 'runtime',
       hostLoops: this.describeHostLoops(),
