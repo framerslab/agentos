@@ -45,6 +45,8 @@ function topLevelKeys(source: string, start: number): string[] {
     if (ch === '"' || ch === "'" || ch === '`') {
       const end = source.indexOf(ch, i + 1);
       if (end < 0) break;
+      // A quoted property name (`"output": x`) is a key like an unquoted one.
+      if (depth === 1 && expectKey && ch !== '`' && /^\s*:/.test(source.slice(end + 1))) keys.push(source.slice(i + 1, end));
       i = end;
       expectKey = false;
       continue;
@@ -77,7 +79,8 @@ function topLevelKeys(source: string, start: number): string[] {
       continue;
     }
     if (depth === 1 && expectKey && /[A-Za-z_$]/.test(ch)) {
-      const key = source.slice(i).match(/^[A-Za-z_$][\w$]*(?=\s*:)/);
+      // `name: value` and the shorthand `name,` or `name }` both set `name`.
+      const key = source.slice(i).match(/^[A-Za-z_$][\w$]*(?=\s*(?:[:,}]|\/[/*]))/);
       if (key) keys.push(key[0]);
       expectKey = false;
     }
