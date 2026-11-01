@@ -84,8 +84,6 @@ interface SpeechRequest {
   requested: boolean;
   /** Set by its `response.created`. Audio is matched to the reply by this id. */
   responseId?: string;
-  /** Settles the reply's `flush()`. */
-  settle: () => void;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -114,6 +112,10 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
   private pendingText = '';
   /** The replies waiting to be spoken, oldest first. Only the first has a response. */
   private requests: SpeechRequest[] = [];
+  /** The flushes not yet settled. Each settles when no reply is left, or at a cut or a close. */
+  private waiting: Array<() => void> = [];
+  /** Whether the last reply to end was spoken: a drain after one that failed emits no `'flush_complete'`. */
+  private lastReplySpoken = true;
   /** Tags of responses cut before `response.created` named them: each is cancelled when it comes. */
   private readonly cutBeforeNamed = new Set<string>();
   private lastTag = 0;
@@ -145,12 +147,12 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
         reject(err);
         ws.terminate();
       };
-      const timeoutMs = this.config.connectTimeoutMs ?? 10_000;
-      const timer = setTimeout(() => fail(new Error(`OpenAI Realtime session setup timed out after ${timeoutMs} ms`)), timeoutMs);
-
+      // Built first: a URL it refuses throws here, which rejects with no timer armed and no socket to end.
       const ws = new WebSocket(url, {
         headers: { Authorization: `Bearer ${this.config.apiKey}` },
       });
+      const timeoutMs = this.config.connectTimeoutMs ?? 10_000;
+      const timer = setTimeout(() => fail(new Error(`OpenAI Realtime session setup timed out after ${timeoutMs} ms`)), timeoutMs);
       this.ws = ws;
 
       ws.on('error', (err: Error) => {
@@ -205,9 +207,10 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
   }
 
   /**
-   * Asks for the text pushed since the last flush to be spoken. Replies run one at a time, in order. Settles when the
-   * reply ends, is cut or fails, or the session closes. Only a reply that ended emits `'flush_complete'`; a flush with
-   * no text emits it when the replies before it have ended, and asks the server for nothing.
+   * Asks for the text pushed since the last flush to be spoken. Replies run one at a time, in order. `'flush_complete'`
+   * means what the contract says, that all queued text has been spoken: it comes when the last reply ends with no text
+   * waiting, so a `StreamingTTSChain` keeps the text of a reply still queued for its replay. A flush settles when no
+   * reply is left, or at a cut or a close. A flush with no text asks the server for nothing.
    */
   async flush(): Promise<void> {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
@@ -215,26 +218,28 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
     const text = this.pendingText;
     this.pendingText = '';
     return new Promise<void>((resolve) => {
-      this.requests.push({ tag: String(++this.lastTag), text, requested: false, settle: resolve });
+      this.waiting.push(resolve);
+      this.requests.push({ tag: String(++this.lastTag), text, requested: false });
       this.startNext();
     });
   }
 
   /**
-   * Drops the pending text and every reply, settling each flush without `'flush_complete'`. A response in progress is
+   * Drops the pending text and every reply, and settles every flush without `'flush_complete'`. A response in progress is
    * cancelled by its id, which reaches a response outside the default conversation as a bare `response.cancel` does not.
    * With no response in progress nothing is sent. Frames of a cut response are dropped by their id, so its late audio is
    * not emitted and its `response.done` completes nothing of the next reply.
    */
   cancel(): void {
     this.pendingText = '';
+    this.lastReplySpoken = true;
     const cut = this.requests;
     this.requests = [];
     for (const request of cut) {
       this.stopTimer(request);
       if (request.requested) this.stopResponse(request);
-      request.settle();
     }
+    this.settleWaiting();
   }
 
   close(): void {
@@ -266,7 +271,7 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
     else console.warn(`[openai-realtime] ${warning.message}`);
   }
 
-  /** Sends the first waiting reply's request, passing over replies with no text to speak. */
+  /** Sends the first waiting reply's request, passing over replies with no text to speak; with none left, the flushes end. */
   private startNext(): void {
     for (let request = this.requests[0]; request && !request.requested; request = this.requests[0]) {
       if (request.text.trim()) {
@@ -286,9 +291,19 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
         return;
       }
       this.requests.shift();
-      this.emit('flush_complete');
-      request.settle();
     }
+    if (this.requests.length) return;
+    const spoken = this.lastReplySpoken;
+    this.lastReplySpoken = true;
+    if (spoken && !this.pendingText) this.emit('flush_complete');
+    this.settleWaiting();
+  }
+
+  /** Settles every flush not yet settled. */
+  private settleWaiting(): void {
+    const waiting = this.waiting;
+    this.waiting = [];
+    for (const settle of waiting) settle();
   }
 
   /** The id of a reply's `response.create`, which an `error` frame that refuses it names. */
@@ -303,8 +318,8 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
       if (this.requests[0] !== request) return;
       this.requests.shift();
       this.stopResponse(request);
+      this.lastReplySpoken = false;
       this.reportError(new Error(`OpenAI Realtime response sent nothing for ${timeoutMs} ms`));
-      request.settle();
       this.startNext();
     }, timeoutMs);
   }
@@ -325,15 +340,13 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
     }
   }
 
-  /** Settles every waiting flush, for a session that is closing. */
+  /** Drops every reply and settles every flush, for a session that is closing. */
   private settleAll(): void {
     const requests = this.requests;
     this.requests = [];
     this.cutBeforeNamed.clear();
-    for (const request of requests) {
-      this.stopTimer(request);
-      request.settle();
-    }
+    for (const request of requests) this.stopTimer(request);
+    this.settleWaiting();
   }
 
   private _handleMessage(msg: RealtimeServerEvent): void {
@@ -374,26 +387,23 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
         this.requests.shift();
         this.stopTimer(refused);
       }
+      if (refused) this.lastReplySpoken = false;
       this.reportError(new Error(String(msg.error?.message ?? 'Unknown error')));
-      if (refused) {
-        refused.settle();
-        this.startNext();
-      }
+      if (refused) this.startNext();
     }
   }
 
-  /** Ends the reply at its `response.done`: `completed` completes it, `incomplete` warns and completes what was said, and any other status fails it. */
+  /** Ends the reply at its `response.done`: `completed` is spoken, `incomplete` warns and counts what was said, and any other status fails it. */
   private endReply(request: SpeechRequest, msg: RealtimeServerEvent): void {
     this.requests.shift();
     this.stopTimer(request);
     const status = msg.response?.status;
-    if (status === 'completed' || status === 'incomplete') {
-      if (status === 'incomplete') this.reportWarning(new Error('OpenAI Realtime response ended before all of its text was spoken'));
-      this.emit('flush_complete');
-    } else {
+    this.lastReplySpoken = status === 'completed' || status === 'incomplete';
+    if (status === 'incomplete') {
+      this.reportWarning(new Error('OpenAI Realtime response ended before all of its text was spoken'));
+    } else if (!this.lastReplySpoken) {
       this.reportError(new Error(String(msg.response?.status_details?.error?.message ?? `OpenAI Realtime response ended with status ${status}`)));
     }
-    request.settle();
     this.startNext();
   }
 }
