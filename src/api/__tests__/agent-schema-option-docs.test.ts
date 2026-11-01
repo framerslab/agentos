@@ -82,21 +82,25 @@ function agentExampleKeys(block: string): string[][] {
   return [...block.matchAll(/(?<![\w.$])agent\(\s*\{/g)].map((match) => topLevelKeys(block, match.index + match[0].length - 1));
 }
 
+/** The agent() examples in one source that set `output` at their top level. */
+function outputOffenders(file: string, text: string): string[] {
+  const offenders: string[] = [];
+  for (const block of fencedBlocks(text)) {
+    for (const keys of agentExampleKeys(block)) {
+      if (keys.includes('output')) offenders.push(`${file}: agent({ ${keys.join(', ')} })`);
+    }
+  }
+  if (/(?<![\w.$])agent\(\{\s*output\s*:/.test(text)) offenders.push(`${file}: inline agent({ output: ... })`);
+  return offenders;
+}
+
 describe('agent() examples name the schema option agent() applies', () => {
   it('agent() does not apply `output`, so an example that sets it validates nothing', () => {
     expect(getCapabilitySupport('agent', 'output')).toBe('accepted_but_deferred');
   });
 
   it('no agent() example in the TSDoc, the README or the guides sets `output`', () => {
-    const offenders: string[] = [];
-    for (const { file, text } of documentedSources()) {
-      for (const block of fencedBlocks(text)) {
-        for (const keys of agentExampleKeys(block)) {
-          if (keys.includes('output')) offenders.push(`${file}: agent({ ${keys.join(', ')} })`);
-        }
-      }
-      if (/(?<![\w.$])agent\(\{\s*output\s*:/.test(text)) offenders.push(`${file}: inline agent({ output: ... })`);
-    }
+    const offenders = documentedSources().flatMap(({ file, text }) => outputOffenders(file, text));
     expect(offenders).toEqual([]);
   });
 
@@ -105,5 +109,27 @@ describe('agent() examples name the schema option agent() applies', () => {
     const example = fencedBlocks(source?.text ?? '').find((block) => block.includes('routerParams:'));
     expect(example).toBeDefined();
     expect(agentExampleKeys(example ?? '')).toEqual([['name', 'router', 'routerParams', 'responseSchema']]);
+  });
+});
+
+describe('the agent() example scan', () => {
+  it('finds `output` after a block comment in a fenced example', () => {
+    const text = "```ts\nconst a = agent({ name: 'A', /* the schema */ output: schema });\n```\n";
+    expect(outputOffenders('guide.md', text)).toEqual(['guide.md: agent({ name, output })']);
+  });
+
+  it('finds `output` after another key in an unfenced example', () => {
+    const text = "Call `agent({ provider: 'openai', output: schema })` to get a parsed reply.\n";
+    expect(outputOffenders('guide.md', text)).toEqual(['guide.md: agent({ provider, output })']);
+  });
+
+  it('passes examples that name responseSchema', () => {
+    const text = [
+      '```ts',
+      "agent({ name: 'A', /* the schema */ responseSchema: schema });",
+      '```',
+      "Call `agent({ provider: 'openai', responseSchema: schema })` to get a parsed reply.",
+    ].join('\n');
+    expect(outputOffenders('guide.md', text)).toEqual([]);
   });
 });
