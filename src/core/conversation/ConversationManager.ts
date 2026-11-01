@@ -18,15 +18,21 @@ import { uuidv4 } from '../utils/uuid.js';
 import { GMIError, GMIErrorCode } from '../utils/errors.js';
 import { createLogger } from '../logging/index.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
-import { ensureConversationTables, isPostgresAdapter } from './conversationTables';
 import {
-  INSERT_MESSAGE_SQL,
-  REPLACE_MESSAGE_SQL,
-  SELECT_MESSAGES_SQL,
-  UPDATE_MESSAGE_SQL,
+  ConversationTableConflictError,
+  conversationTableNames,
+  ensureConversationTables,
+  isPostgresAdapter,
+  type ConversationTableNames,
+} from './conversationTables';
+import {
+  insertMessageSql,
   messageFromRow,
   messageRowValues,
   readNumber,
+  replaceMessageSql,
+  selectMessagesSql,
+  updateMessageSql,
   updateMessageValues,
   type ConversationMessageRow,
 } from './conversationRows';
@@ -42,6 +48,7 @@ import {
  * might be implemented to evict conversations inactive for this duration. (Currently conceptual)
  * @property {boolean} [persistenceEnabled=true] - Controls whether storage adapter is used for database persistence of conversations.
  * If true, a StorageAdapter instance must be provided during initialization.
+ * @property {string} [tablePrefix=''] - A prefix for the names of the two tables conversations are persisted in.
  */
 export interface ConversationManagerConfig {
   defaultConversationContextConfig?: Partial<ConversationContextConfig>;
@@ -56,6 +63,16 @@ export interface ConversationManagerConfig {
    * This is intended to support provenance "sealed" mode / immutability guarantees.
    */
   appendOnlyPersistence?: boolean;
+  /**
+   * A prefix for the names of the two tables conversations are persisted in: `<prefix>conversations` and
+   * `<prefix>conversation_messages`, and their indexes. Unset or empty keeps `conversations` and
+   * `conversation_messages`. Set one where the storage adapter holds another component's table of either name: a
+   * memory Brain on the same database makes a `conversations` table of its own, with other columns, and
+   * `SqlStorageAdapter` makes one too. Letters, digits and underscores, starting with a letter or an underscore, at
+   * most 32 characters (`'agentos_'`, for one). Changing it on a database that holds conversations leaves them in the
+   * tables of the old name.
+   */
+  tablePrefix?: string;
 }
 
 /**
@@ -96,6 +113,9 @@ export class ConversationManager {
    */
   private storageAdapter?: StorageAdapter;
 
+  /** The names of the two tables, under the configured prefix. */
+  private tables: ConversationTableNames = conversationTableNames();
+
   /**
    * Flag indicating if the manager has been successfully initialized.
    * @private
@@ -132,7 +152,9 @@ export class ConversationManager {
    * @param {StorageAdapter} [storageAdapter] - Optional storage adapter for database persistence.
    * Required if `config.persistenceEnabled` is true.
    * @returns {Promise<void>} A promise that resolves when initialization is complete.
-   * @throws {GMIError} If configuration is invalid or dependencies are missing when required.
+   * @throws {GMIError} If configuration is invalid or dependencies are missing when required: `CONFIGURATION_ERROR`
+   * for a `tablePrefix` that is not a plain name, or for a table of either name on the storage adapter that another
+   * component made (the message names `tablePrefix`); `DATABASE_ERROR` when the tables cannot be made.
    */
   public async initialize(
     config: ConversationManagerConfig,
@@ -150,7 +172,13 @@ export class ConversationManager {
       inactivityTimeoutMs: config.inactivityTimeoutMs ?? 3600000, // 1 hour
       persistenceEnabled: config.persistenceEnabled ?? true, // Default to true
       appendOnlyPersistence: config.appendOnlyPersistence ?? false,
+      tablePrefix: config.tablePrefix ?? '',
     };
+    try {
+      this.tables = conversationTableNames(this.config.tablePrefix);
+    } catch (error: any) {
+      throw new GMIError(error.message, GMIErrorCode.CONFIGURATION_ERROR, { tablePrefix: this.config.tablePrefix });
+    }
 
     this.utilityAIService = utilityAIService;
     this.storageAdapter = this.config.persistenceEnabled ? storageAdapter : undefined;
@@ -163,7 +191,7 @@ export class ConversationManager {
     // Initialize schema if persistence is enabled
     if (this.config.persistenceEnabled && this.storageAdapter) {
       try {
-        const { addedColumns, widenedColumns } = await ensureConversationTables(this.storageAdapter);
+        const { addedColumns, widenedColumns } = await ensureConversationTables(this.storageAdapter, this.tables);
         if (addedColumns.length > 0 || widenedColumns > 0) {
           createLogger('ConversationManager').info('Brought the conversation tables up to date', {
             addedColumns: addedColumns.join(','),
@@ -172,6 +200,9 @@ export class ConversationManager {
         }
         console.log(`ConversationManager (ID: ${this.managerId}): Schema initialized.`);
       } catch (error: any) {
+        if (error instanceof ConversationTableConflictError) {
+          throw new GMIError(error.message, GMIErrorCode.CONFIGURATION_ERROR, { table: error.table });
+        }
         console.error(`ConversationManager (ID: ${this.managerId}): Failed to initialize schema:`, error);
         throw new GMIError(`Failed to initialize conversation schema.`, GMIErrorCode.DATABASE_ERROR, { underlyingError: error.message });
       }
@@ -331,9 +362,9 @@ export class ConversationManager {
 
     if (this.config.persistenceEnabled && this.storageAdapter) {
       try {
-        await this.storageAdapter.run('DELETE FROM conversations WHERE id = ?', [conversationId]);
+        await this.storageAdapter.run(`DELETE FROM ${this.tables.conversations} WHERE id = ?`, [conversationId]);
         // Messages are deleted via CASCADE, but explicit delete for safety
-        await this.storageAdapter.run('DELETE FROM conversation_messages WHERE conversation_id = ?', [conversationId]);
+        await this.storageAdapter.run(`DELETE FROM ${this.tables.messages} WHERE conversation_id = ?`, [conversationId]);
       } catch (error: any) {
         console.error(`ConversationManager (ID: ${this.managerId}): Error deleting conversation ${conversationId} from DB:`, error);
         throw new GMIError(`Failed to delete conversation ${conversationId} from database.`, GMIErrorCode.DATABASE_ERROR, { underlyingError: error.message });
@@ -360,7 +391,7 @@ export class ConversationManager {
     if (this.config.persistenceEnabled && this.storageAdapter) {
       try {
         const dbConvo = await this.storageAdapter.get<{ id: string; created_at: number | string }>(
-          'SELECT id, created_at FROM conversations WHERE id = ?',
+          `SELECT id, created_at FROM ${this.tables.conversations} WHERE id = ?`,
           [sessionId]
         );
         if (dbConvo) {
@@ -393,7 +424,7 @@ export class ConversationManager {
       try {
         if (this.config.appendOnlyPersistence) {
           const row = await this.storageAdapter.get<{ last_ts: number | string | null }>(
-            'SELECT MAX(timestamp) AS last_ts FROM conversation_messages WHERE conversation_id = ?',
+            `SELECT MAX(timestamp) AS last_ts FROM ${this.tables.messages} WHERE conversation_id = ?`,
             [conversationId]
           );
           const lastMessageAt = readNumber(row?.last_ts);
@@ -401,13 +432,13 @@ export class ConversationManager {
             return lastMessageAt;
           }
           const convo = await this.storageAdapter.get<{ created_at: number | string }>(
-            'SELECT created_at FROM conversations WHERE id = ?',
+            `SELECT created_at FROM ${this.tables.conversations} WHERE id = ?`,
             [conversationId]
           );
           return readNumber(convo?.created_at);
         }
         const convo = await this.storageAdapter.get<{ updated_at: number | string }>(
-          'SELECT updated_at FROM conversations WHERE id = ?',
+          `SELECT updated_at FROM ${this.tables.conversations} WHERE id = ?`,
           [conversationId]
         );
         return readNumber(convo?.updated_at);
@@ -498,13 +529,13 @@ export class ConversationManager {
         // Upsert conversation (cross-platform compatible)
         // Check if exists first, then INSERT or UPDATE (unless append-only).
         const existing = await tx.get<{ id: string }>(
-          'SELECT id FROM conversations WHERE id = ?',
+          `SELECT id FROM ${this.tables.conversations} WHERE id = ?`,
           [conversationData.id]
         );
 
         if (!existing) {
           await tx.run(
-            `INSERT INTO conversations (id, user_id, gmi_instance_id, title, language, session_details, is_archived, tags, created_at, updated_at)
+            `INSERT INTO ${this.tables.conversations} (id, user_id, gmi_instance_id, title, language, session_details, is_archived, tags, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               conversationData.id,
@@ -521,7 +552,7 @@ export class ConversationManager {
           );
         } else if (!this.config.appendOnlyPersistence) {
           await tx.run(
-            `UPDATE conversations SET
+            `UPDATE ${this.tables.conversations} SET
              user_id = ?, gmi_instance_id = ?, title = ?, language = ?, session_details = ?,
              is_archived = ?, tags = ?, updated_at = ?
              WHERE id = ?`,
@@ -548,16 +579,16 @@ export class ConversationManager {
 
           if (this.config.appendOnlyPersistence || postgres) {
             const existingMsg = await tx.get<{ id: string }>(
-              'SELECT id FROM conversation_messages WHERE id = ?',
+              `SELECT id FROM ${this.tables.messages} WHERE id = ?`,
               [values[0]]
             );
             if (!existingMsg) {
-              await tx.run(INSERT_MESSAGE_SQL, values);
+              await tx.run(insertMessageSql(this.tables.messages), values);
             } else if (!this.config.appendOnlyPersistence) {
-              await tx.run(UPDATE_MESSAGE_SQL, updateMessageValues(values));
+              await tx.run(updateMessageSql(this.tables.messages), updateMessageValues(values));
             }
           } else {
-            await tx.run(REPLACE_MESSAGE_SQL, values);
+            await tx.run(replaceMessageSql(this.tables.messages), values);
           }
         }
       });
@@ -592,11 +623,11 @@ export class ConversationManager {
         tags: string;
         created_at: number | string;
         updated_at: number | string;
-      }>('SELECT * FROM conversations WHERE id = ?', [conversationId]);
+      }>(`SELECT * FROM ${this.tables.conversations} WHERE id = ?`, [conversationId]);
 
       if (!convoData) return undefined;
 
-      const messages = await this.storageAdapter.all<ConversationMessageRow>(SELECT_MESSAGES_SQL, [conversationId]);
+      const messages = await this.storageAdapter.all<ConversationMessageRow>(selectMessagesSql(this.tables.messages), [conversationId]);
       const internalMessages: InternalConversationMessage[] = messages.map(messageFromRow);
 
       const sessionMetadataFromDB = JSON.parse(convoData.session_details || '{}') as Record<string, any>;
