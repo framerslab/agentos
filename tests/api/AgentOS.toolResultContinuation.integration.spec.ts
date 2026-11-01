@@ -674,7 +674,12 @@ describe('AgentOS tool-result continuations', () => {
      */
     async function shippedGmi(
       replies: ModelReply[],
-      options: { sources?: RagRetrievedChunk[]; gmiConfig?: Record<string, unknown> } = {},
+      options: {
+        sources?: RagRetrievedChunk[];
+        gmiConfig?: Record<string, unknown>;
+        /** Providers besides the persona's, by id: the provider manager serves each model call from the provider it names. */
+        providers?: Record<string, unknown>;
+      } = {},
     ) {
       const { provider, promptCalls } = scriptedProvider(replies);
       const sources = options.sources;
@@ -694,14 +699,24 @@ describe('AgentOS tool-result continuations', () => {
         ...(sources ? { retrievalAugmentor: { augmenterId: 'stub-retrieval', retrieveContext } as any } : {}),
         promptEngine: historyPromptEngine(),
         llmProviderManager: {
-          getModelInfo: vi.fn().mockResolvedValue({
-            modelId: 'mock-model',
-            providerId: 'mock-provider',
-            contextWindowSize: 8192,
-            capabilities: ['chat', 'tool_use'],
-            supportsStreaming: true,
-          }),
-          getProvider: vi.fn().mockReturnValue(provider),
+          getModelInfo: options.providers
+            ? vi.fn(async (modelId: string, providerId?: string) => ({
+                modelId,
+                providerId: providerId ?? 'mock-provider',
+                contextWindowSize: 8192,
+                capabilities: ['chat', 'tool_use'],
+                supportsStreaming: true,
+              }))
+            : vi.fn().mockResolvedValue({
+                modelId: 'mock-model',
+                providerId: 'mock-provider',
+                contextWindowSize: 8192,
+                capabilities: ['chat', 'tool_use'],
+                supportsStreaming: true,
+              }),
+          getProvider: options.providers
+            ? vi.fn((providerId: string) => options.providers?.[providerId] ?? provider)
+            : vi.fn().mockReturnValue(provider),
           getProviderForModel: vi.fn().mockReturnValue({ providerId: 'mock-provider' }),
         } as any,
         utilityAI: { summarize: vi.fn(), parseJsonSafe: vi.fn() } as any,
@@ -727,9 +742,9 @@ describe('AgentOS tool-result continuations', () => {
      * Runs the user's turn on the host's GMI and waits for the pause it saves for READ_CALL: a turn saves its pause
      * after it streams the call.
      */
-    async function pauseOnRead(host: ReturnType<typeof hostToolGmi>) {
+    async function pauseOnRead(host: ReturnType<typeof hostToolGmi>, request: Partial<AgentOSInput> = {}) {
       sessionGmi = host;
-      const responses = await collect(agentos.processRequest(input));
+      const responses = await collect(agentos.processRequest({ ...input, ...request }));
       const request = responses.find((r) => isActionableToolCallRequestChunk(r));
       expect(request?.toolCalls).toEqual([READ_CALL]);
       await vi.waitFor(() => expect(context.getMetadata(AGENTOS_PENDING_EXTERNAL_TOOL_REQUEST_METADATA_KEY)).toBeDefined());
@@ -985,6 +1000,46 @@ describe('AgentOS tool-result continuations', () => {
       expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
       expect(last.finalResponseText).toBe('The command was refused.');
       expect(continuation.some((r) => isActionableToolCallRequestChunk(r))).toBe(false);
+      expect(await rt.pending()).toBeNull();
+    },
+  );
+
+  it.each([
+    ['on the stream', 'stream'],
+    ['resumed from the saved pause on a GMI that ran none of the turn', 'resume'],
+  ] as const)(
+    "a continuation %s sends its model call to the provider and model the turn named, over the persona's",
+    async (_label, path) => {
+      const rt = await runtime(`conv-continuation-provider-${path}`);
+      const named = { preferredProviderId: 'anthropic', preferredModelId: 'claude-sonnet-4-0' };
+      const anthropic = scriptedProvider(
+        path === 'stream' ? [{ text: 'I will read the notes file first.' }, { text: 'From Anthropic.' }] : [{ text: 'From Anthropic.' }],
+      );
+      anthropic.provider.providerId = 'anthropic';
+      // the persona's provider scripts no reply: a model call that reaches it fails the turn
+      const { gmi, provider } = await rt.shippedGmi([], { providers: { anthropic: anthropic.provider } });
+
+      let continuation: AgentOSResponse[];
+      if (path === 'stream') {
+        // the shipped GMI runs the user's turn on the provider it names; the host stops the turn for READ_CALL
+        const { request } = await rt.pauseOnRead(hostOverShippedGmi(gmi), { options: named });
+        continuation = await collect(
+          rt.agentos.handleToolResult(request.streamId, READ_CALL.id, READ_CALL.name, READ_RESULT.toolOutput, true),
+        );
+      } else {
+        // the turn the host stopped ran on another GMI; the resume names the provider and model again, as a host does
+        const { saved } = await rt.pauseOnRead(hostToolGmi(), { options: named });
+        rt.useGmi(gmi);
+        continuation = await collect(rt.agentos.resumeExternalToolRequest(saved, [READ_RESULT], named));
+      }
+
+      expect(provider.generateCompletionStream).not.toHaveBeenCalled();
+      expect(anthropic.provider.generateCompletionStream.mock.calls.map((call: unknown[]) => call[0])).toEqual(
+        path === 'stream' ? ['claude-sonnet-4-0', 'claude-sonnet-4-0'] : ['claude-sonnet-4-0'],
+      );
+      const last = continuation.at(-1) as AgentOSFinalResponseChunk;
+      expect(last.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+      expect(last.finalResponseText).toBe('From Anthropic.');
       expect(await rt.pending()).toBeNull();
     },
   );

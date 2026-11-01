@@ -197,6 +197,21 @@ function toolCallGateOf(turnInput: GMITurnInput): GMIToolCallGate | undefined {
   return typeof gate === 'function' ? gate : undefined;
 }
 
+/** The model and the provider a turn names in `metadata.options` (`preferredModelId`, `preferredProviderId`). */
+interface TurnModelSelection {
+  modelId?: string;
+  providerId?: string;
+}
+
+/** The model and the provider a turn names; each undefined when it names none. */
+function modelSelectionOf(turnInput: GMITurnInput): TurnModelSelection {
+  const options = turnInput.metadata?.options;
+  const named = (value: unknown): string | undefined => (typeof value === 'string' && value ? value : undefined);
+  const modelId = named(options?.preferredModelId);
+  const providerId = named(options?.preferredProviderId);
+  return { ...(modelId ? { modelId } : {}), ...(providerId ? { providerId } : {}) };
+}
+
 /**
  * `gate`, asked beside `sources` as well as the sources of the call it is asked about: the gate a turn's tool call
  * carries (`callerTurn.toolCallGate`), so a team the call launches has its seats' calls judged beside what the
@@ -316,6 +331,13 @@ export class GMI implements IGMI {
    * continuation that names no gate asks this one.
    */
   private turnToolCallGate: GMIToolCallGate | undefined;
+
+  /**
+   * The model and the provider the turn named (`metadata.options.preferredModelId` and `preferredProviderId`). Set
+   * when a user turn starts; a tool continuation that names neither calls the model and the provider of the turn it
+   * continues.
+   */
+  private turnModelSelection: TurnModelSelection = {};
 
   /**
    * The launched team the turn sits in, when the turn named one (`metadata.agencyLaunch`). Set when a user turn starts;
@@ -715,9 +737,8 @@ export class GMI implements IGMI {
     // whose host passed one): the session is asked again and reads it as a turn of that organization.
     if (continuation && this.turnLearning && this.turnLearning.namespace === namespace) return this.turnLearning;
 
-    const preferredModelId = turnInput.metadata?.options?.preferredModelId;
     const modelId =
-      (typeof preferredModelId === 'string' && preferredModelId) ||
+      this.modelSelectionFor(turnInput).modelId ||
       this.activePersona.defaultModelId ||
       this.config.defaultLlmModelId;
     const answer = await answerWithin(
@@ -837,6 +858,17 @@ export class GMI implements IGMI {
 
     const sessionId = typeof turnInput.sessionId === 'string' ? turnInput.sessionId.trim() : '';
     return sessionId || undefined;
+  }
+
+  /**
+   * The model and the provider `turnInput` calls: the ones it names, else, for a tool continuation that names neither,
+   * the ones of the turn it continues. The pair is taken whole, so a continuation that names one of them never calls
+   * it beside the other of its turn.
+   */
+  private modelSelectionFor(turnInput: GMITurnInput): TurnModelSelection {
+    const named = modelSelectionOf(turnInput);
+    if (named.modelId || named.providerId) return named;
+    return turnInput.metadata?.isToolContinuation === true ? this.turnModelSelection : {};
   }
 
   private getOrganizationIdForTurn(turnInput: GMITurnInput): string | undefined {
@@ -1096,6 +1128,7 @@ export class GMI implements IGMI {
         this.turnResolution = undefined;
         this.turnMemoryScope = undefined;
         this.turnToolCallGate = undefined;
+        this.turnModelSelection = {};
         this.turnLearning = undefined;
         this.turnRagSources = undefined;
       }
@@ -1298,6 +1331,7 @@ export class GMI implements IGMI {
       this.turnMemoryScope = memoryScopeOf(turnInput);
       this.turnLearning = undefined;
       this.turnToolCallGate = toolCallGateOf(turnInput);
+      this.turnModelSelection = modelSelectionOf(turnInput);
       this.turnLaunchFrame = launchFrameOf(turnInput);
       this.turnRagSources = undefined;
     }
@@ -1623,15 +1657,13 @@ export class GMI implements IGMI {
         };
 
         const gateway = this.config.completionGateway;
-        const preferredModelIdFromInput = turnInput.metadata?.options?.preferredModelId as string | undefined;
-        const modelIdToUse = preferredModelIdFromInput || this.activePersona.defaultModelId || this.config.defaultLlmModelId;
-        // The turn's provider (AgentOSInput.options.preferredProviderId) over the persona's and the config's default,
-        // as the model id above: a host that picks a model of another provider names that provider with it.
-        const preferredProviderIdFromInput = turnInput.metadata?.options?.preferredProviderId;
+        // The turn's model and provider (AgentOSInput.options.preferredModelId and preferredProviderId) over the
+        // persona's and the config's default: a host that picks a model of another provider names that provider with
+        // it. A tool continuation that names neither calls those of the turn it continues.
+        const turnSelection = this.modelSelectionFor(turnInput);
+        const modelIdToUse = turnSelection.modelId || this.activePersona.defaultModelId || this.config.defaultLlmModelId;
         const providerIdForModel =
-          (typeof preferredProviderIdFromInput === 'string' && preferredProviderIdFromInput) ||
-          this.activePersona.defaultProviderId ||
-          this.config.defaultLlmProviderId;
+          turnSelection.providerId || this.activePersona.defaultProviderId || this.config.defaultLlmProviderId;
 
         if (!modelIdToUse) {
             throw new GMIError("Could not determine modelId for LLM call.", GMIErrorCode.CONFIGURATION_ERROR, { turnId });
@@ -2374,6 +2406,14 @@ export class GMI implements IGMI {
               ? { organizationId: this.reasoningTrace.organizationId }
               : {}),
             ...(options?.toolCallGate ? { toolCallGate: options.toolCallGate } : {}),
+            ...(options?.preferredModelId || options?.preferredProviderId
+              ? {
+                  options: {
+                    ...(options.preferredModelId ? { preferredModelId: options.preferredModelId } : {}),
+                    ...(options.preferredProviderId ? { preferredProviderId: options.preferredProviderId } : {}),
+                  },
+                }
+              : {}),
         }
     };
     
