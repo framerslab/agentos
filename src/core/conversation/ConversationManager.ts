@@ -70,7 +70,9 @@ export interface ConversationManagerConfig {
    * memory Brain on the same database makes a `conversations` table of its own, with other columns, and
    * `SqlStorageAdapter` makes one too. Letters, digits and underscores, starting with a letter or an underscore, at
    * most 32 characters (`'agentos_'`, for one). Changing it on a database that holds conversations leaves them in the
-   * tables of the old name.
+   * tables of the old name. A provenance storage policy that lists the tables it protects lists the prefixed names:
+   * `AgentOS.initialize()` refuses one that protects `conversations` or `conversation_messages` and not the table of
+   * that kind under the prefix.
    */
   tablePrefix?: string;
 }

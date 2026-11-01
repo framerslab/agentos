@@ -88,6 +88,9 @@ import {
   ConversationManager,
   ConversationManagerConfig,
 } from '../core/conversation/ConversationManager';
+import { conversationTableNames, type ConversationTableNames } from '../core/conversation/conversationTables';
+import { isTableProtected } from '../safety/provenance/enforcement/ProvenanceStorageHooks.js';
+import type { StoragePolicyConfig } from '../safety/provenance/types.js';
 import { ConversationContext } from '../core/conversation/ConversationContext';
 import type { IRollingSummaryMemorySink } from '../core/conversation/IRollingSummaryMemorySink';
 import type { ILongTermMemoryRetriever } from '../core/conversation/ILongTermMemoryRetriever';
@@ -316,6 +319,35 @@ function wrapStorageAdapterWithWriteHooks(
       : undefined,
     prepare: adapter.prepare ? (statement) => adapter.prepare!(statement) : undefined,
   };
+}
+
+/**
+ * The runtime's conversation tables that a provenance storage policy protects under their default names
+ * (`conversations`, `conversation_messages`) and would not protect under the names
+ * `conversationManagerConfig.tablePrefix` gives them: a policy names the tables it protects exactly, as the sealed
+ * profiles do. A table the policy exempts by its prefixed name is the host's choice and is not listed.
+ *
+ * @returns The prefixed names the policy leaves out; empty when the policy enforces nothing, the conversations are not
+ *   persisted, there is no prefix, or the prefix is not a plain name (the conversation manager refuses that itself).
+ */
+function conversationTablesLeftUnprotected(policy: StoragePolicyConfig, config: ConversationManagerConfig | undefined): string[] {
+  if (policy.mode === 'mutable' || config?.persistenceEnabled === false) return [];
+  let names: ConversationTableNames;
+  try {
+    names = conversationTableNames(config?.tablePrefix ?? '');
+  } catch {
+    return [];
+  }
+  const plain = conversationTableNames();
+  return (['conversations', 'messages'] as const)
+    .filter(
+      (kind) =>
+        names[kind] !== plain[kind] &&
+        isTableProtected(plain[kind], policy) &&
+        !isTableProtected(names[kind], policy) &&
+        !policy.exemptTables?.includes(names[kind]),
+    )
+    .map((kind) => names[kind]);
 }
 
 // Re-export from extracted module
@@ -1129,6 +1161,7 @@ export class AgentOS implements IAgentOS {
 
     let storageAdapter = this.config.storageAdapter;
     if (storageAdapter) {
+      let provenancePolicy: StoragePolicyConfig | undefined;
       try {
         const provenanceDescriptor = this.extensionManager
           .getRegistry<any>(EXTENSION_KIND_PROVENANCE)
@@ -1138,12 +1171,24 @@ export class AgentOS implements IAgentOS {
           storageAdapter = wrapStorageAdapterWithWriteHooks(storageAdapter, provenanceHooks, {
             logger: this.logger,
           });
+          provenancePolicy = (provenanceDescriptor as any)?.payload?.config?.storagePolicy;
           this.logger.info('[AgentOS][Provenance] Storage write hooks enabled');
         }
       } catch (error: any) {
         this.logger.warn?.('[AgentOS][Provenance] Failed to apply storage write hooks', {
           error: error?.message ?? error,
         });
+      }
+      // The policy names its tables exactly: under a prefix the conversation tables would lose the protection it gives
+      // them by their default names, so the runtime does not start.
+      const unprotected = provenancePolicy ? conversationTablesLeftUnprotected(provenancePolicy, this.config.conversationManagerConfig) : [];
+      if (provenancePolicy && unprotected.length > 0) {
+        throw new AgentOSServiceError(
+          `The provenance storage policy (mode '${provenancePolicy.mode}') protects the conversation tables by their default names, and conversationManagerConfig.tablePrefix keeps them as ${unprotected.join(', ')}: add ${unprotected.join(', ')} to the policy's storagePolicy.protectedTables, or set no prefix.`,
+          GMIErrorCode.CONFIGURATION_ERROR,
+          { unprotectedTables: unprotected },
+          'AgentOS.initialize',
+        );
       }
     }
 
