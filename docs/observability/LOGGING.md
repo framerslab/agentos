@@ -27,7 +27,7 @@ Without a hand-over, AgentOS writes to a pino root on standard output that it bu
 
 ### One line per server request
 
-`AgentOSServer` runs each request under a fresh id, returns it in the `x-request-id` header, and adds it as `requestId` to every event line AgentOS writes while the request runs. When the response closes it writes one `http.request` line:
+`AgentOSServer` runs each request under a fresh id, returns it in the `x-request-id` header (exposed to cross-origin browser clients when `enableCors` is on), and adds it as `requestId` to every event line AgentOS writes while the request runs. When the response closes it writes one `http.request` line:
 
 ```json
 { "level": 30, "component": "http", "requestId": "3f0c1d9e-6c1b-4f6e-9a57-2b8e0c4d7a11", "method": "POST", "route": "/api/agentos/chat", "status": 200, "ms": 412, "outcome": "ok", "event": "http.request" }
@@ -51,7 +51,7 @@ const restoreConsole = captureConsole(kit);
 installProcessHandlers(kit, { onShutdown: () => process.exit(0) });
 ```
 
-- The kit's map always holds AgentOS's own events, and its type does too. The product's map may name one of them again only with the same fields; another declaration throws a `TypeError`, so AgentOS's own lines are never refused. A refused line is `log_refused` at `warn` with its reason and, for a declared event, its name. A line that reaches `asLogger()` with an undeclared event is written as `agentos.untyped` with only its component and its level.
+- The kit's map always holds AgentOS's own events, and its type does too. The product's map may name one of them again only with the same fields; another declaration throws a `TypeError`, so AgentOS's own lines are never refused. A `context` map adds keys a child may bind to AgentOS's `component`, `extension` and `requestId`, and may name one of those again only with its kind. A refused line is `log_refused` at `warn` with its reason and, for a declared event, its name. A line that reaches `asLogger()` with an undeclared event is written as `agentos.untyped` with only its component and its level.
 - Each event and each refusal reason writes its first lines of a minute up to `burst` (30 unless set), then one `log_held` line with the count held. Every kit in the process shares the budgets.
 - `terminal(event, fields)` writes the process's last line at `fatal`, past the budget. `close()` stops the kit.
 - `captureConsole(kit)` turns each console call into one `console_line` event with the method and, for an error, its type and code, and returns a function that restores the console. For an error whose stack opens with its own name and message, the frame lines (`at ...`) also go to standard error, outside the kit's checks, so they name the files and functions on the stack: at most 50, leaving out any line over 512 characters or holding a control or direction character. A console call never throws on an error whose properties throw when read.

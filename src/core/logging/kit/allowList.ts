@@ -63,11 +63,11 @@ function sameFields(a: Readonly<Record<string, FieldKind>>, b: Readonly<Record<s
  * @param options - The kit's settings.
  * @param options.logger - The pino logger, or pino child, the kit writes through.
  * @param options.events - The product's event map.
- * @param options.context - The context keys a child may bind, AgentOS's own unless given.
+ * @param options.context - The context keys a child may bind beyond AgentOS's own, which stay in the schema because AgentOS's lines carry them.
  * @param options.burst - Lines a minute for each event and each refusal reason, 30 unless set. Every kit in the process shares the budgets, at the smallest bound asked for.
  * @returns The kit, typed over AgentOS's events and the product's map, so it also takes the
  * `console_line` and `process.*` lines `captureConsole` and `installProcessHandlers` write.
- * @throws {TypeError} When `burst` is not a positive integer, an event's name is not a word of at most 64 characters or is `log_refused` or `log_held`, an event declares a context key, `event`, `level` or `time` as a field, or the product's map declares one of AgentOS's events with other fields than AgentOS gives it.
+ * @throws {TypeError} When `burst` is not a positive integer, an event's name is not a word of at most 64 characters or is `log_refused` or `log_held`, an event declares a context key, `event`, `level` or `time` as a field, the product's map declares one of AgentOS's events with other fields than AgentOS gives it, or `context` gives one of AgentOS's context keys another kind.
  *
  * @example
  * ```ts
@@ -79,9 +79,13 @@ function sameFields(a: Readonly<Record<string, FieldKind>>, b: Readonly<Record<s
  */
 export function createAllowListLogger<E extends EventMap, C extends ContextSchema = typeof AGENTOS_CONTEXT>(options: {
   logger: Logger; events: E; context?: C; burst?: number;
-}): AllowListLogger<E & AgentOSEvents, C> {
+}): AllowListLogger<E & AgentOSEvents, C & typeof AGENTOS_CONTEXT> {
   const events: EventMap = { ...AGENTOS_EVENTS, ...options.events };
-  const schema = (options.context ?? AGENTOS_CONTEXT) as C;
+  // AgentOS's own lines carry its context keys, so a host's keys extend them and may name one again only with its kind.
+  for (const [key, kind] of Object.entries(options.context ?? {})) {
+    if (own(AGENTOS_CONTEXT, key) && !sameKind(kind, (AGENTOS_CONTEXT as ContextSchema)[key])) throw new TypeError('context key redeclared with another kind');
+  }
+  const schema = { ...AGENTOS_CONTEXT, ...options.context } as unknown as C;
   const limit = options.burst ?? 30;
   if (!Number.isInteger(limit) || limit < 1) throw new TypeError('burst must be a positive integer');
   // The refusal and held-lines records are the kit's own, so a product map can neither declare nor overwrite them.
@@ -175,6 +179,6 @@ export function createAllowListLogger<E extends EventMap, C extends ContextSchem
     return api as AllowListLogger<E, C>;
   }
   // The map the kit checks against always holds AgentOS's own events, so its type does too.
-  return make({}) as unknown as AllowListLogger<E & AgentOSEvents, C>;
+  return make({}) as unknown as AllowListLogger<E & AgentOSEvents, C & typeof AGENTOS_CONTEXT>;
 }
 export { safeWord };
