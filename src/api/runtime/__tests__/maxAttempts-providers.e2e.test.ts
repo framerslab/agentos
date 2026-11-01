@@ -461,3 +461,23 @@ describe('maxAttempts on the Anthropic and Gemini streams', () => {
     expect(posts(GEMINI_ALIAS_STREAM)).toHaveLength(1);
   });
 });
+
+describe('the configured count bounds a Gemini stream\'s alias when the call names none', () => {
+  const stream = async (maxRetries: number) => {
+    const p = new GeminiProvider();
+    await p.initialize({ apiKey: 'gem-attempts', maxRetries });
+    return p.generateCompletionStream('gemini-3.1-pro-preview', [{ role: 'user', content: 'Say ok.' }], {});
+  };
+
+  it('with maxRetries 1, a retired pin\'s 404 ends the stream and the alias is not asked', async () => {
+    route([[GEMINI_RETIRED_STREAM, [geminiNotFound]], [GEMINI_ALIAS_STREAM, [geminiStreamText('ok')]]]);
+    expect(await rejectionOf(drain(await stream(1)))).toMatchObject({ httpStatus: 404 });
+    expect(posts(GEMINI_ALIAS_STREAM)).toHaveLength(0);
+  });
+
+  it('with maxRetries 2, the alias streams', async () => {
+    route([[GEMINI_RETIRED_STREAM, [geminiNotFound]], [GEMINI_ALIAS_STREAM, [geminiStreamText('ok')]]]);
+    await drain(await stream(2));
+    expect(posts(GEMINI_ALIAS_STREAM)).toHaveLength(1);
+  });
+});

@@ -100,6 +100,7 @@ jobs:
           test "$(npm --version)" = 11.20.0
 
       - name: Build
+        id: build
         run: pnpm run build
 
       - name: Package exports point at built files
@@ -335,6 +336,15 @@ jobs:
       # coverage-summary.json (the totals and each file's figures) and lcov.info.
       - name: Test with coverage
         run: pnpm run test:coverage
+
+      # The logging surface as an application installs it: the packed candidate in an empty project, imported through
+      # @framers/agentos/logging and @framers/agentos/logging/kit, compiled against the installed declarations under
+      # NodeNext and run (scripts/fixtures/logging-kit-consumer.ts). It runs whenever the build passed, after a failed
+      # test step too, so one push reports both.
+      - name: The logging kit runs from the packed package
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 10
+        run: node --test scripts/logging-kit-package.test.mjs
 
       # Each file's figures, for a run that Codecov does not keep. A re-run of the job
       # replaces the artifact an earlier attempt kept.
