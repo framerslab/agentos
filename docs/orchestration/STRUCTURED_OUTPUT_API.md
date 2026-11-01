@@ -73,6 +73,8 @@ When the reply does not parse or does not validate, the reply (shortened) and a 
 | `effort`, `thinking` | Reasoning depth and the thinking switch, passed to the provider; thinking tokens count toward `maxTokens` |
 | `cache`, `schemaCacheTtl` | Prompt caching: `cache: false` marks nothing, and `schemaCacheTtl: '1h'` gives the schema block a one-hour cache marker ([Prompt Caching](../features/PROMPT_CACHING.md)) |
 | `sessionId` | Sent to OpenRouter as `session_id` for sticky routing; other providers ignore it |
+| `serviceTier` | OpenAI's service tier (`'auto'`, `'default'`, `'flex'` or `'priority'`), sent as `service_tier` on every attempt; other providers ignore it ([OpenAI typed cache options](../features/PROMPT_CACHING.md#openai-typed-cache-options)) |
+| `customModelParams` | Provider-specific request fields spread onto every attempt's request body, as on `generateText()`; a fallback leg gets them minus the fields only another vendor accepts ([Fallback Behavior](../features/LLM_PROVIDERS.md#fallback-behavior)) |
 | `source` | A label passed to the usage observer |
 
 ---

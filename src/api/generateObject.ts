@@ -14,7 +14,7 @@
 import { z, type ZodType, type ZodError } from 'zod';
 
 import { generateText } from './generateText.js';
-import type { Message, SystemContentBlock, TokenUsage } from './generateText.js';
+import type { GenerateTextOptions, Message, SystemContentBlock, TokenUsage } from './generateText.js';
 import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
@@ -310,6 +310,23 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * without an affinity concept ignore the field.
    */
   sessionId?: string;
+
+  /**
+   * OpenAI service tier, forwarded to {@link GenerateTextOptions.serviceTier} and sent as `service_tier`
+   * verbatim on every attempt, a validation retry included. No default: OpenAI then serves the request at the
+   * project's configured tier. `'flex'` bills at about batch rates but can answer 429 under load; `'priority'` is a
+   * paid tier. Other providers ignore it.
+   */
+  serviceTier?: GenerateTextOptions['serviceTier'];
+
+  /**
+   * Provider-specific top-level request fields, forwarded to {@link GenerateTextOptions.customModelParams} and
+   * spread onto every attempt's request body, a validation retry included, with the same rules as there: a fallback
+   * leg gets them minus the fields only another vendor accepts (OpenRouter's routing controls, Gemini's request
+   * fields), and keys collide last-wins with the typed fields at the provider layer. A passthrough `tool_choice`, `tools` or `response_format` here can change the
+   * structured-output route this call takes ({@link generateObject}).
+   */
+  customModelParams?: Record<string, unknown>;
 
   /**
    * Opt-in source label forwarded to
@@ -676,6 +693,10 @@ export async function generateObject<T extends ZodType>(
       // Per-conversation affinity key (OpenRouter session_id sticky
       // routing; other providers ignore it).
       ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+      // The OpenAI service tier and the provider passthrough fields, sent as
+      // generateText sends them.
+      ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
+      ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
       // Observer source label (see GenerateObjectOptions.source).
       ...(opts.source !== undefined ? { source: opts.source } : {}),
       _responseFormat: responseFormat,
