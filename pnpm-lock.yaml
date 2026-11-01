@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@framers/sql-storage-adapter':
-        specifier: ^0.8.4
-        version: 0.8.4(better-sqlite3@13.0.3)
+        specifier: ^0.9.1
+        version: 0.9.1(better-sqlite3@13.0.3)
       '@livekit/rtc-node':
         specifier: ^1.1.0
         version: 1.1.0
@@ -1373,6 +1373,23 @@ packages:
       electron:
         optional: true
 
+  '@framers/sql-storage-adapter@0.9.1':
+    resolution: {integrity: sha512-vgCVqdTSroxCpeKl5wSSaBabQlU5v477U9nRp8SWsAZjW/Nhwuf7HvJJoIf1TsacbnqFZNUEQkzAFxNxCucEUg==}
+    peerDependencies:
+      '@aws-sdk/client-s3': ^3.0.0
+      '@capacitor-community/sqlite': ^6.0.0 || ^7.0.0 || ^8.0.0
+      better-sqlite3: ^12.0.0 || ^13.0.0
+      electron: '>=20.0.0'
+    peerDependenciesMeta:
+      '@aws-sdk/client-s3':
+        optional: true
+      '@capacitor-community/sqlite':
+        optional: true
+      better-sqlite3:
+        optional: true
+      electron:
+        optional: true
+
   '@google-cloud/common@5.0.2':
     resolution: {integrity: sha512-V7bmBKYQyu0eVG2BFejuUjlBt+zrya6vtsKdY+JxMM/dNntPF41vZ9+LhOshEUH01zOHEqBSvI7Dad7ZS6aUeA==}
     engines: {node: '>=14.0.0'}
@@ -1964,6 +1981,7 @@ packages:
   '@opentelemetry/sdk-trace-base@2.11.0':
     resolution: {integrity: sha512-H19x/TX/LZdqiYOjM7fqtSxwlplC5pgelavqbQdHbhdq0q/AI/TGkM2dfGuuynTXmJPeF2HoZVoPDu+TGoW78A==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
@@ -9416,6 +9434,16 @@ snapshots:
     optional: true
 
   '@framers/sql-storage-adapter@0.8.4(better-sqlite3@13.0.3)':
+    dependencies:
+      '@types/sql.js': 1.4.11
+      pg: 8.23.1
+      sql.js: 1.14.2
+    optionalDependencies:
+      better-sqlite3: 13.0.3
+    transitivePeerDependencies:
+      - pg-native
+
+  '@framers/sql-storage-adapter@0.9.1(better-sqlite3@13.0.3)':
     dependencies:
       '@types/sql.js': 1.4.11
       pg: 8.23.1
