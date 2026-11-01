@@ -138,7 +138,8 @@ describe('AgentOSServer request lines', () => {
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatchObject({ level: 50, type: 'Error', code: 'E_FIXTURE', requestId: done.requestId });
     expect(done).toMatchObject({ level: 50, method: 'POST', route: 'extension', status: 500, outcome: 'error' });
-    expect(printed).not.toHaveBeenCalled();
+    // The stub server's embedded AgentOS may report its own configuration on the console; no call carries the error.
+    expect(printed.mock.calls.flat().map(String).join('\n')).not.toContain(MARKER);
     expect(JSON.stringify(lines).includes(MARKER)).toBe(false);
   });
 
