@@ -499,6 +499,12 @@ export interface ToolLearningContext {
   turnUserId?: string;
   /** Whether a freeze holds right now; read at the call. */
   frozen?: () => boolean;
+  /**
+   * The ids the turn's own `thread` scope is filed and read under, in place of the call's conversation and session
+   * ids, where the turn's memory names a session of its own: a `gmi()` session id's generation, which tools never see
+   * as the session id. The memory tools file a `thread` trace under the first, in the session's form.
+   */
+  threadIds?: readonly string[];
 }
 
 /** The host's loops a manifest names. */
