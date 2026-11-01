@@ -113,6 +113,21 @@ describe('GMI turn provider selection', () => {
     ]);
   });
 
+  it('resolves the gateway route again for a tool result that names another provider and model than its turn, and keeps the hop for one that names the same', async () => {
+    const { gateway, routes } = recordingGateway();
+    const { gmi } = await createScriptedGmi({ gateway, persona: { defaultProviderId: 'openai', defaultModelId: 'gpt-4o-mini' } });
+    const anthropic = { preferredModelId: 'claude-sonnet-4-0', preferredProviderId: 'anthropic' };
+
+    await runTurn(gmi, textTurn('t1', 'Hello?'));
+    await gmi.handleToolResults([lookupResult], 'user-1', undefined, anthropic);
+    await gmi.handleToolResults([{ ...lookupResult, toolCallId: 'call_y' }], 'user-1', undefined, anthropic);
+
+    expect(routes.map((route) => [route.providerId, route.modelId])).toEqual([
+      ['openai', 'gpt-4o-mini'],
+      ['anthropic', 'claude-sonnet-4-0'],
+    ]);
+  });
+
   it('takes the provider and model a tool result names for a turn the GMI did not run', async () => {
     const { gmi, openai, anthropic, getModelInfo } = await twoProviderGmi([], [textReply('Continued.')]);
 

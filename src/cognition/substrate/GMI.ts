@@ -1334,6 +1334,18 @@ export class GMI implements IGMI {
       this.turnModelSelection = modelSelectionOf(turnInput);
       this.turnLaunchFrame = launchFrameOf(turnInput);
       this.turnRagSources = undefined;
+    } else {
+      // A continuation that names another model or provider than its turn's (a resume whose host passed others) runs
+      // on that pair from here on: the hop of the turn's last step serves another route, so the route is resolved
+      // again. One that names the turn's own pair, or none, stays on the hop.
+      const named = modelSelectionOf(turnInput);
+      if (
+        (named.modelId || named.providerId) &&
+        (named.modelId !== this.turnModelSelection.modelId || named.providerId !== this.turnModelSelection.providerId)
+      ) {
+        this.turnModelSelection = named;
+        this.turnResolution = undefined;
+      }
     }
     // The gate this turn's tool round asks before each call: the one the input names; a continuation that names none
     // asks the gate of the turn it continues.
