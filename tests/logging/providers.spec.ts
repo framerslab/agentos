@@ -4,13 +4,17 @@
  * the host's logger as one `llm.retry` event with the status, the attempt and the scheduled wait, and the provider's
  * error text reaches neither the logger nor a standard stream. The event carries the wait the provider schedules: a
  * `Retry-After` in seconds before the next attempt. The last attempt schedules none, so its error ends the call at
- * once and it writes no retry event.
+ * once and it writes no retry event. A pool whose every key is out of rotation at start reaches the host as one
+ * `llm.key_pool_out` event, with no console line.
  */
 
 import { Console } from 'node:console';
 import { afterEach, expect, it, vi } from 'vitest';
 import pino from 'pino';
 import { OpenAIProvider } from '../../src/core/llm/providers/implementations/OpenAIProvider.js';
+import { OpenRouterProvider } from '../../src/core/llm/providers/implementations/OpenRouterProvider.js';
+import { InMemoryKeyPoolStateStore } from '../../src/core/providers/KeyPoolStateStore.js';
+import { keyFingerprint } from '../../src/core/providers/ApiKeyPool.js';
 import { setLogger, resetLoggerFactory } from '../../src/core/logging/loggerFactory.js';
 
 // The test runner's console forwards to its reporter and writes neither standard stream, so a console line would pass
@@ -57,4 +61,35 @@ it.each([['61', 61_000], ['1', 1_000]] as const)('waits out Retry-After %s befor
     expect.objectContaining({ provider: 'openai', status: 429, attempt: 1, waitMs: delay }),
   ]);
   expect(JSON.stringify(lines)).not.toContain('sentinel-words-7731');
+});
+
+/** A store that holds each key out of rotation for billing until five hours from now. */
+async function allOut(id: string, keys: readonly string[]): Promise<InMemoryKeyPoolStateStore> {
+  const store = new InMemoryKeyPoolStateStore();
+  for (const [index, key] of keys.entries()) {
+    await store.save(id, {
+      fingerprint: keyFingerprint(key), label: `k${index}`, status: 'failed', kind: 'billing', failures: 3,
+      lastFailAt: Date.now() - 60_000, nextRecheckAt: Date.now() + 5 * 3_600_000, updatedAt: Date.now() - 60_000, version: 1,
+    });
+  }
+  return store;
+}
+it.each([
+  ['openai', () => new OpenAIProvider()],
+  ['openrouter', () => new OpenRouterProvider()],
+] as const)('hands a %s pool with every key out of rotation to the host as one event, with no console line', async (provider, create) => {
+  vi.useFakeTimers();
+  const lines: Record<string, unknown>[] = [];
+  setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { lines.push(JSON.parse(line)); } }));
+  const stdout = vi.spyOn(process.stdout, 'write'); const stderr = vi.spyOn(process.stderr, 'write');
+  globalThis.console = new Console({ stdout: process.stdout, stderr: process.stderr, colorMode: false });
+  const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+  const keys = ['key_alpha_0001', 'key_beta_0002'] as const;
+  const id = `${provider}:all-out`;
+  const instance = create();
+  await instance.initialize({ apiKey: keys.join(','), keyPool: { strategy: 'ordered', id, store: await allOut(id, keys) } });
+  expect(instance.isInitialized).toBe(true);
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(lines.filter(line => line.event === 'llm.key_pool_out')).toEqual([expect.objectContaining({ level: 40, provider, count: 2 })]);
+  expect(stdout).not.toHaveBeenCalled(); expect(stderr).not.toHaveBeenCalled();
 });
