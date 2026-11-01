@@ -23,6 +23,20 @@ type Method = (typeof METHODS)[number] | 'OTHER';
  */
 type Route = '/health' | '/api/agentos/personas' | '/api/agentos/chat' | 'preflight' | 'extension' | 'unmatched' | 'unready';
 
+/**
+ * The route a request names before AgentOS is ready, from its method and path alone, so a request given up on while
+ * AgentOS starts keeps its route. An extension's request reads `unmatched` until a handler takes it.
+ */
+function routeOf(req: IncomingMessage): Route {
+  if (req.method === 'OPTIONS') return 'preflight';
+  let path: string;
+  try { path = new URL(req.url ?? '/', 'http://localhost').pathname; } catch { return 'unmatched'; }
+  if (req.method === 'GET' && path === '/health') return '/health';
+  if (req.method === 'GET' && path === '/api/agentos/personas') return '/api/agentos/personas';
+  if (req.method === 'POST' && path === '/api/agentos/chat') return '/api/agentos/chat';
+  return 'unmatched';
+}
+
 /** What one request's completion line is built from, filled in as the request is handled. */
 interface RequestRecord {
   route: Route;
@@ -56,19 +70,20 @@ export class AgentOSServer {
    * Runs one request under a fresh id. The id is returned in `x-request-id`, and every AgentOS event line written
    * while the request runs carries it as `requestId`. When the response closes, one `http.request` line gives the
    * method, the route as the server names it, the status (0 when no status was sent), the milliseconds and the
-   * outcome: `ok`, `error` for a 5xx status or a handler that threw, or `aborted` when the connection closed first.
-   * It is written at `info`, `error` or `warn` to match.
+   * outcome: `error` for a 5xx status or a handler that threw, even when the connection then closed early, otherwise
+   * `aborted` when the connection closed before the response finished, otherwise `ok`. It is written at `error`,
+   * `warn` or `info` to match. A handler's failure is written once, as `http.handler_failed`.
    */
   private receive(req: IncomingMessage, res: ServerResponse): void {
     const requestId = randomUUID();
     const started = performance.now();
-    const record: RequestRecord = { route: 'unmatched', failed: false };
+    const record: RequestRecord = { route: routeOf(req), failed: false };
     const requests = getLoggingState().requests;
     res.setHeader('x-request-id', requestId);
     // A close that comes from the socket runs outside the request's context, so the line enters it again.
     res.once('close', () => requests.run({ requestId }, () => {
       const status = res.headersSent ? res.statusCode : 0;
-      const outcome = !res.writableFinished ? 'aborted' : record.failed || status >= 500 ? 'error' : 'ok';
+      const outcome = record.failed || status >= 500 ? 'error' : !res.writableFinished ? 'aborted' : 'ok';
       const method: Method = (METHODS as readonly string[]).includes(req.method ?? '') ? req.method as Method : 'OTHER';
       const fields = { method, route: record.route, status, ms: Math.max(0, Math.round(performance.now() - started)), outcome } as const;
       if (outcome === 'ok') log.info('http.request', fields);
@@ -77,8 +92,8 @@ export class AgentOSServer {
     }));
     requests.run({ requestId }, () => {
       void this.handleRequest(req, res, record).catch((error: unknown) => {
-        record.failed = true;
-        log.error('http.handler_failed', errorFields(error));
+        // A failure an extension's handler already wrote is not written again.
+        if (!record.failed) { record.failed = true; log.error('http.handler_failed', errorFields(error)); }
         if (!res.headersSent) this.sendJson(res, 500, { error: 'Internal Server Error' });
         else res.destroy();
       });
@@ -138,7 +153,9 @@ export class AgentOSServer {
           // reaches neither the line nor the client.
           record.failed = true;
           log.error('http.handler_failed', errorFields(error));
-          this.sendJson(res, 500, { error: 'Extension HTTP handler error' });
+          // A handler that began its response before it threw has its connection closed; a status cannot follow.
+          if (!res.headersSent) this.sendJson(res, 500, { error: 'Extension HTTP handler error' });
+          else res.destroy();
           return;
         }
         record.route = 'unmatched';
