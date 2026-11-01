@@ -55,6 +55,7 @@ import {
   type FreezeScope,
   type HostLoopName,
   type ILearnerSession,
+  type ILearningLayer,
   type ImportReport,
   type LearnedStateDocument,
   type LearnerContext,
@@ -158,6 +159,8 @@ export interface LearningLayerOptions extends LearningConfig {
 interface StoreSource {
   open(): Promise<LearningStore>;
   detail(store: LearningStore): string;
+  /** True for a store `openStore` opens, which the host may let go of and the layer then opens again. */
+  reopens?: boolean;
 }
 
 /** What the layer keeps of the host beside its config. */
@@ -198,7 +201,7 @@ function storeSourceOf(store: LearningStore | undefined, host: LayerHost): Store
   if (store) return { open: async () => store, detail: (s) => (s.kind === 'sql' ? 'sql store the host passed' : IN_PROCESS) };
   if (host.openStore) {
     const open = host.openStore;
-    return { open, detail: (s) => (s.kind === 'sql' ? "sql store over the agent's memory store" : IN_PROCESS) };
+    return { open, detail: (s) => (s.kind === 'sql' ? "sql store over the agent's memory store" : IN_PROCESS), reopens: true };
   }
   const adapter = host.storageAdapter;
   if (adapter) {
@@ -230,6 +233,8 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
   private closed = false;
   private ready: { store: LearningStore; ledger: Ledger } | undefined;
   private opening: Promise<{ store: LearningStore; ledger: Ledger } | undefined> | undefined;
+  /** Advanced by `releaseStore`: an open begun before it keeps nothing of what it opened. */
+  private storeGeneration = 0;
   private storeDetail = '';
   private storeError: string | undefined;
   /** The run-time freezes and suspensions, read at each turn and changed at once by this process's calls. */
@@ -262,19 +267,31 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
 
   storage(): Promise<{ store: LearningStore; ledger: Ledger } | undefined> {
     if (this.ready) return Promise.resolve(this.ready);
-    this.opening ??= this.openStorage().finally(() => {
-      this.opening = undefined;
-    });
+    if (!this.opening) {
+      const attempt = this.openStorage().finally(() => {
+        // An open the host let go of meanwhile (`releaseStore`) leaves the open that replaced it in place.
+        if (this.opening === attempt) this.opening = undefined;
+      });
+      this.opening = attempt;
+    }
     return this.opening;
   }
 
   private async openStorage(): Promise<{ store: LearningStore; ledger: Ledger } | undefined> {
+    const generation = this.storeGeneration;
     let store: LearningStore;
     try {
       store = await this.source.open();
       // The first read creates a SQL store's tables and fills the freeze cache.
-      this.freezes = await store.freezeRows();
+      const freezes = await store.freezeRows();
+      if (generation !== this.storeGeneration) {
+        // The host let go of the store while it opened: it runs on what the host closes, so the next generation's opens.
+        await store.close().catch(() => undefined);
+        return this.storage();
+      }
+      this.freezes = freezes;
     } catch (error) {
+      if (generation !== this.storeGeneration) return this.storage();
       const reason = messageOf(error);
       if (reason !== this.storeError) {
         console.warn(
@@ -490,6 +507,33 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
 
   async close(): Promise<void> {
     this.closed = true;
+  }
+
+  /**
+   * Drops the store `openStore` opened, so the next call that needs it opens it again: `gmi()` calls it before it
+   * closes the Brain its learning store runs on. A store the host passed, or one over its storage adapter, stays. The
+   * freeze cache stays, and is read again at the next open.
+   */
+  releaseStore(): void {
+    if (!this.source.reopens) return;
+    const released = this.ready;
+    this.storeGeneration += 1;
+    this.ready = undefined;
+    this.opening = undefined;
+    released?.store.close().catch((error: unknown) => {
+      console.warn(`[agentos] learning: a released learning store did not close (${messageOf(error)}).`);
+    });
+  }
+
+  /**
+   * Lets go of a memory manager the host has shut down: `forgetUser` and the re-file reach it no more, so a deletion
+   * is not refused for a manager that can no longer answer.
+   */
+  releaseMemory(memory: ICognitiveMemoryManager): void {
+    this.managers = this.managers.filter((ref) => {
+      const manager = ref.deref();
+      return manager !== undefined && manager !== memory;
+    });
   }
 
   // --- the host calls: every one runs in every mode and under a freeze ---
@@ -1188,6 +1232,30 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     }
     return named;
   }
+}
+
+/**
+ * Lets go of a layer's learning store: its next use opens the store again. A layer built by another implementation of
+ * `ILearningLayer` is left as it is.
+ */
+export function releaseLearningStore(layer: ILearningLayer): void {
+  if (layer instanceof LearningLayer) layer.releaseStore();
+}
+
+/**
+ * Hands a layer a memory manager the host built, which `forgetUser` then reaches, and re-files its Brain once. A layer
+ * built by another implementation of `ILearningLayer` is left as it is.
+ */
+export async function adoptLearningMemory(layer: ILearningLayer, memory: ICognitiveMemoryManager): Promise<void> {
+  if (layer instanceof LearningLayer) await layer.adoptMemory(memory);
+}
+
+/**
+ * Lets a layer go of a memory manager the host has shut down (`LearningLayer.releaseMemory`). A layer built by another
+ * implementation of `ILearningLayer` is left as it is.
+ */
+export function releaseLearningMemory(layer: ILearningLayer, memory: ICognitiveMemoryManager): void {
+  if (layer instanceof LearningLayer) layer.releaseMemory(memory);
 }
 
 /**

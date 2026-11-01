@@ -8962,6 +8962,13 @@ describe("the standalone retriever and the rolling-summary sink, by a turn's sco
       const report = await os.getLearningLayer()!.forgetUser!('bob', { namespace: 'A' });
       expect(liveIn(file).filter((trace) => trace.content.includes('GOATS-2'))).toEqual([]);
       expect(liveIn(file).filter((trace) => trace.contributorIds?.includes('bob') || trace.turnUserId === 'bob')).toEqual([]);
+      // Nor does a summary an upsert replaced, which the sink forgot and the file kept: no row of the file holds bob's words.
+      const db = new Database(file);
+      try {
+        expect(db.prepare("SELECT COUNT(*) AS n FROM memory_traces WHERE content LIKE '%GOATS-2%'").get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
       expect(filedWith(file, 'BEES-1').map(([, scopeId]) => scopeId)).toEqual(['A/ana::tutor', 'A/ana']);
       expect(filedWith(file, 'TRAIN-4')).toHaveLength(3);
       expect(report.stores).toContainEqual({
@@ -8969,6 +8976,43 @@ describe("the standalone retriever and the rolling-summary sink, by a turn's sco
         reached: false,
         reason: "the full runtime's conversation store and a gmi() session's history keep a conversation's messages until the host deletes them, and a later compaction summarizes them again",
       });
+    } finally {
+      await os.shutdown();
+    }
+  });
+
+  it("takes with forgetUser a second user's words that a later compaction on the full runtime summarized, though that user's own turn filed nothing", async () => {
+    quiet();
+    const { file, memory } = await sinkFacade();
+    const store = new InMemoryLearningStore();
+    const apiKey = key();
+    const { compactions } = compactingProvider(apiKey);
+    const os = await compactingRuntime(apiKey, memory, { store, memoryTools: memory });
+    const shared = { sessionId: 's-q', conversationId: 'c-q', organizationId: 'A' };
+    try {
+      compactions.push(compaction('- Canary WOOL-1: ana knits.'));
+      await turn(os, { userId: 'ana', ...shared, textInput: 'I knit.' });
+      await settled(async () => expect(await verdicts(store, chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: 'ana' }))).toEqual(['pending', 'kept']));
+      // cy's turn compacts nothing (its compaction fails), so the sink writes nothing on cy's turn.
+      await turn(os, { userId: 'cy', ...shared, textInput: 'I keep quails.' });
+      const quails = '- Canary WOOL-1: ana knits.\n- Canary QUAIL-7: cy keeps quails.';
+      compactions.push(compaction(quails));
+      await turn(os, { userId: 'ana', ...shared, textInput: 'Nice.' });
+      await settled(async () => expect(await verdicts(store, chainKeyOf({ namespace: 'A', agentKey: 'tutor', userId: null }, 'ana'))).toEqual(['pending', 'kept']));
+      expect(filedWith(file, 'QUAIL-7').map(([scope, scopeId, , contributors]) => [scope, scopeId, contributors])).toEqual([
+        ['persona', 'A//s-q::tutor', ['ana', 'cy']],
+        ['thread', 'A//c-q', ['ana', 'cy']],
+        ['user', 'A//s-q', ['ana', 'cy']],
+      ]);
+
+      await os.getLearningLayer()!.forgetUser!('cy', { namespace: 'A' });
+      const db = new Database(file);
+      try {
+        expect(db.prepare("SELECT COUNT(*) AS n FROM memory_traces WHERE content LIKE '%QUAIL-7%'").get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+      expect(filedWith(file, 'WOOL-1').map(([, scopeId]) => scopeId)).toEqual(['A/ana::tutor', 'A/ana']);
     } finally {
       await os.shutdown();
     }
