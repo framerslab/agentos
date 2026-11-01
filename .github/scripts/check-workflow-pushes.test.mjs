@@ -720,6 +720,39 @@ describe('refused: a workflow that pushes to master', () => {
     ]);
   });
 
+  test('a push that names no remote may reach origin or a remote with refspecs, and a key held in a variable any remote', () => {
+    // From CodeRabbit's review of framerslab/agentos#679: --repo names the remote when no operand does, and a push that
+    // names none goes to origin unless settings this check does not follow choose another. So with HEAD:side set for
+    // backup alone, git push and git push --repo=origin push the checked-out branch, master on a master run. A remote
+    // held in a variable in the key may be the one pushed to.
+    expectFindings({
+      '.github/workflows/a.yml': workflow(ON_MASTER, text`
+        - run: |
+            git config --add remote.backup.push HEAD:side
+            git push --repo=origin
+      `),
+      '.github/workflows/b.yml': workflow(ON_MASTER, text`
+        - run: |
+            git config --add remote.backup.push HEAD:side
+            git push
+      `),
+      '.github/workflows/c.yml': workflow(ON_PULL_REQUEST, text`
+        - run: |
+            git config --add remote.$REMOTE.push HEAD:master
+            git push origin
+      `),
+      '.github/workflows/d.yml': workflow(ON_PULL_REQUEST, text`
+        - run: |
+            git config --add remote.backup.push HEAD:master
+            git push --repo origin
+      `),
+    }, [
+      /^jobs\.j\.steps\[0\]: "git push --repo=origin" pushes the checked-out branch, master on a run on master$/,
+      /^jobs\.j\.steps\[0\]: "git push" pushes the checked-out branch, master on a run on master$/,
+      /^jobs\.j\.steps\[0\]: "git push origin" \(remote\.<name>\.push\) pushes to master$/,
+    ]);
+  });
+
   test('a git command runs in the checkout its directory is in: cd, env -C, GIT_DIR, --git-dir after -C, and where that cannot be told', () => {
     const pushes = (/** @type {number[]} */ steps) => steps.map((k) => new RegExp(`^jobs\\.j\\.steps\\[${k}\\]: "git push origin HEAD" pushes the checked-out branch, master on a run on master$`));
     // A pull request run with master checked out at base and at nested/base. A compound command a | feeds or an &
@@ -1710,6 +1743,10 @@ describe('the command, against what bash and git do', () => {
     // A push reads the refspecs of the remote it pushes to alone. From CodeRabbit's review of framerslab/agentos#679.
     { name: 'other-remote-setting', pushes: false, run: 'git config --add remote.backup.push HEAD:refs/heads/master\ngit push origin' },
     { name: 'other-remote-flag', pushes: false, run: 'git -c remote.backup.push=HEAD:refs/heads/master push origin' },
+    // A push that names no remote, or names it with --repo, pushes to origin as push.default says when origin has no
+    // refspecs of its own.
+    { name: 'other-remote-bare', pushes: true, run: 'cd base\ngit config --add remote.backup.push HEAD:refs/heads/side\ngit push' },
+    { name: 'other-remote-repo', pushes: true, run: 'cd base\ngit config --add remote.backup.push HEAD:refs/heads/side\ngit push --repo=origin' },
     { name: 'base-setting', pushes: false, run: 'git -C base config remote.origin.push HEAD:refs/heads/master\ngit push origin' },
     { name: 'global-setting', pushes: true, run: 'git config --global remote.origin.push HEAD:refs/heads/master\ngit push origin' },
   ];
