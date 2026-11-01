@@ -143,6 +143,47 @@ describe('AgentOSServer request lines', () => {
     expect(JSON.stringify(lines).includes(MARKER)).toBe(false);
   });
 
+  it('writes a handler that throws after its response began as one failure and an error line', async () => {
+    const lines = capture();
+    const late: Handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.write('partial');
+      throw Object.assign(new Error(MARKER), { code: 'E_LATE' });
+    };
+    await serve(makeServer([late]), async (base) => {
+      await fetch(`${base}/hooks/late`).then((response) => response.text()).catch(() => undefined);
+      await completions(lines, 1);
+    });
+    const [done] = await completions(lines, 1);
+    expect(lines.filter((line) => line.event === 'http.handler_failed')).toHaveLength(1);
+    expect(done).toMatchObject({ level: 50, route: 'extension', status: 200, outcome: 'error' });
+    expect(JSON.stringify(lines).includes(MARKER)).toBe(false);
+  });
+
+  it('names a known route for a request the client gave up on while AgentOS was starting', async () => {
+    const lines = capture();
+    const server = makeServer([]);
+    let ready: () => void = () => undefined;
+    Reflect.set(server, 'agentReady', new Promise<void>((resolve) => { ready = resolve; }));
+    const listening = server.getServer();
+    await new Promise<void>((resolve) => listening.listen(0, '127.0.0.1', () => resolve()));
+    const { port } = listening.address() as { port: number };
+    try {
+      const client = httpRequest({ host: '127.0.0.1', port, path: `/health?q=${MARKER}`, method: 'GET' });
+      client.on('error', () => undefined);
+      const sent = new Promise<void>((resolve) => listening.once('request', () => resolve()));
+      client.end();
+      await sent;
+      client.destroy();
+      const [done] = await completions(lines, 1);
+      expect(done).toMatchObject({ level: 40, method: 'GET', route: '/health', status: 0, outcome: 'aborted' });
+    } finally {
+      ready();
+      await server.stop();
+    }
+    expect(JSON.stringify(lines).includes(MARKER)).toBe(false);
+  });
+
   it('writes a request the client gave up on as aborted, once', async () => {
     const lines = capture();
     let entered: () => void = () => undefined;
