@@ -35,6 +35,7 @@ import { ensureLearningSchema } from './schema.js';
 import { assertStorableText, holdsLoneSurrogate } from './storableText.js';
 import type { LearningKind, LedgerVerdict } from '../types.js';
 
+/** How a {@link SqlLearningStore} is built: the host's adapter, and whether the store makes its own tables. */
 export interface SqlLearningStoreOptions {
   /** The host's storage adapter, with transactions. The store never closes it. */
   adapter: StorageAdapter;

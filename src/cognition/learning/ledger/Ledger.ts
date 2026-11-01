@@ -110,6 +110,11 @@ export type DecideResult =
   | { status: 'forgotten' | 'conflict' | 'unknown_candidate' }
   | { status: 'refused'; current: LedgerVerdict };
 
+/**
+ * What the load check found of one chain ({@link Ledger.verifyChain}): `ok` when every row from the newest `reanchor`
+ * on hashes, links and follows as written and the head names the newest row; else `reason` names the first row or the
+ * head that does not. `keyed` says whether the hashes were checked with the layer's `ledgerKey`.
+ */
 export type ChainCheck = { ok: true; keyed: boolean } | { ok: false; keyed: boolean; reason: string };
 
 export interface LedgerOptions {
