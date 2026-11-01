@@ -10425,7 +10425,9 @@ describe("the full runtime's own learning layer: its store on the host's storage
     const tools = await Memory.createWithAdapter(adapter, { brainId: 'tools-brain', selfImprove: false });
     const k = key();
     const played = script('openai', k, { replies: [addCall('r1', 'Canary HERON-2.'), reply.text('Noted.')] });
-    const first = await runtime(k, { storageAdapter: adapter, memoryTools: { memory: tools }, learning: true });
+    // The facade's Brain has a conversations table of its own: the runtime keeps its conversations under a prefix.
+    const conversationManagerConfig = { tablePrefix: 'agentos_' };
+    const first = await runtime(k, { storageAdapter: adapter, conversationManagerConfig, memoryTools: { memory: tools }, learning: true });
     expect((await first.getLearningLayer()!.manifest()).loops.ledger).toEqual({ live: true, detail: "sql store over the host's storage adapter; unkeyed" });
 
     await turn(first, { userId: 'ana', sessionId: 's-1', organizationId: 'A', textInput: 'Remember my canary.' });
@@ -10442,7 +10444,7 @@ describe("the full runtime's own learning layer: its store on the host's storage
 
     // A runtime started again on the database, with no memory tools of its own.
     played.replies.push(reply.text('Noted.'), reply.text('Noted.'));
-    const second = await runtime(k, { storageAdapter: adapter, learning: true });
+    const second = await runtime(k, { storageAdapter: adapter, conversationManagerConfig, learning: true });
     await turn(second, { userId: 'ana', sessionId: 's-2', organizationId: 'A' });
     expect(systemTextOf(mainCalls(played).at(-1))).toContain(directiveFor('openness', 0.7));
     await turn(second, { userId: 'bo', sessionId: 's-3', organizationId: 'A' });
