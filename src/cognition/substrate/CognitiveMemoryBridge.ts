@@ -341,11 +341,12 @@ export class CognitiveMemoryBridge {
   /**
    * Encodes a piece of content into the cognitive memory store.
    *
-   * First fires the observer hook (if available), then encodes the content
-   * with the current PAD state, mood, and derived tags.
+   * Fires the observer hook (if available) and encodes the content with the
+   * current PAD state, mood, and derived tags.
    *
-   * With `options.learning`, the trace goes under the turn's user scope id through the turn's guard; a refused filing
-   * is traced with its reason, never its words, and feeds no observer either.
+   * With `options.learning`, the trace goes under the turn's user scope id through the turn's guard, and the observer
+   * is fed once the guard reports the filing kept: a refused filing, and one the guard takes back because its user was
+   * forgotten while it ran, feed it nothing. A refused filing is traced with its reason, never its words.
    *
    * @param content - The text content to encode.
    * @param options - Encoding options (type, sourceType, scopeId, role, and the turn's learning).
@@ -358,9 +359,11 @@ export class CognitiveMemoryBridge {
     const learning = options.learning;
     const userCtx = this.getUserContext();
     const scopeId = learning ? learning.scopes.userScopeId : options.scopeId ?? userCtx.userId ?? this.getGmiId();
-    const file = async (): Promise<MemoryTrace> => {
+    const observe = async (): Promise<void> => {
       await this.cognitiveMemory.observe?.(options.role, content, this.getPadState());
-      return this.cognitiveMemory.encode(content, this.getPadState(), this.getMood(), {
+    };
+    const file = async (): Promise<MemoryTrace> =>
+      this.cognitiveMemory.encode(content, this.getPadState(), this.getMood(), {
         type: options.type,
         scope: 'user',
         scopeId,
@@ -368,9 +371,9 @@ export class CognitiveMemoryBridge {
         tags: options.tags ?? this.buildTags(options.role),
         ...(learning?.turnUserId ? { turnUserId: learning.turnUserId } : {}),
       });
-    };
     try {
       if (!learning?.guard) {
+        await observe();
         await file();
         return;
       }
@@ -383,13 +386,15 @@ export class CognitiveMemoryBridge {
           await this.cognitiveMemory.deleteTraces([trace.id]);
         },
       });
-      if (outcome.status === 'rejected') {
-        this.addTraceEntry(
-          outcome.reason === 'forgotten' ? 'DEBUG' : 'WARNING',
-          `Cognitive memory did not file the ${options.role} message (${outcome.reason}).`,
-          { role: options.role, reason: outcome.reason },
-        );
+      if (outcome.status === 'written') {
+        await observe();
+        return;
       }
+      this.addTraceEntry(
+        outcome.reason === 'forgotten' ? 'DEBUG' : 'WARNING',
+        `Cognitive memory did not file the ${options.role} message (${outcome.reason}).`,
+        { role: options.role, reason: outcome.reason },
+      );
     } catch (error: any) {
       this.addTraceEntry('WARNING', 'Cognitive memory encoding failed.', {
         role: options.role,
