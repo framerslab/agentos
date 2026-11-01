@@ -830,7 +830,7 @@ export class MetapromptExecutor {
 
     // Same resolution as the self-reflection path: the metaprompt's own model
     // and provider, then the persona defaults, then the GMI's configured
-    // defaults. Throws a CONFIGURATION_ERROR GMIError when nothing resolves.
+    // defaults. Throws a GMIError with `CONFIGURATION_ERROR` (`SYS_CONFIGURATION_ERROR`) when nothing resolves.
     const { modelId, providerId } = this.config.getModelAndProvider(
       metaPrompt.modelId,
       metaPrompt.providerId,

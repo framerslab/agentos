@@ -157,9 +157,12 @@ describe('the full runtime with the learning flag on', () => {
 
   it('refuses learning.namespace, learning beside a passed layer, and an unknown mode, before any service starts', async () => {
     const initialize = vi.spyOn(GMIManager.prototype, 'initialize');
-    await expect(boot({ learning: { namespace: 'acme' } })).rejects.toThrow(/learning\.namespace/);
-    await expect(boot({ learning: true, gmiManagerConfig: { personaLoaderConfig: {}, learningLayer: createLearningLayer() } })).rejects.toThrow(/gmiManagerConfig\.learningLayer/);
-    await expect(boot({ learning: { mode: 'sideways' } })).rejects.toThrow(/learning\.mode: unknown mode 'sideways'/);
+    await expect(boot({ learning: { namespace: 'acme' } })).rejects.toMatchObject({ code: 'SYS_CONFIGURATION_ERROR', message: expect.stringMatching(/learning\.namespace/) });
+    await expect(boot({ learning: true, gmiManagerConfig: { personaLoaderConfig: {}, learningLayer: createLearningLayer() } })).rejects.toMatchObject({
+      code: 'SYS_CONFIGURATION_ERROR',
+      message: expect.stringMatching(/gmiManagerConfig\.learningLayer/),
+    });
+    await expect(boot({ learning: { mode: 'sideways' } })).rejects.toMatchObject({ code: 'SYS_CONFIGURATION_ERROR', message: expect.stringMatching(/learning\.mode: unknown mode 'sideways'/) });
     // No GMI manager was started, nor anything the runtime starts before it.
     expect(initialize).not.toHaveBeenCalled();
   });

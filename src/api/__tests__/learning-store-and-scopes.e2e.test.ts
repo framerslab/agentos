@@ -12202,7 +12202,10 @@ describe('the docs a host reads about it', () => {
   it("describe the conversation table prefix beside a Brain, the history forgetUser leaves, the flag that turns learning on, and the root's learning exports", () => {
     const quickstart = doc('docs/getting-started/SQL_STORAGE_QUICKSTART.md');
     expect(quickstart).toContain('`tablePrefix` (`conversationManagerConfig.tablePrefix` on the runtime)');
-    expect(quickstart).toContain("with a `CONFIGURATION_ERROR` that names `tablePrefix`, before it changes anything");
+    expect(quickstart).toContain(
+      "with an error whose `code` is `'SYS_CONFIGURATION_ERROR'` and whose message names `conversationManagerConfig.tablePrefix`, before it changes anything",
+    );
+    expect(quickstart).not.toContain('a `CONFIGURATION_ERROR`');
     expect(quickstart).toContain('a Brain opened later beside the unprefixed tables finds a `conversations` table that is not its own. On PostgreSQL that Brain does not open');
     expect(quickstart).toContain('on SQLite it opens, and its conversation export and import fail.');
     expect(doc('docs/memory/CLIENT_SIDE_STORAGE.md')).toContain('the runtime refuses an adapter where the Brain made that table first, naming the option');

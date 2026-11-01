@@ -28,7 +28,7 @@ export interface PersonaSourceConfig {
 const DEFAULT_LOADER_CONFIG: PersonaLoaderConfig = { personaSource: './personas', loaderType: 'file_system' };
 
 /**
- * @throws AgentOSServiceError CONFIGURATION_ERROR when both `personas` and `personaLoader`
+ * @throws AgentOSServiceError `CONFIGURATION_ERROR` (`SYS_CONFIGURATION_ERROR`) when both `personas` and `personaLoader`
  * are set, or when `personas` breaks a structural rule (see assertInlinePersonaDefinitions).
  */
 export function validatePersonaSource(config: PersonaSourceConfig): void {

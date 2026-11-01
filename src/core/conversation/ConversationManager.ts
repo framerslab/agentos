@@ -154,9 +154,10 @@ export class ConversationManager {
    * @param {StorageAdapter} [storageAdapter] - Optional storage adapter for database persistence.
    * Required if `config.persistenceEnabled` is true.
    * @returns {Promise<void>} A promise that resolves when initialization is complete.
-   * @throws {GMIError} If configuration is invalid or dependencies are missing when required: `CONFIGURATION_ERROR`
-   * for a `tablePrefix` that is not a plain name, or for a table of either name on the storage adapter that another
-   * component made (the message names `tablePrefix`); `DATABASE_ERROR` when the tables cannot be made.
+   * @throws {GMIError} If configuration is invalid or dependencies are missing when required:
+   * `CONFIGURATION_ERROR` (`SYS_CONFIGURATION_ERROR`) for a `tablePrefix` that is not a plain name, or for a table of
+   * either name on the storage adapter that another component made (the message names
+   * `conversationManagerConfig.tablePrefix`); `DATABASE_ERROR` (`SYS_DATABASE_ERROR`) when the tables cannot be made.
    */
   public async initialize(
     config: ConversationManagerConfig,
