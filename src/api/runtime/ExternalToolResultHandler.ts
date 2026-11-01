@@ -598,9 +598,17 @@ export class ExternalToolResultHandler {
             gmiInstanceIdForChunks,
             streamContext,
           );
-          const continuationOptions: GMIToolResultOptions | undefined = continuationGate
-            ? { toolCallGate: continuationGate }
-            : undefined;
+          // the model and the provider the stream's turn named go with the results: a GMI built again for the
+          // continuation holds neither
+          const { preferredModelId, preferredProviderId } = streamContext.processingOptions ?? {};
+          const continuationOptions: GMIToolResultOptions | undefined =
+            continuationGate || preferredModelId || preferredProviderId
+              ? {
+                  ...(continuationGate ? { toolCallGate: continuationGate } : {}),
+                  ...(preferredModelId ? { preferredModelId } : {}),
+                  ...(preferredProviderId ? { preferredProviderId } : {}),
+                }
+              : undefined;
           // The caller took the pause; the store keeps that before the results reach the GMI, since the GMI takes
           // them once. A store that refuses the save fails the continuation here, with the pause put back as the store
           // holds it.
