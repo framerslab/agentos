@@ -267,17 +267,28 @@ export interface AgentMemoryBrain {
 
 /**
  * Opens the Brain behind `memory.store`: on a SQLite file, a Brain agentos closes; on a host's adapter, one it never
- * closes, since closing a Brain closes its adapter. The brain id is the store's `brainId`, else the agent's key.
+ * closes, since closing a Brain closes its adapter. The brain id is the store's `brainId`, else the agent's key. A
+ * PostgreSQL adapter must read BIGINT as numbers (`typeParsers: { int8: 'number' }`, as `Brain.openPostgres` opens
+ * its own): the Brain's integer columns are BIGINT there, and read as text a trace's retrieval count and times load
+ * as strings and an access appends to the count. One that reads BIGINT as text is refused before the Brain opens.
  *
  * @param store - `memory.store`, checked by {@link assertMemoryStore}.
  * @param agentKey - `learning.agentKey`.
- * @throws {Error} Naming `memory.store`, when the store does not open.
+ * @throws {Error} Naming `memory.store`, when the store does not open or its PostgreSQL adapter reads BIGINT as text.
  */
 export async function openAgentMemoryBrain(store: NonNullable<MemoryConfig['store']>, agentKey: string): Promise<AgentMemoryBrain> {
   try {
     if ('path' in store) {
       const brain = await Brain.openSqlite(store.path, { brainId: agentKey });
       return { brain, close: () => brain.close() };
+    }
+    if (String(store.adapter.kind).includes('postgres')) {
+      const probe = await store.adapter.get<{ n: unknown }>('SELECT CAST(1 AS BIGINT) AS n');
+      if (typeof probe?.n !== 'number') {
+        throw new Error(
+          "its PostgreSQL adapter reads BIGINT as text; open the adapter with typeParsers: { int8: 'number' }, as Brain.openPostgres opens its own, so a trace's counts and times load as numbers",
+        );
+      }
     }
     const brain = await Brain.openWithAdapter(store.adapter, { brainId: store.brainId?.trim() || agentKey });
     return { brain, close: async () => undefined };

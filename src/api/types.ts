@@ -117,7 +117,8 @@ export interface MemoryConfig {
    * `brainId` or `learning.agentKey`, an archive over the same adapter keeps a gist's original, and the agent's
    * learning store runs on the same adapter. A file is closed by `agent.close()` and opened again by the next session
    * or host call that needs it. One process serves a SQLite file; several processes share a Postgres database, each
-   * through an adapter of its own.
+   * through an adapter of its own, opened with `typeParsers: { int8: 'number' }`: the store refuses a PostgreSQL adapter
+   * that reads BIGINT as text, since a trace's counts and times would load as strings.
    * Needs the learning option on and `learning.agentKey`, which names the agent's brain and its learners; for durable
    * memory without learning, set `learning: { agentKey, mode: 'off' }`. Without it, memory lives in the process.
    */
