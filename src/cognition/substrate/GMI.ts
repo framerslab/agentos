@@ -1625,7 +1625,13 @@ export class GMI implements IGMI {
         const gateway = this.config.completionGateway;
         const preferredModelIdFromInput = turnInput.metadata?.options?.preferredModelId as string | undefined;
         const modelIdToUse = preferredModelIdFromInput || this.activePersona.defaultModelId || this.config.defaultLlmModelId;
-        const providerIdForModel = this.activePersona.defaultProviderId || this.config.defaultLlmProviderId;
+        // The turn's provider (AgentOSInput.options.preferredProviderId) over the persona's and the config's default,
+        // as the model id above: a host that picks a model of another provider names that provider with it.
+        const preferredProviderIdFromInput = turnInput.metadata?.options?.preferredProviderId;
+        const providerIdForModel =
+          (typeof preferredProviderIdFromInput === 'string' && preferredProviderIdFromInput) ||
+          this.activePersona.defaultProviderId ||
+          this.config.defaultLlmProviderId;
 
         if (!modelIdToUse) {
             throw new GMIError("Could not determine modelId for LLM call.", GMIErrorCode.CONFIGURATION_ERROR, { turnId });
