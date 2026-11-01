@@ -364,6 +364,8 @@ describe('the same runtime with the learning flag off', () => {
     provider.replies.push(toolCall('memory_search', { query: 'bike', scope: 'user' }));
     await send(agentos, { userId: 'bo', organizationId: 'A', sessionId: 's-3', textInput: 'Does it rain where I ride my bike?' });
     expect(provider.seenMessages.length - before).toBe(2);
+    // The search ran: its result is a list, not a tool error.
+    expect(toolMessagesOf(provider.seenMessages[before + 1])).toContain('{"results":[');
     const ofBo = JSON.stringify(provider.seenMessages.slice(before));
     for (const canary of ['PLAIN-7', 'PLAIN-8', 'PLAIN-9']) expect(ofBo, canary).not.toContain(canary);
 
