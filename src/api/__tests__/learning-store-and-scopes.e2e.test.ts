@@ -11628,7 +11628,7 @@ describe("two tenants with one user id on a host's one database, and the same ru
         expect(sentIn(mainCalls().slice(-1))).toContain('OWL-1');
       }, 120_000);
 
-      it('keeps the plain table names with no prefix, and a Brain opened later on that database files and recalls, and fails only its conversation export, as the docs say', async () => {
+      it('keeps the plain table names with no prefix, and a Brain opened later on that database does not open on PostgreSQL, and on SQLite files and recalls and fails its conversation export, as the docs say', async () => {
         quiet();
         const k = key();
         tenantProvider(k);
@@ -11639,6 +11639,10 @@ describe("two tenants with one user id on a host's one database, and the same ru
         expect(await tablesStarting(db, 'conversation')).toEqual(['conversation_messages', 'conversations']);
         expect((await db.all<{ content: string }>('SELECT content FROM conversation_messages')).some((row) => row.content.includes('OWL-2'))).toBe(true);
 
+        if (String(db.kind ?? '').includes('postgres')) {
+          await expect(Brain.openWithAdapter(db, { brainId: 'late' })).rejects.toThrow();
+          return;
+        }
         const later = await Memory.createWithAdapter(db, { brainId: 'late', selfImprove: false });
         await later.remember('Canary OWL-3: the later Brain holds this.', { scope: 'user', scopeId: 'ana' });
         expect((await later.recall('later Brain')).map((hit) => hit.trace.content)).toEqual(['Canary OWL-3: the later Brain holds this.']);
@@ -12199,8 +12203,9 @@ describe('the docs a host reads about it', () => {
     const quickstart = doc('docs/getting-started/SQL_STORAGE_QUICKSTART.md');
     expect(quickstart).toContain('`tablePrefix` (`conversationManagerConfig.tablePrefix` on the runtime)');
     expect(quickstart).toContain("with a `CONFIGURATION_ERROR` that names `tablePrefix`, before it changes anything");
-    expect(quickstart).toContain('a Brain opened later beside the unprefixed tables finds a `conversations` table that is not its own, and its conversation export and import fail there');
-    expect(doc('docs/memory/CLIENT_SIDE_STORAGE.md')).toContain('the runtime refuses such an adapter without a prefix, naming the option');
+    expect(quickstart).toContain('a Brain opened later beside the unprefixed tables finds a `conversations` table that is not its own. On PostgreSQL that Brain does not open');
+    expect(quickstart).toContain('on SQLite it opens, and its conversation export and import fail.');
+    expect(doc('docs/memory/CLIENT_SIDE_STORAGE.md')).toContain('the runtime refuses an adapter where the Brain made that table first, naming the option');
     const guide = doc('docs/GMI.md');
     expect(guide).toContain("a conversation's own history (the full runtime's conversation store and a `gmi()` session's history keep its messages until the host deletes them");
     expect(guide).toContain('It is off unless the host turns it on');
