@@ -19,8 +19,8 @@ export const INLINE_PERSONA_LOADER_CONFIG: PersonaLoaderConfig = { personaSource
  * an array. Semantic validation (required fields,
  * semver, prompt length) still runs in GMIManager through `validatePersonas`.
  * @throws GMIError `CONFIGURATION_ERROR` (`SYS_CONFIGURATION_ERROR`): for an entry, naming its index, and its id where
- *   the entry has one (`details.index`, `details.id`); for a value that is not an array, with the type received
- *   (`details.received`).
+ *   that id is a non-empty string (`details.index`, `details.id`); for a value that is not an array, with the type
+ *   received (`details.received`).
  */
 export function assertInlinePersonaDefinitions(definitions: unknown): asserts definitions is IPersonaDefinition[] {
   if (!Array.isArray(definitions)) {
