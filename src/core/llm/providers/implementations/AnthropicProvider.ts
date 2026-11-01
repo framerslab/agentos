@@ -197,7 +197,12 @@ interface KeyFailureDetails {
  * match the existing `opus-5`, `sonnet-5` and `fable-5` alternatives on
  * purpose, because `\b` matches at the hyphen before their trailing version
  * digit.
- * Every earlier Claude model (Opus ≤ 4.6, Sonnet 4.6 and earlier, Haiku) still accepts it.
+ * Claude Haiku 5.5 rejects any non-default `temperature`, `top_p` or `top_k`
+ * with HTTP 400 (Anthropic's Haiku 5.5 migration guide says to remove all
+ * three), so it is in the family too, though it is not a reasoning-default
+ * model in the Opus sense.
+ * Every earlier Claude model (Opus ≤ 4.6, Sonnet 4.6 and earlier, Haiku 4.5
+ * and earlier) still accepts it.
  * The same family also rejects `top_p` / `top_k`, so {@link buildRequestPayload}
  * gates `top_p` on this predicate too.
  *
@@ -213,11 +218,10 @@ interface KeyFailureDetails {
  *   model, `true` otherwise.
  */
 export function modelSupportsTemperature(modelId: string): boolean {
-  // Reasoning-default models that reject `temperature` (and `top_p` / `top_k`):
-  // Claude Opus 4.7 / 4.8 / 5 / 5.5, Sonnet 5 / 5.5, Fable 5 / 5.1, and any
-  // dated variant. Future reasoning-first siblings get added here as Anthropic
-  // releases them, in lockstep with modelSupportsThinking.
-  return !/^claude-(opus-4-(7|8)|opus-5|sonnet-5|fable-5)\b/i.test(modelId);
+  // Models that reject `temperature` (and `top_p` / `top_k`): Claude Opus
+  // 4.7 / 4.8 / 5 / 5.5, Sonnet 5 / 5.5, Fable 5 / 5.1, Haiku 5.5, and any
+  // dated variant. Future siblings get added here as Anthropic releases them.
+  return !/^claude-(opus-4-(7|8)|opus-5|sonnet-5|fable-5|haiku-5-5)\b/i.test(modelId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1681,6 +1685,12 @@ export class AnthropicProvider implements IProvider {
     options: ModelCompletionOptions,
     stream: boolean,
   ): Record<string, unknown> {
+    // The model the request is shaped for. A passthrough `model`
+    // (customModelParams.model) replaces the given id on the wire, so the
+    // sampling, thinking, effort, token and cache decisions follow it too.
+    const passthroughModel = options.customModelParams?.model;
+    const capabilityModelId =
+      typeof passthroughModel === 'string' && passthroughModel ? passthroughModel : modelId;
     // --- Extract system messages into content blocks ---
     // Anthropic treats system as a top-level field, not a conversation role.
     // When cache_control markers are present on content parts, emit system
@@ -1749,7 +1759,7 @@ export class AnthropicProvider implements IProvider {
         ? true
         : stripEnv === '0' || stripEnv === 'false'
           ? false
-          : !resolveCacheCapabilities(modelId).retainsPriorThinkingInContext;
+          : !resolveCacheCapabilities(capabilityModelId).retainsPriorThinkingInContext;
     let lastAssistantIdx = -1;
     for (let i = 0; i < conversationMessages.length; i++) {
       if (conversationMessages[i].role === 'assistant') lastAssistantIdx = i;
@@ -1789,7 +1799,7 @@ export class AnthropicProvider implements IProvider {
       // Clamp to the model's real output ceiling so an escalated truncation-retry
       // (max_tokens → 64000) is reshaped to the model's limit instead of 400ing.
       max_tokens: clampAnthropicMaxTokens(
-        modelId,
+        capabilityModelId,
         options.maxTokens ?? this.config.defaultMaxTokens ?? 4096,
       ),
       messages: anthropicMessages,
@@ -1806,12 +1816,12 @@ export class AnthropicProvider implements IProvider {
     }
 
     // --- Optional parameters ---
-    // Guard temperature behind modelSupportsTemperature: Opus 4.7 (and
-    // future reasoning-first Claude models) reject it with HTTP 400.
+    // Guard temperature behind modelSupportsTemperature: Opus 4.7 and later,
+    // Sonnet 5+, Fable and Haiku 5.5 reject it with HTTP 400.
     // Older models still accept it. See modelSupportsTemperature() above.
     if (
       options.temperature !== undefined &&
-      modelSupportsTemperature(modelId)
+      modelSupportsTemperature(capabilityModelId)
     ) {
       payload.temperature = options.temperature;
     }
@@ -1820,7 +1830,7 @@ export class AnthropicProvider implements IProvider {
     // predicate so a caller passing topP without a thinking budget — the path
     // that otherwise skips the thinking-reconciliation drop below — doesn't
     // 400 the request.
-    if (options.topP !== undefined && modelSupportsTemperature(modelId)) {
+    if (options.topP !== undefined && modelSupportsTemperature(capabilityModelId)) {
       payload.top_p = options.topP;
     }
     if (options.stopSequences?.length) payload.stop_sequences = options.stopSequences;
@@ -1833,7 +1843,7 @@ export class AnthropicProvider implements IProvider {
     // resolveThinkingPayload returns null for non-thinking models or
     // when no budget is set, leaving the request untouched.
     const thinkingResolved = resolveThinkingPayload(
-      modelId,
+      capabilityModelId,
       options.thinking,
       payload.max_tokens as number,
     );
@@ -1851,14 +1861,14 @@ export class AnthropicProvider implements IProvider {
     // effort block below caps it there.
     let thinkingOffEffortCap: 'high' | undefined;
     if (!thinkingResolved && options.thinking === false) {
-      const off = resolveThinkingOff(modelId);
+      const off = resolveThinkingOff(capabilityModelId);
       if (off.kind === 'send') {
         payload.thinking = off.thinking;
         thinkingOffEffortCap = off.maxEffort;
       } else if (off.kind === 'always_on') {
         warnOnce(
-          `thinking-always-on:${modelId}`,
-          `[agentos] AnthropicProvider: thinking cannot be turned off on ${modelId}; the request runs ` +
+          `thinking-always-on:${capabilityModelId}`,
+          `[agentos] AnthropicProvider: thinking cannot be turned off on ${capabilityModelId}; the request runs ` +
             `with adaptive thinking. Lower options.effort to reduce it.`,
         );
       }
@@ -1870,11 +1880,11 @@ export class AnthropicProvider implements IProvider {
     // — it rides on output_config. Dropped on unsupported models or invalid
     // values, and lowered to a level the model takes, so an out-of-range
     // effort never returns 400 (see resolveAnthropicEffort).
-    let effort = resolveAnthropicEffort(modelId, options.effort);
+    let effort = resolveAnthropicEffort(capabilityModelId, options.effort);
     if (thinkingOffEffortCap && (effort === 'xhigh' || effort === 'max')) {
       warnOnce(
-        `thinking-off-effort:${modelId}`,
-        `[agentos] AnthropicProvider: ${modelId} turns thinking off only at effort ` +
+        `thinking-off-effort:${capabilityModelId}`,
+        `[agentos] AnthropicProvider: ${capabilityModelId} turns thinking off only at effort ` +
           `${thinkingOffEffortCap} or below; sending effort '${thinkingOffEffortCap}' ` +
           `instead of '${effort}'.`,
       );
@@ -1989,6 +1999,54 @@ export class AnthropicProvider implements IProvider {
     // The model on the wire: a passthrough `model` replaces the one given, and
     // the schema route, the forced-choice clamp and the warnings follow it.
     const wireModelId = typeof payload.model === 'string' && payload.model ? payload.model : modelId;
+
+    // A passthrough can also carry the sampling fields the typed options
+    // withhold above. The model on the wire answers them with 400, so they go
+    // here too: `temperature` and `top_p` on every model that rejects
+    // `temperature`, and `top_k` on Claude Haiku 5.5, whose migration guide
+    // says to remove all three.
+    if (options.customModelParams && !modelSupportsTemperature(wireModelId)) {
+      const sampling = /^claude-haiku-5-5\b/i.test(wireModelId)
+        ? ['temperature', 'top_p', 'top_k']
+        : ['temperature', 'top_p'];
+      const dropped = sampling.filter((key) => Object.prototype.hasOwnProperty.call(payload, key));
+      if (dropped.length > 0) {
+        for (const key of dropped) delete payload[key];
+        warnOnce(
+          `passthrough-sampling:${wireModelId}`,
+          `[agentos] AnthropicProvider: ${wireModelId} rejects ${dropped.join(', ')}; ` +
+            `dropped from customModelParams.`,
+        );
+      }
+    }
+
+    // A passthrough `output_config` replaces the capped effort set above, so a
+    // thinking-off request whose model turns thinking off only at effort high
+    // or below is capped again here: `thinking: false` with
+    // `customModelParams.output_config.effort: 'max'` would otherwise send the
+    // off shape beside an effort the model answers with 400. The rest of the
+    // passthrough `output_config` stays, and a passthrough `thinking` that
+    // turns thinking back on leaves the effort as passed.
+    const wireThinkingType = (payload.thinking as { type?: unknown } | undefined)?.type;
+    if (
+      thinkingOffEffortCap &&
+      options.customModelParams &&
+      (wireThinkingType === 'disabled' || wireThinkingType === 'between_tools')
+    ) {
+      const oc = payload.output_config;
+      if (oc && typeof oc === 'object' && !Array.isArray(oc)) {
+        const passed = (oc as Record<string, unknown>).effort;
+        if (passed === 'xhigh' || passed === 'max') {
+          warnOnce(
+            `thinking-off-effort:${capabilityModelId}`,
+            `[agentos] AnthropicProvider: ${capabilityModelId} turns thinking off only at effort ` +
+              `${thinkingOffEffortCap} or below; sending effort '${thinkingOffEffortCap}' ` +
+              `instead of '${passed}'.`,
+          );
+          payload.output_config = { ...(oc as Record<string, unknown>), effort: thinkingOffEffortCap };
+        }
+      }
+    }
 
     // The JSON output format and the prompt-only schema block, after the
     // passthrough: the passthrough assigns whole top-level keys, so a format
@@ -2230,7 +2288,7 @@ export class AnthropicProvider implements IProvider {
       // Model-dynamic: stand the AUTO path down for ids without Anthropic
       // prompt caching (a non-claude id routed here by a proxy config).
       // Explicit caller markers above still pass through untouched.
-      && resolveCacheCapabilities(modelId).supportsPromptCaching
+      && resolveCacheCapabilities(capabilityModelId).supportsPromptCaching
     ) {
       if (customSystemOverride || customMessagesOverride) {
         // customModelParams replaced payload.system/messages wholesale, so

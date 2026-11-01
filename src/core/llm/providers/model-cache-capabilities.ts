@@ -11,7 +11,7 @@
  *
  *     | Floor | Models |
  *     | --- | --- |
- *     | 512 | Fable 5 / 5.1, Mythos 5 / 5.1, Opus 5 / 5.5, Sonnet 5.5 |
+ *     | 512 | Fable 5 / 5.1, Mythos 5 / 5.1, Opus 5 / 5.5, Sonnet 5.5, Haiku 5.5 |
  *     | 1024 | Opus 4.8, Sonnet 5, Sonnet 4.6, Sonnet 4.5 and older Sonnet, Opus 4.0 / 4.1, Opus 3 |
  *     | 2048 | Opus 4.7, Mythos Preview, Haiku 3.x |
  *     | 4096 | Opus 4.5 / 4.6, Haiku 4.5 |
@@ -21,10 +21,10 @@
  *     1024-floor models, Sonnet 5 did not cache at 830 tokens, and Opus 4.5
  *     did not cache at 561.
  *
- *  2. **Prior-turn thinking retention**: on Opus 4.5+ and Sonnet 4.6+ (and
- *     Fable/Mythos), thinking blocks from previous assistant turns are KEPT
+ *  2. **Prior-turn thinking retention**: on Opus 4.5+, Sonnet 4.6+ and Haiku
+ *     5.5 (and Fable/Mythos), thinking blocks from previous assistant turns are KEPT
  *     in context by default, participate in prompt caching, and are billed
- *     only when shown; on earlier Opus/Sonnet models and ALL Haiku models
+ *     only when shown; on earlier Opus/Sonnet models and Haiku 4.5 and older
  *     the server strips them from context BEFORE caching. Client-side
  *     handling should mirror the server: pass blocks back verbatim on
  *     retaining models (byte-stable prefix -> incremental cache reads) and
@@ -90,7 +90,8 @@ export function resolveCacheCapabilities(modelId: string): AnthropicCacheCapabil
     };
   }
 
-  // --- Haiku: never retains prior thinking, floors per generation ---
+  // --- Haiku: 5.5 keeps prior thinking at the 512 floor; 4.5 and 3.x never retain ---
+  if (/claude-haiku-5-5/.test(id)) return caps(512, true);
   if (/claude-haiku-4-5|claude-4-5-haiku/.test(id)) return caps(4096, false);
   if (/claude-3-5-haiku|claude-3-haiku/.test(id)) return caps(2048, false);
 
