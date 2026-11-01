@@ -1,15 +1,16 @@
 /**
  * @file agentos-learning-tenants.e2e.test.ts
  * Two tenants with one user id on one adapter and one Brain, on the full runtime with the learning flag on: the GMIs'
- * memory, the standalone facade (its tools, its long-term retriever and its rolling-summary sink) and the learning
- * store all on one SQLite adapter, the GMIs' memory and the facade on one brain id. What tenant A's user 42 said, what
- * A's agent stored with memory_add on that user's turn and what the sink filed from A's compaction reach A's next
- * session and no request of tenant B's user 42, whose memory_search finds none of it; forgetUser for A's 42 deletes
- * all three, with the knowledge-graph copies the GMIs' memory wrote, and keeps B's traces. A memory_delete reaches by
- * id only its own tenant's trace, and takes the copy of a trace the GMI filed with it. A JSON export of A's 42
- * imported into a fresh Brain is read for A's 42 only and goes with forgetUser. Two anonymous sessions file their
- * memory tools' writes under their own forms, each with a row of no user, and find nothing of each other.
- * AgentOS.create(); only the OpenAI provider class is stubbed.
+ * memory, the standalone facade (its tools, its long-term retriever and its rolling-summary sink), the learning store
+ * and the runtime's conversations (under conversationManagerConfig.tablePrefix, without which the runtime refuses an
+ * adapter that holds a Brain) all on one SQLite adapter, the GMIs' memory and the facade on one brain id. What tenant
+ * A's user 42 said, what A's agent stored with memory_add on that user's turn and what the sink filed from A's
+ * compaction reach A's next session and no request of tenant B's user 42, whose memory_search finds none of it;
+ * forgetUser for A's 42 deletes all three, with the knowledge-graph copies the GMIs' memory wrote, and keeps B's
+ * traces. A memory_delete reaches by id only its own tenant's trace, and takes the copy of a trace the GMI filed with
+ * it. A JSON export of A's 42 imported into a fresh Brain is read for A's 42 only and goes with forgetUser. Two
+ * anonymous sessions file their memory tools' writes under their own forms, each with a row of no user, and find
+ * nothing of each other. AgentOS.create(); only the OpenAI provider class is stubbed.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -100,9 +101,14 @@ afterEach(async () => {
 
 /**
  * The full runtime on one SQLite adapter: the learning store, the GMIs' memory and a standalone facade, the last two
- * on brain `tutor`; compaction on every turn (one message is enough, none is kept back).
+ * on brain `tutor`, and the runtime's conversations under the table prefix `agentos_` (the Brain has a
+ * `conversations` table of its own); compaction on every turn (one message is enough, none is kept back).
  */
-async function bootOneBrain(facadeOver?: (adapter: StorageAdapter) => Promise<Memory>): Promise<{ os: AgentOS; db: StorageAdapter; facade: Memory }> {
+async function bootOneBrain(
+  facadeOver?: (adapter: StorageAdapter) => Promise<Memory>,
+  // `null` leaves the conversation tables under their plain names.
+  tablePrefix: string | null = 'agentos_',
+): Promise<{ os: AgentOS; db: StorageAdapter; facade: Memory }> {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'learning-tenants-e2e-'));
   const db = await resolveStorageAdapter({ filePath: path.join(dir, 'one.sqlite'), priority: ['better-sqlite3', 'sqljs'], quiet: true });
   adapter = db;
@@ -115,6 +121,7 @@ async function bootOneBrain(facadeOver?: (adapter: StorageAdapter) => Promise<Me
     turnPlanning: { enabled: false },
     personas: [tutor],
     storageAdapter: db,
+    conversationManagerConfig: { ...base.conversationManagerConfig, ...(tablePrefix === null ? {} : { tablePrefix }) },
     gmiManagerConfig: { ...base.gmiManagerConfig, cognitiveMemoryFactory: () => shared.forSession() },
     standaloneMemory: { memory: facade, tools: true, longTermRetriever: true, rollingSummarySink: true },
     orchestratorConfig: {
@@ -150,6 +157,28 @@ const copiesOf = async (db: StorageAdapter): Promise<string[]> =>
 /** Whether brain `tutor` holds the knowledge-graph copy of a trace. */
 const hasCopy = async (db: StorageAdapter, traceId: string): Promise<boolean> =>
   (await db.get("SELECT id FROM knowledge_nodes WHERE brain_id = 'tutor' AND id = ?", [copyKey(traceId)])) != null;
+
+describe("the runtime's conversations on the adapter of a memory Brain", () => {
+  it("are kept under conversationManagerConfig.tablePrefix, and without one the runtime refuses to start, naming the option", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(bootOneBrain(undefined, null)).rejects.toThrow(/conversationManagerConfig\.tablePrefix/);
+    await closeMemory();
+    await adapter!.close();
+    adapter = undefined;
+    fs.rmSync(dir!, { recursive: true, force: true });
+
+    const { os: agentos, db } = await bootOneBrain();
+    await send(agentos, { userId: '42', organizationId: 'A', sessionId: 's-a1', textInput: 'Canary WREN-8: I row on Tuesdays.' });
+    await agentos.shutdown();
+    booted = undefined;
+    // Saved at shutdown, if not before.
+    const kept = await db.all<{ content: string }>('SELECT content FROM agentos_conversation_messages');
+    expect(kept.some((row) => row.content.includes('WREN-8'))).toBe(true);
+    // The Brain's own conversations table keeps its columns.
+    expect(await db.all("SELECT brain_id, id FROM conversations WHERE brain_id = 'tutor'")).toEqual([]);
+  });
+});
 
 describe('two tenants with one user id on one adapter and one Brain', () => {
   it("keep A's 42's words, tool writes and summaries from every request of B's 42, and forgetUser for A's 42 deletes them all with their copies and keeps B's", async () => {
