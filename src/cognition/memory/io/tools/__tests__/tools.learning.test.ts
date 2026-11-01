@@ -452,6 +452,38 @@ describe('memory_search where a learning layer runs', () => {
     const stale: ToolExecutionContext = { ...plain, userContext: { userId: '42', organizationId: 'A' } as UserContext };
     expect(await found(tools, 'canary', stale)).toEqual([]);
   });
+
+  it("reads no trace a release older than the scope-id column left with no scope id while its metadata names one", async () => {
+    quiet();
+    const { brain, layer, tools } = await setUp();
+    // User 7's trace, filed with no layer: its scope id in the column and in the metadata.
+    const ofSeven: ToolExecutionContext = { ...NO_LAYER, userContext: { userId: '7' } as UserContext };
+    const older = traceIdOf(await tools.memory_add!.execute({ content: 'Older release canary OSPREY-9.' }, ofSeven));
+    const plain = await turnOf(await layer.forLearner({ namespace: '', agentKey: 'tutor', userId: '42' }, contextOf('s-1')), {
+      userId: '42',
+      namespace: '',
+      sessionId: 's-1',
+    });
+    const namespaced = await turnOf(await layer.forLearner(LEARNER_A, contextOf('s-2')), { userId: '42', namespace: 'A', sessionId: 's-2' });
+    const seven = await turnOf(await layer.forLearner({ namespace: '', agentKey: 'tutor', userId: '7' }, contextOf('s-7')), {
+      userId: '7',
+      namespace: '',
+      sessionId: 's-7',
+    });
+    expect(await found(tools, 'canary', seven)).toEqual(['Older release canary OSPREY-9.']);
+    expect(await found(tools, 'canary', plain)).toEqual([]);
+
+    // The row as a release older than the column writes it to a Brain this process holds open: '' in the column, the
+    // scope id in the metadata alone, until the Brain's next open files it.
+    await brain.run(`UPDATE memory_traces SET scope_id = '' WHERE brain_id = ? AND id = ?`, [brain.brainId, older]);
+
+    expect(await found(tools, 'canary', plain)).toEqual([]);
+    expect(await found(tools, 'canary', namespaced)).toEqual([]);
+    const narrowed = (await tools.memory_search!.execute({ query: 'canary', scope: 'user' }, namespaced)).output as { results: unknown[] };
+    expect(narrowed.results).toEqual([]);
+    // With no layer the search reads it as before, so its absence on the turns is the scopes' doing.
+    expect(await found(tools, 'canary', NO_LAYER)).toEqual(['Older release canary OSPREY-9.']);
+  });
 });
 
 /**
