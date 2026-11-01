@@ -32,7 +32,7 @@ import {
   ProviderEmbeddingOptions,
   ProviderEmbeddingResponse,
 } from '../IProvider';
-import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
+import { stripParamsForGemini } from '../openrouter-only-params';
 import { redactUrlSecrets } from '../url-secrets';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
@@ -1505,13 +1505,14 @@ export class GeminiProvider implements IProvider {
     }
 
     // Pass through custom model params (excluding ones we already handle,
-    // and never OpenRouter's routing controls — Gemini 400s on unknown
-    // top-level names like `provider`; see openrouter-only-params).
+    // and never OpenRouter's routing controls or another vendor's
+    // structured-output field — Gemini 400s on unknown top-level names like
+    // `provider`; see openrouter-only-params).
     if (options.customModelParams) {
       // thinkingConfig belongs inside generationConfig (set above); at the
       // payload root Gemini rejects it as an unknown field.
       const { topK, thinkingConfig, ...rest } = options.customModelParams;
-      const passthrough = stripOpenRouterOnlyParams(rest);
+      const passthrough = stripParamsForGemini(rest);
       if (passthrough) {
         Object.assign(payload, passthrough);
       }
