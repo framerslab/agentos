@@ -22,6 +22,10 @@ describe('resolveCacheCapabilities', () => {
     ['claude-sonnet-5-5', { floor: 512, retains: true }],
     ['anthropic/claude-sonnet-5-5', { floor: 512, retains: true }],
     ['claude-sonnet-5-5-20261001', { floor: 512, retains: true }],
+    // Haiku 5.5: the 512 floor, and it keeps prior-turn thinking in context
+    ['claude-haiku-5-5', { floor: 512, retains: true }],
+    ['anthropic/claude-haiku-5-5', { floor: 512, retains: true }],
+    ['anthropic.claude-haiku-5-5', { floor: 512, retains: true }],
     // Mythos Preview keeps its own 2048 floor
     ['claude-mythos-preview', { floor: 2048, retains: true }],
     // Opus 4.x: each minor version has its own floor
@@ -45,7 +49,7 @@ describe('resolveCacheCapabilities', () => {
     ['claude-sonnet-4-20250514', { floor: 1024, retains: false }],
     ['claude-3-7-sonnet-20250219', { floor: 1024, retains: false }],
     ['claude-3-5-sonnet-20241022', { floor: 1024, retains: false }],
-    // Haiku: never retains; 4.5 has the 4096 floor, 3.x the 2048 floor
+    // Haiku through 4.5: never retains; 4.5 has the 4096 floor, 3.x the 2048 floor
     ['claude-haiku-4-5-20251001', { floor: 4096, retains: false }],
     ['claude-haiku-4-5', { floor: 4096, retains: false }],
     ['claude-3-5-haiku-20241022', { floor: 2048, retains: false }],
