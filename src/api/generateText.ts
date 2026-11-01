@@ -460,7 +460,10 @@ export interface GenerateTextOptions {
    * this call only. Large-output callers (e.g. structured-output generation
    * that emits long strings) can raise the abort window without slowing the
    * provider's default failover for chat or narration traffic. Native path
-   * only; providers without a request timeout ignore it.
+   * only; providers without a request timeout ignore it. `streamText()`
+   * forwards it to the provider's stream: on Anthropic it bounds the stream's
+   * connection (the request and its response headers), and the gap between
+   * streamed events after that is the provider's `streamIdleTimeoutMs`.
    */
   requestTimeout?: number;
   /**
