@@ -10,11 +10,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager';
 import { toolFormatFor, type CompletionGateway, type CompletionRoute } from '../../../api/runtime/completionGateway';
-import { createScriptedGmi, runTurn, scriptedProvider, textReply, textTurn } from './helpers/scriptedGmi';
+import type { ModelCompletionResponse } from '../../../core/llm/providers/IProvider';
+import { createScriptedGmi, runTurn, scriptedProvider, textReply, textTurn, toolCallReply } from './helpers/scriptedGmi';
 
 /** A one-hop gateway that serves whatever provider the route names and records each route. */
-function recordingGateway() {
+function recordingGateway(replies?: ModelCompletionResponse[][]) {
   const routes: CompletionRoute[] = [];
+  /** The provider of the hop that served each model call. */
+  const served: string[] = [];
   const gateway: CompletionGateway = {
     resolve: async (route, after) => {
       if (after) return null;
@@ -31,9 +34,14 @@ function recordingGateway() {
         chain: [{ provider: providerId, model: modelId }],
       };
     },
-    stream: () => Object.assign((async function* () { yield* textReply('Aye.'); })(), { outcome: Promise.resolve({ kind: 'delivered' as const }) }),
+    stream: (resolution) => {
+      served.push(resolution.providerId);
+      const reply = replies ? replies.shift() : textReply('Aye.');
+      if (!reply) throw new Error('unexpected model call');
+      return Object.assign((async function* () { yield* reply; })(), { outcome: Promise.resolve({ kind: 'delivered' as const }) });
+    },
   };
-  return { gateway, routes };
+  return { gateway, routes, served };
 }
 
 describe('GMI turn provider selection', () => {
@@ -126,6 +134,31 @@ describe('GMI turn provider selection', () => {
       ['openai', 'gpt-4o-mini'],
       ['anthropic', 'claude-sonnet-4-0'],
     ]);
+  });
+
+  it("keeps each stream on its own hop when a continuation that names another provider runs while its turn's stream goes on", async () => {
+    // the turn's first step asks for lookup; while the GMI runs it, a tool result that names Anthropic continues the turn
+    const { gateway, served } = recordingGateway([
+      toolCallReply([{ id: 'call_a', name: 'lookup', args: { q: 'a' } }]),
+      textReply('From Anthropic.'),
+      textReply('From OpenAI.'),
+      textReply('Anthropic again.'),
+    ]);
+    const { gmi, processToolCall } = await createScriptedGmi({ gateway, persona: { defaultProviderId: 'openai', defaultModelId: 'gpt-4o-mini' } });
+    const anthropic = { preferredModelId: 'claude-sonnet-4-0', preferredProviderId: 'anthropic' };
+    let overlapping: string | null | undefined;
+    processToolCall.mockImplementationOnce(async ({ toolCallRequest }) => {
+      overlapping = (await gmi.handleToolResults([lookupResult], 'user-1', undefined, anthropic)).responseText;
+      return { toolCallId: toolCallRequest.id, toolName: toolCallRequest.name, output: { ok: true } };
+    });
+
+    await runTurn(gmi, textTurn('t1', 'Hello?'));
+    // a later tool result that names neither keeps the route the newest continuation chose, and its hop
+    const later = await gmi.handleToolResults([{ ...lookupResult, toolCallId: 'call_y' }], 'user-1');
+
+    expect(overlapping).toBe('From Anthropic.');
+    expect(later.responseText).toBe('Anthropic again.');
+    expect(served).toEqual(['openai', 'anthropic', 'openai', 'anthropic']);
   });
 
   it('takes the provider and model a tool result names for a turn the GMI did not run', async () => {

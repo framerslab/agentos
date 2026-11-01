@@ -1358,6 +1358,12 @@ export class GMI implements IGMI {
     this.stateOwnerTurn = turnNumber;
     // False once a newer turn has started; lifecycle writes below check it.
     const ownsState = (): boolean => this.stateOwnerTurn === turnNumber;
+    // The model and the provider this stream calls, fixed when it starts: a continuation that starts while this
+    // stream goes on and names another pair changes the turn's, never this stream's.
+    const streamSelection = this.modelSelectionFor(turnInput);
+    // The gateway hop that served this stream's last step; its next step starts there. Kept apart from the turn's
+    // (`turnResolution`), which only the newest stream of the GMI writes.
+    let streamResolution: CompletionResolution | undefined;
     const turnId = turnInput.interactionId || `turn-${uuidv4()}`;
     // Store turnId on reasoningTrace for current turn
     if (this.reasoningTrace) {
@@ -1672,10 +1678,9 @@ export class GMI implements IGMI {
         // The turn's model and provider (AgentOSInput.options.preferredModelId and preferredProviderId) over the
         // persona's and the config's default: a host that picks a model of another provider names that provider with
         // it. A tool continuation that names neither calls those of the turn it continues.
-        const turnSelection = this.modelSelectionFor(turnInput);
-        const modelIdToUse = turnSelection.modelId || this.activePersona.defaultModelId || this.config.defaultLlmModelId;
+        const modelIdToUse = streamSelection.modelId || this.activePersona.defaultModelId || this.config.defaultLlmModelId;
         const providerIdForModel =
-          turnSelection.providerId || this.activePersona.defaultProviderId || this.config.defaultLlmProviderId;
+          streamSelection.providerId || this.activePersona.defaultProviderId || this.config.defaultLlmProviderId;
 
         if (!modelIdToUse) {
             throw new GMIError("Could not determine modelId for LLM call.", GMIErrorCode.CONFIGURATION_ERROR, { turnId });
@@ -1774,13 +1779,16 @@ export class GMI implements IGMI {
             }
           : undefined;
 
-        // The hop that serves this step: the one that served the turn's last
-        // step, else the route's first hop that can start. Resolved before the
-        // prompt is built, so the prompt is budgeted for the serving model (D1).
+        // The hop that serves this step: the one that served this stream's last
+        // step, else, while this stream is the GMI's newest, the one that served
+        // the turn's last step, else the route's first hop that can start.
+        // Resolved before the prompt is built, so the prompt is budgeted for the
+        // serving model (D1).
         let resolution: CompletionResolution | null = null;
         if (gateway && route) {
           try {
-            resolution = this.turnResolution ?? (await gateway.resolve(route));
+            resolution =
+              streamResolution ?? (ownsState() ? this.turnResolution : undefined) ?? (await gateway.resolve(route));
           } catch (resolveError) {
             // resolve() throws only when the primary cannot be set up (no
             // credentials, a provider or model that does not resolve): a
@@ -2055,7 +2063,11 @@ export class GMI implements IGMI {
           }
           break hopLoop;
         }
-        if (resolution) this.turnResolution = resolution;
+        if (resolution) {
+          streamResolution = resolution;
+          // an older stream never writes back over the hop of a newer continuation's route
+          if (ownsState()) this.turnResolution = resolution;
+        }
 
         // The step's usage, counted once (D4c).
         if (stepUsage) addUsage(aggregatedUsage, stepUsage);
