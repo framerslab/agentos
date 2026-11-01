@@ -1009,6 +1009,77 @@ describe('Claude Haiku 5.5 through the public API', () => {
     expect(body).not.toHaveProperty('thinking');
     expect(body.output_config).toEqual({ effort: 'max' });
   });
+
+  it('drops sampling parameters passed through customModelParams', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'ok')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'x',
+      customModelParams: { temperature: 0.2, top_p: 0.9, top_k: 40 },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body).not.toHaveProperty('temperature');
+    expect(body).not.toHaveProperty('top_p');
+    expect(body).not.toHaveProperty('top_k');
+    warn.mockRestore();
+  });
+
+  it('still sends a passthrough top_k to Claude Haiku 4.5', async () => {
+    route({ 'claude-haiku-4-5-20251001': [textTurn('claude-haiku-4-5-20251001', 'ok')] });
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001',
+      prompt: 'x',
+      customModelParams: { top_k: 40 },
+      fallbackProviders: [],
+    });
+
+    expect(postedBodies()[0].top_k).toBe(40);
+  });
+
+  it('shapes the request for a passthrough model: Haiku 5.5 overridden to Haiku 4.5 sends no effort', async () => {
+    route({ 'claude-haiku-4-5-20251001': [textTurn('claude-haiku-4-5-20251001', 'ok')] });
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-5-5',
+      prompt: 'x',
+      effort: 'low',
+      temperature: 0,
+      customModelParams: { model: 'claude-haiku-4-5-20251001' },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body.model).toBe('claude-haiku-4-5-20251001');
+    expect(body).not.toHaveProperty('output_config');
+    expect(body.temperature).toBe(0);
+  });
+
+  it('shapes the request for a passthrough model: Haiku 4.5 overridden to Haiku 5.5 sends no temperature', async () => {
+    route({ 'claude-haiku-5-5': [textTurn('claude-haiku-5-5', 'ok')] });
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001',
+      prompt: 'x',
+      temperature: 0,
+      effort: 'low',
+      customModelParams: { model: 'claude-haiku-5-5' },
+      fallbackProviders: [],
+    });
+
+    const [body] = postedBodies();
+    expect(body.model).toBe('claude-haiku-5-5');
+    expect(body).not.toHaveProperty('temperature');
+    expect(body.output_config).toEqual({ effort: 'low' });
+  });
 });
 
 describe('structured calls carry thinking and effort to the wire', () => {
