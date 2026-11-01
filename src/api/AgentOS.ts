@@ -1885,7 +1885,7 @@ export class AgentOS implements IAgentOS {
    * `gmiManagerConfig.learningLayer` are not both set (the manager takes one layer). `learning: null`, and a field set
    * to `null`, read as unset, as a config read from JSON or YAML writes them.
    *
-   * @throws {AgentOSServiceError} With `CONFIGURATION_ERROR`, naming the option.
+   * @throws {AgentOSServiceError} With `CONFIGURATION_ERROR` (`SYS_CONFIGURATION_ERROR`), naming the option.
    */
   private assertLearningConfig(config: AgentOSConfig): void {
     const option = config.learning as boolean | LearningConfig | null | undefined;
