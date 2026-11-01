@@ -33,7 +33,7 @@ export type Fields<S extends Readonly<Record<string, FieldKind>>> = { [K in keyo
 export type ContextValues<C extends ContextSchema> = Fields<C>;
 
 /** The provider names a line may carry. Any other provider is written as `unknown`. */
-export const PROVIDERS = ['openai', 'openrouter', 'anthropic', 'gemini', 'ollama', 'requesty', 'groq', 'mistral', 'together', 'xai', 'litellm', 'minimax', 'unknown'] as const;
+export const PROVIDERS = ['openai', 'openrouter', 'anthropic', 'gemini', 'ollama', 'requesty', 'groq', 'mistral', 'together', 'xai', 'litellm', 'minimax', 'claude-code-cli', 'gemini-cli', 'unknown'] as const;
 const provider = { enum: PROVIDERS };
 const api = { enum: ['generateText', 'streamText'] as const };
 // The fields every fallback event of generateText and streamText shares.
@@ -101,9 +101,13 @@ export type AgentOSContext = ContextValues<typeof AGENTOS_CONTEXT>;
  * @returns `true` when the string must not reach a line.
  */
 export function credential(value: string): boolean {
+  return keyShape(value) || /(?:^|[./:\s-])[A-Za-z0-9_]{20,}(?:$|[./:\s-])/.test(value);
+}
+
+// The credential shapes other than a long segment: a key prefix, the word bearer, or a JWT.
+function keyShape(value: string): boolean {
   return /(?:^|[./:\s-])(?:sk[-_]|pk_|rk_)/i.test(value) || /bearer/i.test(value)
-    || /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)
-    || /(?:^|[./:\s-])[A-Za-z0-9_]{20,}(?:$|[./:\s-])/.test(value);
+    || /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
 }
 
 /**
@@ -132,9 +136,29 @@ export function valid(kind: FieldKind, value: unknown, key = ''): boolean {
  */
 export function safeWord(value: unknown): string { return valid('word', value) ? value as string : 'unknown'; }
 
+// A class name ending in Error or Exception, and an upper-case constant code of two or more parts joined by
+// underscores, each part at most 16 characters. Either may be 20 characters or more, which the long-segment
+// credential rule alone would refuse; the other credential shapes still refuse them.
+const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,54}(?:Error|Exception)$/;
+const CONSTANT_CODE = /^[A-Z][A-Z0-9]{0,15}(?:_[A-Z0-9]{1,16})+$/;
+
+// A value read from a caught error, or undefined when reading it throws.
+function read(get: () => unknown): unknown {
+  try { return get(); } catch { return undefined; }
+}
+
+// A value as a word when it has `form` and no key shape, otherwise as `safeWord` writes it.
+function formWord(value: unknown, form: RegExp): string {
+  if (typeof value === 'string' && value.length <= 64 && form.test(value) && !keyShape(value)) return value;
+  return safeWord(value);
+}
+
 /**
  * The fields an error is written as: its type and its code, never its message or its stack.
- * Either is `unknown` when it is not a valid word.
+ * Either is `unknown` when it is not a valid word. A class name ending in `Error` or
+ * `Exception` and an upper-case constant code such as `STREAM_PARSING_ERROR` are kept at any
+ * length up to 64 characters, while a value with the shape of a credential is still `unknown`.
+ * Reading the error never throws: a property whose getter throws is written as `unknown`.
  *
  * @param error - The caught value.
  * @returns `type`, the error's name (or the value's `typeof` when it is not an `Error`), and `code`, its `code` property.
@@ -146,8 +170,9 @@ export function safeWord(value: unknown): string { return valid('word', value) ?
  * ```
  */
 export function errorFields(error: unknown): { type: string; code: string } {
-  const record = typeof error === 'object' && error !== null ? error as Record<string, unknown> : {};
-  return { type: safeWord(error instanceof Error ? error.name : typeof error), code: safeWord(record.code) };
+  const type = read(() => (error instanceof Error ? error.name : typeof error));
+  const code = read(() => (typeof error === 'object' && error !== null ? (error as Record<string, unknown>).code : undefined));
+  return { type: formWord(type, CLASS_NAME), code: formWord(code, CONSTANT_CODE) };
 }
 
 /**
