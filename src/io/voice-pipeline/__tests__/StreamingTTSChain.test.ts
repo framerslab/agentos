@@ -877,6 +877,100 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     });
   });
 
+  describe('a healthy session', () => {
+    it("leaves nothing behind per write: no write races a promise that stays pending for the session's life, which would keep one reaction per token", async () => {
+      const a = pullSession();
+      const chain = new StreamingTTSChain([provider('a', 10, a).tts], { enableMidSynthesisFailover: true });
+      const session = await chain.startSession();
+      session.setAudioSink!(async () => {});
+      const race = vi.spyOn(Promise, 'race');
+      try {
+        for (let i = 0; i < 10; i++) await session.writeTokens!('Hi. ');
+        expect(race).not.toHaveBeenCalled();
+      } finally {
+        race.mockRestore();
+      }
+    });
+  });
+
+  describe('a host hook that throws', () => {
+    it('goes on to the next backup when onProviderFailed throws during a switch', async () => {
+      const a = pushSession();
+      const second = provider('b', 20, pushSession());
+      second.startSession.mockRejectedValue(new Error('401 unauthorized'));
+      const c = pushSession();
+      const failover = vi.fn();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts, provider('c', 30, c).tts], {
+          enableMidSynthesisFailover: true,
+          onProviderFailed: () => {
+            throw new Error('host bug');
+          },
+          onProviderFailover: failover,
+        });
+        const session = await chain.startSession();
+        const errors = vi.fn();
+        session.on('error', errors);
+        session.pushTokens('Hi.');
+        a.emit('error', new Error('socket hang up'));
+        await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+        expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'c' });
+        expect(c.pushTokens).toHaveBeenCalledWith('Hi.');
+        expect(errors).not.toHaveBeenCalled();
+        expect(warn.mock.calls).toEqual([['[chain] onProviderFailed threw']]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('keeps the backup that took the text when onProviderFailover throws', async () => {
+      const a = pushSession();
+      const b = pushSession();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts], {
+          enableMidSynthesisFailover: true,
+          onProviderFailover: () => {
+            throw new Error('host bug');
+          },
+        });
+        const session = await chain.startSession();
+        const errors = vi.fn();
+        session.on('error', errors);
+        session.pushTokens('Hi.');
+        a.emit('error', new Error('socket hang up'));
+        await session.flush();
+        expect(b.flush).toHaveBeenCalledOnce();
+        expect(errors).not.toHaveBeenCalled();
+        expect(warn.mock.calls).toEqual([['[chain] onProviderFailover threw']]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it.each(['onProviderSelected', 'onProviderFailed'] as const)('opens the session when %s throws at startup, with the provider that opened and none recorded failed for the hook', async (hook) => {
+      const first = provider('a', 10, pushSession());
+      if (hook === 'onProviderFailed') first.startSession.mockRejectedValue(new Error('401 unauthorized'));
+      const second = pushSession();
+      const breaker = new CircuitBreaker({ failureThreshold: 1, windowMs: 60_000, cooldownMs: 60_000 });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const chain = new StreamingTTSChain([first.tts, provider('b', 20, second).tts], {
+          breaker,
+          [hook]: () => {
+            throw new Error('host bug');
+          },
+        });
+        await chain.startSession();
+        expect(chain.currentProviderId).toBe(hook === 'onProviderFailed' ? 'b' : 'a');
+        expect(breaker.isAvailable(hook === 'onProviderFailed' ? 'b' : 'a')).toBe(true);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
   describe('a cut write the provider refuses late', () => {
     it("takes the refusal of a write a cancel() cut as the cut's, though the next request's text has come: the write resolves and the provider stays in use", async () => {
       const a = pullSession();
