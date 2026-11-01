@@ -659,6 +659,9 @@ final text with the supplied Zod schema and returns the value in `result.parsed`
 It can extract JSON from a code fence. `controls.maxValidationRetries` defaults
 to 1, so an invalid reply gets one more attempt. Set it to 0 to throw
 `ObjectGenerationError` on the first invalid reply.
+`output` is the `agency()` option: `agent()` accepts it, does not apply it
+and names it in its construction warning, so pass an agent's schema as
+`responseSchema`.
 Repair attempts retain the completed transcript, including native tool calls
 and their results, and run without tools so they cannot repeat an action.
 

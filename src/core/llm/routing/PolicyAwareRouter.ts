@@ -113,8 +113,9 @@ export class PolicyAwareRouter implements IModelRouter {
     // under either spelling, as in the fallback walk: a call with tools
     // requires `function_calling`, which the catalog lists as `tool_use`. This prevents the
     // router from picking a prose-only model like Dolphin Mixtral when the
-    // agent has set `output: someZodSchema`, which would fail Zod validation
-    // because the model returns natural language instead of JSON.
+    // caller asks for structured output (`agent({ responseSchema })`,
+    // `agency({ output })`), which would fail Zod validation because the
+    // model returns natural language instead of JSON.
     const required = params.requiredCapabilities ?? [];
     if (required.length > 0) {
       const candidates = this.catalog
