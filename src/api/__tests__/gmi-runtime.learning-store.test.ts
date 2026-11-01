@@ -214,6 +214,26 @@ describe("an agent's memory and learned state in one SQLite file", () => {
     }
   });
 
+  it('keep no learning store a host call was opening when agent.close() closed the file: the next call opens it again', async () => {
+    quietManifest();
+    const file = tempFile();
+    const tutor = gmi(options(key(), { ...memoryOn({ path: file }), learning: { agentKey: 'tutor' } }));
+    // The call opens the file's Brain and the learning store on it while close() lets them go.
+    const opening = tutor.learning!.manifest();
+    await tutor.close();
+    await opening.catch(() => undefined);
+
+    await tutor.learning!.freeze!({ userId: 'ana' }, 'ops');
+    expect((await tutor.learning!.manifest()).loops.ledger).toMatchObject({ live: true });
+    await tutor.close();
+    const brain = await Brain.openSqlite(file, { brainId: 'tutor' });
+    try {
+      expect(await brain.all('SELECT mode FROM agentos_learning_freezes')).toEqual([{ mode: 'frozen' }]);
+    } finally {
+      await brain.close();
+    }
+  });
+
   it("run on a host's own adapter, which the agent never closes", async () => {
     quietManifest();
     embeddings();
