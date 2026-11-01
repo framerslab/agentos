@@ -326,8 +326,9 @@ export interface ITool<TInput extends Record<string, any> = any, TOutput = any> 
    * Optional. The refusal a call meets before it acts, whatever a human would answer: the result the tool returns
    * without changing anything, or `undefined` when the call may run. The tool orchestrator asks it before its approval
    * gate and returns such a refusal in place of asking for approval, so no one is asked to approve a call that cannot
-   * act. The self-modification tools answer the learning layer's refusals here (`selfChangeRefusal`); a tool that
-   * leaves it out is gated as before. The tool's `execute` refuses the same call itself.
+   * act. The self-modification tools answer the learning layer's refusals here (`selfChangeRefusal`), and the memory
+   * tools that write answer a freeze, `memory_reflect`'s withdrawal and the refusals a turn's scope ids give before any
+   * trace is read; a tool that leaves it out is gated as before. The tool's `execute` refuses the same call itself.
    *
    * @param args - The call's arguments as the model sent them, before the input schema is checked.
    * @param context - The call's context, its session data among it.

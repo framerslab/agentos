@@ -40,7 +40,8 @@ import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
 import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
-import type { LearningConfig, LoopManifest } from '../cognition/learning/types.js';
+import type { ForgetReport, ImportReport, LearnedStateDocument, LearningConfig, LedgerEntry, LoopManifest } from '../cognition/learning/types.js';
+import type { HexacoTraitValues } from '../cognition/substrate/personas/hexaco.js';
 import type { AgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
 import type {
@@ -288,7 +289,7 @@ export interface AgentOptions extends BaseAgentConfig {
    */
   cache?: import('./generateText.js').GenerateTextOptions['cache'];
   /**
-   * Session conversation-history policy (spec 2026-07-20 §1a/§1c). Sessions
+   * Session conversation-history policy. Sessions
    * maintain a lossless transcript by default — independent of the memory
    * subsystem — bounded past `maxTokens` (default 120K estimated) by
    * chunk-amortized whole-block eviction. `false` restores stateless
@@ -340,12 +341,12 @@ export interface AgentOptions extends BaseAgentConfig {
    */
   cognition?: CognitionProfile | CognitionConfig;
   /**
-   * The learning layer when `runtime` is `'gmi'` (docs/GMI.md, "Learning"). Unset or `false`: off, and the agent
-   * runs as it did before the layer existed. `true` or a {@link LearningConfig}: the agent's GMIs send the
+   * The learning layer when `runtime` is `'gmi'` (docs/GMI.md, "Learning"). Unset, `false` or `null`: off, and the
+   * agent runs as it did before the layer existed. `true` or a {@link LearningConfig}: the agent's GMIs send the
    * personality section as a system prompt of its own on every turn, and each session opened with a user id is
    * bound to a learner. The legacy runtime ignores it.
    */
-  learning?: boolean | LearningConfig;
+  learning?: boolean | LearningConfig | null;
   /**
    * Temporary teams this agent launches from a turn, with `runtime: 'gmi'`: `launch: true` registers the
    * `launch_agency` tool, which runs an `agency()` team on one goal and returns its answer as the call's result, and
@@ -361,11 +362,43 @@ export interface AgentOptions extends BaseAgentConfig {
 }
 
 /**
- * What a host reads of an agent's learning layer ({@link Agent.learning}).
+ * What a host reads of an agent's learning layer, and the operator's calls on it ({@link Agent.learning}), with the
+ * agent's key (`learning.agentKey`, else a named agent's persona id) and namespace (`learning.namespace`) filled in.
+ * A call that names a user acts on that user's learner of this agent, and rejects, naming `learning.agentKey`, on an
+ * agent with no key. Every call runs in every mode, a freeze included. `gmi()` sets every member.
  */
 export interface AgentLearning {
   /** Which loops the agent runs, and for each one that is off, why. */
   manifest(): Promise<LoopManifest>;
+  /**
+   * Freezes self-change, persisted in the learning store: no new candidate is made and the memory tools refuse
+   * (`frozen`), while reverts, `operatorSet` and `forgetUser` still run. With `userId`, that user's learner; without,
+   * the whole agent (every learner of the layer, for an agent with no key).
+   */
+  freeze?(target?: { userId?: string }, by?: string): Promise<void>;
+  /** Lifts a freeze {@link AgentLearning.freeze} set on the same target. */
+  unfreeze?(target?: { userId?: string }): Promise<void>;
+  /** Mode `off` at run time, persisted: learned state is neither read nor written; the memory tools still write. */
+  suspend?(target?: { userId?: string }, by?: string): Promise<void>;
+  /** Lifts a suspension {@link AgentLearning.suspend} set on the same target. */
+  unsuspend?(target?: { userId?: string }): Promise<void>;
+  /** Sets a user's traits, honesty-humility and emotionality included, through the ledger; `'baseline'` resets them. */
+  operatorSet?(input: { userId: string; traits: 'baseline' | HexacoTraitValues; by: string; note?: string }): Promise<LedgerEntry>;
+  /** Takes back a kept change by its ledger id: an operator's trait change, an import, or a recorded memory write. */
+  revert?(ledgerId: string, by: string): Promise<LedgerEntry>;
+  /** A user's learned state as one JSON document. */
+  exportLearnedState?(userId: string): Promise<LearnedStateDocument>;
+  /**
+   * Takes a document in: its traits, clamped to this agent's persona; what this release cannot admit is refused. With
+   * `target`, into that user's learner of this agent; without, into the learner the document names.
+   */
+  importLearnedState?(doc: LearnedStateDocument, target?: { userId: string }): Promise<ImportReport>;
+  /**
+   * Deletes every learned row and memory trace of a user in the agent's namespace that the layer reaches. With
+   * `memory.store`, the agent's memory is opened for the call when no session holds it, so the deletion reaches the
+   * store after `agent.close()` too.
+   */
+  forgetUser?(userId: string): Promise<ForgetReport>;
 }
 
 /**
@@ -399,14 +432,14 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
   /** Extra schema-validation attempts on the default runtime. Defaults to 0. */
   maxValidationRetries?: number;
   /**
-   * Telemetry + eviction-boundary label for this send's transcript block
-   * (spec §1c(iv)). Labels are markers, not pins.
+   * Telemetry + eviction-boundary label for this send's transcript block.
+   * Labels are markers, not pins.
    */
   blockLabel?: string;
   /**
    * Per-send generation overrides, merged over the agent's baseOpts with
    * send-level precedence — the same contract `generate(prompt, extra)`
-   * gives `extra` (spec §1f). Long tool-driving loops rely on these
+   * gives `extra`. Long tool-driving loops rely on these
    * (toolChoice, requestTimeout, cacheDiagnostics); without send-level
    * carriage a caller migrating from generate() silently loses them.
    */
@@ -499,7 +532,7 @@ export interface AgentSession {
   messages(): SessionTranscriptMessage[];
   /**
    * Atomically replaces the session history with a caller-built compact
-   * snapshot — the divergence-reset primitive (spec §1d). Bumps the
+   * snapshot — the divergence-reset primitive. Bumps the
    * history epoch: an in-flight send that began under an older epoch
    * still returns to its caller, but its history append is discarded.
    * Throws when the snapshot violates tool_use/tool_result pairing.
@@ -752,7 +785,7 @@ export function loadSoulFromOption(
 
 /**
  * Copies only the defined per-send generation overrides off SessionSendOptions
- * (spec §1f) so undefined keys never clobber agent-level baseOpts via spread.
+ * so undefined keys never clobber agent-level baseOpts via spread.
  */
 function pickSendGenerationOverrides(
   sendOpts?: SessionSendOptions<ZodType>,
@@ -1104,7 +1137,7 @@ export function agent(opts: AgentOptions): Agent {
     session(id?: string): AgentSession {
       const sessionId = id ?? crypto.randomUUID();
       if (!sessionBuffers.has(sessionId)) {
-        // History is independent of the memory subsystem (spec §1a): every
+        // History is independent of the memory subsystem: every
         // session keeps a lossless transcript unless the agent opts out via
         // `history: false`. Bounded by default — unbounded growth was the
         // latent failure mode for every long-lived consumer.

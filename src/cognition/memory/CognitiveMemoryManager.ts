@@ -96,6 +96,17 @@ export interface FlushReflectionResult {
   compressionRatio: number;
 }
 
+/** What {@link ICognitiveMemoryManager.deleteScope} and `deleteTraces` did. */
+export interface MemoryDeletion {
+  /**
+   * Traces deleted: those with a Brain row or live in the store (with no Brain, a live document of the vector index
+   * counts), so a call made again counts none.
+   */
+  deleted: number;
+  /** Whether the knowledge graph's episodic copies were deleted with them (`IKnowledgeGraph.deleteMemories`). */
+  graph: 'reached' | 'not_supported';
+}
+
 export interface ICognitiveMemoryManager {
   initialize(config: CognitiveMemoryConfig): Promise<void>;
 
@@ -112,6 +123,8 @@ export interface ICognitiveMemoryManager {
       contentSentiment?: number;
       tags?: string[];
       entities?: string[];
+      /** {@link MemoryTrace.turnUserId}: set on a trace a turn with no learner files for a second user. */
+      turnUserId?: string;
       /**
        * When encoding a subjective trace from `PerspectiveObserver`
        * (`@framers/agentos/memory/pipeline/observation/PerspectiveObserver`),
@@ -259,6 +272,36 @@ export interface ICognitiveMemoryManager {
    */
   rehydrate?(traceId: string, requestContext?: string): Promise<string | null>;
 
+  /**
+   * Delete every trace of one scope for good, as an account deletion needs: its memory-graph node, its original in
+   * the configured archive and the typed facts extracted from it, then the trace in the cache (every store over the
+   * Brain in this process keeps none of its words), the vector index and the Brain, and the knowledge graph's
+   * episodic copy (`MemoryStore.deleteScope`). With no Brain, the scope's documents in the vector index are found and
+   * deleted too, those another store filed before a restart included. With `turnUserId`, only the scope's traces that
+   * user filed as a second user on the session ({@link MemoryTrace.turnUserId}). Optional, so a host's own
+   * implementation keeps compiling.
+   *
+   * @throws TypeError when `scopeId` is empty, so a caller's missing id never deletes every trace filed under no scope
+   *   id, or when `turnUserId` is given and is not a non-empty string.
+   */
+  deleteScope?(scope: MemoryScope, scopeId: string, options?: { turnUserId?: string }): Promise<MemoryDeletion>;
+
+  /**
+   * Delete the given traces for good, as {@link deleteScope} does for a scope. An id with no Brain row and no trace in
+   * the store is skipped; with no Brain, a trace the store never loaded is reached through `deleteScope` alone.
+   */
+  deleteTraces?(traceIds: readonly string[]): Promise<MemoryDeletion>;
+
+  /**
+   * Re-files the Brain's plain `user` and `persona` scope ids that hold a `/`, a `%` or a `:` in the encoded form a
+   * learning layer reads, once per Brain, and moves what the manager's store holds of the traces it moved; on a Brain
+   * another handle or process re-filed, the store follows the Brain's rows (`MemoryStore.ensureEncodedScopeIds`). The
+   * layer calls it when it first opens the manager. Optional, so a host's own implementation keeps compiling.
+   *
+   * @returns How many traces its re-file moved: none when the Brain held the record already.
+   */
+  ensureEncodedScopeIds?(): Promise<number>;
+
   /** Shutdown and release resources. */
   shutdown(): Promise<void>;
 }
@@ -378,6 +421,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       mechanismsEngine: this.mechanismsEngine ?? undefined,
       moodProvider: config.moodProvider,
       enableGraphActivation: config.enableGraphActivation ?? false,
+      ...(config.persistAccessState === false ? { persistAccessState: false } : {}),
     });
 
     // Attach Brain for durable write-through when configured.
@@ -711,6 +755,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       updatedAt: now,
       isActive: true,
     };
+    if (options.turnUserId) trace.turnUserId = options.turnUserId;
 
     // Stamp PerspectiveObserver provenance into MechanismMetadata when this
     // trace originated from a subjective rewrite of an objective event. The
@@ -1551,6 +1596,67 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
   getStore(): MemoryStore {
     return this.store;
+  }
+
+  /**
+   * Delete every trace of one scope for good (`MemoryStore.deleteScope`), a batch at a time. What this manager keeps
+   * of each trace in a batch goes before the batch's traces ({@link forgetTraces}), so a call that fails part way can
+   * be made again and finds the same traces. With `turnUserId`, only the scope's traces that user filed as a second
+   * user on the session.
+   *
+   * @throws TypeError when `scopeId` is empty, or when `turnUserId` is given and is not a non-empty string.
+   */
+  async deleteScope(scope: MemoryScope, scopeId: string, options: { turnUserId?: string } = {}): Promise<MemoryDeletion> {
+    this.ensureInitialized();
+    const deleted = await this.store.deleteScope(scope, scopeId, {
+      ...(options.turnUserId !== undefined ? { turnUserId: options.turnUserId } : {}),
+      beforeDelete: (traceIds) => this.forgetTraces(traceIds),
+    });
+    return this.deletionOf(deleted);
+  }
+
+  /**
+   * Delete the given traces for good, as {@link deleteScope} does for a scope. An id the store finds no trace of (no
+   * Brain row, nothing it holds) is skipped, and nothing this manager keeps under that id is touched.
+   */
+  async deleteTraces(traceIds: readonly string[]): Promise<MemoryDeletion> {
+    this.ensureInitialized();
+    const deleted = await this.store.deleteTraces([...new Set(traceIds)], {
+      beforeDelete: (found) => this.forgetTraces(found),
+    });
+    return this.deletionOf(deleted);
+  }
+
+  async ensureEncodedScopeIds(): Promise<number> {
+    this.ensureInitialized();
+    return this.store.ensureEncodedScopeIds();
+  }
+
+  /**
+   * Remove what this manager keeps of each trace about to be deleted for good, the store having found it: its memory
+   * graph node with the node's edges (the node names the trace's scope id, its Hebbian edges the traces it was
+   * recalled with), its original in the archive (`IMemoryArchive.drop`, with its access log), and the typed facts this
+   * manager extracted from it at encode (`<traceId>-fact-<n>`, with their edges).
+   */
+  private async forgetTraces(traceIds: readonly string[]): Promise<void> {
+    const graph = this.graph;
+    if (graph) for (const id of traceIds) await graph.removeNode(id);
+    const archive = this.archive;
+    if (archive) for (const id of traceIds) await archive.drop(id);
+    const typedFacts = this.typedNetworkStore;
+    if (typedFacts) {
+      const traces = new Set(traceIds);
+      const factIds: string[] = [];
+      for (const fact of typedFacts.iterateFacts()) {
+        const cut = fact.id.lastIndexOf('-fact-');
+        if (cut > 0 && traces.has(fact.id.slice(0, cut))) factIds.push(fact.id);
+      }
+      typedFacts.deleteFacts(factIds);
+    }
+  }
+
+  private deletionOf(deleted: number): MemoryDeletion {
+    return { deleted, graph: this.store.reachesGraphCopies() ? 'reached' : 'not_supported' };
   }
 
   /**

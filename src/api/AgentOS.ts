@@ -63,7 +63,7 @@ import {
 import { GMIManager, GMIManagerConfig } from '../cognition/substrate/GMIManager';
 import { createLearningLayer } from '../cognition/learning/LearningLayer.js';
 import { resolveLearningConfig } from '../cognition/learning/config.js';
-import type { HostLoopName, ILearningLayer, LearningConfig, LoopState } from '../cognition/learning/types.js';
+import type { HostLoopName, ILearningLayer, LearningConfig, LearningMemoryTools, LoopState } from '../cognition/learning/types.js';
 import {
   AIModelProviderManager,
   AIModelProviderManagerConfig,
@@ -88,6 +88,9 @@ import {
   ConversationManager,
   ConversationManagerConfig,
 } from '../core/conversation/ConversationManager';
+import { conversationTableNames, type ConversationTableNames } from '../core/conversation/conversationTables';
+import { isTableProtected } from '../safety/provenance/enforcement/ProvenanceStorageHooks.js';
+import type { StoragePolicyConfig } from '../safety/provenance/types.js';
 import { ConversationContext } from '../core/conversation/ConversationContext';
 import type { IRollingSummaryMemorySink } from '../core/conversation/IRollingSummaryMemorySink';
 import type { ILongTermMemoryRetriever } from '../core/conversation/ILongTermMemoryRetriever';
@@ -316,6 +319,35 @@ function wrapStorageAdapterWithWriteHooks(
       : undefined,
     prepare: adapter.prepare ? (statement) => adapter.prepare!(statement) : undefined,
   };
+}
+
+/**
+ * The runtime's conversation tables that a provenance storage policy protects under their default names
+ * (`conversations`, `conversation_messages`) and would not protect under the names
+ * `conversationManagerConfig.tablePrefix` gives them: a policy names the tables it protects exactly, as the sealed
+ * profiles do. A table the policy exempts by its prefixed name is the host's choice and is not listed.
+ *
+ * @returns The prefixed names the policy leaves out; empty when the policy enforces nothing, the conversations are not
+ *   persisted, there is no prefix, or the prefix is not a plain name (the conversation manager refuses that itself).
+ */
+function conversationTablesLeftUnprotected(policy: StoragePolicyConfig, config: ConversationManagerConfig | undefined): string[] {
+  if (policy.mode === 'mutable' || config?.persistenceEnabled === false) return [];
+  let names: ConversationTableNames;
+  try {
+    names = conversationTableNames(config?.tablePrefix ?? '');
+  } catch {
+    return [];
+  }
+  const plain = conversationTableNames();
+  return (['conversations', 'messages'] as const)
+    .filter(
+      (kind) =>
+        names[kind] !== plain[kind] &&
+        isTableProtected(plain[kind], policy) &&
+        !isTableProtected(names[kind], policy) &&
+        !policy.exemptTables?.includes(names[kind]),
+    )
+    .map((kind) => names[kind]);
 }
 
 // Re-export from extracted module
@@ -779,16 +811,20 @@ export interface AgentOSConfig {
   observability?: AgentOSObservabilityConfig;
 
   /**
-   * The learning layer (docs/GMI.md, "Learning"). Unset or `false`: off, and the runtime's GMIs run as they did
-   * before the layer existed. `true` or a {@link LearningConfig}: every GMI sends its persona's personality section
+   * The learning layer (docs/GMI.md, "Learning"). Unset, `false` or `null`: off, and the runtime's GMIs run as they
+   * did before the layer existed. `true` or a {@link LearningConfig}: every GMI sends its persona's personality section
    * as a system prompt of its own on every turn, and each session is bound to a learner: its persona with the user
    * and the resolved organization of its first turn. `namespace` is refused here, because the runtime takes the
-   * organization from each turn. A host that built a layer itself passes it in `gmiManagerConfig.learningLayer`
-   * instead: a layer passed there turns learning on whatever this option says, and `true` or a config beside one is
-   * refused. {@link AgentOS.getLearningLayer} returns the layer.
+   * organization from each turn. The layer the runtime builds keeps its learning store on `storageAdapter` (SQL when the
+   * adapter has transactions; else in the process), reaches the memory tools' facade and the standalone memory's (its
+   * retriever's and its sink's) for `forgetUser` and `revert`, after any `learning.memoryTools` the host sets, and the
+   * memory tools pack leaves `memory_reflect` out. A host that built a layer itself passes it in
+   * `gmiManagerConfig.learningLayer` instead, with its own store and facades: a layer passed there turns learning on
+   * whatever this option says, and `true` or a config beside one is refused. {@link AgentOS.getLearningLayer} returns
+   * the layer.
    * @default false
    */
-  learning?: boolean | LearningConfig;
+  learning?: boolean | LearningConfig | null;
 
   /**
    * Teams a persona's GMI may launch from a turn (`launch_agency`). With `launch: true` the runtime registers the
@@ -1119,10 +1155,13 @@ export class AgentOS implements IAgentOS {
     await this.ragMemoryInitializer.registerMemoryTools(
       this.config.memoryTools,
       extensionLifecycleContext,
+      // The layer is built later, from the same config: whether it will exist is decided here already.
+      { learningLayer: this.learningConfigured() },
     );
 
     let storageAdapter = this.config.storageAdapter;
     if (storageAdapter) {
+      let provenancePolicy: StoragePolicyConfig | undefined;
       try {
         const provenanceDescriptor = this.extensionManager
           .getRegistry<any>(EXTENSION_KIND_PROVENANCE)
@@ -1132,12 +1171,24 @@ export class AgentOS implements IAgentOS {
           storageAdapter = wrapStorageAdapterWithWriteHooks(storageAdapter, provenanceHooks, {
             logger: this.logger,
           });
+          provenancePolicy = (provenanceDescriptor as any)?.payload?.config?.storagePolicy;
           this.logger.info('[AgentOS][Provenance] Storage write hooks enabled');
         }
       } catch (error: any) {
         this.logger.warn?.('[AgentOS][Provenance] Failed to apply storage write hooks', {
           error: error?.message ?? error,
         });
+      }
+      // The policy names its tables exactly: under a prefix the conversation tables would lose the protection it gives
+      // them by their default names, so the runtime does not start.
+      const unprotected = provenancePolicy ? conversationTablesLeftUnprotected(provenancePolicy, this.config.conversationManagerConfig) : [];
+      if (provenancePolicy && unprotected.length > 0) {
+        throw new AgentOSServiceError(
+          `The provenance storage policy (mode '${provenancePolicy.mode}') protects the conversation tables by their default names, and conversationManagerConfig.tablePrefix keeps them as ${unprotected.join(', ')}: add ${unprotected.join(', ')} to the policy's storagePolicy.protectedTables, or set no prefix.`,
+          GMIErrorCode.CONFIGURATION_ERROR,
+          { unprotectedTables: unprotected },
+          'AgentOS.initialize',
+        );
       }
     }
 
@@ -1822,23 +1873,31 @@ export class AgentOS implements IAgentOS {
     return this.learningLayer;
   }
 
+  /** Whether the runtime has a learning layer: `learning` on, or a layer passed in `gmiManagerConfig.learningLayer`. */
+  private learningConfigured(): boolean {
+    const option = this.config.learning as boolean | LearningConfig | null | undefined;
+    return (option !== undefined && option !== null && option !== false) || Boolean(this.config.gmiManagerConfig?.learningLayer);
+  }
+
   /**
    * Checks the `learning` option before any service starts: a `LearningConfig` must be valid, `learning.namespace`
    * is refused (the runtime takes each turn's resolved organization), and `learning` and
-   * `gmiManagerConfig.learningLayer` are not both set (the manager takes one layer).
+   * `gmiManagerConfig.learningLayer` are not both set (the manager takes one layer). `learning: null`, and a field set
+   * to `null`, read as unset, as a config read from JSON or YAML writes them.
    *
    * @throws {AgentOSServiceError} With `CONFIGURATION_ERROR`, naming the option.
    */
   private assertLearningConfig(config: AgentOSConfig): void {
-    const option = config.learning;
-    if (option === undefined || option === false) return;
+    const option = config.learning as boolean | LearningConfig | null | undefined;
+    if (option === undefined || option === null || option === false) return;
     const refuse = (message: string): never => {
       throw new AgentOSServiceError(message, GMIErrorCode.CONFIGURATION_ERROR, undefined, 'AgentOS.initialize');
     };
     if (config.gmiManagerConfig?.learningLayer) {
       refuse('Both learning and gmiManagerConfig.learningLayer are set; set one.');
     }
-    if (option !== true && (option as LearningConfig | null)?.namespace !== undefined) {
+    const namespace = option === true ? undefined : (option as { namespace?: unknown }).namespace;
+    if (namespace !== undefined && namespace !== null) {
       refuse("learning.namespace is read by gmi() only; the runtime takes each turn's resolved organizationId.");
     }
     try {
@@ -1851,14 +1910,31 @@ export class AgentOS implements IAgentOS {
   /**
    * The layer the GMI manager is built with: one built from `learning` (profile `custom`: the runtime has no
    * cognition profile, so rendering is on and the self-change kinds are off unless the config asks for them), or
-   * the one the host passed in `gmiManagerConfig.learningLayer`, or none.
+   * the one the host passed in `gmiManagerConfig.learningLayer`, or none. A layer the runtime builds keeps its store
+   * on the host's own `storageAdapter`, never the provenance-wrapped one, whose write hooks can turn a run() into a
+   * no-op, and reaches the facade of `memoryTools` and the standalone memory's after any `learning.memoryTools`.
    */
   private resolveLearningLayer(): ILearningLayer | undefined {
-    const option = this.config.learning;
+    const option = this.config.learning as boolean | LearningConfig | null | undefined;
     this.ownsLearningLayer = false;
-    if (option === undefined || option === false) return this.config.gmiManagerConfig.learningLayer;
+    // Unset, null or false: no layer of the runtime's own.
+    if (option === undefined || option === null || option === false) return this.config.gmiManagerConfig.learningLayer;
+    const config: LearningConfig = option === true ? {} : option;
+    const tools = this.config.memoryTools && this.config.memoryTools.enabled !== false ? this.config.memoryTools.memory : undefined;
+    const standalone =
+      this.config.standaloneMemory && this.config.standaloneMemory.enabled !== false ? this.config.standaloneMemory.memory : undefined;
+    // The host's own facade first, then the memory tools' and the standalone memory's, each once. The layer checks a
+    // facade member by member at run time, so the config's facade types are read through `unknown`.
+    const facades = ([config.memoryTools, tools, standalone] as unknown[]).filter(
+      (facade, index, all) => !!facade && typeof facade === 'object' && all.indexOf(facade) === index,
+    ) as LearningMemoryTools[];
+    const [memoryTools, ...memoryFacades] = facades;
     const layer = createLearningLayer({
-      ...(option === true ? {} : option),
+      ...config,
+      ...(memoryTools ? { memoryTools } : {}),
+      ...(memoryFacades.length > 0 ? { memoryFacades } : {}),
+      // The host's own adapter: the provenance wrap is a local of initialize() and never on the config.
+      ...(this.config.storageAdapter ? { storageAdapter: this.config.storageAdapter } : {}),
       profile: 'custom',
       surface: 'runtime',
       hostLoops: this.describeHostLoops(),

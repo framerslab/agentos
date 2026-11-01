@@ -121,4 +121,20 @@ describe('TypedNetworkStore', () => {
   it('getEdges returns empty array for unknown fact', () => {
     expect(store.getEdges('not-here')).toEqual([]);
   });
+
+  it('deleteFacts takes a fact out of every bank it is filed in, with its edges both ways', () => {
+    store.addFact({ ...baseFact, id: 'f1', bank: 'WORLD' });
+    // Added again under another bank, the fact is filed in both: addFact keeps the bank it had.
+    store.addFact({ ...baseFact, id: 'f1', bank: 'OPINION', confidence: 0.6 });
+    store.addFact({ ...baseFact, id: 'f2', bank: 'WORLD' });
+    store.addEdge({ fromFactId: 'f1', toFactId: 'f2', kind: 'entity', weight: 1.0 });
+
+    expect(store.deleteFacts(['f1', 'not-here'])).toBe(1);
+
+    expect([...store.getBank('WORLD')]).toEqual(['f2']);
+    expect(store.getBank('OPINION').size).toBe(0);
+    expect(store.getFact('f1')).toBeUndefined();
+    expect(store.getEdges('f1')).toEqual([]);
+    expect(store.getEdges('f2')).toEqual([]);
+  });
 });

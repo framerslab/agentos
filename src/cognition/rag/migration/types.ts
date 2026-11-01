@@ -8,6 +8,8 @@
  * to an IMigrationTarget, never loading the entire dataset into memory.
  */
 
+import type { BrainScopeIdForm } from '../../memory/retrieval/store/scopeIdForm.js';
+
 // ---------------------------------------------------------------------------
 // Backend identification
 // ---------------------------------------------------------------------------
@@ -105,6 +107,13 @@ export interface IMigrationSource {
    * @returns Array of row objects with column values.
    */
   readBatch(table: string, offset: number, limit: number): Promise<Record<string, unknown>[]>;
+  /**
+   * Every brain the source holds, with its scope-id form (`brain_meta.scope_id_form`), for the handshake the engine
+   * runs before it copies any table. A Qdrant source reads the brains its sidecar names, and counts each as holding
+   * traces whose scope ids the two forms read apart, since its traces are in Qdrant. A source that names no brain (a
+   * Pinecone index, a Qdrant source with no sidecar) leaves it out.
+   */
+  scopeIdForms?(): Promise<Map<string, BrainScopeIdForm>>;
   /** Close the connection and release resources. */
   close(): Promise<void>;
 }
@@ -129,6 +138,15 @@ export interface IMigrationTarget {
    * @returns Number of rows successfully written.
    */
   writeBatch(table: string, rows: Record<string, unknown>[]): Promise<number>;
+  /**
+   * These brains as the target holds them, with their scope-id forms, for the handshake the engine runs before it
+   * copies any table; a brain the target does not hold reads as holding nothing. With no ids, every brain the target
+   * holds. A Qdrant target reads its sidecar, and counts a brain the sidecar holds as holding traces whose scope ids
+   * the two forms read apart, since its traces are in Qdrant; one with no sidecar leaves it out.
+   */
+  scopeIdForms?(brainIds?: readonly string[]): Promise<Map<string, BrainScopeIdForm>>;
+  /** Removes one brain's scope-id form record, when the handshake gives the copy the source's plain form. */
+  clearScopeIdForm?(brainId: string): Promise<void>;
   /** Close the connection and release resources. */
   close(): Promise<void>;
 }

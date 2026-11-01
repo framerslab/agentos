@@ -7,6 +7,13 @@
  */
 
 import type { IMigrationSource } from '../types.js';
+import { readScopeIdForms, type BrainScopeIdForm } from '../../../memory/retrieval/store/scopeIdForm.js';
+
+/** A statement with `?` placeholders in `pg`'s numbered form (`$1`, `$2`, ...); its text holds no other `?`. */
+function numbered(sql: string): string {
+  let n = 0;
+  return sql.replace(/\?/g, () => `$${(n += 1)}`);
+}
 
 /**
  * Tables in the AgentOS Postgres schema that should be migrated.
@@ -67,6 +74,15 @@ export class PostgresSourceAdapter implements IMigrationSource {
     const pool = await this._ensurePool();
     const result = await pool.query(`SELECT * FROM "${table}" LIMIT $1 OFFSET $2`, [limit, offset]);
     return result.rows as Record<string, unknown>[];
+  }
+
+  /** Every brain this database holds, with its scope-id form. */
+  async scopeIdForms(): Promise<Map<string, BrainScopeIdForm>> {
+    const pool = await this._ensurePool();
+    return readScopeIdForms({
+      get: async <T>(sql: string, params: unknown[] = []) => (await pool.query(numbered(sql), params)).rows[0] as T | undefined,
+      all: async <T>(sql: string, params: unknown[] = []) => (await pool.query(numbered(sql), params)).rows as T[],
+    });
   }
 
   /** Close the connection pool. */

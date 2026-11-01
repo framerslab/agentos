@@ -18,9 +18,11 @@
  */
 
 import type { ITool, ToolExecutionResult, ToolExecutionContext, JSONSchemaObject } from '../../../../core/tools/ITool.js';
+import { memoryWriteRefusal, readToolLearningContext } from '../../../learning/toolContext.js';
 import type { ConsolidationLoop } from '../../pipeline/consolidation/ConsolidationLoop.js';
 import type { ConsolidationResult } from '../facade/types.js';
 import type { Brain } from '../../retrieval/store/Brain.js';
+import { refusedMemoryWrite } from './learningWrite.js';
 
 // ---------------------------------------------------------------------------
 // Input type
@@ -108,20 +110,40 @@ export class MemoryReflectTool implements ITool<MemoryReflectInput, Consolidatio
   // ---------------------------------------------------------------------------
 
   /**
+   * The refusal a consolidation meets whatever a human would answer, read before the tool orchestrator's approval gate
+   * (`ITool.refusalBeforeApproval`), so no one is asked to approve a run that cannot act: a freeze, then any call that
+   * carries a learning layer's session data (`withdrawn`). `execute` refuses the same call itself, in the same order.
+   *
+   * @param _args - The call's arguments.
+   * @param context - The call's context.
+   * @returns The refusal, or `undefined` when the call may run.
+   */
+  refusalBeforeApproval(_args: Record<string, any>, context: ToolExecutionContext): ToolExecutionResult<ConsolidationResult> | undefined {
+    const refusal = memoryWriteRefusal(context.sessionData);
+    if (refusal) return refusedMemoryWrite(this.name, refusal);
+    return readToolLearningContext(context.sessionData) ? refusedMemoryWrite(this.name, 'withdrawn') : undefined;
+  }
+
+  /**
    * Run one full consolidation cycle and return the statistics.
    *
    * If a consolidation cycle is already in progress (mutex guard in
    * {@link ConsolidationLoop}), `run()` returns immediately with zero counts —
    * this is surfaced as a successful result with all-zero statistics.
    *
-   * @param _args    - Reflect input (optional topic hint, currently unused).
-   * @param _context - Tool execution context (not used by this tool).
+   * @param _args   - Reflect input (optional topic hint, currently unused).
+   * @param context - Tool execution context: a freeze refuses the call (`frozen`), and so does a call that carries
+   *   `sessionData.learning` (`withdrawn`), since consolidation merges and derives across every scope of the brain.
    * @returns {@link ConsolidationResult} on success, or an error result.
    */
   async execute(
     _args: MemoryReflectInput,
-    _context: ToolExecutionContext,
+    context: ToolExecutionContext,
   ): Promise<ToolExecutionResult<ConsolidationResult>> {
+    // Only a freeze stops a memory write; consolidation then does not run where a learning layer exists at all.
+    const refusal = memoryWriteRefusal(context.sessionData);
+    if (refusal) return refusedMemoryWrite(this.name, refusal);
+    if (readToolLearningContext(context.sessionData)) return refusedMemoryWrite(this.name, 'withdrawn');
     try {
       const result = await this.consolidation.run();
       return { success: true, output: result };
