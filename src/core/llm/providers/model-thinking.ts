@@ -14,14 +14,18 @@
  * budget AND the model supports it.
  *
  * Turning thinking off (`thinking: false`): leaving the field out keeps the
- * model's default, which is thinking ON for Opus 5, Sonnet 5 and Sonnet 5.5,
+ * model's default, which is thinking ON for Opus 5, Sonnet 5, Sonnet 5.5 and Haiku 5.5,
  * and always on for Opus 5.5, Fable and Mythos. The models that can turn it
  * off each take their own shape, and some only at a capped effort;
  * {@link resolveThinkingOff} maps a model id to it.
  *
  * This is the thinking-capability sibling of `modelSupportsTemperature`
  * in AnthropicProvider.ts — the same reasoning-default family that
- * REJECTS `temperature` is the family that ACCEPTS `thinking`. Kept in
+ * REJECTS `temperature` is the family that ACCEPTS `thinking`, with one
+ * exception: Claude Haiku 5.5 rejects `temperature` but is not in
+ * {@link modelSupportsThinking}. It thinks adaptively by default, so a
+ * thinking budget needs no block there, and it keeps a forced `tool_choice`
+ * that a thinking-on block would clamp to `auto`. Kept in
  * its own pure module (mirroring `model-output-limits.ts`) so the unit
  * test imports no provider/SDK code.
  */
@@ -36,8 +40,8 @@
  * or rejects it. Opus 5.5, Sonnet 5.5 and Fable 5.1 match the `opus-5`,
  * `sonnet-5` and `fable-5` alternatives on purpose, because `\b` matches at
  * the hyphen before their trailing version digit. Future reasoning-first
- * siblings get added to the regex as Anthropic releases them, in lockstep
- * with `modelSupportsTemperature`.
+ * siblings get added to the regex as Anthropic releases them, alongside
+ * `modelSupportsTemperature` (which also lists Claude Haiku 5.5).
  *
  * @param modelId Anthropic-side model id.
  * @returns `true` when Anthropic accepts a `thinking` block for this model.
@@ -108,6 +112,7 @@ export type ThinkingOffShape =
  * | Sonnet 5.5 | `{ type: 'between_tools' }` at effort high or below | probed 2026-09-30: `disabled` returns 400, `between_tools` 200 |
  * | Opus 5 | `{ type: 'disabled' }` at effort high or below | probed 2026-09-30: `disabled` 200, `between_tools` 400 |
  * | Sonnet 5 | `{ type: 'disabled' }` | Anthropic's model docs |
+ * | Haiku 5.5 | `{ type: 'disabled' }` at effort high or below | Anthropic's effort docs: `disabled` at `high` or below, 400 at `xhigh` or `max` |
  * | Opus 5.5, Fable 5.x, Mythos 5.x | none: always on | probed 2026-09-30 on Opus 5.5 and Fable 5.1: both shapes return 400 |
  * | everything else | omit the field | thinks only when asked |
  *
@@ -128,5 +133,8 @@ export function resolveThinkingOff(modelId: string): ThinkingOffShape {
     return { kind: 'send', thinking: { type: 'disabled' }, maxEffort: 'high' };
   }
   if (/^claude-sonnet-5\b/i.test(modelId)) return { kind: 'send', thinking: { type: 'disabled' } };
+  if (/^claude-haiku-5-5\b/i.test(modelId)) {
+    return { kind: 'send', thinking: { type: 'disabled' }, maxEffort: 'high' };
+  }
   return { kind: 'omit' };
 }
