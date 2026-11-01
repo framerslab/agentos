@@ -142,8 +142,11 @@ export interface StreamingTTSChainOptions {
    * before its text has all come. A switch no provider can take
    * ends the facade with `'error'` (only to a listener) and then `'close'`;
    * a `flush()` that waited for it rejects with `synthesis failed`, and text
-   * pushed after that throws; the chain reports `provider_unavailable`, and the
-   * error is an `AggregateVoiceError` with every failure of the switch. A
+   * pushed after that throws; when every provider it could open has failed, the
+   * chain reports `provider_unavailable` and the error is an
+   * `AggregateVoiceError` with every failure of the switch, and a refused
+   * authorization or `partial synthesis cannot be replayed` ends it as that
+   * error alone. A hook that throws ends nothing: it is one console line. A
    * `writeTokens()` under way when the session in use fails settles with the
    * switch, without waiting for the failed provider's own write: it resolves
    * when a provider took the text and rejects with `synthesis failed` when none
@@ -168,6 +171,40 @@ export interface StreamingTTSChainOptions {
 }
 
 type TTSProvider = IStreamingTTS & HealthyProvider;
+
+/**
+ * A signal that waits give way to. A race against a promise that stays pending keeps one reaction per race for that
+ * promise's life, one per token on a session's writes; a wait here that ends first leaves nothing behind on the signal.
+ */
+function waitSignal() {
+  const waiting = new Set<() => void>();
+  return {
+    /** Ends every wait under way. */
+    fire: (): void => {
+      const now = [...waiting];
+      waiting.clear();
+      for (const release of now) release();
+    },
+    /** Settles as `work()` settles, or resolves when the signal fires first, as it may during the call itself. */
+    until: (work: () => unknown): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        const release = (): void => resolve();
+        waiting.add(release);
+        const settle = (finish: () => void): void => {
+          waiting.delete(release);
+          finish();
+        };
+        try {
+          Promise.resolve(work()).then(
+            () => settle(resolve),
+            (error: unknown) => settle(() => reject(error)),
+          );
+        } catch (error) {
+          settle(() => reject(error));
+        }
+      }),
+  };
+}
 
 /** Existing synthesis chain with awaited authorization and bounded replay. */
 export class StreamingTTSChain implements IStreamingTTS {
@@ -205,10 +242,19 @@ export class StreamingTTSChain implements IStreamingTTS {
     this.opts.metrics?.emit(event);
   }
 
+  /** Calls a host hook. A hook that throws is the host's bug: it ends no call, leaves the providers' state as it was and is one console line. */
+  private notify(name: string, hook: () => void): void {
+    try {
+      hook();
+    } catch {
+      console.warn('[chain] ' + name + ' threw');
+    }
+  }
+
   /** Reports a provider that failed to open, or a backup that failed as it took a switch's text, and records it failed. */
   private reportFailed(provider: TTSProvider, failure: VoicePipelineError): void {
     const event: TTSProviderFailedEvent = { kind: 'tts', providerId: provider.providerId, errorClass: failure.errorClass, message: this.policy.mode === 'legacy' ? failure.message : 'provider opening failed' };
-    this.opts.onProviderFailed?.(event);
+    this.notify('onProviderFailed', () => this.opts.onProviderFailed?.(event));
     this.metric({ type: 'provider_failed', ...event });
     this.opts.breaker?.recordFailure(provider.providerId, failure.errorClass);
   }
@@ -233,7 +279,7 @@ export class StreamingTTSChain implements IStreamingTTS {
         const session = await provider.startSession(config);
         this.activeProviderId = provider.providerId;
         const event: TTSProviderSelectedEvent = { kind: 'tts', providerId: provider.providerId, attempt: i + 1 };
-        this.opts.onProviderSelected?.(event);
+        this.notify('onProviderSelected', () => this.opts.onProviderSelected?.(event));
         this.metric({ type: 'provider_selected', ...event });
         this.opts.breaker?.recordSuccess(provider.providerId);
         return this.wrap(session, provider, candidates.slice(i + 1), config);
@@ -325,33 +371,21 @@ export class StreamingTTSChain implements IStreamingTTS {
     // the cut's error.
     let cutInSwitch = false;
     let sink: ((chunk: EncodedAudioChunk) => Promise<void>) | undefined;
-    // A promise the facade settles itself.
-    const deferred = (): { promise: Promise<void>; resolve: () => void } => {
-      let resolve: () => void = () => {};
-      const promise = new Promise<void>((settle) => {
-        resolve = () => settle();
-      });
-      return { promise, resolve };
-    };
-    // Settles when the facade lets go of the session in use, as a switch starts or the facade ends, and is then
-    // replaced: a flush waits on that session's own flush only until then, since a provider whose connection dropped
-    // mid-flush may never settle it.
-    let leaving = deferred();
-    const letGo = (): void => {
-      leaving.resolve();
-      leaving = deferred();
-    };
-    // Settles when the facade ends. A switch may wait without end on a provider's opening or its authorization, so a
+    // Fires when the facade lets go of the session in use, as a switch starts or the facade ends: a flush or a write waits
+    // on that session's own promise only until then, since a provider whose connection dropped may never settle it.
+    const leaving = waitSignal();
+    const letGo = leaving.fire;
+    // Fires when the facade ends. A switch may wait without end on a provider's opening or its authorization, so a
     // caller waits on the switch only until then; the switch discards a backup that opens later.
-    const ended = deferred();
-    const untilSwitchEnds = (): Promise<unknown> => Promise.race([switching, ended.promise]);
+    const ended = waitSignal();
+    const untilSwitchEnds = (): Promise<void> => ended.until(() => switching);
     const finish = (): void => {
       if (closed) return;
       closed = true;
       tokens = [];
       characters = 0;
       letGo();
-      ended.resolve();
+      ended.fire();
       facade.emit('close');
     };
     // Cancels and closes a session the facade has let go of; a throw from either does not stop the switch or the facade's
@@ -502,8 +536,7 @@ export class StreamingTTSChain implements IStreamingTTS {
               if (sink) {
                 // A write may never settle once the backup's connection has dropped: its failure lets go of it, also
                 // when it comes within the call.
-                const left = leaving.promise;
-                await Promise.race([next.writeTokens!(text), left]);
+                await leaving.until(() => next.writeTokens!(text));
               } else next.pushTokens(text);
             } catch (error) {
               if (request === epoch) lost ??= error instanceof Error ? error : new Error('TTS write failed');
@@ -528,7 +561,7 @@ export class StreamingTTSChain implements IStreamingTTS {
         this.activeProviderId = backup.providerId;
         this.opts.breaker?.recordSuccess(backup.providerId);
         const event: TTSProviderFailoverEvent = { kind: 'tts', from: from.providerId, to: backup.providerId, reason: failure.errorClass, lostMs: Date.now() - started };
-        this.opts.onProviderFailover?.(event);
+        this.notify('onProviderFailover', () => this.opts.onProviderFailover?.(event));
         this.metric({ type: 'provider_failover', ...event });
         return;
       }
@@ -611,10 +644,9 @@ export class StreamingTTSChain implements IStreamingTTS {
         if (cancelled || epoch !== request || !current) return;
         for (;;) {
           const session: StreamingTTSSession = current;
-          const left = leaving.promise;
           let failure: Error | undefined;
           try {
-            await Promise.race([session.flush(), left]);
+            await leaving.until(() => session.flush());
           } catch (error) {
             failure = error instanceof Error ? error : new Error('TTS flush failed');
           }
@@ -680,11 +712,11 @@ export class StreamingTTSChain implements IStreamingTTS {
         if (!closedByClose && epoch !== request) return;
         admit(text);
         if (!current) throw new Error('synthesis unavailable');
-        const left = leaving.promise;
+        const session: StreamingTTSSession = current;
         let failure: Error | undefined;
         try {
-          if (!current.writeTokens) throw new Error('awaited producer required');
-          await Promise.race([current.writeTokens(text), left]);
+          if (!session.writeTokens) throw new Error('awaited producer required');
+          await leaving.until(() => session.writeTokens!(text));
         } catch (error) {
           failure = error instanceof Error ? error : new Error('TTS write failed');
         }
