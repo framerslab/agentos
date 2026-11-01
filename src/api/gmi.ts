@@ -1340,8 +1340,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // avatar is not available on the GMI path
     },
     // With learning on: the layer as the agent's host reads it and the operator's calls, with the agent's key and
-    // namespace filled in. agent.close() ends every session's learner session through session.close() and leaves the
-    // layer open, because the agent serves sessions opened after close().
+    // namespace filled in. agent.close() ends every session's learner session as it closes the session, without ending
+    // the session id's memory, and leaves the layer open, because the agent serves sessions opened after close().
     ...(layer ? { learning: learningHostCalls(layer, { agentKey, namespace: learningConfig?.namespace ?? '' }, memoryForForget, runningHostCalls) } : {}),
   };
   Object.defineProperty(handle, '__config', { value: opts, enumerable: false, configurable: true });
