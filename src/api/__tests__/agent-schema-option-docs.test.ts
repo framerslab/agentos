@@ -49,6 +49,13 @@ function topLevelKeys(source: string, start: number): string[] {
       expectKey = false;
       continue;
     }
+    if (ch === '/' && source[i + 1] === '*') {
+      // A block comment leaves the key state as it was, so `/* note */ output: x` still reads `output`.
+      const end = source.indexOf('*/', i + 2);
+      if (end < 0) break;
+      i = end + 1;
+      continue;
+    }
     if (ch === '/' && source[i + 1] === '/') {
       const end = source.indexOf('\n', i);
       if (end < 0) break;
@@ -70,7 +77,7 @@ function topLevelKeys(source: string, start: number): string[] {
       continue;
     }
     if (depth === 1 && expectKey && /[A-Za-z_$]/.test(ch)) {
-      const key = /^[A-Za-z_$][\w$]*(?=\s*:)/.exec(source.slice(i));
+      const key = source.slice(i).match(/^[A-Za-z_$][\w$]*(?=\s*:)/);
       if (key) keys.push(key[0]);
       expectKey = false;
     }
@@ -82,16 +89,11 @@ function agentExampleKeys(block: string): string[][] {
   return [...block.matchAll(/(?<![\w.$])agent\(\s*\{/g)].map((match) => topLevelKeys(block, match.index + match[0].length - 1));
 }
 
-/** The agent() examples in one source that set `output` at their top level. */
+/** The agent() examples in one source, fenced or inline, that set `output` at their top level. */
 function outputOffenders(file: string, text: string): string[] {
-  const offenders: string[] = [];
-  for (const block of fencedBlocks(text)) {
-    for (const keys of agentExampleKeys(block)) {
-      if (keys.includes('output')) offenders.push(`${file}: agent({ ${keys.join(', ')} })`);
-    }
-  }
-  if (/(?<![\w.$])agent\(\{\s*output\s*:/.test(text)) offenders.push(`${file}: inline agent({ output: ... })`);
-  return offenders;
+  return agentExampleKeys(text)
+    .filter((keys) => keys.includes('output'))
+    .map((keys) => `${file}: agent({ ${keys.join(', ')} })`);
 }
 
 describe('agent() examples name the schema option agent() applies', () => {
