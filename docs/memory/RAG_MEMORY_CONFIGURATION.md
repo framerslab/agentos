@@ -105,6 +105,12 @@ is one recorded memory write; the sink then needs a `Memory` facade that reads
 back, deletes and restores a trace by id (`brainId`, `readTrace`, `deleteTraces`,
 `restoreTrace`), as `Memory.createSqlite()` and `Memory.createWithAdapter()` give
 ([GMI, Where a turn's memory is filed and read](../GMI.md#where-a-turns-memory-is-filed-and-read)).
+The runtime hands its layer this facade and the one `memoryTools` names, so
+`forgetUser` deletes a user's scopes in their Brains, and keeps the layer's
+learning store on `storageAdapter` when it has transactions. Wherever the
+runtime has a layer, the memory tools pack leaves `memory_reflect` out, even
+with `includeReflect: true`, and logs a warning saying so; consolidate with
+`memory.consolidate()`.
 
 ## High-Level API: AgentMemory
 
