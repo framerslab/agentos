@@ -266,6 +266,22 @@ describe('GeminiVideoProvider', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('counts data: URL images toward maxImageBytes', async () => {
+    await provider.initialize({ apiKey: 'gk-test', maxImageBytes: 8 });
+    const sixteen = Buffer.alloc(16, 1);
+
+    await expect(
+      provider.generateVideo({
+        prompt: 'p',
+        referenceImages: [`data:image/png;base64,${sixteen.toString('base64')}`],
+      }),
+    ).rejects.toMatchObject({ reason: 'too_large' });
+    await expect(
+      provider.generateVideo({ prompt: 'p', referenceImages: [`data:image/svg+xml,${'%41'.repeat(16)}`] }),
+    ).rejects.toMatchObject({ reason: 'too_large' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('raises a refused image fetch with its status and without its URL', async () => {
     const connector: EgressConnector = async () => answer(404, {}, Buffer.from('not here'));
     await provider.initialize({ apiKey: 'gk-test', imageEgress: { lookup: resolvesTo(PUBLIC_V4), connector } });
@@ -385,6 +401,27 @@ describe('GeminiVideoProvider', () => {
     expect(result.videos[0].base64).toBe(VIDEO_BYTES.toString('base64'));
     expect(result.videos[0].url).toBeUndefined();
     expect(result.videos[0].providerMetadata).toMatchObject({ interactionId: 'int-1', fileUri: uri });
+  });
+
+  it('polls and downloads a file with the key that generated it', async () => {
+    // Files belong to the project of the key that made them
+    // (https://ai.google.dev/api/files), so a pool of keys from several
+    // projects must not switch keys between the interaction and the file.
+    await provider.initialize({ apiKey: 'gk-a,gk-b', pollIntervalMs: 1 });
+    fetchSpy
+      .mockResolvedValueOnce(
+        jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', uri: 'files/vid9' }])),
+      )
+      .mockResolvedValueOnce(jsonResponse({ name: 'files/vid9', state: 'PROCESSING' }))
+      .mockResolvedValueOnce(jsonResponse({ name: 'files/vid9', state: 'PROCESSING' }))
+      .mockResolvedValueOnce(jsonResponse({ name: 'files/vid9', state: 'ACTIVE' }))
+      .mockResolvedValueOnce(imageResponse(Buffer.from('mp4'), 'video/mp4'));
+
+    await provider.generateVideo({ prompt: 'p' });
+
+    const keys = (fetchSpy.mock.calls as Array<[string, any]>).map(([, init]) => init.headers['x-goog-api-key']);
+    expect(keys).toHaveLength(5);
+    expect(new Set(keys).size).toBe(1);
   });
 
   it('raises a video delivered by URI whose file fails processing', async () => {

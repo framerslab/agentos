@@ -33,4 +33,9 @@ describe('media/video index', () => {
     expect(getVideoProviderOptions('replicate', bag)).toBeUndefined();
     expect(getVideoProviderOptions('luma', bag)).toEqual({ loop: true });
   });
+
+  it('reads a provider entry whatever the case of its key', () => {
+    expect(getVideoProviderOptions('fal', { Fal: { end_image_url: 'u' } })).toEqual({ end_image_url: 'u' });
+    expect(getVideoProviderOptions('replicate', { REPLICATE: { seed: 2 }, fal: {} })).toEqual({ seed: 2 });
+  });
 });
