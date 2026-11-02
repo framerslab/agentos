@@ -474,7 +474,7 @@ describe('FalVideoProvider request inputs and queue URLs', () => {
       prompt: 'm',
       image: 'https://cdn.example.com/m.png',
       durationSec: 6,
-    });
+    } as any);
     expect(submitBody().duration).toBe('6');
 
     fetchSpy.mockReset();
