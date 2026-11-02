@@ -59,7 +59,8 @@
  * which the Omni guide recommends for videos over 4 MB. The URI names a Files
  * API file: poll it until its state is `ACTIVE`, then download it with the
  * API key in the `x-goog-api-key` header. An interaction whose `status` is
- * not `completed` is raised with its error message.
+ * not `completed` is raised with the messages of the faults its `errors`
+ * list records.
  *
  * ## Deadline
  *
@@ -150,7 +151,8 @@ interface GeminiInteraction {
   id?: string;
   status?: string;
   steps?: Array<{ type?: string; content?: GeminiContentPart[] }>;
-  error?: { message?: string; code?: number | string };
+  /** Faults recorded on the interaction (https://ai.google.dev/api/interactions-api). */
+  errors?: Array<{ code?: string; message?: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -444,7 +446,10 @@ export class GeminiVideoProvider implements IVideoGenerator {
    */
   private _buildResult(interaction: GeminiInteraction, model: string): VideoResult {
     if (interaction.status && interaction.status !== 'completed') {
-      const reason = interaction.error?.message ? `: ${interaction.error.message}` : '.';
+      const messages = (Array.isArray(interaction.errors) ? interaction.errors : [])
+        .map((fault) => (typeof fault?.message === 'string' ? fault.message.trim() : ''))
+        .filter((message) => message.length > 0);
+      const reason = messages.length > 0 ? `: ${messages.join('; ')}` : '.';
       throw new Error(`Gemini video generation ended with status ${interaction.status}${reason}`);
     }
 
