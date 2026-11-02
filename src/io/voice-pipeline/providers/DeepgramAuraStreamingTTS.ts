@@ -50,7 +50,10 @@
  * old text after the next segment's `Speak` would play as that segment's, and
  * the old `Flushed` would complete it. The socket is closed, nothing it still
  * sends reaches the session, one console warning line says so, and the next
- * segment opens a fresh socket. Deepgram takes at most 20 `Flush` messages in 60
+ * segment opens a fresh socket. When the wait was for the late `Flushed` of a
+ * timed-out segment whose late audio would still play, the rest of that audio
+ * is lost with the socket, so a `'warning'` says so instead, one console
+ * warning line when nothing listens for it. Deepgram takes at most 20 `Flush` messages in 60
  * seconds and answers the rest with a `Warning`: a segment that would pass that
  * limit is spoken without a `Flush`, the segments after it join it, each as its
  * own `Speak`, and one `Flush` once the window has passed completes them
@@ -69,7 +72,10 @@
  * followed the same way, by the next segment's fresh socket, and so is one
  * Deepgram closes while the next segment waits for such a response: that
  * response cannot come any more, and nothing of the waiting segment was sent
- * on the socket. A
+ * on the socket. When that response is the late `Flushed` of a timed-out
+ * segment whose late audio would still play, before the next reply's text has
+ * come, the close also loses the rest of that audio: a `'warning'` names the
+ * close, never `'error'`, so the reply is not taken as heard whole. A
  * socket that fails to open for a reply (refused, closed or failed before it
  * opens, or not open within eight seconds) is a `'warning'` naming the cause,
  * one console warning line when nothing listens for it, never `'error'`, and
@@ -390,16 +396,23 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * with `flush_complete`, and the session closes. With none in flight it
    * closes nothing, between replies or while the next segment waits for a
    * stale response (the late `Flushed` of a timed-out segment, the `Cleared`
-   * that answers a `Clear`): nothing was sent on the socket that the session
-   * still waits to hear, the response waited for cannot come any more, and the
-   * next segment starts on a fresh socket.
+   * that answers a `Clear`): nothing of the waiting segment was sent on the
+   * socket, the response waited for cannot come any more, and the next
+   * segment starts on a fresh socket. A close while the late `Flushed` of a
+   * timed-out segment is waited for, and its late audio would still play
+   * ({@link lateAudioOwed}), takes the rest of that audio with it: one
+   * `'warning'` names the close, so the reply is not taken as heard whole.
    *
    * @param message - The loss, with the close code and the cause when known.
    */
   private socketClosed(message: string): void {
     this.unanswered.length = 0;
     if (!this.segments.hasInFlight) {
+      const lost = this.lateAudioOwed();
       this.release();
+      if (lost) {
+        this.warnOf(new Error(`${message} while the next segment waited for the late Flushed of a segment that timed out; what of that segment's audio had not come is lost`));
+      }
       return;
     }
     this.closed = true;
@@ -664,19 +677,36 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * `Flush`, after the next segment's `Speak`, and its audio names no segment, so nothing would tell them from that
    * segment's. The socket is given up: closed, and no longer the session's, so nothing it still sends reaches the
    * session, and one console warning line says so. The next segment opens a fresh socket, as a reply does after
-   * Deepgram closed the idle one.
+   * Deepgram closed the idle one. A late `Flushed` given up while the timed-out segment's late audio would still play
+   * ({@link lateAudioOwed}) takes the rest of that audio with the socket: a `'warning'` says so in place of the console
+   * line, which it still is when nothing listens, so the reply is not taken as heard whole.
    */
   private staleWaitEnded(): void {
     const ws = this.ws;
     if (ws && this.isOpen()) {
       const awaited = this.clearing ? 'Cleared' : 'Flushed';
+      const lost = this.lateAudioOwed();
       this.ws = null;
       this.ready = false;
       this.unanswered.length = 0;
       ws.close(1000, 'response overdue');
-      console.warn(`[deepgram-aura] no ${awaited} came within its wait; the socket is closed, and the next segment opens a fresh one`);
+      if (lost) {
+        this.warnOf(new Error("no Flushed came within its wait; the socket is closed, the next segment opens a fresh one, and what of the timed-out segment's audio had not come is lost"));
+      } else {
+        console.warn(`[deepgram-aura] no ${awaited} came within its wait; the socket is closed, and the next segment opens a fresh one`);
+      }
     }
     this.release();
+  }
+
+  /**
+   * Whether the session waits for the late `Flushed` of a segment that timed out while that segment's late audio would
+   * still play: not the `Cleared` of a `Clear`, whose audio is dropped, and not once the next reply's text has come,
+   * from when it is dropped too. A wait that ends without that `Flushed`, the socket closed or given up, then loses
+   * what of the segment's audio had not come.
+   */
+  private lateAudioOwed(): boolean {
+    return this.stale !== undefined && !this.clearing && !this.dropStale;
   }
 
   /**

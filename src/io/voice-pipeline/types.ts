@@ -1238,7 +1238,7 @@ export interface StreamingTTSConfig {
  * |--------------------|---------------------------|--------------------------------------|
  * | `'audio'`          | {@link EncodedAudioChunk}  | A synthesised chunk ready for playback. |
  * | `'flush_complete'`  | *(none)*                  | All queued tokens have been synthesised. |
- * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`), or a socket that failed to open for a reply, which ends unplayed (`DeepgramAuraStreamingTTS`). With nothing listening for it, the provider writes one warning line; `StreamingTTSChain`'s failover facade carries the warning of the provider session in use; `VoicePipelineOrchestrator` listens, and reports it as a recoverable `session_error` of the TTS part. |
+ * | `'warning'`        | `Error`                   | A failure the session goes on after, such as a provider socket lost mid-segment and the segment spoken again (`ElevenLabsStreamingTTS`), or a socket that failed to open for a reply, which ends unplayed, or one lost while the late audio of a segment that timed out was still to come (`DeepgramAuraStreamingTTS`). With nothing listening for it, the provider writes one warning line; `StreamingTTSChain`'s failover facade carries the warning of the provider session in use; `VoicePipelineOrchestrator` listens, and reports it as a recoverable `session_error` of the TTS part. |
  * | `'error'`          | `Error`                   | Unrecoverable synthesis error.       |
  * | `'close'`          | *(none)*                  | Session terminated.                  |
  *
@@ -1968,15 +1968,16 @@ export type VoiceConversationItem =
        * a barge-in or typed text cut, the prefix the transport has acknowledged as played, which is empty while no
        * transport reports which text it played. A partly played reply's heard extent is then unknown, and `text` is not
        * cut to a guess; so is that of a reply whose transport's playout wait (`IStreamTransport.waitForPlayout()`)
-       * rejected, and, without a call profile, of one some of whose audio may never have played: a pause held it on a
-       * transport that plays the audio itself, which discards what its track held, or its TTS session warned while it
-       * spoke.
+       * rejected, and, without a call profile, of one a pause held on a transport that plays the audio itself, which
+       * discards what its track held. A reply whose TTS session warned while it spoke may have lost some of its text:
+       * without a call profile no word of it is known heard, and under one its heard text is the prefix its acknowledged
+       * playback proves.
        */
       playedText: string;
       /**
        * Whether a barge-in, typed text or another interruption cut the reply, or its audio did not play out: the
        * transport's playout wait rejected, as a stalled LiveKit track's does once it has discarded what it had not
-       * played, or, without a call profile, a pause held it on a transport that plays the audio itself or its TTS session
+       * played, or, without a call profile, a pause held it on a transport that plays the audio itself, or its TTS session
        * warned while it spoke.
        */
       interrupted: boolean;

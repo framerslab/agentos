@@ -35,8 +35,11 @@
  * VAD session and an audio endpoint detector; each reply synthesizes through a
  * pull-contract TTS session into playback the transport acknowledges; results
  * carry worker and inference generations and a transport epoch, so a stale one
- * cannot speak; interruption follows measured speech; and the physical
- * transport can be detached and reattached without ending the call.
+ * cannot speak; a TTS session's `'warning'` is reported and ends nothing, as
+ * without a profile, and the reply it came in joins as interrupted with what
+ * its acknowledged playback proves heard; interruption follows measured
+ * speech; and the physical transport can be detached and reattached without
+ * ending the call.
  *
  * ## Design notes
  *
@@ -3008,7 +3011,10 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
    * Speaks one reply of `identity`'s generation through a new pull-contract TTS session and acknowledged playback;
    * `agent_done` goes out only once synthesis is complete, its final usage is reported and playback is acknowledged.
    * Its first word is `speech_created` (`source`) and makes the agent speak; once acknowledged, it joins the
-   * conversation as played.
+   * conversation as played. A `'warning'` of the TTS session, a failure it goes on after such as a socket that failed
+   * to open for the reply, is reported as the orchestrator's `'error'` and a recoverable `session_error` of the TTS
+   * part, as without a call profile; some of the reply's text may then never have been spoken, so it joins as
+   * interrupted, its `playedText` the prefix its acknowledged playback proves, and `agent_done` carries that text.
    */
   private async synthesize(tokens: AsyncIterable<string>, identity: AudioIdentity, source: 'reply' | 'say'): Promise<void> {
     const generation = identity.generation;
@@ -3033,6 +3039,7 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     this.queue = queue;
     let finalUsage = false;
     let flushed = false;
+    let warned = false;
     let text = '';
     tts.on('usage', (event: StreamingTTSUsageEvent) => {
       try {
@@ -3050,6 +3057,13 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     });
     tts.on('flush_complete', () => {
       if (this.live(generation)) flushed = true;
+    });
+    // A failure the TTS session goes on after: some of the reply's text may never have been spoken.
+    tts.on('warning', (warning: unknown) => {
+      if (!this.live(generation)) return;
+      warned = true;
+      const error = this.report(warning, 'a TTS warning');
+      this.sessionError(error, true, 'tts');
     });
     tts.on('close', () => {
       if (this.tts === tts && this.live(generation) && !flushed) this.fail('provider_failure', 'tts');
@@ -3092,12 +3106,14 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
     tts.close();
     this.queue = undefined;
     // The reply played to its end, its whole playback acknowledged: it joins the conversation as heard now, and no later
-    // barge-in, as one while agent_done goes out, reports its text.
+    // barge-in, as one while agent_done goes out, reports its text. One its TTS session warned of may have lost some of
+    // its text: it joins as interrupted, with the contiguous prefix of acknowledged segments as its played text.
     this.replying = false;
     this.replyText = '';
-    if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: text, interrupted: false }, createdAt: Date.now() });
+    const heard = warned ? queue.playedText : text;
+    if (text) this.events.emit('conversation_item_added', { item: { role: 'assistant', text, playedText: heard, interrupted: warned }, createdAt: Date.now() });
     if (!this.live(generation)) return;
-    await this.send({ type: 'agent_done', text, durationMs: queue.stats().playedMs }, generation);
+    await this.send({ type: 'agent_done', text: heard, durationMs: queue.stats().playedMs }, generation);
     if (!this.live(generation)) return;
     this.changing = true;
     await this.resetInput();
