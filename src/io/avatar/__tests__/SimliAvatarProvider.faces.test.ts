@@ -90,7 +90,9 @@ describe('SimliAvatarProvider.createFace', () => {
 
     const form = init.body as FormData;
     expect(form).toBeInstanceOf(FormData);
-    expect([...form.keys()]).toEqual(['image']);
+    const fields: string[] = [];
+    form.forEach((_value, field) => fields.push(field));
+    expect(fields).toEqual(['image']);
     const part = form.get('image') as File;
     expect(part.type).toBe('image/png');
     expect(part.name).toBe('face.png');
