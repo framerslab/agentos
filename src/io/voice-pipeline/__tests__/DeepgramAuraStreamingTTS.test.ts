@@ -1239,6 +1239,26 @@ describe('DeepgramAuraStreamingTTS', () => {
     }
   });
 
+  it("emits no flush_complete for a second flush() of a reply when a listener of the first's warning cancels or closes the session, and settles both", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    for (const cut of ['cancel', 'close'] as const) {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const flushes = vi.fn();
+      session.on('warning', () => session[cut]());
+      session.on('flush_complete', flushes);
+
+      session.pushTokens('Hello there.');
+      // Both flushes wait on the reply's one segment, so its end settles them in one pass.
+      const first = session.flush();
+      const second = session.flush();
+      frame(ws, 1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await Promise.all([first, second]);
+      expect(flushes).not.toHaveBeenCalled();
+    }
+  });
+
   it("reports nothing more when Deepgram closes the socket while the next reply waits for the late Flushed of the reply before's timed-out sentence, whose late audio no reply plays any more", async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const session = await tts.startSession({ format: 'pcm' });
