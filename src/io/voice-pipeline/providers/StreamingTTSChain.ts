@@ -310,7 +310,8 @@ export class StreamingTTSChain implements IStreamingTTS {
    * `flush_complete` of its flush, ends nothing and goes nowhere. `close()` stops a switch under way and ends every wait
    * on it at once, though a provider's opening or a write of its never settles, and a backup that opens after it is
    * cancelled and closed. `cancel()` cuts the request and not the switch: the switch goes on, the
-   * backup takes the text admitted since the cancel, and a replay under way when it comes starts over on that text.
+   * backup takes the text admitted since the cancel, and a replay under way when it comes starts over on that text,
+   * without waiting for a replay write of the cut text that the backup never settles.
    * `cancel()` and `close()` advance an epoch; a flush ends without flushing once the epoch it began in has passed,
    * so the flush of a cut request completes nothing of the next one, and a `writeTokens()` that waited on a switch
    * admits nothing and resolves once the epoch it was issued in has passed, as a write the cancel cut in flight does,
@@ -681,6 +682,10 @@ export class StreamingTTSChain implements IStreamingTTS {
         epoch++;
         tokens = [];
         characters = 0;
+        // A write the cancel cut is waited on no longer, as the session contract does not require cancel() to settle
+        // it: a write of the facade's own resolves, and a replay write under way starts the replay over on the text
+        // admitted since, so the switch can end. A flush the cancel cut ends as well.
+        letGo();
         current?.cancel();
       },
       close: (): void => {
@@ -704,8 +709,8 @@ export class StreamingTTSChain implements IStreamingTTS {
       // and does not yield otherwise, as a flush does: a switch that began during a yield would leave it writing to the
       // session that failed, past the signal that lets go of it. The session's own write is waited on only until the
       // facade lets go of that session: a provider whose connection dropped may never settle it, and the text is the
-      // backup's by then. A write a cancel() cut in flight resolves however the provider settles it, and its refusal
-      // begins no switch: the next request's text may already be on that healthy session.
+      // backup's by then. A write a cancel() cut in flight resolves at the cancel, whether or not the provider ever settles
+      // it, and its later refusal begins no switch: the next request's text may already be on that healthy session.
       writeTokens: async (text: string): Promise<void> => {
         const request = epoch;
         while (switching && !closed) await untilSwitchEnds();
