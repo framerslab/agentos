@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@framers/sql-storage-adapter':
-        specifier: ^0.9.1
-        version: 0.9.1(better-sqlite3@13.0.3)
+        specifier: ^0.9.2
+        version: 0.9.2(better-sqlite3@13.0.3)
       '@livekit/rtc-node':
         specifier: ^1.1.0
         version: 1.1.0
@@ -109,8 +109,8 @@ importers:
         specifier: ^0.11.0
         version: 0.11.0(@framers/agentos@)(better-sqlite3@13.0.3)
       '@framers/agentos-extensions-registry':
-        specifier: ^0.18.15
-        version: 0.18.15(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)
+        specifier: ^0.18.16
+        version: 0.18.16(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)
       '@jitl/quickjs-wasmfile-release-sync':
         specifier: 0.32.0
         version: 0.32.0
@@ -770,19 +770,22 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.13.134'
 
-  '@framers/agentos-ext-agent-delegation@0.1.3':
-    resolution: {integrity: sha512-01nfjsiHK0pXT7lg0ItN4EgJuQtB0CkKI7dycp85GWqCTaBmmgNn8Bpq/AP6bQDbatf2nkTC/MaMVlJL3TmZfQ==}
+  '@framers/agentos-ext-agent-delegation@0.1.4':
+    resolution: {integrity: sha512-nT0yT8K3kGt59g2ue5oM9hLvB2e4vuk7wbz8tV37DQx8EzATqefw+myR5Aaw0ySJrLrM0m3Tr2y2CEwM0II6Ow==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-amazon-polly@0.2.3':
-    resolution: {integrity: sha512-TgK67vYn8aIV2sgIz7uAePvY9Ts701f6TcCj9dcA53xaNHm6Pzn2yrzSs7PTCojX5lYzbgiqYmOQVzPkOzY8bg==}
+  '@framers/agentos-ext-amazon-polly@0.2.4':
+    resolution: {integrity: sha512-1coUUGoh381s/KPy4AjsiTxyiCGxN0LzwS75nKhzcgzoiIVQdw6cM6MX7N05PR0g507pxVOdVuPmhdr7SwKclA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@aws-sdk/client-polly': ^3.0.0
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-auth@1.2.1':
-    resolution: {integrity: sha512-c4eSRNCyqZuUhKqRQ3NmnPZcdoi+LPmACOGc1vIChxwE5DLYGLP/YCIBQERAMKHrcZzFaXGpw0qAJhLgUXzRUg==}
+  '@framers/agentos-ext-auth@1.2.2':
+    resolution: {integrity: sha512-NAjEobifXFYK/5JUAAktWIsvId2H9II5mydRw9DsO8AhEu33vHcI6lGQngXHZYdsYLWyEOarfDgjhubmdVSymw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -805,8 +808,9 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-bluesky@0.1.3':
-    resolution: {integrity: sha512-rNQK/4H9wo5npII3mH7albEbXY+eEyomb7F36Q3kv4Gl7Jc3bubl3Hfakq9jliG3Wcj1FtO2emQs2qFBlMnSTA==}
+  '@framers/agentos-ext-channel-bluesky@0.1.5':
+    resolution: {integrity: sha512-xGdMU73jp1fOhNycJkIUsjBkkaJbAKXLTyiPjY02hfDNJB2T8iQQmR9I4XjgE8Mhw07RZWJvKjays2swvJa3RA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -816,21 +820,23 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-email@0.4.4':
-    resolution: {integrity: sha512-IhNWiOlw1h9vXszPtgHuWf2/6xz08AH6xGe3DvCVcZ4Al9UZ7gUgBXULaMQiWwReTN7010s+dfR+OxRx6J0XIA==}
+  '@framers/agentos-ext-channel-email@0.5.0':
+    resolution: {integrity: sha512-rJ7r5GGYz6p2tyIb3mPH5zYtavxD/D3bu887/dVGqoyscC9HcuDXoxKJQt56P5ZvMRWrlCAzKkbAEIpHnsI39Q==}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
     peerDependenciesMeta:
       '@framers/agentos':
         optional: true
 
-  '@framers/agentos-ext-channel-facebook@0.1.3':
-    resolution: {integrity: sha512-1YQTOvbX6UR1epIqONcweyRiFvy1+/badLPt1q3kF/eyGTHqCUE/pkyhN3DTzPZF0X4RA5oCXhIff5tzZZRgdg==}
+  '@framers/agentos-ext-channel-facebook@0.1.5':
+    resolution: {integrity: sha512-JfIxPQs8a8MLmW6CIgVUHGlDpEUP8ayLcZjDkotA33B/usV4hEVYfZOPOq3EHUaJNAmASWsdk+gjtSLakZqTQw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-farcaster@0.1.3':
-    resolution: {integrity: sha512-JhetyiGk9ObN59OUmtfgCZlaGwFBjeUyIEZn25JvCGzUJWoKIK7IalSwh8QspIlz31ls2sMiF+6UmvTZW+ajUg==}
+  '@framers/agentos-ext-channel-farcaster@0.1.5':
+    resolution: {integrity: sha512-WJmDiy7mE2M5pixKdXjmY3rE46wa27I1CouNFU83YT51HBO3ZagBp/caQkbNA4cR8H0g2wccqkVX0t4kZnVXhQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -840,8 +846,9 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-google-business@0.1.3':
-    resolution: {integrity: sha512-zaIoxN8uFTiPozDTUz5SoBJC/BYqeIHhan2y4aY9ox3KSkGp7J+M+A4k63QSTkMOQgyQGZvzkVJLrrDgnmpeQQ==}
+  '@framers/agentos-ext-channel-google-business@0.1.5':
+    resolution: {integrity: sha512-UEX2hq7ROu4qlskN5gga+V9mX3PMAmZORX0QjWHibxcIwEtq4fip0l0nEBgEy8jjjT8JamEfrdUkoaXR3Px3eg==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -857,8 +864,9 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-instagram@0.1.3':
-    resolution: {integrity: sha512-TFL3fpQa9RGHV3Yr4Wtl44L/RCMv8Z0nhk1FaHsTq8UVsVpSr0BoNGEs+s2is5Lp/YhVPHKTb/PJaAIhu+JKRQ==}
+  '@framers/agentos-ext-channel-instagram@0.1.5':
+    resolution: {integrity: sha512-Ai7M5eiCCNPDGWMV6FK4R2jDCnthwKct9sEUr7iqCA3Au3drBRVPT6PCO3zpxyqzNBPrmIsjkmWAoRDQRlrq2g==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -868,8 +876,9 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-lemmy@0.1.3':
-    resolution: {integrity: sha512-SNeRjXQ6INGE+qA0CU8ILQ5xUjPFNL69uuxnkdxRhB5I2XKSE90NRiNyy/L7BPdtwnyL8log/E/glgItl1F8Zw==}
+  '@framers/agentos-ext-channel-lemmy@0.1.5':
+    resolution: {integrity: sha512-nZJvElRZ3Du5iohpkcLcNWMAfSj7ZvDmNoc7083QVQMt/ZfxBk76t1hfQaXnv5AipnbGuK06T95DKerr9NOanA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -879,8 +888,9 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-linkedin@0.1.3':
-    resolution: {integrity: sha512-yUQheGy9TIi833xVlhonKiRbwp12MT9biT9VeliE8dGCTBg0NmXFZkp6A6i/o37HL0ChlhvJpU+l7y99C82Qew==}
+  '@framers/agentos-ext-channel-linkedin@0.1.5':
+    resolution: {integrity: sha512-ZDmaP465IGfLhMO1RRnD2JsINcwhAiwWQO0eNkM1I7t1OrjODjbFhoCjVjNH7QxSQ270TJykTBIX+xJ6Z6hCzw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -908,8 +918,8 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-nostr@0.1.5':
-    resolution: {integrity: sha512-KmkMsSkt3WYPgVC1//z873r6CSDXpUlqaQTMElxK/JlJDAzdodUD6qW8xWm1CP3EWraZttt+2pSsKIbtjWxyFg==}
+  '@framers/agentos-ext-channel-nostr@0.1.8':
+    resolution: {integrity: sha512-M4X+b5SvUxp7U3iZaFGGhqWeRGlZkeVJoLr6MkXyAFHzUVdWEeX17zOFdOXt4NeyiioajBlQkXSUfdo01p3kNA==}
     engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
@@ -956,8 +966,9 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-threads@0.1.3':
-    resolution: {integrity: sha512-s82hZyuw5n1zIPmv/K+mpDNGzUMfBm3yE2ptTQWp1Urh/3JOskjJlUwrbkNNI39V9PfEmIviX4METTa4WWLG9Q==}
+  '@framers/agentos-ext-channel-threads@0.1.5':
+    resolution: {integrity: sha512-XU7Wv439w9fcmOKGw/cJmng1HmK4flzk5ESU5U5f4Mvg+LXkImZT+QWyS+Rrv9fmzyxcpSReih1S2Y9mzSJVUw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -979,8 +990,9 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-channel-twitter@0.1.3':
-    resolution: {integrity: sha512-vzVhdDm1L5Nm2RpCD/Fz7mLjXGgm+eAZIBM+WCJDyxjeZqy3rVD7S1TSulaI9xAp+ByFCFK2lti5lFscCVohKQ==}
+  '@framers/agentos-ext-channel-twitter@0.1.5':
+    resolution: {integrity: sha512-SPG82OI1huZwOpXWAXJS+DG27IhxYjQDyMYhkkB90guPWVG1jfAeBlsLnsPaskzIO/xeEeC5SAlWZe61MjPp+Q==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -1015,58 +1027,69 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-clearbit@1.1.2':
-    resolution: {integrity: sha512-yUpOWLUq+HZP4jCd9/X2r74XZi20K8/QQcArJwt8Z0arfiynaiO9anWb0vher4KO/7Cu/7fG2tvdKzvvaqrnZw==}
+  '@framers/agentos-ext-clearbit@1.1.3':
+    resolution: {integrity: sha512-bALLjt/hmlTRvDoiHkDgGIDh3JvkO7hbbOBXNkoPHHquyzxpd8NmeKj7A/5h7zbgGRFKM0nh4DyzAx4vvc0Fdg==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cli-executor@1.3.1':
-    resolution: {integrity: sha512-OQZs4YQGRX4Lf3xiWbShh/Fq4F2BaCTbwQUhXLwJ2MaG55oA0SH53yJSbJpmvW+tuS5KKYYxQmabZTk4Fco/yw==}
+  '@framers/agentos-ext-cli-executor@1.3.3':
+    resolution: {integrity: sha512-3h4Im6feC1I1pT6z4FQWhGH/nSgOGyghOe+pA/OXkqTmsdYc4CXtc6a7Xoa1Cw0lX2mZEoZbX8HNiv5Jx9sTZA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cloud-aws@0.1.3':
-    resolution: {integrity: sha512-lyONBpIuKn/k9bqbuAKfEfxDyvMYoplE8mxCXToQhcU7u9Z75I8Iqf6ZVbh4drRmZ0fbLEl9L2p65y4orefJ1Q==}
+  '@framers/agentos-ext-cloud-aws@0.1.4':
+    resolution: {integrity: sha512-rLRY2xPl+NPeQdllFM7U/B7orgFo7/bDdXZrlIGDQoi9u6j/Ptc3IHGRRq1juKWTu8qcQE+Ekyw2l37jDufhyQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cloud-cloudflare-pages@0.1.3':
-    resolution: {integrity: sha512-HBql72md22WVvTdkmWDTXno7VpNdaD80bGAq5O6OGmOD1EDz2/k2gQl1dwhOQUI1iMl6QXO1FQznknHuRN+yrA==}
+  '@framers/agentos-ext-cloud-cloudflare-pages@0.1.4':
+    resolution: {integrity: sha512-H4I+XiTkSO+fGpOR78dP7g7B8VldZtj2cDehHDFNldLzOG9ZggqV5DWGD8KMO7dmrl2zKy+WY/e5MBPAF/oNCg==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cloud-digitalocean@0.1.3':
-    resolution: {integrity: sha512-2862J+v7jCrQ53qgvUjxLNkQ0fhKbQ66HVdNQJZKfvdxD1LVanVmQCnyYA5+XSBMu0peIPVpPzRX7xFVHb3OQA==}
+  '@framers/agentos-ext-cloud-digitalocean@0.1.4':
+    resolution: {integrity: sha512-BRawCOFAmg1tF1KVWdgKMJwhTj7AO7Cpo3WuRkNdOsP2nWxL/KDT9N6yEsFGapLQvia7xbAuzKK4Lt0+Xj9DrA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cloud-flyio@0.1.3':
-    resolution: {integrity: sha512-NaKHM5/Po1wOBTZ/eNdGe6rLb6qtErTKBf6kc2/wdJwipQQcKR2D/lgQ7GAln/HvAOuZHFLvqtFuy9Qo170egA==}
+  '@framers/agentos-ext-cloud-flyio@0.1.4':
+    resolution: {integrity: sha512-A6FYTRQKEd3Vo+xLMfmfER3ARnWWYdPB9jiTQR+Pz+LgBXIv4mLUVU+gZnnEqbsst/RAsVwIuBvoL8wpnold1g==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cloud-heroku@0.1.3':
-    resolution: {integrity: sha512-ip6fHgK5avGsqSTjPHfxZ9/I68yLwyQp6YaiON3bkF5ABcbQVEwNfyv1Hml63M2yadvpC13vkseXAXAdArjIjw==}
+  '@framers/agentos-ext-cloud-heroku@0.1.4':
+    resolution: {integrity: sha512-TolI9C/DbOsywzvFXFThOJuD6EAz1pmFfmja6Gu+X/5DOyCnWh29Wc7IFEPOK0AtVas2zF+Xoon3PfzpN49+7g==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cloud-linode@0.1.3':
-    resolution: {integrity: sha512-odfflezcJjGNYelISCtEk2M2MdrqLuuTHAIWDjwJX6PGrRjp+2nDAYW5H/Wt/tDoUNvknM+sHpjPVgYEO3U7tQ==}
+  '@framers/agentos-ext-cloud-linode@0.1.4':
+    resolution: {integrity: sha512-d/sddS7+FrPlq622sdAsxf4dyBse5lFajBCyPmcL5qDBJV4WcETzlQACicF3/JqzWdxoOUkKKRXDCYSMlPl7EQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cloud-netlify@0.1.3':
-    resolution: {integrity: sha512-M3VK2zYayKd6DS4RF+FPI0/ZbwGXjWRrBoMsBFwUUcXtPAdaMbFNQ19Jorudx6z7NN/egHZnejN6vXW7h94DhA==}
+  '@framers/agentos-ext-cloud-netlify@0.1.4':
+    resolution: {integrity: sha512-F+2SKZBDHT0dG5UiLcFbff/004VDeT1D0UcP42dj6iMSdMUhjmYFgf5L1K3Mu4t7/XuojLoVRMFUIpqMIlOG4A==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cloud-railway@0.1.3':
-    resolution: {integrity: sha512-BYyi5cDla576rtar9xD3PEySQZpbP8aDzoI8SAMkMeY7jAt/icHxkXvLCtIMeTvz0Hs3zkfrRV7+0a5C5P6apw==}
+  '@framers/agentos-ext-cloud-railway@0.1.4':
+    resolution: {integrity: sha512-pG4U9OyenczGS25HclaKjoVBA1QIBKmMyIoZ8KfnKyCvKIRbHC1ePbtw3XrclOJ5/n9h4Rjc62as3aq99btnfw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-cloud-vercel@0.1.3':
-    resolution: {integrity: sha512-Hz5EK6tQzmFMXzw+S0qfInh8cJ6l91HeJFWm3vIZZqmVi5MU3VXZ5ee1VM0UD34TvoPze0qSCTKX/MhbpWqKkw==}
+  '@framers/agentos-ext-cloud-vercel@0.1.4':
+    resolution: {integrity: sha512-FAeB+E93ezKBDsfEktBRet0MlcRn2QE1vpC4GW85H4gdFOC3vGX0dmSU8HusdxphhlMywwzk3Kic+PSUQkW7hw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -1075,28 +1098,33 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.7.0'
 
-  '@framers/agentos-ext-content-extraction@0.1.3':
-    resolution: {integrity: sha512-gBhiiBeXYyABad594Sl9Q8dWCO9uvxjs8C8VBr0gPdKelnO/2oULKKaGk7icdXGwrKK+MSkHSqNPvkxU3E7aCw==}
+  '@framers/agentos-ext-content-extraction@0.1.5':
+    resolution: {integrity: sha512-niR6FR7vb4I2xZILtTMRdKy8nAp844mvXwhvcEgqDVODkV3lRuG+9P5Lv2kwNtZLi21qnqPYXSQws0Z1YOnAlw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-content-policy-rewriter@0.1.2':
-    resolution: {integrity: sha512-wO7emriGpP0+8ScHkJ0LlsOC+WBHBSVwCCEQaiOqrOWjG1Hm+4g7eOo0dnIPv6aTJ4yJnRHpLhas6y9tXEK+oA==}
+  '@framers/agentos-ext-content-policy-rewriter@0.1.3':
+    resolution: {integrity: sha512-RnLy1YRCXRo9qlH4vKfwjBnYs/VIB8fUQQmkzL4rd0fWvljt7bvP+YR9zbyhq7Fiiy5F3BkRgzKSRZLEST7XWw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-credential-vault@0.1.3':
-    resolution: {integrity: sha512-xrCcZ4ChuJxUQyj074jxPcwYjpAM7z+YJ+ttyzoGrxGX4PCfjOxIsyNWGRIUx4WFxFThbgcu27TsXplZtZDKbg==}
+  '@framers/agentos-ext-credential-vault@0.1.5':
+    resolution: {integrity: sha512-T90nfvahtXv8jeCqr4BpuK/iyri+c98dZSoVfYSLhVXZCSvRoJNasJQ5XHyFe5AkNrOEjFVp7QJrj/cd6IsvGg==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-deep-research@0.2.3':
-    resolution: {integrity: sha512-RnS9y6MmkiI3agVHVR0ycWDSAcxn3PmzRwGTP3CdJ/4+xicEtjp31LmsuY6YCuqspAiaOgbaxrOxosn/ayJFIg==}
+  '@framers/agentos-ext-deep-research@0.2.5':
+    resolution: {integrity: sha512-l6HDhtlHwUF0qy1sY++hFRItx8tPjLpcp9WuJWPF+9mhYqZn8DBLCrW1k3jMLzDicekxlqRGHkQq5MCq5Wh1ug==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-diarization@0.2.3':
-    resolution: {integrity: sha512-jjb/Sgdon33+fP+pbMwxn41Mf91HLxSAHZ3clp2Fgti6uEsWu8u3qT4Adp3Ucii4IMlxcPe5KHavo0O0O8gxMA==}
+  '@framers/agentos-ext-diarization@0.2.4':
+    resolution: {integrity: sha512-nM9FAh9BgF6/vIcAaNQBR6hV+cZk5GvgLHKTHkTTDYP2TH5b7ki9ZaTw2eudG8ks4Qzfe4PQPkIMhRkhrNscMA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
       onnxruntime-node: ^1.18.0
@@ -1104,28 +1132,33 @@ packages:
       onnxruntime-node:
         optional: true
 
-  '@framers/agentos-ext-document-export@0.3.4':
-    resolution: {integrity: sha512-6EnyMYbQbarhj4IUrT7Nmo237vt7c1FNjSONt7mLPGc0mWIGUeu5wI3JKRrDt6cxgqJ4+iHuxbPP6YwgDzdNUQ==}
+  '@framers/agentos-ext-document-export@0.3.7':
+    resolution: {integrity: sha512-4HXIM6w+D6yWTlD5o6cGB6tJpIxBJScuRLs413PdZGRa7dGYySWHZLVHXVnOjnwORJg2ECkAxVJBg4FLDyMQIA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-domain-cloudflare-registrar@0.1.3':
-    resolution: {integrity: sha512-jWQuwomnP+2yb18UdoUedLs0stjnfo2AodHjJAB4Lf5RqxqTRiS0V1J/TCQ8slEXR5Wwx9C/diMrOWx4bGd8iw==}
+  '@framers/agentos-ext-domain-cloudflare-registrar@0.1.4':
+    resolution: {integrity: sha512-T2lcKe7NB+lC9fAaLlGUV2egLRZRjlbOWGOHoePJfdDy4FqsfnowcZrbuu9n/rlnG4PYD1+j3lSQ/QYJ2o8XZQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-domain-godaddy@0.1.3':
-    resolution: {integrity: sha512-V+Rwcszl4p3y7wfkNaY5uNuumEkwEbSRq8ibcDIHunMBLh3C8XL38CcdNw/l9+5Z/G5lTbzM40mZzMVeCqqd9Q==}
+  '@framers/agentos-ext-domain-godaddy@0.1.4':
+    resolution: {integrity: sha512-8OzS82AqNdxEfKjtA8j9kH5d/BUVs01ekXuw3b5NHf7HhE7qktB/xm1/e+EWfZkCTYsRYp9owNhsRpb+zKiiww==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-domain-namecheap@0.1.3':
-    resolution: {integrity: sha512-P7mtkFyWnUOQYBtrm9B/LwQ0zVPS0kr5lok9SNhqM7TJAScQSw/n9+0AA//avPqB8coTYx/JRYy//Ci8ZZy98Q==}
+  '@framers/agentos-ext-domain-namecheap@0.1.4':
+    resolution: {integrity: sha512-KOM1fucjLR99SDomziE9bVh71pm9x8MlbKOFtqij+Bevk5nzUG+16yOoV2NT1nAmZIhClbOQ+vRR+/q7YmQXEQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-domain-porkbun@0.1.3':
-    resolution: {integrity: sha512-Kl4yvtEXvPDn9yYLG4CEC3+GLb53D1g8MGWmYowQcRHsKOFqs8f6/tM4W6EN33UuaMKoqMdWzGwXopuskG0XHQ==}
+  '@framers/agentos-ext-domain-porkbun@0.1.4':
+    resolution: {integrity: sha512-jzYLAvJSr9/WH4k3V/71+P1j5oaXs2tlX5IKlyUwgZxMG8kKzwqlswqck4yTWjkSWrb9CDBwCEArxz71iXKU4g==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -1135,31 +1168,35 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-endpoint-semantic@0.2.3':
-    resolution: {integrity: sha512-PEXgq74T1VgisJcOU30G3fQC+LRRbMNSi8jbOj2wkFN8UTYYfJR5qz1jeKNdapupZzNG11RICt48i9s9Zmd3KA==}
+  '@framers/agentos-ext-endpoint-semantic@0.2.4':
+    resolution: {integrity: sha512-rycUk+8SimE+O/Ucnpbgqq+YGg2OoJ6PSKp1vCzGZYS8Duzwm8pHI/0+kw/OgHk7XRgTSQccQ2hEJqfC5hCifw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-giphy@1.1.1':
-    resolution: {integrity: sha512-bQRuLejCOmpaO30CBnkw+xzelSk8L0clo0HDDC6V8RbnxyZGHEGTVaPjJwVreskcJKYvDVNanixLfM1r9ZMryQ==}
+  '@framers/agentos-ext-giphy@1.1.2':
+    resolution: {integrity: sha512-a/etZOirczjnk34QzW6PZ5r9gPvILNCQFJ6jK8SMyaUlltdtyFIZjKcN7/yPQDz1y8FsGXuXHNZid9M2kvMeNw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-github@0.5.0':
-    resolution: {integrity: sha512-VwcXi7LEwB7S8AMjwJru2MqxUcQlatKasdPacYBxnH9IFwUEqigtvLbn2kmSmz8jdUGcns7tJVQXHQqSztde7A==}
+  '@framers/agentos-ext-github@0.9.0':
+    resolution: {integrity: sha512-gItZBa34fSlcr5h0GmsnTuFJAJtdvvu+Ib6laDzZhiUZn2r2xG/QntA1u/QAKnRIl99n8MPE6J+4DeV18l3Y0g==}
     engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.13.144'
-      '@framers/agentos-ext-account-sources': '>=0.7.0'
+      '@framers/agentos-ext-account-sources': '>=0.9.0'
 
-  '@framers/agentos-ext-google-cloud-stt@0.3.6':
-    resolution: {integrity: sha512-gF+I0anR1oTE1PolZBKj9hyKm0v2QbcWgjR/8fGTSm0izro8tb7G1ODceQNJ17bdD7r2JDla6bKt2TKjnUvLiQ==}
+  '@framers/agentos-ext-google-cloud-stt@0.3.7':
+    resolution: {integrity: sha512-t8FzutY1mYA+NDwobfQFijbjti424lcOP9ddPvHQ3xGzw6zGs8aTRlUtnqomxRJoNmMJbe6BPzZj+WyN50ToUA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
       '@google-cloud/speech': ^6.0.0
 
-  '@framers/agentos-ext-google-cloud-tts@0.3.6':
-    resolution: {integrity: sha512-C58/I0cMRbd12g3iuocWwmtr/eCocapwza7TuSslYZus4xzTUS0pg0KNajsxRJg+T79MTUazqw893DExYHmKCg==}
+  '@framers/agentos-ext-google-cloud-tts@0.3.7':
+    resolution: {integrity: sha512-e2wcC4lhrSBhXPO+3qKHD2qR0frDCIkE0nNE5sf9dPpcqB+uaveTyQo2ZRWspyF7vy8yX5Fo8zqDb8rpBZsg6Q==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
       '@google-cloud/text-to-speech': ^5.0.0 || ^6.0.0 || ^7.0.0
@@ -1171,13 +1208,14 @@ packages:
       '@framers/agentos': '>=0.13.144'
       '@framers/agentos-ext-account-sources': '>=0.8.0'
 
-  '@framers/agentos-ext-grounding-guard@0.8.1':
-    resolution: {integrity: sha512-wSuPAQo1I0XtTucsQfBNWh1OJMLwGGubmJcfFp8KHG3JHlZyGW2WDDFHaRGYiOEn57Bw3jBBMwafGa5HEQKpWg==}
+  '@framers/agentos-ext-grounding-guard@0.9.0':
+    resolution: {integrity: sha512-LXo6EMTkEiI66nIznxJoC0qO1B6DywRyEPRcnKpNz/3XGUUBGVLFBlJtJZBuHlrx50HhWnIftkCqSN4aKzlxJg==}
     peerDependencies:
       '@framers/agentos': '>=0.12.0'
 
-  '@framers/agentos-ext-hacker-news@1.1.2':
-    resolution: {integrity: sha512-q0g+BkABP+CQyH3ux/g4pO8AqbWddOLaz6aG0p96NcTbCmk8NoKyVa5j5D40rHxTw67iA+gsPV4DfRiz3oeq/w==}
+  '@framers/agentos-ext-hacker-news@1.1.3':
+    resolution: {integrity: sha512-TcQW7RozNk+zIuoqSARJ8UyUdGqjlEINThfJRsPJht3c8SlyCtKF9tdp8d1hbf6UYYZp4kKJ4MXTvIQDMZoZ2g==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -1187,13 +1225,15 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-image-search@1.1.1':
-    resolution: {integrity: sha512-5ITAx9vcoLM99v/oxmxiyZoUmIhxlBHQw8EqAXcictG5ViKSwy0Xh6DbuILd0Ww41nPHp6+zWRHjdCQJXekDJA==}
+  '@framers/agentos-ext-image-search@1.1.2':
+    resolution: {integrity: sha512-LHiTv99t2L9CYYq4WHVi6ZfG551dSIaVXqF05VQ52N0M9oqaBkLC49VBVQo1eByh6vzI8WOq4plafJpuopr9sg==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-letterboxd@1.1.2':
-    resolution: {integrity: sha512-STs21Rm54c3UHzpRuMUqDxbG1y7P7XYiR5fWMlSQTK9+K/YLgndfAumAxJkcQQ+R9SEU6gcspcwyI/wf3RiQ6A==}
+  '@framers/agentos-ext-letterboxd@1.1.3':
+    resolution: {integrity: sha512-t3/JiONPRvw7hTnMCiZsiiWpx2TNLEX8VRFdpg92Zc1DEMimdumQH+fQ27XajP4zDq31edwwNgHv6r5j20r3sA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -1202,23 +1242,27 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.7.0'
 
-  '@framers/agentos-ext-news-search@1.1.1':
-    resolution: {integrity: sha512-ycmfvTzOdrlYZhi8kZJCEYb36dzeoFApYJuLvgb2vSx+OXhyB9swHQv7wR5oHDdYkiC1/r17+vvA3ShaxFjVQg==}
+  '@framers/agentos-ext-news-search@1.1.2':
+    resolution: {integrity: sha512-glxnBOXm7AWKewPGTXZ2Gwi00JVbzJGy4W2CBSfdLyT0PoR+ETHjiL4vNmcBni52KuEzK0TlsISfIJu7bXNHrA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-notifications@0.1.4':
-    resolution: {integrity: sha512-NXGEYvJTRLNJnQG3c4aao9MGSh/bph+aHeyY9Lan6gvBCeSqdXyW4XJI2Yj7Tdz+4LcoAPhQGBrzary4jPN5TQ==}
+  '@framers/agentos-ext-notifications@0.1.6':
+    resolution: {integrity: sha512-NB8J+rK47ID8m5bR0NgCQaNJf9sdZWqc2mjKHWKq17l4LqsU57onED71szTcxKYjUJ7D5qObrP2FYFxeWHiRFw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-omdb@1.1.2':
-    resolution: {integrity: sha512-7l0oeGqtfqT3ZfyQeOv6gOcbLlwiJ6vDxjgGRtMoxUKamptwf5seyG3yMV69u6pRf9ZOjIyXbC217PdihmR4aA==}
+  '@framers/agentos-ext-omdb@1.1.3':
+    resolution: {integrity: sha512-BJ9ldHelYqffpW8cHWFHfz1VMPCcy9UFyvYuch9y587k6MtAO8Q1jLI/KzFw1fqaGKk/KGR0YkxSEV+kVPjPSg==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-openwakeword@0.2.3':
-    resolution: {integrity: sha512-7Jh/4uN2lD3R/9StpVob7gfFUMvGG4wN6ONJVIRlcJHjKo5QFEDzl0h0ZXiV8ff4xzyh3s2blGTxNHeHgOXZ+Q==}
+  '@framers/agentos-ext-openwakeword@0.2.4':
+    resolution: {integrity: sha512-XzoZytM0j+fM8Tep/KuCNFAC7srYbsNDDkYPonESY3m7O0Ns1eQQVsjI7/ocixi1MQLnW31OHa2d02XXi7+7Nw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
       onnxruntime-node: ^1.17.0
@@ -1228,13 +1272,15 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.12.0'
 
-  '@framers/agentos-ext-piper@0.2.3':
-    resolution: {integrity: sha512-noGeUBJyYCUT9/tWc35CwNlmPLMHLCSQlDdzq/JJCnEbO0S8D75eBkf+h0MS3qE1tEpDSmFPSv81yZfe8Zq4TQ==}
+  '@framers/agentos-ext-piper@0.2.5':
+    resolution: {integrity: sha512-eFkRYqAlkF/gPNFsF+a1kE1WXqY87aPcds8Aeo50EflDsf8IOza0a6MGjdlk4t8Qu0/W8zT7ozkkYcUagE1fyA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-porcupine@0.2.3':
-    resolution: {integrity: sha512-WTQMD+bDlcspd2LY6DgDVgLmBFm2SX+juiod2YTZVnFK6uvoEUyV18WjF4hqjad2iCZj7dAw7MFT23rK1ZqMwA==}
+  '@framers/agentos-ext-porcupine@0.2.4':
+    resolution: {integrity: sha512-/KWgADGDNWI4DDA2Ekw4cBs08xnFNAnOS3s4C54GUTgN35vURq28mb33fshKBTJncF5q/0XurYgs+SFXy5Kxhw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
       '@picovoice/porcupine-node': ^3.0.0
@@ -1245,28 +1291,33 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-stealth-browser@1.1.2':
-    resolution: {integrity: sha512-yC0zlR4b4ktguzVTQLMl6HodnGqeFzXCFV3270CHDKdCetWoCDoUZ10uBs6LNrmbT1OdVbctMyh2htrza4oYDg==}
+  '@framers/agentos-ext-stealth-browser@1.1.4':
+    resolution: {integrity: sha512-Ze2q5cslww6tlxk/CzJnEt1dzMMYM1oD1c5nD4DxFTSuP1sZ8WZMtl47fi+O6F+vMpE+7BXOvsKqyOpoQGZBFg==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-streaming-stt-deepgram@0.2.3':
-    resolution: {integrity: sha512-wi+qoEU3futYTX6ljmbSNA9p25zkzKUPmAxciO89BTWVX5vK8CxUl1VH3BKXkfo7XBfxVi5GOzacpEl9VS7V/Q==}
+  '@framers/agentos-ext-streaming-stt-deepgram@0.2.5':
+    resolution: {integrity: sha512-lDdhn9wf1VeRa6jDf0wXG3QdccbSjr6yFKcN7K2MIafx70D83/FJ74hD+KYGn2RhN2wJQUbXzd8PKJYVU5OhCQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-streaming-stt-whisper@0.2.4':
-    resolution: {integrity: sha512-XbKcRXm37o6H7s3/h/D6mSbM19SHY61k1JQwsg0tPjRFp0Puz+1k697NgURYyNps80NKzquBrVKTmeJiTr5Fzw==}
+  '@framers/agentos-ext-streaming-stt-whisper@0.2.5':
+    resolution: {integrity: sha512-u1UAsgW3w2hfrTP43NtIFli6gBbEjVdrqWyHWZq5o9FJT6sBlc9IeECa4nv8a9OVDobenwBcQtNFdnM6HZ11sA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-streaming-tts-elevenlabs@0.2.4':
-    resolution: {integrity: sha512-7Ol2QrKwceoh0YHJvYNxcQRj4m86erpuE4uQ7eH5k/loPafCowdt68bMFdYkyX+2qrzP6S+rIDpcLfFuRNfmaw==}
+  '@framers/agentos-ext-streaming-tts-elevenlabs@0.2.6':
+    resolution: {integrity: sha512-TArl/TbAsgn323lXRsYoSpwfMITORsbNrzw4CPAv5AF819UDDD+/IverfeYaGxNjZ5MHOZ3FxLitTZQSZ4E1mQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-streaming-tts-openai@0.2.4':
-    resolution: {integrity: sha512-/AQeLAzDurENIfrRev6IQ20euNB0MwOpijaVyx72KgpMFeMN1YbFatnegNBuZA3iqgEIEU/+UiNexwzRs3ehnw==}
+  '@framers/agentos-ext-streaming-tts-openai@0.2.5':
+    resolution: {integrity: sha512-9/iJy0yXWkYnO7h8CFyvF8h7wnUOGnifU9/XIxIFPp25v/5TZAGH+aOppOnqg2YJTKrwG8G5VWK8WL7jBYUz+w==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -1276,13 +1327,15 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-tool-multi-channel-post@0.1.3':
-    resolution: {integrity: sha512-nUNW84TFKCnfmwbMgNp/wcNXagsWggzbKaLYcd4nQZBcoKJvToJazs6RVjUZcGhCc6KEYqcJk287R0SD7hWgHQ==}
+  '@framers/agentos-ext-tool-multi-channel-post@0.1.4':
+    resolution: {integrity: sha512-0MNQPsmDc2JKKn+NG5jnNN/dh+pjVxpALrsrNPHdLUbgsJHA1GNJrsTdRgpzHzjgMR+uCpr9dzMIdMxFSmG/IQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-tool-site-deploy@0.1.3':
-    resolution: {integrity: sha512-PqFCXpHMITjG5jIim76cTwQKpXkLHzg0htdatrviFJ+j6h8zt3NhMmZjTaqtlspUSut7A/GPM95+Si91JlVfFg==}
+  '@framers/agentos-ext-tool-site-deploy@0.1.4':
+    resolution: {integrity: sha512-tODFAcheADXH23GEThK+KqZgXN6RiUKCqxB6aIKRpMMRLgH/ykkevvdBJGJ7HH4Md7cB616vaMFA8rT9kW2WqQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
@@ -1297,8 +1350,9 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.13.104'
 
-  '@framers/agentos-ext-voice-synthesis@3.1.0':
-    resolution: {integrity: sha512-m7ySwnc7gVH2fOoLRNsQ3iYflMUrFldRprKsMA06XP1WLujNHAG6iCcGvotFeqTrQDuaf5U+ufcJLsoSPIAZSw==}
+  '@framers/agentos-ext-voice-synthesis@3.1.2':
+    resolution: {integrity: sha512-mgrrcKovipMaV3B6zCXOIMovCdJNZhMUTndOp7ANL0tTSZehwFGRW2hL2zlQxGPOk2VU+DaU5VBFF2amkdnmww==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.13.44'
 
@@ -1314,47 +1368,53 @@ packages:
     peerDependencies:
       '@framers/agentos': '>=0.13.104'
 
-  '@framers/agentos-ext-vosk@0.2.3':
-    resolution: {integrity: sha512-sb/JplQBLcipfsMEsmw6JwHUOONiHNm/r2Q7iLbZE6b+Oofryixce3fihCeXtp4clnsIPXI8pXK2SomSznH7Dw==}
+  '@framers/agentos-ext-vosk@0.2.4':
+    resolution: {integrity: sha512-BtyXzq9bfD+NqgTqQTVhdkgZxePlup1rybwnZrelKe3JBFNX44Gf3p2I59aYLdf8qojQM48LbD3XAv+ztfUqVw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
       vosk: ^0.3.0
 
-  '@framers/agentos-ext-weather@1.1.2':
-    resolution: {integrity: sha512-Aq/FrrZu8tw8E9bfmQq8zR99P5WEStzXc+Uz9NqmYMlbFdbuzl0KsuYFT4mlxOqN/xdlUxyS9UQnQcotEUBdeQ==}
+  '@framers/agentos-ext-weather@1.1.4':
+    resolution: {integrity: sha512-8IrR3R3iw6xoAQjAErpHSSN1nJENlZskSG/J6rNLYlVVxbO2Ey8YXGc794swE36HfMzX6EBLrsuwFiWcVhy0xw==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-web-browser@1.3.2':
-    resolution: {integrity: sha512-H4ndMR2di7ED7T2gH44Ewdlezk9r5yCSD++Y8f0FnM4VD2xQ0BNK/pE8dPtXzRAN+R8Y/VQoBzlbLz/ij6S/ag==}
+  '@framers/agentos-ext-web-browser@1.3.4':
+    resolution: {integrity: sha512-AVCGB8R0nGNpbDAe+avEg6PHPGQIgIiwMN6n+HfJYGav+KaaU1zFaG9rUKeDUt2E0Uc1gUt1mo4QYoLjXE5xMg==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-web-scraper@0.1.3':
-    resolution: {integrity: sha512-Vf4mtmLU//u85YynHQ1gNgGvkIi1jmD3C3R3c2uZnRgwBvKbNPFf6OCCcikGAJ+1jPBgH+eu6PMsEKurr0dDIA==}
+  '@framers/agentos-ext-web-scraper@0.1.4':
+    resolution: {integrity: sha512-0yG18kJTp7nNjEgCSupRs0cASqm+ye14n+jHFNLcn1xDxV+crHX2UcvnTAwH/Em/TC7rK2y3a8LM0tp/6rGINA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-web-search@1.3.2':
-    resolution: {integrity: sha512-+QF+UzbfACzj73InJtnttxwzxwQfkjsvNR/i6DKtFdplBN0gUMi8jEY3RPaPi6EbSkaIyF35CW6RGrmx8Pcfvg==}
+  '@framers/agentos-ext-web-search@1.3.4':
+    resolution: {integrity: sha512-cfGBBoIHgD4YTLGjdUVwI076J0JIYijlDfdNYyQsohWd0Njdr280Wkje26VbwVFy8xAvaWuszntfmYWGP0EpiQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-ext-widget-generator@1.1.2':
-    resolution: {integrity: sha512-A/VGQjSX7IYnilTuGmIU+j+NwJI3S4U+HwZ8OvVQCvnA/hO8aIo07D+sfpXPyeKJI/7jBVZg6a+3cSYt8WxJMw==}
+  '@framers/agentos-ext-widget-generator@1.1.3':
+    resolution: {integrity: sha512-3QUqbUOsvGkz/d1dVFEjXI+aZ5ST6O6sYKjs3Oknm8dOjSevZvHw5W084UaqHwQJGNgJkspbq3TpadI13aOAwA==}
+    engines: {node: '>=22'}
     peerDependencies:
       '@framers/agentos': '>=0.10.40'
 
-  '@framers/agentos-extensions-registry@0.18.15':
-    resolution: {integrity: sha512-K6H2EW6YN6IueH0K9esJ+guIca9XWlf91uYwAX6ddFNrszZmBo7A0HLOgIvnGnqZqlBxP42uPQ2lX9ie99DqCQ==}
+  '@framers/agentos-extensions-registry@0.18.16':
+    resolution: {integrity: sha512-xOrxYKtznfuKOz3Nmd+7U6Kd7P999xiJGlp2FqdNndDQarJ2lx/bzo5HCUe/4TgPuuairlKjKS3LwTJCRR2T1Q==}
     peerDependencies:
       '@framers/agentos': '>=0.10.34'
     peerDependenciesMeta:
       '@framers/agentos':
         optional: true
 
-  '@framers/agentos-skills@0.10.2':
-    resolution: {integrity: sha512-YVYU/5RSOBcasaXEfnZC9OjnC23jnNn9dUZDUuCDelzV14Ty2L0glzRX56Mxr5QvnGScCsJ6nU0UY7X5iwNovA==}
+  '@framers/agentos-skills@0.10.4':
+    resolution: {integrity: sha512-ZFlO+ijBVZBmTQwPDZUUeFlpAGlYlfJBnQhJ3OIH85IkzqC20AO4YQmf1AhZb+LjcH2lDf6wIlzexzx2dUkelw==}
 
   '@framers/sql-storage-adapter@0.8.4':
     resolution: {integrity: sha512-mAFsMXB7CDoqySZ1EbbxN1cHKeRNFRM0Ib88aF8SVEcoDFyMNIh6X0sxKPjGkgp9C0idiEQ1SWlclkb0d7lFnw==}
@@ -1373,8 +1433,8 @@ packages:
       electron:
         optional: true
 
-  '@framers/sql-storage-adapter@0.9.1':
-    resolution: {integrity: sha512-vgCVqdTSroxCpeKl5wSSaBabQlU5v477U9nRp8SWsAZjW/Nhwuf7HvJJoIf1TsacbnqFZNUEQkzAFxNxCucEUg==}
+  '@framers/sql-storage-adapter@0.9.2':
+    resolution: {integrity: sha512-GkpvKyJIa6KmiDSwlhYFafP+Smgzy11RkOUbrbgloYKem/ZEW1DbA+MtrGdTuCQMK6yiFyddq8JHVCYjgmNg/A==}
     peerDependencies:
       '@aws-sdk/client-s3': ^3.0.0
       '@capacitor-community/sqlite': ^6.0.0 || ^7.0.0 || ^8.0.0
@@ -5598,8 +5658,8 @@ packages:
     resolution: {integrity: sha512-ARftfC5HdUNu9jJeL8pHj8debUIHA2b91FizCoMzY4lG6dDX13jdvTK0TBe24IBDRf2HvJSzzwEPvmbkQWHRSg==}
     engines: {node: '>=20'}
 
-  nostr-tools@2.23.1:
-    resolution: {integrity: sha512-Q5SJ1omrseBFXtLwqDhufpFLA6vX3rS/IuBCc974qaYX6YKGwEPxa/ZsyxruUOr+b+5EpWL2hFmCB5AueYrfBw==}
+  nostr-tools@2.25.2:
+    resolution: {integrity: sha512-7JAx+brEPmqGz1yzaK9MOxvis/Nl1B38j9hVsBSRDMRmxk5XSc0+5LlPEYbzeiUyk41RURBDcfuMzmaT754HAg==}
     peerDependencies:
       typescript: '>=5.0.0'
     peerDependenciesMeta:
@@ -8548,18 +8608,18 @@ snapshots:
       - electron
       - pg-native
 
-  '@framers/agentos-ext-agent-delegation@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-agent-delegation@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-amazon-polly@0.2.3(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@)':
+  '@framers/agentos-ext-amazon-polly@0.2.4(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@)':
     dependencies:
       '@aws-sdk/client-polly': 3.1045.0
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-auth@1.2.1(@framers/agentos@)':
+  '@framers/agentos-ext-auth@1.2.2(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       bcrypt: 5.1.1
@@ -8598,7 +8658,7 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-bluesky@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-channel-bluesky@0.1.5(@framers/agentos@)':
     dependencies:
       '@atproto/api': 0.13.35
       '@framers/agentos': 'link:'
@@ -8613,7 +8673,7 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-email@0.4.4(@framers/agentos@)':
+  '@framers/agentos-ext-channel-email@0.5.0(@framers/agentos@)':
     dependencies:
       imapflow: 1.7.8
       nodemailer: 10.1.1
@@ -8621,7 +8681,7 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-facebook@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-channel-facebook@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -8630,7 +8690,7 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-farcaster@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-channel-farcaster@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -8650,7 +8710,7 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-google-business@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-channel-google-business@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -8673,7 +8733,7 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-instagram@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-channel-instagram@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -8687,7 +8747,7 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-lemmy@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-channel-lemmy@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -8705,7 +8765,7 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-linkedin@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-channel-linkedin@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -8742,10 +8802,10 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-channel-nostr@0.1.5(@framers/agentos@)(typescript@5.9.3)':
+  '@framers/agentos-ext-channel-nostr@0.1.8(@framers/agentos@)(typescript@5.9.3)':
     dependencies:
       '@framers/agentos': 'link:'
-      nostr-tools: 2.23.1(typescript@5.9.3)
+      nostr-tools: 2.25.2(typescript@5.9.3)
       ws: 8.22.0
     transitivePeerDependencies:
       - bufferutil
@@ -8817,7 +8877,7 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-channel-threads@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-channel-threads@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -8852,7 +8912,7 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-channel-twitter@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-channel-twitter@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       twitter-api-v2: 1.29.1
@@ -8887,12 +8947,12 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-clearbit@1.1.2(@framers/agentos@)':
+  '@framers/agentos-ext-clearbit@1.1.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cli-executor@1.3.1(@framers/agentos@)':
+  '@framers/agentos-ext-cli-executor@1.3.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       docx: 9.8.1
@@ -8901,47 +8961,47 @@ snapshots:
       xlsx: 0.18.5
     optional: true
 
-  '@framers/agentos-ext-cloud-aws@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-cloud-aws@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-cloudflare-pages@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-cloud-cloudflare-pages@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-digitalocean@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-cloud-digitalocean@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-flyio@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-cloud-flyio@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-heroku@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-cloud-heroku@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-linode@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-cloud-linode@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-netlify@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-cloud-netlify@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-railway@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-cloud-railway@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-cloud-vercel@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-cloud-vercel@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
@@ -8951,7 +9011,7 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-content-extraction@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-content-extraction@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -8960,17 +9020,17 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-content-policy-rewriter@0.1.2(@framers/agentos@)':
+  '@framers/agentos-ext-content-policy-rewriter@0.1.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-credential-vault@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-credential-vault@0.1.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-deep-research@0.2.3(@framers/agentos@)':
+  '@framers/agentos-ext-deep-research@0.2.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -8979,14 +9039,14 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-diarization@0.2.3(@framers/agentos@)(onnxruntime-node@1.21.0)':
+  '@framers/agentos-ext-diarization@0.2.4(@framers/agentos@)(onnxruntime-node@1.21.0)':
     dependencies:
       '@framers/agentos': 'link:'
     optionalDependencies:
       onnxruntime-node: 1.21.0
     optional: true
 
-  '@framers/agentos-ext-document-export@0.3.4(@framers/agentos@)':
+  '@framers/agentos-ext-document-export@0.3.7(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       csv-stringify: 6.9.0
@@ -8997,22 +9057,22 @@ snapshots:
       pptxgenjs: 4.0.1
     optional: true
 
-  '@framers/agentos-ext-domain-cloudflare-registrar@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-domain-cloudflare-registrar@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-domain-godaddy@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-domain-godaddy@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-domain-namecheap@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-domain-namecheap@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-domain-porkbun@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-domain-porkbun@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
@@ -9025,30 +9085,30 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-endpoint-semantic@0.2.3(@framers/agentos@)':
+  '@framers/agentos-ext-endpoint-semantic@0.2.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-giphy@1.1.1(@framers/agentos@)':
+  '@framers/agentos-ext-giphy@1.1.2(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-github@0.5.0(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
+  '@framers/agentos-ext-github@0.9.0(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       '@framers/agentos-ext-account-sources': 0.11.0(@framers/agentos@)(better-sqlite3@13.0.3)
       '@octokit/rest': 22.0.1
     optional: true
 
-  '@framers/agentos-ext-google-cloud-stt@0.3.6(@framers/agentos@)(@google-cloud/speech@6.7.1)':
+  '@framers/agentos-ext-google-cloud-stt@0.3.7(@framers/agentos@)(@google-cloud/speech@6.7.1)':
     dependencies:
       '@framers/agentos': 'link:'
       '@google-cloud/speech': 6.7.1
     optional: true
 
-  '@framers/agentos-ext-google-cloud-tts@0.3.6(@framers/agentos@)(@google-cloud/text-to-speech@5.8.1)':
+  '@framers/agentos-ext-google-cloud-tts@0.3.7(@framers/agentos@)(@google-cloud/text-to-speech@5.8.1)':
     dependencies:
       '@framers/agentos': 'link:'
       '@google-cloud/text-to-speech': 5.8.1
@@ -9060,14 +9120,14 @@ snapshots:
       '@framers/agentos-ext-account-sources': 0.11.0(@framers/agentos@)(better-sqlite3@13.0.3)
     optional: true
 
-  '@framers/agentos-ext-grounding-guard@0.8.1(@framers/agentos@)':
+  '@framers/agentos-ext-grounding-guard@0.9.0(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optionalDependencies:
       '@huggingface/transformers': 3.8.1
     optional: true
 
-  '@framers/agentos-ext-hacker-news@1.1.2(@framers/agentos@)':
+  '@framers/agentos-ext-hacker-news@1.1.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
@@ -9077,12 +9137,12 @@ snapshots:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-image-search@1.1.1(@framers/agentos@)':
+  '@framers/agentos-ext-image-search@1.1.2(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-letterboxd@1.1.2(@framers/agentos@)':
+  '@framers/agentos-ext-letterboxd@1.1.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
@@ -9094,22 +9154,22 @@ snapshots:
       '@huggingface/transformers': 3.8.1
     optional: true
 
-  '@framers/agentos-ext-news-search@1.1.1(@framers/agentos@)':
+  '@framers/agentos-ext-news-search@1.1.2(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-notifications@0.1.4(@framers/agentos@)':
+  '@framers/agentos-ext-notifications@0.1.6(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-omdb@1.1.2(@framers/agentos@)':
+  '@framers/agentos-ext-omdb@1.1.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-openwakeword@0.2.3(@framers/agentos@)(onnxruntime-node@1.21.0)':
+  '@framers/agentos-ext-openwakeword@0.2.4(@framers/agentos@)(onnxruntime-node@1.21.0)':
     dependencies:
       '@framers/agentos': 'link:'
       onnxruntime-node: 1.21.0
@@ -9130,12 +9190,12 @@ snapshots:
       - tesseract.js
     optional: true
 
-  '@framers/agentos-ext-piper@0.2.3(@framers/agentos@)':
+  '@framers/agentos-ext-piper@0.2.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-porcupine@0.2.3(@framers/agentos@)(@picovoice/porcupine-node@3.0.6)':
+  '@framers/agentos-ext-porcupine@0.2.4(@framers/agentos@)(@picovoice/porcupine-node@3.0.6)':
     dependencies:
       '@framers/agentos': 'link:'
       '@picovoice/porcupine-node': 3.0.6
@@ -9146,7 +9206,7 @@ snapshots:
       '@framers/agentos': 'link:'
       htmlparser2: 12.0.0
 
-  '@framers/agentos-ext-stealth-browser@1.1.2(@framers/agentos@)':
+  '@framers/agentos-ext-stealth-browser@1.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       cheerio: 1.2.0
@@ -9165,7 +9225,7 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-streaming-stt-deepgram@0.2.3(@framers/agentos@)':
+  '@framers/agentos-ext-streaming-stt-deepgram@0.2.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       ws: 8.22.0
@@ -9174,12 +9234,12 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-streaming-stt-whisper@0.2.4(@framers/agentos@)':
+  '@framers/agentos-ext-streaming-stt-whisper@0.2.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-streaming-tts-elevenlabs@0.2.4(@framers/agentos@)':
+  '@framers/agentos-ext-streaming-tts-elevenlabs@0.2.6(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       ws: 8.22.0
@@ -9188,7 +9248,7 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-streaming-tts-openai@0.2.4(@framers/agentos@)':
+  '@framers/agentos-ext-streaming-tts-openai@0.2.5(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
@@ -9205,12 +9265,12 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-tool-multi-channel-post@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-tool-multi-channel-post@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-tool-site-deploy@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-tool-site-deploy@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
@@ -9231,7 +9291,7 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-voice-synthesis@3.1.0(@framers/agentos@)':
+  '@framers/agentos-ext-voice-synthesis@3.1.2(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
@@ -9251,18 +9311,18 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-vosk@0.2.3(@framers/agentos@)(vosk@0.3.39)':
+  '@framers/agentos-ext-vosk@0.2.4(@framers/agentos@)(vosk@0.3.39)':
     dependencies:
       '@framers/agentos': 'link:'
       vosk: 0.3.39
     optional: true
 
-  '@framers/agentos-ext-weather@1.1.2(@framers/agentos@)':
+  '@framers/agentos-ext-weather@1.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-ext-web-browser@1.3.2(@framers/agentos@)':
+  '@framers/agentos-ext-web-browser@1.3.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       cheerio: 1.2.0
@@ -9276,13 +9336,13 @@ snapshots:
       - utf-8-validate
     optional: true
 
-  '@framers/agentos-ext-web-scraper@0.1.3(@framers/agentos@)':
+  '@framers/agentos-ext-web-scraper@0.1.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       yaml: 2.9.1
     optional: true
 
-  '@framers/agentos-ext-web-search@1.3.2(@framers/agentos@)':
+  '@framers/agentos-ext-web-search@1.3.4(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
       axios: 1.20.0
@@ -9291,39 +9351,39 @@ snapshots:
       - supports-color
     optional: true
 
-  '@framers/agentos-ext-widget-generator@1.1.2(@framers/agentos@)':
+  '@framers/agentos-ext-widget-generator@1.1.3(@framers/agentos@)':
     dependencies:
       '@framers/agentos': 'link:'
     optional: true
 
-  '@framers/agentos-extensions-registry@0.18.15(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)':
+  '@framers/agentos-extensions-registry@0.18.16(@aws-sdk/client-polly@3.1045.0)(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)':
     optionalDependencies:
       '@framers/agentos': 'link:'
-      '@framers/agentos-ext-agent-delegation': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-amazon-polly': 0.2.3(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@)
-      '@framers/agentos-ext-auth': 1.2.1(@framers/agentos@)
+      '@framers/agentos-ext-agent-delegation': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-amazon-polly': 0.2.4(@aws-sdk/client-polly@3.1045.0)(@framers/agentos@)
+      '@framers/agentos-ext-auth': 1.2.2(@framers/agentos@)
       '@framers/agentos-ext-browser-automation': 0.3.0(@framers/agentos@)
       '@framers/agentos-ext-calendar-google': 1.0.3(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
       '@framers/agentos-ext-channel-blog-publisher': 0.1.4(@framers/agentos@)
-      '@framers/agentos-ext-channel-bluesky': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-bluesky': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-discord': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-channel-email': 0.4.4(@framers/agentos@)
-      '@framers/agentos-ext-channel-facebook': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-channel-farcaster': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-email': 0.5.0(@framers/agentos@)
+      '@framers/agentos-ext-channel-facebook': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-channel-farcaster': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-feishu': 0.1.5(@framers/agentos@)
-      '@framers/agentos-ext-channel-google-business': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-google-business': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-google-chat': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-imessage': 0.1.5(@framers/agentos@)
-      '@framers/agentos-ext-channel-instagram': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-instagram': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-irc': 0.1.4(@framers/agentos@)
-      '@framers/agentos-ext-channel-lemmy': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-lemmy': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-line': 0.1.5(@framers/agentos@)
-      '@framers/agentos-ext-channel-linkedin': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-linkedin': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-mastodon': 0.2.0(@framers/agentos@)
       '@framers/agentos-ext-channel-matrix': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-mattermost': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-nextcloud': 0.1.5(@framers/agentos@)
-      '@framers/agentos-ext-channel-nostr': 0.1.5(@framers/agentos@)(typescript@5.9.3)
+      '@framers/agentos-ext-channel-nostr': 0.1.8(@framers/agentos@)(typescript@5.9.3)
       '@framers/agentos-ext-channel-pinterest': 0.1.4(@framers/agentos@)
       '@framers/agentos-ext-channel-reddit': 0.1.4(@framers/agentos@)
       '@framers/agentos-ext-channel-signal': 0.1.5(@framers/agentos@)
@@ -9331,77 +9391,77 @@ snapshots:
       '@framers/agentos-ext-channel-sms': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-teams': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-telegram': 0.1.4(@framers/agentos@)
-      '@framers/agentos-ext-channel-threads': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-threads': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-tiktok': 0.1.4(@framers/agentos@)
       '@framers/agentos-ext-channel-tlon': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-twitch': 0.1.5(@framers/agentos@)
-      '@framers/agentos-ext-channel-twitter': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-channel-twitter': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-webchat': 0.1.3(@framers/agentos@)
       '@framers/agentos-ext-channel-whatsapp': 0.1.3(@framers/agentos@)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))
       '@framers/agentos-ext-channel-youtube': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-zalo': 0.1.5(@framers/agentos@)
       '@framers/agentos-ext-channel-zalouser': 0.1.4(@framers/agentos@)
-      '@framers/agentos-ext-clearbit': 1.1.2(@framers/agentos@)
-      '@framers/agentos-ext-cli-executor': 1.3.1(@framers/agentos@)
-      '@framers/agentos-ext-cloud-aws': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-cloud-cloudflare-pages': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-cloud-digitalocean': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-cloud-flyio': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-cloud-heroku': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-cloud-linode': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-cloud-netlify': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-cloud-railway': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-cloud-vercel': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-clearbit': 1.1.3(@framers/agentos@)
+      '@framers/agentos-ext-cli-executor': 1.3.3(@framers/agentos@)
+      '@framers/agentos-ext-cloud-aws': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-cloud-cloudflare-pages': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-cloud-digitalocean': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-cloud-flyio': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-cloud-heroku': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-cloud-linode': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-cloud-netlify': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-cloud-railway': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-cloud-vercel': 0.1.4(@framers/agentos@)
       '@framers/agentos-ext-code-safety': 0.2.3(@framers/agentos@)
-      '@framers/agentos-ext-content-extraction': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-content-policy-rewriter': 0.1.2(@framers/agentos@)
-      '@framers/agentos-ext-credential-vault': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-deep-research': 0.2.3(@framers/agentos@)
-      '@framers/agentos-ext-diarization': 0.2.3(@framers/agentos@)(onnxruntime-node@1.21.0)
-      '@framers/agentos-ext-document-export': 0.3.4(@framers/agentos@)
-      '@framers/agentos-ext-domain-cloudflare-registrar': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-domain-godaddy': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-domain-namecheap': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-domain-porkbun': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-content-extraction': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-content-policy-rewriter': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-credential-vault': 0.1.5(@framers/agentos@)
+      '@framers/agentos-ext-deep-research': 0.2.5(@framers/agentos@)
+      '@framers/agentos-ext-diarization': 0.2.4(@framers/agentos@)(onnxruntime-node@1.21.0)
+      '@framers/agentos-ext-document-export': 0.3.7(@framers/agentos@)
+      '@framers/agentos-ext-domain-cloudflare-registrar': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-domain-godaddy': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-domain-namecheap': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-domain-porkbun': 0.1.4(@framers/agentos@)
       '@framers/agentos-ext-email-gmail': 0.1.6(@framers/agentos@)
-      '@framers/agentos-ext-endpoint-semantic': 0.2.3(@framers/agentos@)
-      '@framers/agentos-ext-giphy': 1.1.1(@framers/agentos@)
-      '@framers/agentos-ext-github': 0.5.0(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
-      '@framers/agentos-ext-google-cloud-stt': 0.3.6(@framers/agentos@)(@google-cloud/speech@6.7.1)
-      '@framers/agentos-ext-google-cloud-tts': 0.3.6(@framers/agentos@)(@google-cloud/text-to-speech@5.8.1)
-      '@framers/agentos-ext-grounding-guard': 0.8.1(@framers/agentos@)
-      '@framers/agentos-ext-hacker-news': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-endpoint-semantic': 0.2.4(@framers/agentos@)
+      '@framers/agentos-ext-giphy': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-github': 0.9.0(@framers/agentos-ext-account-sources@0.11.0(@framers/agentos@)(better-sqlite3@13.0.3))(@framers/agentos@)
+      '@framers/agentos-ext-google-cloud-stt': 0.3.7(@framers/agentos@)(@google-cloud/speech@6.7.1)
+      '@framers/agentos-ext-google-cloud-tts': 0.3.7(@framers/agentos@)(@google-cloud/text-to-speech@5.8.1)
+      '@framers/agentos-ext-grounding-guard': 0.9.0(@framers/agentos@)
+      '@framers/agentos-ext-hacker-news': 1.1.3(@framers/agentos@)
       '@framers/agentos-ext-image-generation': 2.1.0(@framers/agentos@)
-      '@framers/agentos-ext-image-search': 1.1.1(@framers/agentos@)
-      '@framers/agentos-ext-letterboxd': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-image-search': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-letterboxd': 1.1.3(@framers/agentos@)
       '@framers/agentos-ext-ml-classifiers': 0.3.2(@framers/agentos@)
-      '@framers/agentos-ext-news-search': 1.1.1(@framers/agentos@)
-      '@framers/agentos-ext-notifications': 0.1.4(@framers/agentos@)
-      '@framers/agentos-ext-omdb': 1.1.2(@framers/agentos@)
-      '@framers/agentos-ext-openwakeword': 0.2.3(@framers/agentos@)(onnxruntime-node@1.21.0)
+      '@framers/agentos-ext-news-search': 1.1.2(@framers/agentos@)
+      '@framers/agentos-ext-notifications': 0.1.6(@framers/agentos@)
+      '@framers/agentos-ext-omdb': 1.1.3(@framers/agentos@)
+      '@framers/agentos-ext-openwakeword': 0.2.4(@framers/agentos@)(onnxruntime-node@1.21.0)
       '@framers/agentos-ext-pii-redaction': 0.3.2(@framers/agentos@)(express@4.22.3)(mammoth@1.13.0)(pdf-parse@1.1.4)(react@19.3.0)(tesseract.js@7.0.0)
-      '@framers/agentos-ext-piper': 0.2.3(@framers/agentos@)
-      '@framers/agentos-ext-porcupine': 0.2.3(@framers/agentos@)(@picovoice/porcupine-node@3.0.6)
-      '@framers/agentos-ext-stealth-browser': 1.1.2(@framers/agentos@)
-      '@framers/agentos-ext-streaming-stt-deepgram': 0.2.3(@framers/agentos@)
-      '@framers/agentos-ext-streaming-stt-whisper': 0.2.4(@framers/agentos@)
-      '@framers/agentos-ext-streaming-tts-elevenlabs': 0.2.4(@framers/agentos@)
-      '@framers/agentos-ext-streaming-tts-openai': 0.2.4(@framers/agentos@)
+      '@framers/agentos-ext-piper': 0.2.5(@framers/agentos@)
+      '@framers/agentos-ext-porcupine': 0.2.4(@framers/agentos@)(@picovoice/porcupine-node@3.0.6)
+      '@framers/agentos-ext-stealth-browser': 1.1.4(@framers/agentos@)
+      '@framers/agentos-ext-streaming-stt-deepgram': 0.2.5(@framers/agentos@)
+      '@framers/agentos-ext-streaming-stt-whisper': 0.2.5(@framers/agentos@)
+      '@framers/agentos-ext-streaming-tts-elevenlabs': 0.2.6(@framers/agentos@)
+      '@framers/agentos-ext-streaming-tts-openai': 0.2.5(@framers/agentos@)
       '@framers/agentos-ext-telegram': 1.2.1(@framers/agentos@)(request@2.88.2)
-      '@framers/agentos-ext-tool-multi-channel-post': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-tool-site-deploy': 0.1.3(@framers/agentos@)
+      '@framers/agentos-ext-tool-multi-channel-post': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-tool-site-deploy': 0.1.4(@framers/agentos@)
       '@framers/agentos-ext-topicality': 0.2.3(@framers/agentos@)
       '@framers/agentos-ext-voice-plivo': 0.2.0(@framers/agentos@)
-      '@framers/agentos-ext-voice-synthesis': 3.1.0(@framers/agentos@)
+      '@framers/agentos-ext-voice-synthesis': 3.1.2(@framers/agentos@)
       '@framers/agentos-ext-voice-telnyx': 0.2.0(@framers/agentos@)
       '@framers/agentos-ext-voice-twilio': 0.2.0(@framers/agentos@)
-      '@framers/agentos-ext-vosk': 0.2.3(@framers/agentos@)(vosk@0.3.39)
-      '@framers/agentos-ext-weather': 1.1.2(@framers/agentos@)
-      '@framers/agentos-ext-web-browser': 1.3.2(@framers/agentos@)
-      '@framers/agentos-ext-web-scraper': 0.1.3(@framers/agentos@)
-      '@framers/agentos-ext-web-search': 1.3.2(@framers/agentos@)
-      '@framers/agentos-ext-widget-generator': 1.1.2(@framers/agentos@)
-      '@framers/agentos-skills': 0.10.2
+      '@framers/agentos-ext-vosk': 0.2.4(@framers/agentos@)(vosk@0.3.39)
+      '@framers/agentos-ext-weather': 1.1.4(@framers/agentos@)
+      '@framers/agentos-ext-web-browser': 1.3.4(@framers/agentos@)
+      '@framers/agentos-ext-web-scraper': 0.1.4(@framers/agentos@)
+      '@framers/agentos-ext-web-search': 1.3.4(@framers/agentos@)
+      '@framers/agentos-ext-widget-generator': 1.1.3(@framers/agentos@)
+      '@framers/agentos-skills': 0.10.4
     transitivePeerDependencies:
       - '@aws-sdk/client-polly'
       - '@framers/agentos-ext-account-sources'
@@ -9430,7 +9490,7 @@ snapshots:
       - utf-8-validate
       - vosk
 
-  '@framers/agentos-skills@0.10.2':
+  '@framers/agentos-skills@0.10.4':
     optional: true
 
   '@framers/sql-storage-adapter@0.8.4(better-sqlite3@13.0.3)':
@@ -9443,7 +9503,7 @@ snapshots:
     transitivePeerDependencies:
       - pg-native
 
-  '@framers/sql-storage-adapter@0.9.1(better-sqlite3@13.0.3)':
+  '@framers/sql-storage-adapter@0.9.2(better-sqlite3@13.0.3)':
     dependencies:
       '@types/sql.js': 1.4.11
       pg: 8.23.1
@@ -14614,7 +14674,7 @@ snapshots:
 
   normalize-url@9.0.1: {}
 
-  nostr-tools@2.23.1(typescript@5.9.3):
+  nostr-tools@2.25.2(typescript@5.9.3):
     dependencies:
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.0.1
