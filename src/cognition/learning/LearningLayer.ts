@@ -932,6 +932,12 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     /** The brains whose delete failed here; a failure in a store with no brain id is `failedElsewhere`. */
     const failed = new Set<string>();
     let failedElsewhere = false;
+    /**
+     * The brains whose live memory manager failed. The manager holds what only it reaches of each trace (its knowledge
+     * graph's copy, which holds the trace's words), and a trace's row is what a second call finds it by: no other delete
+     * of the brain counts as reaching it, and none goes through the host's storage adapter.
+     */
+    const managerFailed = new Set<string>();
 
     for (const manager of this.liveManagers()) {
       const brain = brainOfManager(manager);
@@ -955,8 +961,10 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
         if (brain) reached.add(brain.brainId);
       } catch (error) {
         stores.push({ store: name, reached: false, reason: messageOf(error) });
-        if (brain) failed.add(brain.brainId);
-        else failedElsewhere = true;
+        if (brain) {
+          failed.add(brain.brainId);
+          managerFailed.add(brain.brainId);
+        } else failedElsewhere = true;
       }
     }
 
@@ -983,7 +991,7 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
 
     const failedHere = new Set(failed);
     for (const brainId of new Set([...rows.flatMap((row) => row.brainIds), ...named.keys(), ...failedHere])) {
-      if (reached.has(brainId)) continue;
+      if (reached.has(brainId) || managerFailed.has(brainId)) continue;
       const { entry, failed: adapterFailed } = await this.forgetOnAdapter(brainId, targets, named.get(brainId));
       if (entry.reached) reached.add(brainId);
       if (adapterFailed) failed.add(brainId);
@@ -992,7 +1000,7 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     }
 
     // The learning store last: its rows are the index of everything above, so they stay while a store above failed.
-    if (failedElsewhere || [...failed].some((brainId) => !reached.has(brainId))) {
+    if (failedElsewhere || [...failed].some((brainId) => !reached.has(brainId) || managerFailed.has(brainId))) {
       stores.push({
         store: 'learning store',
         reached: false,
@@ -1075,6 +1083,8 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
   /**
    * Deletes in a brain no live manager or facade reached, through a facade over the host's storage adapter when the
    * adapter holds that brain's traces. The facade is never closed: closing its Brain would close the host's adapter.
+   * A brain whose live memory manager failed is not deleted here: the facade reaches none of what the manager keeps of
+   * each trace (its knowledge graph's copy among them), which a deleted row would leave with nothing to find it by.
    *
    * @returns The brain's report entry, and whether the delete failed there (a second call tries it again).
    */
