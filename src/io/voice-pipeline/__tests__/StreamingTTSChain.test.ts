@@ -1085,6 +1085,30 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
       expect(r.events.filter((event) => event.type === 'provider_unavailable')).toEqual([{ type: 'provider_unavailable', kind: 'tts', checkedProviders: ['a', 'b'] }]);
     });
 
+    it('reports no provider_unavailable when close() came while the last backup opened and its opening then fails', async () => {
+      const a = pushSession();
+      const second = provider('b', 20, pushSession());
+      let refuse!: (error: Error) => void;
+      second.startSession.mockImplementation(() => new Promise<StreamingTTSSession>((_resolve, reject) => {
+        refuse = reject;
+      }));
+      const r = reports();
+      const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts], { enableMidSynthesisFailover: true, metrics: r.metrics, onProviderFailed: r.onProviderFailed });
+      const session = await chain.startSession();
+      const errors = vi.fn();
+      session.on('error', errors);
+      session.pushTokens('Hi.');
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(second.startSession).toHaveBeenCalledOnce());
+      session.close();
+      refuse(new Error('socket hang up'));
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      // The opening did fail, and says so; the caller's close ended the session, so no provider is reported as what ended it.
+      expect(r.onProviderFailed.mock.calls.map(([event]) => event.providerId)).toEqual(['b']);
+      expect(r.events.filter((event) => event.type === 'provider_unavailable')).toEqual([]);
+      expect(errors).not.toHaveBeenCalled();
+    });
+
     it('carries no provider text in those events under a ProviderPolicy', async () => {
       const a = pushSession();
       const second = provider('b', 20, pushSession());

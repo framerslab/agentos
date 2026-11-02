@@ -26,7 +26,9 @@
  * the last `ringBufferCapacityMs` of audio and, when the session in use fails,
  * or closes before a flush, opens the next provider the policy permits,
  * replays that audio and the frames pushed meanwhile, and goes on; a backup
- * that fails as it takes the replay is passed over for the next one.
+ * that fails to open or as it takes the replay is reported and passed over for
+ * the next one, and when none is left the error holds every failure of the
+ * switch. A host hook that throws ends nothing: it is one console line.
  */
 
 import { VoiceEventEmitter } from '../VoiceEventEmitter.js';
@@ -60,11 +62,14 @@ export interface ProviderSelectedEvent {
   attempt: number;
 }
 
-/** Failed opening notification; strict policies redact provider messages. */
+/** Failed provider notification; strict policies redact provider messages. */
 export interface ProviderFailedEvent {
   /** The chain that tried the provider. */
   kind: 'stt' | 'tts';
-  /** The provider whose opening failed, named as in {@link ProviderSelectedEvent.providerId}. */
+  /**
+   * The provider whose opening failed, or the backup that failed as it took a switch's audio, named as in
+   * {@link ProviderSelectedEvent.providerId}.
+   */
   providerId: string;
   /** The failure's class, as `VoicePipelineError.classifyError` reads it. */
   errorClass: HealthErrorClass;
@@ -97,7 +102,7 @@ export interface StreamingSTTChainOptions {
   metrics?: VoiceMetricsReporter;
   /** Called when a session opens. */
   onProviderSelected?: (event: ProviderSelectedEvent) => void;
-  /** Called when a provider's opening fails. */
+  /** Called when a provider's opening fails, at startup or during a switch, or when a backup fails as it takes a switch's audio. */
   onProviderFailed?: (event: ProviderFailedEvent) => void;
   /** Called when the facade has moved to a backup during a session. */
   onProviderFailover?: (event: ProviderFailoverEvent) => void;
@@ -118,16 +123,25 @@ export interface StreamingSTTChainOptions {
    * retracts an open line's interim text, still reach the facade's listeners:
    * on a switch, before the backup's; when the facade ends, before its
    * `'close'`. A provider close after flush and before the next frame emits one
-   * facade close; later audio is ignored. A backup that fails as it takes the
-   * replay (an `'error'` or a `'close'`, or a frame it refuses) is recorded as
-   * failed and closed, and the next provider takes the same audio. A frame
+   * facade close; later audio is ignored. A backup whose opening fails during
+   * the switch, or that fails as it takes the replay (an `'error'` or a
+   * `'close'`, or a frame it refuses), is reported through `onProviderFailed`
+   * and `provider_failed` as one whose opening fails at startup is, recorded
+   * as failed and closed, and the next provider takes the same audio. A failed
+   * session's `close()` that throws stops no switch. A hook that throws ends
+   * nothing: it is one console line. A frame
    * whose duration (samples over sample rate) is not above zero and at most
    * `ringBufferCapacityMs`, or, in a session opened with `config.call`, one
    * without its scope, call and turn ids (non-empty strings) and its
    * generation (three finite numeric fences), ends the facade before any
    * provider receives it, and so does a switch no provider can take: the
-   * facade emits `'error'` (only to a listener) and then `'close'`. Default:
-   * false.
+   * facade emits `'error'` (only to a listener) and then `'close'`. When every
+   * provider the switch could open has failed, the chain reports
+   * `provider_unavailable` and the error is an `AggregateVoiceError` with every
+   * failure of the switch, the session's that began it first; a refused
+   * authorization or an `SttConnectionAuthorizationError` ends it as that
+   * error alone, and a `close()` the caller made during the switch ends it
+   * with neither. Default: false.
    */
   enableMidUtteranceFailover?: boolean;
   /** Ring buffer capacity in ms for mid-utterance replay, and the longest frame the facade accepts. Default 3000. */
@@ -217,6 +231,28 @@ export class StreamingSTTChain implements IStreamingSTT {
     return this.names.get(provider) ?? provider.providerId;
   }
 
+  /** Calls a host hook. A hook that throws is the host's bug: it ends no call, leaves the providers' state as it was and is one console line. */
+  private notify(name: string, hook: () => void): void {
+    try {
+      hook();
+    } catch {
+      console.warn('[chain] ' + name + ' threw');
+    }
+  }
+
+  /** Reports a provider that failed to open, or a backup that failed as it took a switch's audio, and records it failed. */
+  private reportFailed(provider: STTProvider, failure: VoicePipelineError): void {
+    const event: ProviderFailedEvent = { kind: 'stt', providerId: this.nameOf(provider), errorClass: failure.errorClass, message: this.policy.mode === 'legacy' ? failure.message : 'provider opening failed' };
+    this.notify('onProviderFailed', () => this.opts.onProviderFailed?.(event));
+    this.metric({ type: 'provider_failed', ...event });
+    this.opts.breaker?.recordFailure(this.nameOf(provider), failure.errorClass);
+  }
+
+  /** Reports that every provider was tried, or passed over by the breaker, and none could take the session. */
+  private reportUnavailable(): void {
+    this.metric({ type: 'provider_unavailable', kind: 'stt', checkedProviders: this.list.map((p) => this.nameOf(p)) });
+  }
+
   /**
    * Opens the first authorized available provider. A denied authorization is never retried as a provider failure.
    *
@@ -239,7 +275,7 @@ export class StreamingSTTChain implements IStreamingSTT {
         const session = await provider.startSession(config);
         this.activeProviderId = provider.providerId;
         const selected: ProviderSelectedEvent = { kind: 'stt', providerId: this.nameOf(provider), attempt: i + 1 };
-        this.opts.onProviderSelected?.(selected);
+        this.notify('onProviderSelected', () => this.opts.onProviderSelected?.(selected));
         this.metric({ type: 'provider_selected', ...selected });
         this.opts.breaker?.recordSuccess(this.nameOf(provider));
         return this.wrap(session, provider, candidates.slice(i + 1), config);
@@ -247,13 +283,10 @@ export class StreamingSTTChain implements IStreamingSTT {
         if (error instanceof SttConnectionAuthorizationError) throw error;
         const failure = VoicePipelineError.classifyError(error, { kind: 'stt', provider: provider.providerId });
         errors.push(failure);
-        const event: ProviderFailedEvent = { kind: 'stt', providerId: this.nameOf(provider), errorClass: failure.errorClass, message: this.policy.mode === 'legacy' ? failure.message : 'provider opening failed' };
-        this.opts.onProviderFailed?.(event);
-        this.metric({ type: 'provider_failed', ...event });
-        this.opts.breaker?.recordFailure(this.nameOf(provider), failure.errorClass);
+        this.reportFailed(provider, failure);
       }
     }
-    this.metric({ type: 'provider_unavailable', kind: 'stt', checkedProviders: this.list.map((p) => this.nameOf(p)) });
+    this.reportUnavailable();
     if (!errors.length) throw new Error('No STT providers available (all tripped or filtered)');
     throw new AggregateVoiceError(errors);
   }
@@ -262,9 +295,10 @@ export class StreamingSTTChain implements IStreamingSTT {
    * Wraps the session a provider opened. With failover off the session is returned as it is. Otherwise the facade
    * tees audio into a ring buffer and, on the active session's error, or its close before a flush, closes it and
    * opens the next remaining provider (authorized first under a `ProviderPolicy`), replays the buffered audio when
-   * there is at least `minReplayMs` of it, then the frames pushed during the switch, and goes on. A backup that
-   * reports an error or a close while it takes that audio, or refuses a frame of it, is recorded as failed and
-   * closed, and the next remaining provider takes the same audio. Only the active
+   * there is at least `minReplayMs` of it, then the frames pushed during the switch, and goes on. A backup whose
+   * opening fails, or that reports an error or a close while it takes that audio, or refuses a frame of it, is
+   * reported, recorded as failed and closed, and the next remaining provider takes the same audio. When none is left,
+   * the switch ends the facade with an `AggregateVoiceError` holding every failure of the switch. Only the active
    * session's transcripts, speech events and warnings reach the facade, and the transcripts a session emits as the
    * facade closes it, which go out before anything that follows. A final that repeats one another provider already
    * gave for the same audio is dropped; an empty final, which retracts its own provider's interim text, is never
@@ -278,9 +312,9 @@ export class StreamingSTTChain implements IStreamingSTT {
    * onto its own input timeline (the audio pushed since it opened, or since its last `reset()`), so a final the
    * backup transcribes again from the replay meets the one the failed provider gave for the same audio. A backup that
    * cannot open because the `config.connectionHooks` refused its socket ends the facade with that
-   * `SttConnectionAuthorizationError`, and so does an `'error'` that is one from the session in use (a refused
-   * reconnect of its own, or a frame past its funded limit), during a switch as well: no further provider is tried
-   * for a funding refusal.
+   * `SttConnectionAuthorizationError`, and so does an `'error'` or a refused frame that is one from the session in
+   * use (a refused reconnect of its own, or a frame past its funded limit), during a switch as well: no further
+   * provider is tried for a funding refusal.
    */
   private wrap(initial: StreamingSTTSession, first: STTProvider, candidates: STTProvider[], config?: StreamingSTTConfig): StreamingSTTSession {
     if (!this.opts.enableMidUtteranceFailover) return initial;
@@ -418,12 +452,17 @@ export class StreamingSTTChain implements IStreamingSTT {
     const failover = async (error: Error): Promise<void> => {
       const from = provider;
       const failure = VoicePipelineError.classifyError(error, { kind: 'stt', provider: from.providerId });
+      const failures = [failure];
       this.opts.breaker?.recordFailure(this.nameOf(from), failure.errorClass);
       const started = Date.now();
       const old = current;
       current = undefined;
       lost = undefined;
-      retire(old);
+      try {
+        retire(old);
+      } catch {
+        /* the failed session's close() that throws stops no switch */
+      }
       for (const backup of remaining) {
         if (closed) return;
         if (this.opts.breaker && !this.opts.breaker.isAvailable(this.nameOf(backup))) continue;
@@ -435,8 +474,9 @@ export class StreamingSTTChain implements IStreamingSTT {
         } catch (error) {
           // A funding refusal is no outage: the switch ends, and the facade with it, without another provider.
           if (error instanceof SttConnectionAuthorizationError) throw error;
-          const failed = VoicePipelineError.classifyError(error, { kind: 'stt', provider: backup.providerId });
-          this.opts.breaker?.recordFailure(this.nameOf(backup), failed.errorClass);
+          const opening = VoicePipelineError.classifyError(error, { kind: 'stt', provider: backup.providerId });
+          failures.push(opening);
+          this.reportFailed(backup, opening);
           continue;
         }
         if (closed) {
@@ -467,13 +507,16 @@ export class StreamingSTTChain implements IStreamingSTT {
             await deliver(next, frame);
           }
         } catch (error) {
+          // A funding refusal is no outage, whichever way the session gives it.
+          if (error instanceof SttConnectionAuthorizationError) throw error;
           lost ??= error instanceof Error ? error : new Error('STT push failed');
         }
         if (closed) return;
         if (lost) {
-          // The backup failed as it took the replay: it is recorded and closed, and the next provider takes the audio.
-          const failed = VoicePipelineError.classifyError(lost, { kind: 'stt', provider: backup.providerId });
-          this.opts.breaker?.recordFailure(this.nameOf(backup), failed.errorClass);
+          // The backup failed as it took the replay: it is closed, its last transcripts going out, and reported, and the
+          // next provider takes the audio. A hook that closes the facade ends the switch at the top of the loop.
+          const taking = VoicePipelineError.classifyError(lost, { kind: 'stt', provider: backup.providerId });
+          failures.push(taking);
           lost = undefined;
           current = undefined;
           try {
@@ -481,12 +524,13 @@ export class StreamingSTTChain implements IStreamingSTT {
           } catch {
             /* the switch goes on to the next provider */
           }
+          this.reportFailed(backup, taking);
           continue;
         }
         this.activeProviderId = backup.providerId;
         this.opts.breaker?.recordSuccess(this.nameOf(backup));
         const event: ProviderFailoverEvent = { kind: 'stt', from: this.nameOf(from), to: this.nameOf(backup), reason: failure.errorClass, lostMs: Date.now() - started + lostMs };
-        this.opts.onProviderFailover?.(event);
+        this.notify('onProviderFailover', () => this.opts.onProviderFailover?.(event));
         this.metric({ type: 'provider_failover', ...event });
         if (lostMs) {
           facade.emit('stt:gap', { lostMs, attempt: 1 });
@@ -494,7 +538,10 @@ export class StreamingSTTChain implements IStreamingSTT {
         }
         return;
       }
-      throw new AggregateVoiceError([failure]);
+      // A close the caller asked for ended the session: its last backup's failure is reported, and nothing more is.
+      if (closed) return;
+      this.reportUnavailable();
+      throw new AggregateVoiceError(failures);
     };
     const begin = (error: Error): void => {
       if (closed || switching) return;
@@ -546,7 +593,9 @@ export class StreamingSTTChain implements IStreamingSTT {
         try {
           await deliver(current, frame);
         } catch (error) {
-          begin(error instanceof Error ? error : new Error('STT push failed'));
+          // A funding refusal is no outage, whichever way the session gives it.
+          if (error instanceof SttConnectionAuthorizationError) fatal(error);
+          else begin(error instanceof Error ? error : new Error('STT push failed'));
         }
       },
       flush: async (): Promise<void> => {
