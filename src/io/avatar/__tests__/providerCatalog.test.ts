@@ -12,6 +12,11 @@ describe('AVATAR_PROVIDER_CATALOG', () => {
     expect(simli!.defaultSampleRate).toBe(16000);
   });
 
+  it('lists face creation among simli features', () => {
+    const simli = AVATAR_PROVIDER_CATALOG.find((e) => e.id === 'simli');
+    expect(simli!.features).toContain('face-creation');
+  });
+
   it('every entry carries the discovery fields', () => {
     for (const entry of AVATAR_PROVIDER_CATALOG) {
       expect(entry.id.length).toBeGreaterThan(0);
