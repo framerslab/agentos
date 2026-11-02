@@ -1,0 +1,61 @@
+name: Tracked plan or feature
+description: Work that takes more than one pull request. Each pull request says "Part of #n"; the last one says "Closes #n".
+title: "<area>: <what ships>"
+labels: ["track"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Open one issue for a plan or feature that takes more than one pull request. A fix that fits in one pull request, a review follow-up, a dependency bump or a docs edit needs no issue.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What ships
+      description: What a person can see or do once this is done.
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Spec or design
+      description: Link to the spec or design document. In a public repository, link public material only.
+      placeholder: https://github.com/<owner>/<repo>/blob/master/docs/<file>.md
+    validations:
+      required: true
+  - type: input
+    id: plan
+    attributes:
+      label: Plan
+      description: Link to the plan, or "None".
+    validations:
+      required: true
+  - type: textarea
+    id: pictures
+    attributes:
+      label: Screens and pictures
+      description: For a change a person sees, link the design round (feature list, decisions, picked mockups) and add pictures of the screen as it is now. Drag images in or link them. Write "No visible change" otherwise.
+    validations:
+      required: true
+  - type: textarea
+    id: docs
+    attributes:
+      label: Docs to change
+      description: The README, docs pages or runbooks this work updates.
+    validations:
+      required: true
+  - type: textarea
+    id: tasks
+    attributes:
+      label: Tasks
+      description: One line per task or pull request. Tick a line when its pull request merges. The pull request that finishes the work says "Closes #n", which closes this issue when it merges into the default branch.
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: The checks that prove it works end to end, such as an integration or end-to-end test and a check on the live site.
+    validations:
+      required: true
