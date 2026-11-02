@@ -6,6 +6,7 @@ describe('media/video index', () => {
   it('lists the built-in video providers', () => {
     expect(listVideoProviderFactories()).toEqual([
       'fal',
+      'gemini',
       'replicate',
       'runway',
     ]);

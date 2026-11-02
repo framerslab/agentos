@@ -72,7 +72,7 @@ describe('FalVideoProvider', () => {
     await provider.initialize({ apiKey: 'fal_test_key' });
     expect(provider.isInitialized).toBe(true);
     expect(provider.providerId).toBe('fal');
-    expect(provider.defaultModelId).toBe('kling-video/v1');
+    expect(provider.defaultModelId).toBe('fal-ai/kling-video/v2.5-turbo/pro/text-to-video');
   });
 
   it('should throw on initialize without API key', async () => {
@@ -208,7 +208,8 @@ describe('FalVideoProvider', () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.image_url).toContain('data:image/png;base64,');
     expect(body.prompt).toBe('animate this photo');
-    expect(body.duration).toBe(5);
+    // fal's Kling endpoints take duration as the string enum '5' | '10'.
+    expect(body.duration).toBe('5');
   });
 
   it('should throw when imageToVideo called while not initialized', async () => {
@@ -336,5 +337,226 @@ describe('FalVideoProvider', () => {
 
     await provider.shutdown();
     expect(provider.isInitialized).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request inputs, queue URLs and failures (captured request bodies)
+// ---------------------------------------------------------------------------
+
+/** The first eight bytes of a PNG file. */
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
+/** The first bytes of a JPEG file. */
+const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+
+describe('FalVideoProvider request inputs and queue URLs', () => {
+  let provider: FalVideoProvider;
+  let fetchSpy: FetchSpy;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    provider = new FalVideoProvider();
+    fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    await provider.initialize({ apiKey: 'fal_key', pollIntervalMs: 1 });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /** Queue a submit response, one COMPLETED status and a result with a video. */
+  function queueRun(submit: Record<string, unknown>): void {
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse(submit))
+      .mockResolvedValueOnce(mockResponse({ status: 'COMPLETED' }))
+      .mockResolvedValueOnce(mockResponse({ video: { url: 'https://fal.media/out.mp4' } }));
+  }
+
+  /** The JSON body of the submit request. */
+  function submitBody(): Record<string, unknown> {
+    return JSON.parse(fetchSpy.mock.calls[0][1].body);
+  }
+
+  it('sends an image URL as given, with resolution, reference image URLs, negative prompt and provider options', async () => {
+    queueRun({ request_id: 'req-1' });
+
+    await provider.imageToVideo({
+      modelId: 'fal-ai/minimax/hailuo-02/standard/image-to-video',
+      prompt: 'the lantern swings',
+      image: 'https://cdn.example.com/start.png',
+      resolution: '768P',
+      negativePrompt: 'blur',
+      referenceImages: ['https://cdn.example.com/ref-a.png', PNG_BYTES],
+      providerOptions: {
+        end_image_url: 'https://cdn.example.com/end.png',
+        prompt_optimizer: false,
+        prompt: 'a provider option never replaces the prompt',
+      },
+    } as any);
+
+    expect(submitBody()).toEqual({
+      prompt: 'the lantern swings',
+      image_url: 'https://cdn.example.com/start.png',
+      resolution: '768P',
+      negative_prompt: 'blur',
+      reference_image_urls: [
+        'https://cdn.example.com/ref-a.png',
+        `data:image/png;base64,${PNG_BYTES.toString('base64')}`,
+      ],
+      end_image_url: 'https://cdn.example.com/end.png',
+      prompt_optimizer: false,
+    });
+  });
+
+  it('sends resolution and reference image URLs for text-to-video', async () => {
+    queueRun({ request_id: 'req-t2v' });
+
+    await provider.generateVideo({
+      modelId: 'fal-ai/vidu/reference-to-video',
+      prompt: 'two friends at a fair',
+      resolution: '1080p',
+      referenceImages: ['https://cdn.example.com/a.png', 'https://cdn.example.com/b.png'],
+    } as any);
+
+    expect(submitBody()).toEqual({
+      prompt: 'two friends at a fair',
+      resolution: '1080p',
+      reference_image_urls: ['https://cdn.example.com/a.png', 'https://cdn.example.com/b.png'],
+    });
+  });
+
+  it('sends a Buffer image as a data URL with its own MIME type', async () => {
+    queueRun({ request_id: 'req-jpeg' });
+
+    await provider.imageToVideo({
+      modelId: 'fal-ai/wan-i2v',
+      prompt: 'waves roll in',
+      image: JPEG_BYTES,
+    });
+
+    expect(submitBody().image_url).toBe(`data:image/jpeg;base64,${JPEG_BYTES.toString('base64')}`);
+  });
+
+  it('takes only its own entry from a provider-keyed options bag', async () => {
+    queueRun({ request_id: 'req-bag' });
+
+    await provider.imageToVideo({
+      modelId: 'fal-ai/kling-video/v2.5-turbo/pro/image-to-video',
+      prompt: 'the door opens',
+      image: 'https://cdn.example.com/door.png',
+      providerOptions: {
+        fal: { tail_image_url: 'https://cdn.example.com/door-open.png' },
+        replicate: { start_image: 'https://cdn.example.com/other.png' },
+      },
+    } as any);
+
+    expect(submitBody()).toEqual({
+      prompt: 'the door opens',
+      image_url: 'https://cdn.example.com/door.png',
+      tail_image_url: 'https://cdn.example.com/door-open.png',
+    });
+  });
+
+  it('sends duration as the string enum to Kling and MiniMax endpoints and as a number to others', async () => {
+    queueRun({ request_id: 'req-k' });
+    await provider.generateVideo({
+      modelId: 'fal-ai/kling-video/v2.5-turbo/pro/text-to-video',
+      prompt: 'k',
+      durationSec: 10,
+    });
+    expect(submitBody().duration).toBe('10');
+
+    fetchSpy.mockReset();
+    queueRun({ request_id: 'req-m' });
+    await provider.imageToVideo({
+      modelId: 'fal-ai/minimax/hailuo-02/standard/image-to-video',
+      prompt: 'm',
+      image: 'https://cdn.example.com/m.png',
+      durationSec: 6,
+    });
+    expect(submitBody().duration).toBe('6');
+
+    fetchSpy.mockReset();
+    queueRun({ request_id: 'req-h' });
+    await provider.generateVideo({ modelId: 'fal-ai/hunyuan-video', prompt: 'h', durationSec: 5 });
+    expect(submitBody().duration).toBe(5);
+  });
+
+  it('polls the status_url and fetches the response_url the submit response gives', async () => {
+    queueRun({
+      request_id: 'req-urls',
+      status_url: 'https://queue.fal.run/fal-ai/minimax/requests/req-urls/status',
+      response_url: 'https://queue.fal.run/fal-ai/minimax/requests/req-urls',
+    });
+
+    const result = await provider.imageToVideo({
+      modelId: 'fal-ai/minimax/hailuo-02/standard/image-to-video',
+      prompt: 'p',
+      image: 'https://cdn.example.com/p.png',
+    } as any);
+
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://queue.fal.run/fal-ai/minimax/hailuo-02/standard/image-to-video');
+    expect(fetchSpy.mock.calls[1][0]).toBe('https://queue.fal.run/fal-ai/minimax/requests/req-urls/status');
+    expect(fetchSpy.mock.calls[2][0]).toBe('https://queue.fal.run/fal-ai/minimax/requests/req-urls');
+    expect(result.videos[0].url).toBe('https://fal.media/out.mp4');
+  });
+
+  it('builds the queue URLs on the app path when the submit response omits them', async () => {
+    queueRun({ request_id: 'req-app' });
+
+    await provider.generateVideo({
+      modelId: 'fal-ai/kling-video/v2.5-turbo/pro/text-to-video',
+      prompt: 'p',
+    });
+
+    expect(fetchSpy.mock.calls[1][0]).toBe('https://queue.fal.run/fal-ai/kling-video/requests/req-app/status');
+    expect(fetchSpy.mock.calls[2][0]).toBe('https://queue.fal.run/fal-ai/kling-video/requests/req-app');
+  });
+
+  it('keeps the status poll and the result fetch on a custom baseURL', async () => {
+    await provider.initialize({ apiKey: 'fal_key', pollIntervalMs: 1, baseURL: 'https://gateway.example.com/fal' });
+    queueRun({
+      request_id: 'req-gw',
+      status_url: 'https://queue.fal.run/fal-ai/kling-video/requests/req-gw/status',
+      response_url: 'https://queue.fal.run/fal-ai/kling-video/requests/req-gw',
+    });
+
+    await provider.generateVideo({ modelId: 'fal-ai/kling-video/v2.5-turbo/pro/text-to-video', prompt: 'p' });
+
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://gateway.example.com/fal/fal-ai/kling-video/v2.5-turbo/pro/text-to-video');
+    expect(fetchSpy.mock.calls[1][0]).toBe('https://gateway.example.com/fal/fal-ai/kling-video/requests/req-gw/status');
+    expect(fetchSpy.mock.calls[2][0]).toBe('https://gateway.example.com/fal/fal-ai/kling-video/requests/req-gw');
+  });
+
+  it('raises the error of a request that ends COMPLETED with an error, without fetching a result', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse({ request_id: 'req-err' }))
+      .mockResolvedValueOnce(mockResponse({
+        status: 'COMPLETED',
+        error: "Input should be '5' or '10'",
+        error_type: 'validation_error',
+      }));
+
+    await expect(
+      provider.generateVideo({ modelId: 'fal-ai/kling-video/v2.5-turbo/pro/text-to-video', prompt: 'p' }),
+    ).rejects.toThrow(/Fal\.ai video generation failed for request req-err \[validation_error\]: Input should be '5' or '10'/);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs Kling 2.5 Turbo Pro by default: the text-to-video endpoint for a prompt, the image-to-video endpoint for an image', async () => {
+    const fresh = new FalVideoProvider();
+    await fresh.initialize({ apiKey: 'fal_key', pollIntervalMs: 1 });
+
+    queueRun({ request_id: 'req-d1' });
+    const t2v = await fresh.generateVideo({ prompt: 'p' });
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://queue.fal.run/fal-ai/kling-video/v2.5-turbo/pro/text-to-video');
+    expect(t2v.modelId).toBe('fal-ai/kling-video/v2.5-turbo/pro/text-to-video');
+
+    fetchSpy.mockReset();
+    queueRun({ request_id: 'req-d2' });
+    const i2v = await fresh.imageToVideo({ prompt: 'p', image: 'https://cdn.example.com/s.png' } as any);
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://queue.fal.run/fal-ai/kling-video/v2.5-turbo/pro/image-to-video');
+    expect(i2v.modelId).toBe('fal-ai/kling-video/v2.5-turbo/pro/image-to-video');
   });
 });

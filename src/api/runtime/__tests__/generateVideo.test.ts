@@ -157,6 +157,75 @@ describe('generateVideo', () => {
     expect(__getMockProvider('runway').imageToVideo).toHaveBeenCalled();
   });
 
+  it('sends an image given as a URL to image-to-video with resolution, reference images and provider options', async () => {
+    const providerOptions = { fal: { end_image_url: 'https://cdn.example.com/end.png' } };
+
+    await generateVideo({
+      prompt: 'The lantern swings',
+      image: 'https://cdn.example.com/start.png',
+      resolution: '768P',
+      referenceImages: ['https://cdn.example.com/ref.png'],
+      providerOptions,
+      provider: 'fal',
+      apiKey: 'test-fal-key',
+      timeoutMs: 90_000,
+    } as any);
+
+    const { __getMockProvider } = await import('../../../io/media/video/index.js') as any;
+    const fal = __getMockProvider('fal');
+    expect(fal.generateVideo).not.toHaveBeenCalled();
+    expect(fal.imageToVideo).toHaveBeenCalledTimes(1);
+    const request = fal.imageToVideo.mock.calls[0][0];
+    expect(request).toMatchObject({
+      prompt: 'The lantern swings',
+      image: 'https://cdn.example.com/start.png',
+      resolution: '768P',
+      referenceImages: ['https://cdn.example.com/ref.png'],
+      providerOptions,
+    });
+    // The call names no model, so the provider picks its image-to-video default.
+    expect(request.modelId).toBeUndefined();
+    // The timeout goes to initialize(), never into the model inputs.
+    expect(fal.initialize).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 90_000 }));
+  });
+
+  it('passes reference images and provider options to text-to-video and keeps the timeout out of the provider options', async () => {
+    const reference = Buffer.from('ref-bytes');
+
+    await generateVideo({
+      prompt: 'The same cat in three rooms',
+      model: 'google/veo-3.1',
+      referenceImages: [reference],
+      providerOptions: { generate_audio: false },
+      provider: 'replicate',
+      apiKey: 'test-replicate-key',
+      timeoutMs: 9_000,
+    } as any);
+
+    const { __getMockProvider } = await import('../../../io/media/video/index.js') as any;
+    const request = __getMockProvider('replicate').generateVideo.mock.calls[0][0];
+    expect(request.modelId).toBe('google/veo-3.1');
+    expect(request.referenceImages).toEqual([reference]);
+    expect(request.providerOptions).toEqual({ generate_audio: false });
+  });
+
+  it('reads GEMINI_API_KEY for provider "gemini" and never picks gemini from the environment alone', async () => {
+    delete process.env.RUNWAY_API_KEY;
+    delete process.env.REPLICATE_API_TOKEN;
+    delete process.env.FAL_API_KEY;
+    process.env.GEMINI_API_KEY = 'env-gemini-key';
+
+    const result = await generateVideo({ prompt: 'A marble rolls', provider: 'gemini' });
+
+    const { __getMockProvider } = await import('../../../io/media/video/index.js') as any;
+    expect(result.provider).toBe('gemini');
+    expect(__getMockProvider('gemini').initialize).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'env-gemini-key' }),
+    );
+
+    await expect(generateVideo({ prompt: 'A marble rolls' })).rejects.toThrow(/No video provider configured/);
+  });
+
   it('uses provider preferences to select the weighted auto-detected primary provider', async () => {
     process.env.RUNWAY_API_KEY = 'env-runway-key';
     process.env.REPLICATE_API_TOKEN = 'env-replicate-key';

@@ -72,7 +72,7 @@ describe('ReplicateVideoProvider', () => {
     await provider.initialize({ apiKey: 'r8_test_key' });
     expect(provider.isInitialized).toBe(true);
     expect(provider.providerId).toBe('replicate');
-    expect(provider.defaultModelId).toBe('klingai/kling-v1');
+    expect(provider.defaultModelId).toBe('kwaivgi/kling-v2.5-turbo-pro');
   });
 
   it('should throw on initialize without API key', async () => {
@@ -142,7 +142,9 @@ describe('ReplicateVideoProvider', () => {
     expect(submitOpts.headers.Prefer).toBe('wait=60');
 
     const body = JSON.parse(submitOpts.body);
-    expect(body.model).toBe('klingai/kling-v1');
+    // predictions.create names the model in `version`; it has no `model` field.
+    expect(body.version).toBe('klingai/kling-v1');
+    expect(body).not.toHaveProperty('model');
     expect(body.input.prompt).toBe('test prompt');
     expect(body.input.duration).toBe(5);
     expect(body.input.aspect_ratio).toBe('16:9');
@@ -387,5 +389,134 @@ describe('ReplicateVideoProvider', () => {
 
     await provider.shutdown();
     expect(provider.isInitialized).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Model inputs (captured request bodies)
+// ---------------------------------------------------------------------------
+
+/** The first eight bytes of a PNG file. */
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
+
+describe('ReplicateVideoProvider model inputs', () => {
+  let provider: ReplicateVideoProvider;
+  let fetchSpy: FetchSpy;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    provider = new ReplicateVideoProvider();
+    fetchSpy = vi.fn().mockResolvedValue(mockResponse({
+      id: 'pred-1',
+      status: 'succeeded',
+      output: 'https://replicate.delivery/out.mp4',
+    }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    await provider.initialize({ apiKey: 'r8_key', pollIntervalMs: 1 });
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /** The JSON body of the create-prediction request. */
+  function submitBody(): Record<string, any> {
+    return JSON.parse(fetchSpy.mock.calls[0][1].body);
+  }
+
+  it('sends an image URL, resolution, reference images and provider options as model inputs', async () => {
+    await provider.imageToVideo({
+      modelId: 'google/veo-3.1',
+      prompt: 'a lighthouse at dusk',
+      image: 'https://cdn.example.com/start.png',
+      resolution: '1080p',
+      negativePrompt: 'blur',
+      referenceImages: ['https://cdn.example.com/ref.png', PNG_BYTES],
+      providerOptions: {
+        last_frame: 'https://cdn.example.com/end.png',
+        generate_audio: false,
+        prompt: 'a provider option never replaces the prompt',
+      },
+    } as any);
+
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://api.replicate.com/v1/predictions');
+    expect(submitBody()).toEqual({
+      version: 'google/veo-3.1',
+      input: {
+        prompt: 'a lighthouse at dusk',
+        image: 'https://cdn.example.com/start.png',
+        resolution: '1080p',
+        negative_prompt: 'blur',
+        reference_images: [
+          'https://cdn.example.com/ref.png',
+          `data:image/png;base64,${PNG_BYTES.toString('base64')}`,
+        ],
+        last_frame: 'https://cdn.example.com/end.png',
+        generate_audio: false,
+      },
+    });
+  });
+
+  it('sends the source image under the input name each model family takes', async () => {
+    const cases: Array<[string, string]> = [
+      ['kwaivgi/kling-v2.1', 'start_image'],
+      ['minimax/hailuo-02', 'first_frame_image'],
+      ['wan-video/wan-2.2-i2v-fast', 'image'],
+    ];
+    for (const [modelId, field] of cases) {
+      fetchSpy.mockClear();
+      await provider.imageToVideo({ modelId, prompt: 'p', image: 'https://cdn.example.com/s.png' } as any);
+      const input = submitBody().input;
+      expect(input[field]).toBe('https://cdn.example.com/s.png');
+      for (const other of ['image', 'start_image', 'first_frame_image'].filter((name) => name !== field)) {
+        expect(input).not.toHaveProperty(other);
+      }
+    }
+  });
+
+  it('sends resolution and reference images for text-to-video', async () => {
+    await provider.generateVideo({
+      modelId: 'google/veo-3.1',
+      prompt: 'the same cat in three rooms',
+      resolution: '720p',
+      referenceImages: ['https://cdn.example.com/cat.png'],
+    } as any);
+
+    expect(submitBody().input).toEqual({
+      prompt: 'the same cat in three rooms',
+      resolution: '720p',
+      reference_images: ['https://cdn.example.com/cat.png'],
+    });
+  });
+
+  it('takes only its own entry from a provider-keyed options bag', async () => {
+    await provider.imageToVideo({
+      modelId: 'minimax/video-01',
+      prompt: 'p',
+      image: 'https://cdn.example.com/s.png',
+      providerOptions: {
+        replicate: { subject_reference: 'https://cdn.example.com/face.png' },
+        fal: { end_image_url: 'https://cdn.example.com/end.png' },
+      },
+    } as any);
+
+    expect(submitBody().input).toEqual({
+      prompt: 'p',
+      first_frame_image: 'https://cdn.example.com/s.png',
+      subject_reference: 'https://cdn.example.com/face.png',
+    });
+  });
+
+  it('runs kwaivgi/kling-v2.5-turbo-pro by default', async () => {
+    const fresh = new ReplicateVideoProvider();
+    await fresh.initialize({ apiKey: 'r8_key', pollIntervalMs: 1 });
+
+    const result = await fresh.imageToVideo({ prompt: 'p', image: 'https://cdn.example.com/s.png' } as any);
+
+    expect(submitBody()).toEqual({
+      version: 'kwaivgi/kling-v2.5-turbo-pro',
+      input: { prompt: 'p', start_image: 'https://cdn.example.com/s.png' },
+    });
+    expect(result.modelId).toBe('kwaivgi/kling-v2.5-turbo-pro');
   });
 });
