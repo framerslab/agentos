@@ -64,6 +64,12 @@ function topLevelKeys(source: string, start: number): string[] {
       i = end - 1;
       continue;
     }
+    if (depth === 1 && expectKey && source.startsWith('...', i)) {
+      // A spread operand (`...defaults`) is a value, not a key; the key state resumes after the next comma.
+      expectKey = false;
+      i += 2;
+      continue;
+    }
     if (ch === '{' || ch === '[' || ch === '(') {
       depth += 1;
       expectKey = depth === 1;

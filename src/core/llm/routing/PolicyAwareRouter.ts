@@ -111,11 +111,13 @@ export class PolicyAwareRouter implements IModelRouter {
     // capabilities (e.g. `json_mode` for structured output), only return
     // uncensored models that explicitly support them. A capability matches
     // under either spelling, as in the fallback walk: a call with tools
-    // requires `function_calling`, which the catalog lists as `tool_use`. This prevents the
-    // router from picking a prose-only model like Dolphin Mixtral when the
-    // caller asks for structured output (`agent({ responseSchema })`,
-    // `agency({ output })`), which would fail Zod validation because the
-    // model returns natural language instead of JSON.
+    // requires `function_calling`, which the catalog lists as `tool_use`.
+    // The list holds only what the caller names (`routerParams.requiredCapabilities`
+    // or the host policy) plus `function_calling` for a call with tools: a
+    // response schema adds nothing. A structured-output call
+    // (`agent({ responseSchema })`, `agency({ output })`) that must not land
+    // on a prose-only model like Dolphin Mixtral, whose natural-language reply
+    // fails Zod validation, names `json_mode` itself.
     const required = params.requiredCapabilities ?? [];
     if (required.length > 0) {
       const candidates = this.catalog
