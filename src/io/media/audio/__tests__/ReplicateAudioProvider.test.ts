@@ -24,6 +24,7 @@
  * - An explicitly versioned model is reported with its version
  * - Only the wav and mp3 output formats are sent, mapped per known model
  * - The seed reaches the models whose schema takes one
+ * - elevenlabs/music gets its length as `music_length_ms`
  * - Provider options never replace the prompt, duration or output format
  * - Polling a prediction that did not finish inside the wait window
  * - supports() returns true for both music and sfx
@@ -277,6 +278,23 @@ describe('ReplicateAudioProvider', () => {
     expect(JSON.parse(fetchSpy.mock.calls[0][1].body).input).toEqual({ prompt: 'a', output_format: 'wav_cd_quality' });
     expect(JSON.parse(fetchSpy.mock.calls[1][1].body).input).toEqual({ prompt: 'b', output_format: 'mp3_standard' });
     expect(JSON.parse(fetchSpy.mock.calls[2][1].body).input).toEqual({ prompt: 'c' });
+  });
+
+  it('sends elevenlabs/music its length as music_length_ms', async () => {
+    await provider.initialize({ apiKey: 'r8_audio_key', pollIntervalMs: 1 });
+    fetchSpy.mockResolvedValueOnce(mockResponse({
+      id: 'p',
+      status: 'succeeded',
+      output: 'https://replicate.delivery/a.mp3',
+    }));
+
+    // elevenlabs/music has no `duration` input; it takes `music_length_ms`.
+    await provider.generateMusic({ prompt: 'Lo-fi beat', durationSec: 30, modelId: 'elevenlabs/music' });
+
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).input).toEqual({
+      prompt: 'Lo-fi beat',
+      music_length_ms: 30000,
+    });
   });
 
   it('polls a prediction that did not finish inside the wait window', async () => {
