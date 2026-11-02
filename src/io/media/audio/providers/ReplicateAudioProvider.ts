@@ -41,8 +41,12 @@
  * 3. **Result**: `output` is the audio URL (string or first array element).
  *
  * The model input is `{ prompt, duration }`, plus `output_format` when the
- * request sets `outputFormat`, plus every key of `providerOptions` (for
- * example musicgen's `model_version` or `normalization_strategy`).
+ * request sets `outputFormat` to `wav` or `mp3` (the two formats musicgen and
+ * audiogen accept; other formats are left to the model's default), plus every
+ * other key of `providerOptions` (for example musicgen's `model_version` or
+ * `normalization_strategy`). Provider options never replace `prompt`,
+ * `duration` or `output_format`. A model given as `owner/name:version` or a
+ * bare version id is reported in the result exactly as given.
  *
  * ## Authentication
  *
@@ -235,7 +239,8 @@ interface ReplicateRoute {
  */
 function resolveRoute(model: string): ReplicateRoute {
   if (VERSION_ID.test(model) || model.includes(':')) {
-    return { path: '/predictions', version: model, reportedModel: model.split(':')[0] };
+    // The caller chose this version, so the result names it.
+    return { path: '/predictions', version: model, reportedModel: model };
   }
   const name = MODEL_ALIASES[model] ?? model;
   const pinned = REPLICATE_AUDIO_MODEL_VERSIONS[name];
@@ -446,11 +451,19 @@ export class ReplicateAudioProvider implements IAudioGenerator {
     };
 
     if (request.durationSec !== undefined) input.duration = request.durationSec;
-    if (request.outputFormat !== undefined) input.output_format = request.outputFormat;
-    Object.assign(input, request.providerOptions ?? {});
+    // meta/musicgen and sepal/audiogen accept only `wav` and `mp3`; any other
+    // format is left to the model's default.
+    if (request.outputFormat === 'wav' || request.outputFormat === 'mp3') {
+      input.output_format = request.outputFormat;
+    }
+    // Provider options add model inputs; they never replace the fields above.
+    for (const [key, value] of Object.entries(request.providerOptions ?? {})) {
+      if (!(key in input)) input[key] = value;
+    }
 
     const prediction = await this._runPrediction(route, input);
-    return this._buildResult(prediction, route.reportedModel, request.outputFormat);
+    const sentFormat = typeof input.output_format === 'string' ? input.output_format : undefined;
+    return this._buildResult(prediction, route.reportedModel, sentFormat);
   }
 
   /**

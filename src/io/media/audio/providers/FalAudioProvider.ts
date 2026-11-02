@@ -17,7 +17,9 @@
  * | `fal-ai/stable-audio-25/text-to-audio`  | `seconds_total`      | `audio`      |
  *
  * Models whose id starts with `fal-ai/stable-audio` get `seconds_total`; every
- * other model gets `duration`. The result is read from `audio`, `audio_file`
+ * other model gets `duration`. `seed` is sent when the request sets it, and
+ * `providerOptions` add model inputs without replacing the prompt, the
+ * duration field or the seed. The result is read from `audio`, `audio_file`
  * or `audio_url`, whichever the model returns. Each model's schema is on its
  * fal.ai page, for example https://fal.ai/models/fal-ai/musicgen/api.
  *
@@ -406,7 +408,10 @@ export class FalAudioProvider implements IAudioGenerator {
       body[model.startsWith('fal-ai/stable-audio') ? 'seconds_total' : 'duration'] = request.durationSec;
     }
     if (request.seed !== undefined) body.seed = request.seed;
-    Object.assign(body, request.providerOptions ?? {});
+    // Provider options add model inputs; they never replace the fields above.
+    for (const [key, value] of Object.entries(request.providerOptions ?? {})) {
+      if (!(key in body)) body[key] = value;
+    }
 
     // Three-step flow: submit -> poll -> fetch
     const urls = await this._submitTask(model, body);
