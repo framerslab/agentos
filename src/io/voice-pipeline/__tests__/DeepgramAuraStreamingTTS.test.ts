@@ -1184,7 +1184,41 @@ describe('DeepgramAuraStreamingTTS', () => {
     }
   });
 
-  it("reports nothing when Deepgram closes the socket while the next reply waits for the late Flushed of the reply before's timed-out sentence, whose late audio no reply plays any more", async () => {
+  it("warns before the flush_complete of a reply whose last segment timed out, since nothing proves the rest of its audio came, and not again when the wait for its late Flushed ends without it", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const order: string[] = [];
+      const warnings = vi.fn((warning: Error) => order.push(`warning: ${warning.message}`));
+      session.on('warning', warnings);
+      session.on('flush_complete', () => order.push('flush_complete'));
+      ws.send.mockClear();
+
+      // The reply's one sentence times out after one frame: its flush completes, and its late audio may never come, so
+      // the reply cannot be taken as heard whole once that flush completes.
+      session.pushTokens('Hello there.');
+      const flushed = session.flush();
+      frame(ws, 1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await flushed;
+      expect(order).toEqual([
+        "warning: the reply's last segment had no Flushed within its wait; its flush completes before the rest of that segment's audio is known to have come",
+        'flush_complete',
+      ]);
+      // No late Flushed comes: the socket is given up, as one console line says, and the loss already warned of is not
+      // reported again.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(ws.close).toHaveBeenCalledWith(1000, 'response overdue');
+      expect(warnings).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("reports nothing more when Deepgram closes the socket while the next reply waits for the late Flushed of the reply before's timed-out sentence, whose late audio no reply plays any more", async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const session = await tts.startSession({ format: 'pcm' });
     const ws = socketOf(session);
@@ -1202,14 +1236,16 @@ describe('DeepgramAuraStreamingTTS', () => {
     frame(ws, 1);
     await vi.advanceTimersByTimeAsync(5_000);
     await first;
-    // The next reply's text has come: what the timed-out sentence still sends is dropped, so its loss loses nothing.
+    // The reply's one sentence timed out, so its flush warned that the rest of its audio may never come.
+    expect(warnings).toHaveBeenCalledOnce();
+    // The next reply's text has come: what the timed-out sentence still sends is dropped, so its loss loses nothing more.
     session.pushTokens('Next one. ');
     const second = session.flush();
     (ws as unknown as { readyState: number }).readyState = 3;
     ws.emit('close', 1011, Buffer.from(''));
     expect(errors).not.toHaveBeenCalled();
     expect(closes).not.toHaveBeenCalled();
-    expect(warnings).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalledOnce();
     let fresh!: MockSocket;
     await vi.waitFor(() => {
       fresh = socketOf(session);
@@ -1226,7 +1262,7 @@ describe('DeepgramAuraStreamingTTS', () => {
     ]);
     expect(errors).not.toHaveBeenCalled();
     expect(closes).not.toHaveBeenCalled();
-    expect(warnings).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalledOnce();
   });
 
   it('reports an error the socket reports mid-reply once, as the cause of the close that follows it', async () => {
