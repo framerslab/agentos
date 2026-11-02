@@ -311,6 +311,22 @@ describe('GeminiVideoProvider', () => {
     expect(seen).toEqual(['http://assets.lan:8080/start.png']);
   });
 
+  it('sends a base64 data: URL with escapes, line breaks or the URL-safe alphabet as standard base64', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }])),
+    );
+    const bytes = Buffer.from([0xfb, 0xff, 0xbf, 0x01, 0x02, 0x03]);
+    expect(bytes.toString('base64')).toBe('+/+/AQID');
+
+    await provider.generateVideo({ prompt: 'p', referenceImages: ['data:image/png;base64,%2B/-_\nAQ%49D'] });
+
+    expect(JSON.parse(interactionCall()[1].body).input[0]).toEqual({
+      type: 'image',
+      data: '+/+/AQID',
+      mime_type: 'image/png',
+    });
+  });
+
   it('decodes a data: URL image that is not base64 encoded', async () => {
     fetchSpy.mockResolvedValueOnce(
       jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }])),
