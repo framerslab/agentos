@@ -203,7 +203,7 @@ export interface AgentOptions extends BaseAgentConfig {
    *   name: 'World Architect',
    *   router: policyAwareRouter,
    *   routerParams: { requiredCapabilities: ['json_mode'] },
-   *   output: WorldIdentitySchema,
+   *   responseSchema: WorldIdentitySchema,
    * });
    * ```
    *
