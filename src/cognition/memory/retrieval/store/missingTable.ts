@@ -1,10 +1,11 @@
 /**
  * @fileoverview Whether a database error says a table or a column does not exist.
- * @module rag/migration/adapters/missingTable
+ * @module memory/retrieval/store/missingTable
  *
- * The scope-id form handshake reads `brain_meta` and clears a record from it. A store without the table, or one from
- * before brain ids (no `brain_id` column), holds no record; any other failure (a locked file, a dropped connection)
- * must stop the migration rather than read as no record.
+ * The scope-id form reads (`brain_meta`, `memory_traces`, `knowledge_nodes`) and the RAG migration's clear of a
+ * record. A store without the table, or one from before brain ids (no `brain_id` column), holds no record and no
+ * brain; any other failure (a locked file, a dropped connection) must stop the import, the export or the migration
+ * rather than read as a store that holds nothing.
  */
 
 /**

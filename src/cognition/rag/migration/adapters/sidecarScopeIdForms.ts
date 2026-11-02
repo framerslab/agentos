@@ -13,7 +13,7 @@ import {
   readScopeIdForms,
   type BrainScopeIdForm,
 } from '../../../memory/retrieval/store/scopeIdForm.js';
-import { isMissingTableError } from './missingTable.js';
+import { isMissingTableError } from '../../../memory/retrieval/store/missingTable.js';
 
 /**
  * The forms of the brains a sidecar names, or of the brains given.
