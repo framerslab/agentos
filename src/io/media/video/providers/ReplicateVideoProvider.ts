@@ -3,27 +3,49 @@
  *
  * Video generation provider for the Replicate API.
  *
- * Replicate hosts a wide range of open-source video models (Kling, CogVideo,
- * AnimateDiff, etc.) behind a uniform predictions API. This provider mirrors
- * the pattern established by {@link ReplicateImageProvider}: create a
- * prediction with `Prefer: wait`, then poll if it hasn't completed inline.
+ * Replicate hosts a wide range of video models (Kling, MiniMax Hailuo, Veo,
+ * Wan, etc.) behind a uniform predictions API. This provider mirrors the
+ * pattern established by {@link ReplicateImageProvider}: create a prediction
+ * with `Prefer: wait`, then poll if it hasn't completed inline.
  *
- * ## Supported models
+ * ## Models
  *
- * | Model ID                         | Description                           |
- * |----------------------------------|---------------------------------------|
- * | `klingai/kling-v1`               | Kling v1 — high quality open model    |
- * | `tencent/hunyuan-video`          | HunyuanVideo — Tencent's video model  |
- * | `minimax/video-01`               | MiniMax Video-01                      |
+ * The model is `owner/name` for an official model (for example
+ * `google/veo-3.1` or `kwaivgi/kling-v2.5-turbo-pro`, the default),
+ * `owner/name:version` or a bare 64-character version id. It is sent as the
+ * prediction's `version`, which takes all three forms
+ * (https://replicate.com/docs/reference/http#predictions.create).
+ *
+ * ## Model inputs
+ *
+ * | Request field      | Replicate input                                       |
+ * |--------------------|-------------------------------------------------------|
+ * | `prompt`           | `prompt`                                              |
+ * | `image`            | `start_image` (`kwaivgi/kling*`), `first_frame_image` (`minimax/*`), otherwise `image` |
+ * | `referenceImages`  | `reference_images`                                    |
+ * | `durationSec`      | `duration`                                            |
+ * | `aspectRatio`      | `aspect_ratio`                                        |
+ * | `resolution`       | `resolution`                                          |
+ * | `negativePrompt`   | `negative_prompt`                                     |
+ * | `seed`             | `seed`                                                |
+ *
+ * The image names come from each model's input schema
+ * (`GET https://api.replicate.com/v1/models/{owner}/{name}`): Kling takes
+ * `start_image`, MiniMax Hailuo and Video-01 take `first_frame_image`, and
+ * Veo 3.1 and Wan take `image`. Images given as URLs are sent as given and a
+ * `Buffer` as a `data:` URL; Replicate accepts both for file inputs.
+ * `providerOptions` (or their `replicate` entry) add other inputs, such as
+ * Veo's `last_frame` or MiniMax's `subject_reference`, and never replace the
+ * fields above.
  *
  * ## API flow (submit + sync wait + optional poll)
  *
- * 1. **Create prediction** — `POST ${baseURL}/predictions` with
- *    `Prefer: wait=60`. If the model finishes within 60 seconds the
- *    response already contains the output.
- * 2. **Poll** (if needed) — `GET prediction.urls.get` until `status` is
+ * 1. **Create prediction**: `POST ${baseURL}/predictions` with
+ *    `{ version, input }` and `Prefer: wait=60`. If the model finishes within
+ *    60 seconds the response already contains the output.
+ * 2. **Poll** (if needed): `GET prediction.urls.get` until `status` is
  *    `succeeded`, `failed`, or `canceled`.
- * 3. **Result** — `output` is the video URL (string or first array element).
+ * 3. **Result**: `output` is the video URL (string or first array element).
  *
  * ## Authentication
  *
@@ -35,6 +57,7 @@
 
 import type { IVideoGenerator } from '../IVideoGenerator.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
+import { addProviderInputs, getVideoProviderOptions, videoImageToUrl } from '../videoInputs.js';
 import type {
   VideoGenerateRequest,
   ImageToVideoRequest,
@@ -45,6 +68,9 @@ import type {
 // Configuration
 // ---------------------------------------------------------------------------
 
+/** Model used when neither the request nor the config names one. */
+const DEFAULT_MODEL = 'kwaivgi/kling-v2.5-turbo-pro';
+
 /**
  * Configuration for the Replicate video generation provider.
  *
@@ -52,7 +78,7 @@ import type {
  * ```typescript
  * const config: ReplicateVideoProviderConfig = {
  *   apiKey: process.env.REPLICATE_API_TOKEN!,
- *   defaultModelId: 'klingai/kling-v1',
+ *   defaultModelId: 'google/veo-3.1',
  * };
  * ```
  */
@@ -67,8 +93,9 @@ export interface ReplicateVideoProviderConfig {
   baseURL?: string;
 
   /**
-   * Default model to use when the request doesn't specify one.
-   * @default 'klingai/kling-v1'
+   * Default model to use when the request doesn't specify one: `owner/name`,
+   * `owner/name:version` or a version id.
+   * @default 'kwaivgi/kling-v2.5-turbo-pro'
    */
   defaultModelId?: string;
 
@@ -134,6 +161,24 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * The input name a model takes its source image under, from the model input
+ * schemas on Replicate: Kling (`kwaivgi/kling-v2.1`,
+ * `kwaivgi/kling-v2.5-turbo-pro`) takes `start_image`, MiniMax
+ * (`minimax/hailuo-02`, `minimax/video-01`) takes `first_frame_image`, and
+ * the others (`google/veo-3.1`, `wan-video/wan-2.2-i2v-fast`) take `image`.
+ *
+ * @param model - The model id, with or without a version.
+ * @returns The input field name.
+ * @internal
+ */
+function imageInputName(model: string): string {
+  const name = model.toLowerCase();
+  if (name.startsWith('kwaivgi/kling')) return 'start_image';
+  if (name.startsWith('minimax/')) return 'first_frame_image';
+  return 'image';
+}
+
+/**
  * Extract a video URL from the Replicate prediction output.
  *
  * Replicate returns output in different shapes depending on the model:
@@ -188,7 +233,7 @@ function extractVideoUrl(output: unknown): string | undefined {
  * await provider.initialize({ apiKey: process.env.REPLICATE_API_TOKEN! });
  *
  * const result = await provider.generateVideo({
- *   modelId: 'klingai/kling-v1',
+ *   modelId: 'google/veo-3.1',
  *   prompt: 'A butterfly emerging from a cocoon in slow motion',
  * });
  * console.log(result.videos[0].url);
@@ -233,7 +278,7 @@ export class ReplicateVideoProvider implements IVideoGenerator {
       defaultModelId:
         typeof config.defaultModelId === 'string' && config.defaultModelId.trim()
           ? config.defaultModelId.trim()
-          : 'klingai/kling-v1',
+          : DEFAULT_MODEL,
       pollIntervalMs:
         typeof config.pollIntervalMs === 'number' && config.pollIntervalMs > 0
           ? config.pollIntervalMs
@@ -270,27 +315,19 @@ export class ReplicateVideoProvider implements IVideoGenerator {
       throw new Error('Replicate video provider is not initialized. Call initialize() first.');
     }
 
-    const model = request.modelId || this.defaultModelId || 'klingai/kling-v1';
-
-    const input: Record<string, unknown> = {
-      prompt: request.prompt,
-    };
-
-    if (request.durationSec !== undefined) input.duration = request.durationSec;
-    if (request.aspectRatio) input.aspect_ratio = request.aspectRatio;
-    if (request.seed !== undefined) input.seed = request.seed;
-
-    const prediction = await this._runPrediction(model, input);
+    const model = request.modelId || this.defaultModelId || DEFAULT_MODEL;
+    const prediction = await this._runPrediction(model, this._buildInput(model, request));
     return this._buildResult(prediction, model);
   }
 
   /**
    * Generate a video from a source image using the Replicate predictions API.
    *
-   * The source image Buffer is converted to a base64 data URL and passed as
-   * the `image` input parameter.
+   * The image goes under the input name the model takes (`start_image`,
+   * `first_frame_image` or `image`): a URL as given, a `Buffer` as a `data:`
+   * URL with the MIME type read from its first bytes.
    *
-   * @param request - Generation parameters including the source image buffer.
+   * @param request - Generation parameters including the source image.
    * @returns The generated video result envelope.
    *
    * @throws {Error} If the provider is not initialized or the API fails.
@@ -300,20 +337,8 @@ export class ReplicateVideoProvider implements IVideoGenerator {
       throw new Error('Replicate video provider is not initialized. Call initialize() first.');
     }
 
-    const model = request.modelId || this.defaultModelId || 'klingai/kling-v1';
-
-    // Convert the image buffer to a base64 data URL.
-    const imageBase64 = `data:image/png;base64,${request.image.toString('base64')}`;
-
-    const input: Record<string, unknown> = {
-      prompt: request.prompt,
-      image: imageBase64,
-    };
-
-    if (request.durationSec !== undefined) input.duration = request.durationSec;
-    if (request.aspectRatio) input.aspect_ratio = request.aspectRatio;
-    if (request.seed !== undefined) input.seed = request.seed;
-
+    const model = request.modelId || this.defaultModelId || DEFAULT_MODEL;
+    const input = this._buildInput(model, request, videoImageToUrl(request.image));
     const prediction = await this._runPrediction(model, input);
     return this._buildResult(prediction, model);
   }
@@ -344,13 +369,44 @@ export class ReplicateVideoProvider implements IVideoGenerator {
   // -------------------------------------------------------------------------
 
   /**
+   * Build the model input from the request's fields and provider options.
+   *
+   * @param model - Model identifier.
+   * @param request - The text-to-video or image-to-video request.
+   * @param imageUrl - The source image as a URL, for image-to-video.
+   * @returns The prediction's `input`.
+   * @internal
+   */
+  private _buildInput(
+    model: string,
+    request: VideoGenerateRequest | ImageToVideoRequest,
+    imageUrl?: string,
+  ): Record<string, unknown> {
+    const input: Record<string, unknown> = {
+      prompt: request.prompt,
+    };
+
+    if (imageUrl !== undefined) input[imageInputName(model)] = imageUrl;
+    if (request.durationSec !== undefined) input.duration = request.durationSec;
+    if (request.aspectRatio) input.aspect_ratio = request.aspectRatio;
+    if (request.resolution) input.resolution = request.resolution;
+    if (request.negativePrompt) input.negative_prompt = request.negativePrompt;
+    if (request.seed !== undefined) input.seed = request.seed;
+    if (request.referenceImages?.length) {
+      input.reference_images = request.referenceImages.map(videoImageToUrl);
+    }
+    // Provider options add model inputs; they never replace the fields above.
+    return addProviderInputs(input, getVideoProviderOptions(this.providerId, request.providerOptions));
+  }
+
+  /**
    * Create a prediction and wait for it to complete.
    *
    * Uses `Prefer: wait=60` to get synchronous completion for fast models.
    * Falls back to polling if the prediction hasn't completed within the
    * wait window.
    *
-   * @param model - Model identifier (e.g. 'klingai/kling-v1').
+   * @param model - Model identifier (e.g. 'kwaivgi/kling-v2.5-turbo-pro').
    * @param input - Model input parameters.
    * @returns The completed prediction object.
    *
@@ -397,8 +453,10 @@ export class ReplicateVideoProvider implements IVideoGenerator {
     model: string,
     input: Record<string, unknown>,
   ): Promise<ReplicatePrediction> {
+    // predictions.create names the model in `version`: `owner/name` for an
+    // official model, `owner/name:version`, or a bare version id.
     const body: Record<string, unknown> = {
-      model,
+      version: model,
       input,
     };
 

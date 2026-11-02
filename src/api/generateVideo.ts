@@ -4,7 +4,9 @@
  *
  * Resolves a video generation provider from explicit `opts.provider`, or by
  * probing environment variables in priority order:
- * `RUNWAY_API_KEY` -> `REPLICATE_API_TOKEN` -> `FAL_API_KEY`.
+ * `RUNWAY_API_KEY` -> `REPLICATE_API_TOKEN` -> `FAL_API_KEY`. The `gemini`
+ * provider (`GEMINI_API_KEY`) runs only when `opts.provider` names it, so a
+ * Gemini key set for text never starts a video job on its own.
  *
  * When multiple video-capable providers are configured (via env vars), the
  * primary provider is wrapped in a {@link FallbackVideoProxy} so that a
@@ -22,7 +24,10 @@ import type {
   VideoResult,
   VideoProgressEvent,
   VideoAspectRatio,
+  VideoImageInput,
+  VideoProviderOptionBag,
 } from '../io/media/video/index.js';
+import { hasVideoImage } from '../io/media/video/videoInputs.js';
 import {
   resolveProviderChain,
   resolveProviderOrder,
@@ -45,6 +50,14 @@ const VIDEO_PROVIDER_ENV_MAP: Array<{ envKey: string; providerId: string }> = [
   { envKey: 'RUNWAY_API_KEY', providerId: 'runway' },
   { envKey: 'REPLICATE_API_TOKEN', providerId: 'replicate' },
   { envKey: 'FAL_API_KEY', providerId: 'fal' },
+];
+
+/**
+ * Providers that run only when the call names them, with the env var their
+ * key is read from. They never join auto-detection or a fallback chain.
+ */
+const EXPLICIT_VIDEO_PROVIDER_ENV_MAP: Array<{ envKey: string; providerId: string }> = [
+  { envKey: 'GEMINI_API_KEY', providerId: 'gemini' },
 ];
 
 /** Shared emitter for video fallback events (singleton per process). */
@@ -124,7 +137,9 @@ function detectFallbackVideoProviders(primaryProviderId: string): string[] {
  * @returns The environment variable name, or a generic fallback.
  */
 function envKeyForProvider(providerId: string): string {
-  const entry = VIDEO_PROVIDER_ENV_MAP.find((e) => e.providerId === providerId);
+  const entry = [...VIDEO_PROVIDER_ENV_MAP, ...EXPLICIT_VIDEO_PROVIDER_ENV_MAP].find(
+    (e) => e.providerId === providerId,
+  );
   return entry?.envKey ?? `${providerId.toUpperCase()}_API_KEY`;
 }
 
@@ -205,22 +220,37 @@ export interface GenerateVideoOptions {
   prompt: string;
 
   /**
-   * Source image for image-to-video generation. When provided, the
-   * request is dispatched to `imageToVideo()` instead of `generateVideo()`.
-   * Accepts a raw `Buffer`.
+   * Source image (the first frame) for image-to-video generation. When
+   * provided, the request is dispatched to `imageToVideo()` instead of
+   * `generateVideo()`.
+   *
+   * Accepts a `Buffer`, an `https://` URL or a `data:` URL. fal, Replicate and
+   * Runway receive a URL as given and a `Buffer` as a `data:` URL; the Gemini
+   * provider reads an `https://` URL itself and sends the bytes inline.
    */
-  image?: Buffer;
+  image?: VideoImageInput;
 
   /**
-   * Explicit provider identifier (e.g. `"runway"`, `"replicate"`, `"fal"`).
-   * When omitted, auto-detection from environment variables is used.
+   * Images of subjects or assets the video must keep consistent
+   * (reference-to-video), in the same forms as `image`. Sent as fal's
+   * `reference_image_urls`, Replicate's `reference_images`, or Gemini image
+   * parts after the source image.
+   */
+  referenceImages?: VideoImageInput[];
+
+  /**
+   * Explicit provider identifier (`"runway"`, `"replicate"`, `"fal"` or
+   * `"gemini"`). When omitted, auto-detection from environment variables is
+   * used; `"gemini"` runs only when named here.
    */
   provider?: string;
 
   /**
-   * Model identifier within the provider (e.g. `"gen3a_turbo"`,
-   * `"klingai/kling-v1"`). When omitted, the provider's default model
-   * is used.
+   * Model identifier within the provider (e.g.
+   * `"fal-ai/minimax/hailuo-02/standard/image-to-video"`, `"google/veo-3.1"`,
+   * `"gemini-omni-1.1-flash"`). When omitted, the provider picks its default,
+   * which on fal is a text-to-video or an image-to-video endpoint as the call
+   * needs.
    */
   model?: string;
 
@@ -230,7 +260,11 @@ export interface GenerateVideoOptions {
   /** Desired aspect ratio (e.g. `"16:9"`, `"9:16"`). */
   aspectRatio?: VideoAspectRatio;
 
-  /** Desired output resolution (e.g. `"1280x720"`, `"720p"`). */
+  /**
+   * Desired output resolution, in the model's own vocabulary (e.g. `"720p"`,
+   * `"1080p"`, or `"768P"` for MiniMax on fal). Sent as given, for
+   * text-to-video and image-to-video.
+   */
   resolution?: string;
 
   /** Negative prompt describing content to avoid. */
@@ -240,10 +274,24 @@ export interface GenerateVideoOptions {
   seed?: number;
 
   /**
-   * Maximum time in milliseconds to wait for generation to complete.
-   * Provider-dependent — not all providers honour client-side timeouts.
+   * Maximum time in milliseconds to wait for generation to complete, given to
+   * each provider at `initialize()`: the polling budget on fal, Replicate and
+   * Runway, and the deadline of every request on Gemini.
    */
   timeoutMs?: number;
+
+  /**
+   * Provider-specific model inputs the typed fields do not cover, such as
+   * fal's `end_image_url` or Replicate's `last_frame`.
+   *
+   * Key them by provider id (`{ fal: {...}, replicate: {...} }`) so each
+   * provider in a fallback chain receives only its own entry; a bag with no
+   * provider-id key goes whole to fal, Replicate and Gemini. They add inputs
+   * and never replace a field the call sets: to send a model-specific value
+   * for such a field, leave the typed field unset and put the value here.
+   * Runway sends no provider options.
+   */
+  providerOptions?: VideoProviderOptionBag | Record<string, unknown>;
 
   /**
    * Optional progress callback invoked during long-running generation.
@@ -276,7 +324,7 @@ export interface GenerateVideoOptions {
 export interface GenerateVideoResult {
   /** Model identifier reported by the provider. */
   model: string;
-  /** Provider identifier (e.g. `"runway"`, `"replicate"`, `"fal"`). */
+  /** Provider identifier (`"runway"`, `"replicate"`, `"fal"` or `"gemini"`). */
   provider: string;
   /** Unix timestamp (ms) when the video was created. */
   created: number;
@@ -297,8 +345,9 @@ export interface GenerateVideoResult {
  * auto-detection, initialises the matching video provider (optionally wrapped
  * in a fallback chain), and returns a normalised {@link GenerateVideoResult}.
  *
- * When `opts.image` is provided, the request is routed to
- * {@link IVideoGenerator.imageToVideo} for image-to-video generation.
+ * When `opts.image` is provided (a `Buffer` or a non-empty URL), the request
+ * is routed to {@link IVideoGenerator.imageToVideo} for image-to-video
+ * generation.
  * Otherwise, {@link IVideoGenerator.generateVideo} is used for text-to-video.
  *
  * @param opts - Video generation options.
@@ -318,6 +367,16 @@ export interface GenerateVideoResult {
  * const i2v = await generateVideo({
  *   prompt: 'Camera slowly zooms out',
  *   image: fs.readFileSync('input.png'),
+ * });
+ *
+ * // Image by URL, with resolution, reference images and a model input
+ * const clip = await generateVideo({
+ *   provider: 'fal',
+ *   model: 'fal-ai/minimax/hailuo-02/standard/image-to-video',
+ *   prompt: 'The lantern swings',
+ *   image: 'https://cdn.example.com/start.png',
+ *   resolution: '768P',
+ *   providerOptions: { fal: { end_image_url: 'https://cdn.example.com/end.png' } },
  * });
  * ```
  */
@@ -370,7 +429,7 @@ export async function generateVideo(opts: GenerateVideoOptions): Promise<Generat
         );
         if (providerChain.length === 0) {
           throw new Error(
-            'No video provider configured. Set RUNWAY_API_KEY, REPLICATE_API_TOKEN, or FAL_API_KEY.',
+            'No video provider configured. Set RUNWAY_API_KEY, REPLICATE_API_TOKEN, or FAL_API_KEY, or pass provider: "gemini" with GEMINI_API_KEY set.',
           );
         }
         providerId = providerChain[0];
@@ -397,38 +456,40 @@ export async function generateVideo(opts: GenerateVideoOptions): Promise<Generat
       // --- Dispatch to text-to-video or image-to-video ---
       let result: VideoResult;
 
-      if (opts.image) {
+      // The model goes to the primary only (it was also its defaultModelId at
+      // initialize()); with none named, each provider picks its own default
+      // for the capability. The timeout went to initialize() as well.
+      const modelId = provider instanceof FallbackVideoProxy ? undefined : opts.model;
+
+      if (hasVideoImage(opts.image)) {
         if (!provider.supports('image-to-video') || typeof provider.imageToVideo !== 'function') {
           throw new Error(`Provider "${providerId}" does not support image-to-video generation.`);
         }
         // Image-to-video
         result = await provider.imageToVideo({
-          modelId:
-            provider instanceof FallbackVideoProxy
-              ? undefined
-              : (opts.model ?? provider.defaultModelId ?? ''),
+          modelId,
           image: opts.image,
           prompt: opts.prompt,
           negativePrompt: opts.negativePrompt,
           durationSec: opts.durationSec,
           aspectRatio: opts.aspectRatio,
+          resolution: opts.resolution,
+          referenceImages: opts.referenceImages,
           seed: opts.seed,
-          providerOptions: opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : undefined,
+          providerOptions: opts.providerOptions,
         });
       } else {
         // Text-to-video
         result = await provider.generateVideo({
-          modelId:
-            provider instanceof FallbackVideoProxy
-              ? undefined
-              : (opts.model ?? provider.defaultModelId ?? ''),
+          modelId,
           prompt: opts.prompt,
           negativePrompt: opts.negativePrompt,
           durationSec: opts.durationSec,
           aspectRatio: opts.aspectRatio,
           resolution: opts.resolution,
+          referenceImages: opts.referenceImages,
           seed: opts.seed,
-          providerOptions: opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : undefined,
+          providerOptions: opts.providerOptions,
         });
       }
 

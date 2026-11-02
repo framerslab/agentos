@@ -32,6 +32,7 @@
 
 import type { IVideoGenerator } from '../IVideoGenerator.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
+import { videoImageToUrl } from '../videoInputs.js';
 import type {
   VideoGenerateRequest,
   ImageToVideoRequest,
@@ -255,7 +256,8 @@ export class RunwayVideoProvider implements IVideoGenerator {
   /**
    * Generate a video from a source image using the Runway image_to_video endpoint.
    *
-   * The source image Buffer is converted to a base64 data URL for the API.
+   * An image given as a URL is sent as given; a `Buffer` is sent as a
+   * `data:` URL with the MIME type read from its first bytes.
    *
    * @param request - Generation parameters including the source image buffer.
    * @returns The generated video result envelope.
@@ -269,12 +271,9 @@ export class RunwayVideoProvider implements IVideoGenerator {
 
     const model = request.modelId || this.defaultModelId || 'gen3a_turbo';
 
-    // Convert the image buffer to a base64 data URL for the Runway API.
-    const imageBase64 = `data:image/png;base64,${request.image.toString('base64')}`;
-
     const body: Record<string, unknown> = {
       model,
-      prompt_image: imageBase64,
+      prompt_image: videoImageToUrl(request.image),
     };
 
     if (request.prompt) body.prompt = request.prompt;

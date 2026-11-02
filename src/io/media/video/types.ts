@@ -4,7 +4,7 @@
  *
  * These types are consumed by {@link IVideoGenerator}, {@link IVideoAnalyzer},
  * and {@link FallbackVideoProxy} to provide a unified video pipeline across
- * multiple provider backends (Runway, Pika, Kling, Luma, etc.).
+ * multiple provider backends (Runway, Replicate, fal, Gemini, etc.).
  */
 
 // ---------------------------------------------------------------------------
@@ -16,7 +16,50 @@ export type VideoProviderId =
   | 'runway'
   | 'replicate'
   | 'fal'
+  | 'gemini'
   | (string & {});
+
+/**
+ * An image handed to a video model: raw bytes, an `https://` URL, or a
+ * `data:` URL.
+ *
+ * fal, Replicate and Runway receive a URL as given, so the provider fetches
+ * the file itself; a `Buffer` is sent to them as a `data:` URL whose MIME type
+ * is read from the file's first bytes (PNG, JPEG, GIF or WebP; PNG when none
+ * matches). The Gemini provider sends every image inline: it reads an
+ * `https://` URL itself, and passes a Gemini Files API URI as a `uri`.
+ */
+export type VideoImageInput = Buffer | string;
+
+/**
+ * Provider-specific model inputs for a video request.
+ *
+ * Keyed by provider id (`{ fal: {...}, replicate: {...} }`), each provider in
+ * a fallback chain receives only its own entry. A bag with no provider-id key
+ * goes whole to fal, Replicate and Gemini. The entries add model inputs and
+ * never replace a field the request sets (the prompt, the image, the
+ * duration, the resolution and the like): to send a model-specific value for
+ * such a field, leave the typed field unset and put the value here. The
+ * Runway provider sends no provider options.
+ */
+export interface VideoProviderOptionBag {
+  /** Model inputs for fal, merged into the queue submit body. */
+  fal?: Record<string, unknown>;
+  /** Model inputs for Replicate, merged into the prediction's `input`. */
+  replicate?: Record<string, unknown>;
+  /**
+   * Reserved for Runway. The Runway provider sends no provider options, so an
+   * entry here marks the bag as keyed by provider and is not sent.
+   */
+  runway?: Record<string, unknown>;
+  /**
+   * Fields for the Gemini Interactions API, merged into the request body;
+   * `response_format` and `generation_config` objects are merged key by key.
+   */
+  gemini?: Record<string, unknown>;
+  /** Entries for other registered providers. */
+  [providerId: string]: unknown;
+}
 
 /** Output container format for generated videos. */
 export type VideoOutputFormat = 'mp4' | 'webm' | 'gif';
@@ -82,8 +125,17 @@ export interface VideoGenerateRequest {
   durationSec?: number;
   /** Desired aspect ratio (e.g. `'16:9'`). */
   aspectRatio?: VideoAspectRatio;
-  /** Desired output resolution (e.g. `'1280x720'`). */
+  /**
+   * Desired output resolution, in the model's own vocabulary (for example
+   * `'720p'`, `'1080p'`, or fal's `'768P'` for MiniMax). Sent as given.
+   */
   resolution?: string;
+  /**
+   * Images of subjects or assets the video must keep consistent
+   * (reference-to-video). Sent as fal's `reference_image_urls`, Replicate's
+   * `reference_images`, or Gemini image parts.
+   */
+  referenceImages?: VideoImageInput[];
   /** Output container format. Defaults to `'mp4'`. */
   outputFormat?: VideoOutputFormat;
   /** Frames per second for the output video. */
@@ -94,8 +146,11 @@ export interface VideoGenerateRequest {
   n?: number;
   /** Identifier of the requesting user (for billing / rate limiting). */
   userId?: string;
-  /** Arbitrary provider-specific options. */
-  providerOptions?: Record<string, unknown>;
+  /**
+   * Provider-specific model inputs: a {@link VideoProviderOptionBag} keyed by
+   * provider id, or a flat object that fal, Replicate and Gemini receive whole.
+   */
+  providerOptions?: VideoProviderOptionBag | Record<string, unknown>;
 }
 
 /**
@@ -108,8 +163,11 @@ export interface VideoGenerateRequest {
 export interface ImageToVideoRequest {
   /** Model identifier to use for generation. */
   modelId?: string;
-  /** Source image as a raw `Buffer`. */
-  image: Buffer;
+  /**
+   * Source image (the first frame): raw bytes, an `https://` URL or a `data:`
+   * URL. See {@link VideoImageInput} for how each provider sends it.
+   */
+  image: VideoImageInput;
   /** Text prompt describing the desired motion / narrative. */
   prompt: string;
   /** Negative prompt describing content to avoid. */
@@ -118,6 +176,17 @@ export interface ImageToVideoRequest {
   durationSec?: number;
   /** Desired aspect ratio. */
   aspectRatio?: VideoAspectRatio;
+  /**
+   * Desired output resolution, in the model's own vocabulary (for example
+   * `'720p'`, `'1080p'`, or fal's `'768P'` for MiniMax). Sent as given.
+   */
+  resolution?: string;
+  /**
+   * Images of subjects or assets the video must keep consistent, besides the
+   * source image. Sent as fal's `reference_image_urls`, Replicate's
+   * `reference_images`, or Gemini image parts after the source image.
+   */
+  referenceImages?: VideoImageInput[];
   /** Output container format. Defaults to `'mp4'`. */
   outputFormat?: VideoOutputFormat;
   /** Frames per second for the output video. */
@@ -126,8 +195,11 @@ export interface ImageToVideoRequest {
   seed?: number;
   /** Identifier of the requesting user. */
   userId?: string;
-  /** Arbitrary provider-specific options. */
-  providerOptions?: Record<string, unknown>;
+  /**
+   * Provider-specific model inputs: a {@link VideoProviderOptionBag} keyed by
+   * provider id, or a flat object that fal, Replicate and Gemini receive whole.
+   */
+  providerOptions?: VideoProviderOptionBag | Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@
 
 import type { IVideoGenerator } from './IVideoGenerator.js';
 import { FalVideoProvider } from './providers/FalVideoProvider.js';
+import { GeminiVideoProvider } from './providers/GeminiVideoProvider.js';
 import { ReplicateVideoProvider } from './providers/ReplicateVideoProvider.js';
 import { RunwayVideoProvider } from './providers/RunwayVideoProvider.js';
 
@@ -21,6 +22,7 @@ export * from './IVideoGenerator.js';
 export * from './IVideoAnalyzer.js';
 export * from './FallbackVideoProxy.js';
 export * from './VideoAnalyzer.js';
+export { getVideoProviderOptions } from './videoInputs.js';
 
 // ---------------------------------------------------------------------------
 // Provider factory registry
@@ -32,20 +34,21 @@ export type VideoProviderFactory = () => IVideoGenerator;
 /**
  * Internal registry mapping provider IDs to provider constructors.
  *
- * Built-in providers (Runway, Replicate, Fal) are pre-registered here so the
- * public `createVideoProvider()` API remains synchronous and ESM-safe.
+ * Built-in providers (Runway, Replicate, Fal, Gemini) are pre-registered here
+ * so the public `createVideoProvider()` API remains synchronous and ESM-safe.
  */
 const videoProviderFactories = new Map<string, VideoProviderFactory>([
   ['runway', () => new RunwayVideoProvider()],
   ['replicate', () => new ReplicateVideoProvider()],
   ['fal', () => new FalVideoProvider()],
+  ['gemini', () => new GeminiVideoProvider()],
 ]);
 
 /**
  * Register a video provider factory for a given provider ID.
  *
  * Use this to add third-party or custom video providers at runtime.
- * Built-in providers (runway, replicate, fal) are pre-registered.
+ * Built-in providers (runway, replicate, fal, gemini) are pre-registered.
  *
  * @param providerId - Unique identifier for the provider (lowercased for matching).
  * @param factory - Factory function that creates a new uninitialised provider instance.
@@ -63,7 +66,7 @@ export function registerVideoProviderFactory(
  * Looks up the factory in the registry and returns a new uninitialised
  * provider. The caller must call `provider.initialize(config)` before use.
  *
- * @param providerId - Provider identifier (e.g. `"runway"`, `"replicate"`, `"fal"`).
+ * @param providerId - Provider identifier (e.g. `"runway"`, `"replicate"`, `"fal"`, `"gemini"`).
  * @returns A new uninitialised {@link IVideoGenerator} instance.
  * @throws {Error} When no factory is registered for the given provider ID.
  */
