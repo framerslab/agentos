@@ -387,12 +387,16 @@ export async function generateSFX(opts: GenerateSFXOptions): Promise<GenerateSFX
       }
       emitAudioProgress(opts.onProgress, 'processing', 25, `Generating SFX with ${providerId}.`);
 
+      // Only the caller's model is forwarded. A provider that serves both
+      // music and SFX reports its music model as `defaultModelId`, so passing
+      // that here would run the SFX request on the music model; with no model
+      // each provider picks its own SFX default.
       const result = await provider.generateSFX({
         prompt: opts.prompt,
         modelId:
           provider instanceof FallbackAudioProxy
             ? undefined
-            : (opts.model ?? provider.defaultModelId),
+            : opts.model,
         durationSec: opts.durationSec,
         outputFormat: opts.outputFormat,
         seed: opts.seed,

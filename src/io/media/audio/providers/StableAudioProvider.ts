@@ -4,19 +4,27 @@
  * Audio generation provider for the Stability AI Stable Audio API.
  *
  * Stable Audio generates both music and sound effects from text prompts
- * using the Stable Audio Open model. The API is synchronous: a single
- * POST request returns audio data directly (no queue or polling).
+ * through Stability's Stable Audio 2 text-to-audio endpoint. The endpoint is
+ * synchronous: a single POST returns the audio bytes (no queue or polling).
  *
  * ## Supported models
  *
- * | Model ID                   | Description                        |
- * |----------------------------|------------------------------------|
- * | `stable-audio-open-1.0`    | Stable Audio Open 1.0 — default    |
+ * | Model ID            | Description                                   |
+ * |---------------------|-----------------------------------------------|
+ * | `stable-audio-2.5`  | Stable Audio 2.5, up to 190 s; default        |
+ * | `stable-audio-2`    | Stable Audio 2.0, up to 190 s                 |
  *
  * ## API flow (synchronous)
  *
- * 1. **Generate** — `POST ${baseURL}/audio/generate` with prompt, duration,
- *    and output format. Returns audio data directly in the response body.
+ * 1. **Generate**: `POST ${baseURL}/audio/stable-audio-2/text-to-audio` with a
+ *    `multipart/form-data` body (`prompt`, `model`, `output_format`, and the
+ *    optional `duration`, `seed`, `steps`, `cfg_scale`) and `Accept: audio/*`.
+ *    The response body is the audio in the requested format (`mp3` or `wav`).
+ *
+ * Request fields are documented at
+ * https://docs.stability.ai/api-reference/stable-audio-2/text-to-audio.
+ * Primitive values in `providerOptions` (for example `steps` or `cfg_scale`)
+ * are appended to the form as-is.
  *
  * ## Authentication
  *
@@ -29,6 +37,9 @@ import type { IAudioGenerator } from '../IAudioGenerator.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
 import type { MusicGenerateRequest, SFXGenerateRequest, AudioResult } from '../types.js';
 
+/** Model used when neither the request nor the config names one. */
+const DEFAULT_MODEL_ID = 'stable-audio-2.5';
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -40,7 +51,7 @@ import type { MusicGenerateRequest, SFXGenerateRequest, AudioResult } from '../t
  * ```typescript
  * const config: StableAudioProviderConfig = {
  *   apiKey: process.env.STABILITY_API_KEY!,
- *   defaultModelId: 'stable-audio-open-1.0',
+ *   defaultModelId: 'stable-audio-2.5',
  * };
  * ```
  */
@@ -55,8 +66,9 @@ export interface StableAudioProviderConfig {
   baseURL?: string;
 
   /**
-   * Default model to use when the request doesn't specify one.
-   * @default 'stable-audio-open-1.0'
+   * Default model to use when the request doesn't specify one
+   * (`stable-audio-2.5` or `stable-audio-2`).
+   * @default 'stable-audio-2.5'
    */
   defaultModelId?: string;
 }
@@ -124,7 +136,7 @@ export class StableAudioProvider implements IAudioGenerator {
       defaultModelId:
         typeof config.defaultModelId === 'string' && config.defaultModelId.trim()
           ? config.defaultModelId.trim()
-          : 'stable-audio-open-1.0',
+          : DEFAULT_MODEL_ID,
     };
 
     this.defaultModelId = this._config.defaultModelId;
@@ -150,7 +162,7 @@ export class StableAudioProvider implements IAudioGenerator {
       throw new Error('Stable Audio provider is not initialized. Call initialize() first.');
     }
 
-    return this._generate(request.prompt, request.durationSec, request.modelId);
+    return this._generate(request);
   }
 
   /**
@@ -167,7 +179,7 @@ export class StableAudioProvider implements IAudioGenerator {
       throw new Error('Stable Audio provider is not initialized. Call initialize() first.');
     }
 
-    return this._generate(request.prompt, request.durationSec, request.modelId);
+    return this._generate(request);
   }
 
   // -------------------------------------------------------------------------
@@ -196,42 +208,47 @@ export class StableAudioProvider implements IAudioGenerator {
   // -------------------------------------------------------------------------
 
   /**
-   * Send a synchronous audio generation request to the Stability AI API.
+   * Send a synchronous request to the Stable Audio 2 text-to-audio endpoint.
    *
-   * The API returns audio data directly in the response body (no queue or
-   * polling required). The response is treated as a binary blob and converted
-   * to a base64-encoded string.
+   * The body is `multipart/form-data`; `fetch` sets the `Content-Type` header
+   * with its boundary, so none is set here. With `Accept: audio/*` the
+   * response body is the audio bytes, converted to base64 for the envelope.
    *
-   * @param prompt - Text description of the desired audio.
-   * @param durationSec - Desired duration in seconds.
-   * @param modelId - Optional model override.
+   * @param request - Music or SFX request (prompt, duration, model, format,
+   *   seed and provider options).
    * @returns Normalized audio result envelope.
    *
    * @throws {Error} If the HTTP request fails.
    * @internal
    */
   private async _generate(
-    prompt: string,
-    durationSec?: number,
-    modelId?: string,
+    request: MusicGenerateRequest | SFXGenerateRequest,
   ): Promise<AudioResult> {
-    const model = modelId || this.defaultModelId || 'stable-audio-open-1.0';
-    const url = `${this._config.baseURL}/audio/generate`;
+    const model = request.modelId || this.defaultModelId || DEFAULT_MODEL_ID;
+    const outputFormat = request.outputFormat === 'wav' ? 'wav' : 'mp3';
+    const durationSec = request.durationSec;
+    const url = `${this._config.baseURL}/audio/stable-audio-2/text-to-audio`;
 
-    const body: Record<string, unknown> = {
-      prompt,
-      output_format: 'mp3',
-    };
-
-    if (durationSec !== undefined) body.duration = durationSec;
+    const form = new FormData();
+    form.append('prompt', request.prompt);
+    form.append('model', model);
+    form.append('output_format', outputFormat);
+    if (durationSec !== undefined) form.append('duration', String(durationSec));
+    if (request.seed !== undefined) form.append('seed', String(request.seed));
+    for (const [key, value] of Object.entries(request.providerOptions ?? {})) {
+      if (form.has(key)) continue;
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        form.append(key, String(value));
+      }
+    }
 
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.keyPool.next()}`,
-        'Content-Type': 'application/json',
+        Accept: 'audio/*',
       },
-      body: JSON.stringify(body),
+      body: form,
     });
 
     if (!response.ok) {
@@ -249,7 +266,7 @@ export class StableAudioProvider implements IAudioGenerator {
       providerId: this.providerId,
       audio: [{
         base64,
-        mimeType: 'audio/mpeg',
+        mimeType: outputFormat === 'wav' ? 'audio/wav' : 'audio/mpeg',
         durationSec,
         providerMetadata: {},
       }],
