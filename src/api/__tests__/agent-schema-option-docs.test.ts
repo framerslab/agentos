@@ -138,6 +138,11 @@ describe('the agent() example scan', () => {
     expect(outputOffenders('guide.md', text)).toEqual(['guide.md: agent({ model, output })', 'guide.md: agent({ model, output })']);
   });
 
+  it('does not read a spread operand as a key', () => {
+    const text = '```ts\nagent({ ...output, model });\nagent({ ...defaults, output });\n```\n';
+    expect(outputOffenders('guide.md', text)).toEqual(['guide.md: agent({ output })']);
+  });
+
   it('passes examples that name responseSchema', () => {
     const text = [
       '```ts',
