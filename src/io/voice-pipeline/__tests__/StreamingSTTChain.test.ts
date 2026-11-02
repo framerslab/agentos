@@ -2,6 +2,11 @@ import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { StreamingSTTChain, type ProviderFailoverEvent } from '../providers/StreamingSTTChain.js';
 import { defaultCapabilities } from '../HealthyProvider.js';
+import { CircuitBreaker } from '../CircuitBreaker.js';
+import { AggregateVoiceError } from '../VoicePipelineError.js';
+import { SttConnectionAuthorizationError } from '../SttConnectionAuthorizationError.js';
+import { VoiceMetricsReporter, type VoiceMetricEvent } from '../VoiceMetricsReporter.js';
+import type { ProviderPolicy } from '../ProviderPolicy.js';
 import type {
   AudioFrame,
   AudioIdentity,
@@ -824,5 +829,406 @@ describe('StreamingSTTChain: a backup that fails as it takes over', () => {
     expect(b.flush).not.toHaveBeenCalled();
     expect(chain.currentProviderId).toBe('c');
     expect(errors).not.toHaveBeenCalled();
+  });
+
+  describe('the events of a backup that fails during a switch', () => {
+    /** The chain's failure events, as its hooks and its metrics report them. */
+    function reports() {
+      const metrics = new VoiceMetricsReporter();
+      const events: VoiceMetricEvent[] = [];
+      metrics.subscribe((event) => events.push(event));
+      return { metrics, events, onProviderFailed: vi.fn(), onProviderFailover: vi.fn() };
+    }
+    const named = (events: VoiceMetricEvent[], type: VoiceMetricEvent['type']): VoiceMetricEvent[] => events.filter((event) => event.type === type);
+
+    /** A hosted policy that permits the named providers and a mid-session switch among them. */
+    function allowlisted(ids: string[], over: Partial<ProviderPolicy> = {}): ProviderPolicy {
+      return {
+        mode: 'hosted',
+        fallback: 'allowlisted',
+        identity: { scopeId: 'scope-a', callId: 'call-a', turnId: 'turn-a', generation: { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 } },
+        purposes: ['stt'],
+        providers: ids.map((providerId) => ({ providerId, locality: 'remote' as const, purposes: ['stt' as const], priceVersion: `rate-${providerId}` })),
+        authorize: vi.fn(async () => {}),
+        onFallback: vi.fn(),
+        ...over,
+      };
+    }
+
+    /** What the facade reports, in order: each `'error'`, then `'close'`. */
+    function watched(facade: StreamingSTTSession) {
+      const errors: Error[] = [];
+      const closes = vi.fn();
+      facade.on('error', (error: Error) => errors.push(error));
+      facade.on('close', closes);
+      return { errors, closes };
+    }
+
+    it('reports a backup whose opening fails during a switch, as a failed opening at startup is reported', async () => {
+      const a = spySession();
+      const second = spyProvider('b', 20, spySession());
+      second.startSession.mockRejectedValue(new Error('401 unauthorized'));
+      const c = spySession();
+      const r = reports();
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt, spyProvider('c', 30, c).stt], { enableMidUtteranceFailover: true, ...r });
+      const facade = await chain.startSession();
+      const seen = watched(facade);
+      const frame = halfSecond();
+      await facade.pushAudio(frame);
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(r.onProviderFailover).toHaveBeenCalledOnce());
+      expect(r.onProviderFailover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'c' });
+      expect(r.onProviderFailed.mock.calls.map(([event]) => event)).toEqual([{ kind: 'stt', providerId: 'b', errorClass: 'auth', message: '401 unauthorized' }]);
+      expect(named(r.events, 'provider_failed')).toEqual([{ type: 'provider_failed', kind: 'stt', providerId: 'b', errorClass: 'auth', message: '401 unauthorized' }]);
+      expect(named(r.events, 'provider_unavailable')).toEqual([]);
+      expect(c.pushAudio).toHaveBeenCalledWith(frame);
+      expect(seen.errors).toEqual([]);
+    });
+
+    it.each([
+      ['reports an error', 'socket hang up'],
+      ['closes', 'provider closed'],
+      ['refuses a frame', 'socket closed'],
+    ] as const)('reports a backup that %s as it takes the replay, records it failed and closes it', async (how, message) => {
+      const a = spySession();
+      const b = spySession();
+      if (how === 'reports an error') {
+        b.pushAudio.mockImplementation(async () => {
+          b.emit('error', new Error('socket hang up'));
+        });
+      } else if (how === 'closes') {
+        b.pushAudio.mockImplementation(async () => {
+          b.emit('close');
+        });
+      } else b.pushAudio.mockRejectedValue(new Error('socket closed'));
+      const c = spySession();
+      const breaker = new CircuitBreaker({ failureThreshold: 1, windowMs: 60_000, cooldownMs: 60_000 });
+      const r = reports();
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, spyProvider('b', 20, b).stt, spyProvider('c', 30, c).stt], { breaker, enableMidUtteranceFailover: true, ...r });
+      const facade = await chain.startSession();
+      await facade.pushAudio(halfSecond());
+      a.emit('error', new Error('connection reset'));
+      await vi.waitFor(() => expect(r.onProviderFailover).toHaveBeenCalledOnce());
+      expect(r.onProviderFailover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'c' });
+      expect(r.onProviderFailed.mock.calls.map(([event]) => event)).toEqual([expect.objectContaining({ kind: 'stt', providerId: 'b', message })]);
+      expect(named(r.events, 'provider_failed')).toEqual([expect.objectContaining({ providerId: 'b', message })]);
+      expect(breaker.isAvailable('b')).toBe(false);
+      expect(b.close).toHaveBeenCalledOnce();
+    });
+
+    it('reports provider_unavailable and names every failure in the aggregate error when the backup refuses and none is left', async () => {
+      const a = spySession();
+      const second = spyProvider('b', 20, spySession());
+      second.startSession.mockRejectedValue(new Error('401 unauthorized'));
+      const r = reports();
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt], { enableMidUtteranceFailover: true, metrics: r.metrics });
+      const facade = await chain.startSession();
+      const seen = watched(facade);
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(seen.closes).toHaveBeenCalledOnce());
+      expect(seen.errors).toHaveLength(1);
+      const failure = seen.errors[0] as AggregateVoiceError;
+      expect(failure).toBeInstanceOf(AggregateVoiceError);
+      expect(failure.attempts.map((attempt) => [attempt.provider, attempt.errorClass])).toEqual([['a', 'network'], ['b', 'auth']]);
+      expect(failure.message).toContain('401 unauthorized');
+      expect(named(r.events, 'provider_unavailable')).toEqual([{ type: 'provider_unavailable', kind: 'stt', checkedProviders: ['a', 'b'] }]);
+    });
+
+    it('holds in the aggregate error a backup that failed to open and one that failed as it took the replay', async () => {
+      const a = spySession();
+      const second = spyProvider('b', 20, spySession());
+      second.startSession.mockRejectedValue(new Error('429 rate limit'));
+      const c = spySession();
+      c.pushAudio.mockRejectedValue(new Error('socket closed'));
+      const r = reports();
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt, spyProvider('c', 30, c).stt], { enableMidUtteranceFailover: true, metrics: r.metrics });
+      const facade = await chain.startSession();
+      const seen = watched(facade);
+      await facade.pushAudio(halfSecond());
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(seen.closes).toHaveBeenCalledOnce());
+      expect((seen.errors[0] as AggregateVoiceError).attempts.map((attempt) => [attempt.provider, attempt.message])).toEqual([
+        ['a', 'socket hang up'],
+        ['b', '429 rate limit'],
+        ['c', 'socket closed'],
+      ]);
+      expect(named(r.events, 'provider_failed').map((event) => (event as { providerId: string }).providerId)).toEqual(['b', 'c']);
+      expect(named(r.events, 'provider_unavailable')).toHaveLength(1);
+    });
+
+    it('reports provider_unavailable for a chain of one whose session fails', async () => {
+      const a = spySession();
+      const r = reports();
+      const facade = await new StreamingSTTChain([spyProvider('a', 10, a).stt], { enableMidUtteranceFailover: true, metrics: r.metrics }).startSession();
+      const seen = watched(facade);
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(seen.closes).toHaveBeenCalledOnce());
+      expect((seen.errors[0] as AggregateVoiceError).attempts.map((attempt) => attempt.provider)).toEqual(['a']);
+      expect(named(r.events, 'provider_unavailable')).toEqual([{ type: 'provider_unavailable', kind: 'stt', checkedProviders: ['a'] }]);
+    });
+
+    it('names two providers with the same id by their place in those events', async () => {
+      const a = spySession();
+      const second = spyProvider('moonshine-browser', 20, spySession());
+      second.startSession.mockRejectedValue(new Error('model failed to load'));
+      const r = reports();
+      const chain = new StreamingSTTChain([spyProvider('moonshine-browser', 10, a).stt, second.stt], { enableMidUtteranceFailover: true, metrics: r.metrics });
+      const facade = await chain.startSession();
+      const seen = watched(facade);
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(seen.closes).toHaveBeenCalledOnce());
+      expect(named(r.events, 'provider_failed')).toEqual([expect.objectContaining({ providerId: 'moonshine-browser#2' })]);
+      expect(named(r.events, 'provider_unavailable')).toEqual([{ type: 'provider_unavailable', kind: 'stt', checkedProviders: ['moonshine-browser#1', 'moonshine-browser#2'] }]);
+    });
+
+    it('carries no provider text in those events under a ProviderPolicy', async () => {
+      const a = spySession();
+      const second = spyProvider('b', 20, spySession());
+      second.startSession.mockRejectedValue(new Error('401 key sk-secret refused'));
+      const c = spySession();
+      c.pushAudio.mockRejectedValue(new Error('refused for key sk-secret'));
+      const d = spySession();
+      const r = reports();
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt, spyProvider('c', 30, c).stt, spyProvider('d', 40, d).stt], {
+        enableMidUtteranceFailover: true,
+        policy: allowlisted(['a', 'b', 'c', 'd']),
+        ...r,
+      });
+      const facade = await chain.startSession();
+      await facade.pushAudio(halfSecond());
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(r.onProviderFailover).toHaveBeenCalledOnce());
+      expect(r.onProviderFailed.mock.calls.map(([event]) => [event.providerId, event.message])).toEqual([
+        ['b', 'provider opening failed'],
+        ['c', 'provider opening failed'],
+      ]);
+      expect(named(r.events, 'provider_failed').map((event) => (event as { message: string }).message)).toEqual(['provider opening failed', 'provider opening failed']);
+    });
+
+    it('ends the facade with a refused authorization alone, with no aggregate error and no provider_unavailable, once an earlier backup was reported', async () => {
+      const a = spySession();
+      const second = spyProvider('b', 20, spySession());
+      second.startSession.mockRejectedValue(new Error('401 unauthorized'));
+      const third = spyProvider('c', 30, spySession());
+      const r = reports();
+      const authorize = vi.fn(async (opening: { to: string }): Promise<void> => {
+        if (opening.to === 'c') throw new Error('no hold');
+      });
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt, third.stt], {
+        enableMidUtteranceFailover: true,
+        policy: allowlisted(['a', 'b', 'c'], { authorize }),
+        ...r,
+      });
+      const facade = await chain.startSession();
+      const seen = watched(facade);
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(seen.closes).toHaveBeenCalledOnce());
+      expect(seen.errors.map((error) => [error.name, error.message])).toEqual([['Error', 'provider authorization refused']]);
+      expect(third.startSession).not.toHaveBeenCalled();
+      expect(r.onProviderFailed.mock.calls.map(([event]) => event.providerId)).toEqual(['b']);
+      expect(named(r.events, 'provider_unavailable')).toEqual([]);
+    });
+
+    it.each(['refuses to open', 'refuses a replayed frame'] as const)('ends the facade with a funding refusal alone when a backup %s, reports it as no failure and opens no other', async (how) => {
+      const a = spySession();
+      const b = spySession();
+      const second = spyProvider('b', 20, b);
+      const refusal = new SttConnectionAuthorizationError();
+      if (how === 'refuses to open') second.startSession.mockRejectedValue(refusal);
+      else b.pushAudio.mockRejectedValue(refusal);
+      const third = spyProvider('c', 30, spySession());
+      const breaker = new CircuitBreaker({ failureThreshold: 1, windowMs: 60_000, cooldownMs: 60_000 });
+      const r = reports();
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt, third.stt], { breaker, enableMidUtteranceFailover: true, ...r });
+      const facade = await chain.startSession();
+      const seen = watched(facade);
+      await facade.pushAudio(halfSecond());
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(seen.closes).toHaveBeenCalledOnce());
+      expect(seen.errors).toEqual([refusal]);
+      expect(third.startSession).not.toHaveBeenCalled();
+      expect(r.onProviderFailed).not.toHaveBeenCalled();
+      expect(named(r.events, 'provider_unavailable')).toEqual([]);
+      expect(breaker.isAvailable('b')).toBe(true);
+    });
+
+    it('ends the facade with a funding refusal alone when the session in use refuses a frame, and opens no backup', async () => {
+      const a = spySession();
+      const refusal = new SttConnectionAuthorizationError();
+      a.pushAudio.mockRejectedValue(refusal);
+      const second = spyProvider('b', 20, spySession());
+      const breaker = new CircuitBreaker({ failureThreshold: 1, windowMs: 60_000, cooldownMs: 60_000 });
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt], { breaker, enableMidUtteranceFailover: true });
+      const facade = await chain.startSession();
+      const seen = watched(facade);
+      await facade.pushAudio(halfSecond());
+      await vi.waitFor(() => expect(seen.closes).toHaveBeenCalledOnce());
+      expect(seen.errors).toEqual([refusal]);
+      expect(second.startSession).not.toHaveBeenCalled();
+      expect(breaker.isAvailable('a')).toBe(true);
+    });
+
+    it('reports no provider_unavailable when close() came while the last backup opened and its opening then fails', async () => {
+      const a = spySession();
+      const second = spyProvider('b', 20, spySession());
+      let refuse!: (error: Error) => void;
+      second.startSession.mockImplementation(() => new Promise<StreamingSTTSession>((_resolve, reject) => {
+        refuse = reject;
+      }));
+      const r = reports();
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt], { enableMidUtteranceFailover: true, ...r });
+      const facade = await chain.startSession();
+      const seen = watched(facade);
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(second.startSession).toHaveBeenCalledOnce());
+      facade.close();
+      refuse(new Error('socket hang up'));
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      // The opening did fail, and says so; the caller's close ended the session, so no provider is reported as what ended it.
+      expect(r.onProviderFailed.mock.calls.map(([event]) => event.providerId)).toEqual(['b']);
+      expect(named(r.events, 'provider_unavailable')).toEqual([]);
+      expect(seen.errors).toEqual([]);
+      expect(seen.closes).toHaveBeenCalledOnce();
+    });
+
+    it('goes on to the backup and keeps the failure when close() of the failed session throws', async () => {
+      const a = spySession();
+      a.close.mockImplementation(() => {
+        throw new Error('already closed');
+      });
+      const b = spySession();
+      const r = reports();
+      const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, spyProvider('b', 20, b).stt], { enableMidUtteranceFailover: true, ...r });
+      const facade = await chain.startSession();
+      const seen = watched(facade);
+      const frame = halfSecond();
+      await facade.pushAudio(frame);
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(r.onProviderFailover).toHaveBeenCalledOnce());
+      expect(r.onProviderFailover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b', reason: 'network' });
+      expect(b.pushAudio).toHaveBeenCalledWith(frame);
+      expect(seen.errors).toEqual([]);
+      expect(seen.closes).not.toHaveBeenCalled();
+    });
+
+    it('ends the facade on the failure, not on the throw, when close() of the failed session throws and no backup is left', async () => {
+      const a = spySession();
+      a.close.mockImplementation(() => {
+        throw new Error('already closed');
+      });
+      const facade = await new StreamingSTTChain([spyProvider('a', 10, a).stt], { enableMidUtteranceFailover: true }).startSession();
+      const seen = watched(facade);
+      a.emit('error', new Error('socket hang up'));
+      await vi.waitFor(() => expect(seen.closes).toHaveBeenCalledOnce());
+      expect((seen.errors[0] as AggregateVoiceError).attempts.map((attempt) => attempt.message)).toEqual(['socket hang up']);
+    });
+
+    describe('a host hook', () => {
+      it('goes on to the next backup when onProviderFailed throws during a switch', async () => {
+        const a = spySession();
+        const second = spyProvider('b', 20, spySession());
+        second.startSession.mockRejectedValue(new Error('401 unauthorized'));
+        const c = spySession();
+        const failover = vi.fn();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt, spyProvider('c', 30, c).stt], {
+            enableMidUtteranceFailover: true,
+            onProviderFailed: () => {
+              throw new Error('host bug');
+            },
+            onProviderFailover: failover,
+          });
+          const facade = await chain.startSession();
+          const seen = watched(facade);
+          const frame = halfSecond();
+          await facade.pushAudio(frame);
+          a.emit('error', new Error('socket hang up'));
+          await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+          expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'c' });
+          expect(c.pushAudio).toHaveBeenCalledWith(frame);
+          expect(seen.errors).toEqual([]);
+          expect(warn.mock.calls).toEqual([['[chain] onProviderFailed threw']]);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('keeps the backup that took the audio when onProviderFailover throws', async () => {
+        const a = spySession();
+        const b = spySession();
+        const r = reports();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, spyProvider('b', 20, b).stt], {
+            enableMidUtteranceFailover: true,
+            metrics: r.metrics,
+            onProviderFailover: () => {
+              throw new Error('host bug');
+            },
+          });
+          const facade = await chain.startSession();
+          const seen = watched(facade);
+          await facade.pushAudio(halfSecond());
+          a.emit('error', new Error('socket hang up'));
+          await vi.waitFor(() => expect(named(r.events, 'provider_failover')).toHaveLength(1));
+          await facade.flush();
+          expect(b.flush).toHaveBeenCalledOnce();
+          expect(chain.currentProviderId).toBe('b');
+          expect(seen.errors).toEqual([]);
+          expect(seen.closes).not.toHaveBeenCalled();
+          expect(warn.mock.calls).toEqual([['[chain] onProviderFailover threw']]);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it.each(['onProviderSelected', 'onProviderFailed'] as const)('opens the session when %s throws at startup, with the provider that opened and none recorded failed for the hook', async (hook) => {
+        const first = spyProvider('a', 10, spySession());
+        if (hook === 'onProviderFailed') first.startSession.mockRejectedValue(new Error('401 unauthorized'));
+        const breaker = new CircuitBreaker({ failureThreshold: 1, windowMs: 60_000, cooldownMs: 60_000 });
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const chain = new StreamingSTTChain([first.stt, spyProvider('b', 20, spySession()).stt], {
+            breaker,
+            [hook]: () => {
+              throw new Error('host bug');
+            },
+          });
+          await chain.startSession();
+          const opened = hook === 'onProviderFailed' ? 'b' : 'a';
+          expect(chain.currentProviderId).toBe(opened);
+          expect(breaker.isAvailable(opened)).toBe(true);
+          expect(warn.mock.calls).toEqual([[`[chain] ${hook} threw`]]);
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it.each(['to open', 'a replayed frame'] as const)('ends the switch when onProviderFailed closes the facade for a backup that refuses %s: no other opens, and it is closed once', async (how) => {
+        const a = spySession();
+        const b = spySession();
+        const second = spyProvider('b', 20, b);
+        if (how === 'to open') second.startSession.mockRejectedValue(new Error('401 unauthorized'));
+        else b.pushAudio.mockRejectedValue(new Error('socket closed'));
+        const third = spyProvider('c', 30, spySession());
+        const r = reports();
+        const failed = vi.fn((): void => {
+          facade.close();
+        });
+        const chain = new StreamingSTTChain([spyProvider('a', 10, a).stt, second.stt, third.stt], { enableMidUtteranceFailover: true, metrics: r.metrics, onProviderFailed: failed });
+        const facade = await chain.startSession();
+        const seen = watched(facade);
+        await facade.pushAudio(halfSecond());
+        a.emit('error', new Error('socket hang up'));
+        await vi.waitFor(() => expect(failed).toHaveBeenCalledOnce());
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        expect(third.startSession).not.toHaveBeenCalled();
+        expect(b.close).toHaveBeenCalledTimes(how === 'to open' ? 0 : 1);
+        expect(seen.errors).toEqual([]);
+        expect(seen.closes).toHaveBeenCalledOnce();
+        expect(named(r.events, 'provider_unavailable')).toEqual([]);
+      });
+    });
   });
 });

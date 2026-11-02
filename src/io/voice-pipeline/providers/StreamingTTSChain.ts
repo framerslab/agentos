@@ -566,6 +566,8 @@ export class StreamingTTSChain implements IStreamingTTS {
         this.metric({ type: 'provider_failover', ...event });
         return;
       }
+      // A close the caller asked for ended the session: its last backup's failure is reported, and nothing more is.
+      if (closed) return;
       this.metric({ type: 'provider_unavailable', kind: 'tts', checkedProviders: this.list.map((p) => p.providerId) });
       throw new AggregateVoiceError(failures);
     };

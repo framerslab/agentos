@@ -9,12 +9,15 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { VoicePipelineOrchestrator, type CallPipelineProfile } from '../VoicePipelineOrchestrator.js';
+import { StreamingTTSChain } from '../providers/StreamingTTSChain.js';
+import { defaultCapabilities, type HealthyProvider } from '../HealthyProvider.js';
 import { recordSessionEvents } from './session-event-log.js';
 import type {
   AudioIdentity,
   EncodedAudioChunk,
   IAudioEndpointDetector,
   IPlaybackTransport,
+  IStreamingTTS,
   IVadSession,
   ScopedAudioFrame,
   ScopedStreamingSTTSession,
@@ -25,10 +28,11 @@ import type {
 
 /**
  * A call over fake parts, its session started with a log of the orchestrator's session events taken from before;
- * `overrides` replace fields of the call profile, and `ttsWarning`, when given, is the `'warning'` each TTS session
- * emits as it is first written to.
+ * `overrides` replace fields of the call profile, `ttsWarning`, when given, is the `'warning'` each TTS session
+ * emits as it is first written to, and `wrapTts`, when given, makes the provider the call speaks through from the fake
+ * one.
  */
-async function call(overrides: Partial<CallPipelineProfile> = {}, ttsWarning?: Error) {
+async function call(overrides: Partial<CallPipelineProfile> = {}, ttsWarning?: Error, wrapTts: (inner: IStreamingTTS) => IStreamingTTS = (inner) => inner) {
   const initial: AudioIdentity = {
     scopeId: 'scope-a',
     callId: 'call-a',
@@ -106,7 +110,7 @@ async function call(overrides: Partial<CallPipelineProfile> = {}, ttsWarning?: E
   const log = recordSessionEvents(runtime);
   const session = await runtime.startSession(transport, agent, {
     streamingSTT: { providerId: 'fake', isStreaming: true, startSession: async () => stt },
-    streamingTTS: {
+    streamingTTS: wrapTts({
       providerId: 'fake',
       startSession: async (config?: StreamingTTSConfig) => {
         let sink: ((chunk: EncodedAudioChunk) => Promise<void>) | undefined;
@@ -140,7 +144,7 @@ async function call(overrides: Partial<CallPipelineProfile> = {}, ttsWarning?: E
         });
         return t;
       },
-    },
+    }),
     callProfile: profile,
   });
   const turn = () => endpoint.emit('turn_complete', { ...identity, transcript: 'hello', confidence: 1, durationMs: 20, reason: 'manual' });
@@ -515,6 +519,36 @@ describe('session events under a call profile', () => {
     await f.runtime.stopSession('done');
   });
 
+  it("reports a warning through a strict StreamingTTSChain's facade over a pull-contract session, without the provider's text, and adds the reply as interrupted", async () => {
+    const identity: AudioIdentity = { scopeId: 'scope-a', callId: 'call-a', turnId: 'turn-a', generation: { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 } };
+    const f = await call({}, new Error('deepgram aura ws rejected: key sk-secret'), (inner) =>
+      new StreamingTTSChain([Object.assign(inner, { priority: 10, capabilities: defaultCapabilities(), healthCheck: async () => ({ ok: true }) }) as IStreamingTTS & HealthyProvider], {
+        enableMidSynthesisFailover: true,
+        policy: {
+          mode: 'hosted',
+          fallback: 'none',
+          identity,
+          purposes: ['tts'],
+          providers: [{ providerId: 'fake', locality: 'remote', purposes: ['tts'], priceVersion: 'rate-fake' }],
+          authorize: vi.fn(async () => {}),
+          onFallback: vi.fn(),
+        },
+      })
+    );
+    const errors = vi.fn();
+    f.runtime.on('error', errors);
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+    expect(errors.mock.calls.map(([error]) => (error as Error).message)).toEqual(['provider warning']);
+    expect(f.log.filter((line) => line.startsWith('session_error'))).toEqual(['session_error tts true']);
+    expect(f.log.filter((line) => line.startsWith('item assistant'))).toEqual(['item assistant interrupted hello|']);
+    expect(f.transport.sendControl).toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_done', text: '' }));
+    expect(f.log).not.toContain('close done');
+    await f.runtime.stopSession('done');
+  });
+
   it('adds a reply whose playback was acknowledged as heard, though speech comes while its agent_done goes out', async () => {
     const f = await call();
     const cut: string[] = [];
@@ -819,6 +853,27 @@ describe('session events under a call profile', () => {
     await f.runtime.stopSession();
   });
 
+  it("adds a reply its TTS session warned of as interrupted, with the acknowledged segments alone as its played text and its agent_done's text, though its last chunk's playback was acknowledged", async () => {
+    const f = await callWithBoundaries(new Error('a segment had no completion within its wait'));
+    const errors = vi.fn();
+    f.runtime.on('error', errors);
+
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    // The first segment's last frame is acknowledged; the second comes with the warning, its completion unproven.
+    f.ack();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledTimes(2));
+    expect(errors).toHaveBeenCalledOnce();
+    f.ack();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+
+    expect(f.log.filter((line) => line.startsWith('session_error'))).toEqual(['session_error tts true']);
+    expect(f.log.filter((line) => line.startsWith('item assistant'))).toEqual(['item assistant interrupted Hello there. How are you|Hello there.']);
+    expect(f.transport.sendControl).toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_done', text: 'Hello there.' }));
+    expect(f.log).not.toContain('close done');
+    await f.runtime.stopSession('done');
+  });
+
   it("takes the interrupted item's played text as playback is cleared, so it and the room's agent line agree", async () => {
     const f = await callWithBoundaries();
     // What the room's agent line holds: the text of each chunk the transport acknowledged, cut as playback is
@@ -873,7 +928,7 @@ describe('session events under a call profile', () => {
    * A call over the same fake parts as `call()`, whose agent answers in two sentence segments and whose TTS session
    * ends each segment with one chunk that carries the segment's boundary, as the streaming adapters do.
    */
-  async function callWithBoundaries() {
+  async function callWithBoundaries(secondSegmentWarning?: Error) {
     const initial: AudioIdentity = {
       scopeId: 'scope-a',
       callId: 'call-a',
@@ -973,6 +1028,9 @@ describe('session events under a call profile', () => {
                 final: true,
               };
               offset += tokens.length;
+              // A segment whose completion never came: the session warns, and its frame carries no boundary.
+              const unproven = secondSegmentWarning !== undefined && segments === 2;
+              if (unproven) t.emit('warning', secondSegmentWarning);
               t.emit('usage', { ...scoped, providerId: 'fake', acceptedCharacters: tokens.length, generatedSamples: 320 * segments, sampleRate: 16000, status: 'running', final: false });
               await sink!({
                 scopeId: scoped.scopeId,
@@ -984,7 +1042,7 @@ describe('session events under a call profile', () => {
                 durationMs: 20,
                 text: tokens,
                 generation: { ...scoped.generation },
-                textBoundary,
+                ...(unproven ? {} : { textBoundary }),
               });
             },
             async flush() {

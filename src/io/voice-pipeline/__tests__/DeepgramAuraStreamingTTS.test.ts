@@ -1218,6 +1218,53 @@ describe('DeepgramAuraStreamingTTS', () => {
     }
   });
 
+  it("reports nothing more when Deepgram closes the socket after a reply whose last segment timed out has warned, with no next text, and the session stays open for the next reply", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const errors = vi.fn();
+      const closes = vi.fn();
+      const warnings = vi.fn();
+      session.on('error', errors);
+      session.on('close', closes);
+      session.on('warning', warnings);
+      ws.send.mockClear();
+
+      session.pushTokens('Hello there.');
+      const first = session.flush();
+      frame(ws, 1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await first;
+      expect(warnings).toHaveBeenCalledOnce();
+      // The close comes before any next text: the warning already told the reply's loss, so the close adds nothing.
+      (ws as unknown as { readyState: number }).readyState = 3;
+      ws.emit('close', 1011, Buffer.from('NET-0001'));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(warnings).toHaveBeenCalledOnce();
+      expect(warn).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+      expect(closes).not.toHaveBeenCalled();
+
+      session.pushTokens('Next one. ');
+      const second = session.flush();
+      let fresh!: MockSocket;
+      await vi.waitFor(() => {
+        fresh = socketOf(session);
+        expect(fresh).toBeTruthy();
+        expect(fresh).not.toBe(ws);
+        expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
+      });
+      frame(fresh, 2);
+      control(fresh, { type: 'Flushed', sequence_id: 0 });
+      await second;
+      expect(warnings).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("emits no flush_complete for a reply whose last segment timed out when a listener of its warning cancels or closes the session", async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     for (const cut of ['cancel', 'close'] as const) {
@@ -1847,5 +1894,66 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(heard()).toEqual([9]);
     expect(items).toEqual([{ role: 'assistant', text: 'One. Two.', playedText: 'One. Two.', interrupted: false }]);
     expect(errors).toEqual([]);
+  });
+
+  it("adds a reply whose last segment timed out after one frame as unheard, through a StreamingTTSChain's failover facade and a session without a call profile, with no text in its agent_done", async () => {
+    const transport = Object.assign(new EventEmitter(), {
+      id: 'transport-1',
+      state: 'open' as const,
+      sendAudio: vi.fn(async (_chunk: EncodedAudioChunk) => undefined),
+      sendControl: vi.fn(async (_message: unknown) => undefined),
+      close: vi.fn(),
+    });
+    const stt = Object.assign(new EventEmitter(), { pushAudio: vi.fn(), flush: vi.fn(async () => undefined), close: vi.fn() });
+    const endpoint = Object.assign(new EventEmitter(), { mode: 'heuristic' as const, pushVadEvent: vi.fn(), pushTranscript: vi.fn(), reset: vi.fn() });
+    const agent = {
+      sendText: vi.fn(() =>
+        (async function* () {
+          yield 'One.';
+        })()
+      ),
+      abort: vi.fn(),
+    };
+    // The provider's own session, which the chain's facade wraps.
+    let session!: StreamingTTSSession;
+    vi.spyOn(tts, 'startSession').mockImplementation(async (config?: StreamingTTSConfig) => {
+      session = await DeepgramAuraStreamingTTS.prototype.startSession.call(tts, config);
+      return session;
+    });
+    const chain = new StreamingTTSChain([tts], { enableMidSynthesisFailover: true });
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: chain.providerId, format: 'pcm' });
+    const items: unknown[] = [];
+    const sessionErrors: Array<{ recoverable: boolean; source: string }> = [];
+    const errors: Error[] = [];
+    orchestrator.on('conversation_item_added', (event: { item: { role: string } }) => {
+      if (event.item.role === 'assistant') items.push(event.item);
+    });
+    orchestrator.on('session_error', (event: { recoverable: boolean; source: string }) => sessionErrors.push({ recoverable: event.recoverable, source: event.source }));
+    orchestrator.on('error', (error: Error) => errors.push(error));
+    await orchestrator.startSession(transport as unknown as IStreamTransport, agent, {
+      streamingSTT: { providerId: 'fake-stt', isStreaming: true, startSession: async () => stt as unknown as StreamingSTTSession },
+      streamingTTS: chain,
+      endpointDetector: endpoint as unknown as IEndpointDetector,
+      bargeinHandler: { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) },
+    });
+    const ws = socketOf(session);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+    try {
+      endpoint.emit('turn_complete', { transcript: 'Where is my order?', confidence: 0.9, durationMs: 800, reason: 'silence_timeout' });
+      await vi.waitFor(() => expect(sent(ws)).toEqual([{ type: 'Speak', text: 'One.' }, { type: 'Flush' }]));
+      frame(ws, 1);
+      // The reply's one segment gets no Flushed within its wait: the flush completes, with a warning before it.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.waitFor(() => expect(items).toHaveLength(1));
+      await vi.waitFor(() => expect(orchestrator.state).toBe('listening'));
+    } finally {
+      await orchestrator.stopSession('done');
+    }
+    expect(items).toEqual([{ role: 'assistant', text: 'One.', playedText: '', interrupted: true }]);
+    const done = transport.sendControl.mock.calls.map(([message]) => message as { type: string; text?: string }).filter((message) => message.type === 'agent_done');
+    expect(done.map((message) => message.text)).toEqual(['']);
+    expect(sessionErrors).toEqual([{ recoverable: true, source: 'tts' }]);
+    expect(errors.map((error) => error.message)).toEqual([expect.stringContaining("the reply's last segment had no Flushed within its wait")]);
   });
 });
