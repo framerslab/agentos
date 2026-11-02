@@ -31,7 +31,9 @@
  *    request also ends `COMPLETED`, with an `error` field, which is raised.
  * 3. **Fetch**: `GET response_url` returns the model output.
  *
- * When the submit response omits the URLs they are built from the app path
+ * When `baseURL` is on another origin than the URLs fal returns (a gateway),
+ * their paths are moved onto `baseURL`. When the submit response omits the
+ * URLs they are built from the app path
  * (the first two segments of the model id):
  * `${baseURL}/${owner}/${app}/requests/${request_id}[/status]`. Queue
  * reference: https://fal.ai/docs/api-reference/inference-api/queue/submit.md.
@@ -459,9 +461,29 @@ export class FalAudioProvider implements IAudioGenerator {
 
     return {
       requestId: data.request_id,
-      statusUrl: data.status_url || `${requestBase}/status`,
-      responseUrl: data.response_url || requestBase,
+      statusUrl: this._onBaseURL(data.status_url) ?? `${requestBase}/status`,
+      responseUrl: this._onBaseURL(data.response_url) ?? requestBase,
     };
+  }
+
+  /**
+   * Keep a queue URL on the configured base URL. fal answers with its own
+   * host; when `baseURL` points at a gateway on another origin, the URL's path
+   * is moved onto `baseURL` so the polls and the result fetch go through it.
+   *
+   * @param url - A URL from the submit response.
+   * @returns The URL to request, or `undefined` when none was given.
+   * @internal
+   */
+  private _onBaseURL(url: string | null | undefined): string | undefined {
+    if (!url) return undefined;
+    try {
+      const target = new URL(url);
+      if (target.origin === new URL(this._config.baseURL).origin) return url;
+      return `${this._config.baseURL.replace(/\/+$/, '')}${target.pathname}${target.search}`;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
