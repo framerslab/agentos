@@ -474,6 +474,26 @@ describe('GeminiVideoProvider', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('refuses a background interaction before it fetches any image', async () => {
+    let connected = 0;
+    const connector: EgressConnector = async () => {
+      connected += 1;
+      return answer(200, { 'content-type': 'image/jpeg' }, JPEG_BYTES);
+    };
+    await provider.initialize({ apiKey: 'gk-test', imageEgress: { lookup: resolvesTo(PUBLIC_V4), connector } });
+
+    await expect(
+      provider.imageToVideo({
+        prompt: 'p',
+        image: 'https://cdn.example.com/start.jpg',
+        referenceImages: ['https://cdn.example.com/ref.jpg'],
+        providerOptions: { gemini: { background: true } },
+      }),
+    ).rejects.toThrow(/does not run background interactions/);
+    expect(connected).toBe(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('runs a configured model', async () => {
     await provider.initialize({ apiKey: 'gk-test', defaultModelId: 'gemini-omni-flash-next' });
     fetchSpy.mockResolvedValueOnce(
@@ -579,6 +599,25 @@ describe('GeminiVideoProvider', () => {
     await expect(fresh.initialize({ apiKey: 'gk-test', timeoutMs: 3_000_000_000 })).rejects.toThrow(RangeError);
     await expect(fresh.initialize({ apiKey: 'gk-test', timeoutMs: Number.POSITIVE_INFINITY })).rejects.toThrow(RangeError);
     await expect(fresh.initialize({ apiKey: 'gk-test', timeoutMs: 2_147_483_647 })).resolves.toBeUndefined();
+  });
+
+  it('refuses a maxImageBytes that is not finite at initialize', async () => {
+    const fresh = createVideoProvider('gemini');
+    // An infinite budget would read an image URL without a byte bound.
+    await expect(
+      fresh.initialize({ apiKey: 'gk-test', maxImageBytes: Number.POSITIVE_INFINITY }),
+    ).rejects.toThrow(RangeError);
+    await expect(fresh.initialize({ apiKey: 'gk-test', maxImageBytes: 1024 })).resolves.toBeUndefined();
+  });
+
+  it('refuses a pollIntervalMs past the longest timer delay at initialize', async () => {
+    const fresh = createVideoProvider('gemini');
+    // Node fires a longer timer after 1 ms, which would poll the Files API without a pause.
+    await expect(fresh.initialize({ apiKey: 'gk-test', pollIntervalMs: 3_000_000_000 })).rejects.toThrow(RangeError);
+    await expect(
+      fresh.initialize({ apiKey: 'gk-test', pollIntervalMs: Number.POSITIVE_INFINITY }),
+    ).rejects.toThrow(RangeError);
+    await expect(fresh.initialize({ apiKey: 'gk-test', pollIntervalMs: 2_147_483_647 })).resolves.toBeUndefined();
   });
 
   it('requires an API key', async () => {
