@@ -327,6 +327,20 @@ describe('GeminiVideoProvider', () => {
     });
   });
 
+  it('reads a data: URL whatever the case of its scheme', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }])),
+    );
+
+    await provider.generateVideo({ prompt: 'p', referenceImages: ['DATA:image/webp;base64,UklGRgAAAABXRUJQ'] });
+
+    expect(JSON.parse(interactionCall()[1].body).input[0]).toEqual({
+      type: 'image',
+      data: 'UklGRgAAAABXRUJQ',
+      mime_type: 'image/webp',
+    });
+  });
+
   it('decodes a data: URL image that is not base64 encoded', async () => {
     fetchSpy.mockResolvedValueOnce(
       jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }])),
