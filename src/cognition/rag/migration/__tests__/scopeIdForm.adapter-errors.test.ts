@@ -4,7 +4,8 @@
  * database refuses (here a trigger, as a locked file or a dropped connection would) fails the call, so the migration
  * reports it rather than copy plain ids under the record; a target with no `brain_meta` table holds no record, and
  * its clear passes. A Qdrant sidecar's read that fails for another reason than a missing `brain_meta` stops the
- * handshake; a missing table reads as no brain.
+ * handshake, whether it names the brains or lists them; a missing table reads as no brain. The reads every SQLite and
+ * PostgreSQL adapter runs (a brain's record and rows, the list of brains a store holds) fail the same way.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -14,6 +15,7 @@ import Database from 'better-sqlite3';
 import { QdrantTargetAdapter } from '../adapters/QdrantTargetAdapter.js';
 import { SqliteTargetAdapter } from '../adapters/SqliteTargetAdapter.js';
 import { sidecarScopeIdForms } from '../adapters/sidecarScopeIdForms.js';
+import { ABSENT_BRAIN, readBrainScopeIdForm, readScopeIdForms, type ScopeIdFormReader } from '../../../memory/retrieval/store/scopeIdForm.js';
 import type { IMigrationTarget } from '../types.js';
 
 const dirs: string[] = [];
@@ -80,11 +82,53 @@ describe("a Qdrant sidecar's brains", () => {
     };
     const failing = { prepare: () => ({ get: busy, all: busy }) } as unknown as Database.Database;
     await expect(sidecarScopeIdForms(failing, ['b'])).rejects.toThrow(/database is locked/);
+    // A Qdrant source lists the brains its sidecar names: a list that fails stops the handshake too.
+    await expect(sidecarScopeIdForms(failing)).rejects.toThrow(/database is locked/);
 
     const empty = tempPath('empty.sqlite');
     const db = new Database(empty);
     try {
       expect(await sidecarScopeIdForms(db, ['b'])).toEqual(new Map([['b', { encoded: false, rows: false, reserved: false }]]));
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("the scope-id form reads of a SQLite or PostgreSQL store", () => {
+  /** A reader whose statements fail as a locked file or a dropped connection does, except those `passes` lets through. */
+  const failingReader = (passes: (sql: string) => boolean = () => false): ScopeIdFormReader => {
+    const fail = (): never => {
+      throw Object.assign(new Error('Connection terminated unexpectedly'), { code: '57P01' });
+    };
+    return {
+      get: async <T>(sql: string): Promise<T | undefined> => (passes(sql) ? undefined : fail()),
+      all: async <T>(sql: string): Promise<T[]> => (passes(sql) ? [] : fail()),
+    };
+  };
+
+  it("fail on a brain's record or rows that cannot be read, rather than read as a brain without the record", async () => {
+    await expect(readBrainScopeIdForm(failingReader(), 'b')).rejects.toThrow(/Connection terminated/);
+    // The record reads, and the rows do not.
+    await expect(readBrainScopeIdForm(failingReader((sql) => sql.includes('brain_meta')), 'b')).rejects.toThrow(/Connection terminated/);
+    await expect(readScopeIdForms(failingReader(), ['b'])).rejects.toThrow(/Connection terminated/);
+  });
+
+  it('fail on a list of the brains a store holds that cannot be read, rather than list none', async () => {
+    await expect(readScopeIdForms(failingReader())).rejects.toThrow(/Connection terminated/);
+  });
+
+  it('read a store without the tables, or from before brain ids, as holding no brain', async () => {
+    const empty = tempPath('empty.sqlite');
+    const db = new Database(empty);
+    db.exec('CREATE TABLE memory_traces (id TEXT PRIMARY KEY, scope TEXT, content TEXT)');
+    const reader: ScopeIdFormReader = {
+      get: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).get(...params) as T | undefined,
+      all: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).all(...params) as T[],
+    };
+    try {
+      expect(await readScopeIdForms(reader)).toEqual(new Map());
+      expect(await readBrainScopeIdForm(reader, 'b')).toEqual(ABSENT_BRAIN);
     } finally {
       db.close();
     }
