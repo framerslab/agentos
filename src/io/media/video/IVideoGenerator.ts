@@ -63,6 +63,9 @@ export interface IVideoGenerator {
   /**
    * Generate a video from a source image and a motion prompt.
    *
+   * `request.image` is a `Buffer` or a URL string (`https://` or `data:`);
+   * see `VideoImageInput` in `types.ts`.
+   *
    * This method is optional — providers that do not support image-to-video
    * should either omit it or have {@link supports} return `false` for
    * `'image-to-video'`.

@@ -120,7 +120,7 @@ The variable names Anthropic alone, so a product that also holds a list of OpenA
 - **Speech STT:** OpenAI Whisper, Deepgram, AssemblyAI
 - **Voice Pipeline:** OpenAI batch TTS, Realtime TTS and Realtime transcription STT, ElevenLabs batch and streaming TTS and streaming STT, Cartesia batch and streaming TTS, Hume batch and streaming TTS, Deepgram Aura batch and streaming TTS and Deepgram streaming STT
 - **Image:** OpenAI, Stability, Flux, Fal, Replicate, OpenRouter
-- **Video:** Fal, Replicate, Runway
+- **Video:** Fal, Replicate, Runway, Gemini
 - **Audio:** ElevenLabs SFX, Suno, Udio, Stable Audio, Fal, Replicate
 - **Segmentation:** Replicate
 - **Web Search:** Serper, Tavily, Brave, Firecrawl

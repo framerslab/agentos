@@ -233,6 +233,27 @@ describe('RunwayVideoProvider', () => {
     expect(body.ratio).toBe('9:16');
   });
 
+  it('should send an image given as a URL as is', async () => {
+    await provider.initialize({ apiKey: 'key', pollIntervalMs: 1 });
+
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse({ id: 'task-url' }))
+      .mockResolvedValueOnce(mockResponse({
+        id: 'task-url',
+        status: 'SUCCEEDED',
+        output: ['https://runway.com/i2v.mp4'],
+      }));
+
+    await provider.imageToVideo({
+      modelId: 'gen3a_turbo',
+      prompt: 'animate this',
+      image: 'https://cdn.example.com/still.jpg',
+    } as any);
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.prompt_image).toBe('https://cdn.example.com/still.jpg');
+  });
+
   it('should throw when imageToVideo called while not initialized', async () => {
     const imageBuffer = Buffer.from('fake-image-data');
     await expect(

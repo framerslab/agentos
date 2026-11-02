@@ -420,6 +420,40 @@ console.log(result.provider);
 console.log(result.videos[0]?.url);
 ```
 
+`image` routes the call to image-to-video and takes a `Buffer`, an `https://` URL or a `data:` URL. `resolution` and `referenceImages` go to text-to-video and image-to-video alike; `resolution` is sent in the model's own vocabulary (`720p`, `1080p`, or `512P` and `768P` for MiniMax on fal). `providerOptions` carry the model inputs the typed fields do not cover:
+
+```ts
+const clip = await generateVideo({
+  provider: 'fal',
+  model: 'fal-ai/minimax/hailuo-02/standard/image-to-video',
+  prompt: 'The lantern swings in the wind',
+  image: 'https://cdn.example.com/lantern.png',
+  resolution: '768P',
+  providerOptions: {
+    fal: { end_image_url: 'https://cdn.example.com/lantern-end.png', prompt_optimizer: false },
+    // Used when Replicate runs as a fallback, on its default Kling 2.5 Turbo Pro.
+    replicate: { end_image: 'https://cdn.example.com/lantern-end.png' },
+  },
+});
+```
+
+Key `providerOptions` by provider id so each provider in a fallback chain receives only its own entry (an id added with `registerVideoProviderFactory()` keys a bag as the built-in ids do); a bag with no provider-id key goes whole to fal, Replicate and Gemini. They add inputs and never replace a field the call sets, so to send a model-specific value for such a field, leave the typed field unset and put the value there. Runway sends the prompt, `duration`, `ratio` (from `aspectRatio`) and the source image; it sends no `resolution`, reference images or provider options. A custom provider registered with `registerVideoProviderFactory()` receives `image` as the caller passed it, a `Buffer` or a string, and `videoImageToUrl()` turns either into a URL. `timeoutMs` goes to each provider at `initialize()`: the polling budget on fal, Replicate and Runway, and the deadline of every request on Gemini, which rounds a fractional value up to whole milliseconds and refuses one past 2147483647, the longest timer Node keeps.
+
+### Built-in Video Providers
+
+| Provider    | Default model                                                                        | API key env var       | Image input                                                        |
+| ----------- | ------------------------------------------------------------------------------------ | --------------------- | ------------------------------------------------------------------ |
+| `runway`    | `gen3a_turbo`                                                                        | `RUNWAY_API_KEY`      | `prompt_image`                                                     |
+| `replicate` | `kwaivgi/kling-v2.5-turbo-pro`                                                       | `REPLICATE_API_TOKEN` | `start_image` (Kling), `first_frame_image` (MiniMax), else `image` |
+| `fal`       | `fal-ai/kling-video/v2.5-turbo/pro/text-to-video` (its `image-to-video` for an image) | `FAL_API_KEY`         | `image_url`                                                        |
+| `gemini`    | `gemini-omni-1.1-flash`                                                              | `GEMINI_API_KEY`      | an inline image part                                               |
+
+With no `provider`, AgentOS picks the first of `RUNWAY_API_KEY`, `REPLICATE_API_TOKEN` and `FAL_API_KEY` that is set and keeps the others as fallbacks. `gemini` runs only when `provider: 'gemini'` names it, so a Gemini key set for text never starts a video job.
+
+- **fal** sends the image and `referenceImages` as `image_url` and `reference_image_urls` (a URL as given, a `Buffer` as a `data:` URL), plus `resolution`, `negative_prompt`, `aspect_ratio` and `seed`. Kling and MiniMax endpoints take `duration` as a string (`"5"`, `"10"`; `"6"`, `"10"`), and the provider sends it that way. It polls the `status_url` and fetches the `response_url` fal returns, and raises a request that ends `COMPLETED` with an `error`.
+- **Replicate** posts `{ version: model, input }`, where `model` is `owner/name`, `owner/name:version` or a version id. It sends `referenceImages` as `reference_images`, plus `resolution`, `negative_prompt`, `duration`, `aspect_ratio` and `seed`. A bare version id names no model family, so its image goes as `image` unless `providerOptions: { replicate: { imageInputName: 'start_image' } }` names the field; `imageInputName` itself is not sent.
+- **Gemini** runs Gemini Omni Flash on the Interactions API (`POST /v1beta/interactions`, key in the `x-goog-api-key` header). The source image, then the reference images, then the prompt go as input parts; `aspectRatio` (`16:9`, `9:16`) and `resolution` (`360p`, `720p`, `1080p`, `4k`) go in `response_format`. It fetches an image URL itself through the checked egress path (`https` on port 443 to a name whose every address is public, the connection pinned to the checked address, each of up to 3 redirects checked the same way, 20 MiB read across a call's images, redirect bodies included), sends the bytes inline without the API key, decodes a base64 or percent-encoded `data:` URL (counted against the same bound), and sends a Files API URI as a `uri` part. The provider's own `imageEgress: { profile: 'local' }` allows `http` and private addresses for a developer's machine, and `maxImageBytes` changes the bound (a value past `Number.MAX_SAFE_INTEGER`, `Infinity` included, is refused). It returns the video as base64; with `providerOptions: { gemini: { response_format: { delivery: 'uri' } } }`, which the Omni guide recommends for videos over 4 MB, it polls the Files API file until it is `ACTIVE`, downloads it with the key, and returns the bytes as base64 with the URI in `providerMetadata.fileUri` ([URI delivery](https://ai.google.dev/gemini-api/docs/omni#retrieving-videos-with-an-uri)). `providerOptions.gemini.background: true` is refused before any image is fetched, since the provider does not poll a background interaction. `pollIntervalMs` sets the pause between Files API polls and, like `timeoutMs`, is refused past 2147483647. Google shut down the Veo models in the Gemini API (`veo-3.0-*` on 30 June 2026, the `veo-3.1-*-preview` models on 22 October 2026) and names `gemini-omni-1.1-flash` as their replacement ([deprecations](https://ai.google.dev/gemini-api/docs/deprecations), [Omni guide](https://ai.google.dev/gemini-api/docs/omni)).
+
 ## `analyzeVideo()`
 
 `analyzeVideo()` auto-creates a [`VisionPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/vision/VisionPipeline.ts), uses the structured
