@@ -40,17 +40,19 @@
  *    `succeeded`, `failed`, or `canceled`.
  * 3. **Result**: `output` is the audio URL (string or first array element).
  *
- * The model input is `{ prompt, duration }`, plus `output_format` and `seed`
+ * The model input is `{ prompt, duration }` (`music_length_ms`, in
+ * milliseconds, for `elevenlabs/music`), plus `output_format` and `seed`
  * where the model takes them, plus every other key of `providerOptions` (for
  * example musicgen's `model_version` or `normalization_strategy`). Provider
- * options never replace `prompt`, `duration`, `output_format` or `seed`.
+ * options never replace `prompt`, the length, `output_format` or `seed`.
  *
  * `outputFormat` `wav` or `mp3` is sent as the model's own `output_format`
  * value: `wav`/`mp3` for `meta/musicgen` and `sepal/audiogen`,
  * `wav_cd_quality`/`mp3_standard` for `elevenlabs/music`, and nothing for
  * `stability-ai/stable-audio-2.5`, which has no such input. `flac`, `ogg` and
- * `aac` are never sent; the model's default format is used and the result's
- * MIME type follows the file returned. `seed` is sent to every model except
+ * `aac` are never sent; the model's default format is used. The result's MIME
+ * type is read from the output URL's extension, then from the format sent, and
+ * is `audio/mpeg` when neither names one. `seed` is sent to every model except
  * `sepal/audiogen` and `elevenlabs/music`, which take none. A model with no
  * entry here gets `output_format` `wav`/`mp3` and `seed` as given; pass other
  * names through `providerOptions`.
@@ -235,6 +237,8 @@ interface ModelInputs {
   formats: Readonly<Partial<Record<'wav' | 'mp3', string>>>;
   /** Whether the model takes a `seed` input. */
   seed: boolean;
+  /** Input that carries the length: `duration` in seconds or `music_length_ms`. */
+  length?: 'duration' | 'music_length_ms';
 }
 
 /** `output_format` and `seed` for a model this provider has no entry for. */
@@ -248,7 +252,11 @@ const KNOWN_MODEL_INPUTS: Readonly<Record<string, ModelInputs>> = Object.freeze(
   'meta/musicgen': { formats: { wav: 'wav', mp3: 'mp3' }, seed: true },
   'sepal/audiogen': { formats: { wav: 'wav', mp3: 'mp3' }, seed: false },
   'stability-ai/stable-audio-2.5': { formats: {}, seed: true },
-  'elevenlabs/music': { formats: { wav: 'wav_cd_quality', mp3: 'mp3_standard' }, seed: false },
+  'elevenlabs/music': {
+    formats: { wav: 'wav_cd_quality', mp3: 'mp3_standard' },
+    seed: false,
+    length: 'music_length_ms',
+  },
 });
 
 /** A bare 64-character Replicate version id. */
@@ -485,10 +493,16 @@ export class ReplicateAudioProvider implements IAudioGenerator {
       prompt: request.prompt,
     };
 
-    if (request.durationSec !== undefined) input.duration = request.durationSec;
     // A format or seed the model has no input for is left to the model's default.
     const name = VERSION_ID.test(model) ? '' : (MODEL_ALIASES[model] ?? model).split(':')[0];
     const known = KNOWN_MODEL_INPUTS[name] ?? GENERIC_INPUTS;
+    if (request.durationSec !== undefined) {
+      if (known.length === 'music_length_ms') {
+        input.music_length_ms = Math.round(request.durationSec * 1000);
+      } else {
+        input.duration = request.durationSec;
+      }
+    }
     const format =
       request.outputFormat === 'wav' || request.outputFormat === 'mp3'
         ? known.formats[request.outputFormat]
