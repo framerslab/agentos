@@ -21,7 +21,10 @@ import type { AddressInfo } from 'node:net';
 import { OpenAIRealtimeTTS } from '../providers/OpenAIRealtimeTTS.js';
 import { StreamingTTSChain } from '../providers/StreamingTTSChain.js';
 import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
+import { createVoiceProvidersFromEnv } from '../env-constructor.js';
+import { AggregateVoiceError } from '../VoicePipelineError.js';
 import { defaultCapabilities, type HealthyProvider } from '../HealthyProvider.js';
+import type { ProviderPolicy } from '../ProviderPolicy.js';
 import type {
   EncodedAudioChunk,
   IBargeinHandler,
@@ -81,8 +84,8 @@ class LocalRealtimeServer {
   frames: Frame[] = [];
   /** The upgrade request of each connection. */
   requests: IncomingMessage[] = [];
-  /** A refused upgrade answers this status; a refused session answers an error frame and close code 4000. */
-  refuse: 'upgrade' | 'session' | undefined;
+  /** A refused upgrade answers this status; a refused session answers an error frame and close code 4000; `close` accepts the upgrade and closes with no frame. */
+  refuse: 'upgrade' | 'session' | 'close' | undefined;
   /** Leave `session.update` unanswered. */
   holdSessionUpdate = false;
   /** The responses running on the server, by id. */
@@ -109,6 +112,10 @@ class LocalRealtimeServer {
       if (this.refuse === 'session') {
         this.send({ type: 'error', error: { type: 'invalid_request_error', code: 'invalid_model', message: 'Model not supported' } });
         socket.close(4000);
+        return;
+      }
+      if (this.refuse === 'close') {
+        socket.close(1011);
         return;
       }
       this.send({ type: 'session.created', session: {} });
@@ -161,6 +168,11 @@ class LocalRealtimeServer {
   /** The socket dies with no close the client asked for. */
   dropConnection(): void {
     this.socket?.terminate();
+  }
+
+  /** Closes the socket in the ordinary way, with no error frame before it. */
+  closeSocket(code: number): void {
+    this.socket?.close(code);
   }
 
   private answer(frame: Frame): void {
@@ -441,6 +453,29 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       server.refuse = 'upgrade';
 
       await expect(tts.startSession()).rejects.toThrow('401');
+    });
+
+    it('refuses to open on a socket the server closes before session.created, by rejecting and emitting no error', async () => {
+      server.refuse = 'close';
+
+      await expect(tts.startSession()).rejects.toThrow('closed during session setup');
+      // Nothing can listen yet: an 'error' emitted now would throw out of the socket's dispatch and fail this run.
+      await delay(SOCKET_TURN_MS);
+      expect(server.frames).toEqual([]);
+    });
+
+    it('refuses to open on a socket the server closes before it answers session.update', async () => {
+      server.holdSessionUpdate = true;
+      const outcome = tts.startSession().then(
+        () => 'opened',
+        (error: Error) => error.message
+      );
+      await until(() => server.sent('session.update').length === 1, 'the session update');
+
+      server.closeSocket(1011);
+
+      expect(await outcome).toContain('closed during session setup');
+      await delay(SOCKET_TURN_MS);
     });
 
     it('refuses to open when the server takes too long', async () => {
@@ -803,6 +838,189 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
 
       expect(chain.currentProviderId).toBe('backup');
       expect(next.startSession).toHaveBeenCalledOnce();
+    });
+
+    it('a socket the server closes before session.created fails over at the start', async () => {
+      server.refuse = 'close';
+      const next = backup();
+      const chain = new StreamingTTSChain([tts, next]);
+
+      const session = await chain.startSession();
+      open.push(session);
+
+      expect(chain.currentProviderId).toBe('backup');
+      expect(next.startSession).toHaveBeenCalledOnce();
+    });
+
+    describe('under a ProviderPolicy', () => {
+      /** A hosted policy that permits this provider and then the backup. */
+      const policy = (): ProviderPolicy => ({
+        mode: 'hosted',
+        fallback: 'allowlisted',
+        identity: {
+          scopeId: 'scope-a',
+          callId: 'call-a',
+          turnId: 'turn-a',
+          generation: { workerGeneration: 1, inferenceGeneration: 1, transportEpoch: 1 },
+        },
+        purposes: ['tts'],
+        providers: [
+          { providerId: 'openai-realtime', locality: 'remote', purposes: ['tts'], priceVersion: 'rate-a' },
+          { providerId: 'backup', locality: 'remote', purposes: ['tts'], priceVersion: 'rate-b' },
+        ],
+        authorize: async () => {},
+        onFallback: () => {},
+      });
+
+      /** A flush's outcome: `settled` or the message it rejected with. */
+      const outcome = (flush: Promise<void>): Promise<string> =>
+        flush.then(
+          () => 'settled',
+          (error: Error) => error.message
+        );
+
+      it("refuses a failover after audio with 'partial synthesis cannot be replayed', and no backup opens", async () => {
+        const next = backup();
+        const chain = new StreamingTTSChain([tts, next], { policy: policy(), enableMidSynthesisFailover: true });
+        const session = await chain.startSession();
+        open.push(session);
+        const log = record(session);
+        session.pushTokens('A reply.');
+        const flush = outcome(session.flush());
+        await until(() => server.running.size === 1, 'the response');
+        await delay(SOCKET_TURN_MS);
+        server.audio(server.responseId(0));
+        await until(() => log.audio.length === 1, 'the audio');
+
+        server.dropConnection();
+        await until(() => log.errors.length === 1, 'the failure');
+
+        expect(log.errors[0]!.message).toBe('partial synthesis cannot be replayed');
+        expect(next.startSession).not.toHaveBeenCalled();
+        expect(log.closes).toBe(1);
+        expect(await flush).toBe('synthesis failed');
+      });
+
+      it('refuses it as well for a reply queued behind one already spoken, though that reply has produced no audio, since flush_complete waits for the last reply', async () => {
+        const next = backup();
+        const chain = new StreamingTTSChain([tts, next], { policy: policy(), enableMidSynthesisFailover: true });
+        const session = await chain.startSession();
+        open.push(session);
+        const log = record(session);
+        session.pushTokens('First.');
+        const first = outcome(session.flush());
+        session.pushTokens('Second.');
+        const second = outcome(session.flush());
+        await until(() => server.running.size === 1, 'the first response');
+        await delay(SOCKET_TURN_MS);
+        server.audio(server.responseId(0));
+        await until(() => log.audio.length === 1, 'the first reply to be heard');
+        server.finish(server.responseId(0));
+        await until(() => server.sent('response.create').length === 2, 'the second response');
+        expect(log.flushes).toBe(0);
+
+        server.dropConnection();
+        await until(() => log.errors.length === 1, 'the failure');
+
+        expect(log.errors[0]!.message).toBe('partial synthesis cannot be replayed');
+        expect(next.startSession).not.toHaveBeenCalled();
+        expect(log.audio).toHaveLength(1);
+        expect(await first).toBe('synthesis failed');
+        expect(await second).toBe('synthesis failed');
+      });
+
+      it('lets a backup take the text of a reply that has produced no audio', async () => {
+        const next = backup();
+        const chain = new StreamingTTSChain([tts, next], { policy: policy(), enableMidSynthesisFailover: true });
+        const session = await chain.startSession();
+        open.push(session);
+        const log = record(session);
+        session.pushTokens('A reply.');
+        void session.flush();
+        await until(() => server.running.size === 1, 'the response');
+        await delay(SOCKET_TURN_MS);
+
+        server.dropConnection();
+        await until(() => vi.mocked(next.startSession).mock.calls.length === 1, 'the failover');
+        const taken = (await vi.mocked(next.startSession).mock.results[0]!.value) as StreamingTTSSession;
+        await until(() => vi.mocked(taken.pushTokens).mock.calls.length > 0, 'the replay');
+
+        expect(vi.mocked(taken.pushTokens).mock.calls.map(([text]) => text).join('')).toBe('A reply.');
+        expect(log.errors).toEqual([]);
+      });
+    });
+  });
+
+  describe('as createVoiceProvidersFromEnv builds it from OPENAI_API_KEY alone', () => {
+    /** The bundle, with its Realtime provider pointed at the local server. */
+    const openAIOnly = () => {
+      const bundle = createVoiceProvidersFromEnv({ env: { OPENAI_API_KEY: 'test-key' } });
+      const realtime = bundle.tts.providers.find((provider) => provider.providerId === 'openai-realtime');
+      (realtime as unknown as { config: { baseUrl?: string } }).config.baseUrl = server.url;
+      return bundle;
+    };
+
+    it('speaks a reply', async () => {
+      const { tts: chain } = openAIOnly();
+      const session = await chain.startSession();
+      open.push(session);
+      const log = record(session);
+
+      session.pushTokens('A reply.');
+      const flush = session.flush();
+      await until(() => server.running.size === 1, 'the response');
+      await delay(SOCKET_TURN_MS);
+      server.audio(server.responseId(0));
+      server.finish(server.responseId(0));
+      await flush;
+
+      expect(log.audio).toHaveLength(1);
+      expect(log.flushes).toBe(1);
+      expect(log.errors).toEqual([]);
+    });
+
+    it("a refused session fails with the server's own reason, and no other entry is reported as failing to open", async () => {
+      server.refuse = 'session';
+      const { tts: chain, metrics } = openAIOnly();
+      const failed: string[] = [];
+      metrics.subscribe((event) => {
+        if (event.type === 'provider_failed') failed.push(event.providerId);
+      });
+
+      const error = await chain.startSession().then(
+        () => undefined,
+        (reason: unknown) => reason
+      );
+
+      expect(error).toBeInstanceOf(AggregateVoiceError);
+      expect((error as AggregateVoiceError).attempts.map((attempt) => attempt.provider)).toEqual(['openai-realtime']);
+      expect((error as Error).message).toContain('Model not supported');
+      expect((error as Error).message).not.toContain('startSession');
+      expect(failed).toEqual(['openai-realtime']);
+    });
+
+    it('a socket lost during a reply ends the session on that failure, with no backup to report', async () => {
+      const { tts: chain, metrics } = openAIOnly();
+      const failed: string[] = [];
+      metrics.subscribe((event) => {
+        if (event.type === 'provider_failed') failed.push(event.providerId);
+      });
+      const session = await chain.startSession();
+      open.push(session);
+      const log = record(session);
+      session.pushTokens('A reply.');
+      const flush = session.flush().then(
+        () => 'settled',
+        (error: Error) => error.message
+      );
+      await until(() => server.running.size === 1, 'the response');
+
+      server.dropConnection();
+      await until(() => log.errors.length === 1, 'the failure');
+
+      expect((log.errors[0] as AggregateVoiceError).attempts.map((attempt) => attempt.provider)).toEqual(['openai-realtime']);
+      expect(failed).toEqual([]);
+      expect(await flush).toBe('synthesis failed');
     });
   });
 
