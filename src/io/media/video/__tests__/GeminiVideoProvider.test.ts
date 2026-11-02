@@ -552,6 +552,35 @@ describe('GeminiVideoProvider', () => {
     await expect(provider.generateVideo({ prompt: 'p' })).rejects.toThrow(/timed out after 20ms/);
   });
 
+  it('runs a call with a fractional timeoutMs, rounded up to whole milliseconds', async () => {
+    await provider.initialize({ apiKey: 'gk-test', timeoutMs: 200.5 });
+    fetchSpy.mockImplementationOnce(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((resolve, reject) => {
+          const timer = setTimeout(
+            () => resolve(jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }]))),
+            20,
+          );
+          init.signal.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(new Error('The operation was aborted.'));
+          });
+        }),
+    );
+
+    const result = await provider.generateVideo({ prompt: 'p' });
+
+    expect(result.videos[0]).toMatchObject({ base64: VIDEO_B64 });
+  });
+
+  it('refuses a timeoutMs past the longest timer delay at initialize', async () => {
+    const fresh = createVideoProvider('gemini');
+    // Node fires a longer timer after 1 ms, which would end every call at once.
+    await expect(fresh.initialize({ apiKey: 'gk-test', timeoutMs: 3_000_000_000 })).rejects.toThrow(RangeError);
+    await expect(fresh.initialize({ apiKey: 'gk-test', timeoutMs: Number.POSITIVE_INFINITY })).rejects.toThrow(RangeError);
+    await expect(fresh.initialize({ apiKey: 'gk-test', timeoutMs: 2_147_483_647 })).resolves.toBeUndefined();
+  });
+
   it('requires an API key', async () => {
     const fresh = createVideoProvider('gemini');
     await expect(fresh.initialize({})).rejects.toThrow(/requires apiKey/);
