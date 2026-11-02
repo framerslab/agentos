@@ -16,6 +16,7 @@ import { QdrantTargetAdapter } from '../adapters/QdrantTargetAdapter.js';
 import { SqliteTargetAdapter } from '../adapters/SqliteTargetAdapter.js';
 import { sidecarScopeIdForms } from '../adapters/sidecarScopeIdForms.js';
 import { ABSENT_BRAIN, readBrainScopeIdForm, readScopeIdForms, type ScopeIdFormReader } from '../../../memory/retrieval/store/scopeIdForm.js';
+import { isMissingTableError } from '../../../memory/retrieval/store/missingTable.js';
 import type { IMigrationTarget } from '../types.js';
 
 const dirs: string[] = [];
@@ -116,6 +117,26 @@ describe("the scope-id form reads of a SQLite or PostgreSQL store", () => {
 
   it('fail on a list of the brains a store holds that cannot be read, rather than list none', async () => {
     await expect(readScopeIdForms(failingReader())).rejects.toThrow(/Connection terminated/);
+    // A database that is gone says "does not exist" too, of the database: that is no missing table.
+    const gone = (): never => {
+      throw Object.assign(new Error('database "brains" does not exist'), { code: '3D000' });
+    };
+    await expect(readScopeIdForms({ get: async () => gone(), all: async () => gone() })).rejects.toThrow(/database "brains"/);
+  });
+
+  it("fail on a trace scan that fails for another reason than a table without scope_id, rather than read the metadata alone", async () => {
+    let scans = 0;
+    const reader: ScopeIdFormReader = {
+      get: async <T>(sql: string): Promise<T | undefined> => (sql.includes('memory_traces') ? ({ id: 't-a' } as T) : undefined),
+      all: async <T>(sql: string): Promise<T[]> => {
+        if (!sql.includes('memory_traces')) return [];
+        scans += 1;
+        // The first scan reads scope_id and fails once on the connection; the column exists.
+        if (scans === 1) throw Object.assign(new Error('Connection terminated unexpectedly'), { code: '57P01' });
+        return [{ id: 't-a', scope: 'user', metadata: '{}' }] as T[];
+      },
+    };
+    await expect(readBrainScopeIdForm(reader, 'b')).rejects.toThrow(/Connection terminated/);
   });
 
   it('read a store without the tables, or from before brain ids, as holding no brain', async () => {
@@ -132,5 +153,28 @@ describe("the scope-id form reads of a SQLite or PostgreSQL store", () => {
     } finally {
       db.close();
     }
+  });
+});
+
+describe('a missing table or column, as the scope-id form reads tell it apart', () => {
+  it.each([
+    ['SQLite, a table', Object.assign(new Error('no such table: brain_meta'), { code: 'SQLITE_ERROR' })],
+    ['SQLite, a column', Object.assign(new Error('no such column: brain_id'), { code: 'SQLITE_ERROR' })],
+    ['sql.js, a table', new Error('no such table: knowledge_nodes')],
+    ['PostgreSQL, a relation', Object.assign(new Error('relation "brain_meta" does not exist'), { code: '42P01' })],
+    ['PostgreSQL, a column', Object.assign(new Error('column "brain_id" does not exist'), { code: '42703' })],
+    ['PostgreSQL through an adapter that drops the code', new Error('relation "knowledge_nodes" does not exist')],
+  ])('is %s', (_name, error) => {
+    expect(isMissingTableError(error)).toBe(true);
+  });
+
+  it.each([
+    ['a database that is gone', Object.assign(new Error('database "brains" does not exist'), { code: '3D000' })],
+    ['a role that is gone', Object.assign(new Error('role "agent" does not exist'), { code: '28000' })],
+    ['a connection that is gone', new Error('connection does not exist')],
+    ['a locked file', Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' })],
+    ['a PostgreSQL code that names something else, whatever its words', Object.assign(new Error('relation "brain_meta" does not exist'), { code: '57P01' })],
+  ])('is not %s', (_name, error) => {
+    expect(isMissingTableError(error)).toBe(false);
   });
 });

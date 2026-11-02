@@ -16,7 +16,7 @@
  * minutes; and a write whose writer decides it while the recovery reads its traces stays as its writer decided it.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Memory } from '../../memory/io/facade/Memory';
+import { Memory } from '../../memory/io/facade/Memory';
 import { KnowledgeGraph } from '../../memory/retrieval/graph/knowledge/KnowledgeGraph';
 import { Brain } from '../../memory/retrieval/store/Brain';
 import { readTraceSnapshot } from '../../memory/retrieval/store/tracePersistence';
@@ -310,7 +310,7 @@ describe('forgetUser', () => {
     );
   });
 
-  it("keeps a memory manager's traces and the user's rows while its knowledge graph fails, though the host's storage adapter holds its Brain", async () => {
+  it("keeps a memory manager's traces and the user's rows while its knowledge graph fails, though the host's storage adapter and a facade hold its Brain", async () => {
     quiet();
     // A GMI's memory: its Brain on the host's storage adapter, and a knowledge graph of its own outside that database.
     const adapter = await adapterAt(tempFile());
@@ -318,8 +318,11 @@ describe('forgetUser', () => {
     const graph = new KnowledgeGraph();
     await graph.initialize();
     const manager = await managerOnBrain(brain, graph);
+    // The host's memory tools over the same Brain, whose own SQL graph holds none of the manager's copies. Never closed:
+    // closing its Brain would close the host's adapter.
+    const tools = await Memory.createWithAdapter(adapter, { brainId: 'agent-1', selfImprove: false });
     const store = new InMemoryLearningStore();
-    const layer = createLearningLayer({ store, storageAdapter: adapter });
+    const layer = createLearningLayer({ store, storageAdapter: adapter, memoryTools: tools });
     const session = await layer.forLearner(KEY, context({ memory: manager }));
     await session.guardMemoryWrite!({
       apply: () => manager.encode('A42 is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: learnerScopeIds(KEY, 'tutor').userScopeId }),
@@ -338,6 +341,7 @@ describe('forgetUser', () => {
     expect(await liveContents(brain)).toEqual(['A42 is allergic to walnuts.']);
     expect(first.stores.filter((entry) => entry.store.includes('agent-1'))).toEqual([
       { store: 'memory manager of brain agent-1', reached: false, reason: expect.stringMatching(/graph offline/) },
+      { store: 'memory tools facade of brain agent-1', reached: false, reason: expect.stringMatching(/memory manager of brain agent-1 failed/) },
     ]);
     expect(first.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: false }));
     expect(await store.sessionRowsOf('A', '42')).not.toEqual([]);
@@ -350,6 +354,7 @@ describe('forgetUser', () => {
     expect(second.stores).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ store: 'memory manager of brain agent-1', reached: true }),
+        expect.objectContaining({ store: 'memory tools facade of brain agent-1', reached: true }),
         expect.objectContaining({ store: 'learning store', reached: true }),
       ]),
     );
