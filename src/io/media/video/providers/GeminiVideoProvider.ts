@@ -73,7 +73,8 @@
  * the video is returned as `base64`, with the URI in
  * `providerMetadata.fileUri`. A file whose state is `FAILED` is raised. An
  * interaction whose `status` is not `completed` is raised with the messages
- * of the faults its `errors` list records.
+ * of the faults its `errors` list records, and one with no `status` is
+ * raised as well.
  *
  * ## Deadline
  *
@@ -615,7 +616,10 @@ export class GeminiVideoProvider implements IVideoGenerator {
    * @internal
    */
   private _buildResult(interaction: GeminiInteraction, model: string): VideoResult {
-    if (interaction.status && interaction.status !== 'completed') {
+    if (interaction.status !== 'completed') {
+      // `status` is required on the Interaction resource; a reply without it
+      // is not taken as a completed generation.
+      if (!interaction.status) throw new Error('Gemini video generation ended with no status.');
       const messages = (Array.isArray(interaction.errors) ? interaction.errors : [])
         .map((fault) => (typeof fault?.message === 'string' ? fault.message.trim() : ''))
         .filter((message) => message.length > 0);
