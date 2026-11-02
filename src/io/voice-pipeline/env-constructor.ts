@@ -29,10 +29,8 @@ import {
 import { ElevenLabsStreamingTTS } from './providers/ElevenLabsStreamingTTS.js';
 import { DeepgramAuraStreamingTTS } from './providers/DeepgramAuraStreamingTTS.js';
 import { OpenAIRealtimeTTS } from './providers/OpenAIRealtimeTTS.js';
-import { ElevenLabsBatchTTS } from './providers/ElevenLabsBatchTTS.js';
 import { CartesiaStreamingTTS } from './providers/CartesiaStreamingTTS.js';
 import { HumeStreamingTTS } from './providers/HumeStreamingTTS.js';
-import { OpenAIBatchTTS } from './providers/OpenAIBatchTTS.js';
 import {
   StreamingSTTChain,
   type StreamingSTTChainOptions,
@@ -157,6 +155,11 @@ function sttProvidersFromEnv(
  * A provider close after flush and before the next frame emits one facade
  * `close`; later audio is ignored and no backup starts.
  *
+ * The TTS chain holds only providers that open a session: one-shot providers
+ * such as `OpenAIBatchTTS` stay out, so `OPENAI_API_KEY` alone gives a chain of
+ * `OpenAIRealtimeTTS` with no backup, and `ELEVENLABS_API_KEY` alone a chain of
+ * `ElevenLabsStreamingTTS`.
+ *
  * @param config - Environment source, preferences, failover switches and OpenAI Realtime options.
  * @returns The chains with their metrics reporter and circuit breaker.
  * @throws {NoVoiceProvidersAvailableError} When the keys set build no STT provider or no TTS provider.
@@ -207,21 +210,12 @@ export function createVoiceProvidersFromEnv(
     ttsProviders.push(
       new OpenAIRealtimeTTS({ apiKey: openaiKey, priority: 20 })
     );
-    ttsProviders.push(
-      new OpenAIBatchTTS({ apiKey: openaiKey, priority: 90 }) as unknown as
-        IStreamingTTS & HealthyProvider
-    );
-  }
-  if (elevenLabsKey) {
-    ttsProviders.push(
-      new ElevenLabsBatchTTS({ apiKey: elevenLabsKey, priority: 80 }) as unknown as
-        IStreamingTTS & HealthyProvider
-    );
   }
 
-  // New alternates ride the STREAMING chain only (there is no batch chain
-  // here; batch consumers instantiate providers directly). A preference
-  // promotes the vendor ahead of Deepgram Aura's first-try slot (5).
+  // Only a provider that opens a session enters this chain. A batch provider
+  // has no startSession() and the library has no adapter that gives it one, so
+  // batch consumers instantiate those providers directly. A preference promotes
+  // the vendor ahead of Deepgram Aura's first-try slot (5).
   if (cartesiaKey && cartesiaVoiceId) {
     // Cartesia has no vendor-default voice — without a voice id the provider
     // cannot synthesize, so it only joins the chain when one is configured.

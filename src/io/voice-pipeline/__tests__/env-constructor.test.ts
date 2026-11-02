@@ -68,13 +68,14 @@ describe('createVoiceProvidersFromEnv', () => {
     );
   });
 
-  it('includes OpenAI Realtime TTS + batch fallback when OPENAI_API_KEY is set', () => {
+  it('includes OpenAI Realtime TTS and no batch provider when OPENAI_API_KEY is set', () => {
     const { tts } = createVoiceProvidersFromEnv({
       env: { OPENAI_API_KEY: 'op', ELEVENLABS_API_KEY: 'el' },
     });
     const ids = tts.providers.map((p) => p.providerId);
     expect(ids).toContain('openai-realtime');
-    expect(ids.some((id) => id.startsWith('openai-tts'))).toBe(true);
+    expect(ids.some((id) => id.startsWith('openai-tts'))).toBe(false);
+    expect(ids).not.toContain('elevenlabs-batch');
   });
 
   it('enables failover modes by default', () => {
@@ -115,6 +116,33 @@ describe('createVoiceProvidersFromEnv', () => {
       env: { ELEVENLABS_API_KEY: 'el', OPENAI_API_KEY: 'op' },
     });
     expect(tts.providers.map((p) => p.providerId)).not.toContain('deepgram-aura');
+  });
+});
+
+describe('the TTS chain of createVoiceProvidersFromEnv', () => {
+  it.each<[string, Record<string, string>]>([
+    ['OPENAI_API_KEY', { OPENAI_API_KEY: 'op' }],
+    ['ELEVENLABS_API_KEY', { ELEVENLABS_API_KEY: 'el' }],
+    ['DEEPGRAM_API_KEY', { DEEPGRAM_API_KEY: 'dg' }],
+    ['every key', { DEEPGRAM_API_KEY: 'dg', ELEVENLABS_API_KEY: 'el', OPENAI_API_KEY: 'op', CARTESIA_API_KEY: 'c', CARTESIA_VOICE_ID: 'v1' }],
+  ])('holds only providers that open a session, with %s', (_name, env) => {
+    const { tts } = createVoiceProvidersFromEnv({ env });
+
+    const unable = tts.providers.filter((provider) => typeof provider.startSession !== 'function');
+
+    expect(unable.map((provider) => provider.providerId)).toEqual([]);
+  });
+
+  it('is the Realtime provider alone with OPENAI_API_KEY', () => {
+    const { tts } = createVoiceProvidersFromEnv({ env: { OPENAI_API_KEY: 'op' } });
+
+    expect(tts.providers.map((provider) => provider.providerId)).toEqual(['openai-realtime']);
+  });
+
+  it('is the streaming provider alone with ELEVENLABS_API_KEY', () => {
+    const { tts } = createVoiceProvidersFromEnv({ env: { ELEVENLABS_API_KEY: 'el' } });
+
+    expect(tts.providers.map((provider) => provider.providerId)).toEqual(['elevenlabs-streaming']);
   });
 });
 
