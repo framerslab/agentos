@@ -474,6 +474,22 @@ describe('ReplicateVideoProvider model inputs', () => {
     }
   });
 
+  it('sends the source image under the input name the provider options give, for a bare version id', async () => {
+    // A bare version id names no model family, so the caller names the field.
+    const version = '5c2c8f1d0e7a4b3c9a8f6e5d4c3b2a190817263544536271809f8e7d6c5b4a39';
+    await provider.imageToVideo({
+      modelId: version,
+      prompt: 'p',
+      image: 'https://cdn.example.com/s.png',
+      providerOptions: { replicate: { imageInputName: 'start_image', cfg_scale: 0.5 } },
+    } as any);
+
+    expect(submitBody()).toEqual({
+      version,
+      input: { prompt: 'p', start_image: 'https://cdn.example.com/s.png', cfg_scale: 0.5 },
+    });
+  });
+
   it('sends resolution and reference images for text-to-video', async () => {
     await provider.generateVideo({
       modelId: 'google/veo-3.1',

@@ -10,6 +10,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createVideoProvider } from '../index.js';
+import type { EgressConnector, EgressConnectResponse } from '../../../../safety/egress/index.js';
 
 type FetchSpy = ReturnType<typeof vi.fn>;
 
@@ -56,6 +57,15 @@ const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0
 /** The first bytes of a JPEG file. */
 const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
 const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+
+/** A public IPv4 address for the checked egress path's lookup. */
+const PUBLIC_V4 = '142.250.0.1';
+/** A lookup that answers `address` for every name. */
+const resolvesTo = (address: string) => async () => [{ address, family: address.includes(':') ? 6 : 4 }];
+/** A connector answer. */
+function answer(status: number, headers: Record<string, string>, bytes: Buffer): EgressConnectResponse {
+  return { status, headers, body: (async function* () { yield bytes; })() };
+}
 
 describe('GeminiVideoProvider', () => {
   let provider: any;
@@ -135,12 +145,16 @@ describe('GeminiVideoProvider', () => {
     expect(body.generation_config).toEqual({ video_config: { task: 'image_to_video' } });
   });
 
-  it('fetches an image URL under the call deadline without the key, and sends a Files API URI as a uri', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(imageResponse(JPEG_BYTES, 'image/jpeg; charset=binary'))
-      .mockResolvedValueOnce(
-        jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }])),
-      );
+  it('fetches an image URL through the checked egress path without the key, and sends a Files API URI as a uri', async () => {
+    const seen: Array<{ url: string; method: string; headers: Record<string, string> }> = [];
+    const connector: EgressConnector = async (req) => {
+      seen.push({ url: req.destination.url.href, method: req.method, headers: req.headers });
+      return answer(200, { 'content-type': 'image/jpeg; charset=binary' }, JPEG_BYTES);
+    };
+    await provider.initialize({ apiKey: 'gk-test', imageEgress: { lookup: resolvesTo(PUBLIC_V4), connector } });
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }])),
+    );
 
     await provider.imageToVideo({
       prompt: 'p',
@@ -148,10 +162,10 @@ describe('GeminiVideoProvider', () => {
       referenceImages: ['https://generativelanguage.googleapis.com/v1beta/files/abc123'],
     });
 
-    const [imageUrl, imageInit] = fetchSpy.mock.calls[0];
-    expect(imageUrl).toBe('https://cdn.example.com/start.jpg');
-    expect(imageInit.signal).toBeInstanceOf(AbortSignal);
-    expect(JSON.stringify(imageInit.headers ?? {})).not.toContain('gk-test');
+    expect(seen).toEqual([{ url: 'https://cdn.example.com/start.jpg', method: 'GET', headers: {} }]);
+    // The image never goes through the global fetch; the interaction does.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(interactionCall()[0]).toBe(INTERACTIONS_URL);
 
     const body = JSON.parse(interactionCall()[1].body);
     expect(body.input).toEqual([
@@ -159,6 +173,126 @@ describe('GeminiVideoProvider', () => {
       { type: 'image', uri: 'https://generativelanguage.googleapis.com/v1beta/files/abc123' },
       { type: 'text', text: 'p' },
     ]);
+  });
+
+  it('refuses an http image URL and a name with a private address before connecting', async () => {
+    let connected = 0;
+    const connector: EgressConnector = async () => {
+      connected += 1;
+      return answer(200, { 'content-type': 'image/png' }, PNG_BYTES);
+    };
+    const lookup = async (hostname: string) => [
+      { address: hostname === 'metadata.internal.example' ? '169.254.169.254' : PUBLIC_V4, family: 4 },
+    ];
+    await provider.initialize({ apiKey: 'gk-test', imageEgress: { lookup, connector } });
+
+    await expect(
+      provider.imageToVideo({ prompt: 'p', image: 'http://cdn.example.com/start.png' }),
+    ).rejects.toMatchObject({ reason: 'scheme' });
+    await expect(
+      provider.imageToVideo({ prompt: 'p', image: 'https://metadata.internal.example/latest' }),
+    ).rejects.toMatchObject({ reason: 'private_address' });
+    expect(connected).toBe(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('checks every redirect of an image URL as its own destination', async () => {
+    const seen: string[] = [];
+    const connector: EgressConnector = async (req) => {
+      seen.push(req.destination.url.href);
+      if (req.destination.url.pathname === '/moved') {
+        return answer(302, { location: '/start.png' }, Buffer.alloc(0));
+      }
+      if (req.destination.url.pathname === '/to-private') {
+        return answer(301, { location: 'https://metadata.internal.example/latest' }, Buffer.alloc(0));
+      }
+      return answer(200, { 'content-type': 'image/png' }, PNG_BYTES);
+    };
+    const lookup = async (hostname: string) => [
+      { address: hostname === 'metadata.internal.example' ? '169.254.169.254' : PUBLIC_V4, family: 4 },
+    ];
+    await provider.initialize({ apiKey: 'gk-test', imageEgress: { lookup, connector } });
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }])),
+    );
+
+    await provider.imageToVideo({ prompt: 'p', image: 'https://cdn.example.com/moved' });
+    expect(seen).toEqual(['https://cdn.example.com/moved', 'https://cdn.example.com/start.png']);
+    expect(JSON.parse(interactionCall()[1].body).input[0]).toEqual({
+      type: 'image',
+      data: PNG_BYTES.toString('base64'),
+      mime_type: 'image/png',
+    });
+
+    seen.length = 0;
+    await expect(
+      provider.imageToVideo({ prompt: 'p', image: 'https://cdn.example.com/to-private' }),
+    ).rejects.toMatchObject({ reason: 'private_address' });
+    expect(seen).toEqual(['https://cdn.example.com/to-private']);
+  });
+
+  it('refuses image bytes past maxImageBytes across the images of a call', async () => {
+    const connector: EgressConnector = async () => answer(200, { 'content-type': 'image/png' }, PNG_BYTES);
+    await provider.initialize({
+      apiKey: 'gk-test',
+      maxImageBytes: PNG_BYTES.length + 4,
+      imageEgress: { lookup: resolvesTo(PUBLIC_V4), connector },
+    });
+
+    await expect(
+      provider.imageToVideo({
+        prompt: 'p',
+        image: 'https://cdn.example.com/a.png',
+        referenceImages: ['https://cdn.example.com/b.png'],
+      }),
+    ).rejects.toMatchObject({ reason: 'too_large' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('raises a refused image fetch with its status and without its URL', async () => {
+    const connector: EgressConnector = async () => answer(404, {}, Buffer.from('not here'));
+    await provider.initialize({ apiKey: 'gk-test', imageEgress: { lookup: resolvesTo(PUBLIC_V4), connector } });
+
+    const error = await provider
+      .imageToVideo({ prompt: 'p', image: 'https://cdn.example.com/secret-name.png' })
+      .catch((e: Error) => e);
+    expect(error.message).toBe('Gemini video provider could not read an image (HTTP 404).');
+  });
+
+  it('reads private and http image URLs under the local egress profile', async () => {
+    const seen: string[] = [];
+    const connector: EgressConnector = async (req) => {
+      seen.push(req.destination.url.href);
+      return answer(200, { 'content-type': 'image/png' }, PNG_BYTES);
+    };
+    await provider.initialize({
+      apiKey: 'gk-test',
+      imageEgress: { profile: 'local', lookup: resolvesTo('10.0.0.8'), connector },
+    });
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }])),
+    );
+
+    await provider.imageToVideo({ prompt: 'p', image: 'http://assets.lan:8080/start.png' });
+
+    expect(seen).toEqual(['http://assets.lan:8080/start.png']);
+  });
+
+  it('decodes a data: URL image that is not base64 encoded', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 }])),
+    );
+
+    await provider.generateVideo({
+      prompt: 'p',
+      referenceImages: ['data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22x%22%2F%3E'],
+    });
+
+    expect(JSON.parse(interactionCall()[1].body).input[0]).toEqual({
+      type: 'image',
+      data: Buffer.from('<svg xmlns="x"/>').toString('base64'),
+      mime_type: 'image/svg+xml',
+    });
   });
 
   it('asks for reference-to-video when a prompt comes with reference images and no source image', async () => {
@@ -205,15 +339,55 @@ describe('GeminiVideoProvider', () => {
     });
   });
 
-  it('returns the URI of a video delivered by URI', async () => {
-    const uri = 'https://generativelanguage.googleapis.com/v1beta/files/vid-9:download?alt=media';
-    fetchSpy.mockResolvedValueOnce(jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', uri }])));
+  it('waits for a video delivered by URI to be ACTIVE, then downloads it with the key', async () => {
+    await provider.initialize({ apiKey: 'gk-test', pollIntervalMs: 1 });
+    const uri = 'https://generativelanguage.googleapis.com/v1beta/files/vid9';
+    const VIDEO_BYTES = Buffer.from('mp4-file-bytes');
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', uri }])))
+      .mockResolvedValueOnce(jsonResponse({ name: 'files/vid9', state: 'PROCESSING' }))
+      .mockResolvedValueOnce(jsonResponse({ name: 'files/vid9', state: 'ACTIVE' }))
+      .mockResolvedValueOnce(imageResponse(VIDEO_BYTES, 'video/mp4'));
 
-    const result = await provider.generateVideo({ prompt: 'p' });
+    const result = await provider.generateVideo({
+      prompt: 'p',
+      providerOptions: { gemini: { response_format: { delivery: 'uri' } } },
+    });
 
-    expect(result.videos[0].url).toBe(uri);
-    expect(result.videos[0].base64).toBeUndefined();
-    expect(result.videos[0].providerMetadata).toMatchObject({ interactionId: 'int-1' });
+    const calls = fetchSpy.mock.calls as Array<[string, any]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      INTERACTIONS_URL,
+      'https://generativelanguage.googleapis.com/v1beta/files/vid9',
+      'https://generativelanguage.googleapis.com/v1beta/files/vid9',
+      'https://generativelanguage.googleapis.com/v1beta/files/vid9:download?alt=media',
+    ]);
+    for (const [, init] of calls.slice(1)) {
+      expect(init.headers['x-goog-api-key']).toBe('gk-test');
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    }
+    expect(result.videos[0].base64).toBe(VIDEO_BYTES.toString('base64'));
+    expect(result.videos[0].url).toBeUndefined();
+    expect(result.videos[0].providerMetadata).toMatchObject({ interactionId: 'int-1', fileUri: uri });
+  });
+
+  it('raises a video delivered by URI whose file fails processing', async () => {
+    await provider.initialize({ apiKey: 'gk-test', pollIntervalMs: 1 });
+    fetchSpy
+      .mockResolvedValueOnce(
+        jsonResponse(interaction([{ type: 'video', mime_type: 'video/mp4', uri: 'files/vid9' }])),
+      )
+      .mockResolvedValueOnce(jsonResponse({ name: 'files/vid9', state: 'FAILED' }));
+
+    await expect(provider.generateVideo({ prompt: 'p' })).rejects.toThrow(
+      'Gemini video file files/vid9 failed processing.',
+    );
+  });
+
+  it('refuses a background interaction, which it does not poll', async () => {
+    await expect(
+      provider.generateVideo({ prompt: 'p', providerOptions: { gemini: { background: true } } }),
+    ).rejects.toThrow(/does not run background interactions/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('runs a configured model', async () => {
