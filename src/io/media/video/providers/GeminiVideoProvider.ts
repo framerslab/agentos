@@ -703,8 +703,9 @@ function headerValue(headers: Record<string, string | string[] | undefined>, nam
 
 /**
  * Decode a `data:` URL (RFC 2397) into an image part: a base64 payload is
- * sent as it is, and a percent-encoded one is decoded to its bytes and
- * base64 encoded. The decoded size is charged to the call's image budget
+ * sent as standard base64 (its escapes decoded, line breaks dropped, the
+ * URL-safe alphabet mapped), and a percent-encoded one is decoded to its
+ * bytes and base64 encoded. The decoded size is charged to the call's image budget
  * before anything is decoded.
  *
  * @throws {Error} If the URL is malformed or its MIME type is not an image.
@@ -721,12 +722,24 @@ function dataUrlPart(value: string, budget: { remaining: number }): GeminiConten
     throw new Error('Gemini video provider takes a data: URL image only with an image/ MIME type.');
   }
   const payload = value.slice(comma + 1);
-  const size = isBase64 ? base64DecodedLength(payload) : percentDecodedLength(payload);
+  // A `%XX` escape counts as the one character it decodes to.
+  const size = isBase64
+    ? base64DecodedLength(payload.replace(/%[0-9a-fA-F]{2}/g, 'A'))
+    : percentDecodedLength(payload);
   if (size > budget.remaining) {
     throw new EgressRefusedError('too_large', 'an inline image is past maxImageBytes');
   }
   budget.remaining -= size;
-  if (isBase64) return { type: 'image', data: payload, mime_type: mimeType };
+  if (isBase64) {
+    // RFC 2397 allows escapes and line breaks in the payload, and some
+    // writers use the URL-safe alphabet; Gemini takes standard base64.
+    const clean = payload
+      .replace(/%([0-9a-fA-F]{2})/g, (_escape, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/\s+/g, '')
+      .replace(/-/g, '+')
+      .replace(/_/g, '/');
+    return { type: 'image', data: Buffer.from(clean, 'base64').toString('base64'), mime_type: mimeType };
+  }
   return { type: 'image', data: percentDecode(payload).toString('base64'), mime_type: mimeType };
 }
 
