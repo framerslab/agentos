@@ -715,10 +715,12 @@ export interface ResourceControls {
   /**
    * Maximum number of retries when structured output validation fails.
    *
-   * When `agent({ output: someZodSchema })` is set and the LLM returns text
+   * When `agency({ output: someZodSchema })` is set and the LLM returns text
    * that does not parse or validate against the schema, the agency will
    * retry the generation up to this many times, each time appending an
-   * error feedback hint to the prompt so the model can self-correct. The
+   * error feedback hint to the prompt so the model can self-correct.
+   * `agent({ responseSchema })` reads the same setting for `generate()`
+   * (`agent()` does not apply `output`; it warns at construction). The
    * retry runs under `generate()` and a session's `send()`; `stream()` and a
    * session's `stream()` finalize the one run they streamed. A final
    * text that a `beforeReturn` approval replaced with a different one is not
