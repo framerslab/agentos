@@ -229,12 +229,29 @@ describe('GeminiVideoProvider', () => {
   });
 
   it('raises an interaction that ends without completing', async () => {
+    fetchSpy.mockResolvedValueOnce(jsonResponse({ ...interaction([]), status: 'cancelled' }));
+
+    await expect(provider.generateVideo({ prompt: 'p' })).rejects.toThrow(
+      /Gemini video generation ended with status cancelled\./,
+    );
+  });
+
+  it('raises the messages of the errors a failed interaction records', async () => {
+    // The Interaction resource records its faults in `errors`, a list of
+    // `{ code, message }` (https://ai.google.dev/api/interactions-api).
     fetchSpy.mockResolvedValueOnce(
-      jsonResponse({ ...interaction([]), status: 'failed', error: { message: 'blocked by policy' } }),
+      jsonResponse({
+        ...interaction([]),
+        status: 'failed',
+        errors: [
+          { code: 'https://example.com/errors/safety', message: 'The prompt was blocked.' },
+          { message: 'No video was generated.' },
+        ],
+      }),
     );
 
     await expect(provider.generateVideo({ prompt: 'p' })).rejects.toThrow(
-      /Gemini video generation ended with status failed: blocked by policy/,
+      'Gemini video generation ended with status failed: The prompt was blocked.; No video was generated.',
     );
   });
 
