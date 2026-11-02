@@ -153,6 +153,8 @@ export class SegmentSynthesisQueue {
   private queued = 0;
   private ended = 0;
   private waiters: FlushWaiter[] = [];
+  // Counts cancels, so a settling pass stops completing flushes once a hook's listener has cancelled.
+  private cancels = 0;
   private holding = false;
 
   /**
@@ -277,6 +279,7 @@ export class SegmentSynthesisQueue {
 
   /** Drops the queued segments, the held frame and the segment in flight, forgets the text, and resolves the pending flushes without `flush_complete`. */
   cancel(): void {
+    this.cancels++;
     if (this.flight) this.end(this.flight);
     this.silent = undefined;
     this.pending.length = 0;
@@ -368,8 +371,10 @@ export class SegmentSynthesisQueue {
     const due = this.waiters.filter((waiter) => waiter.until <= this.ended);
     if (due.length === 0) return;
     this.waiters = this.waiters.filter((waiter) => waiter.until > this.ended);
+    const cancels = this.cancels;
     for (const waiter of due) {
-      this.hooks.flushed();
+      // A listener of an earlier flush's hook may cancel: the flushes left in this pass settle without flush_complete.
+      if (this.cancels === cancels) this.hooks.flushed();
       waiter.resolve();
     }
   }

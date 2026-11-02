@@ -1098,6 +1098,214 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(closes).not.toHaveBeenCalled();
   });
 
+  it("warns, and stays open, when Deepgram closes the socket while the next segment of the same reply waits for the late Flushed of a timed-out one, whose audio that had not come is lost", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const chunks = recorded(session);
+    const errors = vi.fn();
+    const closes = vi.fn();
+    const warnings = vi.fn();
+    const flushes = vi.fn();
+    session.on('error', errors);
+    session.on('close', closes);
+    session.on('warning', warnings);
+    session.on('flush_complete', flushes);
+    ws.send.mockClear();
+
+    // "One." times out after one frame of its audio, and " Two." waits for its late Flushed.
+    session.pushTokens('One. Two.');
+    const flushed = session.flush();
+    frame(ws, 1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(sent(ws)).toEqual([{ type: 'Speak', text: 'One.' }, { type: 'Flush' }]);
+    // Deepgram closes the socket before that Flushed: what it had still to send of "One." can no longer come, so the
+    // reply is not heard whole. Nothing of " Two." went out on the socket, so the reply goes on, and says so.
+    (ws as unknown as { readyState: number }).readyState = 3;
+    ws.emit('close', 1011, Buffer.from('NET-0001'));
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalledOnce();
+    expect((warnings.mock.calls[0][0] as Error).message).toBe(
+      "deepgram aura ws closed (code 1011: NET-0001) while the next segment waited for the late Flushed of a segment that timed out; what of that segment's audio had not come is lost"
+    );
+    let fresh!: MockSocket;
+    await vi.waitFor(() => {
+      fresh = socketOf(session);
+      expect(fresh).toBeTruthy();
+      expect(fresh).not.toBe(ws);
+      expect(sent(fresh)).toEqual([{ type: 'Speak', text: ' Two.' }, { type: 'Flush' }]);
+    });
+    frame(fresh, 2);
+    control(fresh, { type: 'Flushed', sequence_id: 0 });
+    await flushed;
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
+      [1, undefined],
+      [2, ' Two.'],
+    ]);
+    expect(flushes).toHaveBeenCalledOnce();
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalledOnce();
+  });
+
+  it("warns, in place of the console line, once the wait for the late Flushed of a timed-out segment of the same reply ends without it, since the socket given up takes the rest of that segment's audio with it", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const warnings = vi.fn();
+      session.on('warning', warnings);
+      ws.send.mockClear();
+
+      session.pushTokens('One. Two.');
+      const flushed = session.flush();
+      frame(ws, 1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(ws.close).toHaveBeenCalledWith(1000, 'response overdue');
+      expect(warnings).toHaveBeenCalledOnce();
+      expect((warnings.mock.calls[0][0] as Error).message).toBe(
+        "no Flushed came within its wait; the socket is closed, the next segment opens a fresh one, and what of the timed-out segment's audio had not come is lost"
+      );
+      expect(warn).not.toHaveBeenCalled();
+      let fresh!: MockSocket;
+      await vi.waitFor(() => {
+        fresh = socketOf(session);
+        expect(fresh).toBeTruthy();
+        expect(fresh).not.toBe(ws);
+        expect(sent(fresh)).toEqual([{ type: 'Speak', text: ' Two.' }, { type: 'Flush' }]);
+      });
+      control(fresh, { type: 'Flushed', sequence_id: 0 });
+      await flushed;
+      expect(warnings).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("warns before the flush_complete of a reply whose last segment timed out, since nothing proves the rest of its audio came, and not again when the wait for its late Flushed ends without it", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const order: string[] = [];
+      const warnings = vi.fn((warning: Error) => order.push(`warning: ${warning.message}`));
+      session.on('warning', warnings);
+      session.on('flush_complete', () => order.push('flush_complete'));
+      ws.send.mockClear();
+
+      // The reply's one sentence times out after one frame: its flush completes, and its late audio may never come, so
+      // the reply cannot be taken as heard whole once that flush completes.
+      session.pushTokens('Hello there.');
+      const flushed = session.flush();
+      frame(ws, 1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await flushed;
+      expect(order).toEqual([
+        "warning: the reply's last segment had no Flushed within its wait; its flush completes before the rest of that segment's audio is known to have come",
+        'flush_complete',
+      ]);
+      // No late Flushed comes: the socket is given up, as one console line says, and the loss already warned of is not
+      // reported again.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(ws.close).toHaveBeenCalledWith(1000, 'response overdue');
+      expect(warnings).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("emits no flush_complete for a reply whose last segment timed out when a listener of its warning cancels or closes the session", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    for (const cut of ['cancel', 'close'] as const) {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const flushes = vi.fn();
+      // The listener cuts the reply as the warning reaches it: a cancel or close() ends the flush without flush_complete.
+      const warnings = vi.fn(() => session[cut]());
+      session.on('warning', warnings);
+      session.on('flush_complete', flushes);
+
+      session.pushTokens('Hello there.');
+      const flushed = session.flush();
+      frame(ws, 1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await flushed;
+      expect(warnings).toHaveBeenCalledOnce();
+      expect(flushes).not.toHaveBeenCalled();
+    }
+  });
+
+  it("emits no flush_complete for a second flush() of a reply when a listener of the first's warning cancels or closes the session, and settles both", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    for (const cut of ['cancel', 'close'] as const) {
+      const session = await tts.startSession({ format: 'pcm' });
+      const ws = socketOf(session);
+      const flushes = vi.fn();
+      session.on('warning', () => session[cut]());
+      session.on('flush_complete', flushes);
+
+      session.pushTokens('Hello there.');
+      // Both flushes wait on the reply's one segment, so its end settles them in one pass.
+      const first = session.flush();
+      const second = session.flush();
+      frame(ws, 1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await Promise.all([first, second]);
+      expect(flushes).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reports nothing more when Deepgram closes the socket while the next reply waits for the late Flushed of the reply before's timed-out sentence, whose late audio no reply plays any more", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const session = await tts.startSession({ format: 'pcm' });
+    const ws = socketOf(session);
+    const chunks = recorded(session);
+    const errors = vi.fn();
+    const closes = vi.fn();
+    const warnings = vi.fn();
+    session.on('error', errors);
+    session.on('close', closes);
+    session.on('warning', warnings);
+    ws.send.mockClear();
+
+    session.pushTokens('Hello there.');
+    const first = session.flush();
+    frame(ws, 1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await first;
+    // The reply's one sentence timed out, so its flush warned that the rest of its audio may never come.
+    expect(warnings).toHaveBeenCalledOnce();
+    // The next reply's text has come: what the timed-out sentence still sends is dropped, so its loss loses nothing more.
+    session.pushTokens('Next one. ');
+    const second = session.flush();
+    (ws as unknown as { readyState: number }).readyState = 3;
+    ws.emit('close', 1011, Buffer.from(''));
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalledOnce();
+    let fresh!: MockSocket;
+    await vi.waitFor(() => {
+      fresh = socketOf(session);
+      expect(fresh).toBeTruthy();
+      expect(fresh).not.toBe(ws);
+      expect(sent(fresh)).toEqual([{ type: 'Speak', text: 'Next one.' }, { type: 'Flush' }]);
+    });
+    frame(fresh, 2);
+    control(fresh, { type: 'Flushed', sequence_id: 0 });
+    await second;
+    expect(chunks.map((chunk) => [chunk.audio[0], chunk.textBoundary?.text])).toEqual([
+      [1, undefined],
+      [2, 'Next one.'],
+    ]);
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalledOnce();
+  });
+
   it('reports an error the socket reports mid-reply once, as the cause of the close that follows it', async () => {
     const session = await tts.startSession({ format: 'pcm' });
     const ws = socketOf(session);
