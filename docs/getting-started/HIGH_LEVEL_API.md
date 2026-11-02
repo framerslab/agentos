@@ -471,6 +471,30 @@ console.log(music.audio[0]?.url);
 console.log(sfx.audio[0]?.url);
 ```
 
+### Cloud audio providers
+
+| Provider          | Endpoint                                                                 | Music default            | SFX default            | API key env var       |
+| ----------------- | ------------------------------------------------------------------------ | ------------------------ | ---------------------- | --------------------- |
+| `stable-audio`    | `POST https://api.stability.ai/v2beta/audio/stable-audio-2/text-to-audio` (multipart) | `stable-audio-2.5`       | `stable-audio-2.5`     | `STABILITY_API_KEY`   |
+| `replicate-audio` | `POST https://api.replicate.com/v1/predictions`, or `/v1/models/{owner}/{name}/predictions` for official models | `meta/musicgen` (version pinned) | `sepal/audiogen` (version pinned) | `REPLICATE_API_TOKEN` |
+| `fal-audio`       | `POST https://queue.fal.run/{model}` (queue)                             | `fal-ai/musicgen`        | `fal-ai/stable-audio`  | `FAL_API_KEY`         |
+
+- `stable-audio` accepts `stable-audio-2.5` and `stable-audio-2`. `outputFormat` takes `mp3` (the default) or `wav`, and primitive `providerOptions` such as `steps` and `cfg_scale` become form fields.
+- `replicate-audio` takes `owner/name`, `owner/name:version` or a bare version id. Replicate runs community models only by version, so `meta/musicgen` and `sepal/audiogen` carry pinned versions, and the retired `meta/audiogen` id resolves to `sepal/audiogen`. Any other `owner/name`, such as `stability-ai/stable-audio-2.5`, runs on the official-model route. `outputFormat` becomes `output_format` and `providerOptions` merge into the model input (for example `{ model_version: 'stereo-large' }` for MusicGen).
+- `fal-audio` sends `seconds_total` to Stable Audio models and `duration` to the others, and `providerOptions` merge into the input. The provider reads the model's `audio`, `audio_file` or `audio_url` output. A request that fails in the queue is raised with fal's `error` text.
+- When no `model` is given, `generateSFX()` runs each provider on its SFX default, not on its music default.
+
+```ts
+const loop = await generateMusic({
+  provider: 'replicate-audio',
+  model: 'meta/musicgen',
+  prompt: 'Slow ambient pads for a rainy night',
+  durationSec: 30,
+  outputFormat: 'wav',
+  providerOptions: { model_version: 'stereo-large', normalization_strategy: 'peak' },
+});
+```
+
 ## Media Provider Preferences
 
 Image, video, music, and SFX helpers accept `providerPreferences` so callers can

@@ -255,6 +255,25 @@ describe('ReplicateAudioProvider', () => {
     expect(body.version).toBe(`sepal/audiogen:${AUDIOGEN_VERSION}`);
   });
 
+  it('applies a defaultModelId override to both capabilities', async () => {
+    await provider.initialize({
+      apiKey: 'r8_audio_key',
+      pollIntervalMs: 1,
+      defaultModelId: 'stability-ai/stable-audio-2.5',
+    });
+    const done = { id: 'p', status: 'succeeded', output: 'https://replicate.delivery/a.mp3' };
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse(done))
+      .mockResolvedValueOnce(mockResponse(done));
+
+    await provider.generateMusic({ prompt: 'x' });
+    await provider.generateSFX({ prompt: 'y' });
+
+    const route = 'https://api.replicate.com/v1/models/stability-ai/stable-audio-2.5/predictions';
+    expect(fetchSpy.mock.calls[0][0]).toBe(route);
+    expect(fetchSpy.mock.calls[1][0]).toBe(route);
+  });
+
   // -------------------------------------------------------------------------
   // supports()
   // -------------------------------------------------------------------------

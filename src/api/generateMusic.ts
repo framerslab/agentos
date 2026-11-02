@@ -218,7 +218,7 @@ export interface GenerateMusicOptions {
 
   /**
    * Model identifier within the provider (e.g. `"suno-v3.5"`,
-   * `"stable-audio-open-1.0"`). When omitted, the provider's default
+   * `"stable-audio-2.5"`). When omitted, the provider's default
    * model is used.
    */
   model?: string;
