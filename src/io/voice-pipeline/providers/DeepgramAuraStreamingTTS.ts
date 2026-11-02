@@ -270,6 +270,8 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * `'warning'` said that the rest of that segment's audio may never come: the wait's end does not report that loss again.
    */
   private lateReported = false;
+  /** How many times `cancel()` or `close()` has cut the session: a flush a warning's listener cut takes no `flush_complete`. */
+  private cuts = 0;
   /** How many `flush()` calls wait for the queue. */
   private flushCalls = 0;
   private readonly voice: string;
@@ -505,6 +507,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * sent nothing: the next reply takes it.
    */
   cancel(): void {
+    this.cuts++;
     const outstanding = this.segments.hasInFlight || this.stale !== undefined || this.unanswered.length > 0;
     this.segments.cancel();
     this.failed = false;
@@ -528,6 +531,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.cuts++;
     this.segments.cancel();
     this.release();
     const ws = this.ws;
@@ -725,12 +729,15 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * Every segment of a `flush()` has ended: `flush_complete` goes out. When the reply's last segment timed out and its
    * late audio would still play ({@link lateAudioOwed}), nothing proves the rest of that audio will come, so a
    * `'warning'` says so first, one console warning line when nothing listens for it, and the reply is not taken as
-   * heard whole; the wait's end, the late `Flushed`, a close or the socket given up, reports that loss no more.
+   * heard whole; the wait's end, the late `Flushed`, a close or the socket given up, reports that loss no more. A
+   * listener of that warning that calls `cancel()` or `close()` ends the flush as those do, without `flush_complete`.
    */
   private flushCompleted(): void {
     if (this.lateAudioOwed()) {
+      const cuts = this.cuts;
       this.lateReported = true;
       this.warnOf(new Error("the reply's last segment had no Flushed within its wait; its flush completes before the rest of that segment's audio is known to have come"));
+      if (this.cuts !== cuts) return;
     }
     this.emit('flush_complete');
   }
