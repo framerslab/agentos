@@ -43,7 +43,7 @@ export function isPlainRecord(value: unknown): value is Record<string, unknown> 
  * registered with `registerVideoProviderFactory()`, is keyed by provider: the
  * provider receives its own entry, or nothing when the bag has none for it. A
  * bag with no such key is flat and is returned whole to every provider that
- * reads its options.
+ * reads its options. Keys match provider ids whatever their case.
  *
  * @param providerId - The id of the provider reading its options.
  * @param providerOptions - The request's `providerOptions`.
@@ -63,12 +63,15 @@ export function getVideoProviderOptions(
 ): Record<string, unknown> | undefined {
   if (!isPlainRecord(providerOptions)) return undefined;
 
-  const keyed = Object.keys(providerOptions).some(
-    (key) => key === providerId || KEYED_VIDEO_PROVIDER_IDS.has(key.toLowerCase()),
-  );
+  // Keys match providers case-insensitively, for marking the bag as keyed
+  // and for finding the provider's own entry alike.
+  const id = providerId.toLowerCase();
+  const keys = Object.keys(providerOptions);
+  const keyed = keys.some((key) => key.toLowerCase() === id || KEYED_VIDEO_PROVIDER_IDS.has(key.toLowerCase()));
   if (!keyed) return providerOptions;
 
-  const own = providerOptions[providerId];
+  const ownKey = keys.find((key) => key === providerId) ?? keys.find((key) => key.toLowerCase() === id);
+  const own = ownKey === undefined ? undefined : providerOptions[ownKey];
   return isPlainRecord(own) ? own : undefined;
 }
 

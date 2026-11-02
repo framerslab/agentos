@@ -241,7 +241,7 @@ export interface GeneratedVideo {
  * {@link IVideoGenerator.imageToVideo}.
  */
 export interface VideoResult {
-  /** Unix timestamp (ms) when the result was created. */
+  /** Unix timestamp (seconds) when the result was created, as every media result reports it. */
   created: number;
   /** Model identifier that produced the result. */
   modelId: string;

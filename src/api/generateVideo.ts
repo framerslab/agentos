@@ -328,7 +328,7 @@ export interface GenerateVideoResult {
   model: string;
   /** Provider identifier (`"runway"`, `"replicate"`, `"fal"` or `"gemini"`). */
   provider: string;
-  /** Unix timestamp (ms) when the video was created. */
+  /** Unix timestamp (seconds) when the video was created, as every media result reports it. */
   created: number;
   /** Array of generated video objects containing URLs or base64 data. */
   videos: VideoResult['videos'];

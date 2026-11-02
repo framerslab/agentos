@@ -97,6 +97,7 @@ import type {
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
 import {
   checkedRequest,
+  EgressRefusedError,
   hostedEgressPolicy,
   localEgressPolicy,
   type AddressLookup,
@@ -372,6 +373,9 @@ export class GeminiVideoProvider implements IVideoGenerator {
     const model = request.modelId || this._config.defaultModelId;
     const timeoutMs = this._config.timeoutMs;
     const signal = AbortSignal.timeout(timeoutMs);
+    // One key for the whole call: a Files API file belongs to the project of
+    // the key that generated it (https://ai.google.dev/api/files).
+    const apiKey = this.keyPool.next();
 
     try {
       const budget = { remaining: this._config.maxImageBytes };
@@ -386,7 +390,7 @@ export class GeminiVideoProvider implements IVideoGenerator {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': this.keyPool.next(),
+          'x-goog-api-key': apiKey,
         },
         body: JSON.stringify(body),
         signal,
@@ -402,7 +406,7 @@ export class GeminiVideoProvider implements IVideoGenerator {
       for (const video of result.videos) {
         if (video.base64 || !video.url) continue;
         const fileUri = video.url;
-        video.base64 = await this._downloadFile(fileUri, signal);
+        video.base64 = await this._downloadFile(fileUri, signal, apiKey);
         delete video.url;
         video.providerMetadata = { ...video.providerMetadata, fileUri };
       }
@@ -491,7 +495,7 @@ export class GeminiVideoProvider implements IVideoGenerator {
     }
 
     const value = image.trim();
-    if (value.startsWith('data:')) return dataUrlPart(value);
+    if (value.startsWith('data:')) return dataUrlPart(value, budget);
 
     let url: URL | undefined;
     try {
@@ -570,11 +574,12 @@ export class GeminiVideoProvider implements IVideoGenerator {
    *
    * @param fileUri - The URI the interaction gave (`files/{id}` or a full URL).
    * @param signal - The call's deadline.
+   * @param apiKey - The key that generated the file; its project owns it.
    * @returns The video bytes as base64.
    * @throws {Error} If the file fails processing or a request is refused.
    * @internal
    */
-  private async _downloadFile(fileUri: string, signal: AbortSignal): Promise<string> {
+  private async _downloadFile(fileUri: string, signal: AbortSignal, apiKey: string): Promise<string> {
     const match = /(?:^|\/)files\/([^/?#:]+)/.exec(fileUri);
     if (!match) {
       throw new Error(`Gemini video generation returned a video URI that names no file: ${fileUri}`);
@@ -584,7 +589,7 @@ export class GeminiVideoProvider implements IVideoGenerator {
 
     for (;;) {
       const response = await fetch(fileUrl, {
-        headers: { 'x-goog-api-key': this.keyPool.next() },
+        headers: { 'x-goog-api-key': apiKey },
         signal,
       });
       if (!response.ok) {
@@ -598,7 +603,7 @@ export class GeminiVideoProvider implements IVideoGenerator {
     }
 
     const download = await fetch(`${fileUrl}:download?alt=media`, {
-      headers: { 'x-goog-api-key': this.keyPool.next() },
+      headers: { 'x-goog-api-key': apiKey },
       signal,
     });
     if (!download.ok) {
@@ -699,12 +704,14 @@ function headerValue(headers: Record<string, string | string[] | undefined>, nam
 /**
  * Decode a `data:` URL (RFC 2397) into an image part: a base64 payload is
  * sent as it is, and a percent-encoded one is decoded to its bytes and
- * base64 encoded.
+ * base64 encoded. The decoded size is charged to the call's image budget
+ * before anything is decoded.
  *
  * @throws {Error} If the URL is malformed or its MIME type is not an image.
+ * @throws {EgressRefusedError} `too_large` when the image is past the budget.
  * @internal
  */
-function dataUrlPart(value: string): GeminiContentPart {
+function dataUrlPart(value: string, budget: { remaining: number }): GeminiContentPart {
   const comma = value.indexOf(',');
   if (comma < 0) throw new Error('Gemini video provider got a data: URL image with no data.');
   const params = value.slice('data:'.length, comma).split(';').map((part) => part.trim());
@@ -714,8 +721,32 @@ function dataUrlPart(value: string): GeminiContentPart {
     throw new Error('Gemini video provider takes a data: URL image only with an image/ MIME type.');
   }
   const payload = value.slice(comma + 1);
+  const size = isBase64 ? base64DecodedLength(payload) : percentDecodedLength(payload);
+  if (size > budget.remaining) {
+    throw new EgressRefusedError('too_large', 'an inline image is past maxImageBytes');
+  }
+  budget.remaining -= size;
   if (isBase64) return { type: 'image', data: payload, mime_type: mimeType };
   return { type: 'image', data: percentDecode(payload).toString('base64'), mime_type: mimeType };
+}
+
+/**
+ * The number of bytes a base64 payload decodes to.
+ * @internal
+ */
+function base64DecodedLength(payload: string): number {
+  const digits = payload.replace(/[^A-Za-z0-9+/_-]/g, '').length;
+  return Math.floor((digits * 3) / 4);
+}
+
+/**
+ * The number of bytes a percent-encoded payload decodes to: one for each
+ * `%XX`, and the UTF-8 length of every other character.
+ * @internal
+ */
+function percentDecodedLength(payload: string): number {
+  const escapes = payload.match(/%[0-9a-fA-F]{2}/g)?.length ?? 0;
+  return Buffer.byteLength(payload, 'utf8') - 2 * escapes;
 }
 
 /**
