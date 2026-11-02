@@ -410,6 +410,19 @@ describe('GeminiVideoProvider', () => {
     );
   });
 
+  it('raises an interaction with no status, even when it holds a video', async () => {
+    // `status` is a required field of the Interaction resource
+    // (https://ai.google.dev/api/interactions-api); a reply without it is not a completed one.
+    const { status: _status, ...noStatus } = interaction([
+      { type: 'video', mime_type: 'video/mp4', data: VIDEO_B64 },
+    ]);
+    fetchSpy.mockResolvedValueOnce(jsonResponse(noStatus));
+
+    await expect(provider.generateVideo({ prompt: 'p' })).rejects.toThrow(
+      'Gemini video generation ended with no status.',
+    );
+  });
+
   it('raises the messages of the errors a failed interaction records', async () => {
     // The Interaction resource records its faults in `errors`, a list of
     // `{ code, message }` (https://ai.google.dev/api/interactions-api).
