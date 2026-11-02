@@ -36,7 +36,10 @@
  * `Buffer` as a `data:` URL; Replicate accepts both for file inputs.
  * `providerOptions` (or their `replicate` entry) add other inputs, such as
  * Veo's `last_frame` or MiniMax's `subject_reference`, and never replace the
- * fields above.
+ * fields above. Their `imageInputName` entry is not sent: it names the input
+ * the source image goes under, ahead of the model-family rule above. A bare
+ * version id names no family, so its image goes under `image` unless
+ * `imageInputName` says otherwise (`start_image` for a Kling version).
  *
  * ## API flow (submit + sync wait + optional poll)
  *
@@ -386,7 +389,16 @@ export class ReplicateVideoProvider implements IVideoGenerator {
       prompt: request.prompt,
     };
 
-    if (imageUrl !== undefined) input[imageInputName(model)] = imageUrl;
+    // `imageInputName` names the source image's field; it is not a model
+    // input. A bare version id names no model family, so it needs one.
+    const { imageInputName: namedImageInput, ...extra } =
+      getVideoProviderOptions(this.providerId, request.providerOptions) ?? {};
+    const imageField =
+      typeof namedImageInput === 'string' && namedImageInput.trim()
+        ? namedImageInput.trim()
+        : imageInputName(model);
+
+    if (imageUrl !== undefined) input[imageField] = imageUrl;
     if (request.durationSec !== undefined) input.duration = request.durationSec;
     if (request.aspectRatio) input.aspect_ratio = request.aspectRatio;
     if (request.resolution) input.resolution = request.resolution;
@@ -396,7 +408,7 @@ export class ReplicateVideoProvider implements IVideoGenerator {
       input.reference_images = request.referenceImages.map(videoImageToUrl);
     }
     // Provider options add model inputs; they never replace the fields above.
-    return addProviderInputs(input, getVideoProviderOptions(this.providerId, request.providerOptions));
+    return addProviderInputs(input, extra);
   }
 
   /**

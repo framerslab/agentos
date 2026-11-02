@@ -226,7 +226,9 @@ export interface GenerateVideoOptions {
    *
    * Accepts a `Buffer`, an `https://` URL or a `data:` URL. fal, Replicate and
    * Runway receive a URL as given and a `Buffer` as a `data:` URL; the Gemini
-   * provider reads an `https://` URL itself and sends the bytes inline.
+   * provider fetches an `https://` URL itself through the checked egress
+   * path (public addresses on port 443, each redirect checked) and sends the
+   * bytes inline.
    */
   image?: VideoImageInput;
 

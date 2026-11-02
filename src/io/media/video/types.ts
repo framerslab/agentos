@@ -26,8 +26,11 @@ export type VideoProviderId =
  * fal, Replicate and Runway receive a URL as given, so the provider fetches
  * the file itself; a `Buffer` is sent to them as a `data:` URL whose MIME type
  * is read from the file's first bytes (PNG, JPEG, GIF or WebP; PNG when none
- * matches). The Gemini provider sends every image inline: it reads an
- * `https://` URL itself, and passes a Gemini Files API URI as a `uri`.
+ * matches). The Gemini provider sends every image inline: it fetches an
+ * image URL itself through the checked egress path (https on 443 to public
+ * addresses, each redirect checked, 20 MiB across a call's images by
+ * default), decodes a base64 or percent-encoded `data:` URL, and passes a
+ * Gemini Files API URI as a `uri`.
  */
 export type VideoImageInput = Buffer | string;
 
@@ -35,8 +38,9 @@ export type VideoImageInput = Buffer | string;
  * Provider-specific model inputs for a video request.
  *
  * Keyed by provider id (`{ fal: {...}, replicate: {...} }`), each provider in
- * a fallback chain receives only its own entry. A bag with no provider-id key
- * goes whole to fal, Replicate and Gemini. The entries add model inputs and
+ * a fallback chain receives only its own entry; the ids of providers added
+ * with `registerVideoProviderFactory()` key a bag as the built-in ids do. A
+ * bag with no provider-id key goes whole to fal, Replicate and Gemini. The entries add model inputs and
  * never replace a field the request sets (the prompt, the image, the
  * duration, the resolution and the like): to send a model-specific value for
  * such a field, leave the typed field unset and put the value here. The
@@ -45,7 +49,11 @@ export type VideoImageInput = Buffer | string;
 export interface VideoProviderOptionBag {
   /** Model inputs for fal, merged into the queue submit body. */
   fal?: Record<string, unknown>;
-  /** Model inputs for Replicate, merged into the prediction's `input`. */
+  /**
+   * Model inputs for Replicate, merged into the prediction's `input`. Its
+   * `imageInputName` is not sent: it names the input the source image goes
+   * under (for a bare version id, which names no model family).
+   */
   replicate?: Record<string, unknown>;
   /**
    * Reserved for Runway. The Runway provider sends no provider options, so an
@@ -55,6 +63,8 @@ export interface VideoProviderOptionBag {
   /**
    * Fields for the Gemini Interactions API, merged into the request body;
    * `response_format` and `generation_config` objects are merged key by key.
+   * `background: true` is refused: the provider does not poll a background
+   * interaction.
    */
   gemini?: Record<string, unknown>;
   /** Entries for other registered providers. */

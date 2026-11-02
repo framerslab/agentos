@@ -6,8 +6,24 @@
 
 import type { VideoImageInput, VideoProviderOptionBag } from './types.js';
 
-/** Provider ids that mark a {@link VideoProviderOptionBag} as keyed by provider. */
-const BUILT_IN_VIDEO_PROVIDER_IDS = new Set(['fal', 'replicate', 'runway', 'gemini']);
+/**
+ * Provider ids that mark a {@link VideoProviderOptionBag} as keyed by
+ * provider: the built-in providers, and every id registered through
+ * `registerVideoProviderFactory()`.
+ */
+const KEYED_VIDEO_PROVIDER_IDS = new Set(['fal', 'replicate', 'runway', 'gemini']);
+
+/**
+ * Mark a provider id as one that keys a {@link VideoProviderOptionBag}, so a
+ * bag holding an entry for that provider is read as keyed by every other
+ * provider too. `registerVideoProviderFactory()` calls it for each id it
+ * registers.
+ *
+ * @param providerId - The provider id; matched lowercased.
+ */
+export function registerKeyedVideoProviderId(providerId: string): void {
+  KEYED_VIDEO_PROVIDER_IDS.add(providerId.toLowerCase());
+}
 
 /**
  * Whether a value is a plain object (not an array, not null).
@@ -23,7 +39,8 @@ export function isPlainRecord(value: unknown): value is Record<string, unknown> 
  * Read one provider's options from a request's `providerOptions`.
  *
  * A bag that holds the provider's own id, or the id of any built-in video
- * provider (`fal`, `replicate`, `runway`, `gemini`), is keyed by provider: the
+ * provider (`fal`, `replicate`, `runway`, `gemini`) or of a provider
+ * registered with `registerVideoProviderFactory()`, is keyed by provider: the
  * provider receives its own entry, or nothing when the bag has none for it. A
  * bag with no such key is flat and is returned whole to every provider that
  * reads its options.
@@ -47,7 +64,7 @@ export function getVideoProviderOptions(
   if (!isPlainRecord(providerOptions)) return undefined;
 
   const keyed = Object.keys(providerOptions).some(
-    (key) => key === providerId || BUILT_IN_VIDEO_PROVIDER_IDS.has(key),
+    (key) => key === providerId || KEYED_VIDEO_PROVIDER_IDS.has(key.toLowerCase()),
   );
   if (!keyed) return providerOptions;
 

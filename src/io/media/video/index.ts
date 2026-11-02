@@ -16,6 +16,7 @@ import { FalVideoProvider } from './providers/FalVideoProvider.js';
 import { GeminiVideoProvider } from './providers/GeminiVideoProvider.js';
 import { ReplicateVideoProvider } from './providers/ReplicateVideoProvider.js';
 import { RunwayVideoProvider } from './providers/RunwayVideoProvider.js';
+import { registerKeyedVideoProviderId } from './videoInputs.js';
 
 export * from './types.js';
 export * from './IVideoGenerator.js';
@@ -49,6 +50,9 @@ const videoProviderFactories = new Map<string, VideoProviderFactory>([
  *
  * Use this to add third-party or custom video providers at runtime.
  * Built-in providers (runway, replicate, fal, gemini) are pre-registered.
+ * The id also keys `providerOptions`: a bag holding an entry under it is
+ * read as keyed by provider, so the fallback providers never receive that
+ * entry as flat model inputs.
  *
  * @param providerId - Unique identifier for the provider (lowercased for matching).
  * @param factory - Factory function that creates a new uninitialised provider instance.
@@ -58,6 +62,7 @@ export function registerVideoProviderFactory(
   factory: VideoProviderFactory,
 ): void {
   videoProviderFactories.set(providerId.toLowerCase(), factory);
+  registerKeyedVideoProviderId(providerId);
 }
 
 /**
