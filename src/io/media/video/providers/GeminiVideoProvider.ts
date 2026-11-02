@@ -42,7 +42,8 @@
  *   port 443 to a name whose every address is public, checked before the
  *   connection opens and pinned to the checked address. A redirect is
  *   followed (up to 3) only after its target passes the same check. The
- *   images fetched in one call may total `maxImageBytes` (20 MiB by default).
+ *   bytes read in one call's image fetches, redirect bodies included, may
+ *   total `maxImageBytes` (20 MiB by default).
  *   `imageEgress: { profile: 'local' }` allows `http` and private addresses,
  *   for a developer's own machine.
  * - `aspectRatio` (`16:9`, `9:16`) and `resolution` (`360p`, `720p`, `1080p`,
@@ -528,11 +529,13 @@ export class GeminiVideoProvider implements IVideoGenerator {
     budget: { remaining: number },
   ): Promise<{ bytes: Buffer; mimeType: string }> {
     const { profile, lookup, connector } = this._config.imageEgress;
-    const bounds = { timeoutMs: this._config.timeoutMs, maxResponseBytes: Math.max(0, budget.remaining) };
-    const policy: EgressPolicy = profile === 'local' ? localEgressPolicy(bounds) : hostedEgressPolicy(bounds);
 
     let target = url;
     for (let hop = 0; ; hop += 1) {
+      // Every answer, a redirect's body included, is read against what is
+      // left of the call's budget.
+      const bounds = { timeoutMs: this._config.timeoutMs, maxResponseBytes: Math.max(0, budget.remaining) };
+      const policy: EgressPolicy = profile === 'local' ? localEgressPolicy(bounds) : hostedEgressPolicy(bounds);
       const response = await checkedRequest({
         url: target,
         method: 'GET',
@@ -542,6 +545,7 @@ export class GeminiVideoProvider implements IVideoGenerator {
         ...(lookup ? { lookup } : {}),
         ...(connector ? { connector } : {}),
       });
+      budget.remaining -= response.body.length;
       if (response.status >= 300 && response.status < 400) {
         const location = headerValue(response.headers, 'location');
         if (!location || hop >= MAX_IMAGE_REDIRECTS) {
@@ -553,7 +557,6 @@ export class GeminiVideoProvider implements IVideoGenerator {
       if (response.status < 200 || response.status >= 300) {
         throw new Error(`Gemini video provider could not read an image (HTTP ${response.status}).`);
       }
-      budget.remaining -= response.body.length;
       const declared = headerValue(response.headers, 'content-type')?.split(';')[0]?.trim().toLowerCase();
       return {
         bytes: response.body,
