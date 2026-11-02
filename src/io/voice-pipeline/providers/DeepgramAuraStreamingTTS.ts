@@ -53,7 +53,11 @@
  * segment opens a fresh socket. When the wait was for the late `Flushed` of a
  * timed-out segment whose late audio would still play, the rest of that audio
  * is lost with the socket, so a `'warning'` says so instead, one console
- * warning line when nothing listens for it. Deepgram takes at most 20 `Flush` messages in 60
+ * warning line when nothing listens for it. A reply whose last segment timed
+ * out completes its `flush()` at the timeout, before that late audio could
+ * come: one `'warning'` goes out before its `flush_complete`, saying so, one
+ * console warning line when nothing listens for it, so the reply is not taken
+ * as heard whole, and the wait's end reports that loss no more. Deepgram takes at most 20 `Flush` messages in 60
  * seconds and answers the rest with a `Warning`: a segment that would pass that
  * limit is spoken without a `Flush`, the segments after it join it, each as its
  * own `Speak`, and one `Flush` once the window has passed completes them
@@ -261,6 +265,11 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
    * of the reply before: until the wait ends, Deepgram's audio is that segment's, which no reply plays any more.
    */
   private dropStale = false;
+  /**
+   * Set when a flush completed while the late `Flushed` of its reply's timed-out last segment was waited for, and its
+   * `'warning'` said that the rest of that segment's audio may never come: the wait's end does not report that loss again.
+   */
+  private lateReported = false;
   /** How many `flush()` calls wait for the queue. */
   private flushCalls = 0;
   private readonly voice: string;
@@ -283,7 +292,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
       // A segment arriving while the one in flight waits for a Flush slot is spoken now and completed with it.
       extend: (segment) => this.speakMore(segment),
       emit: (chunk) => this.emit('audio', chunk),
-      flushed: () => this.emit('flush_complete'),
+      flushed: () => this.flushCompleted(),
       // The segment's Flush is still outstanding: its Flushed may yet come, and must not complete the next segment.
       timedOut: () => {
         for (const flush of this.unanswered) flush.flight = false;
@@ -463,7 +472,9 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
 
   /**
    * Queues the final, unterminated segment and resolves once every queued
-   * segment has completed or timed out; `flush_complete` goes out once, then.
+   * segment has completed or timed out; `flush_complete` goes out once, then,
+   * after a `'warning'` when the last segment timed out and its late audio
+   * would still play ({@link flushCompleted}).
    * A cancel or `close()` ends the wait without `flush_complete`; a socket
    * Deepgram closes mid-reply ends it with `flush_complete`, after the
    * `'error'` that reports the lost reply, and so does a socket that fails to
@@ -702,11 +713,26 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   /**
    * Whether the session waits for the late `Flushed` of a segment that timed out while that segment's late audio would
    * still play: not the `Cleared` of a `Clear`, whose audio is dropped, and not once the next reply's text has come,
-   * from when it is dropped too. A wait that ends without that `Flushed`, the socket closed or given up, then loses
-   * what of the segment's audio had not come.
+   * from when it is dropped too, nor once a flush that completed meanwhile has warned of it ({@link flushCompleted}).
+   * A wait that ends without that `Flushed`, the socket closed or given up, then loses what of the segment's audio had
+   * not come.
    */
   private lateAudioOwed(): boolean {
-    return this.stale !== undefined && !this.clearing && !this.dropStale;
+    return this.stale !== undefined && !this.clearing && !this.dropStale && !this.lateReported;
+  }
+
+  /**
+   * Every segment of a `flush()` has ended: `flush_complete` goes out. When the reply's last segment timed out and its
+   * late audio would still play ({@link lateAudioOwed}), nothing proves the rest of that audio will come, so a
+   * `'warning'` says so first, one console warning line when nothing listens for it, and the reply is not taken as
+   * heard whole; the wait's end, the late `Flushed`, a close or the socket given up, reports that loss no more.
+   */
+  private flushCompleted(): void {
+    if (this.lateAudioOwed()) {
+      this.lateReported = true;
+      this.warnOf(new Error("the reply's last segment had no Flushed within its wait; its flush completes before the rest of that segment's audio is known to have come"));
+    }
+    this.emit('flush_complete');
   }
 
   /**
@@ -717,6 +743,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   private release(): void {
     this.clearing = false;
     this.dropStale = false;
+    this.lateReported = false;
     if (this.stale === undefined) return;
     clearTimeout(this.stale);
     this.stale = undefined;
