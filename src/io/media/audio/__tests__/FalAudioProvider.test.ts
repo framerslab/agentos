@@ -20,6 +20,7 @@
  * - SFX runs on fal-ai/stable-audio by default, sends `seconds_total` and
  *   reads `audio_file`
  * - The provider polls the `status_url` and reads the `response_url` it was given
+ * - Those requests stay on a custom `baseURL`
  * - Provider options never replace the prompt, duration or seed
  * - A `defaultModelId` override still applies to both capabilities
  * - A COMPLETED status with an `error` is raised as a failure
@@ -180,6 +181,28 @@ describe('FalAudioProvider', () => {
     expect(result.audio[0].mimeType).toBe('audio/mpeg');
     expect(fetchSpy.mock.calls[1][0]).toBe('https://queue.fal.run/fal-ai/musicgen/requests/req-bare/status');
     expect(fetchSpy.mock.calls[2][0]).toBe('https://queue.fal.run/fal-ai/musicgen/requests/req-bare');
+  });
+
+  it('keeps the status and result requests on a custom baseURL', async () => {
+    await provider.initialize({
+      apiKey: 'fal_key',
+      pollIntervalMs: 1,
+      baseURL: 'https://gateway.example.com/fal',
+    });
+
+    // The queue answers with its own host; the polls must still go through the gateway.
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse(submitted('fal-ai/musicgen', 'req-gw-1')))
+      .mockResolvedValueOnce(mockResponse({ status: 'COMPLETED', request_id: 'req-gw-1' }))
+      .mockResolvedValueOnce(mockResponse({ audio_url: { url: 'https://v3.fal.media/files/m.wav' } }));
+
+    await provider.generateMusic({ prompt: 'March' });
+
+    expect(fetchSpy.mock.calls[0][0]).toBe('https://gateway.example.com/fal/fal-ai/musicgen');
+    expect(fetchSpy.mock.calls[1][0]).toBe(
+      'https://gateway.example.com/fal/fal-ai/musicgen/requests/req-gw-1/status',
+    );
+    expect(fetchSpy.mock.calls[2][0]).toBe('https://gateway.example.com/fal/fal-ai/musicgen/requests/req-gw-1');
   });
 
   // -------------------------------------------------------------------------

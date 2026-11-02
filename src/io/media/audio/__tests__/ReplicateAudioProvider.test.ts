@@ -22,7 +22,8 @@
  * - A full `owner/name:version` or a bare version id is sent as given
  * - Output format and provider options reach the model input
  * - An explicitly versioned model is reported with its version
- * - Only the wav and mp3 output formats are sent
+ * - Only the wav and mp3 output formats are sent, mapped per known model
+ * - The seed reaches the models whose schema takes one
  * - Provider options never replace the prompt, duration or output format
  * - Polling a prediction that did not finish inside the wait window
  * - supports() returns true for both music and sfx
@@ -238,6 +239,44 @@ describe('ReplicateAudioProvider', () => {
       output_format: 'wav',
       top_k: 250,
     });
+  });
+
+  it('sends the seed to the models whose schema takes one', async () => {
+    await provider.initialize({ apiKey: 'r8_audio_key', pollIntervalMs: 1 });
+    const done = { id: 'p', status: 'succeeded', output: 'https://replicate.delivery/a.wav' };
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse(done))
+      .mockResolvedValueOnce(mockResponse(done))
+      .mockResolvedValueOnce(mockResponse(done));
+
+    // meta/musicgen and stability-ai/stable-audio-2.5 list a `seed` input;
+    // sepal/audiogen does not.
+    await provider.generateMusic({ prompt: 'a', seed: 42 });
+    await provider.generateSFX({ prompt: 'b', seed: 42 });
+    await provider.generateMusic({ prompt: 'c', seed: 42, modelId: 'stability-ai/stable-audio-2.5' });
+
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).input).toEqual({ prompt: 'a', seed: 42 });
+    expect(JSON.parse(fetchSpy.mock.calls[1][1].body).input).toEqual({ prompt: 'b' });
+    expect(JSON.parse(fetchSpy.mock.calls[2][1].body).input).toEqual({ prompt: 'c', seed: 42 });
+  });
+
+  it('maps the output format to the values each known model accepts', async () => {
+    await provider.initialize({ apiKey: 'r8_audio_key', pollIntervalMs: 1 });
+    const done = { id: 'p', status: 'succeeded', output: 'https://replicate.delivery/a.wav' };
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse(done))
+      .mockResolvedValueOnce(mockResponse(done))
+      .mockResolvedValueOnce(mockResponse(done));
+
+    // elevenlabs/music takes mp3_standard, wav_cd_quality and similar values;
+    // stability-ai/stable-audio-2.5 has no output_format input.
+    await provider.generateMusic({ prompt: 'a', outputFormat: 'wav', modelId: 'elevenlabs/music' });
+    await provider.generateMusic({ prompt: 'b', outputFormat: 'mp3', modelId: 'elevenlabs/music' });
+    await provider.generateMusic({ prompt: 'c', outputFormat: 'wav', modelId: 'stability-ai/stable-audio-2.5' });
+
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).input).toEqual({ prompt: 'a', output_format: 'wav_cd_quality' });
+    expect(JSON.parse(fetchSpy.mock.calls[1][1].body).input).toEqual({ prompt: 'b', output_format: 'mp3_standard' });
+    expect(JSON.parse(fetchSpy.mock.calls[2][1].body).input).toEqual({ prompt: 'c' });
   });
 
   it('polls a prediction that did not finish inside the wait window', async () => {
