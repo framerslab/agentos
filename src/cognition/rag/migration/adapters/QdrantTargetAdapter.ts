@@ -10,7 +10,7 @@
 import type { IMigrationTarget } from '../types.js';
 import Database from 'better-sqlite3';
 import { SCOPE_ID_FORM_KEY, type BrainScopeIdForm } from '../../../memory/retrieval/store/scopeIdForm.js';
-import { isMissingTableError } from './missingTable.js';
+import { isMissingTableError } from '../../../memory/retrieval/store/missingTable.js';
 import { sidecarScopeIdForms } from './sidecarScopeIdForms.js';
 
 /** Tables that go into Qdrant as point collections. */

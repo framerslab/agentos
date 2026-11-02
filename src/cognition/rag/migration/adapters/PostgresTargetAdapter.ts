@@ -8,7 +8,7 @@
  */
 
 import type { IMigrationTarget } from '../types.js';
-import { isMissingTableError } from './missingTable.js';
+import { isMissingTableError } from '../../../memory/retrieval/store/missingTable.js';
 import {
   readScopeIdForms,
   SCOPE_ID_FORM_KEY,

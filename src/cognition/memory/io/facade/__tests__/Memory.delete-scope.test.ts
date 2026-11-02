@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Memory } from '../Memory.js';
 import type { Brain } from '../../../retrieval/store/Brain.js';
+import type { IKnowledgeGraph } from '../../../retrieval/graph/knowledge/IKnowledgeGraph.js';
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
 import { readTraceSnapshot } from '../../../retrieval/store/tracePersistence.js';
 import * as root from '../../../../../index.js';
@@ -239,6 +240,32 @@ describe('Memory.deleteTraces and restoreTrace', () => {
     await expect(memory.deleteScope('user', 'ana')).resolves.toEqual({ deleted: 1 });
     expect(await brain.all('SELECT id FROM memory_traces')).toEqual([]);
     expect(offline.mock.calls[1]?.[0]).toEqual({ traceIds: [gone.id] });
+  });
+
+  it("fails a scope's delete when the knowledge graph cannot delete a copy filed under it whose trace is gone", async () => {
+    const { memory } = await facade();
+    const graph = (memory as unknown as { _knowledgeGraph: IKnowledgeGraph })._knowledgeGraph;
+    // The copy of a trace whose row is gone, as an older release left one: no row holds the words.
+    await graph.recordMemory({
+      type: 'conversation',
+      summary: 'Ana is allergic to walnuts.',
+      description: 'Ana is allergic to walnuts.',
+      participants: ['ana'],
+      importance: 0.5,
+      entityIds: [],
+      occurredAt: new Date(1).toISOString(),
+      outcome: 'unknown',
+      context: { memoryTraceId: 'gone-1', scope: 'user', scopeId: 'ana', type: 'episodic' },
+    });
+    const copies = async () => (await graph.queryMemories({ limit: 100 })).filter((copy) => copy.context?.memoryTraceId === 'gone-1');
+    const offline = vi.spyOn(graph, 'deleteMemories').mockRejectedValueOnce(new Error('graph offline'));
+
+    await expect(memory.deleteScope('user', 'ana')).rejects.toThrow(/graph offline/);
+    expect(await copies()).toHaveLength(1);
+
+    await expect(memory.deleteScope('user', 'ana')).resolves.toEqual({ deleted: 0 });
+    expect(await copies()).toEqual([]);
+    expect(offline).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the vector of a trace it restores to the content its row holds, and drops it for other content", async () => {

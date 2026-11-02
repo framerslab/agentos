@@ -12087,7 +12087,9 @@ describe('the docs a host reads about it', () => {
     expect(gmiDoc).toContain('| `exportLearnedState(learner)` | One JSON document');
     expect(gmiDoc).toContain('| `importLearnedState(doc, target?)` | Takes the four learnable traits');
     expect(gmiDoc).toContain("`forgetUser` takes the user's write chain, so every write this process admitted for the user reaches its verdict first.");
-    expect(gmiDoc).toContain("A brain a session row names that neither reaches is reached through the host's storage adapter when it holds that brain's traces.");
+    expect(gmiDoc).toContain(
+      "A brain a session row names that neither reaches is reached through the host's storage adapter when it holds that brain's traces, unless a memory manager of that brain failed",
+    );
     expect(gmiDoc).toContain("names the first 16 hexadecimal digits of the user's tombstone, never the user id");
     expect(gmiDoc).toContain("A recorded memory write that a crash left `pending` (its verdict never written) is decided at the learner's next session");
     expect(gmiDoc).toContain('(reason `floor_raised`)');

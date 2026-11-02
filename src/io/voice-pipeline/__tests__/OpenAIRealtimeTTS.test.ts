@@ -556,6 +556,31 @@ describe('OpenAIRealtimeTTS against a local Realtime server', () => {
       expect(log.flushes).toBe(1);
     });
 
+    it("keeps a flush a 'flush_complete' listener starts open until its own reply ends", async () => {
+      const session = await start();
+      const log = record(session);
+      let next: { settled: boolean } | undefined;
+      // A listener that speaks again the moment the last reply ends, as a turn loop that queues its next reply does.
+      session.on('flush_complete', () => {
+        if (next) return;
+        session.pushTokens('Second.');
+        next = watch(session.flush());
+      });
+      session.pushTokens('First.');
+      const first = session.flush();
+      await until(() => server.running.size === 1, 'the first response');
+      server.finish(server.responseId(0));
+      await first;
+      await until(() => server.sent('response.create').length === 2, 'the second response');
+      await delay(SOCKET_TURN_MS);
+
+      expect(next?.settled).toBe(false);
+
+      server.finish(server.responseId(1));
+      await until(() => next?.settled === true, 'the second flush to settle');
+      expect(log.flushes).toBe(2);
+    });
+
     it('does not complete while text waits for its flush', async () => {
       const session = await start();
       const log = record(session);

@@ -1,14 +1,17 @@
 /**
  * @file memoryFixtures.ts
  * Real memory for the learning layer's tests: a CognitiveMemoryManager over a SQLite Brain with a deterministic
- * embedding and a SQL knowledge graph, and a Memory facade over a SQLite file of its own. `closeMemory()`, called in a
+ * embedding and a SQL knowledge graph (or a graph the test gives it), a Memory facade over a SQLite file of its own, and
+ * a host's storage adapter over a SQLite file. `closeMemory()`, called in a
  * test file's `afterEach`, closes each and removes its directory.
  */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { CognitiveMemoryManager } from '../../../memory/CognitiveMemoryManager.js';
 import { Memory } from '../../../memory/io/facade/Memory.js';
+import type { IKnowledgeGraph } from '../../../memory/retrieval/graph/knowledge/IKnowledgeGraph.js';
 import { Brain } from '../../../memory/retrieval/store/Brain.js';
 import { SqlKnowledgeGraph } from '../../../memory/retrieval/store/SqlKnowledgeGraph.js';
 import { InMemoryVectorStore } from '../../../rag/vector_stores/InMemoryVectorStore.js';
@@ -39,10 +42,13 @@ function embed(text: string): number[] {
   return vector.map((value) => value + 0.01);
 }
 
-/** A memory manager over a Brain the caller opened and closes, as a GMI's. */
-export async function managerOnBrain(brain: Brain): Promise<CognitiveMemoryManager> {
-  const knowledgeGraph = new SqlKnowledgeGraph(brain);
-  await knowledgeGraph.initialize();
+/**
+ * A memory manager over a Brain the caller opened and closes, as a GMI's. Its knowledge graph is `graph`, initialized
+ * by the caller, else a SQL graph over the Brain.
+ */
+export async function managerOnBrain(brain: Brain, graph?: IKnowledgeGraph): Promise<CognitiveMemoryManager> {
+  const knowledgeGraph = graph ?? new SqlKnowledgeGraph(brain);
+  if (!graph) await knowledgeGraph.initialize();
   const vectorStore = new InMemoryVectorStore();
   await vectorStore.initialize({ id: `learning-${brain.brainId}-${Math.random()}`, type: 'in_memory' });
   const manager = new CognitiveMemoryManager();
@@ -72,6 +78,16 @@ export async function managerOver(filePath: string, brainId: string): Promise<{ 
   // Pushed first, so it runs after the manager's shutdown (closers run newest first).
   closers.push(() => brain.close());
   return { manager: await managerOnBrain(brain), brain };
+}
+
+/**
+ * A storage adapter over a SQLite file, as a host's: closed after every manager and facade opened after it, so a Brain
+ * opened on it is never closed (closing that Brain would close the adapter).
+ */
+export async function adapterAt(filePath: string): Promise<StorageAdapter> {
+  const adapter = await resolveStorageAdapter({ filePath, priority: ['better-sqlite3', 'sqljs'], quiet: true });
+  closers.push(() => adapter.close());
+  return adapter;
 }
 
 /** A Memory facade over a SQLite file of its own, as a host's memory tools are built over. */

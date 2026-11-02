@@ -210,7 +210,8 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
    * Asks for the text pushed since the last flush to be spoken. Replies run one at a time, in order. `'flush_complete'`
    * means what the contract says, that all queued text has been spoken: it comes when the last reply ends with no text
    * waiting, so a `StreamingTTSChain` keeps the text of a reply still queued for its replay. A flush settles when no
-   * reply is left, or at a cut or a close. A flush with no text asks the server for nothing.
+   * reply is left, or at a cut or a close. A flush with no text asks the server for nothing. A flush a `'flush_complete'`
+   * listener starts runs a reply of its own and settles when that reply ends.
    */
   async flush(): Promise<void> {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
@@ -295,8 +296,12 @@ class OpenAIRealtimeTTSSession extends EventEmitter implements StreamingTTSSessi
     if (this.requests.length) return;
     const spoken = this.lastReplySpoken;
     this.lastReplySpoken = true;
+    // The flushes this drain ends are taken before the event: a flush a 'flush_complete' listener starts asks for a
+    // reply of its own and settles when that reply ends.
+    const ended = this.waiting;
+    this.waiting = [];
     if (spoken && !this.pendingText) this.emit('flush_complete');
-    this.settleWaiting();
+    for (const settle of ended) settle();
   }
 
   /** Settles every flush not yet settled. */

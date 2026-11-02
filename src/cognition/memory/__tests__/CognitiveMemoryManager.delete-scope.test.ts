@@ -229,7 +229,39 @@ describe('deleting traces other rows name', () => {
   });
 });
 
+/** Records in the graph the copy of a trace whose row is gone, filed under `scopeId`, as an older release left one. */
+async function orphanCopyIn(graph: IKnowledgeGraph, scopeId: string, text: string): Promise<void> {
+  await graph.recordMemory({
+    type: 'conversation',
+    summary: text,
+    description: text,
+    participants: [scopeId],
+    importance: 0.5,
+    entityIds: [],
+    occurredAt: new Date(1).toISOString(),
+    outcome: 'unknown',
+    context: { memoryTraceId: 'gone-1', scope: 'user', scopeId, type: 'episodic' },
+  });
+}
+
 describe('a knowledge graph that fails to delete the copies', () => {
+  it.each([
+    ['the in-memory graph', (_brain: Brain) => new KnowledgeGraph() as IKnowledgeGraph],
+    ['SqlKnowledgeGraph', (brain: Brain) => new SqlKnowledgeGraph(brain) as IKnowledgeGraph],
+  ])("fails a scope's delete when %s cannot delete a copy whose trace is gone, so a later call deletes it", async (_name, graph) => {
+    const { manager, graph: knowledgeGraph } = await managerOver(tempFile(), graph);
+    await orphanCopyIn(knowledgeGraph, 'ana', 'Ana is allergic to walnuts.');
+    const offline = vi.spyOn(knowledgeGraph, 'deleteMemories').mockRejectedValue(new Error('graph offline'));
+
+    // No row holds the words: the copy is the only record of them, and the call that leaves it fails.
+    await expect(manager.deleteScope('user', 'ana')).rejects.toThrow(/graph offline/);
+    expect((await copiesOf(knowledgeGraph)).map((copy) => copy.text)).toEqual(['Ana is allergic to walnuts.']);
+
+    offline.mockRestore();
+    expect(await manager.deleteScope('user', 'ana')).toEqual({ deleted: 0, graph: 'reached' });
+    expect(await copiesOf(knowledgeGraph)).toEqual([]);
+  });
+
   it('fails the delete with the trace rows kept, so a later call deletes the traces and their copies', async () => {
     const { manager, brain, graph: knowledgeGraph } = await managerOver(tempFile(), (brainOf) => new SqlKnowledgeGraph(brainOf));
     const walnuts = await manager.encode('Ana is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: 'ana' });
