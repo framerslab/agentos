@@ -20,6 +20,7 @@
  * - SFX runs on fal-ai/stable-audio by default, sends `seconds_total` and
  *   reads `audio_file`
  * - The provider polls the `status_url` and reads the `response_url` it was given
+ * - Provider options never replace the prompt, duration or seed
  * - A `defaultModelId` override still applies to both capabilities
  * - A COMPLETED status with an `error` is raised as a failure
  * - supports() returns true for both music and sfx
@@ -208,6 +209,44 @@ describe('FalAudioProvider', () => {
     expect(JSON.parse(fetchSpy.mock.calls[0][1].body)).toEqual({
       prompt: 'Explosion with debris',
       seconds_total: 3,
+    });
+  });
+
+  it('keeps the prompt, duration and seed when provider options name the same keys', async () => {
+    await provider.initialize({ apiKey: 'fal_key', pollIntervalMs: 1 });
+
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse(submitted('fal-ai/musicgen', 'req-opt-1')))
+      .mockResolvedValueOnce(mockResponse({ status: 'COMPLETED', request_id: 'req-opt-1' }))
+      .mockResolvedValueOnce(mockResponse({ audio_url: { url: 'https://v3.fal.media/files/m.wav' } }))
+      .mockResolvedValueOnce(mockResponse(submitted('fal-ai/stable-audio', 'req-opt-2')))
+      .mockResolvedValueOnce(mockResponse({ status: 'COMPLETED', request_id: 'req-opt-2' }))
+      .mockResolvedValueOnce(mockResponse({ audio_file: { url: 'https://v3.fal.media/files/s.wav' } }));
+
+    await provider.generateMusic({
+      prompt: 'Slow piano',
+      durationSec: 30,
+      seed: 7,
+      providerOptions: { prompt: 'Polka', duration: 4, seed: 99, guidance: 3 },
+    });
+    await provider.generateSFX({
+      prompt: 'Glass shatter',
+      durationSec: 5,
+      seed: 11,
+      providerOptions: { prompt: 'Thunder', seconds_total: 40, seed: 99, steps: 50 },
+    });
+
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body)).toEqual({
+      prompt: 'Slow piano',
+      duration: 30,
+      seed: 7,
+      guidance: 3,
+    });
+    expect(JSON.parse(fetchSpy.mock.calls[3][1].body)).toEqual({
+      prompt: 'Glass shatter',
+      seconds_total: 5,
+      seed: 11,
+      steps: 50,
     });
   });
 

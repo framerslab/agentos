@@ -21,6 +21,9 @@
  * - An official model goes to the model predictions route
  * - A full `owner/name:version` or a bare version id is sent as given
  * - Output format and provider options reach the model input
+ * - An explicitly versioned model is reported with its version
+ * - Only the wav and mp3 output formats are sent
+ * - Provider options never replace the prompt, duration or output format
  * - Polling a prediction that did not finish inside the wait window
  * - supports() returns true for both music and sfx
  * - API errors are propagated with status codes
@@ -178,6 +181,63 @@ describe('ReplicateAudioProvider', () => {
     expect(JSON.parse(fetchSpy.mock.calls[0][1].body).version).toBe(custom);
     expect(fetchSpy.mock.calls[1][0]).toBe('https://api.replicate.com/v1/predictions');
     expect(JSON.parse(fetchSpy.mock.calls[1][1].body).version).toBe('b'.repeat(64));
+  });
+
+  it('reports an explicitly versioned model with its version', async () => {
+    await provider.initialize({ apiKey: 'r8_audio_key', pollIntervalMs: 1 });
+    const done = { id: 'p', status: 'succeeded', output: 'https://replicate.delivery/a.mp3' };
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse(done))
+      .mockResolvedValueOnce(mockResponse(done));
+
+    const custom = `someone/custom-musicgen:${'a'.repeat(64)}`;
+    const versioned = await provider.generateMusic({ prompt: 'x', modelId: custom });
+    const bare = await provider.generateSFX({ prompt: 'y', modelId: 'b'.repeat(64) });
+
+    expect(versioned.modelId).toBe(custom);
+    expect(bare.modelId).toBe('b'.repeat(64));
+  });
+
+  it('sends only the wav and mp3 output formats the audio models accept', async () => {
+    await provider.initialize({ apiKey: 'r8_audio_key', pollIntervalMs: 1 });
+    const done = { id: 'p', status: 'succeeded', output: 'https://replicate.delivery/a.wav' };
+    fetchSpy
+      .mockResolvedValueOnce(mockResponse(done))
+      .mockResolvedValueOnce(mockResponse(done))
+      .mockResolvedValueOnce(mockResponse(done));
+
+    // meta/musicgen and sepal/audiogen list output_format as enum ["wav", "mp3"].
+    await provider.generateMusic({ prompt: 'a', outputFormat: 'flac' });
+    await provider.generateSFX({ prompt: 'b', outputFormat: 'ogg' });
+    await provider.generateMusic({ prompt: 'c', outputFormat: 'mp3' });
+
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).input).toEqual({ prompt: 'a' });
+    expect(JSON.parse(fetchSpy.mock.calls[1][1].body).input).toEqual({ prompt: 'b' });
+    expect(JSON.parse(fetchSpy.mock.calls[2][1].body).input).toEqual({ prompt: 'c', output_format: 'mp3' });
+  });
+
+  it('keeps the prompt, duration and output format when provider options name the same keys', async () => {
+    await provider.initialize({ apiKey: 'r8_audio_key', pollIntervalMs: 1 });
+
+    fetchSpy.mockResolvedValueOnce(mockResponse({
+      id: 'pred-music-3',
+      status: 'succeeded',
+      output: 'https://replicate.delivery/music.wav',
+    }));
+
+    await provider.generateMusic({
+      prompt: 'Tense strings',
+      durationSec: 20,
+      outputFormat: 'wav',
+      providerOptions: { prompt: 'Polka', duration: 5, output_format: 'mp3', top_k: 250 },
+    });
+
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).input).toEqual({
+      prompt: 'Tense strings',
+      duration: 20,
+      output_format: 'wav',
+      top_k: 250,
+    });
   });
 
   it('polls a prediction that did not finish inside the wait window', async () => {
