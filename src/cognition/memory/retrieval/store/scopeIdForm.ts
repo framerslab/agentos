@@ -536,8 +536,9 @@ async function tracesHoldReservedScopeIds(db: ScopeIdFormReader, brainId: string
         [brainId, afterId ?? ''],
       );
     } catch (error) {
-      // A table from before the scope_id column: the ids are read from the metadata.
-      if (columns === 'id, scope, metadata') throw error;
+      // A table from before the scope_id column: the ids are read from the metadata. Any other failure stops the scan,
+      // since a row whose id is only in the column would read as holding none.
+      if (columns === 'id, scope, metadata' || !isMissingTableError(error)) throw error;
       columns = 'id, scope, metadata';
       continue;
     }

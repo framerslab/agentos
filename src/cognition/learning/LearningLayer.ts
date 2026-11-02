@@ -934,8 +934,8 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     let failedElsewhere = false;
     /**
      * The brains whose live memory manager failed. The manager holds what only it reaches of each trace (its knowledge
-     * graph's copy, which holds the trace's words), and a trace's row is what a second call finds it by: no other delete
-     * of the brain counts as reaching it, and none goes through the host's storage adapter.
+     * graph's copy, which holds the trace's words), and a trace's row is what a second call finds it by: no facade of the
+     * brain deletes in it, no other delete counts as reaching it, and none goes through the host's storage adapter.
      */
     const managerFailed = new Set<string>();
 
@@ -971,6 +971,12 @@ class LearningLayer implements LearningLayerHandle, LearnerSessionHost {
     for (const facade of this.facadeList) {
       const name = this.facadeName(facade);
       if (typeof facade.deleteScope !== 'function') continue; // named among the unreached stores below
+      const facadeBrain = facadeBrainId(facade);
+      if (facadeBrain && managerFailed.has(facadeBrain)) {
+        // Its rows are what the manager's copies are found by: the facade's own graph holds none of them.
+        stores.push({ store: name, reached: false, reason: `the memory manager of brain ${facadeBrain} failed, so its rows stay for a second call` });
+        continue;
+      }
       try {
         let deleted = 0;
         for (const target of targets) {
