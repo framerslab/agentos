@@ -116,6 +116,9 @@ const GEMINI_API_HOST = 'generativelanguage.googleapis.com';
 /** The most bytes the images fetched by URL in one call may total. */
 const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
+/** The longest timer Node keeps: a longer one fires after 1 ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /** The most redirects one image fetch follows. */
 const MAX_IMAGE_REDIRECTS = 3;
 
@@ -153,6 +156,8 @@ export interface GeminiVideoProviderConfig {
   /**
    * Deadline in milliseconds for one generation call, across its image
    * fetches, the interaction and the download of a video delivered by URI.
+   * A fractional value is rounded up to whole milliseconds; a value past
+   * 2147483647 (the longest timer Node keeps) is refused at `initialize()`.
    * @default 300000
    */
   timeoutMs?: number;
@@ -260,6 +265,7 @@ export class GeminiVideoProvider implements IVideoGenerator {
    *
    * @param config - Configuration object. Must include `apiKey`.
    * @throws {Error} If `apiKey` is missing or empty.
+   * @throws {RangeError} If `timeoutMs` is past 2147483647 milliseconds.
    */
   async initialize(config: Record<string, unknown>): Promise<void> {
     const apiKey = typeof config.apiKey === 'string' ? config.apiKey.trim() : '';
@@ -270,15 +276,24 @@ export class GeminiVideoProvider implements IVideoGenerator {
     const text = (value: unknown): string | undefined =>
       typeof value === 'string' && value.trim() ? value.trim() : undefined;
 
+    // AbortSignal.timeout() takes whole milliseconds only, and Node fires a
+    // timer longer than MAX_TIMEOUT_MS after 1 ms.
+    let timeoutMs = 300_000;
+    if (typeof config.timeoutMs === 'number' && config.timeoutMs > 0) {
+      if (config.timeoutMs > MAX_TIMEOUT_MS) {
+        throw new RangeError(
+          `Gemini video provider timeoutMs must be no larger than ${MAX_TIMEOUT_MS}, not ${String(config.timeoutMs)}.`,
+        );
+      }
+      timeoutMs = Math.ceil(config.timeoutMs);
+    }
+
     this._config = {
       apiKey,
       baseURL: (text(config.baseURL) ?? text(config.baseUrl) ?? 'https://generativelanguage.googleapis.com/v1beta')
         .replace(/\/+$/, ''),
       defaultModelId: text(config.defaultModelId) ?? DEFAULT_MODEL,
-      timeoutMs:
-        typeof config.timeoutMs === 'number' && config.timeoutMs > 0
-          ? config.timeoutMs
-          : 300_000,
+      timeoutMs,
       pollIntervalMs:
         typeof config.pollIntervalMs === 'number' && config.pollIntervalMs > 0
           ? config.pollIntervalMs
