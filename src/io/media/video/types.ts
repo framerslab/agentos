@@ -175,7 +175,10 @@ export interface ImageToVideoRequest {
   modelId?: string;
   /**
    * Source image (the first frame): raw bytes, an `https://` URL or a `data:`
-   * URL. See {@link VideoImageInput} for how each provider sends it.
+   * URL. See {@link VideoImageInput} for how each provider sends it. A custom
+   * provider that sends a URL can pass it through `videoImageToUrl()` (from
+   * the video index), which leaves a string as it is and turns a `Buffer` into
+   * a `data:` URL. A string reaches a provider only when the caller passed one.
    */
   image: VideoImageInput;
   /** Text prompt describing the desired motion / narrative. */

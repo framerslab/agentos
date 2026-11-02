@@ -437,7 +437,7 @@ const clip = await generateVideo({
 });
 ```
 
-Key `providerOptions` by provider id so each provider in a fallback chain receives only its own entry (an id added with `registerVideoProviderFactory()` keys a bag as the built-in ids do); a bag with no provider-id key goes whole to fal, Replicate and Gemini. They add inputs and never replace a field the call sets, so to send a model-specific value for such a field, leave the typed field unset and put the value there. Runway sends no provider options. `timeoutMs` goes to each provider at `initialize()`: the polling budget on fal, Replicate and Runway, and the deadline of every request on Gemini.
+Key `providerOptions` by provider id so each provider in a fallback chain receives only its own entry (an id added with `registerVideoProviderFactory()` keys a bag as the built-in ids do); a bag with no provider-id key goes whole to fal, Replicate and Gemini. They add inputs and never replace a field the call sets, so to send a model-specific value for such a field, leave the typed field unset and put the value there. Runway sends the prompt, `duration`, `ratio` (from `aspectRatio`) and the source image; it sends no `resolution`, reference images or provider options. A custom provider registered with `registerVideoProviderFactory()` receives `image` as the caller passed it, a `Buffer` or a string, and `videoImageToUrl()` turns either into a URL. `timeoutMs` goes to each provider at `initialize()`: the polling budget on fal, Replicate and Runway, and the deadline of every request on Gemini.
 
 ### Built-in Video Providers
 

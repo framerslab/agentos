@@ -495,7 +495,8 @@ export class GeminiVideoProvider implements IVideoGenerator {
     }
 
     const value = image.trim();
-    if (value.startsWith('data:')) return dataUrlPart(value, budget);
+    // URL schemes are case-insensitive (RFC 3986, section 3.1).
+    if (/^data:/i.test(value)) return dataUrlPart(value, budget);
 
     let url: URL | undefined;
     try {

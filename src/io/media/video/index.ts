@@ -23,7 +23,7 @@ export * from './IVideoGenerator.js';
 export * from './IVideoAnalyzer.js';
 export * from './FallbackVideoProxy.js';
 export * from './VideoAnalyzer.js';
-export { getVideoProviderOptions } from './videoInputs.js';
+export { getVideoProviderOptions, videoImageToUrl } from './videoInputs.js';
 
 // ---------------------------------------------------------------------------
 // Provider factory registry
