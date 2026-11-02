@@ -249,6 +249,23 @@ describe('GeminiVideoProvider', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('charges the bodies of redirects to maxImageBytes', async () => {
+    const connector: EgressConnector = async (req) =>
+      req.destination.url.pathname === '/moved'
+        ? answer(302, { location: '/start.png' }, Buffer.from('redirect'))
+        : answer(200, { 'content-type': 'image/png' }, PNG_BYTES);
+    await provider.initialize({
+      apiKey: 'gk-test',
+      maxImageBytes: PNG_BYTES.length + 4,
+      imageEgress: { lookup: resolvesTo(PUBLIC_V4), connector },
+    });
+
+    await expect(
+      provider.imageToVideo({ prompt: 'p', image: 'https://cdn.example.com/moved' }),
+    ).rejects.toMatchObject({ reason: 'too_large' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('raises a refused image fetch with its status and without its URL', async () => {
     const connector: EgressConnector = async () => answer(404, {}, Buffer.from('not here'));
     await provider.initialize({ apiKey: 'gk-test', imageEgress: { lookup: resolvesTo(PUBLIC_V4), connector } });
