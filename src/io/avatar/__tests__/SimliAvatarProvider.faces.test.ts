@@ -9,39 +9,9 @@
  * live spec at https://api.simli.ai/openapi.yaml.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AvatarProviderError } from '../errors.js';
 import { SimliAvatarProvider } from '../providers/SimliAvatarProvider.js';
-
-/** The face surface the provider exposes, as the tests call it. */
-interface FaceSurface {
-  createFace(
-    image: { data: Uint8Array | ArrayBuffer | Blob; mimeType?: string; filename?: string },
-    options?: {
-      name?: string;
-      signal?: AbortSignal;
-      timeoutMs?: number;
-      providerOptions?: Record<string, unknown>;
-    }
-  ): Promise<{
-    faceId: string;
-    message?: string;
-    warnings: string[];
-    startAfterMs?: number;
-    raw: unknown;
-  }>;
-  faceStatus(
-    faceId: string,
-    options?: { signal?: AbortSignal; timeoutMs?: number }
-  ): Promise<{
-    faceId: string;
-    state: string;
-    providerState?: string;
-    queuePosition?: number;
-    startAfterMs?: number;
-    raw: unknown;
-  }>;
-}
-
-const faces = (provider: SimliAvatarProvider) => provider as unknown as FaceSurface;
+import type { IAvatarProvider } from '../types.js';
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 4, 5, 6]);
@@ -70,13 +40,19 @@ describe('SimliAvatarProvider.createFace', () => {
     vi.unstubAllGlobals();
   });
 
+  it('implements the optional face methods of the provider seam', () => {
+    const seam: IAvatarProvider = new SimliAvatarProvider({ apiKey: 'sk' });
+    expect(typeof seam.createFace).toBe('function');
+    expect(typeof seam.faceStatus).toBe('function');
+  });
+
   it('posts the image as the multipart field `image` to /faces/trinity with the API key and face_name', async () => {
     const mock = stubFetch(() =>
       json({ message: 'Queued at position 1', face_id: 'face-new', warnings: [] })
     );
     const provider = new SimliAvatarProvider({ apiKey: 'sk' });
 
-    const job = await faces(provider).createFace({ data: PNG }, { name: 'companion portrait' });
+    const job = await provider.createFace({ data: PNG }, { name: 'companion portrait' });
 
     expect(mock).toHaveBeenCalledTimes(1);
     const { url, init, headers } = captured(mock);
@@ -108,7 +84,7 @@ describe('SimliAvatarProvider.createFace', () => {
 
   it('sends no face_name when no name is given, so the vendor default applies', async () => {
     const mock = stubFetch(() => json({ message: 'ok', face_id: 'f', warnings: [] }));
-    await faces(new SimliAvatarProvider({ apiKey: 'sk' })).createFace({ data: PNG });
+    await new SimliAvatarProvider({ apiKey: 'sk' }).createFace({ data: PNG });
     expect(captured(mock).url.search).toBe('');
   });
 
@@ -123,7 +99,7 @@ describe('SimliAvatarProvider.createFace', () => {
     );
     const provider = new SimliAvatarProvider({ apiKey: 'sk', baseUrl: 'https://simli.test' });
 
-    const job = await faces(provider).createFace(
+    const job = await provider.createFace(
       { data: PNG },
       { name: 'n', providerOptions: { gsVersion: 'GSA_1.0', targetRatio: 0.42 } }
     );
@@ -142,7 +118,7 @@ describe('SimliAvatarProvider.createFace', () => {
 
   it('labels the part with the given type and a matching file name, and keeps a Blob input as given', async () => {
     const mock = stubFetch(() => json({ message: 'ok', face_id: 'f', warnings: [] }));
-    const provider = faces(new SimliAvatarProvider({ apiKey: 'sk' }));
+    const provider = new SimliAvatarProvider({ apiKey: 'sk' });
 
     await provider.createFace({ data: JPEG, mimeType: 'image/jpeg' });
     const jpegPart = (captured(mock, 0).init.body as FormData).get('image') as File;
@@ -169,7 +145,7 @@ describe('SimliAvatarProvider.createFace', () => {
     const mock = stubFetch(() => json({ message: 'ok', face_id: 'f', warnings: [] }));
     const controller = new AbortController();
     controller.abort();
-    await faces(new SimliAvatarProvider({ apiKey: 'sk' })).createFace(
+    await new SimliAvatarProvider({ apiKey: 'sk' }).createFace(
       { data: PNG },
       { signal: controller.signal }
     );
@@ -180,7 +156,7 @@ describe('SimliAvatarProvider.createFace', () => {
 
   it('bounds the upload with a deadline of its own when the caller gives none', async () => {
     const mock = stubFetch(() => json({ message: 'ok', face_id: 'f', warnings: [] }));
-    await faces(new SimliAvatarProvider({ apiKey: 'sk' })).createFace({ data: PNG });
+    await new SimliAvatarProvider({ apiKey: 'sk' }).createFace({ data: PNG });
     const signal = captured(mock).init.signal as AbortSignal;
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(signal.aborted).toBe(false);
@@ -188,9 +164,9 @@ describe('SimliAvatarProvider.createFace', () => {
 
   it('rejects an out-of-avatars 403 with the status and the body the caller can classify', async () => {
     stubFetch(() => json({ detail: 'No Trinity-2 generations left' }, 403));
-    await expect(
-      faces(new SimliAvatarProvider({ apiKey: 'sk' })).createFace({ data: PNG })
-    ).rejects.toMatchObject({
+    const upload = new SimliAvatarProvider({ apiKey: 'sk' }).createFace({ data: PNG });
+    await expect(upload).rejects.toBeInstanceOf(AvatarProviderError);
+    await expect(upload).rejects.toMatchObject({
       name: 'AvatarProviderError',
       providerId: 'simli',
       status: 403,
@@ -204,14 +180,14 @@ describe('SimliAvatarProvider.createFace', () => {
       json({ detail: [{ loc: ['body', 'image'], msg: 'Field required', type: 'missing' }] }, 422)
     );
     await expect(
-      faces(new SimliAvatarProvider({ apiKey: 'sk' })).createFace({ data: PNG })
+      new SimliAvatarProvider({ apiKey: 'sk' }).createFace({ data: PNG })
     ).rejects.toMatchObject({ name: 'AvatarProviderError', status: 422 });
   });
 
   it('rejects a 200 that carries no face_id', async () => {
     stubFetch(() => json({ message: 'ok', warnings: [] }));
     await expect(
-      faces(new SimliAvatarProvider({ apiKey: 'sk' })).createFace({ data: PNG })
+      new SimliAvatarProvider({ apiKey: 'sk' }).createFace({ data: PNG })
     ).rejects.toThrow(/face_id/);
   });
 });
@@ -230,7 +206,7 @@ describe('SimliAvatarProvider.faceStatus', () => {
         generations: [{ face_id: 'face 1/x', status: 'pending', queue_position: 2 }],
       })
     );
-    const status = await faces(new SimliAvatarProvider({ apiKey: 'sk' })).faceStatus('face 1/x');
+    const status = await new SimliAvatarProvider({ apiKey: 'sk' }).faceStatus('face 1/x');
 
     const { url, init, headers } = captured(mock);
     expect(`${url.origin}${url.pathname}`).toBe('https://api.simli.ai/faces/trinity/generation_status');
@@ -255,7 +231,7 @@ describe('SimliAvatarProvider.faceStatus', () => {
         generations: [{ face_id: 'f1', status: 'completed', queue_position: 0 }],
       })
     );
-    const status = await faces(new SimliAvatarProvider({ apiKey: 'sk' })).faceStatus('f1');
+    const status = await new SimliAvatarProvider({ apiKey: 'sk' }).faceStatus('f1');
     expect(status.state).toBe('ready');
     expect(status.providerState).toBe('completed');
     expect(status.queuePosition).toBe(0);
@@ -273,7 +249,7 @@ describe('SimliAvatarProvider.faceStatus', () => {
         ],
       })
     );
-    const status = await faces(new SimliAvatarProvider({ apiKey: 'sk' })).faceStatus('f1');
+    const status = await new SimliAvatarProvider({ apiKey: 'sk' }).faceStatus('f1');
     expect(status).toMatchObject({ faceId: 'f1', state: 'processing', queuePosition: 0 });
     expect(status.startAfterMs).toBeUndefined();
   });
@@ -289,7 +265,7 @@ describe('SimliAvatarProvider.faceStatus', () => {
         ],
       })
     );
-    const status = await faces(new SimliAvatarProvider({ apiKey: 'sk' })).faceStatus('held');
+    const status = await new SimliAvatarProvider({ apiKey: 'sk' }).faceStatus('held');
     expect(status.startAfterMs).toBe(1_798_000_600_000);
   });
 
@@ -302,13 +278,13 @@ describe('SimliAvatarProvider.faceStatus', () => {
         generations: [{ face_id: 'f1', status: 'failed', queue_position: 0 }],
       })
     );
-    const status = await faces(new SimliAvatarProvider({ apiKey: 'sk' })).faceStatus('f1');
+    const status = await new SimliAvatarProvider({ apiKey: 'sk' }).faceStatus('f1');
     expect(status.state).toBe('failed');
   });
 
   it('reads an untracked face as not_found, with no queue position', async () => {
     stubFetch(() => json({ status: 'not_found', queue_position: -1, face_id: 'gone', generations: [] }));
-    const status = await faces(new SimliAvatarProvider({ apiKey: 'sk' })).faceStatus('gone');
+    const status = await new SimliAvatarProvider({ apiKey: 'sk' }).faceStatus('gone');
     expect(status.state).toBe('not_found');
     expect(status.queuePosition).toBeUndefined();
   });
@@ -322,15 +298,15 @@ describe('SimliAvatarProvider.faceStatus', () => {
         generations: [{ face_id: 'other', status: 'completed', queue_position: 0 }],
       })
     );
-    const status = await faces(new SimliAvatarProvider({ apiKey: 'sk' })).faceStatus('mine');
+    const status = await new SimliAvatarProvider({ apiKey: 'sk' }).faceStatus('mine');
     expect(status).toMatchObject({ faceId: 'mine', state: 'not_found' });
   });
 
   it('rejects a failed status request with its status and body', async () => {
     stubFetch(() => new Response('Invalid API key', { status: 401 }));
-    await expect(
-      faces(new SimliAvatarProvider({ apiKey: 'bad' })).faceStatus('f1')
-    ).rejects.toMatchObject({
+    const read = new SimliAvatarProvider({ apiKey: 'bad' }).faceStatus('f1');
+    await expect(read).rejects.toBeInstanceOf(AvatarProviderError);
+    await expect(read).rejects.toMatchObject({
       name: 'AvatarProviderError',
       providerId: 'simli',
       status: 401,
