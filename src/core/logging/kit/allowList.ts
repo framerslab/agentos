@@ -67,7 +67,7 @@ function sameFields(a: Readonly<Record<string, FieldKind>>, b: Readonly<Record<s
  * @param options.burst - Lines a minute for each event and each refusal reason, 30 unless set. Every kit in the process shares the budgets, at the smallest bound asked for.
  * @returns The kit, typed over AgentOS's events and the product's map, so it also takes the
  * `console_line` and `process.*` lines `captureConsole` and `installProcessHandlers` write.
- * @throws {TypeError} When `burst` is not a positive integer, an event's name is not a word of at most 64 characters or is `log_refused` or `log_held`, an event declares a context key, `event`, `level` or `time` as a field, the product's map declares one of AgentOS's events with other fields than AgentOS gives it, or `context` gives one of AgentOS's context keys another kind.
+ * @throws {TypeError} When `burst` is not a positive integer, an event's name is not a word of at most 64 characters or is `log_refused` or `log_held`, an event declares a context key, `event`, `level` or `time` as a field, the product's map declares one of AgentOS's events with other fields than AgentOS gives it, or `context` gives one of AgentOS's context keys another kind or declares `event`, `level` or `time`.
  *
  * @example
  * ```ts
@@ -84,6 +84,8 @@ export function createAllowListLogger<E extends EventMap, C extends ContextSchem
   // AgentOS's own lines carry its context keys, so a host's keys extend them and may name one again only with its kind.
   for (const [key, kind] of Object.entries(options.context ?? {})) {
     if (own(AGENTOS_CONTEXT, key) && !sameKind(kind, (AGENTOS_CONTEXT as ContextSchema)[key])) throw new TypeError('context key redeclared with another kind');
+    // Every line carries these of its own: a bound `level` or `time` would be written beside pino's and overwrite them.
+    if (key === 'event' || key === 'level' || key === 'time') throw new TypeError('reserved context declaration');
   }
   const schema = { ...AGENTOS_CONTEXT, ...options.context } as unknown as C;
   const limit = options.burst ?? 30;

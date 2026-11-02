@@ -6,7 +6,9 @@
  * user of the same id keeps everything; a write in flight reaches its verdict first and is deleted with the rest; with
  * a namespace, the user's plain-form traces are counted and named in one WARNING that names the tombstone, never the
  * user; a session another process holds stops rendering the forgotten learner's kept traits at its next turn; while a
- * memory store fails, the user's learning rows stay as the index a second call deletes the rest by. A memory write's
+ * memory store fails, the user's learning rows stay as the index a second call deletes the rest by, and a memory
+ * manager that fails is not passed over by a delete through the host's storage adapter, which would leave its knowledge
+ * graph's copies with no row to find them by. A memory write's
  * revert deletes what it created and restores what it deleted, can itself be reverted, and gives a user another process
  * forgets meanwhile nothing back; a crash's pending write is decided at the learner's next session by whether its traces
  * hold it, its undo leaving what a later write changed, and stays pending where the layer holds no facade of its brain;
@@ -14,7 +16,9 @@
  * minutes; and a write whose writer decides it while the recovery reads its traces stays as its writer decided it.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Memory } from '../../memory/io/facade/Memory';
+import { Memory } from '../../memory/io/facade/Memory';
+import { KnowledgeGraph } from '../../memory/retrieval/graph/knowledge/KnowledgeGraph';
+import { Brain } from '../../memory/retrieval/store/Brain';
 import { readTraceSnapshot } from '../../memory/retrieval/store/tracePersistence';
 import { renderPersonalitySection } from '../../substrate/personas/personalityPrompt';
 import {
@@ -28,7 +32,7 @@ import {
 } from '../index';
 import { chainKeyOf, Ledger, tombstoneHash } from '../ledger/Ledger';
 import { learnerScopeIds, taggedScopeId } from '../scopes';
-import { closeMemory, facadeAt, liveContents, managerOver, MOOD, tempFile } from './helpers/memoryFixtures';
+import { adapterAt, closeMemory, facadeAt, liveContents, managerOnBrain, managerOver, MOOD, tempFile } from './helpers/memoryFixtures';
 
 const PERSONA = { honesty: 0.9, extraversion: 0.8 };
 const KEY: LearnerKey = { namespace: 'A', agentKey: 'tutor', userId: '42' };
@@ -304,6 +308,57 @@ describe('forgetUser', () => {
         expect.objectContaining({ store: 'learning store', reached: true }),
       ]),
     );
+  });
+
+  it("keeps a memory manager's traces and the user's rows while its knowledge graph fails, though the host's storage adapter and a facade hold its Brain", async () => {
+    quiet();
+    // A GMI's memory: its Brain on the host's storage adapter, and a knowledge graph of its own outside that database.
+    const adapter = await adapterAt(tempFile());
+    const brain = await Brain.openWithAdapter(adapter, { brainId: 'agent-1' });
+    const graph = new KnowledgeGraph();
+    await graph.initialize();
+    const manager = await managerOnBrain(brain, graph);
+    // The host's memory tools over the same Brain, whose own SQL graph holds none of the manager's copies. Never closed:
+    // closing its Brain would close the host's adapter.
+    const tools = await Memory.createWithAdapter(adapter, { brainId: 'agent-1', selfImprove: false });
+    const store = new InMemoryLearningStore();
+    const layer = createLearningLayer({ store, storageAdapter: adapter, memoryTools: tools });
+    const session = await layer.forLearner(KEY, context({ memory: manager }));
+    await session.guardMemoryWrite!({
+      apply: () => manager.encode('A42 is allergic to walnuts.', MOOD, 'neutral', { scope: 'user', scopeId: learnerScopeIds(KEY, 'tutor').userScopeId }),
+      undo: async (trace: { id: string }) => {
+        await manager.deleteTraces([trace.id]);
+      },
+    });
+    const copies = async () =>
+      (await graph.queryMemories({ limit: 100 })).filter((copy) => typeof copy.context?.memoryTraceId === 'string').map((copy) => copy.description);
+    expect(await copies()).toEqual(['A42 is allergic to walnuts.']);
+    const offline = vi.spyOn(graph, 'deleteMemories').mockRejectedValue(new Error('graph offline'));
+
+    const first = await layer.forgetUser('42', { namespace: 'A' });
+
+    // The trace's row is what its copy is found by: it stays, with the user's rows, for a second call through the manager.
+    expect(await liveContents(brain)).toEqual(['A42 is allergic to walnuts.']);
+    expect(first.stores.filter((entry) => entry.store.includes('agent-1'))).toEqual([
+      { store: 'memory manager of brain agent-1', reached: false, reason: expect.stringMatching(/graph offline/) },
+      { store: 'memory tools facade of brain agent-1', reached: false, reason: expect.stringMatching(/memory manager of brain agent-1 failed/) },
+    ]);
+    expect(first.stores).toContainEqual(expect.objectContaining({ store: 'learning store', reached: false }));
+    expect(await store.sessionRowsOf('A', '42')).not.toEqual([]);
+
+    offline.mockRestore();
+    const second = await layer.forgetUser('42', { namespace: 'A' });
+
+    expect(await liveContents(brain)).toEqual([]);
+    expect(await copies()).toEqual([]);
+    expect(second.stores).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ store: 'memory manager of brain agent-1', reached: true }),
+        expect.objectContaining({ store: 'memory tools facade of brain agent-1', reached: true }),
+        expect.objectContaining({ store: 'learning store', reached: true }),
+      ]),
+    );
+    expect(await store.sessionRowsOf('A', '42')).toEqual([]);
   });
 
   it('refuses a blank user id', async () => {

@@ -10,8 +10,10 @@
  * sidecar takes part through its `brain_meta`: the traces live in Qdrant, where the handshake reads no scope id, so a
  * brain a sidecar names counts as holding ids the two forms read apart, and a Qdrant source with the record is refused
  * into a target with such plain ids, as a source with the record is into a Qdrant target whose sidecar holds the brain.
- * A source that names no brain (a Pinecone index) is refused into a target that holds the encoded form. Where
- * AGENTOS_TEST_POSTGRES_URL is set, the same refusal and the same fill into a Postgres Brain.
+ * A source that names no brain (a Pinecone index) is refused into a target that holds the encoded form. A target whose
+ * record cannot be read for another reason than a missing table fails the migration before any table, rather than
+ * read as a brain without the record. Where AGENTOS_TEST_POSTGRES_URL is set, the same refusal and the same fill into a
+ * Postgres Brain.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -179,6 +181,37 @@ describe('MigrationEngine scope-id form handshake', () => {
 
     expect(result.errors).toEqual([]);
     expect(rowsOf(to).traces).toEqual([{ id: 't-old', scope_id: 'ana' }]);
+  });
+});
+
+describe('MigrationEngine scope-id form handshake on a target whose record cannot be read', () => {
+  it('fails before any table when the read of the record fails for another reason than a missing table', async () => {
+    const from = tempPath('source.sqlite');
+    const to = tempPath('target.sqlite');
+    await brainFile(from, [['t-a', 'user', 'team/ana']], false);
+    await brainFile(to, [['t-t', 'user', 'ana']], true);
+    // The record stays in the file, and every read of a value raises, as a locked file or a dropped connection does.
+    const db = new Database(to);
+    try {
+      db.exec(`
+        ALTER TABLE brain_meta RENAME TO brain_meta_rows;
+        CREATE VIEW brain_meta AS SELECT brain_id, key, json_extract(value, '$') AS value FROM brain_meta_rows;
+      `);
+    } finally {
+      db.close();
+    }
+
+    const result = await MigrationEngine.migrate({ from: { type: 'sqlite', path: from }, to: { type: 'sqlite', path: to } });
+
+    expect(result.verified).toBe(false);
+    expect(result.tablesProcessed).toEqual([]);
+    expect(result.errors.join('\n')).toMatch(/malformed JSON/);
+    const read = new Database(to, { readonly: true });
+    try {
+      expect(read.prepare('SELECT id, scope_id FROM memory_traces ORDER BY id').all()).toEqual([{ id: 't-t', scope_id: 'ana' }]);
+    } finally {
+      read.close();
+    }
   });
 });
 
