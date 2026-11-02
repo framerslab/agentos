@@ -16,7 +16,7 @@ No issue       a change that fits in one pull request (a fix, a review follow-up
 
 ## Pictures
 
-<!-- Before and after pictures at phone and desktop width for anything a person sees. Write "No visible change" otherwise. -->
+<!-- Before and after pictures at phone and desktop width for anything a person sees, with secrets and personal data hidden. Write "No visible change" otherwise. -->
 
 ## Type of change
 
