@@ -163,14 +163,17 @@ export interface GeminiVideoProviderConfig {
   timeoutMs?: number;
 
   /**
-   * Milliseconds between polls of a video file delivered by URI.
+   * Milliseconds between polls of a video file delivered by URI. A value
+   * past 2147483647 is refused at `initialize()`.
    * @default 5000
    */
   pollIntervalMs?: number;
 
   /**
    * The most bytes the images fetched by URL in one call may total; a fetch
-   * past it is refused (`EgressRefusedError` `too_large`).
+   * past it is refused (`EgressRefusedError` `too_large`). A value past
+   * `Number.MAX_SAFE_INTEGER`, `Infinity` included, is refused at
+   * `initialize()`.
    * @default 20971520
    */
   maxImageBytes?: number;
@@ -265,7 +268,9 @@ export class GeminiVideoProvider implements IVideoGenerator {
    *
    * @param config - Configuration object. Must include `apiKey`.
    * @throws {Error} If `apiKey` is missing or empty.
-   * @throws {RangeError} If `timeoutMs` is past 2147483647 milliseconds.
+   * @throws {RangeError} If `timeoutMs` or `pollIntervalMs` is past
+   *   2147483647 milliseconds, or `maxImageBytes` is past
+   *   `Number.MAX_SAFE_INTEGER`.
    */
   async initialize(config: Record<string, unknown>): Promise<void> {
     const apiKey = typeof config.apiKey === 'string' ? config.apiKey.trim() : '';
@@ -276,17 +281,23 @@ export class GeminiVideoProvider implements IVideoGenerator {
     const text = (value: unknown): string | undefined =>
       typeof value === 'string' && value.trim() ? value.trim() : undefined;
 
+    // A positive number no larger than `most`, rounded up to a whole number,
+    // or the default when the value is unset, not a number or not positive.
+    const bounded = (name: string, fallback: number, most: number): number => {
+      const value = config[name];
+      if (typeof value !== 'number' || !(value > 0)) return fallback;
+      if (value > most) {
+        throw new RangeError(`Gemini video provider ${name} must be no larger than ${most}, not ${String(value)}.`);
+      }
+      return Math.ceil(value);
+    };
+
     // AbortSignal.timeout() takes whole milliseconds only, and Node fires a
     // timer longer than MAX_TIMEOUT_MS after 1 ms.
-    let timeoutMs = 300_000;
-    if (typeof config.timeoutMs === 'number' && config.timeoutMs > 0) {
-      if (config.timeoutMs > MAX_TIMEOUT_MS) {
-        throw new RangeError(
-          `Gemini video provider timeoutMs must be no larger than ${MAX_TIMEOUT_MS}, not ${String(config.timeoutMs)}.`,
-        );
-      }
-      timeoutMs = Math.ceil(config.timeoutMs);
-    }
+    const timeoutMs = bounded('timeoutMs', 300_000, MAX_TIMEOUT_MS);
+    const pollIntervalMs = bounded('pollIntervalMs', 5_000, MAX_TIMEOUT_MS);
+    // An infinite budget would read an image URL without a byte bound.
+    const maxImageBytes = bounded('maxImageBytes', DEFAULT_MAX_IMAGE_BYTES, Number.MAX_SAFE_INTEGER);
 
     this._config = {
       apiKey,
@@ -294,14 +305,8 @@ export class GeminiVideoProvider implements IVideoGenerator {
         .replace(/\/+$/, ''),
       defaultModelId: text(config.defaultModelId) ?? DEFAULT_MODEL,
       timeoutMs,
-      pollIntervalMs:
-        typeof config.pollIntervalMs === 'number' && config.pollIntervalMs > 0
-          ? config.pollIntervalMs
-          : 5_000,
-      maxImageBytes:
-        typeof config.maxImageBytes === 'number' && config.maxImageBytes > 0
-          ? config.maxImageBytes
-          : DEFAULT_MAX_IMAGE_BYTES,
+      pollIntervalMs,
+      maxImageBytes,
       imageEgress: isPlainRecord(config.imageEgress)
         ? (config.imageEgress as NonNullable<GeminiVideoProviderConfig['imageEgress']>)
         : {},
@@ -385,6 +390,14 @@ export class GeminiVideoProvider implements IVideoGenerator {
       throw new Error('Gemini video provider is not initialized. Call initialize() first.');
     }
 
+    // Refused before any image is fetched: the provider reads the interaction
+    // the create call returns and does not poll a background one.
+    if (getVideoProviderOptions(this.providerId, request.providerOptions)?.background === true) {
+      throw new Error(
+        'Gemini video provider does not run background interactions; leave providerOptions.background unset.',
+      );
+    }
+
     const model = request.modelId || this._config.defaultModelId;
     const timeoutMs = this._config.timeoutMs;
     const signal = AbortSignal.timeout(timeoutMs);
@@ -458,11 +471,6 @@ export class GeminiVideoProvider implements IVideoGenerator {
       generation_config: extraConfig,
       ...rest
     } = extra;
-    if (rest.background === true) {
-      throw new Error(
-        'Gemini video provider does not run background interactions; leave providerOptions.background unset.',
-      );
-    }
 
     const body: Record<string, unknown> = {
       store: false,
