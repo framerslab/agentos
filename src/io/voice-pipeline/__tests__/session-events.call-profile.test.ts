@@ -25,9 +25,10 @@ import type {
 
 /**
  * A call over fake parts, its session started with a log of the orchestrator's session events taken from before;
- * `overrides` replace fields of the call profile.
+ * `overrides` replace fields of the call profile, and `ttsWarning`, when given, is the `'warning'` each TTS session
+ * emits as it is first written to.
  */
-async function call(overrides: Partial<CallPipelineProfile> = {}) {
+async function call(overrides: Partial<CallPipelineProfile> = {}, ttsWarning?: Error) {
   const initial: AudioIdentity = {
     scopeId: 'scope-a',
     callId: 'call-a',
@@ -116,6 +117,7 @@ async function call(overrides: Partial<CallPipelineProfile> = {}) {
           },
           async writeTokens() {
             const scoped = config!.call!;
+            if (ttsWarning) t.emit('warning', ttsWarning);
             t.emit('usage', { ...scoped, providerId: 'fake', acceptedCharacters: 5, generatedSamples: 320, sampleRate: 16000, status: 'running', final: false });
             await sink!({
               scopeId: scoped.scopeId,
@@ -487,6 +489,30 @@ describe('session events under a call profile', () => {
     expect(cut).toEqual(['']);
     expect(f.log.filter((line) => line.startsWith('item assistant'))).toEqual(['item assistant played hello|hello']);
     await f.runtime.stopSession();
+  });
+
+  it("reports a TTS session's warning as the orchestrator's 'error' and a recoverable session_error of the TTS part, and adds the reply it came in as interrupted, with only the text its acknowledged playback proves heard", async () => {
+    // A failure the TTS session goes on after, such as a socket that failed to open for the reply: some of the reply's
+    // text may never have been spoken, though its synthesis completes and its playback is acknowledged.
+    const warning = new Error('deepgram aura ws failed to open for a reply (connect timed out); the reply ends unplayed');
+    const f = await call({}, warning);
+    const errors = vi.fn();
+    f.runtime.on('error', errors);
+    f.turn();
+    await vi.waitFor(() => expect(f.transport.waitForPlayback).toHaveBeenCalledOnce());
+    f.ack();
+    await vi.waitFor(() => expect(f.runtime.state).toBe('listening'));
+    expect(errors).toHaveBeenCalledOnce();
+    expect(errors).toHaveBeenCalledWith(warning);
+    expect(f.log.filter((line) => line.startsWith('session_error'))).toEqual(['session_error tts true']);
+    // The chunk carries no text boundary, so no segment is proven played: the reply joins as interrupted, its playedText
+    // empty, and its agent_done carries the same text, none.
+    expect(f.log.filter((line) => line.startsWith('item assistant'))).toEqual(['item assistant interrupted hello|']);
+    expect(f.transport.sendControl).toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_done', text: '' }));
+    expect(f.transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_done', text: 'hello' }));
+    // The call goes on.
+    expect(f.log).not.toContain('close done');
+    await f.runtime.stopSession('done');
   });
 
   it('adds a reply whose playback was acknowledged as heard, though speech comes while its agent_done goes out', async () => {
