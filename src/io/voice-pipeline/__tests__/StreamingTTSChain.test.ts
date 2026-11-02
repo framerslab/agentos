@@ -1295,6 +1295,40 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
       expect(f.breaker.isAvailable('b')).toBe(true);
     });
 
+    it("restarts the replay on the next request's text when a cancel() cuts a replay write that never settles: the switch ends and later writes go to the backup", async () => {
+      const b = pullSession();
+      b.writeTokens.mockImplementationOnce(parked);
+      const c = pullSession();
+      const f = await switchingFacade(b, c);
+      await vi.waitFor(() => expect(b.writeTokens).toHaveBeenCalledWith('Hello world.'));
+      f.session.cancel();
+      f.session.pushTokens('Next one.');
+      await vi.waitFor(() => expect(f.failover).toHaveBeenCalledOnce());
+      expect(f.failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+      expect(await settled(f.session.writeTokens!(' More.'))).toBe('settled');
+      expect(b.writeTokens.mock.calls).toEqual([['Hello world.'], ['Next one.'], [' More.']]);
+      expect(f.third.startSession).not.toHaveBeenCalled();
+      expect(f.breaker.isAvailable('b')).toBe(true);
+      expect(f.errors).not.toHaveBeenCalled();
+    });
+
+    it('resolves a writeTokens() a cancel() cuts on a healthy session whose write never settles, and the next write goes to that session', async () => {
+      const a = pullSession();
+      a.writeTokens.mockImplementationOnce(parked);
+      const b = pullSession();
+      const second = provider('b', 20, b);
+      const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts], { enableMidSynthesisFailover: true });
+      const session = await chain.startSession();
+      session.setAudioSink!(async () => {});
+      const write = session.writeTokens!('old');
+      await vi.waitFor(() => expect(a.writeTokens).toHaveBeenCalledOnce());
+      session.cancel();
+      expect(await settled(write)).toBe('settled');
+      expect(await settled(session.writeTokens!('new'))).toBe('settled');
+      expect(a.writeTokens.mock.calls).toEqual([['old'], ['new']]);
+      expect(second.startSession).not.toHaveBeenCalled();
+    });
+
     it('takes an error of a backup attached after the cut as its own: it is passed over', async () => {
       const b = pullSession();
       let release: () => void = () => {};
