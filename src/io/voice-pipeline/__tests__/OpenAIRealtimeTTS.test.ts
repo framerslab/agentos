@@ -2,7 +2,8 @@
  * @module voice-pipeline/__tests__/OpenAIRealtimeTTS
  *
  * Runs the real provider over a real socket against a local stand-in for OpenAI's Realtime endpoint, through
- * `StreamingTTSChain` and `VoicePipelineOrchestrator` where the behaviour shows there. The stand-in answers as the
+ * `StreamingTTSChain`, `createVoiceProvidersFromEnv()` and `VoicePipelineOrchestrator` where the behaviour shows there.
+ * The stand-in answers as the
  * live API answered on 1 November 2026 with `gpt-realtime-2.1-mini`:
  * - `session.created` when the socket opens, `session.updated` for a `session.update`;
  * - `response.created` for a `response.create`, carrying the request's `metadata`; several responses out of band

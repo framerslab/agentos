@@ -12,6 +12,10 @@
  * to answer from.
  * Audio arrives as base64 `response.output_audio.delta` frames; a reply ends at its `response.done`.
  *
+ * `'flush_complete'` comes when the last reply has ended, so a `StreamingTTSChain` keeps the text since the last
+ * completion. On a failover a backup speaks again any reply of that run already spoken; under a `ProviderPolicy` the
+ * chain refuses a failover once any reply of the run has produced audio, with `partial synthesis cannot be replayed`.
+ *
  * Realtime has no mode that speaks text as given: the model reads it because the instructions tell it to. OpenAI promises
  * no exact reading. Check the transcript before relying on a word that must be said.
  */

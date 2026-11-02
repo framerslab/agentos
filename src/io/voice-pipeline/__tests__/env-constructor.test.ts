@@ -68,13 +68,14 @@ describe('createVoiceProvidersFromEnv', () => {
     );
   });
 
-  it('includes OpenAI Realtime TTS + batch fallback when OPENAI_API_KEY is set', () => {
+  it('includes OpenAI Realtime TTS and no batch provider when OPENAI_API_KEY is set', () => {
     const { tts } = createVoiceProvidersFromEnv({
       env: { OPENAI_API_KEY: 'op', ELEVENLABS_API_KEY: 'el' },
     });
     const ids = tts.providers.map((p) => p.providerId);
     expect(ids).toContain('openai-realtime');
-    expect(ids.some((id) => id.startsWith('openai-tts'))).toBe(true);
+    expect(ids.some((id) => id.startsWith('openai-tts'))).toBe(false);
+    expect(ids).not.toContain('elevenlabs-batch');
   });
 
   it('enables failover modes by default', () => {
