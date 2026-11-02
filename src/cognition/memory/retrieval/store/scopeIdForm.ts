@@ -31,6 +31,7 @@
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import type { Brain } from './Brain.js';
 import { fillScopeIds } from './migrations/v2-to-v3.js';
+import { isMissingTableError } from './missingTable.js';
 import {
   ENCODED_SCOPE_ID_FORM,
   holdsEncodedScopeIdForm,
@@ -535,8 +536,9 @@ async function tracesHoldReservedScopeIds(db: ScopeIdFormReader, brainId: string
         [brainId, afterId ?? ''],
       );
     } catch (error) {
-      // A table from before the scope_id column: the ids are read from the metadata.
-      if (columns === 'id, scope, metadata') throw error;
+      // A table from before the scope_id column: the ids are read from the metadata. Any other failure stops the scan,
+      // since a row whose id is only in the column would read as holding none.
+      if (columns === 'id, scope, metadata' || !isMissingTableError(error)) throw error;
       columns = 'id, scope, metadata';
       continue;
     }
@@ -600,30 +602,42 @@ export function holdsScopeIdsTheFormChanges(traces: Iterable<unknown>, nodes: It
   return false;
 }
 
-/** Whether a statement that reads one row of a brain finds one. A store without the table holds none. */
+/**
+ * Whether a statement that reads one row of a brain finds one. A store without the table, or one from before brain
+ * ids, holds none.
+ *
+ * @throws What the read threw for any other reason (a locked file, a dropped connection).
+ */
 async function holdsRow(db: ScopeIdFormReader, sql: string, brainId: string): Promise<boolean> {
   try {
     return Boolean(await db.get<{ id: string }>(sql, [brainId]));
-  } catch {
-    return false;
+  } catch (error) {
+    if (isMissingTableError(error)) return false;
+    throw error;
   }
 }
 
 /**
  * Whether one brain holds the record, read by a reader outside a transaction. A store without `brain_meta`, or one
  * from before brain ids, holds none.
+ *
+ * @throws What the read threw for any other reason (a locked file, a dropped connection): read as no record, an encoded
+ *   source would be taken as a plain one and an encoded target as one a plain copy may go into.
  */
 export async function readScopeIdFormRecord(db: ScopeIdFormReader, brainId: string): Promise<boolean> {
   try {
     return await holdsEncodedScopeIdForm(db, brainId);
-  } catch {
-    return false;
+  } catch (error) {
+    if (isMissingTableError(error)) return false;
+    throw error;
   }
 }
 
 /**
  * One brain's form as a store holds it, read by a reader outside a transaction (the RAG migration's). A store whose
  * tables lack a brain id reads as not holding the brain.
+ *
+ * @throws What a read threw for another reason than a missing table or column.
  */
 export async function readBrainScopeIdForm(db: ScopeIdFormReader, brainId: string): Promise<BrainScopeIdForm> {
   const encoded = await readScopeIdFormRecord(db, brainId);
@@ -637,6 +651,9 @@ export async function readBrainScopeIdForm(db: ScopeIdFormReader, brainId: strin
 /**
  * Every brain a store holds (in `brain_meta` or `memory_traces`), with its form; or, given brain ids, those brains
  * alone, whether or not the store holds them.
+ *
+ * @throws What a read threw for another reason than a missing table or column: a list that fails would leave out
+ *   every brain, and the handshake would weigh none.
  */
 export async function readScopeIdForms(
   db: ScopeIdFormReader,
@@ -649,8 +666,9 @@ export async function readScopeIdForms(
         for (const row of await db.all<{ brain_id: string | null }>(sql)) {
           if (typeof row.brain_id === 'string') ids.add(row.brain_id);
         }
-      } catch {
+      } catch (error) {
         // A store without the table, or one from before brain ids, holds no brain this handshake can name.
+        if (!isMissingTableError(error)) throw error;
       }
     }
   }

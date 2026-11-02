@@ -127,6 +127,12 @@ describe('a kit with its own context keys', () => {
     const same = createAllowListLogger({ logger, events: {}, context: { component: 'word' } as const });
     same.close();
   });
+
+  it.each(['event', 'level', 'time'])("refuses a context map that declares %s, a key every line carries of its own", (key) => {
+    const logger = pino({ base: undefined, level: 'debug' }, { write: () => undefined });
+    // Bound on a child, such a key would be written beside pino's own and overwrite the line's severity or time.
+    expect(() => createAllowListLogger({ logger, events: {}, context: { [key]: 'int' as const } })).toThrow(TypeError);
+  });
 });
 
 describe('event handles', () => {

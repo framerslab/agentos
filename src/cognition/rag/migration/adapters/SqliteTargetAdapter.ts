@@ -9,7 +9,7 @@
 
 import Database from 'better-sqlite3';
 import type { IMigrationTarget } from '../types.js';
-import { isMissingTableError } from './missingTable.js';
+import { isMissingTableError } from '../../../memory/retrieval/store/missingTable.js';
 import {
   readScopeIdForms,
   SCOPE_ID_FORM_KEY,
