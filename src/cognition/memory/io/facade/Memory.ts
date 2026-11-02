@@ -889,6 +889,8 @@ export class Memory {
    *
    * @throws TypeError when `scopeId` is empty, so a caller's missing id never deletes every trace filed under no scope
    *   id, or when `turnUserId` is given and is not a non-empty string.
+   * @throws When the knowledge graph cannot delete the copies: of the traces, before any row is deleted; of the scope,
+   *   once the traces are deleted, so a second call finds the copies alone.
    */
   async deleteScope(scope: string, scopeId: string, options: { turnUserId?: string } = {}): Promise<{ deleted: number }> {
     if (typeof scopeId !== 'string' || scopeId === '') {
@@ -908,13 +910,9 @@ export class Memory {
       .filter((row) => only === undefined || traceNamesUser(row.metadata, only))
       .map((row) => row.id);
     const result = await this.deleteTraces(ids);
-    if (only === undefined) {
-      try {
-        await this._knowledgeGraph.deleteMemories({ scopes: [{ scope, scopeId }] });
-      } catch {
-        // The per-trace deletes above took each trace's own copy.
-      }
-    }
+    // The per-trace deletes above took each trace's own copy. A copy filed under the scope whose trace is gone holds
+    // the trace's words with no row to find them by: a graph that cannot delete it fails the call.
+    if (only === undefined) await this._knowledgeGraph.deleteMemories({ scopes: [{ scope, scopeId }] });
     return result;
   }
 

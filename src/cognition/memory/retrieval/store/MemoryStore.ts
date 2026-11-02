@@ -3198,7 +3198,8 @@ export class MemoryStore {
    * not read, since a delete moves the documents after it past a cursor that counts positions. A document whose
    * eviction fails stays in the index, as `softDelete` warns, and a later call reads it again; a document of a trace
    * this store holds under another scope is removed from the collection and its trace kept. Last, every
-   * knowledge-graph copy filed under the scope whose trace was already gone.
+   * knowledge-graph copy filed under the scope whose trace was already gone; a graph that cannot delete them fails the
+   * call, with the scope's traces already deleted, so a second call finds the copies alone.
    *
    * @param options.turnUserId - Deletes only the scope's traces that name this user: a trace a second user filed on
    *   another user's session ({@link MemoryTrace.turnUserId}), or a summary of their words, whose Brain row names them
@@ -3210,8 +3211,9 @@ export class MemoryStore {
    * @returns The number of traces deleted.
    * @throws TypeError when `scopeId` is empty, so a caller's missing id never deletes every trace filed under no scope
    *   id, or when `turnUserId` is given and is not a non-empty string.
-   * @throws When the Brain cannot be read or a row cannot be deleted, or, with no Brain, when the vector index
-   *   cannot say whether it holds the scope's collection or cannot read the collection it holds.
+   * @throws When the Brain cannot be read or a row cannot be deleted, when the knowledge graph cannot delete the
+   *   scope's copies, or, with no Brain, when the vector index cannot say whether it holds the scope's collection or
+   *   cannot read the collection it holds.
    */
   async deleteScope(
     scope: MemoryScope,
@@ -3242,12 +3244,18 @@ export class MemoryStore {
         { dropStale: filedByThem },
       );
     }
-    // With a user named, each deleted trace took its own copy, and the scope's other copies are the session's.
+    // With a user named, each deleted trace took its own copy, and the scope's other copies are the session's. A copy
+    // filed under the scope whose trace is gone holds the trace's words with no row to find them by: a graph that cannot
+    // delete it fails the call, so the caller (account deletion) calls again.
     if (only === undefined) {
       try {
         await this.config.knowledgeGraph.deleteMemories?.({ scopes: [{ scope, scopeId }] });
-      } catch {
-        // Each trace's own copy went with it above.
+      } catch (error) {
+        throw new Error(
+          `MemoryStore.deleteScope: the knowledge graph did not delete the copies filed under ${scope} scope, so the delete is not done: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
     }
     return deleted;
