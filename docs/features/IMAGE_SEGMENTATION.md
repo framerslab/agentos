@@ -286,7 +286,9 @@ interface BackgroundRemovalResult {
 
 The fal provider reads `FAL_API_KEY`, the variable the other fal providers
 read; a comma-separated list rotates. `apiKey` and `baseUrl` on the call
-configure it for that call alone. fal does not retry a synchronous request,
+give it a provider of its own, never the one built from `FAL_API_KEY`; that
+provider is kept for the next call with the same key and URL (the 32 most
+recent), so a call's own key list rotates across calls too. fal does not retry a synchronous request,
 so a caller that wants to keep the source image when the cut fails catches
 the error and goes on with it.
 

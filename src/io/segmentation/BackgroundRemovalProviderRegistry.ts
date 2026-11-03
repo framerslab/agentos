@@ -3,8 +3,10 @@
  *
  * Resolves background removal providers by id. The built-in `fal` provider
  * is built from `FAL_API_KEY` on first use and kept for the calls that bring
- * no credentials; a call's own `apiKey` or `baseUrl` always builds one for
- * that call alone. Custom providers and tests inject
+ * no credentials. A call's own `apiKey` or `baseUrl` gets a provider of its
+ * own, kept for the next call with the same key and URL (the most recent
+ * {@link MAX_CONFIGURED_PROVIDERS}), so a comma-separated key list rotates
+ * across calls as the environment's does. Custom providers and tests inject
  * instances with {@link registerBackgroundRemovalProvider}; a registered
  * instance is served as registered, whatever the call's `apiKey` or `baseUrl`.
  */
@@ -15,6 +17,10 @@ import type { BackgroundRemovalProviderId, IBackgroundRemovalProvider } from './
 const registered = new Map<string, IBackgroundRemovalProvider>();
 /** Built-in providers built from the environment, kept for the next call that brings no credentials. */
 const fromEnvironment = new Map<string, IBackgroundRemovalProvider>();
+/** How many providers built from a call's own credentials are kept, the least recently used dropped first. */
+export const MAX_CONFIGURED_PROVIDERS = 32;
+/** Built-in providers built from a call's own credentials, by id, key and base URL, least recently used first. */
+const fromCallConfig = new Map<string, IBackgroundRemovalProvider>();
 
 /** Credentials for a built-in provider, in place of its environment variables. */
 export interface BackgroundRemovalProviderConfig {
@@ -33,6 +39,7 @@ export function registerBackgroundRemovalProvider(id: string, provider: IBackgro
 export function resetBackgroundRemovalProviders(): void {
   registered.clear();
   fromEnvironment.clear();
+  fromCallConfig.clear();
 }
 
 /**
@@ -40,7 +47,8 @@ export function resetBackgroundRemovalProviders(): void {
  *
  * @param id - Provider id. Defaults to `'fal'`.
  * @param config - Credentials for a built-in provider; without them it is
- *   built from the environment and cached.
+ *   built from the environment. Either way it is kept for the next call
+ *   with the same credentials.
  * @throws {Error} When the id is unknown or the provider's key is missing.
  */
 export async function resolveBackgroundRemovalProvider(
@@ -53,9 +61,10 @@ export async function resolveBackgroundRemovalProvider(
   if (id === 'fal') {
     const ownKey = config.apiKey?.trim();
     const ownBaseUrl = config.baseUrl?.trim();
-    // A call's own credentials always build a provider of its own: the
-    // provider built from the environment holds FAL_API_KEY and fal's URL.
-    if (!ownKey && !ownBaseUrl) {
+    // A call's own credentials never reach the provider built from the
+    // environment, which holds FAL_API_KEY and fal's URL.
+    const fromCall = Boolean(ownKey || ownBaseUrl);
+    if (!fromCall) {
       const cached = fromEnvironment.get(id);
       if (cached) return cached;
     }
@@ -63,9 +72,28 @@ export async function resolveBackgroundRemovalProvider(
     if (!apiKey) {
       throw new Error('Background removal provider "fal" requires FAL_API_KEY or an apiKey on the call.');
     }
+    const cacheKey = JSON.stringify([id, apiKey, ownBaseUrl ?? '']);
+    if (fromCall) {
+      const cached = fromCallConfig.get(cacheKey);
+      if (cached) {
+        // Most recently used last.
+        fromCallConfig.delete(cacheKey);
+        fromCallConfig.set(cacheKey, cached);
+        return cached;
+      }
+    }
     const provider = new FalBackgroundRemovalProvider();
     await provider.initialize({ apiKey, baseURL: ownBaseUrl });
-    if (!ownKey && !ownBaseUrl) fromEnvironment.set(id, provider);
+    if (!fromCall) {
+      fromEnvironment.set(id, provider);
+    } else {
+      fromCallConfig.set(cacheKey, provider);
+      while (fromCallConfig.size > MAX_CONFIGURED_PROVIDERS) {
+        const oldest = fromCallConfig.keys().next().value;
+        if (oldest === undefined) break;
+        fromCallConfig.delete(oldest);
+      }
+    }
     return provider;
   }
 
