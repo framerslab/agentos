@@ -693,6 +693,33 @@ describe('VoicePipelineOrchestrator', () => {
     expect(closes).toEqual([]);
   });
 
+  it('lets only the newest flush() decide a close: an older pending flush that rejects after a newer one ended the input ends no session', async () => {
+    let reject!: (error: Error) => void;
+    // The session's own flush: the first call stays pending, the second resolves.
+    vi.mocked(sttSession.flush).mockImplementationOnce(() => new Promise<void>((_, no) => (reject = no)));
+    const session = await startSession();
+    const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const closes: Array<VoiceSessionEventMap['close']> = [];
+    session.on('session_error', (event) => sessionErrors.push(event));
+    session.on('close', (event) => closes.push(event));
+    orchestrator.on('error', () => undefined);
+
+    const older = sttSession.flush();
+    transport.emit('audio', makeFrame());
+    await vi.advanceTimersByTimeAsync(0);
+    await sttSession.flush();
+    sttSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+
+    reject(new Error('older flush failed'));
+    await expect(older).rejects.toThrow('older flush failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+    expect(sessionErrors).toEqual([]);
+    expect(closes).toEqual([]);
+  });
+
   it('still ends the session on an STT close after a flush() once audio has gone to the session again, and on an error after a flush()', async () => {
     const session = await startSession();
     const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
