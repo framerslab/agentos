@@ -142,7 +142,7 @@ describe('OpenAITranslationProvider', () => {
 describe('OpenAITranslationProvider endpoint', () => {
   it('sends a call to a legacy full endpoint URL there, never to api.openai.com', async () => {
     serve({ '/chat/completions': () => jsonResponse(chatCompletion('Hola.')) });
-    const provider = new OpenAITranslationProvider('openai_chat', { apiKey: 'test-openai-key', endpoint: 'https://proxy.example.test/v1/chat/completions' } as never);
+    const provider = new OpenAITranslationProvider('openai_chat', { apiKey: 'test-openai-key', endpoint: 'https://proxy.example.test/v1/chat/completions' });
     await provider.initialize();
 
     await provider.translate('Hello.', 'en', 'es');
@@ -153,7 +153,7 @@ describe('OpenAITranslationProvider endpoint', () => {
   });
 
   it('refuses at initialize an endpoint that is not a Chat Completions URL', async () => {
-    const provider = new OpenAITranslationProvider('openai_chat', { apiKey: 'test-openai-key', endpoint: 'https://proxy.example.test/translate' } as never);
+    const provider = new OpenAITranslationProvider('openai_chat', { apiKey: 'test-openai-key', endpoint: 'https://proxy.example.test/translate' });
 
     await expect(provider.initialize()).rejects.toThrow(/endpoint/);
     expect(fetchMock).not.toHaveBeenCalled();

@@ -18,12 +18,22 @@ interface OpenAIProviderParams {
   model?: string;
   /** OpenAI-compatible base URL (`https://api.openai.com/v1` by default), as `generateText` takes it. */
   baseUrl?: string;
+  /**
+   * The full Chat Completions URL, as earlier versions took it (`https://host/v1/chat/completions`).
+   * It is read as the base URL before `/chat/completions`; any other URL is refused at `initialize`.
+   * Prefer `baseUrl`.
+   */
+  endpoint?: string;
 }
+
+const CHAT_COMPLETIONS_PATH = /\/chat\/completions\/?$/;
 
 export class OpenAITranslationProvider implements ITranslationProvider {
   public readonly id: string;
   public isInitialized = false;
   private params: OpenAIProviderParams;
+  /** The base URL the calls go to: `baseUrl`, or `endpoint` without its `/chat/completions`. */
+  private baseUrl?: string;
 
   constructor(id: string, params: OpenAIProviderParams) {
     this.id = id;
@@ -32,7 +42,27 @@ export class OpenAITranslationProvider implements ITranslationProvider {
 
   async initialize(): Promise<void> {
     if (!this.params.apiKey) throw new Error('OpenAITranslationProvider: apiKey missing');
+    this.baseUrl = this.resolveBaseUrl();
     this.isInitialized = true;
+  }
+
+  /**
+   * The base URL calls go to: `baseUrl`, or `endpoint` without its `/chat/completions`.
+   *
+   * @throws {Error} When `endpoint` is not a Chat Completions URL or names another base than `baseUrl`, so a call is
+   *   never sent anywhere but where the caller pointed it.
+   */
+  private resolveBaseUrl(): string | undefined {
+    const { endpoint, baseUrl } = this.params;
+    if (endpoint === undefined) return baseUrl;
+    if (typeof endpoint !== 'string' || !CHAT_COMPLETIONS_PATH.test(endpoint)) {
+      throw new Error('OpenAITranslationProvider: endpoint must be a full Chat Completions URL ending in /chat/completions; pass baseUrl instead');
+    }
+    const fromEndpoint = endpoint.replace(CHAT_COMPLETIONS_PATH, '');
+    if (baseUrl !== undefined && baseUrl.replace(/\/+$/, '') !== fromEndpoint) {
+      throw new Error('OpenAITranslationProvider: endpoint and baseUrl name different base URLs; pass baseUrl alone');
+    }
+    return fromEndpoint;
   }
 
   /**
@@ -45,13 +75,14 @@ export class OpenAITranslationProvider implements ITranslationProvider {
   async translate(input: string, source: string, target: string, options?: TranslationOptions): Promise<TranslationResult> {
     const system = `You are a translation engine. Translate the user's text from ${source} to ${target}. Preserve meaning and formatting. Reply with the translation only.`
       + (options?.domain ? ` Domain: ${options.domain}.` : '');
+    const baseUrl = this.isInitialized ? this.baseUrl : this.resolveBaseUrl();
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
       result = await generateText({
         provider: 'openai',
         model: this.params.model || 'gpt-4o-mini',
         apiKey: this.params.apiKey,
-        ...(this.params.baseUrl ? { baseUrl: this.params.baseUrl } : {}),
+        ...(baseUrl ? { baseUrl } : {}),
         system,
         prompt: input,
         // A translation goes to the provider the host configured, never to another vendor's key.
