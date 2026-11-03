@@ -300,6 +300,18 @@ describe('the limits, the meter and the ends', () => {
     // another token is still refused
     expect(await h.manager.processProviderEvent('mock', mockEventContext(runId, 'done', { seconds: 30 }, h.clock.now(), 'not-the-run-token'))).toMatchObject({ accepted: false });
   });
+  it('a done report after the owner purged a run that had completed is still taken and applies nothing', async () => {
+    const h = harness();
+    const runId = await joined(h, 'k1', 'account');
+    await h.report(runId, 'left', { reason: 'ended', seconds: 30 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', billedSeconds: 30 });
+    await h.manager.purgeRun(runId, 'stopped_by_owner');
+    const purged = await h.stores.runs.get(runId);
+    expect(purged).toMatchObject({ state: 'done', billedSeconds: 30, botName: '', purgedAt: expect.any(Number) });
+    expect(purged?.dispatch).toEqual({ workerTokenHash: MockMeetingBotProvider.hash(h.provider.tokenOf(runId)) });
+    expect(await h.report(runId, 'done', { seconds: 30 })).toEqual({ accepted: true, applied: 0 });
+    expect(await h.manager.processProviderEvent('mock', mockEventContext(runId, 'done', { seconds: 30 }, h.clock.now(), 'not-the-run-token'))).toMatchObject({ accepted: false });
+  });
   it('the worker\'s left and done after the manager ended its run as crashed are taken and apply nothing', async () => {
     const h = harness();
     const runId = await joined(h);
