@@ -1197,6 +1197,12 @@ export class GeminiProvider implements IProvider {
       if (streamError instanceof GeminiProviderError && streamError.code === 'content_filter') {
         throw streamError;
       }
+      // The caller's signal rides on the fetch, so an abort mid-stream ends the body's read at once: the stream
+      // ends with the abort chunk, not an error chunk.
+      if (abortSignal?.aborted) {
+        yield this.buildAbortChunk(modelId);
+        return;
+      }
       const message = streamError instanceof Error
         ? streamError.message
         : 'Gemini stream processing error';
@@ -2228,11 +2234,12 @@ export class GeminiProvider implements IProvider {
    *
    * @param {string} endpoint - API endpoint (e.g., "/models/gemini-2.5-flash:streamGenerateContent").
    * @param {Record<string, unknown>} body - Request body.
-   * @param {AbortSignal} [abortSignal] - The caller's signal, which ends a wait on the pool's probes.
+   * @param {AbortSignal} [abortSignal] - The caller's signal. It ends a wait on the pool's probes and aborts the
+   *   request in flight, the returned body's reads included.
    * @returns {Promise<ReadableStream<Uint8Array>>} The response body stream.
    * @throws {GeminiProviderError} On connection errors; a key-scoped failure carries `keyFailure`,
    *   `keyUsable` and `keyCount` on its details, which the stream's hop loop reads; `REQUEST_ABORTED`
-   *   when the caller's signal ended the draw.
+   *   when the caller's signal ended the draw or the request before the body was returned.
    * @private
    */
   private async makeStreamRequest(
@@ -2263,7 +2270,9 @@ export class GeminiProvider implements IProvider {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
-        signal: controller.signal,
+        // The caller's signal aborts the request as the connection timer does, and the body's reads after the
+        // headers have arrived.
+        signal: abortSignal ? AbortSignal.any([controller.signal, abortSignal]) : controller.signal,
       });
       clearTimeout(timeoutId);
 
@@ -2300,6 +2309,9 @@ export class GeminiProvider implements IProvider {
       return response.body;
     } catch (error: unknown) {
       clearTimeout(timeoutId);
+      if (abortSignal?.aborted) {
+        throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       if (error instanceof GeminiProviderError) throw error;
       throw new GeminiProviderError(
         error instanceof Error
