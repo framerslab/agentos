@@ -375,6 +375,20 @@ describe('removeBackground on fal BiRefNet', () => {
     expect(Date.now() - startedAt).toBeLessThan(4_000);
   });
 
+  it('takes a fractional or a very long timeoutMs, and refuses one that is not a positive number', async () => {
+    routes[`POST ${ENDPOINT}`] = () => cutOutAnswer();
+    const call = (timeoutMs: number) => api.removeBackground({ image: SOURCE_URL, timeoutMs, apiKey: 'fal-key-1', baseUrl: origin });
+
+    expect((await call(1_500.5)).image.url).toBe(CUT_URL);
+    expect((await call(3_000_000_000)).image.url).toBe(CUT_URL);
+    expect(received).toHaveLength(2);
+
+    for (const timeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(await rejectionOf(call(timeoutMs))).toMatchObject({ name: 'SegmentationProviderError', code: 'invalid_request' });
+    }
+    expect(received).toHaveLength(2);
+  });
+
   it("stops at the caller's abort, before or during the request, with the abort's reason", async () => {
     const before = new AbortController();
     before.abort();

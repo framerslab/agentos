@@ -45,6 +45,13 @@ const DEFAULT_RESOLUTION = '1024x1024';
 /** The answers fal gives a request it refuses: a bad header, a body over 64 MiB, input the model rejected. */
 const REFUSED_STATUSES = new Set([400, 413, 422]);
 
+/**
+ * The longest deadline a Node.js timer keeps. `AbortSignal.timeout` takes
+ * whole milliseconds up to 2^32 - 1, and a timer past 2^31 - 1 fires after
+ * 1 ms, so a deadline is rounded up and held to this.
+ */
+const MAX_DEADLINE_MS = 2_147_483_647;
+
 /** One file in fal's answer. @internal */
 interface FalImageFile {
   url?: unknown;
@@ -140,6 +147,9 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
         'invalid_request',
       );
     }
+    if (typeof request.timeoutMs !== 'number' || !Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) {
+      throw new SegmentationProviderError('fal background removal timeoutMs must be a positive number of milliseconds.', 'invalid_request');
+    }
     request.signal?.throwIfAborted();
 
     const options = getImageProviderOptions<FalBackgroundRemovalOptions>(this.providerId, request.providerOptions) ?? {};
@@ -154,7 +164,7 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
     if (options.input && typeof options.input === 'object') Object.assign(body, options.input);
     body.image_url = request.imageUrl;
 
-    const deadline = AbortSignal.timeout(request.timeoutMs);
+    const deadline = AbortSignal.timeout(Math.min(Math.ceil(request.timeoutMs), MAX_DEADLINE_MS));
     const signal = request.signal ? AbortSignal.any([request.signal, deadline]) : deadline;
     /** The error a failure ends the call with: the caller's abort, the deadline, or the failure itself. */
     const failure = (error: unknown, step: string): unknown => {

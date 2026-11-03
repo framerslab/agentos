@@ -421,7 +421,7 @@ The built-in provider runs fal's BiRefNet v2 (`fal-ai/birefnet/v2`) with `FAL_AP
 | Option | Default | What it does |
 |--------|---------|--------------|
 | `image` | (required) | An `http(s)` URL or a base64 image data URL, sent as given, or the bytes (`Buffer`, `Uint8Array`) of a PNG, JPEG, WebP or GIF. Any other string is refused. |
-| `output` | `'url'` | `'url'` returns the cut-out's URL; `'buffer'` returns its `buffer` and `dataUrl`, fetched inline from fal. |
+| `output` | `'url'` | `'url'` returns the cut-out's URL; `'buffer'` returns its `buffer` and `dataUrl` (fal is asked to answer inline). |
 | `format` | `'png'` | `'png'` or `'webp'`. |
 | `returnMask` | `false` | Also return the matte as `mask`. |
 | `model` | `'fal-ai/birefnet/v2'` | The fal endpoint. |
