@@ -23,6 +23,7 @@ import {
   DEFAULT_RUN_LIMITS,
   isBilledEnd,
   TERMINAL_RUN_STATES,
+  type MeetingDispatchRecord,
   type MeetingEventType,
   type MeetingFundingPhase,
   type MeetingFundingSnapshot,
@@ -272,6 +273,16 @@ function runLimits(requested: Partial<MeetingRunLimits> | undefined): MeetingRun
     limits[key] = value;
   }
   return limits;
+}
+
+/**
+ * The dispatch record a run that is over keeps: the hash of its worker's per-run token and nothing else. The room, the
+ * worker and the provider's reference go with the rest of the run's live fields. The hash stays so that a report the
+ * worker sends after the end (its `done` after a `left` the manager completed, a retry of either) still verifies under
+ * the run's own token, and is then dropped as a terminal run's report; a report under any other token is still refused.
+ */
+function terminalDispatch(run: MeetingRunRecord): MeetingDispatchRecord | undefined {
+  return run.dispatch === undefined ? undefined : { workerTokenHash: run.dispatch.workerTokenHash };
 }
 
 /** Chat text as the stop phrase is compared with it: each run of whitespace one space, trimmed and lowercased. */
@@ -1597,7 +1608,8 @@ export class MeetingManager {
     // the event goes out before the row is rewritten, the last step: a call whose event fails to go out leaves purgedAt
     // unset, so the caller's retry runs the steps again and sends it, where after the rewrite a retry returns at once
     await this.emit('bot:purged', free, { reason: 'deleted' });
-    await this.stores.runs.replace(free);
+    // the row keeps the worker token's hash a run that is over keeps, so a report its worker sends late is still taken
+    await this.stores.runs.replace({ ...free, dispatch: terminalDispatch(run) });
     return true;
   }
 
@@ -1699,7 +1711,7 @@ export class MeetingManager {
     if (!fundedPending || fundedPending.state !== pending.state) return;
     pending = fundedPending;
     const now = this.now();
-    const failed = await this.stores.runs.update(run.runId, { ...contentFreeRun(pending), dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, creationPending: undefined, creationContext: undefined, state: 'failed', leftAt: now, doneAt: now, billedSeconds: 0, cleanupPending: false }, pending.state);
+    const failed = await this.stores.runs.update(run.runId, { ...contentFreeRun(pending), dispatch: terminalDispatch(pending), transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, creationPending: undefined, creationContext: undefined, state: 'failed', leftAt: now, doneAt: now, billedSeconds: 0, cleanupPending: false }, pending.state);
     if (!failed) return;
     await this.emit('bot:left', failed, { reason: failed.reason, message });
     await this.emit('bot:done', failed, { reason: failed.reason, billedSeconds: 0 });
@@ -1794,7 +1806,7 @@ export class MeetingManager {
     const kept = run.keep === 'none' ? free : { ...free, botName: run.botName, notice: run.notice };
     // the total counted with the report that ended the run (a done report may give one its left report did not), so the
     // usage evidence the row keeps agrees with what was settled
-    const done = await this.stores.runs.update(run.runId, { ...kept, reportedSeconds: counted, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, creationPending: undefined, creationContext: undefined, state: 'done', doneAt: now, billedSeconds: billed, cleanupPending: false }, 'left');
+    const done = await this.stores.runs.update(run.runId, { ...kept, reportedSeconds: counted, dispatch: terminalDispatch(run), transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, creationPending: undefined, creationContext: undefined, state: 'done', doneAt: now, billedSeconds: billed, cleanupPending: false }, 'left');
     if (!done) return;
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
   }
@@ -1938,7 +1950,7 @@ export class MeetingManager {
     await this.emit('bot:done', done, { reason: done.reason, billedSeconds: billed });
     // one write, `done` and the content-free row together as complete() and fail() write theirs: a failure after a first
     // write of `done` would leave a done row holding the url, the bot's name and the notice, and nothing returns to a done run
-    await this.stores.runs.update(runId, { ...done, dispatch: undefined, transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, creationPending: undefined, creationContext: undefined, cleanupPending: false }, 'purging');
+    await this.stores.runs.update(runId, { ...done, dispatch: terminalDispatch(run), transcriber: undefined, pageSeenAt: undefined, monitorSeenAt: undefined, participantCount: undefined, leaveCommandedAt: undefined, captureSuspendedAt: undefined, aloneSince: undefined, creationPending: undefined, creationContext: undefined, cleanupPending: false }, 'purging');
   }
 
   // ── The limits ──
