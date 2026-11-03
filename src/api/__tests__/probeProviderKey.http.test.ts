@@ -24,6 +24,11 @@ import {
   type ProbeProviderKeyOptions,
   type ProviderKeyState,
 } from '../../index.js';
+import { AnthropicProvider } from '../../core/llm/providers/implementations/AnthropicProvider.js';
+import { GeminiProvider } from '../../core/llm/providers/implementations/GeminiProvider.js';
+import { OpenAIProvider } from '../../core/llm/providers/implementations/OpenAIProvider.js';
+import { OpenRouterProvider } from '../../core/llm/providers/implementations/OpenRouterProvider.js';
+import { RequestyProvider } from '../../core/llm/providers/implementations/RequestyProvider.js';
 
 // ---------------------------------------------------------------------------
 // The surface under test, from the package root
@@ -609,6 +614,57 @@ describe('probeProviderKey, whatever the provider', () => {
     expect(result.state).toBe('invalid');
     expect(result.detail).not.toContain(KEY.slice(0, 8));
     expect(result.detail).toContain('Key: [key] is not valid.');
+  });
+
+  it("keeps the base URL's credentials out of the detail when fetch refuses the URL", async () => {
+    // fetch refuses a URL with `user:password@` and names the whole URL in its error.
+    vi.mocked(globalThis.fetch).mockImplementation((input, init) => realFetch(input, init));
+    const withCredentials = origin.replace('http://', 'http://probe-user:s3cret-pass@');
+
+    for (const provider of ['anthropic', 'openai', 'gemini', 'openrouter', 'requesty']) {
+      const result = await api.probeProviderKey({ provider, apiKey: KEY, baseUrl: withCredentials, model: 'probe-model-1' });
+
+      expect(result.state).toBe('unknown');
+      expect(result.detail.startsWith('request failed: ')).toBe(true);
+      expect(result.detail).not.toContain('s3cret-pass');
+      expect(result.detail).not.toContain('probe-user:');
+    }
+    expect(received).toHaveLength(0);
+  });
+
+  it('keeps the key out of the error each provider probe reports when fetch quotes it', async () => {
+    // fetch quotes a header value it refuses, the key with it.
+    vi.mocked(globalThis.fetch).mockRejectedValue(new TypeError(`Headers.append: "Bearer ${KEY}\u0000" is an invalid header value.`));
+
+    for (const provider of [new AnthropicProvider(), new OpenAIProvider(), new GeminiProvider(), new OpenRouterProvider(), new RequestyProvider()]) {
+      const answer = await provider.probeApiKey(KEY, { kind: 'billing', baseURL: origin, model: 'probe-model-1' });
+
+      expect(answer).toMatchObject({ verdict: 'unknown', failure: 'network' });
+      expect(answer.error).toContain('is an invalid header value');
+      expect(answer.error).not.toContain(KEY);
+    }
+  });
+
+  it("lets go of a 2xx answer's connection once the status is read", async () => {
+    // The status and the headers arrive and the body never finishes: an ok probe must not hold the connection.
+    routes['POST /v1/messages'] = () => ({ ...json({ id: 'msg_1', type: 'message', content: [{ type: 'text', text: 'p' }] }), stall: true });
+
+    const result = await api.probeProviderKey({ provider: 'anthropic', apiKey: KEY, baseUrl: origin });
+
+    expect(result.state).toBe('ok');
+    const [answer] = stalled;
+    const closed = await new Promise<boolean>((resolve) => {
+      if (!answer.socket || answer.socket.destroyed) {
+        resolve(true);
+        return;
+      }
+      const timer = setTimeout(() => resolve(false), 2_000);
+      answer.once('close', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    expect(closed).toBe(true);
   });
 
   it("goes to the vendor's own endpoint when baseUrl is blank", async () => {
