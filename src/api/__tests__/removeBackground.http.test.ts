@@ -285,6 +285,83 @@ describe('removeBackground on fal BiRefNet', () => {
     expect(result.mask?.url).toBeUndefined();
   });
 
+  it('rejects an answer without the mask the call asked for', async () => {
+    routes[`POST ${ENDPOINT}`] = () => cutOutAnswer(CUT_URL, { mask_image: null });
+
+    const error = await rejectionOf(
+      api.removeBackground({ image: SOURCE_URL, returnMask: true, apiKey: 'fal-key-1', baseUrl: origin }),
+    );
+
+    expect(error).toMatchObject({ name: 'SegmentationProviderError', code: 'provider_failed' });
+    expect(String(error.message)).toMatch(/no mask/i);
+  });
+
+  it('types the mask by its own file when fal names no content type, not by the cut-out format', async () => {
+    routes[`POST ${ENDPOINT}`] = () =>
+      json({
+        image: { url: 'https://v3.fal.media/files/rabbit/cut.webp' },
+        mask_image: { url: 'https://v3.fal.media/files/rabbit/mask.png' },
+      });
+
+    const result = await api.removeBackground({
+      image: SOURCE_URL,
+      format: 'webp',
+      returnMask: true,
+      apiKey: 'fal-key-1',
+      baseUrl: origin,
+    });
+
+    expect(result.image.mimeType).toBe('image/webp');
+    expect(result.mask?.mimeType).toBe('image/png');
+  });
+
+  it('keeps the inline and mask flags, and the image, over extra input fields', async () => {
+    routes[`POST ${ENDPOINT}`] = () =>
+      cutOutAnswer(dataUrl('image/png', CUT_PNG), { mask_image: { url: dataUrl('image/png', MASK_PNG), content_type: 'image/png' } });
+
+    await api.removeBackground({
+      image: SOURCE_URL,
+      output: 'buffer',
+      returnMask: true,
+      apiKey: 'fal-key-1',
+      baseUrl: origin,
+      providerOptions: {
+        fal: { input: { output_mask: false, sync_mode: false, image_url: 'https://elsewhere.example.com/other.png', mask_only: false } },
+      },
+    });
+
+    expect(jsonOf(received[0])).toEqual({ image_url: SOURCE_URL, ...DEFAULT_BODY, output_mask: true, sync_mode: true, mask_only: false });
+  });
+
+  it('rejects an inline answer that is not base64', async () => {
+    routes[`POST ${ENDPOINT}`] = () => cutOutAnswer('data:image/png;base64,%%%%');
+
+    const error = await rejectionOf(
+      api.removeBackground({ image: SOURCE_URL, output: 'buffer', apiKey: 'fal-key-1', baseUrl: origin }),
+    );
+
+    expect(error).toMatchObject({ name: 'SegmentationProviderError', code: 'provider_failed' });
+  });
+
+  it('stops reading an answer or a download past maxResponseBytes', async () => {
+    const fal = { maxResponseBytes: 512 };
+    routes[`POST ${ENDPOINT}`] = () => cutOutAnswer(CUT_URL, { padding: 'x'.repeat(1_000) });
+    const large = await rejectionOf(
+      api.removeBackground({ image: SOURCE_URL, apiKey: 'fal-key-1', baseUrl: origin, providerOptions: { fal } }),
+    );
+    expect(large).toMatchObject({ name: 'SegmentationProviderError', code: 'provider_failed' });
+    expect(String(large.message)).toContain('512 bytes');
+
+    const fileUrl = `${origin}/files/large.png`;
+    routes[`POST ${ENDPOINT}`] = () => cutOutAnswer(fileUrl);
+    routes['GET /files/large.png'] = () => ({ type: 'image/png', body: Buffer.concat([PNG_SIGNATURE, Buffer.alloc(2_048)]) });
+    const download = await rejectionOf(
+      api.removeBackground({ image: SOURCE_URL, output: 'buffer', apiKey: 'fal-key-1', baseUrl: origin, providerOptions: { fal } }),
+    );
+    expect(download).toMatchObject({ name: 'SegmentationProviderError', code: 'provider_failed' });
+    expect(String(download.message)).toContain('512 bytes');
+  });
+
   it("passes fal's options: the BiRefNet variant, the resolution, refinement and extra input fields", async () => {
     routes[`POST ${ENDPOINT}`] = () => cutOutAnswer();
 
@@ -346,6 +423,9 @@ describe('removeBackground on fal BiRefNet', () => {
       'iVBORw0KGgoAAAANSUhEUg==',
       'ftp://cdn.example.com/hero.png',
       'data:text/plain;base64,aGVsbG8=',
+      'data:image/png;base64,%%%%',
+      'data:image/png;base64,iVBORw0',
+      'data:image/png;base64,====',
       '',
       Buffer.from('these bytes are not an image'),
       Buffer.alloc(0),
