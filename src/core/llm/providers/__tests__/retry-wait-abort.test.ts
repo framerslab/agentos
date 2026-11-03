@@ -4,7 +4,8 @@
  * the request in flight. A 429's Retry-After (up to an hour) or the backoff
  * after a 5xx or a network failure is cut short the moment the signal aborts:
  * the call rejects with REQUEST_ABORTED then (a stream ends with its terminal
- * abort chunk instead), and no further request is sent.
+ * abort chunk instead), and no further request is sent. A stream whose body
+ * has stalled ends at the abort as well.
  * The real Anthropic, Gemini and OpenRouter providers run over a stubbed
  * `fetch` (OpenRouter over an injected axios client) on fake timers; nothing
  * leaves the process.
@@ -65,6 +66,25 @@ async function drain(stream: AsyncGenerator<ModelCompletionResponse, void, undef
   const chunks: ModelCompletionResponse[] = [];
   for await (const chunk of stream) chunks.push(chunk);
   return chunks;
+}
+
+/**
+ * A 200 event stream that sends nothing, as a stalled connection does. Its body errors when the request's signal
+ * aborts, as fetch's body does, so only a request that carries the caller's signal ends at the caller's abort.
+ */
+function stalledEventStream(signal: AbortSignal | null | undefined): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      signal?.addEventListener('abort', () => controller.error(new DOMException('This operation was aborted', 'AbortError')), { once: true });
+    },
+  });
+  return {
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    headers: new Headers({ 'content-type': 'text/event-stream' }),
+    body,
+  } as unknown as Response;
 }
 
 /** A signal that aborts `afterMs` into the fake clock, as a caller's deadline does. */
@@ -212,6 +232,27 @@ describe("a provider's wait between retries ends when the caller's signal aborts
       vi.useFakeTimers();
       const outcome = track(p.generateCompletion('gemini-2.5-flash', messages, { abortSignal: deadline(500) }));
       await expectAbortEndsTheWait(outcome, () => fetchMock.mock.calls.length, 500);
+    });
+
+    it('ends a stream whose body has stalled at the abort with the terminal abort chunk', async () => {
+      const p = await gemini();
+      fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => stalledEventStream(init?.signal));
+      vi.useFakeTimers();
+      let chunks: ModelCompletionResponse[] = [];
+      const outcome = track(
+        drain(p.generateCompletionStream('gemini-2.5-flash', messages, { abortSignal: deadline(500) })).then((all) => {
+          chunks = all;
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(499);
+      expect(outcome.state).toBe('pending');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(outcome.state).toBe('resolved');
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
     });
 
     it('waits no Retry-After after its last attempt', async () => {
