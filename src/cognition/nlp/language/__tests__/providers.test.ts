@@ -158,6 +158,15 @@ describe('OpenAITranslationProvider endpoint', () => {
     await expect(provider.initialize()).rejects.toThrow(/endpoint/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('refuses a relative endpoint, which would leave no base URL and send the call to api.openai.com', async () => {
+    serve({ '/chat/completions': () => jsonResponse(chatCompletion('Hola.')) });
+    const provider = new OpenAITranslationProvider('openai_chat', { apiKey: 'test-openai-key', endpoint: '/chat/completions' });
+
+    await expect(provider.initialize()).rejects.toThrow(/endpoint/);
+    await expect(provider.translate('Hello.', 'en', 'es')).rejects.toThrow(/endpoint/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('DeepLTranslationProvider', () => {
