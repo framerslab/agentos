@@ -687,6 +687,13 @@ export interface StreamingSTTUsageEvent {
  * | `'error'`        | `Error`                         | Unrecoverable provider error.                        |
  * | `'close'`        | *(none)*                        | Session has been fully terminated.                   |
  *
+ * A `'close'` the caller asked for, by `close()` or after the final a
+ * `flush()` ends with, is the session's end. One it did not ask for, as a
+ * provider whose socket drops emits, is a failure of the session:
+ * `StreamingSTTChain` with mid-utterance failover goes on through the next
+ * provider, and `VoicePipelineOrchestrator`, which calls no `flush()` on a
+ * session without a call profile, ends its running session as on `'error'`.
+ *
  * See `IStreamingSTT.startSession()` for the factory method that creates these sessions.
  */
 export interface StreamingSTTSession extends EventEmitterLike {
@@ -2334,9 +2341,18 @@ export type ServerTextMessage =
       /**
        * Emitted when an unrecoverable error occurs in the pipeline.
        * The session will be closed after this message.
+       * `VoicePipelineOrchestrator` sends it, on a session without a call
+       * profile, when the STT or TTS session fails to start (every provider
+       * of a chain included) or another part fails before the session opens,
+       * as `{ type: 'error', code: 'provider_failure', message: 'voice pipeline failed' }`,
+       * then closes the transport. A session that opened ends with
+       * `session_ended` instead. A `startSession()` that throws before it
+       * takes the transport (an orchestrator that is not idle, a missing
+       * component, an endpoint detector whose reset throws) sends nothing
+       * and leaves the transport to the host.
        */
       type: 'error';
-      /** Machine-readable error code (e.g. `'STT_PROVIDER_ERROR'`). */
+      /** Machine-readable error code (e.g. `'provider_failure'`). */
       code: string;
       /** Human-readable description of the error. */
       message: string;
