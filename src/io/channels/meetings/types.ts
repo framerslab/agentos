@@ -140,9 +140,13 @@ export interface MeetingNotice {
   lateArrivalText: string;
 }
 
-/** What dispatch recorded: the room and the hash of the worker's per-run token. Never the token itself. */
+/**
+ * What dispatch recorded: the room and the hash of the worker's per-run token. Never the token itself. A run that is
+ * over keeps the token's hash alone (no room, worker or provider reference), so a report its worker sends after the end
+ * still verifies under the run's own token and is taken without being applied.
+ */
 export interface MeetingDispatchRecord {
-  roomName: string;
+  roomName?: string;
   workerTokenHash: string;
   workerId?: string;
   providerRunRef?: string;
