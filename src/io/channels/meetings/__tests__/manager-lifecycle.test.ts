@@ -31,7 +31,8 @@ describe('the stop command and the purge sequence', () => {
     await h.manager.tick();
     const run = await h.stores.runs.get(runId);
     expect(run).toMatchObject({ state: 'done', reason: 'stopped_by_participant', meetingUrl: '', botName: '', stopPhrase: '', billedSeconds: 90 });
-    expect(run?.dispatch).toBeUndefined();
+    // the room, the worker and the provider's reference go; the token's hash stays, so the worker's late report verifies
+    expect(run?.dispatch).toEqual({ workerTokenHash: MockMeetingBotProvider.hash(h.provider.tokenOf(runId)) });
     expect(await h.stores.transcript.read(runId, 0)).toEqual([]);
     expect((await h.stores.events.read(runId, 0)).filter((e) => e.type === 'bot:chat_message')[0]).toMatchObject({ purged: true });
     expect(purged).toEqual([runId]);
@@ -284,6 +285,32 @@ describe('the limits, the meter and the ends', () => {
     h.clock.advance(60_000);
     await h.manager.tick();
     expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed' });
+  });
+  it('a done report after a left the manager completed is taken and applies nothing', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    await h.report(runId, 'left', { reason: 'ended', seconds: 30 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', billedSeconds: 30 });
+    // the worker's last report, sent after its left with the run's own token
+    expect(await h.report(runId, 'done', { seconds: 30 })).toEqual({ accepted: true, applied: 0 });
+    const run = await h.stores.runs.get(runId);
+    expect(run).toMatchObject({ state: 'done', billedSeconds: 30, reportedSeconds: 30 });
+    expect(run?.dispatch).toEqual({ workerTokenHash: MockMeetingBotProvider.hash(h.provider.tokenOf(runId)) });
+    expect(h.entitlement.settled).toEqual([['res-1', 30]]);
+    // another token is still refused
+    expect(await h.manager.processProviderEvent('mock', mockEventContext(runId, 'done', { seconds: 30 }, h.clock.now(), 'not-the-run-token'))).toMatchObject({ accepted: false });
+  });
+  it('the worker\'s left and done after the manager ended its run as crashed are taken and apply nothing', async () => {
+    const h = harness();
+    const runId = await joined(h);
+    h.provider.alive.clear();
+    h.clock.advance(60_000);
+    await h.manager.tick();
+    const ended = await h.stores.runs.get(runId);
+    expect(ended).toMatchObject({ state: 'done', reason: 'crashed' });
+    expect(await h.report(runId, 'left', { reason: 'ended', seconds: 30 })).toEqual({ accepted: true, applied: 0 });
+    expect(await h.report(runId, 'done', { seconds: 30 })).toEqual({ accepted: true, applied: 0 });
+    expect(await h.stores.runs.get(runId)).toMatchObject({ state: 'done', reason: 'crashed', billedSeconds: ended?.billedSeconds });
   });
   it('leaveBot leaves and keeps the data; a scheduled run can be cancelled before dispatch', async () => {
     const h = harness();
