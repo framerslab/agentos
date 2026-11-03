@@ -43,13 +43,19 @@ export interface KeyProbeAnswer {
   verdict: ProbeResult;
   /** The HTTP status of the answer that decided the verdict; absent when no answer came. */
   status?: number;
-  /** The vendor's error message (`error.message`, else `message`), whitespace collapsed, at most 300 characters. */
+  /**
+   * The vendor's error message (`error.message`, else `message`), whitespace collapsed, the probing key replaced by
+   * `[key]` wherever it appears, then cut to at most 300 characters.
+   */
   message?: string;
   /** The model the billable request went to; absent on an authenticated read. */
   model?: string;
   /** The answer's Retry-After in milliseconds (bounded to one hour), when it sent one above zero. */
   retryAfterMs?: number;
-  /** Why no answer decided the verdict: the timeout, the caller's abort, a failed connection, or no model to send to. */
+  /**
+   * Why no answer decided the verdict: the timeout or the caller's abort (also when either ends the read of an error
+   * body or of a models list), a failed connection, or a models list with no model to send to.
+   */
   failure?: KeyProbeFailure;
   /** The error a failed connection threw, as text. */
   error?: string;
@@ -99,8 +105,12 @@ function headerOf(response: Response, name: string): string | null {
   return null;
 }
 
-/** The vendor's message from an error body: `error.message`, else a top-level `message`. */
-export function vendorErrorMessage(body: string): string | undefined {
+/**
+ * The vendor's message from an error body: `error.message`, else a top-level `message`, whitespace collapsed, with
+ * every occurrence of `apiKey` replaced by `[key]` before it is cut to 300 characters, so a cut never leaves part of
+ * the key behind.
+ */
+export function vendorErrorMessage(body: string, apiKey?: string): string | undefined {
   if (!body) return undefined;
   let parsed: unknown;
   try {
@@ -113,21 +123,41 @@ export function vendorErrorMessage(body: string): string | undefined {
   const inner = outer.error && typeof outer.error === 'object' ? (outer.error as Record<string, unknown>) : undefined;
   const raw = typeof inner?.message === 'string' ? inner.message : typeof outer.message === 'string' ? outer.message : undefined;
   if (raw === undefined) return undefined;
-  const text = raw.replace(/\s+/g, ' ').trim();
+  const redacted = apiKey ? raw.split(apiKey).join('[key]') : raw;
+  const text = redacted.replace(/\s+/g, ' ').trim();
   if (!text) return undefined;
   return text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH - 3)}...` : text;
 }
 
+/** What a probe's answer is read with: the model the request went to, the key it sent, and the probe's signal. */
+export interface KeyProbeReadContext {
+  /** The model the billable request went to. */
+  model?: string;
+  /** The key the probe sent, replaced by `[key]` wherever the vendor's message echoes it. */
+  apiKey?: string;
+  /** The probe's signal: a body read it ends is thrown to the probe's catch, not read as an empty body. */
+  signal?: AbortSignal;
+}
+
 /**
  * Reads a probe's answer: `ok` on a 2xx, else the kind {@link classifyKeyFailure} names or `unknown`, with the
- * status, the vendor's message, the model and the Retry-After.
+ * status, the vendor's message (the key replaced by `[key]`), the model and the Retry-After. An error body that
+ * cannot be read classifies by the status alone, except when the probe's signal has fired: the deadline or the
+ * caller's abort ended the read, so the rejection is thrown for the probe to report.
  */
-export async function readKeyProbeAnswer(response: Response, model?: string): Promise<KeyProbeAnswer> {
+export async function readKeyProbeAnswer(response: Response, context: KeyProbeReadContext = {}): Promise<KeyProbeAnswer> {
+  const { model, apiKey, signal } = context;
   const status = typeof response.status === 'number' ? response.status : undefined;
   const base: KeyProbeAnswer = { verdict: 'ok', ...(status !== undefined ? { status } : {}), ...(model ? { model } : {}) };
   if (response.ok) return base;
-  const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
-  const message = vendorErrorMessage(text);
+  const text =
+    typeof response.text === 'function'
+      ? await response.text().catch((error: unknown) => {
+          if (signal?.aborted) throw error;
+          return '';
+        })
+      : '';
+  const message = vendorErrorMessage(text, apiKey);
   const retryAfter = retryAfterMs(headerOf(response, 'retry-after'));
   return {
     ...base,

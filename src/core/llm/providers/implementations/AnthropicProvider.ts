@@ -3033,9 +3033,12 @@ export class AnthropicProvider implements IProvider {
           body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
           signal: deadline.signal,
         });
-        return await readKeyProbeAnswer(response, model);
+        return await readKeyProbeAnswer(response, { model, apiKey, signal: deadline.signal });
       }
-      return await readKeyProbeAnswer(await fetch(`${baseURL}/v1/models?limit=1`, { method: 'GET', headers, signal: deadline.signal }));
+      return await readKeyProbeAnswer(
+        await fetch(`${baseURL}/v1/models?limit=1`, { method: 'GET', headers, signal: deadline.signal }),
+        { apiKey, signal: deadline.signal },
+      );
     } catch (error) {
       return failedKeyProbeAnswer(error, deadline);
     } finally {

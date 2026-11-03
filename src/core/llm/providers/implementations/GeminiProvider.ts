@@ -2008,10 +2008,11 @@ export class GeminiProvider implements IProvider {
           body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 1 } }),
           signal: deadline.signal,
         });
-        return await readKeyProbeAnswer(response, model);
+        return await readKeyProbeAnswer(response, { model, apiKey, signal: deadline.signal });
       }
       return await readKeyProbeAnswer(
         await fetch(`${baseURL}/models?pageSize=1`, { method: 'GET', headers: this.requestHeaders(apiKey), signal: deadline.signal }),
+        { apiKey, signal: deadline.signal },
       );
     } catch (error) {
       return failedKeyProbeAnswer(error, deadline);

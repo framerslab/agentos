@@ -1707,13 +1707,17 @@ export class OpenRouterProvider implements IProvider {
     const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
     try {
       if (options.kind !== 'billing') {
-        return await readKeyProbeAnswer(await fetch(`${baseURL}/key`, { method: 'GET', headers, signal: deadline.signal }));
+        return await readKeyProbeAnswer(await fetch(`${baseURL}/key`, { method: 'GET', headers, signal: deadline.signal }), { apiKey, signal: deadline.signal });
       }
       let model = options.model || this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
       if (!model && this.availableModelsCache.size === 0) {
         const listed = await fetch(`${baseURL}/models`, { method: 'GET', headers, signal: deadline.signal });
-        if (!listed.ok) return await readKeyProbeAnswer(listed);
-        const body = (await listed.json().catch(() => ({}))) as Partial<OpenRouterListModelsAPIResponse>;
+        if (!listed.ok) return await readKeyProbeAnswer(listed, { apiKey, signal: deadline.signal });
+        const body = (await listed.json().catch((error: unknown) => {
+          // A read the deadline or the caller's abort ended is the probe's failure, not an empty catalog.
+          if (deadline.signal.aborted) throw error;
+          return {};
+        })) as Partial<OpenRouterListModelsAPIResponse>;
         if (Array.isArray(body.data) && this.availableModelsCache.size === 0) {
           for (const apiModel of body.data) {
             const modelInfo = this.mapApiToModelInfo(apiModel);
@@ -1732,7 +1736,7 @@ export class OpenRouterProvider implements IProvider {
           body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
           signal: deadline.signal,
         }),
-        model,
+        { model, apiKey, signal: deadline.signal },
       );
     } catch (error) {
       return failedKeyProbeAnswer(error, deadline);

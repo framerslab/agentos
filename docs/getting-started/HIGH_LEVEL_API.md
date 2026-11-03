@@ -462,7 +462,7 @@ It sends one key the billing probe its provider's key pool sends a key taken out
 | `timeoutMs` | `10000` | How long the probe waits; a value that is not a positive finite number is refused with a `RangeError`. |
 | `signal` | | Ends the probe, which reports `unknown`. |
 
-The result carries `state`, `detail` (the state, the HTTP status and the vendor's message, with the key replaced by `[key]` wherever the vendor echoed it), `provider`, `fingerprint` (the key's `keyFingerprint()`), and `httpStatus`, `model` and `retryAfterMs` when the answer had them. A passing probe costs one request of one output token (16 on OpenRouter, Requesty and OpenAI's reasoning models). See [Key rotation](../KEY_ROTATION.md#probing-one-key).
+The result carries `state`, `detail` (the state, the HTTP status and the vendor's message, at most 300 characters, with the key replaced by `[key]` wherever the vendor echoed it), `provider`, `fingerprint` (the key's `keyFingerprint()`), and `httpStatus`, `model` and `retryAfterMs` when the answer had them. A passing probe costs one request of one output token (16 on OpenRouter, Requesty and OpenAI's reasoning models). See [Key rotation](../KEY_ROTATION.md#probing-one-key).
 
 ## `generateVideo()`
 

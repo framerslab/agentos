@@ -1210,12 +1210,16 @@ export class OpenAIProvider implements IProvider {
       const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
       if (this.config?.organizationId) headers['OpenAI-Organization'] = this.config.organizationId;
       const listModels = () => fetch(`${baseURL}/models`, { method: 'GET', headers, signal: deadline.signal });
-      if (options.kind !== 'billing') return await readKeyProbeAnswer(await listModels());
+      if (options.kind !== 'billing') return await readKeyProbeAnswer(await listModels(), { apiKey, signal: deadline.signal });
       let model = options.model || this.defaultModelId;
       if (!model) {
         const listed = await listModels();
-        if (!listed.ok) return await readKeyProbeAnswer(listed);
-        const body = (await listed.json().catch(() => ({}))) as Partial<OpenAIAPITypes.ListModelsResponse>;
+        if (!listed.ok) return await readKeyProbeAnswer(listed, { apiKey, signal: deadline.signal });
+        const body = (await listed.json().catch((error: unknown) => {
+          // A read the deadline or the caller's abort ended is the probe's failure, not an empty catalog.
+          if (deadline.signal.aborted) throw error;
+          return {};
+        })) as Partial<OpenAIAPITypes.ListModelsResponse>;
         model = (body.data ?? []).map((m) => m.id).find((id) => /^gpt-/.test(id) && !/embedding|realtime|audio|tts|transcribe|image|search/.test(id));
         if (!model) return noModelKeyProbeAnswer();
       }
@@ -1229,7 +1233,7 @@ export class OpenAIProvider implements IProvider {
         }),
         signal: deadline.signal,
       });
-      return await readKeyProbeAnswer(response, model);
+      return await readKeyProbeAnswer(response, { model, apiKey, signal: deadline.signal });
     } catch (error) {
       return failedKeyProbeAnswer(error, deadline);
     } finally {
