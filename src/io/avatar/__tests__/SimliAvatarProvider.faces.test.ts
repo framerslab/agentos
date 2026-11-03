@@ -141,6 +141,29 @@ describe('SimliAvatarProvider.createFace', () => {
     expect(new Uint8Array(await bufferPart.arrayBuffer())).toEqual(JPEG);
   });
 
+  it('reads the bytes of a Blob from another realm, which fails instanceof Blob', async () => {
+    const mock = stubFetch(() => json({ message: 'ok', face_id: 'f', warnings: [] }));
+    // A Blob made by another realm (an iframe, jsdom, a vm context) has the
+    // Blob methods on a prototype this realm's Blob does not own.
+    const source = new Blob([JPEG], { type: 'image/jpeg' });
+    const foreign = {
+      size: source.size,
+      type: source.type,
+      arrayBuffer: () => source.arrayBuffer(),
+      slice: (...args: Parameters<Blob['slice']>) => source.slice(...args),
+      stream: () => source.stream(),
+      text: () => source.text(),
+    } as unknown as Blob;
+    expect(foreign instanceof Blob).toBe(false);
+
+    await new SimliAvatarProvider({ apiKey: 'sk' }).createFace({ data: foreign });
+
+    const part = (captured(mock).init.body as FormData).get('image') as File;
+    expect(part.type).toBe('image/jpeg');
+    expect(part.name).toBe('face.jpg');
+    expect(new Uint8Array(await part.arrayBuffer())).toEqual(JPEG);
+  });
+
   it("passes the caller's abort signal through to the upload", async () => {
     const mock = stubFetch(() => json({ message: 'ok', face_id: 'f', warnings: [] }));
     const controller = new AbortController();
@@ -182,6 +205,66 @@ describe('SimliAvatarProvider.createFace', () => {
     await expect(
       new SimliAvatarProvider({ apiKey: 'sk' }).createFace({ data: PNG })
     ).rejects.toMatchObject({ name: 'AvatarProviderError', status: 422 });
+  });
+
+  it('rejects with the abort, not an HTTP error, when the caller aborts while the error body is read', async () => {
+    const controller = new AbortController();
+    const body = new ReadableStream<Uint8Array>({
+      pull(stream) {
+        controller.abort();
+        stream.error(new DOMException('This operation was aborted', 'AbortError'));
+      },
+    });
+    stubFetch(() => new Response(body, { status: 500 }));
+
+    const upload = new SimliAvatarProvider({ apiKey: 'sk' }).createFace(
+      { data: PNG },
+      { signal: controller.signal }
+    );
+    await expect(upload).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(upload).rejects.not.toBeInstanceOf(AvatarProviderError);
+  });
+
+  it('rejects with a timeout, not an HTTP error, when the deadline passes while the error body is read', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(stream) {
+        stream.error(new DOMException('The operation timed out', 'TimeoutError'));
+      },
+    });
+    stubFetch(() => new Response(body, { status: 503 }));
+
+    await expect(
+      new SimliAvatarProvider({ apiKey: 'sk' }).createFace({ data: PNG })
+    ).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('reads no more of a large error body than it keeps, and cancels the rest', async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const kilobyte = new TextEncoder().encode('x'.repeat(1024));
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(stream) {
+          pulls += 1;
+          if (pulls > 1000) stream.close();
+          else stream.enqueue(kilobyte);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      { highWaterMark: 0 }
+    );
+    stubFetch(() => new Response(body, { status: 502 }));
+
+    const error = await new SimliAvatarProvider({ apiKey: 'sk' })
+      .createFace({ data: PNG })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(AvatarProviderError);
+    expect((error as AvatarProviderError).status).toBe(502);
+    expect((error as AvatarProviderError).body).toBe('x'.repeat(2000));
+    expect(pulls).toBeLessThan(10);
+    expect(cancelled).toBe(true);
   });
 
   it('rejects a 200 that carries no face_id', async () => {
@@ -300,6 +383,19 @@ describe('SimliAvatarProvider.faceStatus', () => {
     );
     const status = await new SimliAvatarProvider({ apiKey: 'sk' }).faceStatus('mine');
     expect(status).toMatchObject({ faceId: 'mine', state: 'not_found' });
+  });
+
+  it('does not read an unnamed top-level status as the asked-for face when generations lists only others', async () => {
+    stubFetch(() =>
+      json({
+        status: 'completed',
+        queue_position: 0,
+        generations: [{ face_id: 'other', status: 'completed', queue_position: 0 }],
+      })
+    );
+    const status = await new SimliAvatarProvider({ apiKey: 'sk' }).faceStatus('mine');
+    expect(status).toMatchObject({ faceId: 'mine', state: 'not_found' });
+    expect(status.providerState).toBeUndefined();
   });
 
   it('rejects a failed status request with its status and body', async () => {
