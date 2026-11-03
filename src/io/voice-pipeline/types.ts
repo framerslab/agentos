@@ -689,10 +689,16 @@ export interface StreamingSTTUsageEvent {
  *
  * A `'close'` the caller asked for, by `close()` or after the final a
  * `flush()` ends with, is the session's end. One it did not ask for, as a
- * provider whose socket drops emits, is a failure of the session:
+ * provider whose socket drops can emit, is a failure of the session:
  * `StreamingSTTChain` with mid-utterance failover goes on through the next
- * provider, and `VoicePipelineOrchestrator`, which calls no `flush()` on a
- * session without a call profile, ends its running session as on `'error'`.
+ * provider in the user's order, and `VoicePipelineOrchestrator` ends its
+ * running session as on `'error'`. The orchestrator calls no `flush()` on a
+ * session without a call profile; a host that ends input on purpose (a
+ * push-to-talk stop) calls `flush()` on the session it holds, and the
+ * orchestrator, which wraps that method on the same object while its session
+ * runs, takes a `'close'` after it, with no frame pushed since, as the
+ * session's end. Hosts call `flush()` through the session object, not a
+ * reference to the method taken before the orchestrator received the session.
  *
  * See `IStreamingSTT.startSession()` for the factory method that creates these sessions.
  */
