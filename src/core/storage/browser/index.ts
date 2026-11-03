@@ -4,7 +4,7 @@
  * is this folder's own code moved there unchanged (the same database, object store, version and upgrade handling), so
  * a page's keys stay where they are, and AgentOS opens no IndexedDB itself. The module imports no adapter, so a page
  * that loads it loads neither sql.js nor pg. Node-free and DOM-free but for IndexedDB, which the store reaches only
- * when it is opened.
+ * when it is opened, and the Web Storage a caller hands `WebStorageKeyValueStore` (a tab's `sessionStorage`).
  * @module agentos/core/storage/browser
  */
 
@@ -16,6 +16,8 @@ export {
   openIndexedDbStore,
   idb,
   createSqlKeyValueStore,
+  WebStorageKeyValueStore,
+  StorageFullError,
   type KeyValueStore,
   type IndexedDbStoreOptions,
   type SqlKeyValueStoreOptions,
