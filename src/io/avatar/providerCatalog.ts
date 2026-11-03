@@ -32,6 +32,6 @@ export const AVATAR_PROVIDER_CATALOG: readonly AvatarProviderCatalogEntry[] = [
     mediaModes: ['client-delegated', 'server-driven'],
     audioFormat: 'pcm16',
     defaultSampleRate: 16000,
-    features: ['webrtc', 'lipsync', 'barge-in', 'sfu-relay'],
+    features: ['webrtc', 'lipsync', 'barge-in', 'sfu-relay', 'face-creation'],
   },
 ];

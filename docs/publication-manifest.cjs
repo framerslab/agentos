@@ -237,6 +237,7 @@ const publicationManifest = [
   agentosDoc('SPEECH_PROVIDERS.md', 'features/speech-providers.md', 'Speech Providers', 'Voice & Speech', 2),
   agentosDoc('MEETING_BOTS.md', 'features/meeting-bots.md', 'Meeting Bots', 'Voice & Speech', 4),
   agentosDoc('TELEPHONY_PROVIDERS.md', 'features/telephony-providers.md', 'Telephony Providers', 'Voice & Speech', 3),
+  agentosDoc('features/REALTIME_AVATARS.md', 'features/realtime-avatars.md', 'Realtime Avatars', 'Voice & Speech', 5),
 
   agentosDoc('IMAGE_GENERATION.md', 'features/image-generation.md', 'Image Generation', 'Media Generation', 1),
   agentosDoc('IMAGE_EDITING.md', 'features/image-editing.md', 'Image Editing (Img2Img, Inpainting, Upscaling)', 'Media Generation', 2),
