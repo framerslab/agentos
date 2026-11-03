@@ -130,7 +130,7 @@ Latin-script text is compared with 13 trigram profiles: English, Spanish, French
 
 A text shorter than 10 characters after trimming, a text with fewer than five letters in its main script or no covered script holding more than half its letters, and a text in a shared script its letters do not decide answer `[{ language: defaultLanguage, confidence: 0.1 }]`. The undecided texts are Cyrillic with letters only Russian writes and letters only Ukrainian writes, with neither, or with a letter of another Cyrillic alphabet; Arabic script with a letter outside the Arabic alphabet, as Persian and Urdu write; Devanagari with ळ (Marathi), and Bengali script with ৰ or ৱ (Assamese). Marathi text without ळ reads as Hindi.
 
-`LanguageService`, the runtime's language negotiation (`AgentOSConfig.languageConfig`), has a detector of its own. After `initialize()` and with `autoDetect: true`, `detectLanguages(text)` marks English, Spanish, French, German, Italian or Portuguese when one of a handful of that language's common words appears, Japanese when kana or a Han character does, Chinese when a Han character does and Korean when a Hangul syllable does, each with confidence 0.6, so one text can mark several; with no match it answers the default language with 0.5. The runtime negotiates a request's language from the `languageHint` and `detectedLanguages` the request carries, and runs no detector on the text.
+`LanguageService`, the runtime's language negotiation (`AgentOSConfig.languageConfig`), has a detector of its own. After `initialize()` and with `autoDetect: true`, `detectLanguages(text)` marks English, Spanish, French, German, Italian or Portuguese when one of a handful of that language's common words appears, Japanese when kana or a Han character does, Chinese when a Han character does and Korean when a Hangul syllable does, each with confidence 0.6, so one text can mark several; with no match it answers the default language with 0.5. The runtime negotiates a request's language from the `languageHint` and `detectedLanguages` the request carries, and runs no detector on the text. A `detectionProviderConfigs` entry adds no detector: see [LanguageService providers](#languageservice-providers).
 
 ### Stop words
 
@@ -214,6 +214,39 @@ With the environment variable `ENABLE_UTILITY_AI=true`, `createAgentOSConfig()` 
 A GMI calls its utility class for sentiment tracking, for the JSON of metaprompt replies and, when the persona's RAG config turns it on, for the turn summary it ingests after a turn. The turn summary's method is `abstractive_llm` unless `ingestionProcessing.summarization.method` names another, and `'extractive'` there is `extractive_sentence_rank`; its length is `targetLength`, `'short'` unless given. A summary that fails, such as one a `StatisticalUtilityAI` is asked for with `abstractive_llm`, leaves the turn to be ingested as it is, with a `WARNING` entry in the reasoning trace that names the method and the error.
 
 The full runtime hands its utility class to the prompt engine, which calls `summarizeConversationHistory()` and `summarizeRAGContext()` on it, and to the `ConversationManager`, which gives it to every conversation it opens. A conversation with `enableAutomaticSummarization` set summarizes the middle of a history that grows past `maxHistoryLengthMessages` with `summarize(text, summarizationOptions)`, `{ desiredLength: 'medium', method: 'abstractive_llm' }` unless set, and cuts the history instead when the call throws, as a `StatisticalUtilityAI` does on that method. The `MemoryLifecycleManager`, which a host builds with a utility class of its own, summarizes for its `summarize_*` actions with `abstractive_llm`.
+
+## LanguageService providers
+
+`LanguageService` translates through the first provider in `translationProviderConfigs` that it can build: `openai_chat` with a key from `OPENAI_API_KEY` or `params.apiKey`, or `deepl` with a key from `DEEPL_API_KEY` or `params.apiKey`. With neither it uses `noop_translation`, which returns the input unchanged under that provider id, so a caller that must show only real translations checks `providerId`.
+
+```ts
+import { LanguageService, TranslationProviderError } from '@framers/agentos';
+
+const languages = new LanguageService({
+  defaultLanguage: 'en',
+  supportedLanguages: ['en', 'es'],
+  translationProviderConfigs: [{ id: 'openai_chat', params: { model: 'gpt-4o-mini' } }],
+});
+await languages.initialize();
+
+try {
+  const res = await languages.maybeTranslateForDisplay('Hello, world.', 'en', 'es');
+  console.log(res?.output, res?.providerMetadata?.usage); // 'Hola, mundo.', { promptTokens, completionTokens, totalTokens, costUSD, ... }
+} catch (err) {
+  if (!(err instanceof TranslationProviderError)) throw err;
+  console.log(err.code, err.status); // 'TRANSLATION_REQUEST_FAILED', 401
+}
+```
+
+| Provider id | What it does | How it fails |
+|---|---|---|
+| `openai_chat` | Sends the text to an OpenAI model (`params.model`, default `gpt-4o-mini`; `params.baseUrl` for another OpenAI-compatible base; a directly built `OpenAITranslationProvider` also takes the older `endpoint`, a full `http` or `https` URL with a host ending in `/chat/completions`, read as the base before that path, and refuses any other `endpoint`, a relative one included, at `initialize`) through `generateText` with `fallbackProviders: []`, so the call is retried, timed and priced by the provider layer and stays on OpenAI. `providerMetadata.usage` is the call's usage with `costUSD`, and `providerMetadata.model` the model that answered. | Throws `TranslationProviderError`: `TRANSLATION_REQUEST_FAILED` with the HTTP `status` when OpenAI answered (401 for a refused key), or `TRANSLATION_EMPTY_OUTPUT` when the model answered with no text. |
+| `deepl` | Posts `{ text: [input], source_lang, target_lang }` as JSON to DeepL's `/v2/translate` with the key in the `Authorization` header as `DeepL-Auth-Key <key>`, the only form DeepL accepts ([authentication](https://developers.deepl.com/docs/getting-started/auth); DeepL ended `auth_key` in a query parameter or the body, see its [change notice](https://developers.deepl.com/docs/resources/breaking-changes-change-notices/november-2025-deprecation-of-legacy-auth-methods)). A Free API key, which ends in `:fx`, goes to `api-free.deepl.com`, any other to `api.deepl.com`; `params.endpoint` sets the URL. Language codes are sent upper-cased. `providerMetadata.character_count` is DeepL's count when it sends one. | Throws `TranslationProviderError`: `TRANSLATION_REQUEST_FAILED` with the HTTP `status` (403 for a refused key, 456 for a used-up quota), or `TRANSLATION_EMPTY_OUTPUT` when DeepL answered with no translation. |
+| `noop_translation` | Returns the input unchanged. Used only when no other provider could be built. | Never fails. |
+
+Each failure writes one `language.translation_failed` line through the AgentOS logger with the provider (`openai` or `deepl`), the reason (`request_failed` or `empty_output`), the status (0 when none came back) and the error's type and code, never the text. A provider never returns its input as the translation of a failed call, and nothing is cached for one. `maybeTranslateForDisplay`, `maybeNormalizeForPivot`, `translateQueryForRag`, `translateRagResults`, `translateToolArguments` and `translateToolResult` reject with the provider's error; a call cancelled through `abortSignal` rejects with the abort's reason.
+
+Detection runs the built-in heuristic alone. `WhisperDetectionProvider` (`whisper_stub`) throws `LanguageDetectionUnsupportedError` (`LANGUAGE_DETECTION_UNSUPPORTED`) from `detect(text)` and makes no call: Whisper is a speech model that names a language only while transcribing audio, and with no confidence. `LanguageService` does not build it or any other `detectionProviderConfigs` entry; it writes one `language.detector_unsupported` line for each. A detector that throws writes `language.detection_failed` and the others' results stand.
 
 ## Helpers that are not exported
 
