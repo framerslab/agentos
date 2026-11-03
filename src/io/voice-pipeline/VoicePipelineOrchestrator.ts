@@ -1549,7 +1549,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * sent the protocol's `error` message, `{ type: 'error', code: 'provider_failure', message: 'voice pipeline failed' }`,
    * which carries none of the failure's own text, and is closed once that send has settled, or after half a second
    * when it hangs; then this call rejects with the failure. A transport that closed itself is sent nothing. A host
-   * sends no reply of its own in its catch: the transport is closing by then, and a WebSocket drops what is sent to it.
+   * sends no reply of its own in its catch for such a failure: the transport is closing by then, and a WebSocket drops
+   * what is sent to it. The throws listed below, and an endpoint detector whose reset throws, come before the session
+   * takes the transport: they send nothing and close nothing, and the host answers its client itself.
    *
    * Once the session runs, an STT session that closes on its own, as one whose provider's socket drops does, ends the
    * session as the STT part's failure, as its `'error'` would: `session_error` with `source: 'stt'`, then
