@@ -861,6 +861,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   private sttEndRequested = false;
   /** The STT session ended after its input was ended on purpose: the transport's audio goes to it no more. */
   private sttEnded = false;
+  /** Counts the STT session's `flush()` calls: only the newest one's rejection reads or changes the state above. */
+  private sttFlushes = 0;
   /** Puts back the STT session's own `flush()` as the session stops (`_observeSttFlush`). */
   private restoreSttFlush?: () => void;
   /**
@@ -1038,7 +1040,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * `IStreamingSTT.startSession()` resolved with), whatever the provider or the chain behind it. The session's own
    * `flush()` is wrapped on that object and put back as the session stops. A flush counts until the next frame the
    * orchestrator pushes; one that rejects or throws ended nothing, and a close that came while it was pending ends the
-   * session as the STT part's failure once it rejects (a close before it began, after an earlier flush, stays the end). A session whose `flush` cannot be replaced (a frozen object)
+   * session as the STT part's failure once it rejects (a close before it began, after an earlier flush, stays the end).
+   * Only the newest flush's rejection counts: an older flush that rejects after a newer one was called changes nothing. A session whose `flush` cannot be replaced (a frozen object)
    * keeps every close a failure.
    *
    * @param stt - The STT session this orchestrator's session owns.
@@ -1050,9 +1053,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (typeof original !== 'function') return;
     const requested = (): Promise<void> => {
       if (this.current !== 'closed') this.sttEndRequested = true;
+      const flush = ++this.sttFlushes;
       // A close before this flush began answered an earlier one: this flush's outcome does not change it.
       const endedBefore = this.sttEnded;
       const failed = (err: unknown): never => {
+        // A newer flush owns the end of input: an older one that rejects later changes nothing.
+        if (flush !== this.sttFlushes) throw err;
         this.sttEndRequested = false;
         // A close that came while this flush was pending was taken as the end it asked for; the flush failed, so the
         // input did not end as asked, and that close is the session's failure.
