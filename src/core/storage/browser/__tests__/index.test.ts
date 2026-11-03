@@ -15,7 +15,16 @@ const INDEX = resolve(here, '../index.ts');
 const KV = '@framers/sql-storage-adapter/kv';
 
 /** The names the entry takes from the library, under which a page reaches the key-value store. */
-const FROM_THE_LIBRARY = ['MemoryKeyValueStore', 'namespaced', 'IndexedDbKeyValueStore', 'openIndexedDbStore', 'idb', 'createSqlKeyValueStore'] as const;
+const FROM_THE_LIBRARY = [
+  'MemoryKeyValueStore',
+  'namespaced',
+  'IndexedDbKeyValueStore',
+  'openIndexedDbStore',
+  'idb',
+  'createSqlKeyValueStore',
+  'WebStorageKeyValueStore',
+  'StorageFullError',
+] as const;
 
 /** The file a relative specifier names, as TypeScript resolves it: `.ts` added, `.js` read as `.ts`, then the folder's `index.ts`. */
 function resolveRelative(file: string, specifier: string): string {
