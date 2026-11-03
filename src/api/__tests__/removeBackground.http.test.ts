@@ -541,6 +541,16 @@ describe('the background removal providers', () => {
     expect(received[0].headers.authorization).toBe('Key fal-tenant-key');
   });
 
+  it("rotates a call's own comma-separated keys across calls, as the environment's keys rotate", async () => {
+    routes[`POST ${ENDPOINT}`] = () => cutOutAnswer();
+
+    for (let i = 0; i < 3; i += 1) {
+      await api.removeBackground({ image: SOURCE_URL, apiKey: 'fal-k1,fal-k2', baseUrl: origin });
+    }
+
+    expect(new Set(received.map((request) => request.headers.authorization))).toEqual(new Set(['Key fal-k1', 'Key fal-k2']));
+  });
+
   it('refuses a provider id it does not know', async () => {
     const error = await rejectionOf(api.removeBackground({ image: SOURCE_URL, provider: 'nowhere' }));
     expect(String(error.message)).toContain('nowhere');
