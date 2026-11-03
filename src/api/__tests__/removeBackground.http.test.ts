@@ -16,72 +16,30 @@ import type { AddressInfo } from 'node:net';
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import * as root from '../../index.js';
+import {
+  FalBackgroundRemovalProvider,
+  registerBackgroundRemovalProvider,
+  removeBackground,
+  resetBackgroundRemovalProviders,
+  resolveBackgroundRemovalProvider,
+  type BackgroundRemovalRequest,
+  type IBackgroundRemovalProvider,
+} from '../../index.js';
 
 // ---------------------------------------------------------------------------
-// The surface under test, reached through the package root
+// The surface under test, from the package root
 // ---------------------------------------------------------------------------
 
-interface CutOut {
-  url?: string;
-  dataUrl?: string;
-  buffer?: Buffer;
-  mimeType: string;
-  width?: number;
-  height?: number;
-  fileSize?: number;
-}
+const api = {
+  removeBackground,
+  FalBackgroundRemovalProvider,
+  registerBackgroundRemovalProvider,
+  resolveBackgroundRemovalProvider,
+  resetBackgroundRemovalProviders,
+};
 
-interface CutOutResult {
-  image: CutOut;
-  mask?: CutOut;
-  providerId: string;
-  modelId: string;
-  durationMs: number;
-}
-
-interface CutOutRequest {
-  modelId: string;
-  imageUrl: string;
-  output: 'url' | 'buffer';
-  format: 'png' | 'webp';
-  returnMask: boolean;
-  timeoutMs: number;
-  signal?: AbortSignal;
-  providerOptions?: Record<string, unknown>;
-}
-
-interface CutOutProvider {
-  readonly providerId: string;
-  readonly isInitialized: boolean;
-  readonly defaultModelId?: string;
-  initialize(config: Record<string, unknown>): Promise<void>;
-  removeBackground(request: CutOutRequest): Promise<CutOutResult>;
-}
-
-interface CutOutOptions {
-  image: string | Buffer | Uint8Array;
-  provider?: string;
-  model?: string;
-  output?: 'url' | 'buffer';
-  format?: 'png' | 'webp';
-  returnMask?: boolean;
-  timeoutMs?: number;
-  signal?: AbortSignal;
-  apiKey?: string;
-  baseUrl?: string;
-  providerOptions?: Record<string, unknown>;
-}
-
-interface CutOutSurface {
-  removeBackground(options: CutOutOptions): Promise<CutOutResult>;
-  FalBackgroundRemovalProvider: new () => CutOutProvider;
-  registerBackgroundRemovalProvider(id: string, provider: CutOutProvider): void;
-  resolveBackgroundRemovalProvider(id?: string): Promise<CutOutProvider>;
-  resetBackgroundRemovalProviders(): void;
-}
-
-const api = root as unknown as CutOutSurface;
+type CutOutRequest = BackgroundRemovalRequest;
+type CutOutProvider = IBackgroundRemovalProvider;
 
 // ---------------------------------------------------------------------------
 // Fixtures: read by their signature alone; the server decodes nothing
@@ -189,7 +147,7 @@ afterEach(() => {
   for (const timer of held.splice(0)) clearTimeout(timer);
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
-  if (typeof api.resetBackgroundRemovalProviders === 'function') api.resetBackgroundRemovalProviders();
+  api.resetBackgroundRemovalProviders();
   expect(unexpected).toEqual([]);
   expect(outside).toEqual([]);
 });

@@ -7,6 +7,7 @@ import {
   generateText, streamText,        // Text generation
   generateObject, streamObject,    // Structured output (Zod validated)
   generateImage, transferStyle,    // Image generation & style transfer
+  removeBackground,                // Subject cut-out on a transparent PNG
   generateVideo, analyzeVideo,     // Video generation & analysis
   generateMusic, generateSFX,      // Audio generation
   performOCR,                      // Vision / OCR
@@ -25,6 +26,7 @@ import {
 | `generateObject()` | Extract structured JSON (Zod) | `await generateObject({ schema: z.object({...}), prompt: '...' })` |
 | `generateImage()` | Generate images (with character consistency) | `await generateImage({ provider: 'openai', prompt: '...' })` |
 | `transferStyle()` | Restyle an image after a reference image, sending the provider both | `await transferStyle({ image: src, styleReference: ref, prompt: '...' })` |
+| `removeBackground()` | Cut the subject out of an image onto a transparent PNG (fal BiRefNet) | `await removeBackground({ image: 'https://example.com/hero.png' })` |
 | `generateVideo()` | Generate video from text/image | `await generateVideo({ prompt: '...' })` |
 | `generateMusic()` | Generate music | `await generateMusic({ prompt: '...' })` |
 | `performOCR()` | Extract text from images | `await performOCR({ imagePath: './doc.png' })` |
@@ -400,6 +402,36 @@ const result = await generateImage({
 console.log(result.provider);
 console.log(result.images[0]?.mimeType);
 ```
+
+## `removeBackground()`
+
+```ts
+import { removeBackground } from '@framers/agentos';
+
+// The subject on a transparent PNG, as a URL on fal's storage.
+const { image } = await removeBackground({ image: 'https://example.com/hero.png' });
+console.log(image.url);
+
+// The bytes instead, with the matte.
+const { image: cut, mask } = await removeBackground({ image: pngBytes, output: 'buffer', returnMask: true });
+```
+
+The built-in provider runs fal's BiRefNet v2 (`fal-ai/birefnet/v2`) with `FAL_API_KEY`. Options:
+
+| Option | Default | What it does |
+|--------|---------|--------------|
+| `image` | (required) | An `http(s)` URL or a base64 image data URL, sent as given, or the bytes (`Buffer`, `Uint8Array`) of a PNG, JPEG, WebP or GIF. Any other string is refused. |
+| `output` | `'url'` | `'url'` returns the cut-out's URL; `'buffer'` returns its `buffer` and `dataUrl`, fetched inline from fal. |
+| `format` | `'png'` | `'png'` or `'webp'`. |
+| `returnMask` | `false` | Also return the matte as `mask`. |
+| `model` | `'fal-ai/birefnet/v2'` | The fal endpoint. |
+| `timeoutMs` | `60000` | The call's deadline, download included; rejects with `code: 'timeout'`. |
+| `signal` | | Aborts the call with the signal's reason. |
+| `apiKey`, `baseUrl` | `FAL_API_KEY`, `https://fal.run` | Credentials for this call. |
+| `providerOptions.fal` | | `variant` (BiRefNet weights, default `'General Use (Light)'`), `operatingResolution` (default `'1024x1024'`), `refineForeground` (default `true`), `input` (extra request fields). |
+| `provider` | `'fal'` | A provider registered with `registerBackgroundRemovalProvider()`. |
+
+Failures reject with `SegmentationProviderError` (`invalid_request`, `provider_failed` or `timeout`, with the HTTP `status` of a failed answer). See [Image Segmentation](../features/IMAGE_SEGMENTATION.md#background-removal).
 
 ## `generateVideo()`
 
