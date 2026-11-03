@@ -670,6 +670,8 @@ describe('VoicePipelineOrchestrator', () => {
   });
 
   it('keeps a session whose STT input already ended as asked running when a later flush() of the closed STT session rejects', async () => {
+    // The session's own flush: the orchestrator wraps the method on the session while its session runs.
+    const ownFlush = vi.mocked(sttSession.flush);
     const session = await startSession();
     const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
     const closes: Array<VoiceSessionEventMap['close']> = [];
@@ -683,7 +685,7 @@ describe('VoicePipelineOrchestrator', () => {
     expect(orchestrator.state).toBe('listening');
 
     // The input ended as asked before this flush began: its rejection is the host's to handle, and no failure.
-    vi.mocked(sttSession.flush).mockRejectedValueOnce(new Error('session closed'));
+    ownFlush.mockRejectedValueOnce(new Error('session closed'));
     await expect(sttSession.flush()).rejects.toThrow('session closed');
     await vi.advanceTimersByTimeAsync(0);
     expect(orchestrator.state).toBe('listening');
