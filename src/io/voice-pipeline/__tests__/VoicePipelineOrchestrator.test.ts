@@ -669,6 +669,28 @@ describe('VoicePipelineOrchestrator', () => {
     expect(closes.map((event) => event.reason)).toEqual(['provider_failure']);
   });
 
+  it('keeps a session whose STT input already ended as asked running when a later flush() of the closed STT session rejects', async () => {
+    const session = await startSession();
+    const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const closes: Array<VoiceSessionEventMap['close']> = [];
+    session.on('session_error', (event) => sessionErrors.push(event));
+    session.on('close', (event) => closes.push(event));
+    orchestrator.on('error', () => undefined);
+
+    await sttSession.flush();
+    sttSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+
+    // The input ended as asked before this flush began: its rejection is the host's to handle, and no failure.
+    vi.mocked(sttSession.flush).mockRejectedValueOnce(new Error('session closed'));
+    await expect(sttSession.flush()).rejects.toThrow('session closed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+    expect(sessionErrors).toEqual([]);
+    expect(closes).toEqual([]);
+  });
+
   it('still ends the session on an STT close after a flush() once audio has gone to the session again, and on an error after a flush()', async () => {
     const session = await startSession();
     const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
