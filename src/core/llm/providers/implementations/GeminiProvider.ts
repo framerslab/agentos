@@ -37,7 +37,7 @@ import { redactUrlSecrets } from '../url-secrets';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
-import { computeRetryBackoffMs, resolveAttemptCount, type AttemptTally } from './retry-backoff.js';
+import { computeRetryBackoffMs, resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 
@@ -2042,8 +2042,9 @@ export class GeminiProvider implements IProvider {
    * @param {string} endpoint - API endpoint path (e.g., "/models/gemini-2.5-flash:generateContent").
    * @param {Record<string, unknown>} body - Request body.
    * @param {number} [requestTimeoutOverride] - Per-call timeout in ms, over the configured default.
-   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, and once
-   *   it has fired no further attempt is sent.
+   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, ends a wait
+   *   between attempts (a Retry-After or a backoff) at once, and once it has fired no further attempt
+   *   is sent.
    * @param {number} [maxAttempts] - The call's attempt count, a first and its retries together, over
    *   `config.maxRetries`; key hops are not counted, and no backoff is waited after the last attempt.
    * @param {AttemptTally} [tally] - Filled with the attempts this request sent, so a caller that sends
@@ -2155,9 +2156,10 @@ export class GeminiProvider implements IProvider {
             // A single key rests here; a pool of several was marked above.
             if (!(this.keyPool && this.keyPool.size > 1)) this.keyPool?.markExhausted(apiKey);
             // Retry-After is authoritative when present; otherwise jittered backoff. No wait after the last attempt.
+            // The caller's abort ends the wait, and the loop's check then reports it.
             if (attempt < attempts - 1) {
               const waitMs = serverRetryAfterMs ?? computeRetryBackoffMs(attempt);
-              await new Promise(resolve => setTimeout(resolve, waitMs));
+              await waitForRetry(waitMs, abortSignal);
             }
             continue;
           }
@@ -2171,7 +2173,7 @@ export class GeminiProvider implements IProvider {
               errorStatus,
               errorData,
             );
-            if (attempt < attempts - 1) await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt)));
+            if (attempt < attempts - 1) await waitForRetry(computeRetryBackoffMs(attempt), abortSignal);
             continue;
           }
 
@@ -2212,7 +2214,7 @@ export class GeminiProvider implements IProvider {
         if (attempt === attempts - 1) break;
         const delay = computeRetryBackoffMs(attempt);
         console.warn(`[GeminiProvider] Retry ${attempt + 1}/${attempts - 1} in ${(delay / 1000).toFixed(1)}s`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await waitForRetry(delay, abortSignal);
       }
     }
     throw lastError;
