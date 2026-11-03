@@ -12,7 +12,16 @@ import * as entry from '../index.js';
 import { namespaced, openIndexedDbStore } from '../index.js';
 
 /** The names the entry takes from the library. */
-const FROM_THE_LIBRARY = ['MemoryKeyValueStore', 'namespaced', 'IndexedDbKeyValueStore', 'openIndexedDbStore', 'idb', 'createSqlKeyValueStore'] as const;
+const FROM_THE_LIBRARY = [
+  'MemoryKeyValueStore',
+  'namespaced',
+  'IndexedDbKeyValueStore',
+  'openIndexedDbStore',
+  'idb',
+  'createSqlKeyValueStore',
+  'WebStorageKeyValueStore',
+  'StorageFullError',
+] as const;
 
 /** A request's outcome and its two events, as 0.13.141's idb.ts typed them. */
 interface LegacyRequest<T> {
