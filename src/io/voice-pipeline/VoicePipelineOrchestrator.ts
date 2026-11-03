@@ -1038,7 +1038,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * `IStreamingSTT.startSession()` resolved with), whatever the provider or the chain behind it. The session's own
    * `flush()` is wrapped on that object and put back as the session stops. A flush counts until the next frame the
    * orchestrator pushes; one that rejects or throws ended nothing, and a close that came while it was pending ends the
-   * session as the STT part's failure once it rejects. A session whose `flush` cannot be replaced (a frozen object)
+   * session as the STT part's failure once it rejects (a close before it began, after an earlier flush, stays the end). A session whose `flush` cannot be replaced (a frozen object)
    * keeps every close a failure.
    *
    * @param stt - The STT session this orchestrator's session owns.
@@ -1050,11 +1050,13 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (typeof original !== 'function') return;
     const requested = (): Promise<void> => {
       if (this.current !== 'closed') this.sttEndRequested = true;
+      // A close before this flush began answered an earlier one: this flush's outcome does not change it.
+      const endedBefore = this.sttEnded;
       const failed = (err: unknown): never => {
         this.sttEndRequested = false;
         // A close that came while this flush was pending was taken as the end it asked for; the flush failed, so the
         // input did not end as asked, and that close is the session's failure.
-        if (this.sttEnded) this.reportFailure('stt');
+        if (!endedBefore && this.sttEnded) this.reportFailure('stt');
         throw err;
       };
       try {
