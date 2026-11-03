@@ -1608,7 +1608,8 @@ export class MeetingManager {
     // the event goes out before the row is rewritten, the last step: a call whose event fails to go out leaves purgedAt
     // unset, so the caller's retry runs the steps again and sends it, where after the rewrite a retry returns at once
     await this.emit('bot:purged', free, { reason: 'deleted' });
-    await this.stores.runs.replace(free);
+    // the row keeps the worker token's hash a run that is over keeps, so a report its worker sends late is still taken
+    await this.stores.runs.replace({ ...free, dispatch: terminalDispatch(run) });
     return true;
   }
 
