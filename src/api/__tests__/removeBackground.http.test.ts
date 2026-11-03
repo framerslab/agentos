@@ -426,6 +426,7 @@ describe('removeBackground on fal BiRefNet', () => {
       'data:image/png;base64,%%%%',
       'data:image/png;base64,iVBORw0',
       'data:image/png;base64,====',
+      'data:image/png;base64,aGVsbG8=',
       '',
       Buffer.from('these bytes are not an image'),
       Buffer.alloc(0),
@@ -549,6 +550,18 @@ describe('the background removal providers', () => {
     }
 
     expect(new Set(received.map((request) => request.headers.authorization))).toEqual(new Set(['Key fal-k1', 'Key fal-k2']));
+  });
+
+  it('builds one provider for calls that miss the cache at the same time', async () => {
+    vi.stubEnv('FAL_API_KEY', 'fal-env-key');
+    const fromEnv = await Promise.all([1, 2, 3].map(() => api.resolveBackgroundRemovalProvider('fal')));
+    expect(new Set(fromEnv).size).toBe(1);
+
+    const config = { apiKey: 'fal-k1,fal-k2', baseUrl: origin };
+    const fromCall = await Promise.all([1, 2, 3].map(() => api.resolveBackgroundRemovalProvider('fal', config)));
+    expect(new Set(fromCall).size).toBe(1);
+    expect(fromCall[0]).not.toBe(fromEnv[0]);
+    expect(await api.resolveBackgroundRemovalProvider('fal', config)).toBe(fromCall[0]);
   });
 
   it('refuses a provider id it does not know', async () => {
