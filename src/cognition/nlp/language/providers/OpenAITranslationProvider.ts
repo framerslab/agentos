@@ -20,13 +20,14 @@ interface OpenAIProviderParams {
   baseUrl?: string;
   /**
    * The full Chat Completions URL, as earlier versions took it (`https://host/v1/chat/completions`).
-   * It is read as the base URL before `/chat/completions`; any other URL is refused at `initialize`.
+   * It is read as the base URL before `/chat/completions`; any other URL, a relative one included, is refused at `initialize`.
    * Prefer `baseUrl`.
    */
   endpoint?: string;
 }
 
 const CHAT_COMPLETIONS_PATH = /\/chat\/completions\/?$/;
+const ABSOLUTE_HTTP_URL = /^https?:\/\/[^/\s]+/i;
 
 export class OpenAITranslationProvider implements ITranslationProvider {
   public readonly id: string;
@@ -49,7 +50,7 @@ export class OpenAITranslationProvider implements ITranslationProvider {
   /**
    * The base URL calls go to: `baseUrl`, or `endpoint` without its `/chat/completions`.
    *
-   * @throws {Error} When `endpoint` is not a Chat Completions URL or names another base than `baseUrl`, so a call is
+   * @throws {Error} When `endpoint` is not an absolute http(s) Chat Completions URL or names another base than `baseUrl`, so a call is
    *   never sent anywhere but where the caller pointed it.
    */
   private resolveBaseUrl(): string | undefined {
@@ -59,6 +60,10 @@ export class OpenAITranslationProvider implements ITranslationProvider {
       throw new Error('OpenAITranslationProvider: endpoint must be a full Chat Completions URL ending in /chat/completions; pass baseUrl instead');
     }
     const fromEndpoint = endpoint.replace(CHAT_COMPLETIONS_PATH, '');
+    // A relative endpoint leaves no base, and generateText would then send the key to api.openai.com.
+    if (!ABSOLUTE_HTTP_URL.test(fromEndpoint)) {
+      throw new Error('OpenAITranslationProvider: endpoint must be a full Chat Completions URL with an http(s) host, such as https://host/v1/chat/completions; pass baseUrl instead');
+    }
     if (baseUrl !== undefined && baseUrl.replace(/\/+$/, '') !== fromEndpoint) {
       throw new Error('OpenAITranslationProvider: endpoint and baseUrl name different base URLs; pass baseUrl alone');
     }
