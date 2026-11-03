@@ -3042,7 +3042,7 @@ export class AnthropicProvider implements IProvider {
         { apiKey, signal: deadline.signal },
       );
     } catch (error) {
-      return failedKeyProbeAnswer(error, deadline);
+      return failedKeyProbeAnswer(error, deadline, { apiKey, baseURL });
     } finally {
       deadline.dispose();
     }

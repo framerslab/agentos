@@ -22,4 +22,5 @@ export {
   type KeyProbeFailure,
   type KeyProbeDeadline,
   type KeyProbeReadContext,
+  type KeyProbeSecrets,
 } from './keyProbe.js';

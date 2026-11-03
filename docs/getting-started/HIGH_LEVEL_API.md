@@ -452,7 +452,7 @@ for (const apiKey of keys) {
 }
 ```
 
-It sends one key the billing probe its provider's key pool sends a key taken out as unpaid, the smallest billable request, and reads the answer with `classifyKeyFailure()`: `ok` (a 2xx), `exhausted` (no credit left or a spend limit reached), `invalid` (a bad, revoked or expired key), `throttled` (a rate limit, with `retryAfterMs` when the answer sent one) or `unknown` (a 5xx, a 403 or 404 for a model the key may not use, no answer within the timeout, a failed connection, the caller's abort, or no model to send to). It reads nothing from the environment and builds no pool; it never throws for an answer.
+It sends one key through the same billing probe the provider's key pool sends to recheck a key it took out as unpaid. The probe is the smallest billable request, and its answer is read with `classifyKeyFailure()`: `ok` (a 2xx), `exhausted` (no credit left or a spend limit reached), `invalid` (a bad, revoked or expired key), `throttled` (a rate limit, with `retryAfterMs` when the answer sent one) or `unknown` (a 5xx, a 403 or 404 for a model the key may not use, no answer within the timeout, a failed connection, the caller's abort, or no model to send to). It reads nothing from the environment and builds no pool; it never throws for an answer.
 
 | Option | Default | What it does |
 |--------|---------|--------------|
@@ -463,7 +463,7 @@ It sends one key the billing probe its provider's key pool sends a key taken out
 | `timeoutMs` | `10000` | How long the probe waits; a value that is not a positive finite number is refused with a `RangeError`. |
 | `signal` | | Ends the probe, which reports `unknown`. |
 
-The result carries `state`, `detail` (the state, the HTTP status and the vendor's message, at most 300 characters, with the key replaced by `[key]` wherever the vendor echoed it), `provider`, `fingerprint` (the key's `keyFingerprint()`), and `httpStatus`, `model` and `retryAfterMs` when the answer had them. A passing probe costs one request of one output token (16 on OpenRouter, Requesty and OpenAI's reasoning models). See [Key rotation](../KEY_ROTATION.md#probing-one-key).
+The result carries `state`, `detail` (the state, the HTTP status and the vendor's message, at most 300 characters, with the key replaced by `[key]` wherever the vendor echoed it; on a failed connection, fetch's error with the key and the base URL's credentials replaced by `[redacted]`), `provider`, `fingerprint` (the key's `keyFingerprint()`), and `httpStatus`, `model` and `retryAfterMs` when the answer had them. A passing probe costs one request of one output token (16 on OpenRouter, Requesty and OpenAI's reasoning models). See [Key rotation](../KEY_ROTATION.md#probing-one-key).
 
 ## `generateVideo()`
 

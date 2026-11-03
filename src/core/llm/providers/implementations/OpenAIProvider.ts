@@ -1235,7 +1235,7 @@ export class OpenAIProvider implements IProvider {
       });
       return await readKeyProbeAnswer(response, { model, apiKey, signal: deadline.signal });
     } catch (error) {
-      return failedKeyProbeAnswer(error, deadline);
+      return failedKeyProbeAnswer(error, deadline, { apiKey, baseURL });
     } finally {
       deadline.dispose();
     }

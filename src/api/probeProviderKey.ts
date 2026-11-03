@@ -74,7 +74,7 @@ export interface ProbeProviderKeyResult {
   /**
    * One line for a person: the state, the HTTP status and the vendor's message (`key rejected (HTTP 401): invalid
    * x-api-key`), or why there was no answer. The key never appears in it; the vendor's text has it replaced with
-   * `[key]`.
+   * `[key]`, and a failed connection's error has the key and the base URL's credentials replaced with `[redacted]`.
    */
   detail: string;
   /** The provider probed. */

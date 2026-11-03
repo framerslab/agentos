@@ -931,7 +931,7 @@ export class RequestyProvider implements IProvider {
         { model, apiKey, signal: deadline.signal },
       );
     } catch (error) {
-      return failedKeyProbeAnswer(error, deadline);
+      return failedKeyProbeAnswer(error, deadline, { apiKey, baseURL });
     } finally {
       deadline.dispose();
     }
