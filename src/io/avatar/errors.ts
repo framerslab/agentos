@@ -26,7 +26,8 @@ export class AvatarProviderError extends Error {
   readonly providerId: string;
   /** The HTTP status the vendor answered with. */
   readonly status: number;
-  /** The response body as text, cut to its first 2000 characters. */
+  /** The response body as text, cut to its first 2000 characters. The rest
+   *  of the response is not read. */
   readonly body: string;
 
   constructor(message: string, init: AvatarProviderErrorInit) {

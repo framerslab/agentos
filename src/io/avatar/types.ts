@@ -72,7 +72,9 @@ export interface AvatarSessionHandle {
  * caller's.
  */
 export interface AvatarFaceImage {
-  /** The image bytes. A Node `Buffer` is a `Uint8Array` and is taken as is. */
+  /** The image bytes. A Node `Buffer` is a `Uint8Array` and is taken as is;
+   *  a Blob from another realm (an iframe, jsdom) is read through its
+   *  `arrayBuffer()`. */
   data: Uint8Array | ArrayBuffer | Blob;
   /** The image's MIME type. Defaults to the Blob's own type, else
    *  `'image/png'`. */
@@ -87,7 +89,9 @@ export interface AvatarFaceCreateOptions {
   /** A name the provider stores with the face (Simli: `face_name`, whose
    *  default is `untitled_avatar`). */
   name?: string;
-  /** Aborts the upload. Combined with the upload's own deadline. */
+  /** Aborts the upload. Combined with the upload's own deadline. An abort
+   *  while an error response's body is read rejects with the abort, not an
+   *  `AvatarProviderError`. */
   signal?: AbortSignal;
   /** Upload deadline in milliseconds. Provider default applies when omitted
    *  (Simli: 120000). */

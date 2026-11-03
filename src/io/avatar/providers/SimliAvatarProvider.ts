@@ -203,17 +203,18 @@ export class SimliAvatarProvider implements IAvatarProvider {
     const headers: Record<string, string> = { 'x-simli-api-key': this.apiKey };
     if (targetRatio != null) headers['target-ratio'] = String(targetRatio);
 
-    const part = faceImagePart(image);
+    const part = await faceImagePart(image);
     const form = new FormData();
     form.append('image', part.blob, part.filename);
 
+    const signal = deadline(options.signal, options.timeoutMs ?? FACE_UPLOAD_TIMEOUT_MS);
     const res = await fetch(`${this.baseUrl}/faces/trinity${queryString(query)}`, {
       method: 'POST',
       headers,
       body: form,
-      signal: deadline(options.signal, options.timeoutMs ?? FACE_UPLOAD_TIMEOUT_MS),
+      signal,
     });
-    if (!res.ok) throw await simliError('face upload', res);
+    if (!res.ok) throw await simliError('face upload', res, signal);
 
     const payload = (await res.json()) as {
       message?: unknown;
@@ -248,23 +249,25 @@ export class SimliAvatarProvider implements IAvatarProvider {
     faceId: string,
     options: AvatarFaceStatusOptions = {}
   ): Promise<AvatarFaceStatus> {
+    const signal = deadline(options.signal, options.timeoutMs ?? CONTROL_PLANE_TIMEOUT_MS);
     const res = await fetch(
       `${this.baseUrl}/faces/trinity/generation_status${queryString({ face_id: faceId })}`,
-      {
-        headers: { 'x-simli-api-key': this.apiKey },
-        signal: deadline(options.signal, options.timeoutMs ?? CONTROL_PLANE_TIMEOUT_MS),
-      }
+      { headers: { 'x-simli-api-key': this.apiKey }, signal }
     );
-    if (!res.ok) throw await simliError('face status read', res);
+    if (!res.ok) throw await simliError('face status read', res, signal);
 
     const payload = (await res.json()) as SimliGeneration & { generations?: unknown };
     // `generations` lists each tracked build; the top-level fields describe the
-    // most recent one, which is the asked-for build when it echoes its id.
-    const listed = Array.isArray(payload.generations)
-      ? (payload.generations as SimliGeneration[]).find((g) => g?.face_id === faceId)
-      : undefined;
-    const build =
-      listed ?? (payload.face_id === undefined || payload.face_id === faceId ? payload : undefined);
+    // most recent one, which is the asked-for build when it echoes its id. With
+    // other builds listed and no id at the top level, those fields could be
+    // any of them, so they are not read as this face's.
+    const generations = Array.isArray(payload.generations)
+      ? (payload.generations as SimliGeneration[])
+      : [];
+    const listed = generations.find((g) => g?.face_id === faceId);
+    const topLevelIsThisFace =
+      payload.face_id === faceId || (payload.face_id === undefined && generations.length === 0);
+    const build = listed ?? (topLevelIsThisFace ? payload : undefined);
 
     if (!build) return { faceId, state: 'not_found', raw: payload };
 
@@ -286,14 +289,32 @@ export class SimliAvatarProvider implements IAvatarProvider {
   }
 }
 
+/**
+ * Whether a value is a Blob, from this realm or another (an iframe, jsdom, a
+ * vm context), where `instanceof Blob` is false. Typed arrays never count.
+ */
+function isBlobLike(value: unknown): value is Blob {
+  if (value instanceof Blob) return true;
+  if (typeof value !== 'object' || value === null || ArrayBuffer.isView(value)) return false;
+  const candidate = value as Partial<Blob>;
+  return (
+    typeof candidate.arrayBuffer === 'function' &&
+    typeof candidate.size === 'number' &&
+    typeof candidate.type === 'string'
+  );
+}
+
 /** The image as the multipart part the face upload sends. */
-function faceImagePart(image: AvatarFaceImage): { blob: Blob; filename: string } {
+async function faceImagePart(image: AvatarFaceImage): Promise<{ blob: Blob; filename: string }> {
   const { data } = image;
-  const ownType = data instanceof Blob && data.type ? data.type : undefined;
+  const ownType = isBlobLike(data) && data.type ? data.type : undefined;
   const mimeType = image.mimeType ?? ownType ?? 'image/png';
   let blob: Blob;
   if (data instanceof Blob) {
     blob = data.type === mimeType ? data : new Blob([data], { type: mimeType });
+  } else if (isBlobLike(data)) {
+    // Another realm's Blob is no BlobPart here: copy its bytes out.
+    blob = new Blob([await data.arrayBuffer()], { type: mimeType });
   } else {
     // A copy in an ArrayBuffer of its own: a view over a SharedArrayBuffer is
     // not a BlobPart. ArrayBuffer.isView holds across realms, where
@@ -328,9 +349,45 @@ function unixSecondsToMs(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value * 1000 : undefined;
 }
 
+/** Whether an error is an abort or a deadline passing. */
+function isAbortError(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null)?.name;
+  return name === 'AbortError' || name === 'TimeoutError';
+}
+
+/**
+ * The first {@link ERROR_BODY_LIMIT} characters of a response body. Reads only
+ * as far as that and cancels the rest. A body that breaks off keeps what
+ * arrived; an abort or a deadline passing during the read rejects with it.
+ */
+async function readErrorBody(res: Response, signal: AbortSignal): Promise<string> {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  try {
+    while (text.length < ERROR_BODY_LIMIT) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } catch (error) {
+    if (signal.aborted) throw signal.reason ?? error;
+    if (isAbortError(error)) throw error;
+  } finally {
+    reader.cancel().catch(() => undefined);
+  }
+  return text.slice(0, ERROR_BODY_LIMIT);
+}
+
 /** The error for a Simli response with an HTTP error status. */
-async function simliError(operation: string, res: Response): Promise<AvatarProviderError> {
-  const body = (await res.text().catch(() => '')).slice(0, ERROR_BODY_LIMIT);
+async function simliError(
+  operation: string,
+  res: Response,
+  signal: AbortSignal
+): Promise<AvatarProviderError> {
+  const body = await readErrorBody(res, signal);
   return new AvatarProviderError(`Simli ${operation} failed: ${res.status} ${body.slice(0, 200)}`, {
     providerId: 'simli',
     status: res.status,

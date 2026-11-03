@@ -48,12 +48,12 @@ const handle = await avatars.createSession({ faceId: job.faceId });
 
 ## Building a face
 
-`createFace(image, options)` takes the image bytes as a `Uint8Array` (a Node `Buffer` included), an `ArrayBuffer` or a `Blob`, with an optional `mimeType` (default: the Blob's own type, else `image/png`) and `filename` (default `face.png`, `face.jpg` or `face.webp` by type). The bytes go to the provider as given: resize, crop or transcode the portrait to what the vendor takes before the call.
+`createFace(image, options)` takes the image bytes as a `Uint8Array` (a Node `Buffer` included), an `ArrayBuffer` or a `Blob` (one from another realm, such as an iframe or jsdom, included), with an optional `mimeType` (default: the Blob's own type, else `image/png`) and `filename` (default `face.png`, `face.jpg` or `face.webp` by type). The bytes go to the provider as given: resize, crop or transcode the portrait to what the vendor takes before the call.
 
 | Option | Meaning |
 |---|---|
 | `name` | A name the provider stores with the face. |
-| `signal` | Aborts the upload. |
+| `signal` | Aborts the upload. An abort while an error response is read rejects with the abort, not an `AvatarProviderError`. |
 | `timeoutMs` | Upload deadline. Simli's default is 120000 ms. |
 | `providerOptions` | Provider-specific. Simli sends `targetRatio` as the `target-ratio` header and every other key as a query parameter, such as `gsVersion`. |
 
@@ -61,7 +61,7 @@ The result, an `AvatarFaceJob`, carries `faceId`, the provider's `message`, its 
 
 `faceStatus(faceId, options)` returns an `AvatarFaceStatus`: `state`, the provider's own word for it as `providerState`, `queuePosition` (0 once the build is being worked on), `startAfterMs` for a held build, and `raw`. Its options are `signal` and `timeoutMs` (Simli's default: 10000 ms).
 
-A vendor answer with an HTTP error status rejects with [`AvatarProviderError`](https://github.com/framerslab/agentos/blob/master/src/io/avatar/errors.ts), which carries `providerId`, `status` and the response `body`. Read the status to tell a refusal worth retrying later from a request the vendor cannot take:
+A vendor answer with an HTTP error status rejects with [`AvatarProviderError`](https://github.com/framerslab/agentos/blob/master/src/io/avatar/errors.ts), which carries `providerId`, `status` and the first 2000 characters of the response `body` (the rest is not read). Read the status to tell a refusal worth retrying later from a request the vendor cannot take:
 
 ```typescript
 import { AvatarProviderError } from '@framers/agentos/io/avatar';
@@ -94,4 +94,5 @@ What Simli documents about face builds ([Generate Trinity Face](https://docs.sim
 - An image that has not been through `POST /faces/trinity/preprocess` is framed by Simli first, which adds about 25 seconds to the upload. Pass the `TARGET-RATIO` header that preprocess returns as `providerOptions.targetRatio`, with the image it returned, to skip that step.
 - One account's GSA_2.0 builds start at least 10 minutes apart. A build inside that window is accepted and held, and `startAfterMs` says until when.
 - A 403 means the account is out of avatars for that `gsVersion`.
+- `faceStatus` reads the entry of `generations` that names the face. Without one, it reads the top-level fields only when they name the face, or when nothing at all is listed; otherwise the face reads `not_found`.
 - Simli's `completed` reads as `ready`. Completed and failed builds stay listed for 24 hours, so a face built longer ago reads `not_found`: record `ready` when you see it.
