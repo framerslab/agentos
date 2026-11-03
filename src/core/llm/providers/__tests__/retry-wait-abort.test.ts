@@ -5,7 +5,8 @@
  * after a 5xx or a network failure is cut short the moment the signal aborts:
  * the call rejects with REQUEST_ABORTED then (a stream ends with its terminal
  * abort chunk instead), and no further request is sent. A stream whose body
- * has stalled ends at the abort as well.
+ * has stalled ends at the abort as well, and a stream yields nothing after its
+ * abort chunk.
  * The real Anthropic, Gemini and OpenRouter providers run over a stubbed
  * `fetch` (OpenRouter over an injected axios client) on fake timers; nothing
  * leaves the process.
@@ -253,6 +254,35 @@ describe("a provider's wait between retries ends when the caller's signal aborts
       expect(outcome.state).toBe('resolved');
       expect(chunks).toHaveLength(1);
       expect(chunks[0]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
+    });
+
+    it('yields nothing after the abort chunk when the abort comes between two events of one read', async () => {
+      const p = await gemini();
+      const event = (text: string) =>
+        `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text }] }, index: 0 }] })}\n\n`;
+      const bytes = new TextEncoder().encode(event('Hel') + event('lo'));
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(bytes);
+            controller.close();
+          },
+        }),
+      } as unknown as Response);
+      const controller = new AbortController();
+      const chunks: ModelCompletionResponse[] = [];
+      for await (const chunk of p.generateCompletionStream('gemini-2.5-flash', messages, { abortSignal: controller.signal })) {
+        chunks.push(chunk);
+        if (chunks.length === 1) controller.abort();
+      }
+
+      expect(chunks[0]).toMatchObject({ responseTextDelta: 'Hel' });
+      expect(chunks[chunks.length - 1]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
+      expect(chunks.filter((chunk) => chunk.isFinal)).toHaveLength(1);
     });
 
     it('waits no Retry-After after its last attempt', async () => {
