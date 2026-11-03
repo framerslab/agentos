@@ -406,6 +406,7 @@ console.log(result.images[0]?.mimeType);
 ## `removeBackground()`
 
 ```ts
+import fs from 'node:fs';
 import { removeBackground } from '@framers/agentos';
 
 // The subject on a transparent PNG, as a URL on fal's storage.
@@ -413,6 +414,7 @@ const { image } = await removeBackground({ image: 'https://example.com/hero.png'
 console.log(image.url);
 
 // The bytes instead, with the matte.
+const pngBytes = fs.readFileSync('hero.png');
 const { image: cut, mask } = await removeBackground({ image: pngBytes, output: 'buffer', returnMask: true });
 ```
 
