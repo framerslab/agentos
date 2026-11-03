@@ -139,6 +139,27 @@ describe('OpenAITranslationProvider', () => {
   });
 });
 
+describe('OpenAITranslationProvider endpoint', () => {
+  it('sends a call to a legacy full endpoint URL there, never to api.openai.com', async () => {
+    serve({ '/chat/completions': () => jsonResponse(chatCompletion('Hola.')) });
+    const provider = new OpenAITranslationProvider('openai_chat', { apiKey: 'test-openai-key', endpoint: 'https://proxy.example.test/v1/chat/completions' } as never);
+    await provider.initialize();
+
+    await provider.translate('Hello.', 'en', 'es');
+
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(posts().map((p) => p.url)).toEqual(['https://proxy.example.test/v1/chat/completions']);
+    expect(urls.some((url) => url.includes('api.openai.com'))).toBe(false);
+  });
+
+  it('refuses at initialize an endpoint that is not a Chat Completions URL', async () => {
+    const provider = new OpenAITranslationProvider('openai_chat', { apiKey: 'test-openai-key', endpoint: 'https://proxy.example.test/translate' } as never);
+
+    await expect(provider.initialize()).rejects.toThrow(/endpoint/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('DeepLTranslationProvider', () => {
   it('sends the key in the Authorization header as DeepL-Auth-Key and never as auth_key', async () => {
     serve({ '/v2/translate': () => jsonResponse({ translations: [{ detected_source_language: 'EN', text: 'Hallo, Welt.' }] }) });
