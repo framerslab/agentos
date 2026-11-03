@@ -1037,8 +1037,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * that ends input on purpose, as a push-to-talk stop does, calls it on the session it holds (the object its
    * `IStreamingSTT.startSession()` resolved with), whatever the provider or the chain behind it. The session's own
    * `flush()` is wrapped on that object and put back as the session stops. A flush counts until the next frame the
-   * orchestrator pushes; one that rejects or throws ended nothing. A session whose `flush` cannot be replaced (a frozen
-   * object) keeps every close a failure.
+   * orchestrator pushes; one that rejects or throws ended nothing, and a close that came while it was pending ends the
+   * session as the STT part's failure once it rejects. A session whose `flush` cannot be replaced (a frozen object)
+   * keeps every close a failure.
    *
    * @param stt - The STT session this orchestrator's session owns.
    */
@@ -1051,6 +1052,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       if (this.current !== 'closed') this.sttEndRequested = true;
       const failed = (err: unknown): never => {
         this.sttEndRequested = false;
+        // A close that came while this flush was pending was taken as the end it asked for; the flush failed, so the
+        // input did not end as asked, and that close is the session's failure.
+        if (this.sttEnded) this.reportFailure('stt');
         throw err;
       };
       try {
