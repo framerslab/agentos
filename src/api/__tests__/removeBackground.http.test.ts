@@ -449,6 +449,18 @@ describe('the background removal providers', () => {
     expect(received).toEqual([]);
   });
 
+  it("sends a call's apiKey and baseUrl after the provider built from FAL_API_KEY is cached", async () => {
+    routes[`POST ${ENDPOINT}`] = () => cutOutAnswer();
+    vi.stubEnv('FAL_API_KEY', 'fal-env-key');
+    const fromEnv = await api.resolveBackgroundRemovalProvider('fal');
+    expect(await api.resolveBackgroundRemovalProvider('fal')).toBe(fromEnv);
+
+    await api.removeBackground({ image: SOURCE_URL, apiKey: 'fal-tenant-key', baseUrl: origin });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].headers.authorization).toBe('Key fal-tenant-key');
+  });
+
   it('refuses a provider id it does not know', async () => {
     const error = await rejectionOf(api.removeBackground({ image: SOURCE_URL, provider: 'nowhere' }));
     expect(String(error.message)).toContain('nowhere');
