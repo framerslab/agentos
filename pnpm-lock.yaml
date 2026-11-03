@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@framers/sql-storage-adapter':
-        specifier: ^0.9.2
-        version: 0.9.2(better-sqlite3@13.0.3)
+        specifier: ^0.9.4
+        version: 0.9.4(better-sqlite3@13.0.3)
       '@livekit/rtc-node':
         specifier: ^1.1.0
         version: 1.1.0
@@ -1433,8 +1433,8 @@ packages:
       electron:
         optional: true
 
-  '@framers/sql-storage-adapter@0.9.2':
-    resolution: {integrity: sha512-GkpvKyJIa6KmiDSwlhYFafP+Smgzy11RkOUbrbgloYKem/ZEW1DbA+MtrGdTuCQMK6yiFyddq8JHVCYjgmNg/A==}
+  '@framers/sql-storage-adapter@0.9.4':
+    resolution: {integrity: sha512-HU2t5+ifizD0ykBmvZI2MX5bU21olukmboU/MWT/2/VKXw7Z97SJYTYTSHCKnJOQ4jYhXWf9Q1cTyT1JniQKWQ==}
     peerDependencies:
       '@aws-sdk/client-s3': ^3.0.0
       '@capacitor-community/sqlite': ^6.0.0 || ^7.0.0 || ^8.0.0
@@ -9503,7 +9503,7 @@ snapshots:
     transitivePeerDependencies:
       - pg-native
 
-  '@framers/sql-storage-adapter@0.9.2(better-sqlite3@13.0.3)':
+  '@framers/sql-storage-adapter@0.9.4(better-sqlite3@13.0.3)':
     dependencies:
       '@types/sql.js': 1.4.11
       pg: 8.23.1
