@@ -88,6 +88,41 @@ function stalledEventStream(signal: AbortSignal | null | undefined): Response {
   } as unknown as Response;
 }
 
+/** A 200 event stream whose body holds `sse` in one read and then ends. */
+function eventStream(sse: string): Response {
+  const bytes = new TextEncoder().encode(sse);
+  return {
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    headers: new Headers({ 'content-type': 'text/event-stream' }),
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    }),
+  } as unknown as Response;
+}
+
+/** One Gemini stream event whose candidate holds a text part for each of `texts`. */
+function geminiEvent(...texts: string[]): string {
+  return `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: texts.map((text) => ({ text })) }, index: 0 }] })}\n\n`;
+}
+
+/** Drains a stream, aborting the controller once the first chunk has arrived, as a caller that stops reading does. */
+async function drainAbortingAfterFirst(
+  stream: AsyncGenerator<ModelCompletionResponse, void, undefined>,
+  controller: AbortController,
+): Promise<ModelCompletionResponse[]> {
+  const chunks: ModelCompletionResponse[] = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+    if (chunks.length === 1) controller.abort();
+  }
+  return chunks;
+}
+
 /** A signal that aborts `afterMs` into the fake clock, as a caller's deadline does. */
 function deadline(afterMs: number): AbortSignal {
   const controller = new AbortController();
@@ -258,31 +293,44 @@ describe("a provider's wait between retries ends when the caller's signal aborts
 
     it('yields nothing after the abort chunk when the abort comes between two events of one read', async () => {
       const p = await gemini();
-      const event = (text: string) =>
-        `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text }] }, index: 0 }] })}\n\n`;
-      const bytes = new TextEncoder().encode(event('Hel') + event('lo'));
-      fetchMock.mockResolvedValue({
-        ok: true,
-        status: 200,
-        statusText: 'OK',
-        headers: new Headers({ 'content-type': 'text/event-stream' }),
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(bytes);
-            controller.close();
-          },
-        }),
-      } as unknown as Response);
+      fetchMock.mockResolvedValue(eventStream(geminiEvent('Hel') + geminiEvent('lo')));
       const controller = new AbortController();
-      const chunks: ModelCompletionResponse[] = [];
-      for await (const chunk of p.generateCompletionStream('gemini-2.5-flash', messages, { abortSignal: controller.signal })) {
-        chunks.push(chunk);
-        if (chunks.length === 1) controller.abort();
-      }
+      const chunks = await drainAbortingAfterFirst(
+        p.generateCompletionStream('gemini-2.5-flash', messages, { abortSignal: controller.signal }),
+        controller,
+      );
 
       expect(chunks[0]).toMatchObject({ responseTextDelta: 'Hel' });
       expect(chunks[chunks.length - 1]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
       expect(chunks.filter((chunk) => chunk.isFinal)).toHaveLength(1);
+    });
+
+    it('yields no later part of the same event after an abort', async () => {
+      const p = await gemini();
+      fetchMock.mockResolvedValue(eventStream(geminiEvent('Hel', 'lo')));
+      const controller = new AbortController();
+      const chunks = await drainAbortingAfterFirst(
+        p.generateCompletionStream('gemini-2.5-flash', messages, { abortSignal: controller.signal }),
+        controller,
+      );
+
+      expect(chunks).toHaveLength(2);
+      expect(chunks[0]).toMatchObject({ responseTextDelta: 'Hel' });
+      expect(chunks[1]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
+    });
+
+    it('ends with the abort chunk, not the success chunk, when the abort comes after the last event', async () => {
+      const p = await gemini();
+      fetchMock.mockResolvedValue(eventStream(geminiEvent('Hello')));
+      const controller = new AbortController();
+      const chunks = await drainAbortingAfterFirst(
+        p.generateCompletionStream('gemini-2.5-flash', messages, { abortSignal: controller.signal }),
+        controller,
+      );
+
+      expect(chunks).toHaveLength(2);
+      expect(chunks[0]).toMatchObject({ responseTextDelta: 'Hello' });
+      expect(chunks[1]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
     });
 
     it('waits no Retry-After after its last attempt', async () => {
