@@ -17,12 +17,21 @@ const OUTPUTS = new Set(['url', 'buffer']);
 const FORMATS = new Set(['png', 'webp']);
 
 /**
+ * Whether a base64 payload decodes to PNG, JPEG, WebP or GIF bytes. Only its
+ * first 32 characters (24 bytes, every signature's length) are decoded.
+ */
+function holdsImage(payload: string): boolean {
+  return imagePartType(Buffer.from(payload.slice(0, 32), 'base64')) !== undefined;
+}
+
+/**
  * The image as the provider takes it: an `http(s)` URL or a base64 image data
- * URL as given, or bytes as a data URL typed by their signature.
+ * URL whose bytes are PNG, JPEG, WebP or GIF as given, or bytes as a data URL
+ * typed by their signature.
  *
  * @throws {SegmentationProviderError} `invalid_request` for any other string,
- *   a data URL whose payload is not standard padded base64 among them, and
- *   for bytes that are not PNG, JPEG, WebP or GIF.
+ *   a data URL whose payload is not standard padded base64 or not one of those
+ *   formats among them, and for bytes that are not PNG, JPEG, WebP or GIF.
  */
 function toImageUrl(image: RemoveBackgroundOptions['image']): string {
   if (typeof image === 'string') {
@@ -36,7 +45,7 @@ function toImageUrl(image: RemoveBackgroundOptions['image']): string {
       }
     } else {
       const dataUrl = /^data:image\/[\w.+-]+;base64,(.*)$/is.exec(value);
-      if (dataUrl && isBase64Payload(dataUrl[1])) return value;
+      if (dataUrl && isBase64Payload(dataUrl[1]) && holdsImage(dataUrl[1])) return value;
     }
     throw new SegmentationProviderError(
       'removeBackground takes an http(s) URL, a base64 image data URL, or the image bytes; read a local file and pass its bytes.',
@@ -77,6 +86,7 @@ function toImageUrl(image: RemoveBackgroundOptions['image']): string {
  *
  * @example
  * ```ts
+ * import fs from 'node:fs';
  * import { removeBackground } from '@framers/agentos';
  *
  * // The cut-out's URL (fal's CDN).

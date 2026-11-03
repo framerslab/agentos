@@ -3,8 +3,9 @@
  *
  * Resolves background removal providers by id. The built-in `fal` provider
  * is built from `FAL_API_KEY` on first use and kept for the calls that bring
- * no credentials. A call's own `apiKey` or `baseUrl` gets a provider of its
- * own, kept for the next call with the same key and URL (the most recent
+ * no credentials; calls that miss the cache at the same time share one build.
+ * A call's own `apiKey` or `baseUrl` gets a provider of its own, kept for the
+ * next call with the same key and URL (the most recent
  * {@link MAX_CONFIGURED_PROVIDERS}), so a comma-separated key list rotates
  * across calls as the environment's does. Custom providers and tests inject
  * instances with {@link registerBackgroundRemovalProvider}; a registered
@@ -15,12 +16,16 @@ import type { BackgroundRemovalProviderId, IBackgroundRemovalProvider } from './
 
 /** Providers registered by the host, served first. */
 const registered = new Map<string, IBackgroundRemovalProvider>();
-/** Built-in providers built from the environment, kept for the next call that brings no credentials. */
-const fromEnvironment = new Map<string, IBackgroundRemovalProvider>();
+/**
+ * Built-in providers built from the environment, kept for the next call that
+ * brings no credentials. The promise is kept from the first miss, so calls
+ * that miss at the same time share one provider and its key pool.
+ */
+const fromEnvironment = new Map<string, Promise<IBackgroundRemovalProvider>>();
 /** How many providers built from a call's own credentials are kept, the least recently used dropped first. */
 export const MAX_CONFIGURED_PROVIDERS = 32;
 /** Built-in providers built from a call's own credentials, by id, key and base URL, least recently used first. */
-const fromCallConfig = new Map<string, IBackgroundRemovalProvider>();
+const fromCallConfig = new Map<string, Promise<IBackgroundRemovalProvider>>();
 
 /** Credentials for a built-in provider, in place of its environment variables. */
 export interface BackgroundRemovalProviderConfig {
@@ -42,13 +47,33 @@ export function resetBackgroundRemovalProviders(): void {
   fromCallConfig.clear();
 }
 
+/** Build and initialize a fal provider; the cache entry is dropped when initialization fails. */
+function buildFal(
+  cache: Map<string, Promise<IBackgroundRemovalProvider>>,
+  cacheKey: string,
+  apiKey: string,
+  baseURL: string | undefined,
+): Promise<IBackgroundRemovalProvider> {
+  const pending = (async () => {
+    const provider = new FalBackgroundRemovalProvider();
+    await provider.initialize({ apiKey, baseURL });
+    return provider;
+  })();
+  cache.set(cacheKey, pending);
+  pending.catch(() => {
+    if (cache.get(cacheKey) === pending) cache.delete(cacheKey);
+  });
+  return pending;
+}
+
 /**
  * Resolve a provider: a registered instance first, else a built-in.
  *
  * @param id - Provider id. Defaults to `'fal'`.
  * @param config - Credentials for a built-in provider; without them it is
  *   built from the environment. Either way it is kept for the next call
- *   with the same credentials.
+ *   with the same credentials, and calls that resolve it at the same time
+ *   get the same instance.
  * @throws {Error} When the id is unknown or the provider's key is missing.
  */
 export async function resolveBackgroundRemovalProvider(
@@ -72,29 +97,23 @@ export async function resolveBackgroundRemovalProvider(
     if (!apiKey) {
       throw new Error('Background removal provider "fal" requires FAL_API_KEY or an apiKey on the call.');
     }
+    if (!fromCall) return buildFal(fromEnvironment, id, apiKey, undefined);
+
     const cacheKey = JSON.stringify([id, apiKey, ownBaseUrl ?? '']);
-    if (fromCall) {
-      const cached = fromCallConfig.get(cacheKey);
-      if (cached) {
-        // Most recently used last.
-        fromCallConfig.delete(cacheKey);
-        fromCallConfig.set(cacheKey, cached);
-        return cached;
-      }
+    const cached = fromCallConfig.get(cacheKey);
+    if (cached) {
+      // Most recently used last.
+      fromCallConfig.delete(cacheKey);
+      fromCallConfig.set(cacheKey, cached);
+      return cached;
     }
-    const provider = new FalBackgroundRemovalProvider();
-    await provider.initialize({ apiKey, baseURL: ownBaseUrl });
-    if (!fromCall) {
-      fromEnvironment.set(id, provider);
-    } else {
-      fromCallConfig.set(cacheKey, provider);
-      while (fromCallConfig.size > MAX_CONFIGURED_PROVIDERS) {
-        const oldest = fromCallConfig.keys().next().value;
-        if (oldest === undefined) break;
-        fromCallConfig.delete(oldest);
-      }
+    const pending = buildFal(fromCallConfig, cacheKey, apiKey, ownBaseUrl);
+    while (fromCallConfig.size > MAX_CONFIGURED_PROVIDERS) {
+      const oldest = fromCallConfig.keys().next().value;
+      if (oldest === undefined) break;
+      fromCallConfig.delete(oldest);
     }
-    return provider;
+    return pending;
   }
 
   throw new Error(`Unknown background removal provider "${id}".`);

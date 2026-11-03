@@ -195,6 +195,7 @@ background. The built-in provider runs fal's BiRefNet v2 endpoint,
 `POST https://fal.run/fal-ai/birefnet/v2`, answered with the cut-out.
 
 ```typescript
+import fs from 'node:fs';
 import { removeBackground } from '@framers/agentos';
 
 // The cut-out's URL on fal's storage.
@@ -237,12 +238,13 @@ interface RemoveBackgroundOptions {
 }
 ```
 
-**The image.** An `http(s)` URL or a base64 image data URL (standard, padded
-base64) goes to fal as given; fal fetches the URL itself. Bytes go as a data
-URL typed by their signature (PNG, JPEG, WebP or GIF). Any other string, a
-local file path, raw base64 or a data URL with a malformed payload among
-them, rejects with `code: 'invalid_request'` before a request is made: read
-the file and pass its bytes.
+**The image.** An `http(s)` URL, or a base64 image data URL (standard, padded
+base64) whose bytes are PNG, JPEG, WebP or GIF, goes to fal as given; fal
+fetches the URL itself. Bytes go as a data URL typed by their signature (PNG,
+JPEG, WebP or GIF). Any other string, a local file path, raw base64 or a data
+URL whose payload is malformed or not one of those formats among them, rejects
+with `code: 'invalid_request'` before a request is made: read the file and
+pass its bytes.
 
 **The output.** With `output: 'url'` the result carries the cut-out's URL on
 fal's storage. With `output: 'buffer'` the call asks fal to return the image

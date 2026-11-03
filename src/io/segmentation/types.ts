@@ -210,11 +210,12 @@ export interface BackgroundRemovalProviderOptionBag {
  */
 export interface RemoveBackgroundOptions {
   /**
-   * The source image: an `http(s)` URL or a base64 image data URL (standard,
-   * padded base64), sent to the provider as given, or the image's bytes, sent
-   * as a data URL typed by their signature (PNG, JPEG, WebP or GIF). Any other
-   * string (a file path, raw base64) is refused: read the file and pass its
-   * bytes.
+   * The source image: an `http(s)` URL, or a base64 image data URL (standard,
+   * padded base64) whose bytes are PNG, JPEG, WebP or GIF, sent to the
+   * provider as given, or the image's bytes, sent as a data URL typed by their
+   * signature (PNG, JPEG, WebP or GIF). Any other string (a file path, raw
+   * base64, a data URL that holds no such image) is refused: read the file and
+   * pass its bytes.
    */
   image: string | Buffer | Uint8Array;
   /** Provider id. Defaults to `'fal'`. */
