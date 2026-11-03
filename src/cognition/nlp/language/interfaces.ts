@@ -189,3 +189,64 @@ export function recombineCodeAndProse(translatedProse: string, codeBlocks: strin
   });
   return output;
 }
+
+/**
+ * Why a translation provider refused to return a translation: the request failed (an HTTP
+ * status other than 2xx, a network error or a timeout), or the provider answered with no text.
+ */
+export type TranslationErrorCode = 'TRANSLATION_REQUEST_FAILED' | 'TRANSLATION_EMPTY_OUTPUT';
+
+/**
+ * Thrown by a translation provider, and so by every `LanguageService` method that translates,
+ * when no translation came back. A provider never returns its input as the output of a failed
+ * call, so a caller that receives a {@link TranslationResult} holds a real translation, and a
+ * caller that wants to show the original line on failure catches this error and decides so.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   const res = await languageService.maybeTranslateForDisplay(line, 'en', 'es');
+ *   show(res?.output ?? line);
+ * } catch (err) {
+ *   if (err instanceof TranslationProviderError) showUntranslated(line, err.code, err.status);
+ *   else throw err;
+ * }
+ * ```
+ */
+export class TranslationProviderError extends Error {
+  /** {@link TranslationErrorCode}: what failed. */
+  public readonly code: TranslationErrorCode;
+  /** The id of the provider that failed, as configured (`openai_chat`, `deepl`). */
+  public readonly providerId: string;
+  /** The HTTP status the provider answered with, when it answered. */
+  public readonly status?: number;
+  /** The underlying error, when there was one. */
+  public readonly cause?: unknown;
+
+  constructor(message: string, providerId: string, code: TranslationErrorCode, status?: number, cause?: unknown) {
+    super(message);
+    this.name = 'TranslationProviderError';
+    this.code = code;
+    this.providerId = providerId;
+    this.status = status;
+    this.cause = cause;
+  }
+}
+
+/**
+ * Thrown by a detection provider that cannot do the detection it is asked for. The
+ * `WhisperDetectionProvider` throws it from `detect(text)`: Whisper is a speech model and
+ * detects nothing from text, and the provider makes no call, so it answers no guess.
+ */
+export class LanguageDetectionUnsupportedError extends Error {
+  /** Always `LANGUAGE_DETECTION_UNSUPPORTED`. */
+  public readonly code = 'LANGUAGE_DETECTION_UNSUPPORTED' as const;
+  /** The id of the provider that refused. */
+  public readonly providerId: string;
+
+  constructor(message: string, providerId: string) {
+    super(message);
+    this.name = 'LanguageDetectionUnsupportedError';
+    this.providerId = providerId;
+  }
+}
