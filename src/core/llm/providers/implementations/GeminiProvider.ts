@@ -1038,9 +1038,10 @@ export class GeminiProvider implements IProvider {
 
     try {
       for await (const rawData of this.parseSseStream(stream)) {
+        // The abort chunk is the stream's last: an event already buffered behind it yields no success chunk.
         if (abortSignal?.aborted) {
           yield this.buildAbortChunk(modelId);
-          break;
+          return;
         }
 
         let chunk: GeminiResponse;
