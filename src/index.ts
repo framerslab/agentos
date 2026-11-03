@@ -459,6 +459,7 @@ export type { UpscaleImageOptions, UpscaleImageResult } from './api/upscaleImage
 export { variateImage } from './api/variateImage.js';
 export type { VariateImageOptions, VariateImageResult } from './api/variateImage.js';
 export { segment } from './api/segment.js';
+export { removeBackground, DEFAULT_BACKGROUND_REMOVAL_TIMEOUT_MS } from './api/removeBackground.js';
 export {
   maskToEditMask,
   cropRegion,
@@ -469,6 +470,11 @@ export {
   SegmentationModeNotSupportedError,
   InvalidSegmentationPromptError,
   SegmentationProviderError,
+  FalBackgroundRemovalProvider,
+  FAL_BIREFNET_MODEL,
+  registerBackgroundRemovalProvider,
+  resolveBackgroundRemovalProvider,
+  resetBackgroundRemovalProviders,
 } from './io/segmentation/index.js';
 export type {
   SegmentOptions,
@@ -482,6 +488,19 @@ export type {
   SegmentationProviderId,
   SegmentationProviderOptionBag,
   ReplicateSegmentationOptions,
+  SegmentationErrorCode,
+  RemoveBackgroundOptions,
+  BackgroundRemovalResult,
+  BackgroundRemovalImage,
+  BackgroundRemovalRequest,
+  BackgroundRemovalOutput,
+  BackgroundRemovalFormat,
+  IBackgroundRemovalProvider,
+  BackgroundRemovalProviderId,
+  BackgroundRemovalProviderOptionBag,
+  BackgroundRemovalProviderConfig,
+  FalBackgroundRemovalOptions,
+  FalBiRefNetVariant,
 } from './io/segmentation/index.js';
 export { generateVideo } from './api/generateVideo.js';
 export type { GenerateVideoOptions, GenerateVideoResult } from './api/generateVideo.js';

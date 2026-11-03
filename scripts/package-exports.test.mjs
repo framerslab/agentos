@@ -100,6 +100,20 @@ test('the built declarations resolve their own relative imports under NodeNext',
   }
 });
 
+test('the segmentation module resolves at its own subpath, background removal included', async () => {
+  assert.deepEqual(pkg.exports['./io/segmentation'], {
+    import: './dist/io/segmentation/index.js',
+    default: './dist/io/segmentation/index.js',
+    types: './dist/io/segmentation/index.d.ts',
+  });
+  // The two-segment wildcard would map the subpath to dist/io/segmentation.js, which the build does not emit.
+  const segmentation = await import('@framers/agentos/io/segmentation');
+  assert.equal(typeof segmentation.ReplicateSegmentationProvider, 'function');
+  assert.equal(typeof segmentation.FalBackgroundRemovalProvider, 'function');
+  assert.equal(typeof segmentation.registerBackgroundRemovalProvider, 'function');
+  assert.equal(segmentation.FAL_BIREFNET_MODEL, 'fal-ai/birefnet/v2');
+});
+
 test('the learning module resolves at its own subpath, as the emergent module does', async () => {
   assert.deepEqual(pkg.exports['./cognition/learning'], {
     import: './dist/cognition/learning/index.js',

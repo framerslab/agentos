@@ -355,6 +355,11 @@
       "default": "./dist/io/avatar/index.js",
       "types": "./dist/io/avatar/index.d.ts"
     },
+    "./io/segmentation": {
+      "import": "./dist/io/segmentation/index.js",
+      "default": "./dist/io/segmentation/index.js",
+      "types": "./dist/io/segmentation/index.d.ts"
+    },
     "./io/media/avatar": {
       "import": "./dist/io/media/avatar/index.js",
       "default": "./dist/io/media/avatar/index.js",
