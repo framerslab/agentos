@@ -82,6 +82,12 @@ export const AGENTOS_EVENTS = {
   'llm.fallback_succeeded': fallback,
   'llm.fallback_failed_after_output': fallback,
   'llm.fallback_exhausted': { api, primaryProvider: provider, attempts: 'int', type: 'word', code: 'word' },
+  // A translation provider failed or answered with no text; it throws TranslationProviderError, and status is 0 when no HTTP status came back.
+  'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output'] }, status: 'int', type: 'word', code: 'word' },
+  // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).
+  'language.detector_unsupported': { detector: 'word' },
+  // A detection provider threw; LanguageService goes on with the others.
+  'language.detection_failed': { detector: 'word', type: 'word', code: 'word' },
 } as const satisfies EventMap;
 
 /** The type of {@link AGENTOS_EVENTS}, which `lazyLogger`'s handles are typed over. */

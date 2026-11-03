@@ -44,6 +44,7 @@ const handles = {
   'src/core/llm/providers/implementations/OpenAIProvider.ts': ['llm', 'openai_provider'],
   'src/core/llm/providers/implementations/OpenRouterProvider.ts': ['llm', 'openrouter_provider'],
   'src/api/server/AgentOSServer.ts': ['http', 'agentos_server'],
+  'src/cognition/nlp/language/log.ts': ['language', 'language_service'],
 } as const;
 
 it('binds a fixed component at every covered source module', async () => {
