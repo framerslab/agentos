@@ -64,7 +64,7 @@ import {
   type AnthropicUsageForCost,
 } from './anthropicCatalog.js';
 import { resolveAnthropicEffort } from '../model-effort.js';
-import { computeRetryBackoffMs, resolveAttemptCount } from './retry-backoff.js';
+import { computeRetryBackoffMs, resolveAttemptCount, waitForRetry } from './retry-backoff.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
 import { redactUrlSecrets } from '../url-secrets';
@@ -832,7 +832,8 @@ export class AnthropicProvider implements IProvider {
    *   `streamIdleTimeoutMs` regardless — a generous total budget must not
    *   extend how long a dead connection can sit silent.
    * @param abortSignal Caller's signal. It aborts the request in flight, its
-   *   body read included, and once it has fired no further attempt is sent.
+   *   body read included, ends a wait between attempts (a Retry-After or a
+   *   backoff) at once, and once it has fired no further attempt is sent.
    * @param schemaToolName The forced schema tool's name when the payload sent
    *   the schema as that tool ({@link accumulateMessagesStream}).
    * @param maxAttempts The call's attempt count, a first and its retries
@@ -911,14 +912,15 @@ export class AnthropicProvider implements IProvider {
         }
         // Honor the server's Retry-After when the failed attempt carried one
         // (429s from makeStreamRequest stash it on error.details) — parity
-        // with the non-stream retry path. Fall back to jittered backoff.
+        // with the non-stream retry path. Fall back to jittered backoff. The
+        // caller's abort ends the wait, and the loop's check then reports it.
         const retryAfterSec = (lastError.details as { retryAfterSec?: number } | undefined)
           ?.retryAfterSec;
         const sleepMs =
           typeof retryAfterSec === 'number' && Number.isFinite(retryAfterSec) && retryAfterSec > 0
             ? retryAfterSec * 1000
             : computeRetryBackoffMs(attempt);
-        await new Promise(resolve => setTimeout(resolve, sleepMs));
+        await waitForRetry(sleepMs, abortSignal);
       }
     }
     throw lastError;
@@ -3081,8 +3083,9 @@ export class AnthropicProvider implements IProvider {
    * @param {'POST'} method - HTTP method (Anthropic Messages API is POST-only).
    * @param {Record<string, unknown>} body - Request body.
    * @param {number} [requestTimeoutOverride] - Per-call timeout in ms, over the configured default.
-   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, and once
-   *   it has fired no further attempt is sent.
+   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, ends a wait
+   *   between attempts (a Retry-After or a backoff) at once, and once it has fired no further attempt
+   *   is sent.
    * @param {number} [maxAttempts] - The call's attempt count, a first and its retries together, over
    *   `config.maxRetries`; key hops are not counted, and no backoff is waited after the last attempt.
    * @returns {Promise<T>} Parsed JSON response.
@@ -3202,9 +3205,10 @@ export class AnthropicProvider implements IProvider {
             lastError = new AnthropicProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', 429, errorType, errorData);
             if (!(this.keyPool && this.keyPool.size > 1)) this.keyPool?.markExhausted(apiKey);
             // Retry-After is authoritative when present; otherwise jittered backoff. No wait after the last attempt.
+            // The caller's abort ends the wait, and the loop's check then reports it.
             if (attempt < attempts - 1) {
               const waitMs = serverRetryAfterMs ?? computeRetryBackoffMs(attempt);
-              await new Promise(resolve => setTimeout(resolve, waitMs));
+              await waitForRetry(waitMs, abortSignal);
             }
             continue;
           }
@@ -3212,7 +3216,7 @@ export class AnthropicProvider implements IProvider {
           // Retryable server errors (5xx)
           if (response.status >= 500) {
             lastError = new AnthropicProviderError(errorMessage, 'API_SERVER_ERROR', response.status, errorType, errorData);
-            if (attempt < attempts - 1) await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt)));
+            if (attempt < attempts - 1) await waitForRetry(computeRetryBackoffMs(attempt), abortSignal);
             continue;
           }
 
@@ -3279,7 +3283,7 @@ export class AnthropicProvider implements IProvider {
         if (attempt === attempts - 1) break;
         const delay = computeRetryBackoffMs(attempt);
         console.warn(`[AnthropicProvider] Retry ${attempt + 1}/${attempts - 1} in ${(delay / 1000).toFixed(1)}s`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await waitForRetry(delay, abortSignal);
       }
     }
     throw lastError;

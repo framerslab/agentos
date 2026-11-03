@@ -40,7 +40,7 @@ import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../..
 import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { errorFields } from '../../../logging/events.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
-import { resolveAttemptCount, type AttemptTally } from './retry-backoff.js';
+import { resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
 /** This module's events, under its fixed diagnostic origin; no runtime name enters telemetry. */
 const log = moduleLogger('llm', 'openrouter_provider');
@@ -1518,9 +1518,9 @@ export class OpenRouterProvider implements IProvider {
    *    with the response's Retry-After when present (capped), else
    *    jittered exponential backoff; 4xx request errors throw immediately.
    *
-   * The caller's `signal` ends a draw that waits on the pool's probes, and
-   * no attempt is sent once it has fired: the request throws
-   * `REQUEST_ABORTED` instead.
+   * The caller's `signal` ends a draw that waits on the pool's probes and a
+   * wait between attempts at once, and no attempt is sent once it has fired:
+   * the request throws `REQUEST_ABORTED` instead.
    *
    * `maxAttempts` is the call's count of attempts, a first and its retries
    * together, over the provider's own 3; key hops are not counted.
@@ -1679,7 +1679,8 @@ export class OpenRouterProvider implements IProvider {
           OpenRouterProvider.MAX_RETRY_SLEEP_MS,
         );
         log.warn('llm.retry', { provider: 'openrouter', status: statusCode ?? 0, attempt: attempt + 1, waitMs: sleepMs });
-        await new Promise((resolve) => setTimeout(resolve, sleepMs));
+        // The caller's abort ends the wait, and the next attempt's check then reports it.
+        await waitForRetry(sleepMs, signal);
       }
     }
 
