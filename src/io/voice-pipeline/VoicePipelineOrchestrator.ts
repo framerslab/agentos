@@ -1544,7 +1544,18 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * 6. Transitions to `'listening'` and starts the watchdog timer.
    * 7. Returns a {@link VoicePipelineSession} handle.
    *
-   * A sub-session that fails to start closes the session, its transport included, and rejects this call.
+   * A sub-session that fails to start closes the session, its transport included, and rejects this call. The
+   * orchestrator owns the transport's close on that path, so it tells the client first: a transport still open is
+   * sent the protocol's `error` message, `{ type: 'error', code: 'provider_failure', message: 'voice pipeline failed' }`,
+   * which carries none of the failure's own text, and is closed once that send has settled, or after half a second
+   * when it hangs; then this call rejects with the failure. A transport that closed itself is sent nothing. A host
+   * sends no reply of its own in its catch: the transport is closing by then, and a WebSocket drops what is sent to it.
+   *
+   * Once the session runs, an STT session that closes on its own, as one whose provider's socket drops does, ends the
+   * session as the STT part's failure, as its `'error'` would: `session_error` with `source: 'stt'`, then
+   * `session_ended` with `provider_failure`. A `StreamingSTTChain` with mid-utterance failover goes on through the next
+   * provider in its order first, and only a close with no provider left reaches the session. The close a stop makes
+   * is no failure.
    *
    * @param transport - The bidirectional audio/text stream transport.
    * @param agent - The agent session adapter for turn-based conversation.
@@ -1610,6 +1621,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     try {
       this.stt = await overrides.streamingSTT.startSession({ language: this.config.language, providerOptions: this.config.sttOptions });
       this.watch(this.stt, 'stt');
+      // An STT session that closes on its own has failed as surely as one that reports 'error': a provider whose socket
+      // drops (a TCP reset reaches ws as close code 1006 with no 'error') ends its session with 'close' alone, and
+      // transcription would stop in silence. A StreamingSTTChain with mid-utterance failover takes the close of the
+      // provider in use as that provider's failure and goes on through the next one; only a close with none left, or
+      // from a session handed over without failover, reaches here. The close a stop makes finds the session closed.
+      this.stt.on('close', () => this.reportFailure('stt'));
       this.tts = await overrides.streamingTTS.startSession({ voice: this.config.voice, format: transport.playbackFormat ?? this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness });
       this.watch(this.tts, 'tts');
       // A TTS session that closes on its own has failed: every later reply would go to a closed session and stay
@@ -2296,7 +2313,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Without a call profile the session moves to `'closed'` and emits `'close'` at once, with the reason and, after a
    * failure, the failure's `Error`; then it aborts the agent's request, closes the STT and TTS sessions, resets the
    * endpoint detector and removes the listeners the session added to it, and closes the transport, unless the transport
-   * has closed itself: a transport still open is sent `session_ended` first and closed once that send has settled, or
+   * has closed itself: a transport still open is sent `session_ended` first (the `error` message instead, on a
+   * failure before the session opened; see `startSession()`) and closed once that send has settled, or
    * after half a second when it hangs, since a transport closed with a send in flight can drop it. The promise rejects when one of those
    * throws. An interruption of the reply under way ends with the session: its timers stop, and the audio and speech
    * it holds are neither sent nor told; so does a reply's wait for its audio to play out. No session event is emitted
@@ -2333,11 +2351,20 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // A transport that closed itself is not closed again; the WebSocket transport would read 'closing' ever after.
       () => {
         if (!transport || transport.state === 'closed') return;
-        // A session that opened tells its client why it ends; the transport closes below, once that send has settled.
-        if (this.publicSession && transport.state === 'open') {
+        // A session that opened tells its client why it ends, and one that failed before it opened sends the protocol's
+        // error message, content-free as the session's 'error' is: the host's own reply in its catch of startSession()
+        // would find the transport closing. The transport closes below, once that send has settled.
+        const last: ServerTextMessage | undefined = this.publicSession
+          ? reason === undefined
+            ? { type: 'session_ended' }
+            : { type: 'session_ended', reason }
+          : reason === 'provider_failure'
+            ? { type: 'error', code: 'provider_failure', message: 'voice pipeline failed' }
+            : undefined;
+        if (last && transport.state === 'open') {
           let sending: Promise<void>;
           try {
-            sending = Promise.resolve(transport.sendControl(reason === undefined ? { type: 'session_ended' } : { type: 'session_ended', reason }));
+            sending = Promise.resolve(transport.sendControl(last));
           } catch (err) {
             // A send that throws has settled too: the transport closes at once.
             sending = Promise.reject(err);

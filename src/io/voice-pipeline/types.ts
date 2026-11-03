@@ -687,6 +687,11 @@ export interface StreamingSTTUsageEvent {
  * | `'error'`        | `Error`                         | Unrecoverable provider error.                        |
  * | `'close'`        | *(none)*                        | Session has been fully terminated.                   |
  *
+ * A `'close'` the caller did not ask for (no `close()`), as a provider whose
+ * socket drops emits, is a failure of the session: `StreamingSTTChain` with
+ * mid-utterance failover goes on through the next provider, and
+ * `VoicePipelineOrchestrator` ends its session as on `'error'`.
+ *
  * See `IStreamingSTT.startSession()` for the factory method that creates these sessions.
  */
 export interface StreamingSTTSession extends EventEmitterLike {
@@ -2334,9 +2339,15 @@ export type ServerTextMessage =
       /**
        * Emitted when an unrecoverable error occurs in the pipeline.
        * The session will be closed after this message.
+       * `VoicePipelineOrchestrator` sends it, on a session without a call
+       * profile, when `startSession()` fails before the session opens (a
+       * provider that fails to start, every provider of a chain included), as
+       * `{ type: 'error', code: 'provider_failure', message: 'voice pipeline failed' }`,
+       * then closes the transport. A session that opened ends with
+       * `session_ended` instead.
        */
       type: 'error';
-      /** Machine-readable error code (e.g. `'STT_PROVIDER_ERROR'`). */
+      /** Machine-readable error code (e.g. `'provider_failure'`). */
       code: string;
       /** Human-readable description of the error. */
       message: string;
