@@ -10,3 +10,15 @@ export {
   type SqlKeyPoolStateStoreOptions,
 } from './KeyPoolStateStore.js';
 export { classifyKeyFailure, isQuotaError, retryAfterMs, statusOfKinds, DEFAULT_MAX_RETRY_AFTER_MS, type KeyFailureKind } from './quotaErrors.js';
+export {
+  DEFAULT_KEY_PROBE_TIMEOUT_MS,
+  startKeyProbeDeadline,
+  readKeyProbeAnswer,
+  noModelKeyProbeAnswer,
+  failedKeyProbeAnswer,
+  vendorErrorMessage,
+  type KeyProbeOptions,
+  type KeyProbeAnswer,
+  type KeyProbeFailure,
+  type KeyProbeDeadline,
+} from './keyProbe.js';

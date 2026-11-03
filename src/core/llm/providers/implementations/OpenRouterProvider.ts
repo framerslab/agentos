@@ -23,6 +23,14 @@ import {
 import { OpenRouterProviderError } from '../errors/OpenRouterProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import {
+  failedKeyProbeAnswer,
+  noModelKeyProbeAnswer,
+  readKeyProbeAnswer,
+  startKeyProbeDeadline,
+  type KeyProbeAnswer,
+  type KeyProbeOptions,
+} from '../../../providers/keyProbe.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
@@ -1681,33 +1689,30 @@ export class OpenRouterProvider implements IProvider {
   }
 
   /**
-   * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
-   * with `GET /key`, the documented read of the calling key (https://openrouter.ai/docs/api-reference/limits). A
-   * billing failure is probed with the smallest billable completion, since that read reports the credit left rather
-   * than refusing for its lack: on the default model, else on the cheapest chat model the catalog lists with a
+   * Probes one API key and reports what its answer showed: the verdict (`ok`, the failure kind it still shows, or
+   * `unknown`), the HTTP status, the vendor's message, the model and the Retry-After. Any kind but `billing` sends
+   * `GET /key`, the documented read of the calling key (https://openrouter.ai/docs/api-reference/limits). `kind:
+   * 'billing'` sends the smallest billable completion, since that read reports the credit left rather than refusing
+   * for its lack: on `options.model`, else the default model, else the cheapest chat model the catalog lists with a
    * price, never a free one, which need not refuse an account without credit (the same page names a negative
-   * balance, not an empty one, as what refuses free models). A
-   * provider that started without its catalog (every key was out) lists it with the probing key first and keeps it;
-   * with no priced model to send, the probe has no verdict and the key stays out. Every answer goes through the same
-   * classifier as a request's.
+   * balance, not an empty one, as what refuses free models). A provider without its catalog (one not initialized,
+   * or one that started with every key out) lists it with the probing key first and keeps it; with no priced model
+   * to send, the probe has no verdict (`failure: 'no_model'`). Every answer goes through the same classifier as a
+   * request's. It works before `initialize()`: the base URL is `options.baseURL`, else the configured one, else
+   * OpenRouter's own. The key pool's probe of a failed key is this method's verdict.
    */
-  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+  public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
+    const deadline = startKeyProbeDeadline(options);
+    const baseURL = options.baseURL || this.config?.baseURL || OPENROUTER_DEFAULT_BASE_URL;
     const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
-    const verdict = async (response: Response): Promise<ProbeResult> => {
-      if (response.ok) return 'ok';
-      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
-      return classifyKeyFailure(response.status, text) ?? 'unknown';
-    };
     try {
-      if (kind !== 'billing') {
-        return await verdict(await fetch(`${this.config.baseURL}/key`, { method: 'GET', headers, signal: controller.signal }));
+      if (options.kind !== 'billing') {
+        return await readKeyProbeAnswer(await fetch(`${baseURL}/key`, { method: 'GET', headers, signal: deadline.signal }));
       }
-      let model = this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
+      let model = options.model || this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
       if (!model && this.availableModelsCache.size === 0) {
-        const listed = await fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
-        if (!listed.ok) return await verdict(listed);
+        const listed = await fetch(`${baseURL}/models`, { method: 'GET', headers, signal: deadline.signal });
+        if (!listed.ok) return await readKeyProbeAnswer(listed);
         const body = (await listed.json().catch(() => ({}))) as Partial<OpenRouterListModelsAPIResponse>;
         if (Array.isArray(body.data) && this.availableModelsCache.size === 0) {
           for (const apiModel of body.data) {
@@ -1717,22 +1722,28 @@ export class OpenRouterProvider implements IProvider {
         }
         model = cheapestPricedChatModel(this.availableModelsCache.values());
       }
-      if (!model) return 'unknown';
-      return await verdict(
-        await fetch(`${this.config.baseURL}/chat/completions`, {
+      if (!model) return noModelKeyProbeAnswer();
+      return await readKeyProbeAnswer(
+        await fetch(`${baseURL}/chat/completions`, {
           method: 'POST',
           headers,
           // 16: OpenRouter's chat reference notes that some providers enforce a minimum of 16 for max_tokens
           // (https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion.md, read 19 October 2026).
           body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
-          signal: controller.signal,
+          signal: deadline.signal,
         }),
+        model,
       );
-    } catch {
-      return 'unknown';
+    } catch (error) {
+      return failedKeyProbeAnswer(error, deadline);
     } finally {
-      clearTimeout(timer);
+      deadline.dispose();
     }
+  }
+
+  /** Probes a key the pool took out of rotation, off the request path: the verdict of `probeApiKey()`. */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
+    return (await this.probeApiKey(apiKey, { kind })).verdict;
   }
 
   /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */

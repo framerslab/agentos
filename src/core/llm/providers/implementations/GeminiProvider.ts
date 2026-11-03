@@ -37,6 +37,13 @@ import { redactUrlSecrets } from '../url-secrets';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import {
+  failedKeyProbeAnswer,
+  readKeyProbeAnswer,
+  startKeyProbeDeadline,
+  type KeyProbeAnswer,
+  type KeyProbeOptions,
+} from '../../../providers/keyProbe.js';
 import { computeRetryBackoffMs, resolveAttemptCount, type AttemptTally } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
@@ -777,6 +784,12 @@ const GEMINI_MODELS: ModelInfo[] = [
 // Provider implementation
 // ---------------------------------------------------------------------------
 
+/** The Gemini API base, the `baseURL` a provider without one sends to. */
+export const GEMINI_DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+
+/** The model a billing probe and `checkHealth()` send their one-token request to when the provider has no default model. */
+export const GEMINI_BILLING_PROBE_MODEL = 'gemini-2.5-flash';
+
 /**
  * @class GeminiProvider
  * @implements {IProvider}
@@ -844,7 +857,7 @@ export class GeminiProvider implements IProvider {
     await this.keyPool?.close();
 
     this.config = {
-      baseURL: 'https://generativelanguage.googleapis.com/v1beta',
+      baseURL: GEMINI_DEFAULT_BASE_URL,
       maxRetries: 3,
       requestTimeout: 60000,
       defaultModelId: 'gemini-2.5-flash',
@@ -1339,7 +1352,7 @@ export class GeminiProvider implements IProvider {
    */
   public async checkHealth(): Promise<{ isHealthy: boolean; details?: unknown }> {
     try {
-      const model = this.defaultModelId || 'gemini-2.5-flash';
+      const model = this.defaultModelId || GEMINI_BILLING_PROBE_MODEL;
       await this.makeApiRequest<GeminiResponse>(
         `/models/${model}:generateContent`,
         {
@@ -1975,33 +1988,41 @@ export class GeminiProvider implements IProvider {
   }
 
   /**
-   * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
-   * with the models list; a billing failure with a one-token generateContent, since a list need not refuse a project
-   * that cannot pay: the request the health check sends, on the same model (the default model, else
-   * `gemini-2.5-flash`), so `checkHealth()` shows when that id stops being served. The answer goes through the same
-   * classifier as a request's.
+   * Probes one API key and reports what its answer showed: the verdict (`ok`, the failure kind it still shows, or
+   * `unknown`), the HTTP status, the vendor's message, the model and the Retry-After. Any kind but `billing` sends the
+   * models list; `kind: 'billing'` sends a one-token generateContent, since a list need not refuse a project that
+   * cannot pay: the request the health check sends, on `options.model`, else the default model, else
+   * `gemini-2.5-flash`, so `checkHealth()` shows when that id stops being served. The answer goes through the same
+   * classifier as a request's. It works before `initialize()`: the base URL is `options.baseURL`, else the configured
+   * one, else Gemini's own. The key pool's probe of a failed key is this method's verdict.
    */
-  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+  public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
+    const deadline = startKeyProbeDeadline(options);
+    const baseURL = options.baseURL || this.config?.baseURL || GEMINI_DEFAULT_BASE_URL;
     try {
-      const response =
-        kind === 'billing'
-          ? await fetch(`${this.config.baseURL}/models/${this.defaultModelId || 'gemini-2.5-flash'}:generateContent`, {
-              method: 'POST',
-              headers: this.requestHeaders(apiKey),
-              body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 1 } }),
-              signal: controller.signal,
-            })
-          : await fetch(`${this.config.baseURL}/models?pageSize=1`, { method: 'GET', headers: this.requestHeaders(apiKey), signal: controller.signal });
-      if (response.ok) return 'ok';
-      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
-      return classifyKeyFailure(response.status, text) ?? 'unknown';
-    } catch {
-      return 'unknown';
+      if (options.kind === 'billing') {
+        const model = options.model || this.defaultModelId || GEMINI_BILLING_PROBE_MODEL;
+        const response = await fetch(`${baseURL}/models/${model}:generateContent`, {
+          method: 'POST',
+          headers: this.requestHeaders(apiKey),
+          body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 1 } }),
+          signal: deadline.signal,
+        });
+        return await readKeyProbeAnswer(response, model);
+      }
+      return await readKeyProbeAnswer(
+        await fetch(`${baseURL}/models?pageSize=1`, { method: 'GET', headers: this.requestHeaders(apiKey), signal: deadline.signal }),
+      );
+    } catch (error) {
+      return failedKeyProbeAnswer(error, deadline);
     } finally {
-      clearTimeout(timer);
+      deadline.dispose();
     }
+  }
+
+  /** Probes a key the pool took out of rotation, off the request path: the verdict of `probeApiKey()`. */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
+    return (await this.probeApiKey(apiKey, { kind })).verdict;
   }
 
   /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */

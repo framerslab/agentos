@@ -41,7 +41,7 @@ await provider.initialize({
 |---|---|---|
 | `quota` | HTTP 429 (a throttle, a spent rate limit) and 456 | Rests the key for the Retry-After when the server sent one (bounded by `maxRetryAfterMs`, one hour; a Retry-After of zero counts as none), else for `cooldownMs` (15 minutes; a positive number of milliseconds, which the bound does not apply to), then puts it back. |
 | `auth` | HTTP 401; a 403 whose envelope names the key (Anthropic's `authentication_error`, OpenAI's `invalid_api_key`, Requesty's "Invalid authorization token"); Google's HTTP 400 with reason `API_KEY_INVALID` | Takes the key out until a probe passes. |
-| `billing` | HTTP 402; a 429 whose envelope says `insufficient_quota` (OpenAI); Anthropic's HTTP 400 "Your credit balance is too low"; Anthropic's spend limits: the HTTP 400 whose message begins "You have reached your specified API usage limits" (or "... specified workspace API usage limits") for a limit the operator set, and the HTTP 429 whose `error.details.error_code` is `enforced_spend_limit_reached` for the tier's monthly cap (no Retry-After, until the next month; [the rate limits page](https://platform.claude.com/docs/en/api/rate-limits), read 18 October 2026) | Takes the key out until a probe passes. |
+| `billing` | HTTP 402; a 429 whose envelope says `insufficient_quota` (OpenAI), or whose `error.code` is one of OpenAI's credit and limit codes, `credit_balance_exhausted`, `organization_spend_limit_exceeded`, `project_spend_limit_exceeded` or `organization_usage_limit_exceeded`, whatever the type ([OpenAI's error codes](https://developers.openai.com/api/docs/guides/error-codes), read 3 November 2026: "the broader `error.type` can still be `insufficient_quota`"); Anthropic's HTTP 400 "Your credit balance is too low"; Anthropic's spend limits: the HTTP 400 whose message begins "You have reached your specified API usage limits" (or "... specified workspace API usage limits") for a limit the operator set, and the HTTP 429 whose `error.details.error_code` is `enforced_spend_limit_reached` for the tier's monthly cap (no Retry-After, until the next month; [the rate limits page](https://platform.claude.com/docs/en/api/rate-limits), read 18 October 2026) | Takes the key out until a probe passes. |
 
 Every other answer (a bad request, a missing model, a server error, a 403 `permission_error` or `insufficient_permissions` for a model, a feature or a region the key may not use) is the request's or the server's fault and leaves the key alone.
 
@@ -87,6 +87,30 @@ await provider.initialize({
 **Pools are per instance.** Two providers that read the same environment variable keep separate pools, so a key one of them takes out stays in the other's rotation until that instance sees the failure too; a shared `store` and `id` make them agree across restarts. `getKeyPool()` in `ApiKeyPoolRegistry.ts` returns one shared pool per environment variable; no built-in provider calls it. The first call's config builds that pool; a config passed to a later call for the same variable is ignored (the pool keeps the strategy, store, id and timings it was built with) and logged once per variable as `key_pool.registry_config_ignored`, which names the variable and none of the config's values, so a host that needs a pool of its own builds it with `new ApiKeyPool()`.
 
 **Health checks.** `checkHealth()` on the OpenAI, Anthropic, Gemini, OpenRouter and Requesty providers sends a key drawn from the pool, as a request does, and reports unhealthy without a request when every key is out. Groq, Mistral, Together, xAI and LiteLLM pass their health check to an `OpenAIProvider`, so theirs draws from that instance's pool. An `OpenAIProvider` set up with an OAuth flow sends the flow's token, as its requests do. Only `OpenAIProvider` and `RequestyProvider` read a per-request `apiKeyOverride`; `AnthropicProvider`, `GeminiProvider` and `OpenRouterProvider` send a pool key whatever the option says, as they did before the pool. OpenAI never marks or hops an override (even one equal to a pool key) or an OAuth token: those are the caller's choice. Requesty never hops an override either, but marks one that is also a pool key, since the key itself answered as bad.
+
+## Probing One Key
+
+`probeProviderKey()` sends one key the billing probe above, the smallest billable request, and says what the answer shows, so a health check can watch each key of a list without writing its own request or its own reading of each vendor's errors:
+
+```ts
+import { probeProviderKey } from '@framers/agentos';
+
+const keys = process.env.ANTHROPIC_API_KEY!.split(',');
+const readings = await Promise.all(keys.map((apiKey) => probeProviderKey({ provider: 'anthropic', apiKey })));
+for (const { fingerprint, state, detail } of readings) console.log(fingerprint, state, detail);
+```
+
+| State | The answer, as `classifyKeyFailure()` reads it |
+|---|---|
+| `ok` | 2xx |
+| `exhausted` | `billing`: no credit left, or a spend limit reached |
+| `invalid` | `auth`: a bad, revoked or expired key |
+| `throttled` | `quota`: a rate limit; `retryAfterMs` carries the Retry-After when the answer sent one |
+| `unknown` | anything else (a 5xx, Anthropic's 529, a 403 or 404 for a model the key may not use), no answer within `timeoutMs` (10 seconds), a failed connection, the caller's `signal`, or no model to send to |
+
+It probes `anthropic`, `openai`, `gemini`, `openrouter` and `requesty` (`PROBEABLE_KEY_PROVIDERS`), on the model the pool's billing probe uses unless `model` names one, at the provider's own endpoint unless `baseUrl` names another. It reads no environment variable and builds no pool, so the key is the only credential sent. The result's `detail` is one line for a person (`no credit or a spend limit reached (HTTP 400): Your credit balance is too low ...`), with the key replaced by `[key]` wherever the vendor's message holds it, and `fingerprint` names the key by `keyFingerprint()`. A provider it has no probe for, an empty key, a comma-separated list (probe each key on its own) and a `timeoutMs` that is not a positive finite number are refused before any request.
+
+Each of the five providers exposes the probe it runs as `probeApiKey(apiKey, { kind, baseURL, model, timeoutMs, signal })`, which works before `initialize()` and answers the verdict (`ok`, a failure kind or `unknown`) with the HTTP status, the vendor's message, the model and the Retry-After (`KeyProbeAnswer`); the pool's probe of a failed key is that method's verdict. `kind: 'billing'` sends the billable request, any other kind the authenticated read.
 
 ## Products That Call `generateText()`
 
@@ -134,6 +158,7 @@ The key pool is implemented in [`src/core/providers/`](https://github.com/framer
 - `ApiKeyPool.ts`: the strategies, `markFailed()` / `markSuccess()`, the probes and rechecks, the persisted state and the log lines; `keyPoolStrategyFromEnv()` reads `AGENTOS_KEY_POOL_STRATEGY`
 - `KeyPoolStateStore.ts`: `KeyState`, `KeyPoolStateStore`, `InMemoryKeyPoolStateStore`, `SqlKeyPoolStateStore` and the table's DDL
 - `quotaErrors.ts`: `classifyKeyFailure()` (the kinds above), `retryAfterMs()` (a Retry-After header as bounded milliseconds) and `isQuotaError()` (the broad rotation test)
+- `keyProbe.ts`: what one probe found (`KeyProbeAnswer`), read from its answer; `probeProviderKey()` in [`src/api/probeProviderKey.ts`](https://github.com/framerslab/agentos/blob/master/src/api/probeProviderKey.ts) turns it into a key's state
 - `ApiKeyPoolRegistry.ts`: one shared pool per environment variable (`getKeyPool()`), built from the first call's config (a later call's config is ignored and logged), not used by the built-in providers
 
 The web-search providers settle each answer through [`searchKeyFailure.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/web-search/providers/searchKeyFailure.ts): the draw, the mark and the error a search throws.

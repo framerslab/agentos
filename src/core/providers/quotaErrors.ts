@@ -47,6 +47,17 @@ const CREDIT_BALANCE_PREFIX = 'your credit balance is too low';
 const SPEND_LIMIT_PREFIX = 'you have reached your specified';
 /** Anthropic's `error.details.error_code` when the organization's tier has reached its monthly spend cap (HTTP 429, no Retry-After). */
 const ENFORCED_SPEND_LIMIT = 'enforced_spend_limit_reached';
+/**
+ * OpenAI's `error.code` values of a 429 that no wait clears: the prepaid balance is spent, or the organization's, the
+ * project's or OpenAI's own monthly limit is reached. "Inspect error.code ... the broader error.type can still be
+ * insufficient_quota" (developers.openai.com/api/docs/guides/error-codes, read 3 November 2026), so the code decides.
+ */
+const OPENAI_BILLING_CODES = new Set([
+  'credit_balance_exhausted',
+  'organization_spend_limit_exceeded',
+  'project_spend_limit_exceeded',
+  'organization_usage_limit_exceeded',
+]);
 
 interface ErrorEnvelope {
   type?: string;
@@ -96,8 +107,11 @@ function envelopeOf(body: string): ErrorEnvelope | null {
  *   resource the key may not use (a model, a feature, a region), not a revoked
  *   key, and leaves the key in rotation.
  * - 402: `billing`. 429: `billing` when the envelope's type or code is
- *   `insufficient_quota` (OpenAI bills that way) or Anthropic's `details.error_code`
- *   is `enforced_spend_limit_reached` (the tier's monthly spend cap, no
+ *   `insufficient_quota` (OpenAI bills that way), when OpenAI's code is
+ *   `credit_balance_exhausted`, `organization_spend_limit_exceeded`,
+ *   `project_spend_limit_exceeded` or `organization_usage_limit_exceeded`
+ *   (whatever the type), or when Anthropic's `details.error_code` is
+ *   `enforced_spend_limit_reached` (the tier's monthly spend cap, no
  *   Retry-After, until the next month), else `quota`. 456: `quota`.
  * - 400: `billing` for Anthropic's credit-balance envelope (type
  *   `invalid_request_error`, a message starting "Your credit balance is too
@@ -126,7 +140,9 @@ export function classifyKeyFailure(status: number, body: string): KeyFailureKind
     case 402:
       return 'billing';
     case 429:
-      return type === 'insufficient_quota' || code === 'insufficient_quota' || errorCode === ENFORCED_SPEND_LIMIT ? 'billing' : 'quota';
+      return type === 'insufficient_quota' || code === 'insufficient_quota' || OPENAI_BILLING_CODES.has(code) || errorCode === ENFORCED_SPEND_LIMIT
+        ? 'billing'
+        : 'quota';
     case 456:
       return 'quota';
     case 400:

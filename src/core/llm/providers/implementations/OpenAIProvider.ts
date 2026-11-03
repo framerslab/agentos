@@ -38,6 +38,14 @@ import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../ope
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import {
+  failedKeyProbeAnswer,
+  noModelKeyProbeAnswer,
+  readKeyProbeAnswer,
+  startKeyProbeDeadline,
+  type KeyProbeAnswer,
+  type KeyProbeOptions,
+} from '../../../providers/keyProbe.js';
 import { toOpenAiResponseFormat, toOpenAiResponsesTextFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
@@ -1183,30 +1191,35 @@ export class OpenAIProvider implements IProvider {
   }
 
   /**
-   * Probes a key the pool took out of rotation (off the request path): an
-   * auth failure with the models list; a billing failure with a one-token
+   * Probes one API key and reports what its answer showed: the verdict
+   * (`ok`, the failure kind it still shows, or `unknown`), the HTTP status,
+   * the vendor's message, the model and the Retry-After. Any kind but
+   * `billing` sends the models list; `kind: 'billing'` sends a one-token
    * completion, since a models list can answer 200 with no credit left. The
-   * completion goes to the default model, else to the first chat model the
-   * account lists; with no model to send, the probe has no verdict and the
-   * key stays out. The reasoning families take `max_completion_tokens`.
+   * completion goes to `options.model`, else the default model, else the first
+   * chat model the account lists; with no model to send, the probe has no
+   * verdict (`failure: 'no_model'`). The reasoning families take
+   * `max_completion_tokens`. It works before `initialize()`: the base URL is
+   * `options.baseURL`, else the configured one, else OpenAI's own. The key
+   * pool's probe of a failed key is this method's verdict.
    */
-  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+  public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
+    const deadline = startKeyProbeDeadline(options);
+    const baseURL = options.baseURL || this.config?.baseURL || OPENAI_DEFAULT_BASE_URL;
     try {
       const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
-      if (this.config.organizationId) headers['OpenAI-Organization'] = this.config.organizationId;
-      const listModels = () => fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
-      if (kind !== 'billing') return await this.probeVerdict(await listModels());
-      let model = this.defaultModelId;
+      if (this.config?.organizationId) headers['OpenAI-Organization'] = this.config.organizationId;
+      const listModels = () => fetch(`${baseURL}/models`, { method: 'GET', headers, signal: deadline.signal });
+      if (options.kind !== 'billing') return await readKeyProbeAnswer(await listModels());
+      let model = options.model || this.defaultModelId;
       if (!model) {
         const listed = await listModels();
-        if (!listed.ok) return await this.probeVerdict(listed);
+        if (!listed.ok) return await readKeyProbeAnswer(listed);
         const body = (await listed.json().catch(() => ({}))) as Partial<OpenAIAPITypes.ListModelsResponse>;
         model = (body.data ?? []).map((m) => m.id).find((id) => /^gpt-/.test(id) && !/embedding|realtime|audio|tts|transcribe|image|search/.test(id));
-        if (!model) return 'unknown';
+        if (!model) return noModelKeyProbeAnswer();
       }
-      const response = await fetch(`${this.config.baseURL}/chat/completions`, {
+      const response = await fetch(`${baseURL}/chat/completions`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -1214,21 +1227,19 @@ export class OpenAIProvider implements IProvider {
           ...(modelRequiresMaxCompletionTokens(model) ? { max_completion_tokens: 16 } : { max_tokens: 1 }),
           messages: [{ role: 'user', content: 'ping' }],
         }),
-        signal: controller.signal,
+        signal: deadline.signal,
       });
-      return await this.probeVerdict(response);
-    } catch {
-      return 'unknown';
+      return await readKeyProbeAnswer(response, model);
+    } catch (error) {
+      return failedKeyProbeAnswer(error, deadline);
     } finally {
-      clearTimeout(timer);
+      deadline.dispose();
     }
   }
 
-  /** A probe's verdict from its answer: ok, the failure kind it still shows, or unknown. */
-  private async probeVerdict(response: Response): Promise<ProbeResult> {
-    if (response.ok) return 'ok';
-    const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
-    return classifyKeyFailure(response.status, text) ?? 'unknown';
+  /** Probes a key the pool took out of rotation, off the request path: the verdict of `probeApiKey()`. */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
+    return (await this.probeApiKey(apiKey, { kind })).verdict;
   }
 
   /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */

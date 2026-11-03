@@ -18,36 +18,25 @@ import type { AddressInfo } from 'node:net';
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import * as root from '../../index.js';
+import {
+  keyFingerprint,
+  probeProviderKey,
+  type ProbeProviderKeyOptions,
+  type ProviderKeyState,
+} from '../../index.js';
 
 // ---------------------------------------------------------------------------
 // The surface under test, from the package root
 // ---------------------------------------------------------------------------
 
-type KeyState = 'ok' | 'exhausted' | 'invalid' | 'throttled' | 'unknown';
+type KeyState = ProviderKeyState;
 
-interface ProbeOptions {
-  provider: string;
-  apiKey: string;
-  model?: string;
-  baseUrl?: string;
-  timeoutMs?: number;
-  signal?: AbortSignal;
-}
+/** The options with a provider id the call does not know, for the refusal case. */
+type ProbeOptions = Omit<ProbeProviderKeyOptions, 'provider'> & { provider: string };
 
-interface ProbeOutcome {
-  state: KeyState;
-  detail: string;
-  provider: string;
-  fingerprint: string;
-  httpStatus?: number;
-  model?: string;
-  retryAfterMs?: number;
-}
-
-const api = root as unknown as {
-  probeProviderKey: (options: ProbeOptions) => Promise<ProbeOutcome>;
-  keyFingerprint: (key: string) => string;
+const api = {
+  probeProviderKey: (options: ProbeOptions) => probeProviderKey(options as ProbeProviderKeyOptions),
+  keyFingerprint,
 };
 
 // ---------------------------------------------------------------------------
