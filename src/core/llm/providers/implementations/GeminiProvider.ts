@@ -1091,6 +1091,11 @@ export class GeminiProvider implements IProvider {
 
         const parts = candidate.content?.parts ?? [];
         for (const part of parts) {
+          // An abort between two parts of one event ends the stream here, not at the next event.
+          if (abortSignal?.aborted) {
+            yield this.buildAbortChunk(modelId);
+            return;
+          }
           // A thought summary is the model's reasoning: it streams as
           // reasoning text, apart from the answer.
           if (part.thought) {
@@ -1156,6 +1161,12 @@ export class GeminiProvider implements IProvider {
             };
           }
         }
+      }
+
+      // An abort after the last event ends the stream with the abort chunk, not the success chunk.
+      if (abortSignal?.aborted) {
+        yield this.buildAbortChunk(modelId);
+        return;
       }
 
       // Emit final chunk with usage and finish reason
