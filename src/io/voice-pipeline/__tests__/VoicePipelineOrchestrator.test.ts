@@ -82,6 +82,7 @@ import { HardCutBargeinHandler } from '../HardCutBargeinHandler.js';
 import { SoftFadeBargeinHandler } from '../SoftFadeBargeinHandler.js';
 import { AgentSessionVoiceAdapter } from '../providers/AgentSessionVoiceAdapter.js';
 import { StreamingTTSChain } from '../providers/StreamingTTSChain.js';
+import { StreamingSTTChain } from '../providers/StreamingSTTChain.js';
 import { defaultCapabilities, type HealthyProvider } from '../HealthyProvider.js';
 import { recordSessionEvents } from './session-event-log.js';
 import type {
@@ -481,6 +482,183 @@ describe('VoicePipelineOrchestrator', () => {
     expect(otherTTS.close).toHaveBeenCalledOnce();
     expect(stopErrors).toEqual([]);
     expect(stopCloses.map((event) => event.reason)).toEqual(['done']);
+  });
+
+  it("ends the session as the STT part's failure when the STT session closes on its own, so transcription never stops in silence", async () => {
+    const session = await startSession();
+    const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const closes: Array<VoiceSessionEventMap['close']> = [];
+    session.on('session_error', (event) => sessionErrors.push(event));
+    session.on('close', (event) => closes.push(event));
+    orchestrator.on('error', () => undefined);
+
+    // A socket reset mid-speech: the provider's session emits 'close' alone, with no 'error' before it.
+    sttSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(orchestrator.state).toBe('closed');
+    expect(sessionErrors.map((event) => [event.source, event.recoverable])).toEqual([['stt', false]]);
+    expect(closes.map((event) => event.reason)).toEqual(['provider_failure']);
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'session_ended', reason: 'provider_failure' });
+    expect(transport.close).toHaveBeenCalledWith(1000, 'provider_failure');
+  });
+
+  it('reports an STT session that fails and then closes as one failure, and takes the close its own stop makes as none', async () => {
+    // An STT session that emits close as it is closed, as the providers do.
+    vi.mocked(sttSession.close).mockImplementation(() => {
+      sttSession.emit('close');
+    });
+    orchestrator.on('error', () => undefined);
+    const failing = await startSession();
+    const failures: Array<VoiceSessionEventMap['session_error']> = [];
+    failing.on('session_error', (event) => failures.push(event));
+    sttSession.emit('error', new Error('socket reset'));
+    sttSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('closed');
+    expect(failures.map((event) => event.source)).toEqual(['stt']);
+
+    // A session stopped by its host closes its STT session, and that close is no failure.
+    const other = new VoicePipelineOrchestrator(makeConfig());
+    const otherSTT = createMockSTTSession();
+    vi.mocked(otherSTT.close).mockImplementation(() => {
+      otherSTT.emit('close');
+    });
+    const stopped = await other.startSession(createMockTransport(), createMockAgentSession(), {
+      streamingSTT: createMockSTT(otherSTT),
+      streamingTTS: createMockTTS(createMockTTSSession()),
+      endpointDetector: createMockEndpoint(),
+      bargeinHandler: createMockBargeinHandler(),
+    });
+    const stopErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const stopCloses: Array<VoiceSessionEventMap['close']> = [];
+    stopped.on('session_error', (event) => stopErrors.push(event));
+    stopped.on('close', (event) => stopCloses.push(event));
+    await other.stopSession('done');
+    expect(otherSTT.close).toHaveBeenCalledOnce();
+    expect(stopErrors).toEqual([]);
+    expect(stopCloses.map((event) => event.reason)).toEqual(['done']);
+  });
+
+  it("goes on through the user's next STT provider when the one in use closes on its own, and ends the session when none is left", async () => {
+    const first = createMockSTTSession();
+    const second = createMockSTTSession();
+    const provider = (providerId: string, priority: number, session: StreamingSTTSession): IStreamingSTT & HealthyProvider => ({
+      providerId,
+      priority,
+      isStreaming: true,
+      capabilities: defaultCapabilities({ streaming: true }),
+      startSession: async () => session,
+      healthCheck: async () => ({ ok: true }),
+    });
+    const chain = new StreamingSTTChain([provider('first', 10, first), provider('second', 20, second)], { enableMidUtteranceFailover: true });
+    const session = await orchestrator.startSession(transport, agentSession, {
+      streamingSTT: chain,
+      streamingTTS: createMockTTS(ttsSession),
+      endpointDetector: endpoint,
+      bargeinHandler: bargein,
+    });
+    const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const closes: Array<VoiceSessionEventMap['close']> = [];
+    session.on('session_error', (event) => sessionErrors.push(event));
+    session.on('close', (event) => closes.push(event));
+    orchestrator.on('error', () => undefined);
+
+    // The first provider's socket drops: the chain switches to the second, and the session goes on listening.
+    first.emit('close');
+    for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+    const frame = makeFrame();
+    transport.emit('audio', frame);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(second.pushAudio).toHaveBeenCalledWith(frame);
+    expect(sessionErrors).toEqual([]);
+
+    // The second drops too, and no provider is left: the session ends on the STT part's failure, once.
+    second.emit('close');
+    for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('closed');
+    expect(sessionErrors.map((event) => [event.source, event.recoverable])).toEqual([['stt', false]]);
+    expect(closes.map((event) => event.reason)).toEqual(['provider_failure']);
+  });
+
+  it('ends the session when an STT session the chain hands over without failover closes on its own', async () => {
+    const only = createMockSTTSession();
+    const chain = new StreamingSTTChain([
+      { providerId: 'only', priority: 10, isStreaming: true, capabilities: defaultCapabilities({ streaming: true }), startSession: async () => only, healthCheck: async () => ({ ok: true }) },
+    ]);
+    const session = await orchestrator.startSession(transport, agentSession, {
+      streamingSTT: chain,
+      streamingTTS: createMockTTS(ttsSession),
+      endpointDetector: endpoint,
+      bargeinHandler: bargein,
+    });
+    const closes: Array<VoiceSessionEventMap['close']> = [];
+    session.on('close', (event) => closes.push(event));
+    orchestrator.on('error', () => undefined);
+
+    only.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(orchestrator.state).toBe('closed');
+    expect(closes.map((event) => event.reason)).toEqual(['provider_failure']);
+  });
+
+  it('tells the client the session failed before it closes the transport when every STT provider fails to open, and rejects with the failure', async () => {
+    const failing = new VoicePipelineOrchestrator(makeConfig());
+    failing.on('error', () => undefined);
+    const refused = vi.fn().mockRejectedValue(new Error('provider said: the words the user spoke'));
+    const start = failing.startSession(transport, agentSession, {
+      streamingSTT: { providerId: 'mock-stt', isStreaming: false, startSession: refused },
+      streamingTTS: createMockTTS(ttsSession),
+      endpointDetector: endpoint,
+      bargeinHandler: bargein,
+    });
+    const rejected = expect(start).rejects.toThrow('provider said');
+    await vi.advanceTimersByTimeAsync(0);
+    await rejected;
+
+    // The client gets the protocol's error message, content-free, and the transport closes only after that send.
+    expect(transport.sendControl).toHaveBeenCalledTimes(1);
+    expect(transport.sendControl).toHaveBeenCalledWith({ type: 'error', code: 'provider_failure', message: 'voice pipeline failed' });
+    expect(transport.close).toHaveBeenCalledWith(1000, 'provider_failure');
+    expect(vi.mocked(transport.sendControl).mock.invocationCallOrder[0]!).toBeLessThan(vi.mocked(transport.close).mock.invocationCallOrder[0]!);
+    expect(failing.state).toBe('closed');
+  });
+
+  it('closes the transport half a second after a start failure when the error send never settles', async () => {
+    const failing = new VoicePipelineOrchestrator(makeConfig());
+    failing.on('error', () => undefined);
+    vi.mocked(transport.sendControl).mockReturnValue(new Promise<void>(() => undefined));
+    const start = failing.startSession(transport, agentSession, {
+      streamingSTT: { providerId: 'mock-stt', isStreaming: false, startSession: vi.fn().mockRejectedValue(new Error('no connection')) },
+      streamingTTS: createMockTTS(ttsSession),
+      endpointDetector: endpoint,
+      bargeinHandler: bargein,
+    });
+    const rejected = expect(start).rejects.toThrow('no connection');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.sendControl).toHaveBeenCalledWith({ type: 'error', code: 'provider_failure', message: 'voice pipeline failed' });
+    expect(transport.close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+    await rejected;
+    expect(transport.close).toHaveBeenCalledWith(1000, 'provider_failure');
+  });
+
+  it('sends nothing to a transport that closed itself before a start failure', async () => {
+    const failing = new VoicePipelineOrchestrator(makeConfig());
+    failing.on('error', () => undefined);
+    (transport as any).state = 'closed';
+    await expect(
+      failing.startSession(transport, agentSession, {
+        streamingSTT: { providerId: 'mock-stt', isStreaming: false, startSession: vi.fn().mockRejectedValue(new Error('no connection')) },
+        streamingTTS: createMockTTS(ttsSession),
+        endpointDetector: endpoint,
+        bargeinHandler: bargein,
+      }),
+    ).rejects.toThrow('no connection');
+    expect(transport.sendControl).not.toHaveBeenCalled();
+    expect(transport.close).not.toHaveBeenCalled();
   });
 
   it('should reset endpoint detector after flush_complete to prepare for next turn', async () => {
