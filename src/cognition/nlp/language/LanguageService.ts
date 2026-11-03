@@ -17,7 +17,8 @@ import {
 } from './interfaces';
 import { OpenAITranslationProvider } from './providers/OpenAITranslationProvider';
 import { DeepLTranslationProvider } from './providers/DeepLTranslationProvider';
-import { WhisperDetectionProvider } from './providers/WhisperDetectionProvider';
+import { languageLog } from './log';
+import { errorFields, safeWord } from '../../../core/logging/events.js';
 
 export interface AgentOSLanguageConfig {
   defaultLanguage: string;
@@ -55,19 +56,20 @@ export class LanguageService implements ILanguageService {
     // Initialize detection providers
     if (this.config.autoDetect) {
       this.detectionProviders.push(new BasicHeuristicDetectionProvider('basic_heuristic', this.config.defaultLanguage));
+      // No configurable detector is built: whisper_stub (WhisperDetectionProvider) refuses text
+      // detection, since Whisper detects a language only from audio, and no other id is known.
       for (const d of (this.config.detectionProviderConfigs || [])) {
-        if (d.id === 'whisper_stub') this.detectionProviders.push(new WhisperDetectionProvider(d.id, d.params || {}));
-        // Additional provider IDs could be mapped here.
+        languageLog.warn('language.detector_unsupported', { detector: safeWord(d.id) });
       }
     }
     // Initialize translation providers (at least a noop)
     for (const t of (this.config.translationProviderConfigs || [])) {
       if (t.id === 'openai_chat') {
         const apiKey = process.env.OPENAI_API_KEY || (t.params?.apiKey as string);
-        if (apiKey) this.translationProviders.push(new OpenAITranslationProvider(t.id, { apiKey, model: t.params?.model as string }));
+        if (apiKey) this.translationProviders.push(new OpenAITranslationProvider(t.id, { apiKey, model: t.params?.model as string, baseUrl: t.params?.baseUrl as string | undefined }));
       } else if (t.id === 'deepl') {
         const apiKey = process.env.DEEPL_API_KEY || (t.params?.apiKey as string);
-        if (apiKey) this.translationProviders.push(new DeepLTranslationProvider(t.id, { apiKey }));
+        if (apiKey) this.translationProviders.push(new DeepLTranslationProvider(t.id, { apiKey, endpoint: t.params?.endpoint as string | undefined }));
       }
     }
     // Always ensure at least one provider
@@ -90,7 +92,10 @@ export class LanguageService implements ILanguageService {
       try {
         const results = await provider.detect(text);
         results.forEach(r => aggregated.push(r));
-      } catch {/* ignore individual provider failure */}
+      } catch (err) {
+        // One provider's failure leaves the others' results.
+        languageLog.warn('language.detection_failed', { detector: safeWord(provider.id), ...errorFields(err) });
+      }
     }
     const byCode: Record<string, DetectedLanguageResult> = {};
     for (const r of aggregated) {
@@ -205,7 +210,12 @@ export class LanguageService implements ILanguageService {
     this.initialized = false;
   }
 
-  /** Internal provider selection & execution with caching, code-block awareness. */
+  /**
+   * Internal provider selection & execution with caching, code-block awareness.
+   *
+   * @throws {TranslationProviderError} When the provider's call fails or answers with no text;
+   *   nothing is cached then, and the input is never returned as a translation.
+   */
   private async performTranslation(input: string, source: string, target: string, options?: TranslationOptions): Promise<TranslationResult | null> {
     if (!this.initialized) return null;
     if (!this.translationProviders.length) return null;
@@ -236,7 +246,13 @@ export class LanguageService implements ILanguageService {
         this.translationCache!.delete(oldestKey);
       }
     }
-    return { output: finalOutput, providerId: provider.id, sourceLanguage: source, targetLanguage: target };
+    return {
+      output: finalOutput,
+      providerId: provider.id,
+      sourceLanguage: source,
+      targetLanguage: target,
+      ...(result.providerMetadata ? { providerMetadata: result.providerMetadata } : {}),
+    };
   }
 
   private pickTranslationProvider(source: string, target: string): ITranslationProvider | undefined {
