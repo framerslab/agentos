@@ -3,7 +3,8 @@
  * The caller's abort signal ends a provider's wait between retries, not only
  * the request in flight. A 429's Retry-After (up to an hour) or the backoff
  * after a 5xx or a network failure is cut short the moment the signal aborts:
- * the call rejects with REQUEST_ABORTED then, and no further request is sent.
+ * the call rejects with REQUEST_ABORTED then (a stream ends with its terminal
+ * abort chunk instead), and no further request is sent.
  * The real Anthropic, Gemini and OpenRouter providers run over a stubbed
  * `fetch` (OpenRouter over an injected axios client) on fake timers; nothing
  * leaves the process.
@@ -18,7 +19,7 @@ import { GeminiProvider } from '../implementations/GeminiProvider';
 import { OpenRouterProvider } from '../implementations/OpenRouterProvider';
 import { waitForRetry } from '../implementations/retry-backoff';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool';
-import type { ChatMessage } from '../IProvider';
+import type { ChatMessage, ModelCompletionResponse } from '../IProvider';
 
 const messages: ChatMessage[] = [{ role: 'user', content: 'Hi' }];
 
@@ -57,6 +58,13 @@ function track(call: Promise<unknown>): Outcome {
     },
   );
   return outcome;
+}
+
+/** Reads a stream to its end and returns every chunk it yielded. */
+async function drain(stream: AsyncGenerator<ModelCompletionResponse, void, undefined>): Promise<ModelCompletionResponse[]> {
+  const chunks: ModelCompletionResponse[] = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return chunks;
 }
 
 /** A signal that aborts `afterMs` into the fake clock, as a caller's deadline does. */
@@ -224,6 +232,30 @@ describe("a provider's wait between retries ends when the caller's signal aborts
       vi.useFakeTimers();
       const outcome = track(p.generateCompletion('anthropic/claude-sonnet-5.5', messages, { abortSignal: deadline(5_000) }));
       await expectAbortEndsTheWait(outcome, () => request.mock.calls.length, 5_000);
+    });
+
+    it("ends a stream's Retry-After wait at the abort with the terminal abort chunk, not a throw", async () => {
+      const request = vi.fn().mockRejectedValue(axiosError(429, { error: { message: 'Rate limit exceeded', code: 429 } }, { 'retry-after': '12' }));
+      const p = openRouter(request);
+      vi.useFakeTimers();
+      let chunks: ModelCompletionResponse[] = [];
+      const outcome = track(
+        drain(p.generateCompletionStream('anthropic/claude-sonnet-5.5', messages, { abortSignal: deadline(5_000) })).then((all) => {
+          chunks = all;
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(outcome.state).toBe('pending');
+      expect(request).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(outcome.state).toBe('resolved');
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(request).toHaveBeenCalledTimes(1);
     });
   });
 

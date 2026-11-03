@@ -293,7 +293,8 @@ export interface ModelCompletionOptions {
    *  - Streaming providers MUST emit a terminal chunk with `isFinal: true` and `error.type='abort'`.
    *  - Non-streaming calls SHOULD throw a cancellation error (or return error response if already partially processed).
    *  - A wait between retries (a 429's Retry-After or a backoff) ends at once and no further request is sent; the
-   *    OpenAI, Anthropic, Gemini and OpenRouter providers end it and throw `REQUEST_ABORTED`.
+   *    OpenAI, Anthropic, Gemini and OpenRouter providers end it. A non-streaming call then throws `REQUEST_ABORTED`;
+   *    a stream (`generateCompletionStream`) ends with the terminal abort chunk above instead of throwing.
    */
   abortSignal?: AbortSignal;
   /** Indicates if a streaming response is expected. */
