@@ -24,8 +24,9 @@
  *
  * Without a call profile the orchestrator runs the components the caller
  * injects. Failures stay inside the session: an `'error'` from the STT session,
- * the TTS session, the transport or the endpoint detector, a TTS session's
- * `close` that the session's own stop did not make, and a turn whose agent
+ * the TTS session, the transport or the endpoint detector, an STT or TTS
+ * session's `close` that the session's own stop did not make (for STT, one that
+ * did not follow a `flush()` the host made to end the input), and a turn whose agent
  * stream or synthesis flush fails, end this session and no other, while a
  * transport send that rejects, and a TTS session's `'warning'`, are reported
  * and end nothing.
@@ -853,6 +854,16 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   /** The failure a session without a call profile ended on, for its `close` event. */
   private failure?: Error;
   /**
+   * The input of the STT session has been ended on purpose: a `flush()` was called on the session (by the host that
+   * holds it, through the method `_observeSttFlush` wraps) and no frame has gone to the session since. A `close` then is
+   * the session's own end, not a failure.
+   */
+  private sttEndRequested = false;
+  /** The STT session ended after its input was ended on purpose: the transport's audio goes to it no more. */
+  private sttEnded = false;
+  /** Puts back the STT session's own `flush()` as the session stops (`_observeSttFlush`). */
+  private restoreSttFlush?: () => void;
+  /**
    * The failures whose `session_error` has yet to go out, each with the part it came from, in order
    * (`_sendFailureEvents`): a failure whose `'error'` listener stops the session has its `session_error` before `close`.
    */
@@ -1018,6 +1029,48 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    */
   private watch(emitter: EventEmitter, source: VoiceSessionErrorSource): void {
     emitter.on('error', () => this.reportFailure(source));
+  }
+
+  /**
+   * Notes each `flush()` of the STT session, so that the `close` a provider may end its stream with after one is taken
+   * as the end of input the caller asked for and not as a failure. The orchestrator calls no `flush()` itself: a host
+   * that ends input on purpose, as a push-to-talk stop does, calls it on the session it holds (the object its
+   * `IStreamingSTT.startSession()` resolved with), whatever the provider or the chain behind it. The session's own
+   * `flush()` is wrapped on that object and put back as the session stops. A flush counts until the next frame the
+   * orchestrator pushes; one that rejects or throws ended nothing. A session whose `flush` cannot be replaced (a frozen
+   * object) keeps every close a failure.
+   *
+   * @param stt - The STT session this orchestrator's session owns.
+   */
+  private _observeSttFlush(stt: StreamingSTTSession): void {
+    const target = stt as unknown as Record<string, unknown>;
+    const own = Object.prototype.hasOwnProperty.call(target, 'flush');
+    const original = stt.flush;
+    if (typeof original !== 'function') return;
+    const requested = (): Promise<void> => {
+      if (this.current !== 'closed') this.sttEndRequested = true;
+      const failed = (err: unknown): never => {
+        this.sttEndRequested = false;
+        throw err;
+      };
+      try {
+        return Promise.resolve(original.call(stt)).catch(failed);
+      } catch (err) {
+        return failed(err);
+      }
+    };
+    try {
+      target.flush = requested;
+    } catch {
+      return;
+    }
+    if (target.flush !== requested) return;
+    this.restoreSttFlush = () => {
+      this.restoreSttFlush = undefined;
+      if (target.flush !== requested) return;
+      if (own) target.flush = original;
+      else delete target.flush;
+    };
   }
 
   /**
@@ -1557,7 +1610,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * session as the STT part's failure, as its `'error'` would: `session_error` with `source: 'stt'`, then
    * `session_ended` with `provider_failure`. A `StreamingSTTChain` with mid-utterance failover goes on through the next
    * provider in its order first, and only a close with no provider left reaches the session. The close a stop makes
-   * is no failure.
+   * is no failure, and neither is a close after the host ended the input on purpose: a host that calls `flush()` on
+   * the STT session it holds (the object its `streamingSTT.startSession()` resolved with), as a push-to-talk stop
+   * does, has asked for the provider's last final, and a provider may end its stream with `close` after it, as the
+   * `StreamingSTTSession` contract has it. That close, with no frame pushed to the session since the flush, leaves the
+   * session running so the reply to that final still plays; the transport's audio goes to the closed STT session no
+   * more, and the session ends when the host closes it. An `'error'` after a flush is still a failure, and so is a
+   * close once a frame has gone to the session after the flush. The orchestrator wraps the session's `flush()` on that
+   * object to see the call, and puts it back as the session stops.
    *
    * @param transport - The bidirectional audio/text stream transport.
    * @param agent - The agent session adapter for turn-based conversation.
@@ -1623,12 +1683,23 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     try {
       this.stt = await overrides.streamingSTT.startSession({ language: this.config.language, providerOptions: this.config.sttOptions });
       this.watch(this.stt, 'stt');
+      this._observeSttFlush(this.stt);
       // An STT session that closes on its own has failed as surely as one that reports 'error': a provider whose socket
-      // drops (a TCP reset reaches ws as close code 1006 with no 'error') ends its session with 'close' alone, and
+      // drops can end its session with 'close' alone (a TCP reset reaches ws as close code 1006 with no 'error'), and
       // transcription would stop in silence. A StreamingSTTChain with mid-utterance failover takes the close of the
-      // provider in use as that provider's failure and goes on through the next one; only a close with none left, or
-      // from a session handed over without failover, reaches here. The close a stop makes finds the session closed.
-      this.stt.on('close', () => this.reportFailure('stt'));
+      // provider in use as that provider's failure and goes on through the next one in the user's order; only a close
+      // with none left, or from a session handed over without failover, reaches here. The close a stop makes finds the
+      // session closed. A close after a flush() that ended the input on purpose, with no frame pushed since, is the
+      // session's own end, as the session contract has it (a final, then 'close'): the session goes on, so the reply to
+      // that final still plays, and ends when the host closes it.
+      this.stt.on('close', () => {
+        if (this.current === 'closed') return;
+        if (this.sttEndRequested) {
+          this.sttEnded = true;
+          return;
+        }
+        this.reportFailure('stt');
+      });
       this.tts = await overrides.streamingTTS.startSession({ voice: this.config.voice, format: transport.playbackFormat ?? this.config.format, providerOptions: this.config.ttsOptions, expressiveness: this.config.ttsExpressiveness });
       this.watch(this.tts, 'tts');
       // A TTS session that closes on its own has failed: every later reply would go to a closed session and stay
@@ -1696,7 +1767,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       },
     };
     transport.on('audio', (frame: AudioFrame) => {
-      if (this.current !== 'closed' && this._takesSpeechFrom('audio')) this.supervise(() => stt.pushAudio(frame), 'stt');
+      if (this.current === 'closed' || this.sttEnded || !this._takesSpeechFrom('audio')) return;
+      // New input: a close from here on is the session's failure again, though a flush() came before.
+      this.sttEndRequested = false;
+      this.supervise(() => stt.pushAudio(frame), 'stt');
     });
     transport.on('close', () => {
       this.supervise(() => this.stopSession('transport_closed'));
@@ -2346,6 +2420,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     let ended: Promise<void> | undefined;
     for (const close of [
       () => this.agent?.abort?.(),
+      () => this.restoreSttFlush?.(),
       () => this.stt?.close(),
       () => this.tts?.close(),
       () => this.endpoint?.reset(),
