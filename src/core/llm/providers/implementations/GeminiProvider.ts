@@ -37,7 +37,7 @@ import { redactUrlSecrets } from '../url-secrets';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
-import { computeRetryBackoffMs, resolveAttemptCount, type AttemptTally } from './retry-backoff.js';
+import { computeRetryBackoffMs, resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 
@@ -1038,9 +1038,10 @@ export class GeminiProvider implements IProvider {
 
     try {
       for await (const rawData of this.parseSseStream(stream)) {
+        // The abort chunk is the stream's last: an event already buffered behind it yields no success chunk.
         if (abortSignal?.aborted) {
           yield this.buildAbortChunk(modelId);
-          break;
+          return;
         }
 
         let chunk: GeminiResponse;
@@ -1090,6 +1091,11 @@ export class GeminiProvider implements IProvider {
 
         const parts = candidate.content?.parts ?? [];
         for (const part of parts) {
+          // An abort between two parts of one event ends the stream here, not at the next event.
+          if (abortSignal?.aborted) {
+            yield this.buildAbortChunk(modelId);
+            return;
+          }
           // A thought summary is the model's reasoning: it streams as
           // reasoning text, apart from the answer.
           if (part.thought) {
@@ -1157,6 +1163,12 @@ export class GeminiProvider implements IProvider {
         }
       }
 
+      // An abort after the last event ends the stream with the abort chunk, not the success chunk.
+      if (abortSignal?.aborted) {
+        yield this.buildAbortChunk(modelId);
+        return;
+      }
+
       // Emit final chunk with usage and finish reason
       const toolCalls = this.assembleToolCalls(toolCallAccum);
       const hasToolCalls = toolCalls.length > 0;
@@ -1196,6 +1208,12 @@ export class GeminiProvider implements IProvider {
       // chunk) so the caller / fallback chain can act on code 'content_filter'.
       if (streamError instanceof GeminiProviderError && streamError.code === 'content_filter') {
         throw streamError;
+      }
+      // The caller's signal rides on the fetch, so an abort mid-stream ends the body's read at once: the stream
+      // ends with the abort chunk, not an error chunk.
+      if (abortSignal?.aborted) {
+        yield this.buildAbortChunk(modelId);
+        return;
       }
       const message = streamError instanceof Error
         ? streamError.message
@@ -2042,8 +2060,9 @@ export class GeminiProvider implements IProvider {
    * @param {string} endpoint - API endpoint path (e.g., "/models/gemini-2.5-flash:generateContent").
    * @param {Record<string, unknown>} body - Request body.
    * @param {number} [requestTimeoutOverride] - Per-call timeout in ms, over the configured default.
-   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, and once
-   *   it has fired no further attempt is sent.
+   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, ends a wait
+   *   between attempts (a Retry-After or a backoff) at once, and once it has fired no further attempt
+   *   is sent.
    * @param {number} [maxAttempts] - The call's attempt count, a first and its retries together, over
    *   `config.maxRetries`; key hops are not counted, and no backoff is waited after the last attempt.
    * @param {AttemptTally} [tally] - Filled with the attempts this request sent, so a caller that sends
@@ -2155,9 +2174,10 @@ export class GeminiProvider implements IProvider {
             // A single key rests here; a pool of several was marked above.
             if (!(this.keyPool && this.keyPool.size > 1)) this.keyPool?.markExhausted(apiKey);
             // Retry-After is authoritative when present; otherwise jittered backoff. No wait after the last attempt.
+            // The caller's abort ends the wait, and the loop's check then reports it.
             if (attempt < attempts - 1) {
               const waitMs = serverRetryAfterMs ?? computeRetryBackoffMs(attempt);
-              await new Promise(resolve => setTimeout(resolve, waitMs));
+              await waitForRetry(waitMs, abortSignal);
             }
             continue;
           }
@@ -2171,7 +2191,7 @@ export class GeminiProvider implements IProvider {
               errorStatus,
               errorData,
             );
-            if (attempt < attempts - 1) await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt)));
+            if (attempt < attempts - 1) await waitForRetry(computeRetryBackoffMs(attempt), abortSignal);
             continue;
           }
 
@@ -2212,7 +2232,7 @@ export class GeminiProvider implements IProvider {
         if (attempt === attempts - 1) break;
         const delay = computeRetryBackoffMs(attempt);
         console.warn(`[GeminiProvider] Retry ${attempt + 1}/${attempts - 1} in ${(delay / 1000).toFixed(1)}s`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await waitForRetry(delay, abortSignal);
       }
     }
     throw lastError;
@@ -2226,11 +2246,12 @@ export class GeminiProvider implements IProvider {
    *
    * @param {string} endpoint - API endpoint (e.g., "/models/gemini-2.5-flash:streamGenerateContent").
    * @param {Record<string, unknown>} body - Request body.
-   * @param {AbortSignal} [abortSignal] - The caller's signal, which ends a wait on the pool's probes.
+   * @param {AbortSignal} [abortSignal] - The caller's signal. It ends a wait on the pool's probes and aborts the
+   *   request in flight, the returned body's reads included.
    * @returns {Promise<ReadableStream<Uint8Array>>} The response body stream.
    * @throws {GeminiProviderError} On connection errors; a key-scoped failure carries `keyFailure`,
    *   `keyUsable` and `keyCount` on its details, which the stream's hop loop reads; `REQUEST_ABORTED`
-   *   when the caller's signal ended the draw.
+   *   when the caller's signal ended the draw or the request before the body was returned.
    * @private
    */
   private async makeStreamRequest(
@@ -2261,7 +2282,9 @@ export class GeminiProvider implements IProvider {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
-        signal: controller.signal,
+        // The caller's signal aborts the request as the connection timer does, and the body's reads after the
+        // headers have arrived.
+        signal: abortSignal ? AbortSignal.any([controller.signal, abortSignal]) : controller.signal,
       });
       clearTimeout(timeoutId);
 
@@ -2298,6 +2321,9 @@ export class GeminiProvider implements IProvider {
       return response.body;
     } catch (error: unknown) {
       clearTimeout(timeoutId);
+      if (abortSignal?.aborted) {
+        throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       if (error instanceof GeminiProviderError) throw error;
       throw new GeminiProviderError(
         error instanceof Error

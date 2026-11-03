@@ -484,8 +484,9 @@ export interface GenerateTextOptions {
    */
   onAttempt?: (outcome: AttemptOutcome) => void;
   /**
-   * Ends the call when it aborts: the provider request in flight is cancelled, no further step, retry or fallback
-   * hop starts, and the call rejects with the signal's reason. An abort never walks the fallback chain. The signal
+   * Ends the call when it aborts: the provider request in flight is cancelled, a provider's wait between retries
+   * (a 429's Retry-After or a backoff) ends at once, no further step, retry or fallback hop starts, and the call
+   * rejects with the signal's reason. An abort never walks the fallback chain. The signal
    * reaches the provider as `ModelCompletionOptions.abortSignal`; a request whose provider does not read it runs to
    * its end, and the call then rejects with the signal's reason.
    */
