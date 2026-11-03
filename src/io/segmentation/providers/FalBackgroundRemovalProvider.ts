@@ -59,13 +59,13 @@ export const FAL_BACKGROUND_REMOVAL_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 const ERROR_BODY_BYTES = 64 * 1024;
 
 /** Media types by file extension, for a file fal names no content type for. */
-const TYPES_BY_EXTENSION: Readonly<Record<string, string>> = {
-  png: 'image/png',
-  webp: 'image/webp',
-  gif: 'image/gif',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-};
+const TYPES_BY_EXTENSION: ReadonlyMap<string, string> = new Map([
+  ['png', 'image/png'],
+  ['webp', 'image/webp'],
+  ['gif', 'image/gif'],
+  ['jpg', 'image/jpeg'],
+  ['jpeg', 'image/jpeg'],
+]);
 
 /** One file in fal's answer. @internal */
 interface FalImageFile {
@@ -104,9 +104,9 @@ export function isBase64Payload(payload: string): boolean {
   return payload.length > 0 && payload.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(payload);
 }
 
-/** A file's media type by the extension of its name or URL path, else `undefined`. */
+/** A file's media type by the extension of its name or `http(s)` URL path, else `undefined`. */
 function typeByName(name: string | undefined): string | undefined {
-  if (!name) return undefined;
+  if (!name || name.startsWith('data:')) return undefined;
   let path = name;
   if (/^https?:\/\//i.test(name)) {
     try {
@@ -116,7 +116,7 @@ function typeByName(name: string | undefined): string | undefined {
     }
   }
   const extension = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase();
-  return extension ? TYPES_BY_EXTENSION[extension] : undefined;
+  return extension ? TYPES_BY_EXTENSION.get(extension) : undefined;
 }
 
 function tooLarge(what: string, limit: number): SegmentationProviderError {
