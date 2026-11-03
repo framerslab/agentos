@@ -3,6 +3,7 @@
  */
 import { imageDataUrl, imagePartType } from '../io/media/images/blobPart.js';
 import { resolveBackgroundRemovalProvider } from '../io/segmentation/BackgroundRemovalProviderRegistry.js';
+import { isBase64Payload } from '../io/segmentation/providers/FalBackgroundRemovalProvider.js';
 import { SegmentationProviderError } from '../io/segmentation/errors.js';
 import type {
   BackgroundRemovalResult,
@@ -19,8 +20,9 @@ const FORMATS = new Set(['png', 'webp']);
  * The image as the provider takes it: an `http(s)` URL or a base64 image data
  * URL as given, or bytes as a data URL typed by their signature.
  *
- * @throws {SegmentationProviderError} `invalid_request` for any other string
- *   and for bytes that are not PNG, JPEG, WebP or GIF.
+ * @throws {SegmentationProviderError} `invalid_request` for any other string,
+ *   a data URL whose payload is not standard padded base64 among them, and
+ *   for bytes that are not PNG, JPEG, WebP or GIF.
  */
 function toImageUrl(image: RemoveBackgroundOptions['image']): string {
   if (typeof image === 'string') {
@@ -32,8 +34,9 @@ function toImageUrl(image: RemoveBackgroundOptions['image']): string {
       } catch {
         // Falls through to the refusal below.
       }
-    } else if (/^data:image\/[\w.+-]+;base64,./i.test(value)) {
-      return value;
+    } else {
+      const dataUrl = /^data:image\/[\w.+-]+;base64,(.*)$/is.exec(value);
+      if (dataUrl && isBase64Payload(dataUrl[1])) return value;
     }
     throw new SegmentationProviderError(
       'removeBackground takes an http(s) URL, a base64 image data URL, or the image bytes; read a local file and pass its bytes.',

@@ -52,10 +52,26 @@ const REFUSED_STATUSES = new Set([400, 413, 422]);
  */
 const MAX_DEADLINE_MS = 2_147_483_647;
 
+/** The most bytes read from fal's answer, and from a download, when the call sets no `maxResponseBytes`. */
+export const FAL_BACKGROUND_REMOVAL_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+
+/** The most bytes of a failed answer kept for its error message. */
+const ERROR_BODY_BYTES = 64 * 1024;
+
+/** Media types by file extension, for a file fal names no content type for. */
+const TYPES_BY_EXTENSION: Readonly<Record<string, string>> = {
+  png: 'image/png',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+};
+
 /** One file in fal's answer. @internal */
 interface FalImageFile {
   url?: unknown;
   content_type?: unknown;
+  file_name?: unknown;
   file_size?: unknown;
   width?: unknown;
   height?: unknown;
@@ -78,6 +94,64 @@ function isEndpointId(id: string): boolean {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Whether `payload` is standard padded base64 (RFC 4648, section 4) of at
+ * least one byte: the form a data URL carries and fal decodes.
+ */
+export function isBase64Payload(payload: string): boolean {
+  return payload.length > 0 && payload.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(payload);
+}
+
+/** A file's media type by the extension of its name or URL path, else `undefined`. */
+function typeByName(name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  let path = name;
+  if (/^https?:\/\//i.test(name)) {
+    try {
+      path = new URL(name).pathname;
+    } catch {
+      return undefined;
+    }
+  }
+  const extension = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase();
+  return extension ? TYPES_BY_EXTENSION[extension] : undefined;
+}
+
+function tooLarge(what: string, limit: number): SegmentationProviderError {
+  return new SegmentationProviderError(
+    `fal background removal ${what} is larger than ${limit} bytes (maxResponseBytes).`,
+    'provider_failed',
+  );
+}
+
+/** A response's body, read until it ends; refused past `limit` bytes, by its declared length or as it arrives. */
+async function readCappedBody(response: Response, limit: number, what: string): Promise<Buffer> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) {
+    await response.body?.cancel().catch(() => undefined);
+    throw tooLarge(what, limit);
+  }
+  if (!response.body) {
+    const whole = Buffer.from(await response.arrayBuffer());
+    if (whole.length > limit) throw tooLarge(what, limit);
+    return whole;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => undefined);
+      throw tooLarge(what, limit);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, total);
 }
 
 /**
@@ -129,10 +203,12 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
    * Cuts the subject of `request.imageUrl` out of its background.
    *
    * @throws {SegmentationProviderError} `invalid_request` for a malformed
-   *   endpoint id or an answer of 400, 413 or 422; `provider_failed` for any
-   *   other failed answer, a network failure or an answer without an image;
-   *   `timeout` when `request.timeoutMs` passes first. A failed answer carries
-   *   its HTTP `status`.
+   *   endpoint id, timeout or `maxResponseBytes`, or an answer of 400, 413 or
+   *   422; `provider_failed` for any other failed answer, a network failure,
+   *   an answer without the image (or without the mask `returnMask` asked
+   *   for), an inline image that is not base64, or an answer or download past
+   *   `maxResponseBytes`; `timeout` when `request.timeoutMs` passes first. A
+   *   failed answer carries its HTTP `status`.
    * @throws The reason of `request.signal` when the caller aborts.
    */
   async removeBackground(request: BackgroundRemovalRequest): Promise<BackgroundRemovalResult> {
@@ -153,15 +229,21 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
     request.signal?.throwIfAborted();
 
     const options = getImageProviderOptions<FalBackgroundRemovalOptions>(this.providerId, request.providerOptions) ?? {};
+    const maxBytes = options.maxResponseBytes ?? FAL_BACKGROUND_REMOVAL_MAX_RESPONSE_BYTES;
+    if (typeof maxBytes !== 'number' || !Number.isFinite(maxBytes) || maxBytes <= 0) {
+      throw new SegmentationProviderError('fal background removal maxResponseBytes must be a positive number of bytes.', 'invalid_request');
+    }
     const body: Record<string, unknown> = {
       model: options.variant ?? DEFAULT_VARIANT,
       operating_resolution: options.operatingResolution ?? DEFAULT_RESOLUTION,
       output_format: request.format,
       refine_foreground: options.refineForeground ?? true,
     };
+    if (options.input && typeof options.input === 'object') Object.assign(body, options.input);
+    // What the call asked for stands over the extra fields: its image, the
+    // mask with returnMask, and the inline answer with output 'buffer'.
     if (request.returnMask) body.output_mask = true;
     if (request.output === 'buffer') body.sync_mode = true;
-    if (options.input && typeof options.input === 'object') Object.assign(body, options.input);
     body.image_url = request.imageUrl;
 
     const deadline = AbortSignal.timeout(Math.min(Math.ceil(request.timeoutMs), MAX_DEADLINE_MS));
@@ -184,8 +266,12 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
         body: JSON.stringify(body),
         signal,
       });
-      const text = await response.text();
       if (!response.ok) {
+        // A failed answer's body only words the error; past its cap the status alone is reported.
+        const text = await readCappedBody(response, ERROR_BODY_BYTES, 'error answer').then(
+          (bytes) => bytes.toString('utf8'),
+          () => '',
+        );
         throw new SegmentationProviderError(
           `fal background removal returned ${response.status}: ${text.slice(0, 500)}`,
           REFUSED_STATUSES.has(response.status) ? 'invalid_request' : 'provider_failed',
@@ -193,6 +279,7 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
           response.status,
         );
       }
+      const text = (await readCappedBody(response, maxBytes, 'answer')).toString('utf8');
       try {
         answer = JSON.parse(text) as FalBiRefNetAnswer | null;
       } catch {
@@ -205,13 +292,15 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
     if (!answer?.image || typeof answer.image.url !== 'string' || !answer.image.url) {
       throw new SegmentationProviderError('fal background removal returned no image.', 'provider_failed');
     }
-    const fallbackType = request.format === 'webp' ? 'image/webp' : 'image/png';
+    const maskFile = answer.mask_image;
+    const hasMask = Boolean(maskFile && typeof maskFile.url === 'string' && maskFile.url);
+    if (request.returnMask && !hasMask) {
+      throw new SegmentationProviderError('fal background removal returned no mask, though the call asked for one.', 'provider_failed');
+    }
     try {
-      const image = await this.readImage(answer.image, fallbackType, request.output, signal);
-      const mask =
-        request.returnMask && answer.mask_image && typeof answer.mask_image.url === 'string' && answer.mask_image.url
-          ? await this.readImage(answer.mask_image, fallbackType, request.output, signal)
-          : undefined;
+      const image = await this.readImage(answer.image, request.format === 'webp' ? 'image/webp' : 'image/png', request.output, signal, maxBytes);
+      // A mask fal names no type for is typed by its own file name, else as PNG: it is a matte, not the cut-out.
+      const mask = request.returnMask && maskFile ? await this.readImage(maskFile, 'image/png', request.output, signal, maxBytes) : undefined;
       return {
         image,
         ...(mask ? { mask } : {}),
@@ -228,28 +317,31 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
    * One file of fal's answer as a {@link BackgroundRemovalImage}: an inline
    * data URI decoded, a URL kept, and with `output: 'buffer'` downloaded. The
    * download carries no key: the file is on fal's storage, and the key goes
-   * to the API alone.
+   * to the API alone. The media type is fal's `content_type`, else the data
+   * URI's or the download's type, else the file name's extension, else
+   * `fallbackType`.
    */
   private async readImage(
     file: FalImageFile,
     fallbackType: string,
     output: BackgroundRemovalOutput,
     signal: AbortSignal,
+    maxBytes: number,
   ): Promise<BackgroundRemovalImage> {
     const url = file.url as string;
-    const image: BackgroundRemovalImage = {
-      mimeType: typeof file.content_type === 'string' && file.content_type ? file.content_type : fallbackType,
-    };
+    const declaredType = typeof file.content_type === 'string' && file.content_type ? file.content_type : undefined;
+    const namedType = typeByName(typeof file.file_name === 'string' ? file.file_name : undefined) ?? typeByName(url);
+    const image: BackgroundRemovalImage = { mimeType: declaredType ?? namedType ?? fallbackType };
     if (typeof file.width === 'number') image.width = file.width;
     if (typeof file.height === 'number') image.height = file.height;
     if (typeof file.file_size === 'number') image.fileSize = file.file_size;
 
     if (url.startsWith('data:')) {
       const parsed = parseDataUrl(url);
-      if (!parsed.base64) {
+      if (!parsed.base64 || !isBase64Payload(parsed.base64)) {
         throw new SegmentationProviderError('fal background removal returned an inline image that is not base64.', 'provider_failed');
       }
-      if (typeof file.content_type !== 'string' && parsed.mimeType) image.mimeType = parsed.mimeType;
+      image.mimeType = declaredType ?? parsed.mimeType ?? fallbackType;
       image.dataUrl = url;
       image.buffer = Buffer.from(parsed.base64, 'base64');
       return image;
@@ -262,6 +354,7 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
       }
       const response = await fetch(url, { signal });
       if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
         throw new SegmentationProviderError(
           `fal background removal download returned ${response.status}.`,
           'provider_failed',
@@ -269,9 +362,9 @@ export class FalBackgroundRemovalProvider implements IBackgroundRemovalProvider 
           response.status,
         );
       }
-      const bytes = Buffer.from(await response.arrayBuffer());
+      const bytes = await readCappedBody(response, maxBytes, 'download');
       const servedType = response.headers.get('content-type')?.split(';')[0].trim();
-      if (typeof file.content_type !== 'string' && servedType?.startsWith('image/')) image.mimeType = servedType;
+      image.mimeType = declaredType ?? (servedType?.startsWith('image/') ? servedType : undefined) ?? namedType ?? fallbackType;
       image.buffer = bytes;
       image.dataUrl = `data:${image.mimeType};base64,${bytes.toString('base64')}`;
     }

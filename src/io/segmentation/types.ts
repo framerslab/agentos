@@ -181,9 +181,16 @@ export interface FalBackgroundRemovalOptions {
   refineForeground?: boolean;
   /**
    * Extra fields merged verbatim into the request body after the fields above
-   * (for example `mask_only`). `image_url` is always the call's image.
+   * (for example `mask_only`). The call's image (`image_url`), the mask
+   * `returnMask` asks for (`output_mask`) and the inline answer `output:
+   * 'buffer'` asks for (`sync_mode`) stand over them.
    */
   input?: Record<string, unknown>;
+  /**
+   * The most bytes read from fal's answer, and from a downloaded cut-out or
+   * mask; past it the call rejects with `provider_failed`. Default 64 MiB.
+   */
+  maxResponseBytes?: number;
 }
 
 /** Namespaced bag of per-provider background removal options. */
@@ -203,10 +210,11 @@ export interface BackgroundRemovalProviderOptionBag {
  */
 export interface RemoveBackgroundOptions {
   /**
-   * The source image: an `http(s)` URL or a base64 image data URL, sent to
-   * the provider as given, or the image's bytes, sent as a data URL typed by
-   * their signature (PNG, JPEG, WebP or GIF). Any other string (a file path,
-   * raw base64) is refused: read the file and pass its bytes.
+   * The source image: an `http(s)` URL or a base64 image data URL (standard,
+   * padded base64), sent to the provider as given, or the image's bytes, sent
+   * as a data URL typed by their signature (PNG, JPEG, WebP or GIF). Any other
+   * string (a file path, raw base64) is refused: read the file and pass its
+   * bytes.
    */
   image: string | Buffer | Uint8Array;
   /** Provider id. Defaults to `'fal'`. */
@@ -257,7 +265,7 @@ export interface BackgroundRemovalImage {
 export interface BackgroundRemovalResult {
   /** The subject on a transparent background. */
   image: BackgroundRemovalImage;
-  /** The matte, with `returnMask`. */
+  /** The matte, with `returnMask`; a provider that answers without it rejects. */
   mask?: BackgroundRemovalImage;
   providerId: string;
   modelId: string;

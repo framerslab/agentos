@@ -423,12 +423,12 @@ The built-in provider runs fal's BiRefNet v2 (`fal-ai/birefnet/v2`) with `FAL_AP
 | `image` | (required) | An `http(s)` URL or a base64 image data URL, sent as given, or the bytes (`Buffer`, `Uint8Array`) of a PNG, JPEG, WebP or GIF. Any other string is refused. |
 | `output` | `'url'` | `'url'` returns the cut-out's URL; `'buffer'` returns its `buffer` and `dataUrl` (fal is asked to answer inline). |
 | `format` | `'png'` | `'png'` or `'webp'`. |
-| `returnMask` | `false` | Also return the matte as `mask`. |
+| `returnMask` | `false` | Also return the matte as `mask`; an answer without it rejects. |
 | `model` | `'fal-ai/birefnet/v2'` | The fal endpoint. |
 | `timeoutMs` | `60000` | The call's deadline, download included; rejects with `code: 'timeout'`. |
 | `signal` | | Aborts the call with the signal's reason. |
 | `apiKey`, `baseUrl` | `FAL_API_KEY`, `https://fal.run` | Credentials for this call. |
-| `providerOptions.fal` | | `variant` (BiRefNet weights, default `'General Use (Light)'`), `operatingResolution` (default `'1024x1024'`), `refineForeground` (default `true`), `input` (extra request fields). |
+| `providerOptions.fal` | | `variant` (BiRefNet weights, default `'General Use (Light)'`), `operatingResolution` (default `'1024x1024'`), `refineForeground` (default `true`), `input` (extra request fields; the image, `output_mask` and `sync_mode` the call sets stand over them), `maxResponseBytes` (default 64 MiB). |
 | `provider` | `'fal'` | A provider registered with `registerBackgroundRemovalProvider()`. |
 
 Failures reject with `SegmentationProviderError` (`invalid_request`, `provider_failed` or `timeout`, with the HTTP `status` of a failed answer). See [Image Segmentation](../features/IMAGE_SEGMENTATION.md#background-removal).

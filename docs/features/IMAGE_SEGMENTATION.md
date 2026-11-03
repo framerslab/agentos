@@ -231,22 +231,32 @@ interface RemoveBackgroundOptions {
       operatingResolution?: '1024x1024' | '2048x2048' | '2304x2304'; // default '1024x1024'
       refineForeground?: boolean;      // default true
       input?: Record<string, unknown>; // extra request fields, e.g. { mask_only: true }
+      maxResponseBytes?: number;       // default 64 MiB, the answer and a download each
     };
   };
 }
 ```
 
-**The image.** An `http(s)` URL or a base64 image data URL goes to fal as
-given; fal fetches the URL itself. Bytes go as a data URL typed by their
-signature (PNG, JPEG, WebP or GIF). Any other string, a local file path or raw
-base64 among them, rejects with `code: 'invalid_request'` before a request is
-made: read the file and pass its bytes.
+**The image.** An `http(s)` URL or a base64 image data URL (standard, padded
+base64) goes to fal as given; fal fetches the URL itself. Bytes go as a data
+URL typed by their signature (PNG, JPEG, WebP or GIF). Any other string, a
+local file path, raw base64 or a data URL with a malformed payload among
+them, rejects with `code: 'invalid_request'` before a request is made: read
+the file and pass its bytes.
 
 **The output.** With `output: 'url'` the result carries the cut-out's URL on
 fal's storage. With `output: 'buffer'` the call asks fal to return the image
 inline (`sync_mode`, which also keeps it out of fal's request history) and the
 result carries `buffer` and `dataUrl`; when fal still answers with a URL, the
-file is downloaded within the same `timeoutMs`, without the API key.
+file is downloaded within the same `timeoutMs`, without the API key. With
+`returnMask`, an answer without the matte rejects with `provider_failed`. fal's
+answer and each download are read up to `maxResponseBytes` (64 MiB by
+default), and past it the call rejects with `provider_failed`.
+
+**Extra fields.** `providerOptions.fal.input` is merged into fal's request
+after the typed options, so it can set any other field of the endpoint. The
+call's image, the `output_mask` that `returnMask` sends and the `sync_mode`
+that `output: 'buffer'` sends stand over it.
 
 **The variant.** `General Use (Light)` is BiRefNet's original model and the
 one fal recommends for most images. `General Use (Heavy)` is slower and more
@@ -280,7 +290,8 @@ configure it for that call alone. fal does not retry a synchronous request,
 so a caller that wants to keep the source image when the cut fails catches
 the error and goes on with it.
 
-Custom backends implement [`IBackgroundRemovalProvider`](https://github.com/framerslab/agentos/blob/master/src/io/segmentation/types.ts) and register via
+The providers and their registry are also exported from the
+`@framers/agentos/io/segmentation` subpath. Custom backends implement [`IBackgroundRemovalProvider`](https://github.com/framerslab/agentos/blob/master/src/io/segmentation/types.ts) and register via
 `registerBackgroundRemovalProvider(id, provider)`; `removeBackground({ provider: id })`
 then hands them the normalized request (the image as a URL or data URL, every
 default filled in).
