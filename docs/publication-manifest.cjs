@@ -244,7 +244,7 @@ const publicationManifest = [
   agentosDoc('CHARACTER_CONSISTENCY.md', 'features/character-consistency.md', 'Character Consistency', 'Media Generation', 2.5),
   agentosDoc('STYLE_TRANSFER.md', 'features/style-transfer.md', 'Style Transfer', 'Media Generation', 2.6),
   agentosDoc('VISION_PIPELINE.md', 'features/vision-pipeline.md', 'Vision Pipeline (OCR & Image Understanding)', 'Media Generation', 3),
-  agentosDoc('IMAGE_SEGMENTATION.md', 'features/image-segmentation.md', 'Image Segmentation (SAM2 / GroundedSAM)', 'Media Generation', 3.5),
+  agentosDoc('IMAGE_SEGMENTATION.md', 'features/image-segmentation.md', 'Image Segmentation and Background Removal', 'Media Generation', 3.5),
   staticDoc('features/audio-generation.md', 'features/audio-generation.md', 'Audio Generation', 'Media Generation', 4),
   staticDoc('features/provider-preferences.md', 'features/provider-preferences.md', 'Provider Preferences', 'Media Generation', 5),
   staticDoc('features/video-pipeline.md', 'features/video-pipeline.md', 'Video Pipeline', 'Media Generation', 6),

@@ -1,8 +1,9 @@
-# Image Segmentation — Promptable Masks via SAM2 & GroundedSAM
+# Image Segmentation — Promptable Masks via SAM2 & GroundedSAM, Background Removal via BiRefNet
 
 > Turn an image plus a prompt (text, point, box, or "segment everything") into
 > pixel masks, hosted through Replicate. Masks drop straight into image editing
-> and CLIP region search.
+> and CLIP region search. `removeBackground()` cuts the subject out of an image
+> onto a transparent PNG, hosted through fal's BiRefNet.
 
 ---
 
@@ -14,8 +15,9 @@
 4. [Result Shape](#result-shape)
 5. [Provider Setup](#provider-setup)
 6. [Consumer Round-Trips](#consumer-round-trips)
-7. [Errors](#errors)
-8. [Scope](#scope)
+7. [Background Removal](#background-removal)
+8. [Errors](#errors)
+9. [Scope](#scope)
 
 ---
 
@@ -185,20 +187,138 @@ for (const m of masks) {
 
 ---
 
+## Background Removal
+
+`removeBackground()` returns the subject of an image on a transparent
+background. The built-in provider runs fal's BiRefNet v2 endpoint,
+`fal-ai/birefnet/v2`, through fal's synchronous API: one
+`POST https://fal.run/fal-ai/birefnet/v2`, answered with the cut-out.
+
+```typescript
+import fs from 'node:fs';
+import { removeBackground } from '@framers/agentos';
+
+// The cut-out's URL on fal's storage.
+const { image } = await removeBackground({ image: 'https://example.com/hero.png' });
+console.log(image.url, image.mimeType, image.width, image.height);
+
+// The cut-out's bytes, and the matte used for the cut.
+const { image: cut, mask } = await removeBackground({
+  image: fs.readFileSync('hero.jpg'),
+  output: 'buffer',
+  returnMask: true,
+});
+fs.writeFileSync('hero-cut.png', cut.buffer!);
+```
+
+[`RemoveBackgroundOptions`](https://github.com/framerslab/agentos/blob/master/src/io/segmentation/types.ts):
+
+```typescript
+interface RemoveBackgroundOptions {
+  image: string | Buffer | Uint8Array; // http(s) URL or base64 image data URL, or the bytes
+  provider?: 'fal' | string;           // default 'fal'
+  model?: string;                      // fal endpoint, default 'fal-ai/birefnet/v2'
+  output?: 'url' | 'buffer';           // default 'url'
+  format?: 'png' | 'webp';             // default 'png'
+  returnMask?: boolean;                // default false
+  timeoutMs?: number;                  // default 60000, download included
+  signal?: AbortSignal;
+  apiKey?: string;                     // instead of FAL_API_KEY
+  baseUrl?: string;                    // default 'https://fal.run'
+  providerOptions?: {
+    fal?: {
+      variant?: 'General Use (Light)' | 'General Use (Light 2K)' | 'General Use (Heavy)'
+        | 'Matting' | 'Portrait' | 'General Use (Dynamic)';   // default 'General Use (Light)'
+      operatingResolution?: '1024x1024' | '2048x2048' | '2304x2304'; // default '1024x1024'
+      refineForeground?: boolean;      // default true
+      input?: Record<string, unknown>; // extra request fields, e.g. { mask_only: true }
+      maxResponseBytes?: number;       // default 64 MiB, the answer and a download each
+    };
+  };
+}
+```
+
+**The image.** An `http(s)` URL, or a base64 image data URL (standard, padded
+base64) whose bytes are PNG, JPEG, WebP or GIF, goes to fal as given; fal
+fetches the URL itself. Bytes go as a data URL typed by their signature (PNG,
+JPEG, WebP or GIF). Any other string, a local file path, raw base64 or a data
+URL whose payload is malformed or not one of those formats among them, rejects
+with `code: 'invalid_request'` before a request is made: read the file and
+pass its bytes.
+
+**The output.** With `output: 'url'` the result carries the cut-out's URL on
+fal's storage. With `output: 'buffer'` the call asks fal to return the image
+inline (`sync_mode`, which also keeps it out of fal's request history) and the
+result carries `buffer` and `dataUrl`; when fal still answers with a URL, the
+file is downloaded within the same `timeoutMs`, without the API key. With
+`returnMask`, an answer without the matte rejects with `provider_failed`. fal's
+answer and each download are read up to `maxResponseBytes` (64 MiB by
+default), and past it the call rejects with `provider_failed`.
+
+**Extra fields.** `providerOptions.fal.input` is merged into fal's request
+after the typed options, so it can set any other field of the endpoint. The
+call's image, the `output_mask` that `returnMask` sends and the `sync_mode`
+that `output: 'buffer'` sends stand over it.
+
+**The variant.** `General Use (Light)` is BiRefNet's original model and the
+one fal recommends for most images. `General Use (Heavy)` is slower and more
+accurate; `Portrait` is trained for portrait images and `Matting` for matting;
+`General Use (Dynamic)` takes resolutions from 256x256 to 2304x2304, and
+`2304x2304` runs on it alone.
+
+```typescript
+interface BackgroundRemovalImage {
+  url?: string;      // on the provider's storage; absent when the image came back inline
+  dataUrl?: string;  // with output 'buffer'
+  buffer?: Buffer;   // with output 'buffer'
+  mimeType: string;  // 'image/png' or 'image/webp'
+  width?: number;
+  height?: number;
+  fileSize?: number;
+}
+
+interface BackgroundRemovalResult {
+  image: BackgroundRemovalImage;   // the subject on a transparent background
+  mask?: BackgroundRemovalImage;   // with returnMask
+  providerId: string;
+  modelId: string;
+  durationMs: number;
+}
+```
+
+The fal provider reads `FAL_API_KEY`, the variable the other fal providers
+read; a comma-separated list rotates. `apiKey` and `baseUrl` on the call
+give it a provider of its own, never the one built from `FAL_API_KEY`; that
+provider is kept for the next call with the same key and URL (the 32 most
+recent), so a call's own key list rotates across calls too. fal does not retry a synchronous request,
+so a caller that wants to keep the source image when the cut fails catches
+the error and goes on with it.
+
+The providers and their registry are also exported from the
+`@framers/agentos/io/segmentation` subpath. Custom backends implement [`IBackgroundRemovalProvider`](https://github.com/framerslab/agentos/blob/master/src/io/segmentation/types.ts) and register via
+`registerBackgroundRemovalProvider(id, provider)`; `removeBackground({ provider: id })`
+then hands them the normalized request (the image as a URL or data URL, every
+default filled in).
+
+---
+
 ## Errors
 
 | Error | When |
 |-------|------|
 | `InvalidSegmentationPromptError` | Zero or more than one prompt mode supplied |
 | `SegmentationModeNotSupportedError` | The provider does not support the resolved mode |
-| [`SegmentationProviderError`](https://github.com/framerslab/agentos/blob/master/src/io/segmentation/errors.ts) | Provider/network failure (`code: 'provider_failed'`), poll timeout (`code: 'timeout'`), or malformed model id (`code: 'invalid_request'`) |
+| [`SegmentationProviderError`](https://github.com/framerslab/agentos/blob/master/src/io/segmentation/errors.ts) | Provider/network failure (`code: 'provider_failed'`), poll or call timeout (`code: 'timeout'`), or a request refused (`code: 'invalid_request'`): a malformed model id, an image `removeBackground()` cannot send, or fal's 400, 413 or 422 answer. A failed HTTP answer carries its `status`. |
+
+A caller's `signal` ends `removeBackground()` with the signal's reason.
 
 ---
 
 ## Scope
 
 Included: the hosted Replicate provider, with **text** (GroundedSAM) and **automatic**
-(SAM2) prompts, plus the `maskToEditMask` and `cropRegion` bridges.
+(SAM2) prompts, plus the `maskToEditMask` and `cropRegion` bridges; and
+`removeBackground()` on fal's BiRefNet v2.
 
 Not in this surface: coordinate (point/box) prompting, which needs a
 coordinate-capable provider; a local/offline SAM provider; in-browser WebGPU

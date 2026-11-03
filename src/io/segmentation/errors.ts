@@ -34,17 +34,23 @@ export class InvalidSegmentationPromptError extends Error {
 /** Discriminates the kind of provider-level failure. */
 export type SegmentationErrorCode = 'provider_failed' | 'timeout' | 'invalid_request';
 
-/** Wraps provider/network failures and poll timeouts. */
+/**
+ * Wraps provider/network failures, timeouts and requests refused before or by
+ * the provider. Thrown by `segment()` and `removeBackground()`.
+ */
 export class SegmentationProviderError extends Error {
   /** Failure category. */
   public readonly code: SegmentationErrorCode;
   /** Underlying cause, when one exists. */
   public readonly cause?: unknown;
+  /** The provider's HTTP status, when the failure is an HTTP answer. */
+  public readonly status?: number;
 
-  constructor(message: string, code: SegmentationErrorCode, cause?: unknown) {
+  constructor(message: string, code: SegmentationErrorCode, cause?: unknown, status?: number) {
     super(message);
     this.name = 'SegmentationProviderError';
     this.code = code;
     this.cause = cause;
+    if (status !== undefined) this.status = status;
   }
 }
