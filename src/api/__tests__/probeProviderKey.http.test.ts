@@ -51,7 +51,11 @@ interface Received {
   body: Buffer;
 }
 
-type Answer = { status?: number; headers?: Record<string, string>; body?: string; delayMs?: number; drop?: boolean };
+/**
+ * One answer: `delayMs` holds it back, `drop` closes the connection before any answer, `stall` sends the status, the
+ * headers and the start of the body, then nothing more.
+ */
+type Answer = { status?: number; headers?: Record<string, string>; body?: string; delayMs?: number; drop?: boolean; stall?: boolean };
 
 /** Every request the server received in the current case, in order. */
 const received: Received[] = [];
@@ -61,6 +65,8 @@ const unexpected: string[] = [];
 const outside: string[] = [];
 /** Answers the server holds back, cleared after each case. */
 const held: NodeJS.Timeout[] = [];
+/** Answers left unfinished, ended after each case. */
+const stalled: http.ServerResponse[] = [];
 /** The current case's answers, by `METHOD /path`. */
 let routes: Record<string, (request: Received) => Answer> = {};
 
@@ -86,6 +92,12 @@ beforeAll(async () => {
       const answer = route(request);
       if (answer.drop) {
         res.socket?.destroy();
+        return;
+      }
+      if (answer.stall) {
+        res.writeHead(answer.status ?? 200, { 'content-type': 'application/json', ...(answer.headers ?? {}) });
+        res.write((answer.body ?? '{}').slice(0, 12));
+        stalled.push(res);
         return;
       }
       const send = () => {
@@ -125,6 +137,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const timer of held.splice(0)) clearTimeout(timer);
+  for (const res of stalled.splice(0)) res.destroy();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   expect(unexpected).toEqual([]);
@@ -282,6 +295,16 @@ describe('probeProviderKey on OpenAI', () => {
     expect(received.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /v1/models', 'POST /v1/chat/completions']);
     expect(jsonOf(received[1]).model).toBe('gpt-4o-mini');
     expect(result).toMatchObject({ state: 'ok', model: 'gpt-4o-mini' });
+  });
+
+  it('reports the timeout, not a catalog without a chat model, when the models list stops before its end', async () => {
+    routes['GET /v1/models'] = () => ({ ...json({ object: 'list', data: [{ id: 'gpt-4o-mini' }] }), stall: true });
+
+    const result = await probe({ timeoutMs: 200 });
+
+    expect(result.state).toBe('unknown');
+    expect(result.detail).toBe('no answer within 200 ms');
+    expect(received.map((r) => r.path)).toEqual(['/v1/models']);
   });
 
   it('sends max_completion_tokens to a reasoning model', async () => {
@@ -528,6 +551,20 @@ describe('probeProviderKey, whatever the provider', () => {
     expect(result.httpStatus).toBeUndefined();
   });
 
+  it('reports the timeout and the abort, not the status, when the error body stops before its end', async () => {
+    // The status and the headers arrive, the body never finishes: the probe has no answer to read.
+    routes['POST /v1/messages'] = () => ({ ...json({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limited' } }, 429), stall: true });
+
+    const timedOut = await api.probeProviderKey({ provider: 'anthropic', apiKey: KEY, baseUrl: origin, timeoutMs: 200 });
+    expect(timedOut.state).toBe('unknown');
+    expect(timedOut.detail).toBe('no answer within 200 ms');
+
+    const caller = new AbortController();
+    setTimeout(() => caller.abort(), 100);
+    const aborted = await api.probeProviderKey({ provider: 'anthropic', apiKey: KEY, baseUrl: origin, signal: caller.signal });
+    expect(aborted).toMatchObject({ state: 'unknown', detail: 'aborted by the caller' });
+  });
+
   it('reports unknown when the connection fails', async () => {
     routes['POST /v1/messages'] = () => ({ drop: true });
 
@@ -560,6 +597,18 @@ describe('probeProviderKey, whatever the provider', () => {
     expect(result.state).toBe('invalid');
     expect(result.detail).not.toContain(KEY);
     expect(result.detail).toBe('key rejected (HTTP 401): invalid x-api-key: [key]');
+  });
+
+  it('keeps the key out of a long vendor message that would be cut through the key', async () => {
+    // The message runs past the 300 characters a detail keeps, with the key across the cut.
+    const filler = 'refused '.repeat(34).trim();
+    routes['POST /v1/messages'] = () => json({ type: 'error', error: { type: 'authentication_error', message: `${filler} Key: ${KEY} is not valid.` } }, 401);
+
+    const result = await api.probeProviderKey({ provider: 'anthropic', apiKey: KEY, baseUrl: origin });
+
+    expect(result.state).toBe('invalid');
+    expect(result.detail).not.toContain(KEY.slice(0, 8));
+    expect(result.detail).toContain('Key: [key] is not valid.');
   });
 
   it("goes to the vendor's own endpoint when baseUrl is blank", async () => {
