@@ -26,8 +26,16 @@ import type {
 } from '../../../../index';
 
 describe('anthropicModelPricing (prices for a host, USD per 1K tokens)', () => {
-  it('prices Claude Sonnet 5.5 with its own cache-read rate', () => {
-    expect(anthropicModelPricing('claude-sonnet-5-5')).toEqual({ input: 0.002, output: 0.01, cacheRead: 0.0001 });
+  it('prices Claude Sonnet 5.5 with its own cache-read rate and the cache-write rates of every model', () => {
+    // https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-04: $2 input, $2.50 5-minute write, $4
+    // 1-hour write, $0.10 cache hit, $10 output per MTok.
+    expect(anthropicModelPricing('claude-sonnet-5-5')).toEqual({
+      input: 0.002,
+      output: 0.01,
+      cacheRead: 0.0001,
+      cacheWrite: 0.0025,
+      cacheWriteOneHour: 0.004,
+    });
   });
 
   it('gives a host the shape it reads for OpenAI', () => {
@@ -64,8 +72,11 @@ describe('anthropicModelPricing (prices for a host, USD per 1K tokens)', () => {
       input: 0.0001,
       output: 0.0005,
       cacheRead: 0.00001,
-      // Over 100K prompt tokens a cache read costs 0.05 per million, five times the base rate as the input does.
-      longContext: { fromTokens: 100000, input: 0.0005, output: 0.0025, cacheRead: 0.00005 },
+      cacheWrite: 0.000125,
+      cacheWriteOneHour: 0.0002,
+      // Over 100K prompt tokens a cache read costs 0.05 per million, five times the base rate as the input does, and the
+      // writes 0.625 and 1 (the pricing page's second Haiku 5.5 row, read 2026-11-04).
+      longContext: { fromTokens: 100000, input: 0.0005, output: 0.0025, cacheRead: 0.00005, cacheWrite: 0.000625, cacheWriteOneHour: 0.001 },
     });
     expect(anthropicModelPricing('claude-sonnet-5-5')?.longContext).toBeUndefined();
   });

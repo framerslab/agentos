@@ -6,6 +6,8 @@
  * (the spend budget, a day's spend reservations) without loading the provider.
  */
 
+import { isOpenAIReasoningModel, openAiReasoningContextWindow } from './openaiModelFamilies.js';
+
 /** USD per 1K tokens: `input` for prompt tokens (an embedding model's whole count), `output` for completion tokens. */
 export interface OpenAIModelPrice {
   readonly input: number;
@@ -150,4 +152,73 @@ export function openAITranscriptionPricing(modelId: string | undefined): number 
     ownRow(OPENAI_TRANSCRIPTION_PRICING, modelId) ??
     ownRow(OPENAI_TRANSCRIPTION_PRICING, modelId.replace(/-\d{4}-\d{2}-\d{2}$/, ''))
   );
+}
+
+/**
+ * Prompt size, in input tokens, above which OpenAI bills a call on a
+ * long-context model at the long-context rates. The pricing page splits its
+ * flagship table into "<=272K" and ">272K" input tokens, and the comparison is
+ * strict: a prompt of exactly 272,000 tokens bills at the standard rates. The
+ * count includes cached tokens, and output size never triggers the tier.
+ */
+export const OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS = 272_000;
+
+/**
+ * Factor OpenAI applies to the input rate of a long-context call. The cached
+ * input and cache write rates double as well.
+ */
+export const OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER = 2;
+
+/** Factor OpenAI applies to the output rate of a long-context call. */
+export const OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER = 1.5;
+
+/**
+ * Whether OpenAI bills `modelId` at the long-context rates when a prompt
+ * exceeds {@link OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS} input tokens. Such a
+ * call bills its whole input at {@link OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER}
+ * times the input rate and its whole output at
+ * {@link OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER} times the output rate.
+ *
+ * OpenAI states the rule for its models with a 1.05M context window, so this
+ * reuses {@link openAiReasoningContextWindow}. That covers the GPT-6 family
+ * (`gpt-6.1-sol` included), the GPT-5.6 family except `gpt-5.6-cyber`,
+ * `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4` and `gpt-5.4-pro`, bare or dated.
+ * Everything else bills flat at every prompt size: the GPT-5 models with a
+ * smaller window (`gpt-5.6-cyber`, which the pricing page lists without a
+ * long-context rate, `gpt-5.4-mini` / `-nano`, `gpt-5.3` and older, and the
+ * chat-latest snapshots), the o-series, and the pre-GPT-5 models, `gpt-4.1`
+ * included despite its 1M window. Checked against
+ * developers.openai.com/api/docs/pricing and the model pages on 2026-09-30.
+ *
+ * @param modelId Model id as requested or as echoed by the API.
+ * @returns `true` when a prompt above the threshold bills at the long-context rates.
+ */
+export function openAiHasLongContextPricing(modelId: string): boolean {
+  return isOpenAIReasoningModel(modelId) && openAiReasoningContextWindow(modelId) === 1050000;
+}
+
+/**
+ * Factor OpenAI applies to the input rate for a prompt-cache write with the default 30-minute lifetime, on a model that
+ * bills cache writes ({@link openAiBillsCacheWrites}). OpenAI caches a prompt by default, so a call that sends no
+ * cache setting still writes at this rate: "Omitting both settings preserves the default "30m" behavior"
+ * (https://developers.openai.com/api/docs/guides/prompt-caching, read 2026-11-04). The pricing page lists the same
+ * rates per model (https://developers.openai.com/api/docs/pricing, read 2026-11-04: GPT-6 Astra $12.50 on a $10
+ * input, GPT-6 Sol $2.50 on $2). The long-context tier doubles them as it doubles the input rate.
+ */
+export const OPENAI_CACHE_WRITE_MULTIPLIER = 1.25;
+
+/**
+ * Factor OpenAI applies to the input rate for a prompt-cache write with the 12-hour lifetime, which a request asks for
+ * with its cache settings (`prompt_cache_options.ttl`, or a breakpoint's own `ttl`): 2.5x on the pricing page and the
+ * prompt-caching guide, read 2026-11-04 (GPT-6 Astra $25 on a $10 input).
+ */
+export const OPENAI_EXTENDED_CACHE_WRITE_MULTIPLIER = 2.5;
+
+/**
+ * Whether OpenAI bills prompt-cache writes on `modelId`: the GPT-5.6 family and later ("Writes cost more than ordinary
+ * input ... on GPT-5.6 and later"; earlier models: "No additional cache-write charge", the prompt-caching guide read
+ * 2026-11-04). Bare or dated, case-insensitive.
+ */
+export function openAiBillsCacheWrites(modelId: string): boolean {
+  return /^gpt-(5\.6|6)(?![0-9])/i.test(modelId);
 }
