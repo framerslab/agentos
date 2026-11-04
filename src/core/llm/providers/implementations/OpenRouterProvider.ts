@@ -534,7 +534,10 @@ export class OpenRouterProvider implements IProvider {
    * - the first system message (stable prefix — later system messages can
    *   be volatile per-turn recall appended by memory hooks), and
    * - the last text block of the final message (moving tail, so multi-turn
-   *   history is read back on the next turn).
+   *   history is read back on the next turn). `options.cache.tail === false`
+   *   leaves this one out, as the direct path does: a call that re-sends a
+   *   stable prefix and never the same tail twice would pay to write a tail
+   *   nothing reads back.
    *
    * Stands down entirely when the caller already placed any cache_control
    * marker on messages or tool definitions (caller placement wins), or on
@@ -649,7 +652,9 @@ export class OpenRouterProvider implements IProvider {
     if (systemIdx >= 0) markMessage(orMessages[systemIdx]);
 
     // Moving tail: the final message, unless it IS the system message we
-    // just marked (single-message requests keep one breakpoint).
+    // just marked (single-message requests keep one breakpoint), or the
+    // call asked for no tail (`cache: { tail: false }`).
+    if (options.cache && options.cache.tail === false) return;
     const lastIdx = orMessages.length - 1;
     if (lastIdx >= 0 && lastIdx !== systemIdx) markMessage(orMessages[lastIdx]);
   }

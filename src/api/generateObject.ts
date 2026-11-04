@@ -285,7 +285,10 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * {@link GenerateTextOptions.cache}.
    * `false` opts this call out of ALL cache marking (the schema block's
    * marker included — right for one-shot extractions); `{ ttl: '1h' }` puts
-   * a 1-hour TTL on the provider's auto markers (the moving message-tail).
+   * a 1-hour TTL on the provider's auto markers (the moving message-tail);
+   * `{ tail: false }` keeps the caller's system markers and the schema
+   * block's marker and places no breakpoint on the messages — right for an
+   * extraction that re-sends the same instructions with new input each call.
    */
   cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
 

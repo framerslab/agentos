@@ -581,7 +581,18 @@ export interface GenerateTextOptions {
    *   orchestrator/tool steps gap 2-14 minutes and human-paced conversation
    *   turns regularly exceed 5 minutes, so the default-TTL entry expires
    *   between steps and every turn re-writes. Caller-placed markers keep
-   *   their own TTLs ({@link SystemContentBlock.cacheTtl}).
+   *   their own TTLs ({@link SystemContentBlock.cacheTtl}), except that
+   *   shorter system markers are raised to 1 hour when a 1-hour tail follows
+   *   them (Anthropic rejects a longer TTL after a shorter one).
+   * - `{ tail: false }` — the provider places no breakpoint on the messages
+   *   (no moving tail, no request-level marker), and the markers the caller
+   *   set ({@link SystemContentBlock.cacheBreakpoint}) go out exactly as set.
+   *   With no caller marker anywhere, the end of the first system message is
+   *   marked instead (carrying `ttl` when given). Set this on calls that
+   *   re-send a long stable prefix and never the same tail twice (judges,
+   *   classifiers): the prefix is still read back from the cache, and the
+   *   unique tail is not written at the 1.25x/2x premium. `cache: false`
+   *   would drop the prefix marker as well.
    * - omitted / `{ ttl: '5m' }` — default 5-minute auto markers.
    */
   cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;

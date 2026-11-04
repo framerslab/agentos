@@ -2280,12 +2280,23 @@ export class AnthropicProvider implements IProvider {
     //    the TTL reaches the wire. For loops whose step gaps exceed the
     //    5-minute default TTL (codegen tool calls run 2-14 min; human
     //    think-time between conversation turns regularly exceeds 5m).
+    //  - `cache: { tail: false }` — no breakpoint on the messages and no
+    //    request-level marker (the API places that one on the last
+    //    cacheable block, which is the tail). Caller markers pass through
+    //    as set, TTLs included: with no tail after them there is no TTL
+    //    order to keep. With no caller marker anywhere, the end of the
+    //    first system message is marked (with the call's ttl); with no
+    //    system, nothing is. For calls that re-send a long stable prefix
+    //    and never the same tail twice (judges, classifiers): the tail
+    //    write is the unique suffix at 1.25x/2x, never read back, while
+    //    `cache: false` would also drop the prefix that IS read back.
     //
     // Process-global kill switch (single-shot batch processes):
     // AGENTOS_ANTHROPIC_AUTO_CACHE=0 — disables the auto path only; caller
     // markers still pass through there (use `cache: false` for a per-call
     // hard-off including caller markers).
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
+    const writeTail = !(options.cache && options.cache.tail === false);
     if (options.cache === false) {
       // customModelParams passthrough ran above and may have injected ANY
       // marked region — raw tools, a request-level cache_control, or even a
@@ -2331,7 +2342,8 @@ export class AnthropicProvider implements IProvider {
         // Never restructure here. Count markers on the ACTUAL payload:
         // any marker means the caller owns the wire (full stand-down);
         // none means the request-level auto marker — valid on any payload
-        // shape — keeps the pre-override caching behavior.
+        // shape — keeps the pre-override caching behavior. That marker sits
+        // on the last cacheable block, so `tail: false` places none.
         const overrideMarkers =
           this.countWireBlockMarkers(payload.system) +
           this.countMessageCacheMarkers(
@@ -2340,7 +2352,7 @@ export class AnthropicProvider implements IProvider {
               : [],
           ) +
           this.countWireBlockMarkers(payload.tools);
-        if (overrideMarkers === 0) {
+        if (overrideMarkers === 0 && writeTail) {
           payload.cache_control = { type: 'ephemeral' };
         }
         return payload;
@@ -2368,8 +2380,8 @@ export class AnthropicProvider implements IProvider {
       const autoTtl: '1h' | undefined =
         options.cache && options.cache.ttl === '1h' ? '1h' : undefined;
       if (explicitBreakpoints === 0 && messageBreakpoints === 0 && toolBreakpoints === 0) {
-        if (payload.thinking !== undefined || autoTtl !== undefined) {
-          // Two reasons to use explicit block-level breakpoints instead of
+        if (payload.thinking !== undefined || autoTtl !== undefined || !writeTail) {
+          // Three reasons to use explicit block-level breakpoints instead of
           // the request-level auto marker:
           //
           //  - Extended thinking: the request-level auto marker measurably
@@ -2380,6 +2392,9 @@ export class AnthropicProvider implements IProvider {
           //    block-level attribute, so honoring it requires explicit
           //    placement. Opt-in only — callers without a TTL keep the
           //    request-level marker exactly as before.
+          //  - `cache: { tail: false }`: the request-level marker lands on
+          //    the last cacheable block, the tail this mode leaves out, so
+          //    only the system-end breakpoint (1. below) is placed.
           //
           // Placement:
           //
@@ -2408,19 +2423,21 @@ export class AnthropicProvider implements IProvider {
             payload.system = systemBlocks;
             placed = true;
           }
-          if (this.markLastCacheableMessageBlock(anthropicMessages, autoTtl)) {
+          if (writeTail && this.markLastCacheableMessageBlock(anthropicMessages, autoTtl)) {
             placed = true;
           }
-          if (!placed) {
+          if (!placed && writeTail) {
             // Degenerate request (no system, no markable message block):
             // fall back to the top-level marker rather than sending
-            // nothing at all.
+            // nothing at all. Under `tail: false` that marker would be the
+            // tail, so such a request goes out unmarked.
             payload.cache_control = { type: 'ephemeral' };
           }
         } else {
           payload.cache_control = { type: 'ephemeral' };
         }
       } else if (
+        writeTail &&
         messageBreakpoints === 0 &&
         explicitBreakpoints > 0 &&
         explicitBreakpoints + toolBreakpoints < 4
@@ -2428,7 +2445,8 @@ export class AnthropicProvider implements IProvider {
         // Caller marked the system prefix only: keep their placement
         // verbatim and pin just the moving message tail (the API cap is 4
         // breakpoints per request — the tail adds one, so require headroom
-        // across ALL wire markers, tools included).
+        // across ALL wire markers, tools included). Under `tail: false` the
+        // caller's markers go out exactly as set and nothing is added.
         // Applies on thinking AND non-thinking requests alike — the streamed
         // conversation surfaces (caller-marked system, no thinking) were the
         // last shape whose per-turn history went permanently uncached.

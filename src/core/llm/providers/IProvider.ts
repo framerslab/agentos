@@ -219,7 +219,18 @@ export interface ModelCompletionOptions {
    *   the auto path uses explicit block placement so the TTL reaches the
    *   wire. For slow loops whose step gaps exceed 5 minutes (codegen
    *   orchestrator/tool calls, human-paced conversation turns).
-   *   Caller-placed markers keep their own TTLs untouched.
+   *   Caller-placed markers keep their own TTLs, except that a caller's
+   *   shorter system markers are raised to `'1h'` when a 1-hour tail follows
+   *   them (Anthropic rejects a longer TTL after a shorter one).
+   * - `{ tail: false }` — no breakpoint on the messages and no request-level
+   *   marker (the API places that one on the last cacheable block): the
+   *   markers the caller set go out exactly as set, TTLs included, and with
+   *   no caller marker anywhere the end of the first system message is
+   *   marked (carrying `ttl` when given); with no system nothing is. For
+   *   calls that re-send a long stable prefix and never the same tail twice
+   *   (judges, classifiers): the prefix is still read back from the cache,
+   *   while the unique tail is not written at the write premium. Combines
+   *   with `ttl`.
    * - `{ ttl: '5m' }` or omitted — default behavior (5-minute auto markers).
    */
   cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
