@@ -413,7 +413,7 @@ function higher(a: number | undefined, b: number | undefined): number | undefine
  *   token undercounts CJK text, emoji and base64, which the providers' counting endpoints bill at up to 0.94 tokens a
  *   byte (the fixtures beside this module's tests).
  * - Input rate: the highest the request can reach. The long-context card's where the token bound passes its
- *   threshold, and the higher of that and the cache-write rate where the request asks for caching
+ *   threshold, and the higher of that and the highest cache-write rate the card names where the request asks for caching
  *   (`cacheMarkers`, or a `cache_control` or `prompt_cache_breakpoint` key in its text) or the model writes the cache
  *   by default (OpenAI on GPT-5.6 and later).
  * - Output: the output cap as the request sends it, at the highest output rate the request can reach. A ceiling
@@ -441,7 +441,12 @@ export function estimateMaxCallCostUSD(providerId: string, modelId: string, req:
   let inputRate = 0;
   let outputRate = 0;
   for (const card of cards) {
-    const write = higher(card.automaticCacheWritePerMTokUSD, cached ? card.cacheWritePerMTokUSD : undefined);
+    // A request that asks for caching can write at any write rate the card names: the longer lifetime's, or the
+    // default one's on a host row that names only that.
+    const write = higher(
+      card.automaticCacheWritePerMTokUSD,
+      cached ? higher(card.cacheWritePerMTokUSD, card.defaultCacheWritePerMTokUSD) : undefined,
+    );
     inputRate = Math.max(inputRate, card.inputPerMTokUSD, write ?? 0);
     outputRate = Math.max(outputRate, card.outputPerMTokUSD);
   }

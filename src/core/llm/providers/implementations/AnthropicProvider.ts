@@ -603,6 +603,18 @@ function oneHourCacheWrites(split: AnthropicCacheCreationBreakdown | null | unde
 /** Anthropic's API base, the `baseURL` a provider without one sends to. */
 export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com';
 
+/**
+ * The base a request's endpoint (`/v1/messages`) is appended to: `baseURL` without its trailing slashes, so
+ * `https://gateway.example/` sends to `https://gateway.example/v1/messages` and not to `//v1/messages`, or
+ * {@link ANTHROPIC_DEFAULT_BASE_URL} when none is given or nothing is left.
+ */
+function anthropicBase(baseURL: string | undefined): string {
+  const base = baseURL ?? '';
+  let end = base.length;
+  while (end > 0 && base.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return end > 0 ? base.slice(0, end) : ANTHROPIC_DEFAULT_BASE_URL;
+}
+
 /** The model a billing probe and `checkHealth()` send their one-token request to when the provider has no default model. */
 export const ANTHROPIC_BILLING_PROBE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -695,6 +707,9 @@ export class AnthropicProvider implements IProvider {
       // shorten-retry loop.
       defaultMaxTokens: 16000,
       ...config,
+      // Every endpoint is appended to the base (`/v1/messages`), so a base given with trailing slashes
+      // (`https://gateway.example/`) would send to `//v1/messages`, which a gateway can refuse.
+      baseURL: anthropicBase(config.baseURL),
     };
     this.keyPool = keyPool;
     await this.keyPool.ready();
@@ -3039,7 +3054,7 @@ export class AnthropicProvider implements IProvider {
    */
   public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
     const deadline = startKeyProbeDeadline(options);
-    const baseURL = options.baseURL || this.config?.baseURL || ANTHROPIC_DEFAULT_BASE_URL;
+    const baseURL = anthropicBase(options.baseURL || this.config?.baseURL);
     try {
       const headers = { ...this.buildHeaders(apiKey), 'Content-Type': 'application/json' };
       if (options.kind === 'billing') {
