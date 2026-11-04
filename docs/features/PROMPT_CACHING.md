@@ -55,7 +55,9 @@ grown history is read back next turn. Caller markers compose with it:
 - Caller **message** markers stand the auto path down entirely — if you are
   placing markers inside `messages`, you own placement.
 - Marked **tool definitions** count toward Anthropic's 4-breakpoint request
-  cap; the auto path drops its tail marker rather than exceed it.
+  cap; the auto path drops its tail marker rather than exceed it. A
+  top-level `cache_control` on an entry of `tools`, or on an `image_url`
+  message part, is sent as set, TTL included.
 
 Costs and floors (Anthropic pricing rules):
 

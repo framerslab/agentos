@@ -342,6 +342,8 @@ interface AnthropicToolDef {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  /** A caller-placed cache breakpoint, carried through from the input tool. */
+  cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
 }
 
 /** Anthropic API error envelope. */
@@ -2381,12 +2383,12 @@ export class AnthropicProvider implements IProvider {
       // caching), and those markers count against Anthropic's hard
       // 4-breakpoint-per-request cap. Fold them into the accounting so a
       // request with e.g. 3 marked system blocks + 1 marked tool (4, at the
-      // cap) does not get a 5th tail marker here and 400. agentos does not
-      // emit marked tools today (adaptTools adds none, and a customModelParams
-      // tools override is raw), so toolBreakpoints is 0 for every current
-      // caller — this is forward-safety, not a behavior change. Any caller
-      // that DOES mark tools also stands the auto path down entirely (below),
-      // matching the caller-owns-the-region philosophy.
+      // cap) does not get a 5th tail marker here and 400. A marked tool
+      // arrives either as a top-level cache_control on an `options.tools`
+      // entry (convertToolDefs carries it through) or in a raw
+      // customModelParams tools override. A caller that marks tools and
+      // nothing else stands the auto path down entirely (below), matching
+      // the caller-owns-the-region philosophy.
       const toolBreakpoints = Array.isArray(payload.tools)
         ? (payload.tools as Array<{ cache_control?: unknown }>).filter(
             (t) => t && typeof t === 'object' && (t as { cache_control?: unknown }).cache_control,
@@ -2729,6 +2731,9 @@ export class AnthropicProvider implements IProvider {
           const url = (part as { image_url: { url: string } }).image_url.url;
           // Extract base64 data from data: URLs
           const dataMatch = url.match(/^data:(image\/\w+);base64,(.+)$/);
+          // A caller-placed breakpoint on the image rides along, as it does
+          // on text parts: image blocks in user turns are cacheable.
+          const imageCc = (part as { cache_control?: unknown }).cache_control;
           if (dataMatch) {
             anthropicContent.push({
               type: 'image',
@@ -2737,12 +2742,14 @@ export class AnthropicProvider implements IProvider {
                 media_type: dataMatch[1],
                 data: dataMatch[2],
               },
+              ...(imageCc ? { cache_control: imageCc } : {}),
             });
           } else {
             // For external URLs, Anthropic supports URL source type
             anthropicContent.push({
               type: 'image',
               source: { type: 'url', url },
+              ...(imageCc ? { cache_control: imageCc } : {}),
             });
           }
         }
@@ -2761,7 +2768,9 @@ export class AnthropicProvider implements IProvider {
    * Converts OpenAI-style tool definitions to Anthropic's format.
    *
    * OpenAI uses `{ type: 'function', function: { name, description, parameters } }`
-   * while Anthropic uses `{ name, description, input_schema }`.
+   * while Anthropic uses `{ name, description, input_schema }`. A top-level
+   * `cache_control` on an input tool, in either format, is copied onto the
+   * converted definition.
    *
    * @param {Array<Record<string, unknown>>} [tools] - OpenAI-formatted tool defs.
    * @returns {AnthropicToolDef[]} Anthropic-formatted tool definitions.
@@ -2770,6 +2779,10 @@ export class AnthropicProvider implements IProvider {
   private convertToolDefs(tools?: Array<Record<string, unknown>>): AnthropicToolDef[] {
     if (!tools || tools.length === 0) return [];
     return tools.map(tool => {
+      // A top-level cache_control on the input tool is the caller's
+      // breakpoint for the tools prefix; it goes out as set, TTL included.
+      const cacheControl = (tool as { cache_control?: AnthropicToolDef['cache_control'] }).cache_control;
+      const marker = cacheControl ? { cache_control: cacheControl } : {};
       // OpenAI format: { type: 'function', function: { name, description, parameters } }
       const fn = (tool as any)?.function;
       if (fn?.name) {
@@ -2778,6 +2791,7 @@ export class AnthropicProvider implements IProvider {
           description: (fn.description ?? '') as string,
           // Anthropic calls it input_schema, OpenAI calls it parameters
           input_schema: fn.parameters ?? { type: 'object' },
+          ...marker,
         };
       }
       // AgentOS ITool format: { name, description, inputSchema }
@@ -2785,6 +2799,7 @@ export class AnthropicProvider implements IProvider {
         name: (tool as any).name ?? 'unknown',
         description: (tool as any).description ?? '',
         input_schema: (tool as any).inputSchema ?? (tool as any).parameters ?? { type: 'object' },
+        ...marker,
       };
     });
   }

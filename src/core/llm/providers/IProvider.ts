@@ -41,7 +41,7 @@
  */
 export type MessageContentPart =
   | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
-  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto'; } }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto'; }; cache_control?: { type: 'ephemeral' } }
   // For Anthropic tool results specifically, fitting their API:
   | { type: 'tool_result'; tool_use_id: string; content?: string | Array<Record<string, any>>; is_error?: boolean; }
   // Fallback for other potential string types for extensibility
@@ -320,7 +320,11 @@ export interface ModelCompletionOptions {
   abortSignal?: AbortSignal;
   /** Indicates if a streaming response is expected. */
   stream?: boolean;
-  /** Schemas of tools the model can call. */
+  /**
+   * Schemas of tools the model can call. On Anthropic, a top-level
+   * `cache_control` (`{ type: 'ephemeral', ttl?: '5m' | '1h' }`) on an entry
+   * is sent on that tool definition as the caller's cache breakpoint.
+   */
   tools?: Array<Record<string, unknown>>;
   /** Controls how the model uses tools. */
   toolChoice?: string | Record<string, unknown>;
