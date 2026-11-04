@@ -305,6 +305,33 @@ describe('generateObject', () => {
     expect(result.usage.cacheCreationTokens).toBe(90);
   });
 
+  it('sums the 1-hour share of the cache writes across retry attempts', async () => {
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(
+        mockResponse('{"name": "Bad",', {
+          promptTokens: 100,
+          completionTokens: 5,
+          totalTokens: 105,
+          cacheCreationInputTokens: 90,
+          cacheCreationExtendedInputTokens: 60,
+        } as unknown as { promptTokens: number; completionTokens: number; totalTokens: number }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse('{"name": "Fixed", "age": 30}', {
+          promptTokens: 100,
+          completionTokens: 10,
+          totalTokens: 110,
+          cacheCreationInputTokens: 10,
+          cacheCreationExtendedInputTokens: 5,
+        } as unknown as { promptTokens: number; completionTokens: number; totalTokens: number }),
+      );
+
+    const result = await generateObject({ schema: personSchema, prompt: 'Extract person info' });
+
+    expect(result.usage.cacheCreationTokens).toBe(100);
+    expect(result.usage.cacheCreationExtendedTokens).toBe(65);
+  });
+
   it('leaves cache-token fields undefined when provider does not report them', async () => {
     // OpenAI auto-caches but does not surface per-call counters. The
     // provider's usage has no cacheReadInputTokens; generateObject must

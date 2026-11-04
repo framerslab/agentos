@@ -20,12 +20,13 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { generateText } from '../generateText.js';
+import { agency } from '../agency.js';
 import { hitl } from '../hitl.js';
 import { baseUrlIfSet, providerEnvVars, resolveProvider, shutdownProviderManagers } from '../model.js';
 import { SpendBudget } from '../runtime/spendBudget.js';
 import { registerModelPricing } from '../runtime/modelPricing.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
-import type { ApprovalRequest } from '../types.js';
+import type { AgencyResult, ApprovalRequest } from '../types.js';
 
 interface Received {
   method: string;
@@ -250,6 +251,24 @@ describe("the lifetime of a call's cache writes", () => {
 
   afterEach(() => {
     registerModelPricing('anthropic', () => undefined);
+  });
+
+  it("reaches an agency's usage and each agent call's record", async () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', origin);
+    const team = agency({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      strategy: 'sequential',
+      agents: { writer: { instructions: 'Write one line.' } },
+    });
+
+    const result = (await team.generate('Hello?')) as AgencyResult;
+
+    const calls = received.filter((r) => r.path === '/v1/messages').length;
+    expect(calls).toBeGreaterThan(0);
+    expect(result.usage.cacheCreationTokens).toBe(1_000 * calls);
+    expect(result.usage.cacheCreationExtendedTokens).toBe(400 * calls);
+    expect(result.agentCalls[0]?.usage).toMatchObject({ cacheCreationTokens: 1_000, cacheCreationExtendedTokens: 400 });
   });
 
   it.each(['claude-sonnet-4-6', 'claude-host-1'])('on %s, reaches the usage the call returns and the cost its budget is charged', async (model) => {
