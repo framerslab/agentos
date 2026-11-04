@@ -69,15 +69,15 @@ const result = await later.resume(runId!);
 | Option | Default | Meaning |
 |---|---|---|
 | `db` | (required) | The adapter the table lives in. Give the store an adapter of its own or the product's own, never AgentOS's provenance-wrapped storage adapter, whose write hooks can turn a `run()` into a no-op. |
-| `tablePrefix` | `agentos_checkpoints` | The table's name, and the start of its indexes' names. A lower-case letter and at most 52 more lower-case letters, digits or underscores; the constructor throws on any other value. Stores under different prefixes keep their checkpoints apart in one database. |
+| `tablePrefix` | `agentos_checkpoints` | The table's name, and the start of its indexes' names. A lower-case letter and at most 52 more lower-case letters, digits or underscores; the constructor throws on any other value. Stores under different prefixes keep their checkpoints apart in one database. The store quotes the name in every statement, so a prefix that is an SQL keyword, such as `order`, names a table. |
 | `ensureSchema` | `true` | Make the table and its indexes on first use when the table is missing. With `false` the store runs no DDL. |
 
-Stores in several processes can start on one empty database at once. On Postgres the `CREATE TABLE IF NOT EXISTS` of the store that loses that race can fail on the catalogue's unique index, so a store whose DDL fails reads the table again and goes on when it answers; when it does not, the call rejects with the DDL's error and the next call tries again.
+Stores in several processes can start on one empty database at once. On Postgres the `CREATE TABLE IF NOT EXISTS` or `CREATE INDEX IF NOT EXISTS` of the store that loses that race fails once the other commits, on the catalogue's unique index or as a duplicate table ([the PostgreSQL list on the race](https://www.postgresql.org/message-id/CA+TgmoZAdYVtwBfp1FL2sMZbiHCWT4UPrzRLNnX1Nb30Ku3-gg@mail.gmail.com)). The store runs its DDL again on such a failure, as the memory and learning stores run their schema steps, and finds what the other made, so the table and every index exist when it completes. Any other failure rejects the call, and the next call tries again.
 
 Each checkpoint is one row of one table:
 
 ```sql
-CREATE TABLE IF NOT EXISTS agentos_checkpoints (
+CREATE TABLE IF NOT EXISTS "agentos_checkpoints" (
   id TEXT PRIMARY KEY,
   graph_id TEXT NOT NULL,
   run_id TEXT NOT NULL,
@@ -88,9 +88,9 @@ CREATE TABLE IF NOT EXISTS agentos_checkpoints (
   state_json TEXT NOT NULL,    -- state, memorySnapshot, nodeResults, visitedNodes, skippedNodes, pendingEdges
   metadata_json TEXT NOT NULL  -- the stateSize and hasMemorySnapshot list() returns
 );
-CREATE INDEX IF NOT EXISTS idx_agentos_checkpoints_run ON agentos_checkpoints (run_id, created_at, save_seq, id);
-CREATE INDEX IF NOT EXISTS idx_agentos_checkpoints_graph ON agentos_checkpoints (graph_id, created_at, save_seq, id);
-CREATE INDEX IF NOT EXISTS idx_agentos_checkpoints_seq ON agentos_checkpoints (save_seq);
+CREATE INDEX IF NOT EXISTS "idx_agentos_checkpoints_run" ON "agentos_checkpoints" (run_id, created_at, save_seq, id);
+CREATE INDEX IF NOT EXISTS "idx_agentos_checkpoints_graph" ON "agentos_checkpoints" (graph_id, created_at, save_seq, id);
+CREATE INDEX IF NOT EXISTS "idx_agentos_checkpoints_seq" ON "agentos_checkpoints" (save_seq);
 ```
 
 A product that runs its own migrations copies `checkpointDdl(prefix)`, which gives this text for a prefix, into one of them and passes `ensureSchema: false`:
@@ -102,7 +102,7 @@ await db.exec(checkpointDdl('acme_checkpoints')); // in the product's migration
 const store = new SqlCheckpointStore({ db, tablePrefix: 'acme_checkpoints', ensureSchema: false });
 ```
 
-The store orders checkpoints as `InMemoryCheckpointStore` does. Each save takes the next `save_seq`, one more than the largest in the table, in the statement that writes the row, and a save again under an id takes a new one, so it counts as the last. A save that starts after another has finished takes the larger number, which keeps the order of the saves that do not overlap (see [Custom Backend](#custom-backend)). Saves that overlap, as those of a parallel batch's nodes do, can take the same number on Postgres, and `id` orders them, so every read gives one order.
+The store orders checkpoints as `InMemoryCheckpointStore` does. Each save takes the next `save_seq`, one more than the largest in the table, in the statement that writes the row, and a save again under an id takes a new one, so it counts as the last. A save that starts after another has finished takes the larger number, which keeps the order of the saves that do not overlap (see [Custom Backend](#custom-backend)). A store runs its own saves one after another in the order they were called, so the saves of a parallel batch's branches, which overlap, keep that order too: the save called last, which records every branch completed by then, is the most recent, and a run resumed from it runs none of the branches it records again. Saves of two stores, or of two processes, that overlap can take the same number on Postgres, and `id` orders them, so every read gives one order. A save the database fails rejects, and the saves queued behind it go on.
 
 A save whose statement the database reports writing no row rejects, and so does one whose `timestamp` is not a whole number of milliseconds. The run then ends with that error (see [When a Save or an Edge Throws](#when-a-save-or-an-edge-throws)).
 

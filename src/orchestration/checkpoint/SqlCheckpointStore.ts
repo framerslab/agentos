@@ -18,6 +18,7 @@
  */
 
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import { retryLostCreate } from '../../cognition/memory/retrieval/store/migrations/lost-create.js';
 import type { GraphState } from '../ir/types.js';
 import type { Checkpoint, CheckpointMetadata, ICheckpointStore } from './ICheckpointStore.js';
 
@@ -61,7 +62,9 @@ function tableOf(tablePrefix: string | undefined): string {
  * - `metadata_json`: the `stateSize` and `hasMemorySnapshot` that {@link SqlCheckpointStore.list} returns, as JSON.
  *
  * Every time is epoch milliseconds in a BIGINT. The text holds no question mark: the Postgres adapter rewrites each
- * one to a numbered parameter.
+ * one to a numbered parameter. The table's and the indexes' names are quoted, here and in every statement of the
+ * store, so a prefix that is an SQL keyword (`order`, `check`) names a table; a quoted lower-case name is the same
+ * name unquoted, on SQLite and on Postgres.
  *
  * @param tablePrefix - The table's name; default `agentos_checkpoints`.
  * @returns The `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` statements, separated by semicolons.
@@ -70,7 +73,7 @@ function tableOf(tablePrefix: string | undefined): string {
 export function checkpointDdl(tablePrefix?: string): string {
   const table = tableOf(tablePrefix);
   return `
-CREATE TABLE IF NOT EXISTS ${table} (
+CREATE TABLE IF NOT EXISTS "${table}" (
   id TEXT PRIMARY KEY,
   graph_id TEXT NOT NULL,
   run_id TEXT NOT NULL,
@@ -81,9 +84,9 @@ CREATE TABLE IF NOT EXISTS ${table} (
   state_json TEXT NOT NULL,
   metadata_json TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_${table}_run ON ${table} (run_id, created_at, save_seq, id);
-CREATE INDEX IF NOT EXISTS idx_${table}_graph ON ${table} (graph_id, created_at, save_seq, id);
-CREATE INDEX IF NOT EXISTS idx_${table}_seq ON ${table} (save_seq);
+CREATE INDEX IF NOT EXISTS "idx_${table}_run" ON "${table}" (run_id, created_at, save_seq, id);
+CREATE INDEX IF NOT EXISTS "idx_${table}_graph" ON "${table}" (graph_id, created_at, save_seq, id);
+CREATE INDEX IF NOT EXISTS "idx_${table}_seq" ON "${table}" (save_seq);
 `;
 }
 
@@ -181,8 +184,10 @@ function metadataOf(row: MetadataRow): CheckpointMetadata {
  *
  * Every save takes the next `save_seq`, one more than the largest in the table, in the statement that writes the row,
  * and a save under an id that exists takes a new one, so a save that starts after another has finished takes the
- * larger number: the order a store has to keep is that of saves that do not overlap. Saves that overlap, as those of
- * a parallel batch's nodes do, can take the same number on Postgres; `id` orders them.
+ * larger number. A store runs its own saves one after another, in the order they were called, so saves of one store
+ * that overlap, as a parallel batch's branches make them, take numbers in that order, as `InMemoryCheckpointStore`
+ * keeps them: the save called last is the most recent, and a resume from it skips every branch it records. Saves of
+ * two stores, or two processes, that overlap can take the same number on Postgres; `id` orders them.
  *
  * Each statement is one statement, so the store needs no transaction. A read, a save and a delete make the table first
  * unless `ensureSchema` is false.
@@ -198,10 +203,14 @@ function metadataOf(row: MetadataRow): CheckpointMetadata {
  */
 export class SqlCheckpointStore implements ICheckpointStore {
   private readonly db: StorageAdapter;
-  /** The table's name, from the checked prefix; every statement reads it here. */
+  /** The table's name, from the checked prefix; {@link checkpointDdl} takes it. */
   private readonly table: string;
+  /** The table's name quoted, which every statement reads here. */
+  private readonly quoted: string;
   private readonly createSchema: boolean;
   private schemaReady: Promise<void> | null = null;
+  /** The last save queued; the next waits for it to settle, so the store's saves run in the order they were called. */
+  private lastWrite: Promise<void> = Promise.resolve();
 
   /**
    * @param options - The adapter, the table's prefix and whether the store makes its table.
@@ -210,6 +219,7 @@ export class SqlCheckpointStore implements ICheckpointStore {
    */
   constructor(options: SqlCheckpointStoreOptions) {
     this.table = tableOf(options.tablePrefix);
+    this.quoted = `"${this.table}"`;
     this.db = options.db;
     this.createSchema = options.ensureSchema !== false;
   }
@@ -220,21 +230,17 @@ export class SqlCheckpointStore implements ICheckpointStore {
    * it looks for the index's name. Called before the first statement; safe to call again. Does nothing with
    * `ensureSchema: false`.
    *
-   * Another process can make the table between the read and the DDL: two stores starting on an empty database both
-   * find it missing. On Postgres the DDL of the one that loses can then fail, `IF NOT EXISTS` notwithstanding, on the
-   * catalogue's unique index. A creation that fails therefore reads the table again and counts a table that answers
-   * as made; when it still does not answer, the call rejects with the DDL's error, and the next call tries again.
+   * Another session can make the table between the read and the DDL: two stores starting on an empty database both
+   * find it missing. On Postgres the DDL of the one that loses then fails once the other commits, `IF NOT EXISTS`
+   * notwithstanding, on the catalogue's unique index or as a duplicate table. The DDL runs again on such a failure, as
+   * the memory and learning stores run their schema steps, and finds what the other made, so the table and every
+   * index exist when it completes. Any other failure rejects, and the next call tries again.
    */
   ensureSchema(): Promise<void> {
     if (!this.createSchema) return Promise.resolve();
     this.schemaReady ??= (async () => {
       if (await this.tableAnswers()) return;
-      try {
-        await this.db.exec(checkpointDdl(this.table));
-      } catch (error) {
-        if (await this.tableAnswers()) return;
-        throw error;
-      }
+      await retryLostCreate(() => this.db.exec(checkpointDdl(this.table)));
     })().catch((error: unknown) => {
       this.schemaReady = null;
       throw error;
@@ -245,7 +251,7 @@ export class SqlCheckpointStore implements ICheckpointStore {
   /** Whether the table answers a read; any error, a missing table's among them, counts as no. */
   private async tableAnswers(): Promise<boolean> {
     try {
-      await this.db.get(`SELECT 1 FROM ${this.table} LIMIT 1`);
+      await this.db.get(`SELECT 1 FROM ${this.quoted} LIMIT 1`);
       return true;
     } catch {
       return false;
@@ -266,7 +272,7 @@ export class SqlCheckpointStore implements ICheckpointStore {
   /** {@inheritDoc ICheckpointStore.get} */
   async get(checkpointId: string): Promise<Checkpoint | null> {
     await this.ensureSchema();
-    const row = await this.db.get<CheckpointRow>(`SELECT ${CHECKPOINT_COLUMNS} FROM ${this.table} WHERE id = ?`, [checkpointId]);
+    const row = await this.db.get<CheckpointRow>(`SELECT ${CHECKPOINT_COLUMNS} FROM ${this.quoted} WHERE id = ?`, [checkpointId]);
     return row ? checkpointOf(row) : null;
   }
 
@@ -276,11 +282,11 @@ export class SqlCheckpointStore implements ICheckpointStore {
     const row =
       nodeId === undefined
         ? await this.db.get<CheckpointRow>(
-            `SELECT ${CHECKPOINT_COLUMNS} FROM ${this.table} WHERE run_id = ? ${MOST_RECENT_FIRST} LIMIT 1`,
+            `SELECT ${CHECKPOINT_COLUMNS} FROM ${this.quoted} WHERE run_id = ? ${MOST_RECENT_FIRST} LIMIT 1`,
             [runId],
           )
         : await this.db.get<CheckpointRow>(
-            `SELECT ${CHECKPOINT_COLUMNS} FROM ${this.table} WHERE run_id = ? AND node_id = ? ${MOST_RECENT_FIRST} LIMIT 1`,
+            `SELECT ${CHECKPOINT_COLUMNS} FROM ${this.quoted} WHERE run_id = ? AND node_id = ? ${MOST_RECENT_FIRST} LIMIT 1`,
             [runId, nodeId],
           );
     return row ? checkpointOf(row) : null;
@@ -301,7 +307,7 @@ export class SqlCheckpointStore implements ICheckpointStore {
   async list(graphId: string, options?: { limit?: number; runId?: string }): Promise<CheckpointMetadata[]> {
     await this.ensureSchema();
     const params: Array<string | number> = [graphId];
-    let statement = `SELECT id, graph_id, run_id, node_id, created_at, metadata_json FROM ${this.table} WHERE graph_id = ?`;
+    let statement = `SELECT id, graph_id, run_id, node_id, created_at, metadata_json FROM ${this.quoted} WHERE graph_id = ?`;
     if (options?.runId !== undefined) {
       statement += ' AND run_id = ?';
       params.push(options.runId);
@@ -319,7 +325,7 @@ export class SqlCheckpointStore implements ICheckpointStore {
   /** {@inheritDoc ICheckpointStore.delete} */
   async delete(checkpointId: string): Promise<void> {
     await this.ensureSchema();
-    await this.db.run(`DELETE FROM ${this.table} WHERE id = ?`, [checkpointId]);
+    await this.db.run(`DELETE FROM ${this.quoted} WHERE id = ?`, [checkpointId]);
   }
 
   /**
@@ -367,8 +373,11 @@ export class SqlCheckpointStore implements ICheckpointStore {
   /**
    * Writes a checkpoint in one statement: a new row, or the row of its id overwritten. Either takes the next
    * `save_seq`. A row a fork wrote keeps its `parent_id` when it is saved again.
+   *
+   * The checkpoint is checked and serialised when the save is called, and its statement queued behind the store's
+   * earlier saves; a save that fails does not stop the next.
    */
-  private async write(checkpoint: Checkpoint, parentId: string | null): Promise<void> {
+  private write(checkpoint: Checkpoint, parentId: string | null): Promise<void> {
     const { id, graphId, runId, nodeId, timestamp, ...snapshot } = checkpoint;
     if (!Number.isSafeInteger(timestamp)) {
       throw new TypeError(
@@ -379,9 +388,16 @@ export class SqlCheckpointStore implements ICheckpointStore {
       stateSize: JSON.stringify(checkpoint.state).length,
       hasMemorySnapshot: checkpoint.memorySnapshot !== undefined,
     };
-    const stateJson = JSON.stringify(snapshot);
+    const parameters = [id, graphId, runId, nodeId, parentId, timestamp, JSON.stringify(snapshot), JSON.stringify(metadata)];
+    const queued = this.lastWrite.then(() => this.insert(id, parameters));
+    this.lastWrite = queued.catch(() => undefined);
+    return queued;
+  }
+
+  /** Runs one queued save's statement, once the table is there, and rejects when the database reports no row. */
+  private async insert(id: string, parameters: Array<string | number | null>): Promise<void> {
     await this.ensureSchema();
-    const t = this.table;
+    const t = this.quoted;
     const result = await this.db.run(
       `INSERT INTO ${t} (id, graph_id, run_id, node_id, parent_id, created_at, save_seq, state_json, metadata_json)
 VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(save_seq), 0) + 1 FROM ${t}), ?, ?)
@@ -394,7 +410,7 @@ ON CONFLICT (id) DO UPDATE SET
   save_seq = excluded.save_seq,
   state_json = excluded.state_json,
   metadata_json = excluded.metadata_json`,
-      [id, graphId, runId, nodeId, parentId, timestamp, stateJson, JSON.stringify(metadata)],
+      parameters,
     );
     if (result.changes !== 1) {
       throw new Error(
