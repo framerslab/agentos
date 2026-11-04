@@ -126,3 +126,14 @@ test('the learning module resolves at its own subpath, as the emergent module do
   assert.equal(typeof learning.deferLearnerSession, 'function');
   assert.equal(typeof learning.selfChangeRefusal, 'function');
 });
+
+test('the key probe resolves at its own subpath, as the other api modules do', async () => {
+  assert.deepEqual(pkg.exports['./api/probeProviderKey'], {
+    import: './dist/api/probeProviderKey.js',
+    default: './dist/api/probeProviderKey.js',
+    types: './dist/api/probeProviderKey.d.ts',
+  });
+  const probe = await import('@framers/agentos/api/probeProviderKey');
+  assert.equal(typeof probe.probeProviderKey, 'function');
+  assert.deepEqual([...probe.PROBEABLE_KEY_PROVIDERS], ['anthropic', 'openai', 'gemini', 'openrouter', 'requesty']);
+});
