@@ -23,6 +23,14 @@ import {
 import { RequestyProviderError } from '../errors/RequestyProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import {
+  failedKeyProbeAnswer,
+  noModelKeyProbeAnswer,
+  readKeyProbeAnswer,
+  startKeyProbeDeadline,
+  type KeyProbeAnswer,
+  type KeyProbeOptions,
+} from '../../../providers/keyProbe.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
@@ -896,55 +904,67 @@ export class RequestyProvider implements IProvider {
   }
 
   /**
-   * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
-   * with the models list, which rejects a revoked key with 403 "Invalid authorization token". A billing failure is
-   * probed with the smallest billable completion, since a list need not refuse a key whose balance is spent: on the
-   * default model, else on the cheapest chat model the catalog lists with a price, never a free one. A provider that
-   * started without its catalog (every key was out) lists it with the probing key first and keeps it; with no priced
-   * model to send, the probe has no verdict and the key stays out. Every answer goes through the same classifier as
-   * a request's.
+   * Probes one API key and reports what its answer showed: the verdict (`ok`, the failure kind it still shows, or
+   * `unknown`), the HTTP status, the vendor's message, the model and the Retry-After. Any kind but `billing` sends the
+   * models list, which rejects a revoked key with 403 "Invalid authorization token". `kind: 'billing'` sends the
+   * smallest billable completion, since a list need not refuse a key whose balance is spent: on `options.model`, else
+   * the default model, else the cheapest chat model the catalog lists with a price, never a free one. A provider
+   * without its catalog (one not initialized, or one that started with every key out) lists it with the probing key
+   * first and keeps it, when the probe goes to the provider's own endpoint (a probe of another base URL lists that
+   * one's catalog and keeps it to itself); with no priced model to send, the probe has no verdict
+   * (`failure: 'no_model'`). Every answer goes through the same classifier as a request's. It works before
+   * `initialize()`: the base URL is
+   * `options.baseURL`, else the configured one, else Requesty's own. The key pool's probe of a failed key is this
+   * method's verdict.
    */
-  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+  public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
+    const deadline = startKeyProbeDeadline(options);
+    const baseURL = options.baseURL || this.config?.baseURL || REQUESTY_DEFAULT_BASE_URL;
     const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
-    const verdict = async (response: Response): Promise<ProbeResult> => {
-      if (response.ok) return 'ok';
-      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
-      return classifyKeyFailure(response.status, text) ?? 'unknown';
-    };
     try {
-      const listModels = () => fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
-      if (kind !== 'billing') return await verdict(await listModels());
-      let model = this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
-      if (!model && this.availableModelsCache.size === 0) {
+      const listModels = () => fetch(`${baseURL}/models`, { method: 'GET', headers, signal: deadline.signal });
+      if (options.kind !== 'billing') return await readKeyProbeAnswer(await listModels(), { apiKey, signal: deadline.signal });
+      // The provider's catalog is its own endpoint's: a probe of another endpoint lists that one's and keeps it to itself.
+      const catalog = baseURL === (this.config?.baseURL || REQUESTY_DEFAULT_BASE_URL) ? this.availableModelsCache : new Map<string, ModelInfo>();
+      let model = options.model || this.defaultModelId || cheapestPricedChatModel(catalog.values());
+      if (!model && catalog.size === 0) {
         const listed = await listModels();
-        if (!listed.ok) return await verdict(listed);
-        const body = (await listed.json().catch(() => ({}))) as Partial<RequestyListModelsAPIResponse>;
-        if (Array.isArray(body.data) && this.availableModelsCache.size === 0) {
+        if (!listed.ok) return await readKeyProbeAnswer(listed, { apiKey, signal: deadline.signal });
+        const body = (await listed.json().catch((error: unknown) => {
+          // A read the deadline or the caller's abort ended is the probe's failure, not an empty catalog.
+          if (deadline.signal.aborted) throw error;
+          return {};
+        })) as Partial<RequestyListModelsAPIResponse>;
+        if (Array.isArray(body.data) && catalog.size === 0) {
           for (const apiModel of body.data) {
             const modelInfo = this.mapApiToModelInfo(apiModel);
-            this.availableModelsCache.set(modelInfo.modelId, modelInfo);
+            catalog.set(modelInfo.modelId, modelInfo);
           }
         }
-        model = cheapestPricedChatModel(this.availableModelsCache.values());
+        model = cheapestPricedChatModel(catalog.values());
       }
-      if (!model) return 'unknown';
-      return await verdict(
-        await fetch(`${this.config.baseURL}/chat/completions`, {
+      if (!model) return noModelKeyProbeAnswer();
+      return await readKeyProbeAnswer(
+        await fetch(`${baseURL}/chat/completions`, {
           method: 'POST',
           headers,
           // 16: the router hands max_tokens to the model's own provider, and some providers enforce a minimum of 16
           // (OpenRouter's chat reference says so of the providers it routes to; Requesty's names no floor).
           body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
-          signal: controller.signal,
+          signal: deadline.signal,
         }),
+        { model, apiKey, signal: deadline.signal },
       );
-    } catch {
-      return 'unknown';
+    } catch (error) {
+      return failedKeyProbeAnswer(error, deadline, { apiKey, baseURL });
     } finally {
-      clearTimeout(timer);
+      deadline.dispose();
     }
+  }
+
+  /** Probes a key the pool took out of rotation, off the request path: the verdict of `probeApiKey()`. */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
+    return (await this.probeApiKey(apiKey, { kind })).verdict;
   }
 
   /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */
