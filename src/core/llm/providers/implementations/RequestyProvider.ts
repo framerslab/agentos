@@ -278,11 +278,15 @@ export class RequestyProvider implements IProvider {
     }
   }
 
-  private async refreshAvailableModels(): Promise<void> {
+  /** Reads `/models` into the cache. `signal`, when given, ends the read in flight and throws `REQUEST_ABORTED`. */
+  private async refreshAvailableModels(signal?: AbortSignal): Promise<void> {
     const responseData = await this.makeApiRequest<RequestyListModelsAPIResponse>(
       '/models',
       'GET',
-      this.config.requestTimeout
+      this.config.requestTimeout,
+      undefined,
+      false,
+      signal ? { signal } : undefined,
     );
 
     this.availableModelsCache.clear();
@@ -565,7 +569,8 @@ export class RequestyProvider implements IProvider {
       throw new RequestyProviderError('Input texts array cannot be empty for generating embeddings.', 'EMBEDDING_NO_INPUT');
     }
 
-    const modelInfo = await this.getModelInfo(modelId);
+    // The lookup carries the call's signal: an aborted call sends nothing, and an abort ends a refresh in flight.
+    const modelInfo = await this.modelInfoForCall(modelId, options?.abortSignal);
     if (modelInfo && !modelInfo.capabilities.includes('embeddings')) {
       console.warn(`RequestyProvider: Model '${modelId}' is not explicitly listed with embedding capabilities. Attempting anyway.`);
     }
@@ -637,6 +642,27 @@ export class RequestyProvider implements IProvider {
         console.log(`RequestyProvider: Model ${modelId} not in cache. Refreshing model list.`);
         await this.refreshAvailableModels();
       } catch (error) {
+        console.warn(`RequestyProvider: Failed to refresh models list while trying to get info for ${modelId}:`, error);
+      }
+    }
+    return this.availableModelsCache.get(modelId);
+  }
+
+  /**
+   * {@link getModelInfo} for a call that carries the caller's signal. A call whose signal has aborted throws
+   * `REQUEST_ABORTED` before any request, and the `/models` refresh a model missing from the cache starts carries
+   * the signal, so an abort ends it at once with `REQUEST_ABORTED`. Any other refresh failure is logged and the
+   * lookup answers from the cache, as {@link getModelInfo} does.
+   */
+  private async modelInfoForCall(modelId: string, signal?: AbortSignal): Promise<ModelInfo | undefined> {
+    this.ensureInitialized();
+    const aborted = () => new RequestyProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+    if (signal?.aborted) throw aborted();
+    if (!this.availableModelsCache.has(modelId)) {
+      try {
+        await this.refreshAvailableModels(signal);
+      } catch (error) {
+        if (signal?.aborted) throw aborted();
         console.warn(`RequestyProvider: Failed to refresh models list while trying to get info for ${modelId}:`, error);
       }
     }

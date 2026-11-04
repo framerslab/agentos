@@ -295,7 +295,9 @@ export interface ModelCompletionOptions {
    *  - A request already sent ends at the abort, whether it waits for its answer or its headers, and a stream
    *    whose body has stalled ends with the terminal abort chunk; the OpenAI, Anthropic, Gemini, OpenRouter,
    *    Requesty and Ollama providers pass the signal to their HTTP client, and their non-streaming calls throw
-   *    `REQUEST_ABORTED`. Ending the request ends the caller's wait; whether the vendor stops work and billing is
+   *    `REQUEST_ABORTED`. An abort after the finish event and before the stream's end leaves the abort chunk as the
+   *    stream's one final chunk (OpenRouter holds its finish chunk until `[DONE]` for this, as Requesty does).
+   *    Ending the request ends the caller's wait; whether the vendor stops work and billing is
    *    the vendor's (OpenRouter stops both only for a stream: https://openrouter.ai/docs/api-reference/streaming).
    *  - A wait between retries (a 429's Retry-After or a backoff) ends at once and no further request is sent; the
    *    OpenAI, Anthropic, Gemini and OpenRouter providers end it. A non-streaming call then throws `REQUEST_ABORTED`;
@@ -521,7 +523,9 @@ export interface ProviderEmbeddingOptions {
   /**
    * Optional AbortSignal for caller-driven cancellation. A provider that reads it cancels the
    * request in flight when it aborts and sends no further request; the OpenAI, OpenRouter, Requesty,
-   * Ollama and Gemini providers read it and throw `REQUEST_ABORTED`.
+   * Ollama and Gemini providers read it and throw `REQUEST_ABORTED`. On OpenRouter and Requesty it also
+   * rides the model-list read an embedding call makes for a model it has not listed: an aborted call
+   * sends nothing, and an abort ends that read at once.
    */
   abortSignal?: AbortSignal;
 }
