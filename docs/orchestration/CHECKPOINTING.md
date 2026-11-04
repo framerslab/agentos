@@ -72,6 +72,8 @@ const result = await later.resume(runId!);
 | `tablePrefix` | `agentos_checkpoints` | The table's name, and the start of its indexes' names. A lower-case letter and at most 52 more lower-case letters, digits or underscores; the constructor throws on any other value. Stores under different prefixes keep their checkpoints apart in one database. |
 | `ensureSchema` | `true` | Make the table and its indexes on first use when the table is missing. With `false` the store runs no DDL. |
 
+Stores in several processes can start on one empty database at once. On Postgres the `CREATE TABLE IF NOT EXISTS` of the store that loses that race can fail on the catalogue's unique index, so a store whose DDL fails reads the table again and goes on when it answers; when it does not, the call rejects with the DDL's error and the next call tries again.
+
 Each checkpoint is one row of one table:
 
 ```sql

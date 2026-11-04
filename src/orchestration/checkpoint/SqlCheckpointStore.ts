@@ -218,23 +218,38 @@ export class SqlCheckpointStore implements ICheckpointStore {
    * Creates the table and its indexes unless the table answers a read already, so a store over a table that exists
    * runs no DDL: on Postgres each `CREATE INDEX` takes a SHARE lock on the table, which holds back its writes, before
    * it looks for the index's name. Called before the first statement; safe to call again. Does nothing with
-   * `ensureSchema: false`. A creation that fails rejects, and the next call tries again.
+   * `ensureSchema: false`.
+   *
+   * Another process can make the table between the read and the DDL: two stores starting on an empty database both
+   * find it missing. On Postgres the DDL of the one that loses can then fail, `IF NOT EXISTS` notwithstanding, on the
+   * catalogue's unique index. A creation that fails therefore reads the table again and counts a table that answers
+   * as made; when it still does not answer, the call rejects with the DDL's error, and the next call tries again.
    */
   ensureSchema(): Promise<void> {
     if (!this.createSchema) return Promise.resolve();
     this.schemaReady ??= (async () => {
+      if (await this.tableAnswers()) return;
       try {
-        await this.db.get(`SELECT 1 FROM ${this.table} LIMIT 1`);
-        return;
-      } catch {
-        // the table is missing: it is made below, and a store that cannot make it rejects with that error
+        await this.db.exec(checkpointDdl(this.table));
+      } catch (error) {
+        if (await this.tableAnswers()) return;
+        throw error;
       }
-      await this.db.exec(checkpointDdl(this.table));
     })().catch((error: unknown) => {
       this.schemaReady = null;
       throw error;
     });
     return this.schemaReady;
+  }
+
+  /** Whether the table answers a read; any error, a missing table's among them, counts as no. */
+  private async tableAnswers(): Promise<boolean> {
+    try {
+      await this.db.get(`SELECT 1 FROM ${this.table} LIMIT 1`);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -280,7 +295,8 @@ export class SqlCheckpointStore implements ICheckpointStore {
    * {@inheritDoc ICheckpointStore.list}
    *
    * As in `InMemoryCheckpointStore`, a `limit` above zero caps the list at its whole part, and any other leaves the
-   * list whole.
+   * list whole. So does one above `Number.MAX_SAFE_INTEGER`, which no table's rows reach: SQLite refuses a `LIMIT` it
+   * cannot hold as a 64-bit integer, and Postgres a `BIGINT` out of range.
    */
   async list(graphId: string, options?: { limit?: number; runId?: string }): Promise<CheckpointMetadata[]> {
     await this.ensureSchema();
@@ -292,7 +308,7 @@ export class SqlCheckpointStore implements ICheckpointStore {
     }
     statement += ` ${MOST_RECENT_FIRST}`;
     const limit = options?.limit;
-    if (limit !== undefined && limit > 0 && Number.isFinite(limit)) {
+    if (limit !== undefined && limit > 0 && limit <= Number.MAX_SAFE_INTEGER) {
       statement += ' LIMIT ?';
       params.push(Math.trunc(limit));
     }
