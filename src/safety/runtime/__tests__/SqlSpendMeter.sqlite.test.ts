@@ -48,6 +48,17 @@ const olderDdl = (tablePrefix?: string): string =>
     .filter((line) => !/_reservations_(account|settled) ON /.test(line))
     .join('\n');
 
+/** The DDL of a store made before the reservations table held `settled_units`. */
+const unsettledDdl = (tablePrefix?: string): string => spendMeterDdl(tablePrefix).replace(/,\n\s*settled_units BIGINT/, '');
+
+/** The last of a list. */
+const lastOf = <T>(list: T[]): T | undefined => list[list.length - 1];
+
+/** The names of a table's columns, in order. */
+async function columnsOf(db: StorageAdapter, table: string): Promise<string[]> {
+  return (await db.all<{ name: string }>(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`)).map((column) => column.name);
+}
+
 /**
  * Runs the contract and the window suite on SQLite stores of their own. Without a prefix each meter makes its tables
  * itself. With one, each store holds only the tables `spendMeterDdl(tablePrefix)` made and its meter passes
@@ -268,6 +279,44 @@ describe('SqlSpendMeter on SQLite, beyond the contract', () => {
       await new SqlSpendMeter({ db: recording(db, second), allowanceFor: () => 1, windowMs: HOUR, requireShared: false }).ensureSchema();
       expect(second).not.toEqual([]);
       expect(second.filter(createsIndex)).toEqual([]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('gives a reservations table made before settled_units the column once a meter ensures the schema; until then a consumed settle takes the whole reservation and onWarning is told', async () => {
+    const db = await openSqlite();
+    try {
+      // a meter's own tables hold the column, last, where adding it to older tables puts it
+      await new SqlSpendMeter({ db, tablePrefix: ALT_PREFIX, allowanceFor: () => 1, periodOf: monthOf, requireShared: false }).ensureSchema();
+      expect(lastOf(await columnsOf(db, `${ALT_PREFIX}_reservations`))).toBe('settled_units');
+      await db.exec(unsettledDdl());
+      expect(await columnsOf(db, 'agentos_spend_reservations')).not.toContain('settled_units');
+      // a meter whose product runs its own migrations adds nothing: it settles as before, and says why
+      const warnings: { statement: string; error: unknown }[] = [];
+      const migrated = new SqlSpendMeter({ db, ensureSchema: false, allowanceFor: () => 10, periodOf: monthOf, requireShared: false, onWarning: (warning) => warnings.push(warning) });
+      await migrated.reserve({ accountId: 'a', operationId: 'before', units: 3, now: OCT });
+      expect(await migrated.settle({ operationId: 'before', outcome: 'consumed', units: 1, now: OCT })).toEqual({ status: 'settled', state: 'consumed' });
+      expect(await migrated.snapshot('a', OCT)).toMatchObject({ used: 3, reserved: 0, remaining: 7 });
+      expect(warnings).toEqual([
+        { statement: expect.stringContaining('settled_units'), error: expect.objectContaining({ message: expect.stringContaining('settled_units') }) },
+      ]);
+      expect(await columnsOf(db, 'agentos_spend_reservations')).not.toContain('settled_units');
+      // a meter that ensures the schema adds the column, keeping the rows, and settles at the units used
+      const meter = new SqlSpendMeter({ db, allowanceFor: () => 10, periodOf: monthOf, requireShared: false });
+      await meter.ensureSchema();
+      expect(lastOf(await columnsOf(db, 'agentos_spend_reservations'))).toBe('settled_units');
+      await meter.reserve({ accountId: 'a', operationId: 'after', units: 3, now: OCT });
+      await meter.settle({ operationId: 'after', outcome: 'consumed', units: 1, now: OCT });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 4, reserved: 0, remaining: 6 });
+      // the turn settled before the column gives back what it took, its whole reservation
+      expect(await meter.settle({ operationId: 'before', outcome: 'replaced', now: OCT })).toEqual({ status: 'settled', state: 'released' });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 1, reserved: 0, remaining: 9 });
+      // a later start finds the column and changes no table
+      const later: string[] = [];
+      await new SqlSpendMeter({ db: recording(db, later), allowanceFor: () => 10, periodOf: monthOf, requireShared: false }).ensureSchema();
+      expect(later).not.toEqual([]);
+      expect(later.filter((statement) => /ALTER TABLE|CREATE/i.test(statement))).toEqual([]);
     } finally {
       await db.close();
     }

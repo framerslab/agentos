@@ -41,6 +41,17 @@ describe('releaseExpiredSpend with fenced holds', () => {
     expect(fenced).toMatch(/^reservation-/);
   });
 
+  it('settles a consumed reservation at the micro-dollars the resolver says it cost, never above what it reserved', async () => {
+    const store = new InMemorySpendDayStore();
+    await reserveSpend(store, { kind: 'call', micro: 500, at: AT, expires: later(1_000), capMicro: 10_000, requireFence: true });
+    await reserveSpend(store, { kind: 'call', micro: 300, at: AT, expires: later(1_000), capMicro: 10_000, requireFence: true });
+    await reserveSpend(store, { kind: 'call', micro: 100, at: AT, expires: later(1_000), capMicro: 10_000, requireFence: true });
+    // the 500 cost 200; the 300 reports 900, held to 300; the 100 reports no figure and is consumed whole
+    const cost: Record<number, number | undefined> = { 500: 200, 300: 900, 100: undefined };
+    expect(await releaseExpiredSpend(store, later(2_000), { resolve: async (r) => ({ outcome: 'consumed', units: cost[r.micro] }) })).toBe(3);
+    expect(await store.lockDay('2026-10-12')).toBe(600);
+  });
+
   it('defers on a resolver failure instead of settling at the whole amount', async () => {
     const store = new InMemorySpendDayStore();
     await reserveSpend(store, { kind: 'call', micro: 500, at: AT, expires: later(1_000), capMicro: 10_000, requireFence: true });

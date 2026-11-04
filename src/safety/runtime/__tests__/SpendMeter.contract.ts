@@ -90,6 +90,74 @@ export function runSpendMeterContractSuite(name: string, factory: SpendMeterFact
       expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 0, remaining: 5 });
     });
 
+    it('settles a consumed turn at the units it used, releasing the rest of its reservation, and refunds a replaced one by what it used', async () => {
+      const meter = await open({ a: 100 });
+      await meter.reserve({ accountId: 'a', operationId: 'cheap', units: 10, now: OCT });
+      expect(await meter.settle({ operationId: 'cheap', outcome: 'consumed', units: 4, now: OCT })).toEqual({ status: 'settled', state: 'consumed' });
+      // the reservation's 10 leave `reserved`; 4 reach `used`, and the other 6 are free again
+      expect(await meter.snapshot('a', OCT)).toEqual({ accountId: 'a', period: '2026-10', allowance: 100, used: 4, reserved: 0, remaining: 96 });
+      await meter.reserve({ accountId: 'a', operationId: 'whole', units: 10, now: OCT });
+      expect(await meter.settle({ operationId: 'whole', outcome: 'consumed', now: OCT })).toEqual({ status: 'settled', state: 'consumed' });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 14, reserved: 0, remaining: 86 });
+      // the refund gives back the 4 the turn used, not the 10 it reserved
+      expect(await meter.settle({ operationId: 'cheap', outcome: 'replaced', now: OCT })).toEqual({ status: 'settled', state: 'released' });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 10, reserved: 0, remaining: 90 });
+      // and a refund of a turn consumed whole gives back the whole reservation
+      expect(await meter.settle({ operationId: 'whole', outcome: 'replaced', now: OCT })).toEqual({ status: 'settled', state: 'released' });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 0, remaining: 100 });
+    });
+
+    it('holds the units a consumed settle takes to its reservation, and ignores units on a release', async () => {
+      const meter = await open({ a: 100 });
+      const settleAt = async (operationId: string, units: number, outcome: 'consumed' | 'released' = 'consumed') => {
+        await meter.reserve({ accountId: 'a', operationId, units: 5, now: OCT });
+        expect(await meter.settle({ operationId, outcome, units, now: OCT })).toEqual({ status: 'settled', state: outcome });
+        return (await meter.snapshot('a', OCT)).used;
+      };
+      // more than it reserved counts as the reservation
+      expect(await settleAt('over', 9)).toBe(5);
+      // a negative number as none
+      expect(await settleAt('negative', -3)).toBe(5);
+      // a fraction by its whole part
+      expect(await settleAt('fraction', 2.7)).toBe(7);
+      // a value that is no number as the whole reservation
+      expect(await settleAt('not-a-number', Number.NaN)).toBe(12);
+      // zero as zero
+      expect(await settleAt('nothing', 0)).toBe(12);
+      // a release frees all five, whatever units it names
+      expect(await settleAt('released', 3, 'released')).toBe(12);
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 12, reserved: 0, remaining: 88 });
+      // refunds give back what each took: 5, 0, 2, 5 and 0
+      for (const operationId of ['over', 'negative', 'fraction', 'not-a-number', 'nothing']) {
+        expect(await meter.settle({ operationId, outcome: 'replaced', now: OCT }), operationId).toEqual({ status: 'settled', state: 'released' });
+      }
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 0, remaining: 100 });
+    });
+
+    it('keeps used plus reserved within the allowance, neither below zero, while settles at the units used race new reservations', async () => {
+      const meter = await open({ a: 50 });
+      for (let i = 0; i < 5; i += 1) await meter.reserve({ accountId: 'a', operationId: `held-${i}`, units: 10, now: OCT });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 50, remaining: 0 });
+      // each settle frees 6 of its 10 units while ten reservations of 6 units ask for them
+      const [settled, reserved] = await Promise.all([
+        Promise.all(Array.from({ length: 5 }, (_, i) => meter.settle({ operationId: `held-${i}`, outcome: 'consumed', units: 4, now: OCT }))),
+        Promise.all(Array.from({ length: 10 }, (_, i) => meter.reserve({ accountId: 'a', operationId: `new-${i}`, units: 6, now: OCT }))),
+      ]);
+      expect(settled.map((s) => s.status)).toEqual(Array(5).fill('settled'));
+      const admitted = reserved.filter((r) => r.status === 'reserved').length;
+      expect(reserved.filter((r) => r.status === 'denied').map((r) => (r.status === 'denied' ? r.reason : r.status))).toEqual(Array(10 - admitted).fill('allowance_exhausted'));
+      expect(admitted).toBeLessThanOrEqual(5);
+      const snap = await meter.snapshot('a', OCT);
+      expect(snap).toMatchObject({ used: 20, reserved: 6 * admitted });
+      expect(snap.used + snap.reserved).toBeLessThanOrEqual(snap.allowance);
+      expect(snap.reserved).toBeGreaterThanOrEqual(0);
+      // the 30 units the settles freed are all there: what the race left takes them to the last one, and no more
+      const room = 30 - 6 * admitted;
+      expect(await meter.reserve({ accountId: 'a', operationId: 'too-much', units: room + 1, now: OCT })).toMatchObject({ status: 'denied', reason: 'allowance_exhausted' });
+      if (room > 0) expect(await meter.reserve({ accountId: 'a', operationId: 'the-rest', units: room, now: OCT })).toMatchObject({ status: 'reserved', remaining: 0 });
+      expect(await meter.snapshot('a', OCT)).toEqual({ accountId: 'a', period: '2026-10', allowance: 50, used: 20, reserved: 30, remaining: 0 });
+    });
+
     it('keeps a reservation alive by heartbeat and settles the expired ones by what the product knows, else by the default', async () => {
       const known: Record<string, 'consumed' | 'released' | 'unknown'> = { stored: 'consumed', lost: 'released' };
       const meter = await open({ a: 10 }, { resolveUnknown: (r) => known[r.operationId] ?? 'unknown' });
