@@ -115,6 +115,9 @@ function addTokenUsage(target: TokenUsage, add: TokenUsage): void {
   if (add.cacheCreationTokens !== undefined) {
     target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + add.cacheCreationTokens;
   }
+  if (add.cacheCreationExtendedTokens !== undefined) {
+    target.cacheCreationExtendedTokens = (target.cacheCreationExtendedTokens ?? 0) + add.cacheCreationExtendedTokens;
+  }
   if (add.inclusiveInputTokens !== undefined) {
     target.inclusiveInputTokens = (target.inclusiveInputTokens ?? 0) + add.inclusiveInputTokens;
   }
@@ -139,6 +142,9 @@ function usageBeyond(report: unknown, counted: TokenUsage): TokenUsage | undefin
     ...(total.cacheReadTokens !== undefined ? { cacheReadTokens: less(total.cacheReadTokens, counted.cacheReadTokens) } : {}),
     ...(total.cacheCreationTokens !== undefined
       ? { cacheCreationTokens: less(total.cacheCreationTokens, counted.cacheCreationTokens) }
+      : {}),
+    ...(total.cacheCreationExtendedTokens !== undefined
+      ? { cacheCreationExtendedTokens: less(total.cacheCreationExtendedTokens, counted.cacheCreationExtendedTokens) }
       : {}),
     ...(total.inclusiveInputTokens !== undefined
       ? { inclusiveInputTokens: less(total.inclusiveInputTokens, counted.inclusiveInputTokens) }
@@ -943,6 +949,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               if (typeof r.usage.cacheCreationInputTokens === 'number') {
                 usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + r.usage.cacheCreationInputTokens;
               }
+              if (typeof r.usage.cacheCreationExtendedInputTokens === 'number') {
+                usage.cacheCreationExtendedTokens = (usage.cacheCreationExtendedTokens ?? 0) + r.usage.cacheCreationExtendedInputTokens;
+              }
               if (typeof r.usage.inclusiveInputTokens === 'number') {
                 usage.inclusiveInputTokens = (usage.inclusiveInputTokens ?? 0) + r.usage.inclusiveInputTokens;
               }
@@ -1156,6 +1165,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               }
               if (typeof cacheCreate === 'number') {
                 usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + cacheCreate;
+              }
+              const cacheCreateExtended = (chunk.usage as { cacheCreationExtendedInputTokens?: number }).cacheCreationExtendedInputTokens;
+              if (typeof cacheCreateExtended === 'number') {
+                usage.cacheCreationExtendedTokens = (usage.cacheCreationExtendedTokens ?? 0) + cacheCreateExtended;
               }
               const chunkInclusiveIn = (chunk.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
               if (typeof chunkInclusiveIn === 'number') {

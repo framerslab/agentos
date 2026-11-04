@@ -28,9 +28,17 @@ export interface ModelPriceTier {
   /**
    * The highest rate a prompt-cache write is billed at when the request asks for caching: Anthropic's 1-hour write
    * (2x input) on a request with `cache_control`, OpenAI's 12-hour write (2.5x input) on a model that bills writes.
-   * Unset where the provider bills no write.
+   * A finished call's writes that its report names as made with that longer lifetime are priced at it. Unset where
+   * the provider bills no write.
    */
   cacheWritePerMTokUSD?: number;
+  /**
+   * The rate of a prompt-cache write with the provider's default lifetime, the one a request that names none writes
+   * with: Anthropic's 5-minute write and OpenAI's 30-minute write, both 1.25x input. A finished call's writes that its
+   * report does not name as made with the longer lifetime are priced at it. Unset where the provider bills no write; a
+   * card with `cacheWritePerMTokUSD` alone prices every write at that rate.
+   */
+  defaultCacheWritePerMTokUSD?: number;
   /**
    * The rate a prompt-cache write is billed at on a request that asks for no caching: OpenAI caches every prompt on
    * GPT-5.6 and later by default and bills the write at 1.25x input. Unset where a request without cache settings
@@ -78,6 +86,7 @@ function countableTier(tier: ModelPriceTier): boolean {
     countable(tier.inputPerMTokUSD) &&
     countable(tier.outputPerMTokUSD) &&
     (tier.cacheWritePerMTokUSD === undefined || countable(tier.cacheWritePerMTokUSD)) &&
+    (tier.defaultCacheWritePerMTokUSD === undefined || countable(tier.defaultCacheWritePerMTokUSD)) &&
     (tier.automaticCacheWritePerMTokUSD === undefined || countable(tier.automaticCacheWritePerMTokUSD)) &&
     (tier.cacheReadPerMTokUSD === undefined || countable(tier.cacheReadPerMTokUSD))
   );
@@ -97,32 +106,44 @@ function checkedHostRow(row: ModelPrice | undefined): ModelPrice | undefined {
   return row;
 }
 
-/** OpenAI's row in this shape: its per-1K rates, its cache writes on GPT-5.6 and later, its long-context card. */
+/**
+ * OpenAI's row in this shape: its per-1K rates, its cached-input rate where the pricing page lists one, its cache
+ * writes on GPT-5.6 and later, its long-context card, on which the cached-input and write rates double with the input
+ * rate.
+ */
 function openAIPrice(modelId: string): ModelPrice | undefined {
   const row = openAIModelPricing(modelId);
   if (!row) return undefined;
   const writes = openAiBillsCacheWrites(modelId);
-  const card = (input: number, output: number): ModelPriceTier => ({
-    inputPerMTokUSD: input,
-    outputPerMTokUSD: output,
-    ...(writes
-      ? {
-          cacheWritePerMTokUSD: Number((input * OPENAI_EXTENDED_CACHE_WRITE_MULTIPLIER).toPrecision(12)),
-          automaticCacheWritePerMTokUSD: Number((input * OPENAI_CACHE_WRITE_MULTIPLIER).toPrecision(12)),
-        }
-      : {}),
-  });
+  const scaled = (rate: number, factor: number): number => Number((rate * factor).toPrecision(12));
+  const card = (input: number, output: number, cachedInput: number | undefined): ModelPriceTier => {
+    const defaultWrite = scaled(input, OPENAI_CACHE_WRITE_MULTIPLIER);
+    return {
+      inputPerMTokUSD: input,
+      outputPerMTokUSD: output,
+      ...(cachedInput !== undefined ? { cacheReadPerMTokUSD: cachedInput } : {}),
+      ...(writes
+        ? {
+            cacheWritePerMTokUSD: scaled(input, OPENAI_EXTENDED_CACHE_WRITE_MULTIPLIER),
+            defaultCacheWritePerMTokUSD: defaultWrite,
+            automaticCacheWritePerMTokUSD: defaultWrite,
+          }
+        : {}),
+    };
+  };
   const input = perMillion(row.input);
   const output = perMillion(row.output);
+  const cachedInput = row.cachedInput !== undefined ? perMillion(row.cachedInput) : undefined;
   return Object.freeze({
-    ...card(input, output),
+    ...card(input, output, cachedInput),
     ...(openAiHasLongContextPricing(modelId)
       ? {
           longContext: Object.freeze({
             thresholdTokens: OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS,
             ...card(
-              Number((input * OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER).toPrecision(12)),
-              Number((output * OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER).toPrecision(12)),
+              scaled(input, OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER),
+              scaled(output, OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER),
+              cachedInput !== undefined ? scaled(cachedInput, OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER) : undefined,
             ),
           }),
         }
@@ -130,12 +151,16 @@ function openAIPrice(modelId: string): ModelPrice | undefined {
   });
 }
 
-/** Anthropic's card from its per-1K row: a request with `cache_control` can write at the 1-hour rate. */
-function anthropicCard(rates: { input: number; output: number; cacheRead: number; cacheWriteOneHour: number }): ModelPriceTier {
+/**
+ * Anthropic's card from its per-1K row: a request with `cache_control` can write at the 1-hour rate, and writes at the
+ * 5-minute rate when it names no lifetime.
+ */
+function anthropicCard(rates: { input: number; output: number; cacheRead: number; cacheWrite: number; cacheWriteOneHour: number }): ModelPriceTier {
   return {
     inputPerMTokUSD: perMillion(rates.input),
     outputPerMTokUSD: perMillion(rates.output),
     cacheWritePerMTokUSD: perMillion(rates.cacheWriteOneHour),
+    defaultCacheWritePerMTokUSD: perMillion(rates.cacheWrite),
     cacheReadPerMTokUSD: perMillion(rates.cacheRead),
   };
 }

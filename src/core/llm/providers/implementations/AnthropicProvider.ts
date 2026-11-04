@@ -589,6 +589,17 @@ function withSchemaRoute<T extends ModelCompletionResponse>(completion: T, paylo
     : { ...completion, schemaRoute };
 }
 
+/**
+ * The 1-hour share of a response's cache writes, as {@link ModelUsage.cacheCreationExtendedInputTokens}: the
+ * `ephemeral_1h_input_tokens` of its `usage.cache_creation` split
+ * (https://platform.claude.com/docs/en/build-with-claude/prompt-caching). Nothing when the response has no split, or
+ * a count that is not a number zero or more.
+ */
+function oneHourCacheWrites(split: AnthropicCacheCreationBreakdown | null | undefined): { cacheCreationExtendedInputTokens?: number } {
+  const oneHour = split?.ephemeral_1h_input_tokens;
+  return typeof oneHour === 'number' && Number.isFinite(oneHour) && oneHour >= 0 ? { cacheCreationExtendedInputTokens: oneHour } : {};
+}
+
 /** Anthropic's API base, the `baseURL` a provider without one sends to. */
 export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com';
 
@@ -1463,6 +1474,7 @@ export class AnthropicProvider implements IProvider {
               ...(cacheCreationTokens !== undefined && {
                 cacheCreationInputTokens: cacheCreationTokens,
               }),
+              ...oneHourCacheWrites(cacheCreationSplit),
               ...(cacheReadTokens !== undefined && {
                 cacheReadInputTokens: cacheReadTokens,
               }),
@@ -2784,6 +2796,9 @@ export class AnthropicProvider implements IProvider {
       totalTokens: apiResponse.usage.input_tokens + apiResponse.usage.output_tokens,
       costUSD: estimateAnthropicCostUSD(pricedModelId, apiResponse.usage),
       cacheCreationInputTokens: apiResponse.usage.cache_creation_input_tokens,
+      // The 1-hour share of the writes, which bill at 2x input where the
+      // 5-minute ones bill at 1.25x: a cost counted from the tokens needs it.
+      ...oneHourCacheWrites(apiResponse.usage.cache_creation),
       cacheReadInputTokens: apiResponse.usage.cache_read_input_tokens,
       // Anthropic's input_tokens EXCLUDES cache reads/writes; the
       // provider-independent inclusive input total adds them back
