@@ -51,7 +51,15 @@ export interface SpendFenceEvidence {
  * `retryAt` with its evidence. A deferred reservation stays reserved and counted.
  */
 export type SpendExpiryDecision =
-  | { outcome: 'consumed' }
+  | {
+      outcome: 'consumed';
+      /**
+       * The units the work used, when the host's evidence shows it (the usage a provider reported): the reservation
+       * settles at that many, at most what it reserved, as {@link SpendSettleRequest.units} does. Left out, the whole
+       * reservation is consumed.
+       */
+      units?: number;
+    }
   | { outcome: 'released' }
   | { outcome: 'deferred'; retryAt: number; evidence?: SpendFenceEvidence };
 
@@ -110,6 +118,14 @@ export type SpendReserveResult =
 export interface SpendSettleRequest {
   operationId: string;
   outcome: SpendOutcome;
+  /**
+   * With `consumed`, the units the work used: that many move to the period's used units and the rest of the
+   * reservation is released, so a meter that reserves a call's largest cost settles at what it cost. Held to the
+   * reservation: more than it reserved counts as the reservation, a negative number as none, a fraction by its whole
+   * part, and NaN as the whole reservation. Left out, the whole reservation is consumed. Ignored by the other outcomes:
+   * `released` frees the whole reservation, and `replaced` gives back what the consumed settle took.
+   */
+  units?: number;
   usage?: SpendUsage;
   now?: number;
 }

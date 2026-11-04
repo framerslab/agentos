@@ -126,6 +126,18 @@ const olderDdl = (tablePrefix?: string): string =>
     .filter((line) => !/_reservations_(account|settled) ON /.test(line))
     .join('\n');
 
+/** The DDL of a store made before the reservations table held `settled_units`. */
+const unsettledDdl = (ddl: string): string => ddl.replace(/,\n\s*settled_units BIGINT/, '');
+
+/** The names of a table's columns in the current schema, in order. */
+async function columnsOf(db: StorageAdapter, table: string): Promise<string[]> {
+  const rows = await db.all<{ column_name: string }>(
+    'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? ORDER BY ordinal_position',
+    [table],
+  );
+  return rows.map((row) => row.column_name);
+}
+
 describeIfPostgres('SqlSpendMeter on Postgres', () => {
   let db: StorageAdapter;
   beforeAll(async () => {
@@ -269,6 +281,42 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
     }
   });
 
+  it('gives a reservations table made before settled_units the column once a meter ensures the schema; until then a consumed settle takes the whole reservation and onWarning is told', async () => {
+    const older = tablesOf(OLDER_PREFIX);
+    const drop = () => db.exec(`DROP TABLE IF EXISTS ${older.reservations}; DROP TABLE IF EXISTS ${older.meter};`);
+    await drop();
+    try {
+      await db.exec(unsettledDdl(spendMeterDdl(OLDER_PREFIX)));
+      expect(await columnsOf(db, older.reservations)).not.toContain('settled_units');
+      // a meter whose product runs its own migrations adds nothing: it settles as before, and says why (42703: undefined_column)
+      const warnings: { statement: string; error: unknown }[] = [];
+      const migrated = new SqlSpendMeter({ db, tablePrefix: OLDER_PREFIX, ensureSchema: false, allowanceFor: () => 10, periodOf: monthOf, onWarning: (warning) => warnings.push(warning) });
+      await migrated.reserve({ accountId: 'a', operationId: 'before', units: 3, now: OCT });
+      expect(await migrated.settle({ operationId: 'before', outcome: 'consumed', units: 1, now: OCT })).toEqual({ status: 'settled', state: 'consumed' });
+      expect(await migrated.snapshot('a', OCT)).toMatchObject({ used: 3, reserved: 0, remaining: 7 });
+      expect(warnings).toEqual([{ statement: expect.stringContaining('settled_units'), error: expect.objectContaining({ code: '42703' }) }]);
+      expect(await columnsOf(db, older.reservations)).not.toContain('settled_units');
+      // a meter that ensures the schema adds the column, last, keeping the rows, and settles at the units used
+      const meter = new SqlSpendMeter({ db, tablePrefix: OLDER_PREFIX, allowanceFor: () => 10, periodOf: monthOf });
+      await meter.ensureSchema();
+      const columns = await columnsOf(db, older.reservations);
+      expect(columns[columns.length - 1]).toBe('settled_units');
+      await meter.reserve({ accountId: 'a', operationId: 'after', units: 3, now: OCT });
+      await meter.settle({ operationId: 'after', outcome: 'consumed', units: 1, now: OCT });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 4, reserved: 0, remaining: 6 });
+      // the turn settled before the column gives back what it took, its whole reservation
+      expect(await meter.settle({ operationId: 'before', outcome: 'replaced', now: OCT })).toEqual({ status: 'settled', state: 'released' });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 1, reserved: 0, remaining: 9 });
+      // a later start finds the column and changes no table: an ALTER TABLE takes an ACCESS EXCLUSIVE lock
+      const later: string[] = [];
+      await new SqlSpendMeter({ db: recording(db, later), tablePrefix: OLDER_PREFIX, allowanceFor: () => 10, periodOf: monthOf }).ensureSchema();
+      expect(later).not.toEqual([]);
+      expect(later.filter((statement) => /ALTER TABLE|CREATE/i.test(statement))).toEqual([]);
+    } finally {
+      await drop();
+    }
+  });
+
   it("runs at a meter's start the statements of the indexes its tables lack and of no other, so a meter on tables that hold all three runs no CREATE INDEX", async () => {
     const older = tablesOf(OLDER_PREFIX);
     const drop = () => db.exec(`DROP TABLE IF EXISTS ${older.reservations}; DROP TABLE IF EXISTS ${older.meter};`);
@@ -293,7 +341,7 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
     }
   });
 
-  it('uses tables its role does not own as they are: Postgres refuses it the indexes they lack, the meter reports each refusal to onWarning, and still counts on them', async () => {
+  it('uses tables its role does not own as they are: Postgres refuses it the indexes and the column they lack, the meter reports each refusal to onWarning, and still counts on them', async () => {
     // tables the database's owner makes from the DDL an earlier release ran, and a role that reads and writes them but owns neither
     const older = tablesOf(OLDER_PREFIX);
     const role = `spend_writer_${RUN}`;
@@ -306,7 +354,8 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
     await drop();
     let writer: StorageAdapter | undefined;
     try {
-      await db.exec(olderDdl(OLDER_PREFIX));
+      // an earlier release's tables: the reconciler's index alone, and no settled_units column
+      await db.exec(unsettledDdl(olderDdl(OLDER_PREFIX)));
       await db.exec(`CREATE ROLE ${role} LOGIN PASSWORD '${password}'; GRANT SELECT, INSERT, UPDATE, DELETE ON ${older.meter}, ${older.reservations} TO ${role};`);
       const url = new URL(POSTGRES_URL!);
       url.username = role;
@@ -316,13 +365,18 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
       const warnings: { statement: string; error: unknown }[] = [];
       const meter = new SqlSpendMeter({ db: writer, tablePrefix: OLDER_PREFIX, allowanceFor: () => 1, windowMs: HOUR, onWarning: (warning) => warnings.push(warning) });
       await expect(meter.ensureSchema()).resolves.toBeUndefined();
-      // each index the tables lack is refused, 42501 being insufficient_privilege; the one they hold is not tried
+      // each index the tables lack is refused, and so is the column, 42501 being insufficient_privilege; the index they hold is not tried
       expect(warnings).toEqual([
         { statement: expect.stringContaining(`idx_${OLDER_PREFIX}_reservations_account ON`), error: expect.objectContaining({ code: '42501' }) },
         { statement: expect.stringContaining(`idx_${OLDER_PREFIX}_reservations_settled ON`), error: expect.objectContaining({ code: '42501' }) },
+        { statement: expect.stringMatching(new RegExp(`ALTER TABLE ${older.reservations} ADD COLUMN settled_units`)), error: expect.objectContaining({ code: '42501' }) },
       ]);
       expect(await meter.reserve({ accountId: 'a', operationId: 'op', now: OCT })).toMatchObject({ status: 'reserved', remaining: 0 });
+      // without the column a consumed settle takes the whole reservation, as before
+      expect(await meter.settle({ operationId: 'op', outcome: 'consumed', units: 0, now: OCT })).toEqual({ status: 'settled', state: 'consumed' });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 1, reserved: 0, remaining: 0 });
       expect((await catalogue(db, older)).indexes.map((index) => index.name)).toEqual([`idx_${OLDER_PREFIX}_reservations_due`]);
+      expect(await columnsOf(db, older.reservations)).not.toContain('settled_units');
     } finally {
       await writer?.close();
       await drop();

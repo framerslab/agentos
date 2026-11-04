@@ -41,10 +41,14 @@ import {
 /**
  * The meter's two tables and their indexes under the default prefix, `agentos_spend`: one index the reconciler reads
  * the due reservations through, one a rolling window counts an account's reservations through, and one a purge finds
- * the settled reservations through, by the time they settled. Every time is epoch milliseconds in a BIGINT. There is
- * no literal question mark anywhere in the text: the Postgres adapter rewrites each one to a numbered parameter. A
- * product that runs its own migrations copies this text, or {@link spendMeterDdl}'s for a prefix of its own, into one
- * of them and passes `ensureSchema: false`. `spendMeterDdl()` answers this text word for word.
+ * the settled reservations through, by the time they settled. Every time is epoch milliseconds in a BIGINT. A
+ * reservation's `settled_units` holds the units its consumed settle moved to `used` (NULL until then, again once a
+ * release or a refund settles it, and on rows an earlier release settled, which took their whole `units`), and comes
+ * last, where `ALTER TABLE ... ADD COLUMN` puts it on tables made before it. There is no literal question mark anywhere in the text: the Postgres adapter rewrites each
+ * one to a numbered parameter. A product that runs its own migrations copies this text, or {@link spendMeterDdl}'s for a
+ * prefix of its own, into one of them and passes `ensureSchema: false`; on tables made before `settled_units` its
+ * migration adds it with `ALTER TABLE <prefix>_reservations ADD COLUMN settled_units BIGINT`. `spendMeterDdl()` answers
+ * this text word for word.
  */
 export const SPEND_METER_DDL = `
 CREATE TABLE IF NOT EXISTS agentos_spend_meter (
@@ -68,7 +72,8 @@ CREATE TABLE IF NOT EXISTS agentos_spend_reservations (
   reserved_at BIGINT NOT NULL,
   expires_at BIGINT NOT NULL,
   settled_at BIGINT,
-  usage_json TEXT
+  usage_json TEXT,
+  settled_units BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_spend_reservations_due ON agentos_spend_reservations (state, expires_at);
 CREATE INDEX IF NOT EXISTS idx_spend_reservations_account ON agentos_spend_reservations (account_id, reserved_at);
@@ -141,7 +146,8 @@ CREATE TABLE IF NOT EXISTS ${t.reservations} (
   reserved_at BIGINT NOT NULL,
   expires_at BIGINT NOT NULL,
   settled_at BIGINT,
-  usage_json TEXT
+  usage_json TEXT,
+  settled_units BIGINT
 );
 ${indexesOf(t).map((index) => `${index.statement};`).join('\n')}
 `;
@@ -212,8 +218,10 @@ export interface SqlSpendMeterOptions {
   resolveUnknown?(reservation: { operationId: string; accountId: string; period: string; units: number }): SpendUnknownResolution | Promise<SpendUnknownResolution>;
   /**
    * Asked by {@link SqlSpendMeter.reconcile} for each expired reservation, in place of `resolveUnknown` and
-   * `unknownAfterLease`: consumed, released, or deferred until `retryAt` with its evidence, which stays reserved and
-   * counted. A resolver that throws defers the reservation for one lease; it never falls through to a default outcome.
+   * `unknownAfterLease`: consumed (at the `units` the decision names, the usage the host's evidence shows, held to the
+   * reservation as {@link SpendSettleRequest.units} is; else the whole reservation), released, or deferred until
+   * `retryAt` with its evidence, which stays reserved and counted. A resolver that throws defers the reservation for one
+   * lease; it never falls through to a default outcome.
    * An answer is written only to the attempt it was asked about and only while that attempt's lease is still out at the
    * pass's `now`, so an operation released and retried while it is asked keeps the retry reserved under its own lease,
    * and a lease a heartbeat renewed, or a deferral another pass made to a next check after `now`, stands meanwhile.
@@ -227,9 +235,9 @@ export interface SqlSpendMeterOptions {
    */
   requireShared?: boolean;
   /**
-   * Create the tables when they are missing, and on tables that exist the indexes they lack (see
-   * {@link SqlSpendMeter.ensureSchema}). Default true. With false the meter runs no DDL: the product's own migrations
-   * make the tables and their indexes.
+   * Create the tables when they are missing, and on tables that exist the indexes and the `settled_units` column they
+   * lack (see {@link SqlSpendMeter.ensureSchema}). Default true. With false the meter runs no DDL: the product's own
+   * migrations make the tables, their indexes and the column, and the meter only reads whether the column is there.
    */
   ensureSchema?: boolean;
   /**
@@ -247,11 +255,13 @@ export interface SqlSpendMeterOptions {
   tablePrefix?: string;
   /**
    * Told of each statement that failed while {@link SqlSpendMeter.ensureSchema} brought tables that exist up to the
-   * meter's indexes, with the statement and the error the store threw: the `CREATE INDEX` of an index the tables lack
-   * (refused, for example, to a role that does not own them, or stopped by a lock or statement timeout), or the read of
-   * the catalogue before them. Such a failure is not fatal: the indexes speed the meter's reads and change none of its
-   * answers, so the meter uses the tables as they are. An error the callback throws is dropped. Without a callback,
-   * nothing is reported.
+   * meter's indexes and its `settled_units` column, with the statement and the error the store threw: the
+   * `CREATE INDEX` of an index the tables lack or the `ALTER TABLE` that adds the column (refused, for example, to a
+   * role that does not own them, or stopped by a lock or statement timeout), or the read of the catalogue before them.
+   * With `ensureSchema: false` it is told, once, of the read that found the reservations table without the column.
+   * Such a failure is not fatal: the indexes speed the meter's reads and change none of its answers, so the meter uses
+   * the tables as they are, and without the column a consumed settle takes its whole reservation, as it did before
+   * {@link SpendSettleRequest.units}. An error the callback throws is dropped. Without a callback, nothing is reported.
    */
   onWarning?(warning: { statement: string; error: unknown }): void;
 }
@@ -271,6 +281,8 @@ interface ReservationRow {
   units: number | string;
   state: SpendReservationState;
   attempts: number | string;
+  /** Read only where the table has the column; NULL but while a consumed settle's units count, and on rows settled before it. */
+  settled_units?: number | string | null;
 }
 
 /** The one period every row of a window meter carries. The window's own statements name it literally. */
@@ -291,6 +303,15 @@ class AllowanceExhausted extends Error {
 }
 
 const num = (v: unknown): number => (typeof v === 'number' ? v : Number(v ?? 0));
+
+/**
+ * The units a consumed settle moves to `used`: the units the work used, held to the reservation. More than it reserved
+ * is the reservation, a negative number none, a fraction its whole part; left out, or NaN, the whole reservation.
+ */
+function consumedUnits(reservation: number, used: number | undefined): number {
+  if (typeof used !== 'number' || Number.isNaN(used)) return reservation;
+  return Math.min(reservation, Math.max(0, Math.trunc(used)));
+}
 
 /** A reserved row's deferral record, from its `usage_json`. */
 function deferralOf(usageJson: unknown): { count: number; evidence?: SpendFenceEvidence } | undefined {
@@ -314,6 +335,11 @@ export class SqlSpendMeter implements ISpendMeter {
   /** The names of this meter's tables, from its checked prefix; every statement reads them here. */
   private readonly tables: SpendMeterTables;
   private schemaReady: Promise<void> | null = null;
+  /**
+   * Whether the reservations table holds `settled_units`, as {@link ensureSchema} found it before the meter's first
+   * statement. Without it a consumed settle takes the whole reservation and the statements name no such column.
+   */
+  private settledUnits = false;
   private reconciler: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly opts: SqlSpendMeterOptions) {
@@ -344,26 +370,71 @@ export class SqlSpendMeter implements ISpendMeter {
    * store's catalogue for the meter's index names (`pg_indexes` on Postgres, `sqlite_master` on SQLite) and runs the
    * `CREATE INDEX IF NOT EXISTS` statement of each index the tables lack, so a store an earlier release made gains the
    * indexes it lacks, and a store that holds them all runs no index statement: on Postgres each one takes a SHARE lock
-   * on the reservations table, which holds back the table's writes, before it looks for the index's name. An index
-   * statement that fails is reported to {@link SqlSpendMeterOptions.onWarning}, and the meter uses the tables as they
-   * are. Called before the first statement; safe to call again. Does nothing with `ensureSchema: false`.
+   * on the reservations table, which holds back the table's writes, before it looks for the index's name. It then reads
+   * whether the reservations table holds `settled_units`, and on one an earlier release made, which lacks it, runs
+   * `ALTER TABLE <prefix>_reservations ADD COLUMN settled_units BIGINT`; a table that holds it gets no `ALTER`, whose
+   * lock would hold back every statement on the table. An index statement or an `ALTER` that fails is reported to
+   * {@link SqlSpendMeterOptions.onWarning}, and the meter uses the tables as they are. Called before the first
+   * statement; safe to call again. With `ensureSchema: false` it runs no DDL and only reads whether the column is there.
    */
   ensureSchema(): Promise<void> {
-    if (this.opts.ensureSchema === false) return Promise.resolve();
-    this.schemaReady ??= (async () => {
-      try {
-        await this.db.get(`SELECT 1 FROM ${this.tables.meter} LIMIT 1`);
-        await this.db.get(`SELECT 1 FROM ${this.tables.reservations} LIMIT 1`);
-      } catch {
-        await this.db.exec(ddlOf(this.tables));
-        return;
-      }
-      await this.addMissingIndexes();
-    })().catch((e) => {
+    this.schemaReady ??= this.prepareSchema().catch((e) => {
       this.schemaReady = null;
       throw e;
     });
     return this.schemaReady;
+  }
+
+  private async prepareSchema(): Promise<void> {
+    if (this.opts.ensureSchema === false) {
+      // the product's migrations own the tables: the meter reads what they hold and changes nothing
+      const found = await this.readSettledUnits();
+      if (found !== true) this.warn(found.statement, found.error);
+      this.settledUnits = found === true;
+      return;
+    }
+    let made = false;
+    try {
+      await this.db.get(`SELECT 1 FROM ${this.tables.meter} LIMIT 1`);
+      await this.db.get(`SELECT 1 FROM ${this.tables.reservations} LIMIT 1`);
+    } catch {
+      await this.db.exec(ddlOf(this.tables));
+      made = true;
+    }
+    // tables the DDL just made hold every index; the column is read either way, since `IF NOT EXISTS` leaves tables
+    // an earlier release made as they were when the reads above failed for another reason
+    if (!made) await this.addMissingIndexes();
+    this.settledUnits = await this.addSettledUnits();
+  }
+
+  /**
+   * Whether the reservations table holds `settled_units`: `true`, or the read that found it missing with the store's
+   * error. A transient error is thrown, and so is the error of a reservations table that is not there at all, so the
+   * start is read again at the next statement rather than taken for a table without the column.
+   */
+  private async readSettledUnits(): Promise<true | { statement: string; error: unknown }> {
+    const statement = `SELECT settled_units FROM ${this.tables.reservations} WHERE 1 = 0`;
+    try {
+      await this.db.get(statement);
+      return true;
+    } catch (error) {
+      if (isTransientStorageError(error)) throw error;
+      // throws while the table is missing: the meter's own statements would fail on it as well
+      await this.db.get(`SELECT 1 FROM ${this.tables.reservations} LIMIT 1`);
+      return { statement, error };
+    }
+  }
+
+  /**
+   * Adds `settled_units` to a reservations table that lacks it, and answers whether the table holds it afterwards. An
+   * `ALTER` the store refuses goes to {@link SqlSpendMeterOptions.onWarning}; one another process ran first leaves the
+   * column in place all the same, which the second read finds.
+   */
+  private async addSettledUnits(): Promise<boolean> {
+    if ((await this.readSettledUnits()) === true) return true;
+    const statement = `ALTER TABLE ${this.tables.reservations} ADD COLUMN settled_units BIGINT`;
+    await this.db.exec(statement).catch((error: unknown) => this.warn(statement, error));
+    return (await this.readSettledUnits()) === true;
   }
 
   /**
@@ -445,10 +516,11 @@ export class SqlSpendMeter implements ISpendMeter {
           );
           let attempt = 1;
           if (!inserted.changes) {
+            // a retry starts clean: no fence, settlement, usage or settled units of the attempt before it
             const retried = await trx.run(
               `UPDATE ${reservations}
                   SET state = 'reserved', attempts = attempts + 1, account_id = ?, period = ?, units = ?, reserved_at = ?, expires_at = ?,
-                      outcome = ?, settled_at = NULL, usage_json = NULL
+                      outcome = ?, settled_at = NULL, usage_json = NULL${this.settledUnits ? ', settled_units = NULL' : ''}
                 WHERE operation_id = ? AND state = 'released' AND attempts < ?`,
               [req.accountId, period, units, now, expiresAt, marker, req.operationId, this.maxAttempts],
             );
@@ -509,13 +581,15 @@ export class SqlSpendMeter implements ISpendMeter {
 
   /**
    * The units an account's reservations hold in the window that reaches back to `since`: the consumed ones reserved
-   * inside it, and every one still reserved whatever its age, since a hold stays committed until it settles. Never a
-   * released one. `except` leaves one operation out: the reservation being decided.
+   * inside it, each by the units its settle took, and every one still reserved whatever its age, since a hold stays
+   * committed until it settles. Never a released one. `except` leaves one operation out: the reservation being decided.
    */
   private async windowUnits(db: StorageAdapter, accountId: string, since: number, except?: string): Promise<{ used: number; reserved: number }> {
+    // a row settled before settled_units existed took its whole reservation
+    const consumed = this.settledUnits ? 'COALESCE(settled_units, units)' : 'units';
     // reserved_at has no upper bound here: a unit another process stamped a little ahead of this clock still counts
     const held = await db.get<{ used: unknown; reserved: unknown }>(
-      `SELECT COALESCE(SUM(CASE WHEN state = 'consumed' THEN units ELSE 0 END), 0) AS used,
+      `SELECT COALESCE(SUM(CASE WHEN state = 'consumed' THEN ${consumed} ELSE 0 END), 0) AS used,
               COALESCE(SUM(CASE WHEN state = 'reserved' THEN units ELSE 0 END), 0) AS reserved
          FROM ${this.tables.reservations}
         WHERE account_id = ? AND period = 'window' AND (state = 'reserved' OR (state = 'consumed' AND reserved_at >= ?))${except === undefined ? '' : ' AND operation_id <> ?'}`,
@@ -539,36 +613,61 @@ export class SqlSpendMeter implements ISpendMeter {
     const now = req.now ?? Date.now();
     const { meter, reservations } = this.tables;
     const guard = pass ? ` AND attempts = ? AND expires_at <= ?${pass.unfenced ? ` AND ${UNFENCED}` : ''}` : '';
+    // whether the table holds settled_units is known once the schema is ready, inside run()
     return this.run(() =>
       this.db.transaction(async (trx): Promise<SpendSettleResult> => {
-        const row = await trx.get<ReservationRow>(`SELECT operation_id, account_id, period, units, state FROM ${reservations} WHERE operation_id = ?`, [req.operationId]);
+        const tracked = this.settledUnits;
+        const row = await trx.get<ReservationRow>(
+          `SELECT operation_id, account_id, period, units, state${tracked ? ', settled_units' : ''} FROM ${reservations} WHERE operation_id = ?`,
+          [req.operationId],
+        );
         if (!row) return { status: 'not_found' };
         const move = transition(row.state, req.outcome);
         if (!move) return { status: 'already_settled', state: row.state };
+        const reservation = num(row.units);
+        // what moves into `used` or out of it: a consumed settle takes the units the work used where the table can
+        // record them, else its whole reservation; a refund gives back what the consumed settle took, which on a row
+        // settled before settled_units existed is its whole reservation
+        let moved = reservation;
+        if (move.used > 0 && tracked) moved = consumedUnits(reservation, req.units);
+        else if (move.used < 0 && tracked && row.settled_units !== null && row.settled_units !== undefined) moved = num(row.settled_units);
+        // the row keeps the units only while they count: a release or a refund clears them, so a retry under the same
+        // operation id starts with none even when a meter that does not write the column makes it, and a consumed settle
+        // of that retry there is counted and refunded by its whole reservation
+        const settledUnits = move.used > 0 ? moved : null;
         // the move only from the state just read: a concurrent settle that got there first leaves nothing to change.
         // A reconcile's move also names the attempt it decided about and its lease, and on Postgres a row another
         // transaction changed meanwhile is tested again in its new version, so a deferral that committed first stands.
         const changed = await trx.run(
-          `UPDATE ${reservations} SET state = ?, outcome = ?, settled_at = ?, usage_json = ? WHERE operation_id = ? AND state = ?${guard}`,
-          [move.to, req.outcome, now, req.usage ? JSON.stringify(req.usage) : null, req.operationId, row.state, ...(pass ? [pass.attempt, now] : [])],
+          `UPDATE ${reservations} SET state = ?, outcome = ?, settled_at = ?, usage_json = ?${tracked ? ', settled_units = ?' : ''} WHERE operation_id = ? AND state = ?${guard}`,
+          [
+            move.to,
+            req.outcome,
+            now,
+            req.usage ? JSON.stringify(req.usage) : null,
+            ...(tracked ? [settledUnits] : []),
+            req.operationId,
+            row.state,
+            ...(pass ? [pass.attempt, now] : []),
+          ],
         );
         if (!changed.changes) {
           const current = await trx.get<{ state: SpendReservationState }>(`SELECT state FROM ${reservations} WHERE operation_id = ?`, [req.operationId]);
           return { status: 'already_settled', state: current?.state };
         }
-        const units = num(row.units);
         const sets: string[] = [];
         const params: unknown[] = [];
         if (move.reserved) {
+          // the whole reservation leaves `reserved`, whatever part of it the work used
           sets.push('reserved = CASE WHEN reserved >= ? THEN reserved - ? ELSE 0 END');
-          params.push(units, units);
+          params.push(reservation, reservation);
         }
         if (move.used > 0) {
           sets.push('used = used + ?');
-          params.push(units);
+          params.push(moved);
         } else if (move.used < 0) {
           sets.push('used = CASE WHEN used >= ? THEN used - ? ELSE 0 END');
-          params.push(units, units);
+          params.push(moved, moved);
         }
         sets.push('updated_at = ?');
         params.push(now, row.account_id, row.period);
@@ -593,12 +692,12 @@ export class SqlSpendMeter implements ISpendMeter {
 
   /**
    * Settles the expired reservations, at most `limit` a pass (default 100), the earliest expiry first. With
-   * `resolveExpired` the host decides each one: consumed, released, or deferred, which keeps it reserved and counted
-   * with its evidence and its next check on its row. Without it an ordinary reservation settles as `resolveUnknown` and
-   * `unknownAfterLease` say, and one made with `requireFence`, or deferred before, stays reserved and counts as pending;
-   * such a pass reads the ordinary reservations into its page first and the fenced holds only into the room they leave,
-   * each in expiry order, so the fenced holds it leaves never take the place of one it can settle, and no pass sorts
-   * every due row to find its page.
+   * `resolveExpired` the host decides each one: consumed (at the `units` its decision names, else whole), released, or
+   * deferred, which keeps it reserved and counted with its evidence and its next check on its row. Without it an
+   * ordinary reservation settles as `resolveUnknown` and `unknownAfterLease` say, and one made with `requireFence`, or
+   * deferred before, stays reserved and counts as pending; such a pass reads the ordinary reservations into its page
+   * first and the fenced holds only into the room they leave, each in expiry order, so the fenced holds it leaves never
+   * take the place of one it can settle, and no pass sorts every due row to find its page.
    *
    * Each decision is written to the reservation as the pass read it, in one conditional statement: the same attempt,
    * still reserved, still past its lease at `now` and, for a settlement without `resolveExpired`, still unfenced. So
@@ -634,6 +733,8 @@ export class SqlSpendMeter implements ISpendMeter {
       // the attempt this pass read: a release and a retry while a resolver is asked make another, which no decision here is about
       const attempt = num(r.attempts);
       let outcome: SpendOutcome;
+      // the units a consumed decision says the work used; left out, the whole reservation
+      let units: number | undefined;
       if (resolveExpired) {
         const prior = deferralOf(r.usage_json);
         let decision: SpendExpiryDecision;
@@ -660,6 +761,7 @@ export class SqlSpendMeter implements ISpendMeter {
           continue;
         }
         outcome = decision.outcome;
+        if (decision.outcome === 'consumed') units = decision.units;
       } else {
         if (fenced) {
           // an opted-in hold: only a reconcile with resolveExpired, or an explicit settle, ends it
@@ -676,7 +778,7 @@ export class SqlSpendMeter implements ISpendMeter {
         }
         outcome = resolution === 'consumed' ? 'consumed' : resolution === 'released' ? 'released' : this.opts.unknownAfterLease === 'consume' ? 'consumed' : 'released';
       }
-      const settled = await this.settleOnce({ operationId: r.operation_id, outcome, now }, { attempt, unfenced: !resolveExpired });
+      const settled = await this.settleOnce({ operationId: r.operation_id, outcome, units, now }, { attempt, unfenced: !resolveExpired });
       if (settled.status !== 'settled') out.pending += settled.state === 'reserved' ? 1 : 0;
       else if (outcome === 'consumed') out.consumed += 1;
       else out.released += 1;

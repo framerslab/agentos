@@ -313,13 +313,15 @@ Each refusal reaches the caller before any model call. The turn settles in the o
 | `resolveUnknown(reservation)` | none | Asked by `reconcile()` what became of an expired reservation: `consumed`, `released` or `unknown` |
 | `resolveExpired(reservation)` | none | Asked by `reconcile()` for each expired reservation in place of `resolveUnknown` and `unknownAfterLease`: `consumed`, `released`, or `deferred` until `retryAt` with its evidence, which keeps the reservation reserved and counted. See [Deferred expiry](#deferred-expiry) |
 | `unknownAfterLease` | `'release'` | How an expired reservation settles when the answer is `unknown` |
-| `ensureSchema` | `true` | Create the two tables when missing, and on tables that exist the indexes they lack; a product that runs its own migrations copies `SPEND_METER_DDL`, or `spendMeterDdl(prefix)` for its `tablePrefix`, and passes `false` |
+| `ensureSchema` | `true` | Create the two tables when missing, and on tables that exist the indexes and the `settled_units` column they lack; a product that runs its own migrations copies `SPEND_METER_DDL`, or `spendMeterDdl(prefix)` for its `tablePrefix`, and passes `false` |
 | `tablePrefix` | `'agentos_spend'` | The start of the two tables' names, `<prefix>_meter` and `<prefix>_reservations`; their indexes are named `idx_<prefix>_reservations_*`, and `idx_spend_reservations_*` under the default. A lower-case letter and at most 37 more lower-case letters, digits or underscores, and not `spend`: the constructor throws on any other value, before any statement is built. At 38 characters the longest names, `idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled`, take the 63 bytes Postgres keeps of an identifier |
-| `onWarning(warning)` | none | Told of each statement that failed while `ensureSchema` brought tables that exist up to the meter's indexes, with the `statement` and the `error`: an index the store refused, or the catalogue read before them. The meter uses the tables as they are |
+| `onWarning(warning)` | none | Told of each statement that failed while `ensureSchema` brought tables that exist up to the meter's indexes and its `settled_units` column, with the `statement` and the `error`: an index or the column the store refused, or the catalogue read before them; with `ensureSchema: false`, once, the read that found the reservations table without the column. The meter uses the tables as they are |
 
 With `windowMs` the meter counts from the reservations themselves, inside each reservation's own transaction and after it has taken the account row's lock, so two reservations cannot both take the last unit of a window. Every row then carries the period `window`, which is the period `allowanceFor` is asked for. A consumed unit counts within its accounting window: from its reservation until more than `windowMs` have passed. A still-reserved hold counts until explicit settlement, even across window boundaries; expiration alone does not release it. A released reservation never counts, and one whose lease ran out still counts until `reconcile()` releases it. `snapshot()` answers the units consumed and reserved inside the window and what remains. A meter given neither `periodOf` nor `windowMs` throws when it is constructed.
 
 The window's count reads the index `idx_spend_reservations_account`, and `purge()` finds the reservations settled before its `before` through `idx_spend_reservations_settled`, on `settled_at` and `state` (`idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled` under another prefix). The DDL creates both with the tables. On tables that exist, `ensureSchema` reads the store's catalogue before the meter's first statement (`pg_indexes` on Postgres, `sqlite_master` on SQLite) and runs the `CREATE INDEX IF NOT EXISTS` statement of each of the meter's indexes the tables lack, so a store whose tables an earlier release made gains them. A meter whose tables hold all three runs no index statement, so on Postgres its start takes no SHARE lock on the reservations table, the lock a `CREATE INDEX` takes before it checks `IF NOT EXISTS`. The indexes change no answer of the meter, so tables that refuse one, as Postgres does for a role that does not own them, are used as they are, and the statement and its error go to `onWarning`. Postgres holds back writes to a table while it builds an index on it, so a product with a large reservations table creates the two indexes first in its own migration, with `CREATE INDEX CONCURRENTLY IF NOT EXISTS` and the names and columns `spendMeterDdl(prefix)` gives them, and runs the meter with `ensureSchema: false`.
+
+The reservations table's last column, `settled_units`, records the units a consumed settle moved to `used` (see [Settlement](#settlement)). On a reservations table that lacks it, a meter that ensures its schema runs `ALTER TABLE <prefix>_reservations ADD COLUMN settled_units BIGINT` once, at its first statement; a table that holds it gets no `ALTER`. A product that runs its own migrations adds the column with that statement in one of them (`agentos_spend_reservations` under the default prefix). Until the column is there, a meter settles as it did before it: a consumed settle takes the whole reservation, whatever `units` it names, and `onWarning` is told of the refused `ALTER`, or, with `ensureSchema: false`, of the read that found the column missing. Rows settled before the column existed hold NULL there and count by their whole reservation. A release or a refund clears the figure, so a retry under the same operation id starts with none. A meter reads whether the column is there once, at its first statement: one that started before the column was added, or a process of an earlier release, keeps settling a consumed reservation whole and refunds one by its whole reservation, even one a meter with the column settled at fewer units, so restart such processes once the column is added.
 
 ### Several meters in one database
 
@@ -378,6 +380,32 @@ const { used, remaining } = await meter.snapshot(userId);
 await meter.setAllowance(userId, 600);
 ```
 
+### Settlement
+
+How a reservation settles follows from what the host can show of the work it held units for:
+
+| What the host knows | Settle | The allowance |
+|---|---|---|
+| The work never ran: the provider refused before any output, or answered with zero usage | `released` | Nothing used; the whole reservation is free again |
+| The work completed and its usage is known | `consumed` with `units`, the units it used | `units` used; the rest of the reservation is free again |
+| The outcome is uncertain: a stream broke, a provider timed out, the process died mid-call | Nothing yet: the reservation stays reserved and counted ([deferred](#deferred-expiry)) | Held until evidence settles it |
+| A verified fault kept a completed answer from the person | `replaced` on the consumed reservation, with the host's own record of the fault beside it | What the consumed settle took is given back |
+
+No elapsed time settles an uncertain outcome. A timeout alone does not show that the provider billed nothing, so a reservation whose work may have run stays reserved until the host's evidence, or a person, settles it. Reserve such a call with `requireFence`, which no reconcile pass without `resolveExpired` settles, and give the meter a `resolveExpired` that defers it until the evidence comes. A refund is a separate entry: `replaced` moves the reservation from consumed to released and takes its units back out of `used`, so the record shows the debit and its refund.
+
+```typescript
+// A call reserved at its largest cost, in micro-dollars, settled at what it cost
+const held = await meter.reserve({ accountId, operationId, units: maxMicro, requireFence: true });
+// ...the call runs, and the provider reports its usage...
+await meter.settle({ operationId, outcome: 'consumed', units: actualMicro, usage });
+```
+
+`units` on a `consumed` settle moves that many units to `used`, and the whole reservation leaves `reserved`, so the rest is free at once. The figure is held to the reservation. More than it reserved counts as the reservation (an actual cost above the reserved bound is the host's estimator or price-table defect, which it records and fixes), a negative number as none, a fraction by its whole part, and NaN as the whole reservation. Left out, the whole reservation is consumed. `released` and `replaced` ignore it. The reservation row keeps the figure in `settled_units`, so a later `replaced` gives back the units the work used, and a rolling window counts a consumed reservation by them. `resolveExpired` settles an expired reservation the same way: `{ outcome: 'consumed', units }` takes the usage the host's evidence shows, and `{ outcome: 'consumed' }` the whole reservation. `releaseExpiredSpend` reads the decision's `units` as micro-dollars, which its store holds to the amount reserved.
+
+One operation id holds one reservation: a retry under the same id while it is reserved is `in_flight`, after it counted `already_consumed`, and after a release it reserves again up to `maxAttemptsPerOperation`. So a client's retry of one logical call is never charged twice. A host that reserves each attempt of a call under an id of its own (`<call>:<attempt>`), to keep an attempt's units apart from the next one's, decides which attempt is debited: it settles the one whose work completed `consumed` and the others `released`, or `replaced` where one had already counted.
+
+No reservation takes `used + reserved` past a period's allowance, and no settle raises their sum: a consumed settle adds to `used` at most what it takes from `reserved`. Neither falls below zero (`CHECK (used >= 0 AND reserved >= 0)`).
+
 ### Deferred expiry
 
 A call whose work may outlive its lease (a worker still running, an inference not yet stopped) must not be released or consumed by a sweeper that cannot prove it stopped. Reserve it with `requireFence: true` and give the meter `resolveExpired`:
@@ -417,6 +445,7 @@ A reservation still reserved is never deleted, and neither is a period meter's p
 A meter that holds an allowance in money reserves each provider call's largest cost before the call and settles to what it cost after. `estimateMaxCallCostUSD(providerId, modelId, request)` gives that largest cost, an upper bound in US dollars, or `undefined` for a call it cannot bound, which the host refuses:
 
 ```typescript
+import { costOfUsageUSD } from '@framers/agentos';
 import { estimateMaxCallCostUSD, registerModelPricing } from '@framers/agentos/safety/runtime';
 
 // OpenRouter's models, refreshed from its models endpoint each day; OpenAI's and Anthropic's tables are built in.
@@ -432,7 +461,10 @@ const max = estimateMaxCallCostUSD('anthropic', body.model, {
 if (max === undefined) return refuse(400, 'not_priced');
 const held = await meter.reserve({ accountId, operationId, units: Math.ceil(max * 1_000_000), requireFence: true });
 if (held.status !== 'reserved') return refuse(402, held.reason); // the account's allowance cannot hold the call
-// Only now is the call sent; it settles `operationId` once it has finished.
+// Only now is the call sent. Once it has finished, it settles at what it cost and the rest of the hold is free;
+// a cost the table cannot give leaves `units` out, which consumes the whole hold.
+const actual = costOfUsageUSD('anthropic', body.model, usage);
+await meter.settle({ operationId, outcome: 'consumed', units: actual === undefined ? undefined : Math.ceil(actual * 1_000_000) });
 ```
 
 The bound:
@@ -451,7 +483,7 @@ A byte-level tokenizer's token covers at least one byte, so the prompt bound hol
 
 The bound counts what the request carries. A request that draws in context stored with the provider (OpenAI's `previous_response_id`, `conversation` or a stored `prompt`) is billed for tokens its text does not show, so a host sends that context in `messages` or refuses the request. A request for output that is not text (OpenAI's `modalities` with `audio`) bills audio tokens at their own rates, so a host flags it `nonTextParts`.
 
-An actual cost above the reserved bound is a price-table or estimator defect: the host settles at the reservation, records the difference and alerts.
+An actual cost above the reserved bound is a price-table or estimator defect: the host settles at the reservation (a `units` above it is held to it), records the difference and alerts. [Settlement](#settlement) gives the outcome for every other ending of the call.
 
 ## Compound credit
 
