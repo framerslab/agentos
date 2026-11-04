@@ -462,11 +462,15 @@ export class OpenRouterProvider implements IProvider {
     }
   }
 
-  private async refreshAvailableModels(): Promise<void> {
+  /** Reads `/models` into the cache. `signal`, when given, ends the read in flight and throws `REQUEST_ABORTED`. */
+  private async refreshAvailableModels(signal?: AbortSignal): Promise<void> {
     const responseData = await this.makeApiRequest<OpenRouterListModelsAPIResponse>(
       '/models',
       'GET',
-      this.config.requestTimeout
+      this.config.requestTimeout,
+      undefined,
+      false,
+      signal,
     );
 
     this.availableModelsCache.clear();
@@ -1002,9 +1006,21 @@ export class OpenRouterProvider implements IProvider {
     const isDecline = (e: unknown): boolean =>
       e instanceof OpenRouterProviderError && (e.code === 'content_filter' || e.code === 'content_policy_violation');
 
+    // Set when the body's read ended because the caller aborted: the request carries the signal, so axios errors
+    // the body at the abort, and a body that stalled ends there with the abort chunk instead of a read error.
+    let readCutByAbort = false as boolean;
+    const quietClose = (): boolean => {
+      if (pendingWaitEnded) return true;
+      if (abortSignal?.aborted) {
+        readCutByAbort = true;
+        return true;
+      }
+      return false;
+    };
+
     try {
       try {
-        for await (const rawChunk of this.parseSseStream(stream, () => pendingWaitEnded)) {
+        for await (const rawChunk of this.parseSseStream(stream, quietClose)) {
           if (abortSignal?.aborted) {
             // The line that shows the abort is usually the trailing usage line:
             // the one a held decline or a held error was waiting for, or the one
@@ -1162,6 +1178,9 @@ export class OpenRouterProvider implements IProvider {
           if (mapped.responseTextDelta && yieldedText.length < yieldedTextCap) {
             yieldedText = (yieldedText + mapped.responseTextDelta).slice(0, yieldedTextCap);
           }
+          // The finish chunk goes out at once, with the usage its line reports, so a caller that stops the call
+          // before the usage-only line still meters what the finish billed; an abort after it ends the stream with
+          // the abort chunk, which carries the usage line when that line is what shows the abort.
           yield schemaLeftPayload ? { ...mapped, schemaInPayload: false } : mapped;
           // Don't break on finish_reason: with stream_options.include_usage,
           // OpenRouter (like OpenAI) emits a trailing usage-only chunk AFTER
@@ -1203,6 +1222,10 @@ export class OpenRouterProvider implements IProvider {
           readError,
         });
       }
+      if (readCutByAbort) {
+        yield abortChunk('Stream aborted by caller');
+        return;
+      }
     } finally {
       if (pendingWaitTimer !== undefined) clearTimeout(pendingWaitTimer);
       abortSignal?.removeEventListener('abort', abortHandler);
@@ -1219,7 +1242,8 @@ export class OpenRouterProvider implements IProvider {
       throw new OpenRouterProviderError('Input texts array cannot be empty for generating embeddings.', 'EMBEDDING_NO_INPUT');
     }
 
-    const modelInfo = await this.getModelInfo(modelId);
+    // The lookup carries the call's signal: an aborted call sends nothing, and an abort ends a refresh in flight.
+    const modelInfo = await this.modelInfoForCall(modelId, options?.abortSignal);
     if (modelInfo && !modelInfo.capabilities.includes('embeddings')) {
       log.warn('llm.option_ignored', { provider: 'openrouter', reason: 'embedding_capability' });
     }
@@ -1237,11 +1261,14 @@ export class OpenRouterProvider implements IProvider {
       payload.customModelParams = { input_type: options.inputType };
     }
 
+    // The call's signal ends the request in flight (REQUEST_ABORTED).
     const apiResponseData = await this.makeApiRequest<OpenRouterEmbeddingAPIResponse>(
       '/embeddings',
       'POST',
       this.config.requestTimeout,
-      payload
+      payload,
+      false,
+      options?.abortSignal,
     );
 
     return {
@@ -1276,12 +1303,27 @@ export class OpenRouterProvider implements IProvider {
   }
 
   public async getModelInfo(modelId: string): Promise<ModelInfo | undefined> {
+    return this.modelInfoForCall(modelId);
+  }
+
+  /**
+   * The model lookup behind {@link getModelInfo}: a model missing from the cache refreshes the `/models` list first,
+   * and a refresh that fails is logged and the lookup answers from the cache. A call that carries the caller's
+   * signal passes it here: a call whose signal has aborted throws
+   * `REQUEST_ABORTED` before any request, and the `/models` refresh a model missing from the cache starts carries
+   * the signal, so an abort ends it at once with `REQUEST_ABORTED` instead of waiting for its timeout or retries.
+   * Any other refresh failure is logged and the lookup answers from the cache, as {@link getModelInfo} does.
+   */
+  private async modelInfoForCall(modelId: string, signal?: AbortSignal): Promise<ModelInfo | undefined> {
     this.ensureInitialized();
+    const aborted = () => new OpenRouterProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+    if (signal?.aborted) throw aborted();
     if (!this.availableModelsCache.has(modelId)) {
       try {
         log.debug('llm.models_refresh', { provider: 'openrouter' });
-        await this.refreshAvailableModels();
+        await this.refreshAvailableModels(signal);
       } catch (error) {
+        if (signal?.aborted) throw aborted();
         log.warn('llm.models_failed', { provider: 'openrouter', ...errorFields(error) });
       }
     }
@@ -1518,9 +1560,13 @@ export class OpenRouterProvider implements IProvider {
    *    with the response's Retry-After when present (capped), else
    *    jittered exponential backoff; 4xx request errors throw immediately.
    *
-   * The caller's `signal` ends a draw that waits on the pool's probes and a
-   * wait between attempts at once, and no attempt is sent once it has fired:
-   * the request throws `REQUEST_ABORTED` instead.
+   * The caller's `signal` rides on each attempt (axios's `signal` option), so
+   * an abort ends the request in flight at once, whether it waits for its
+   * answer or its headers; it also ends a draw that waits on the pool's probes
+   * and a wait between attempts, and no attempt is sent once it has fired: the
+   * request throws `REQUEST_ABORTED` without a retry and without marking the
+   * key. A streamed body already returned errors at the abort, which the
+   * stream turns into its terminal abort chunk.
    *
    * `maxAttempts` is the call's count of attempts, a first and its retries
    * together, over the provider's own 3; key hops are not counted.
@@ -1565,11 +1611,18 @@ export class OpenRouterProvider implements IProvider {
           data: body,
           timeout: timeout,
           headers: { Authorization: `Bearer ${apiKey}` },
+          // The caller's signal ends this request in flight: axios rejects with a CanceledError while it waits for
+          // the answer or the headers, and errors a streamed body it has already returned.
+          ...(signal ? { signal } : {}),
           responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
         });
         if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
         return response.data;
       } catch (error: unknown) {
+        // An abort is the caller's verdict, not the provider's or the key's: no retry, no key marked.
+        if (signal?.aborted) {
+          throw new OpenRouterProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+        }
         let statusCode: number | undefined;
         let errorData: any;
         let errorMessage = 'Unknown OpenRouter API error';
@@ -1586,7 +1639,11 @@ export class OpenRouterProvider implements IProvider {
           // header. Read a bounded prefix and drop the stream, so the
           // message can use the body and nothing keeps the request.
           if (isReadableStream(errorData)) {
-            const { text, complete } = await readErrorStream(errorData);
+            const { text, complete } = await readErrorStream(errorData, signal);
+            // An abort during the read is the caller's verdict, as above: the answer is not classified, no key is marked.
+            if (signal?.aborted) {
+              throw new OpenRouterProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+            }
             // A body cut short can end inside a key, which whole-secret
             // masking would not match. Whole keys are masked first, so a key
             // whose last characters also start a key is not split in two.
@@ -1998,8 +2055,9 @@ export class OpenRouterProvider implements IProvider {
 
   /**
    * The stream's SSE lines. `quietClose` answers true when the caller ended
-   * the stream itself (a bounded wait ran out): the read then ends as a
-   * normal end of stream instead of a logged read error.
+   * the stream itself (a bounded wait ran out, or the caller's signal aborted
+   * the request): the read then ends as a normal end of stream instead of a
+   * logged read error.
    */
   private async *parseSseStream(
     stream: NodeJS.ReadableStream,
