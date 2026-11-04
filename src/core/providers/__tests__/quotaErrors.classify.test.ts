@@ -30,6 +30,20 @@ describe('classifyKeyFailure', () => {
     expect(classifyKeyFailure(456, '')).toBe('quota');
   });
 
+  it("reads OpenAI's credit and spend-limit 429s as billing by their code, whatever the type", () => {
+    // developers.openai.com/api/docs/guides/error-codes, read 3 November 2026: four 429 codes for a spent prepaid
+    // balance and for the organization's, the project's and OpenAI's own monthly limits; "inspect error.code ... the
+    // broader error.type can still be insufficient_quota", so the type is not relied on.
+    for (const code of ['credit_balance_exhausted', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded', 'organization_usage_limit_exceeded']) {
+      expect(classifyKeyFailure(429, openai('insufficient_quota', code))).toBe('billing');
+      expect(classifyKeyFailure(429, JSON.stringify({ error: { message: 'x', type: null, code } }))).toBe('billing');
+      expect(classifyKeyFailure(429, openai('requests', code))).toBe('billing');
+    }
+    // The throttles keep resting the key.
+    expect(classifyKeyFailure(429, openai('requests', 'rate_limit_exceeded'))).toBe('quota');
+    expect(classifyKeyFailure(429, openai('rate_limit_error', 'slow_down'))).toBe('quota');
+  });
+
   it("reads Anthropic's credit-balance 400 as billing and every other 400 as not the key's fault", () => {
     const credit = anthropic(
       'invalid_request_error',
