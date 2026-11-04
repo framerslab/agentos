@@ -53,6 +53,16 @@ describe('a spend budget through the call paths', () => {
     expect(budget.spentUSD()).toBeCloseTo(0.0006, 10);
   });
 
+  it('refuses generateText on a budget with a meter before the provider or the meter is called, since it reserves nothing', async () => {
+    hoisted.generateCompletion.mockResolvedValue(reply('ok', 0.0006));
+    const reserve = vi.fn();
+    const meter = { reserve, settle: vi.fn(), heartbeat: vi.fn(), reconcile: vi.fn(), snapshot: vi.fn(), setAllowance: vi.fn() };
+    const budget = new SpendBudget({ maxCostUSD: 1, meter, accountId: 'acct-1' });
+    await expect(generateText({ provider: 'openai', model: 'gpt-6-luna', prompt: 'hello', maxTokens: 100, budget })).rejects.toBeInstanceOf(CostCapExceededError);
+    expect(hoisted.generateCompletion).not.toHaveBeenCalled();
+    expect(reserve).not.toHaveBeenCalled();
+  });
+
   it('stops generateObject at the cap without another attempt', async () => {
     hoisted.generateCompletion.mockResolvedValue(reply('not json', 0.0006));
     const budget = new SpendBudget({ maxCostUSD: 0.0006 });
