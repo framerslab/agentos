@@ -1152,11 +1152,16 @@ export class OpenAIProvider implements IProvider {
    * @param {string | undefined} apiKeyOverride - API key provided directly in request options.
    * @param {AbortSignal | undefined} abortSignal - The caller's signal, which ends a wait on the pool's probes.
    * @returns {Promise<string>} The API key to use.
-   * @throws {OpenAIProviderError} If no API key is available; `REQUEST_ABORTED` when the signal ended the draw.
+   * @throws {OpenAIProviderError} If no API key is available; `REQUEST_ABORTED` when the signal ended the draw, or
+   * had already aborted before an OAuth token read (no token is asked for).
    */
   private async getApiKey(apiKeyOverride?: string, abortSignal?: AbortSignal): Promise<string> {
     if (apiKeyOverride) return apiKeyOverride;
     if (this.config.oauthFlow) {
+      // A token read can be a refresh request to the identity provider, so an aborted call makes none.
+      if (abortSignal?.aborted) {
+        throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       return await this.config.oauthFlow.getAccessToken();
     }
     if (this.keyPool?.hasKeys) {
