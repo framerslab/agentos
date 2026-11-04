@@ -613,16 +613,31 @@ function oneHourCacheWrites(split: AnthropicCacheCreationBreakdown | null | unde
   return typeof oneHour === 'number' && Number.isFinite(oneHour) && oneHour >= 0 ? { cacheCreationExtendedInputTokens: oneHour } : {};
 }
 
+/**
+ * The tokens a response wrote to the prompt cache: `cache_creation_input_tokens`, or, when the response gives only the
+ * `cache_creation` split (as some gateways do), the sum of its 5-minute and 1-hour counts, as
+ * `estimateAnthropicCostUSD` reads it. Undefined when the response reports neither.
+ */
+function cacheWriteTotal(
+  total: number | undefined,
+  split: AnthropicCacheCreationBreakdown | null | undefined,
+): number | undefined {
+  if (total !== undefined) return total;
+  if (!split) return undefined;
+  const count = (value: number | undefined): number => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0);
+  return count(split.ephemeral_5m_input_tokens) + count(split.ephemeral_1h_input_tokens);
+}
+
 /** Anthropic's API base, the `baseURL` a provider without one sends to. */
 export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com';
 
 /**
- * The base a request's endpoint (`/v1/messages`) is appended to: `baseURL` without its trailing slashes, so
+ * The base a request's endpoint (`/v1/messages`) is appended to: `baseURL` trimmed and without its trailing slashes, so
  * `https://gateway.example/` sends to `https://gateway.example/v1/messages` and not to `//v1/messages`, or
  * {@link ANTHROPIC_DEFAULT_BASE_URL} when none is given or nothing is left.
  */
 function anthropicBase(baseURL: string | undefined): string {
-  const base = baseURL ?? '';
+  const base = (baseURL ?? '').trim();
   let end = base.length;
   while (end > 0 && base.charCodeAt(end - 1) === 0x2f) end -= 1;
   return end > 0 ? base.slice(0, end) : ANTHROPIC_DEFAULT_BASE_URL;
@@ -1381,9 +1396,10 @@ export class AnthropicProvider implements IProvider {
             // input_tokens excludes cached tokens — capture the cache
             // counts so the final chunk's usage prices them (the
             // accumulate path at streamToCompletion does the same).
-            cacheCreationTokens = event.message.usage?.cache_creation_input_tokens;
-            cacheReadTokens = event.message.usage?.cache_read_input_tokens;
             cacheCreationSplit = event.message.usage?.cache_creation;
+            // A usage with the write split alone counts its writes from the split.
+            cacheCreationTokens = cacheWriteTotal(event.message.usage?.cache_creation_input_tokens, cacheCreationSplit);
+            cacheReadTokens = event.message.usage?.cache_read_input_tokens;
             // Cache diagnostics ride message_start in streaming responses
             // (mirrors the streamToCompletion aggregate path).
             streamDiagnostics = event.message.diagnostics;
@@ -2838,12 +2854,13 @@ export class AnthropicProvider implements IProvider {
       .map(block => block.text!);
     let fullText = textParts.join('');
 
+    const cacheWritten = cacheWriteTotal(apiResponse.usage.cache_creation_input_tokens, apiResponse.usage.cache_creation);
     const usage: ModelUsage = {
       promptTokens: apiResponse.usage.input_tokens,
       completionTokens: apiResponse.usage.output_tokens,
       totalTokens: apiResponse.usage.input_tokens + apiResponse.usage.output_tokens,
       costUSD: estimateAnthropicCostUSD(pricedModelId, apiResponse.usage),
-      cacheCreationInputTokens: apiResponse.usage.cache_creation_input_tokens,
+      cacheCreationInputTokens: cacheWritten,
       // The 1-hour share of the writes, which bill at 2x input where the
       // 5-minute ones bill at 1.25x: a cost counted from the tokens needs it.
       ...oneHourCacheWrites(apiResponse.usage.cache_creation),
@@ -2854,7 +2871,7 @@ export class AnthropicProvider implements IProvider {
       inclusiveInputTokens:
         apiResponse.usage.input_tokens
         + (apiResponse.usage.cache_read_input_tokens ?? 0)
-        + (apiResponse.usage.cache_creation_input_tokens ?? 0),
+        + (cacheWritten ?? 0),
     };
 
     // A refused turn is discarded whole, even when the model wrote text or
