@@ -1,6 +1,6 @@
 # Checkpointing and Time-Travel
 
-The AgentOS Unified Orchestration Layer saves checkpoints, resumes a run after an interruption or a failure, and forks a run from a past checkpoint through the [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) interface. [`InMemoryCheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/InMemoryCheckpointStore.ts) is the default implementation; swap in a persistent store by passing your own implementation to `compile({ checkpointStore })`.
+The AgentOS Unified Orchestration Layer saves checkpoints, resumes a run after an interruption or a failure, and forks a run from a past checkpoint through the [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) interface. [`InMemoryCheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/InMemoryCheckpointStore.ts) is the default implementation. [`SqlCheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/SqlCheckpointStore.ts) keeps checkpoints in SQLite or Postgres through [`@framers/sql-storage-adapter`](https://www.npmjs.com/package/@framers/sql-storage-adapter), so a run resumes after the process that saved it has stopped. Pass either, or an implementation of your own, to `compile({ checkpointStore })`.
 
 ## ICheckpointStore
 
@@ -27,7 +27,8 @@ interface ICheckpointStore {
 | Store | Import path | Use case |
 |---|---|---|
 | [`InMemoryCheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/InMemoryCheckpointStore.ts) | `@framers/agentos/orchestration/checkpoint` | Development, testing, ephemeral runs |
-| Custom | Implement [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) | Postgres, Redis, object storage, or any durable backend |
+| [`SqlCheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/SqlCheckpointStore.ts) | `@framers/agentos/orchestration/checkpoint` | Runs that resume after a restart: SQLite (better-sqlite3, or sql.js) for one process, Postgres for several |
+| Custom | Implement [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) | Redis, object storage, or any other durable backend |
 
 ```typescript
 import { InMemoryCheckpointStore } from '@framers/agentos/orchestration/checkpoint';
@@ -39,6 +40,73 @@ const graph = new AgentGraph(...).compile();
 const store = new InMemoryCheckpointStore();
 const graphWithStore = new AgentGraph(...).compile({ checkpointStore: store });
 ```
+
+## SqlCheckpointStore
+
+[`SqlCheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/SqlCheckpointStore.ts) takes any `@framers/sql-storage-adapter` store: better-sqlite3 or sql.js for one process, Postgres for several. It imports only the adapter's types, so it runs the statements of the adapter you give it.
+
+```typescript
+import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
+import { SqlCheckpointStore } from '@framers/agentos/orchestration/checkpoint';
+
+// A process runs the graph until a human node asks, and may stop there.
+const db = await resolveStorageAdapter({ filePath: './checkpoints.sqlite' });
+const graph = new AgentGraph(...).compile({ checkpointStore: new SqlCheckpointStore({ db }) });
+
+let runId: string | undefined;
+for await (const event of graph.stream(input)) {
+  if (event.type === 'run_start') runId = event.runId;
+  if (event.type === 'interrupt') break;
+}
+
+// A later process, after a restart, opens the same file and resumes the run by its id.
+const later = new AgentGraph(...).compile({
+  checkpointStore: new SqlCheckpointStore({ db: await resolveStorageAdapter({ filePath: './checkpoints.sqlite' }) }),
+});
+const result = await later.resume(runId!);
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `db` | (required) | The adapter the table lives in. Give the store an adapter of its own or the product's own, never AgentOS's provenance-wrapped storage adapter, whose write hooks can turn a `run()` into a no-op. |
+| `tablePrefix` | `agentos_checkpoints` | The table's name, and the start of its indexes' names. A lower-case letter and at most 52 more lower-case letters, digits or underscores; the constructor throws on any other value. Stores under different prefixes keep their checkpoints apart in one database. The store quotes the name in every statement, so a prefix that is an SQL keyword, such as `order`, names a table. |
+| `ensureSchema` | `true` | Make the table and its indexes on first use when the table is missing. With `false` the store runs no DDL. |
+
+Stores in several processes can start on one empty database at once. On Postgres the `CREATE TABLE IF NOT EXISTS` or `CREATE INDEX IF NOT EXISTS` of the store that loses that race fails once the other commits, on the catalogue's unique index or as a duplicate table ([the PostgreSQL list on the race](https://www.postgresql.org/message-id/CA+TgmoZAdYVtwBfp1FL2sMZbiHCWT4UPrzRLNnX1Nb30Ku3-gg@mail.gmail.com)). The store runs its DDL again on such a failure, as the memory and learning stores run their schema steps, and finds what the other made, so the table and every index exist when it completes. Any other failure rejects the call, and the next call tries again.
+
+Each checkpoint is one row of one table:
+
+```sql
+CREATE TABLE IF NOT EXISTS "agentos_checkpoints" (
+  id TEXT PRIMARY KEY,
+  graph_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  parent_id TEXT,              -- the checkpoint a fork() was made from
+  created_at BIGINT NOT NULL,  -- the checkpoint's timestamp, epoch milliseconds
+  save_seq BIGINT NOT NULL,    -- the order of the saves
+  state_json TEXT NOT NULL,    -- state, memorySnapshot, nodeResults, visitedNodes, skippedNodes, pendingEdges
+  metadata_json TEXT NOT NULL  -- the stateSize and hasMemorySnapshot list() returns
+);
+CREATE INDEX IF NOT EXISTS "idx_agentos_checkpoints_run" ON "agentos_checkpoints" (run_id, created_at, save_seq, id);
+CREATE INDEX IF NOT EXISTS "idx_agentos_checkpoints_graph" ON "agentos_checkpoints" (graph_id, created_at, save_seq, id);
+CREATE INDEX IF NOT EXISTS "idx_agentos_checkpoints_seq" ON "agentos_checkpoints" (save_seq);
+```
+
+A product that runs its own migrations copies `checkpointDdl(prefix)`, which gives this text for a prefix, into one of them and passes `ensureSchema: false`:
+
+```typescript
+import { checkpointDdl, SqlCheckpointStore } from '@framers/agentos/orchestration/checkpoint';
+
+await db.exec(checkpointDdl('acme_checkpoints')); // in the product's migration
+const store = new SqlCheckpointStore({ db, tablePrefix: 'acme_checkpoints', ensureSchema: false });
+```
+
+The store orders checkpoints as `InMemoryCheckpointStore` does. Each save takes the next `save_seq`, one more than the largest in the table, in the statement that writes the row, and a save again under an id takes a new one, so it counts as the last. A save that starts after another has finished takes the larger number, which keeps the order of the saves that do not overlap (see [Custom Backend](#custom-backend)). A store runs its own saves one after another in the order they were called, so the saves of a parallel batch's branches, which overlap, keep that order too: the save called last, which records every branch completed by then, is the most recent, and a run resumed from it runs none of the branches it records again. Saves of two stores, or of two processes, that overlap can take the same number on Postgres, and `id` orders them, so every read gives one order. A save the database fails rejects, and the saves queued behind it go on.
+
+A save whose statement the database reports writing no row rejects, and so does one whose `timestamp` is not a whole number of milliseconds. The run then ends with that error (see [When a Save or an Edge Throws](#when-a-save-or-an-edge-throws)).
+
+The snapshot is stored as JSON. What `JSON.stringify` cannot hold does not come back as it was saved: a key whose value is `undefined` or a function is dropped, a `Date` comes back as its ISO string, a `Map` or a `Set` as `{}`, and `NaN` or an infinity as `null`. A save of a cycle or of a `BigInt` rejects. A checkpoint read from the store is a copy, so changing it changes nothing stored.
 
 ## What Gets Saved
 
@@ -225,11 +293,11 @@ const newRunId = await store.fork(checkpoints[2].id, {
 const result = await graph.resume(newRunId);
 ```
 
-The `fork()` operation of `InMemoryCheckpointStore`:
+The `fork()` operation of `InMemoryCheckpointStore` and `SqlCheckpointStore`:
 1. Deep-clones the source checkpoint
-2. Assigns a fresh `runId` and checkpoint `id`
+2. Assigns a fresh `runId` and checkpoint `id`, and the time of the fork as its `timestamp`
 3. Merges each `patchState` partition (`input`, `scratch`, `artifacts`, `diagnostics`) into the clone's partition
-4. Persists the new checkpoint
+4. Persists the new checkpoint (`SqlCheckpointStore` records the source's id in its `parent_id`)
 5. Returns the new `runId`
 
 Common uses:
@@ -255,7 +323,7 @@ The mode is recorded in the compiled graph, and `GraphRuntime` does not read it:
 
 ## Custom Backend
 
-To use Postgres, Redis, or any other store, implement [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts):
+[`SqlCheckpointStore`](#sqlcheckpointstore) covers SQLite and Postgres. To use Redis, object storage or any other store, implement [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts). The example shows the contract over a `pg` pool:
 
 ```typescript
 import type { Pool } from 'pg';
