@@ -50,6 +50,11 @@
       "default": "./dist/api/keyPoolDefaults.js",
       "types": "./dist/api/keyPoolDefaults.d.ts"
     },
+    "./api/probeProviderKey": {
+      "import": "./dist/api/probeProviderKey.js",
+      "default": "./dist/api/probeProviderKey.js",
+      "types": "./dist/api/probeProviderKey.d.ts"
+    },
     "./api/streamText": {
       "import": "./dist/api/streamText.js",
       "default": "./dist/api/streamText.js",
