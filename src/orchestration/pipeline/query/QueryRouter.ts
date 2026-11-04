@@ -1636,7 +1636,9 @@ export class QueryRouter {
       return undefined;
     }
 
-    if (process.env.OPENROUTER_API_KEY) {
+    // The URL goes with the OpenRouter key alone: the key scan may have picked
+    // another vendor's key, which must not reach OpenRouter.
+    if (process.env.OPENROUTER_API_KEY && this.getEmbeddingApiKey() === process.env.OPENROUTER_API_KEY) {
       return 'https://openrouter.ai/api/v1';
     }
 
