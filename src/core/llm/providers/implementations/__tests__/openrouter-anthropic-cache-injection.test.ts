@@ -254,6 +254,93 @@ describe('OpenRouter anthropic/* zero-config cache_control', () => {
     expect(tailParts.every((p) => p.cache_control === undefined)).toBe(true);
   });
 
+  it('marks a customModelParams.messages override, not the replaced array', async () => {
+    const override = [
+      { role: 'system', content: 'override rules '.repeat(10) },
+      { role: 'user', content: 'override turn' },
+    ];
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo, {
+      customModelParams: { messages: override },
+    });
+    expect(wire).toHaveLength(2);
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(systemParts[0].text).toBe('override rules '.repeat(10));
+    const tailParts = wire[1].content as WirePart[];
+    expect(tailParts.at(-1)!.cache_control).toEqual({ type: 'ephemeral' });
+    // The caller's override array is left as it was given.
+    expect(override[0].content).toBe('override rules '.repeat(10));
+    expect(override[1].content).toBe('override turn');
+  });
+
+  it('cache tail:false marks the system message of a customModelParams.messages override', async () => {
+    const override = [
+      { role: 'system', content: 'override rules '.repeat(10) },
+      { role: 'user', content: 'override turn' },
+    ];
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false, ttl: '1h' },
+      customModelParams: { messages: override },
+    });
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(typeof wire[1].content).toBe('string');
+    expect(override[0].content).toBe('override rules '.repeat(10));
+  });
+
+  it('cache tail:false marks a customModelParams.messages override on the streaming path', async () => {
+    const { provider, calls } = await makeProvider();
+    const stream = provider.generateCompletionStream('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+      customModelParams: {
+        messages: [
+          { role: 'system', content: 'override rules' },
+          { role: 'user', content: 'override turn' },
+        ],
+      },
+    });
+    for await (const chunk of stream) {
+      void chunk;
+    }
+    const wire = lastChatMessages(calls());
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(typeof wire[1].content).toBe('string');
+  });
+
+  it('cache:false strips cache_control from tool definitions, including a customModelParams.tools override', async () => {
+    const markedTool = () => ({
+      type: 'function',
+      function: { name: 'lookup', parameters: { type: 'object' } },
+      cache_control: { type: 'ephemeral', ttl: '1h' },
+    });
+    const callerTools = [markedTool()];
+    const { provider, calls } = await makeProvider();
+    await provider.generateCompletion('anthropic/claude-sonnet-4-6', convo, {
+      cache: false,
+      tools: callerTools as never,
+    });
+    const overrideTools = [markedTool()];
+    const stream = provider.generateCompletionStream('anthropic/claude-sonnet-4-6', convo, {
+      cache: false,
+      customModelParams: { tools: overrideTools },
+    });
+    for await (const chunk of stream) {
+      void chunk;
+    }
+    const chats = calls().filter((c) => c[0] === '/chat/completions');
+    expect(chats).toHaveLength(2);
+    for (const chat of chats) {
+      const tools = (chat[3] as { tools: Array<Record<string, unknown>> }).tools;
+      expect(tools).toHaveLength(1);
+      expect(tools[0].cache_control).toBeUndefined();
+      expect((tools[0].function as { name: string }).name).toBe('lookup');
+    }
+    // The caller's tool arrays keep their markers (copies are stripped).
+    expect(callerTools[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(overrideTools[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
   it('injects on the streaming path too', async () => {
     const { provider, calls } = await makeProvider();
     const stream = provider.generateCompletionStream(
