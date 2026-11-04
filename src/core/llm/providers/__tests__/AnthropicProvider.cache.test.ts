@@ -1283,6 +1283,53 @@ describe('AnthropicProvider per-call cache option (options.cache)', () => {
     expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
   });
 
+  it('cache tail:false keeps a caller cache_control on options.tools (both tool formats) and adds no marker of its own', async () => {
+    const hourMarker = { type: 'ephemeral', ttl: '1h' };
+    const agentosTool = { name: 'lookup', description: 'Look a word up', inputSchema: { type: 'object' }, cache_control: hourMarker };
+    const openAiTool = {
+      type: 'function',
+      function: { name: 'search', description: 'Search', parameters: { type: 'object' } },
+      cache_control: hourMarker,
+    };
+    for (const tool of [agentosTool, openAiTool]) {
+      const payload = await buildPayload(
+        [
+          { role: 'system', content: 'Stable system prompt.' },
+          { role: 'user', content: 'hi' },
+        ],
+        { cache: { tail: false }, tools: [tool] },
+      );
+      const tools = payload.tools as Array<{ cache_control?: unknown }>;
+      expect(tools[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+      expect(typeof payload.system).toBe('string');
+      expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral', ttl: '1h' }]);
+    }
+  });
+
+  it('cache tail:false keeps a caller cache_control on an image part (data URL and external URL) and adds no marker of its own', async () => {
+    for (const url of ['data:image/png;base64,iVBORw0KGgo=', 'https://example.com/chart.png']) {
+      const payload = await buildPayload(
+        [
+          { role: 'system', content: 'Stable system prompt.' },
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url }, cache_control: { type: 'ephemeral' } },
+              { type: 'text', text: 'What does the chart show?' },
+            ],
+          },
+        ],
+        { cache: { tail: false } },
+      );
+      const messages = payload.messages as Array<{ content: Array<{ type: string; cache_control?: unknown }> }>;
+      const image = messages[messages.length - 1].content[0];
+      expect(image.type).toBe('image');
+      expect(image.cache_control).toEqual({ type: 'ephemeral' });
+      expect(typeof payload.system).toBe('string');
+      expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+    }
+  });
+
   it('cache tail:false with an empty customModelParams system override and no caller markers sends no marker at all', async () => {
     const payload = await buildPayload(
       [{ role: 'user', content: 'hi' }],
