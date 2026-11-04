@@ -26,6 +26,7 @@ import { baseUrlIfSet, providerEnvVars, resolveProvider, shutdownProviderManager
 import { SpendBudget } from '../runtime/spendBudget.js';
 import { registerModelPricing } from '../runtime/modelPricing.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
+import { AnthropicProvider } from '../../core/llm/providers/implementations/AnthropicProvider.js';
 import type { AgencyResult, ApprovalRequest } from '../types.js';
 
 interface Received {
@@ -182,6 +183,18 @@ describe('ANTHROPIC_BASE_URL', () => {
   });
 });
 
+describe('AnthropicProvider given a base URL directly', () => {
+  it('trims it before dropping its trailing slashes, so the request goes to /v1/messages', async () => {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'sk-ant-direct-0002', baseURL: `${origin}/ \n` });
+
+    const res = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Hello?' }], {});
+
+    expect(JSON.stringify(res.choices[0]?.message?.content)).toContain('Served at the base URL.');
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /v1/messages']);
+  });
+});
+
 describe('baseUrlIfSet', () => {
   it('trims a set base URL and reads an empty or whitespace-only one as unset', () => {
     expect(baseUrlIfSet('  https://gateway.example/v1 \n')).toBe('https://gateway.example/v1');
@@ -251,6 +264,24 @@ describe("the lifetime of a call's cache writes", () => {
 
   afterEach(() => {
     registerModelPricing('anthropic', () => undefined);
+  });
+
+  it('takes the write total from the split when the usage gives the split alone', async () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', origin);
+    // A gateway that reports the 5-minute and 1-hour counts without cache_creation_input_tokens.
+    answerUsage = {
+      input_tokens: 100,
+      output_tokens: 100,
+      cache_creation: { ephemeral_5m_input_tokens: 600, ephemeral_1h_input_tokens: 400 },
+    };
+    const budget = new SpendBudget({ maxCostUSD: 1 });
+
+    const result = await generateText({ provider: 'anthropic', model: 'claude-host-1', prompt: 'Hello?', fallbackProviders: [], budget });
+
+    expect(result.usage.cacheCreationTokens).toBe(1_000);
+    expect(result.usage.cacheCreationExtendedTokens).toBe(400);
+    expect(result.usage.inclusiveInputTokens).toBe(1_100);
+    expect(budget.spentUSD()).toBeCloseTo(usd, 12);
   });
 
   it("reaches an agency's usage and each agent call's record", async () => {
