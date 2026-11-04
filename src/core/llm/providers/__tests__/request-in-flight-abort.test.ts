@@ -35,8 +35,9 @@ const QUIET_MS = 1_000;
 
 /**
  * The first event of a streamed answer, as each vendor sends it: OpenRouter's server-sent `data:` line in the
- * OpenAI chunk shape (https://openrouter.ai/docs/api-reference/streaming) and Ollama's newline-delimited JSON
- * object of `/api/chat` (https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion).
+ * OpenAI chunk shape (https://openrouter.ai/docs/api-reference/streaming) and one of the JSON objects Ollama's
+ * `/api/chat` streams (https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion), one to a
+ * line as the provider reads them.
  */
 const OPENROUTER_FIRST_EVENT =
   `data: ${JSON.stringify({

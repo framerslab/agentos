@@ -585,7 +585,8 @@ export class RequestyProvider implements IProvider {
       this.config.requestTimeout,
       payload,
       false,
-      { apiKeyOverride: options?.apiKeyOverride }
+      // The call's signal ends the request in flight (REQUEST_ABORTED).
+      { apiKeyOverride: options?.apiKeyOverride, signal: options?.abortSignal }
     );
 
     if (!Array.isArray(apiResponseData?.data) || !apiResponseData.usage) {
@@ -996,6 +997,10 @@ export class RequestyProvider implements IProvider {
         if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
         return response.data;
       } catch (error: unknown) {
+        // An abort is the caller's verdict, not the provider's or the key's: no key hop, no key marked.
+        if (perRequest?.signal?.aborted) {
+          throw new RequestyProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+        }
         let statusCode: number | undefined;
         let errorData: any;
         let errorMessage = 'Unknown Requesty API error';

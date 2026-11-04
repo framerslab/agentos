@@ -1730,7 +1730,7 @@ export class OpenAIProvider implements IProvider {
     if (!texts || texts.length === 0) {
       throw new OpenAIProviderError('Input texts array cannot be empty for embeddings.', 'EMBEDDING_NO_INPUT');
     }
-    const apiKey = await this.getApiKey(options?.apiKeyOverride);
+    const apiKey = await this.getApiKey(options?.apiKeyOverride, options?.abortSignal);
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -1753,6 +1753,7 @@ export class OpenAIProvider implements IProvider {
     }
 
 
+    // The call's signal aborts the fetch in flight (REQUEST_ABORTED), and no attempt is sent after it.
     const apiResponse = await this.makeApiRequest<OpenAIAPITypes.EmbeddingResponse>(
       '/embeddings',
       'POST',
@@ -1760,7 +1761,7 @@ export class OpenAIProvider implements IProvider {
       payload,
       false,
       undefined,
-      undefined,
+      options?.abortSignal,
       undefined,
       this.keySourceOf(options?.apiKeyOverride),
     );
