@@ -12,6 +12,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { z } from 'zod';
 
 import { generateObject } from '../../../../api/generateObject';
+import { probeProviderKey } from '../../../../api/probeProviderKey';
 import { globalLLMProviderHealth } from '../../../safety/LLMProviderHealthRegistry';
 import type { ChatMessage } from '../IProvider';
 import { OpenRouterProvider, type OpenRouterProviderConfig } from '../implementations/OpenRouterProvider';
@@ -243,5 +244,19 @@ describe('OpenRouterProvider operation id', () => {
 
     expect(answer.verdict).toBe('ok');
     expect(ids(CHAT)[0]).toMatch(UUID);
+  });
+
+  it('refuses a bad header name in a key probe with a RangeError, before anything is sent', async () => {
+    const openrouter = await provider();
+    stub.reset();
+    vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', 'x operation id');
+
+    await expect(openrouter.probeApiKey('sk-or-probed-key')).rejects.toBeInstanceOf(RangeError);
+    await expect(openrouter.probeApiKey('sk-or-probed-key', { kind: 'billing', model: MODEL })).rejects.toBeInstanceOf(RangeError);
+    await expect(
+      probeProviderKey({ provider: 'openrouter', apiKey: 'sk-or-probed-key', baseUrl: `${stub.origin}/api/v1`, model: MODEL }),
+    ).rejects.toBeInstanceOf(RangeError);
+
+    expect(stub.requests).toEqual([]);
   });
 });

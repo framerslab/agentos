@@ -11,6 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { z } from 'zod';
 
 import { generateObject } from '../../../../api/generateObject';
+import { probeProviderKey } from '../../../../api/probeProviderKey';
 import { globalLLMProviderHealth } from '../../../safety/LLMProviderHealthRegistry';
 import type { ChatMessage } from '../IProvider';
 import { OpenAIProvider, type OpenAIProviderConfig } from '../implementations/OpenAIProvider';
@@ -238,5 +239,36 @@ describe('OpenAIProvider operation id', () => {
 
     expect(answer.verdict).toBe('ok');
     expect(ids(CHAT)[0]).toMatch(UUID);
+  });
+
+  it('refuses a bad header name in a key probe with a RangeError, before anything is sent', async () => {
+    const openai = await provider();
+    stub.reset();
+    vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', 'x operation id');
+
+    await expect(openai.probeApiKey('sk-probed-key')).rejects.toBeInstanceOf(RangeError);
+    await expect(openai.probeApiKey('sk-probed-key', { kind: 'billing', model: 'gpt-4o' })).rejects.toBeInstanceOf(RangeError);
+    await expect(
+      probeProviderKey({ provider: 'openai', apiKey: 'sk-probed-key', baseUrl: `${stub.origin}/v1`, model: 'gpt-4o' }),
+    ).rejects.toBeInstanceOf(RangeError);
+
+    expect(stub.requests).toEqual([]);
+  });
+
+  it('replaces a customHeaders entry of the same name in another case, so each attempt carries the operation id alone', async () => {
+    stub.queue(CHAT, UNAVAILABLE, chatCompletion('hi'));
+    const openai = await provider({
+      operationIdHeader: HEADER,
+      customHeaders: { 'X-Operation-Id': 'host-value', 'x-trace-id': 'kept' },
+    });
+
+    await openai.generateCompletion('gpt-4o', messages, {});
+
+    const sent = stub.sent(CHAT);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]?.headers[HEADER]).toMatch(UUID);
+    expect(sent[1]?.headers[HEADER]).toBe(sent[0]?.headers[HEADER]);
+    // The host's other headers still go out.
+    expect(sent.map((request) => request.headers['x-trace-id'])).toEqual(['kept', 'kept']);
   });
 });

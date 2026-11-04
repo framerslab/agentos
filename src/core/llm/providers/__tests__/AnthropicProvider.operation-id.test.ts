@@ -12,6 +12,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { z } from 'zod';
 
 import { generateObject } from '../../../../api/generateObject';
+import { probeProviderKey } from '../../../../api/probeProviderKey';
 import { globalLLMProviderHealth } from '../../../safety/LLMProviderHealthRegistry';
 import type { ChatMessage } from '../IProvider';
 import { AnthropicProvider, type AnthropicProviderConfig } from '../implementations/AnthropicProvider';
@@ -242,5 +243,19 @@ describe('AnthropicProvider operation id', () => {
 
     expect(answer.verdict).toBe('ok');
     expect(ids()[0]).toMatch(UUID);
+  });
+
+  it('refuses a bad header name in a key probe with a RangeError, before anything is sent', async () => {
+    const anthropic = await provider();
+    stub.reset();
+    vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', 'x operation id');
+
+    await expect(anthropic.probeApiKey('sk-ant-probed-key')).rejects.toBeInstanceOf(RangeError);
+    await expect(anthropic.probeApiKey('sk-ant-probed-key', { kind: 'billing', model: MODEL })).rejects.toBeInstanceOf(RangeError);
+    await expect(
+      probeProviderKey({ provider: 'anthropic', apiKey: 'sk-ant-probed-key', baseUrl: stub.origin, model: MODEL }),
+    ).rejects.toBeInstanceOf(RangeError);
+
+    expect(stub.requests).toEqual([]);
   });
 });
