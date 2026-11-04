@@ -226,7 +226,9 @@ export interface ModelCompletionOptions {
    *   marker (the API places that one on the last cacheable block): the
    *   markers the caller set go out exactly as set, TTLs included, and with
    *   no caller marker anywhere the end of the first system message is
-   *   marked (carrying `ttl` when given); with no system nothing is. For
+   *   marked (carrying `ttl` when given), or the last text block of a
+   *   `customModelParams.system` override (on a copy); with no system
+   *   nothing is. For
    *   calls that re-send a long stable prefix and never the same tail twice
    *   (judges, classifiers): the prefix is still read back from the cache,
    *   while the unique tail is not written at the write premium. Combines

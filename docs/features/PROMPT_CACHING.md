@@ -133,7 +133,9 @@ await streamText({
   which is the tail). Your system, message and tool markers go out exactly
   as you set them, TTLs included, since no tail follows them. With no
   marker of yours anywhere, the end of the first system message is marked
-  (with `ttl` when given); a request with no system goes out unmarked. On
+  (with `ttl` when given); a `customModelParams.system` override stands in
+  for that message, and its last text block is marked on a copy. A request
+  with no system goes out unmarked. On
   OpenRouter `anthropic/*` slugs a request that carries a marker of yours
   goes out as you sent it, as it does by default; one with none gets a
   marker on the first system message and none on the final message. The

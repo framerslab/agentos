@@ -2343,7 +2343,11 @@ export class AnthropicProvider implements IProvider {
         // any marker means the caller owns the wire (full stand-down);
         // none means the request-level auto marker — valid on any payload
         // shape — keeps the pre-override caching behavior. That marker sits
-        // on the last cacheable block, so `tail: false` places none.
+        // on the last cacheable block, so `tail: false` places a block-level
+        // marker on the end of the system prefix instead: the override
+        // system as a whole (it stands in for the first system message), or
+        // the provider's own first system message when only the messages
+        // were replaced.
         const overrideMarkers =
           this.countWireBlockMarkers(payload.system) +
           this.countMessageCacheMarkers(
@@ -2352,8 +2356,22 @@ export class AnthropicProvider implements IProvider {
               : [],
           ) +
           this.countWireBlockMarkers(payload.tools);
-        if (overrideMarkers === 0 && writeTail) {
-          payload.cache_control = { type: 'ephemeral' };
+        if (overrideMarkers === 0) {
+          if (writeTail) {
+            payload.cache_control = { type: 'ephemeral' };
+          } else {
+            const prefixMarker: { type: 'ephemeral'; ttl?: '1h' } = {
+              type: 'ephemeral',
+              ...(options.cache && options.cache.ttl === '1h' ? { ttl: '1h' as const } : {}),
+            };
+            if (customSystemOverride) {
+              const marked = this.markWireSystemEnd(payload.system, prefixMarker);
+              if (marked !== undefined) payload.system = marked;
+            } else if (firstSystemMsgBlockEnd > 0) {
+              systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = prefixMarker;
+              payload.system = systemBlocks;
+            }
+          }
         }
         return payload;
       }
@@ -2477,6 +2495,37 @@ export class AnthropicProvider implements IProvider {
     }
 
     return payload;
+  }
+
+  /**
+   * Put a cache breakpoint on the last text block of a `customModelParams`
+   * system override, for `cache: { tail: false }` with no caller marker on
+   * the wire. A string becomes a one-block array so the marker reaches the
+   * wire; an array is copied, never mutated, since it may be the caller's
+   * own object.
+   *
+   * @param system - The `system` region as it will hit the wire.
+   * @param marker - The `cache_control` value to place.
+   * @returns The marked copy, or `undefined` when there is no text block to mark.
+   * @private
+   */
+  private markWireSystemEnd(
+    system: unknown,
+    marker: { type: 'ephemeral'; ttl?: '1h' },
+  ): unknown[] | undefined {
+    if (typeof system === 'string') {
+      return system ? [{ type: 'text', text: system, cache_control: marker }] : undefined;
+    }
+    if (!Array.isArray(system)) return undefined;
+    for (let i = system.length - 1; i >= 0; i -= 1) {
+      const block = system[i];
+      if (block && typeof block === 'object' && (block as Record<string, unknown>).type === 'text') {
+        const copy = system.slice();
+        copy[i] = { ...(block as Record<string, unknown>), cache_control: marker };
+        return copy;
+      }
+    }
+    return undefined;
   }
 
   /**
