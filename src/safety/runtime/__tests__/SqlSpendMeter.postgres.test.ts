@@ -236,7 +236,7 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
     const prefix = prefixOf();
     // the reconcile settles every expired reservation of its tables, so it runs on this run's own
     const own = tablesOf(OWN_PREFIX);
-    const meter = new SqlSpendMeter({ db, tablePrefix: OWN_PREFIX, allowanceFor: () => 3, periodOf: monthOf, leaseMs: 10 });
+    const meter = new SqlSpendMeter({ db, tablePrefix: OWN_PREFIX, allowanceFor: () => 10, periodOf: monthOf, leaseMs: 10 });
     await meter.ensureSchema();
     const { cleanup } = prefixed(db, prefix, meter, own);
     try {
@@ -249,6 +249,23 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
       expect([0, 1]).toContain(snap.used);
       const row = await db.get<{ state: string }>(`SELECT state FROM ${own.reservations} WHERE operation_id = ?`, [`${prefix}op`]);
       expect(snap.used === 1 ? 'consumed' : 'released').toBe(row?.state);
+
+      // the same race with a settle at the units used: 4 of a reservation of 10, or nothing, and the row says which
+      await meter.reserve({ accountId: `${prefix}b`, operationId: `${prefix}units`, units: 10, now: OCT });
+      const [atUnits] = await Promise.all([
+        meter.settle({ operationId: `${prefix}units`, outcome: 'consumed', units: 4, now: OCT + 50 }),
+        meter.reconcile({ now: OCT + 50 }),
+      ]);
+      expect(['settled', 'already_settled']).toContain(atUnits.status);
+      const figures = await meter.snapshot(`${prefix}b`, OCT);
+      expect(figures.reserved).toBe(0);
+      expect([0, 4]).toContain(figures.used);
+      const unitsRow = await db.get<{ state: string; settled_units: string | number | null }>(
+        `SELECT state, settled_units FROM ${own.reservations} WHERE operation_id = ?`,
+        [`${prefix}units`],
+      );
+      expect(unitsRow?.state).toBe(figures.used === 4 ? 'consumed' : 'released');
+      expect(unitsRow?.settled_units === null ? null : Number(unitsRow?.settled_units)).toBe(figures.used === 4 ? 4 : null);
     } finally {
       await cleanup();
     }

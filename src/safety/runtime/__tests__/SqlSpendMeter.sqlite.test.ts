@@ -2,8 +2,8 @@
  * @fileoverview The spend meter's contract over an in-memory SQLite store, its rolling window and its purge there,
  * both again on tables under a second prefix, what a prefix names and refuses, two meters with different rules on one
  * store, the indexes a store an earlier release made gains and the statements a meter's start runs for them, an index
- * the store refuses reported, and the rollback of a refused reservation when a later statement of its transaction
- * fails.
+ * the store refuses reported, what a failed read or a failed `ALTER` of `settled_units` leaves behind, and the rollback
+ * of a refused reservation when a later statement of its transaction fails.
  */
 import { describe, expect, it } from 'vitest';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
@@ -58,6 +58,34 @@ const lastOf = <T>(list: T[]): T | undefined => list[list.length - 1];
 async function columnsOf(db: StorageAdapter, table: string): Promise<string[]> {
   return (await db.all<{ name: string }>(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`)).map((column) => column.name);
 }
+
+/** A store error with a code, as the Postgres and SQLite drivers throw one. */
+const storeError = (message: string, code?: string): Error => Object.assign(new Error(message), code === undefined ? {} : { code });
+
+/** The adapter with the first `times` calls of `method` whose statement matches `match` rejected with `error`, and every other call passed on. */
+function refusing(db: StorageAdapter, method: 'get' | 'exec', match: RegExp, error: unknown, times = 1): StorageAdapter {
+  let left = times;
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop !== method) return Reflect.get(target, prop, receiver);
+      const real = target[method].bind(target) as unknown as (statement: string, ...rest: unknown[]) => Promise<unknown>;
+      return (statement: string, ...rest: unknown[]) => {
+        if (left > 0 && match.test(statement)) {
+          left -= 1;
+          return Promise.reject(error);
+        }
+        return real(statement, ...rest);
+      };
+    },
+  });
+}
+
+/** What the reservations table holds for one operation. */
+const rowOf = (db: StorageAdapter, operationId: string, tablePrefix = 'agentos_spend') =>
+  db.get<{ state: string; outcome: string | null; settled_units: number | null; usage_json: string | null }>(
+    `SELECT state, outcome, settled_units, usage_json FROM ${tablePrefix}_reservations WHERE operation_id = ?`,
+    [operationId],
+  );
 
 /**
  * Runs the contract and the window suite on SQLite stores of their own. Without a prefix each meter makes its tables
@@ -382,6 +410,152 @@ describe('SqlSpendMeter on SQLite, beyond the contract', () => {
       ]);
       expect((await catalogue(db)).indexes.map((index) => index.name)).toEqual(['idx_spend_reservations_due', 'idx_spend_reservations_settled']);
       expect(await meter.reserve({ accountId: 'a', operationId: 'op', now: OCT })).toMatchObject({ status: 'reserved', remaining: 0 });
+    } finally {
+      await db.close();
+    }
+  });
+
+  it.each([
+    ['a statement timeout', storeError('canceling statement due to statement timeout', '57014')],
+    ['a lock timeout', storeError('canceling statement due to lock timeout', '55P03')],
+    ['an error with no code', storeError('the pool is closing')],
+  ])('takes a failed read of settled_units for no answer, never for a table without the column: after %s the statement fails closed, onWarning stays quiet, and the next statement reads again and settles at the units used', async (_name, error) => {
+    const db = await openSqlite();
+    try {
+      await db.exec(spendMeterDdl());
+      const warnings: { statement: string; error: unknown }[] = [];
+      const meter = new SqlSpendMeter({
+        db: refusing(db, 'get', /^SELECT settled_units/, error),
+        ensureSchema: false,
+        allowanceFor: () => 100,
+        periodOf: monthOf,
+        requireShared: false,
+        onWarning: (warning) => warnings.push(warning),
+      });
+      await expect(meter.reserve({ accountId: 'a', operationId: 'x', units: 10, now: OCT })).rejects.toBeInstanceOf(SpendMeterUnavailableError);
+      expect(await rowOf(db, 'x')).toBeFalsy();
+      expect(await meter.reserve({ accountId: 'a', operationId: 'x', units: 10, now: OCT })).toMatchObject({ status: 'reserved' });
+      expect(await meter.settle({ operationId: 'x', outcome: 'consumed', units: 4, now: OCT })).toEqual({ status: 'settled', state: 'consumed' });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 4, reserved: 0, remaining: 96 });
+      expect(Number((await rowOf(db, 'x'))?.settled_units)).toBe(4);
+      expect(warnings).toEqual([]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('answers a reservations table that is not there with the store\'s error under ensureSchema: false, tells onWarning nothing, and reads again once it is made', async () => {
+    const db = await openSqlite();
+    try {
+      const warnings: { statement: string; error: unknown }[] = [];
+      const meter = new SqlSpendMeter({ db, ensureSchema: false, allowanceFor: () => 100, periodOf: monthOf, requireShared: false, onWarning: (warning) => warnings.push(warning) });
+      await expect(meter.ensureSchema()).rejects.toThrow(/no such table/);
+      expect(warnings).toEqual([]);
+      await db.exec(spendMeterDdl());
+      await meter.reserve({ accountId: 'a', operationId: 'x', units: 10, now: OCT });
+      await meter.settle({ operationId: 'x', outcome: 'consumed', units: 4, now: OCT });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 4, reserved: 0 });
+    } finally {
+      await db.close();
+    }
+  });
+
+  it.each([
+    ['SQLite busy', storeError('database is locked', 'SQLITE_BUSY')],
+    ['a Postgres deadlock', storeError('deadlock detected', '40P01')],
+  ])('retries an ALTER that adds settled_units after %s, inside the statement that started it, and settles at the units used', async (_name, error) => {
+    const db = await openSqlite();
+    try {
+      await db.exec(unsettledDdl());
+      const warnings: { statement: string; error: unknown }[] = [];
+      const meter = new SqlSpendMeter({ db: refusing(db, 'exec', /^ALTER TABLE/, error), allowanceFor: () => 100, periodOf: monthOf, requireShared: false, onWarning: (warning) => warnings.push(warning) });
+      expect(await meter.reserve({ accountId: 'a', operationId: 'x', units: 10, now: OCT })).toMatchObject({ status: 'reserved' });
+      expect(lastOf(await columnsOf(db, 'agentos_spend_reservations'))).toBe('settled_units');
+      await meter.settle({ operationId: 'x', outcome: 'consumed', units: 4, now: OCT });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 4, reserved: 0, remaining: 96 });
+      expect(warnings).toEqual([]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it.each([
+    ['a lock timeout', storeError('canceling statement due to lock timeout', '55P03')],
+    ['a statement timeout', storeError('canceling statement due to statement timeout', '57014')],
+  ])('fails the statement closed when %s stops the ALTER that adds settled_units, and the next statement runs it again', async (_name, error) => {
+    const db = await openSqlite();
+    try {
+      await db.exec(unsettledDdl());
+      const warnings: { statement: string; error: unknown }[] = [];
+      const meter = new SqlSpendMeter({ db: refusing(db, 'exec', /^ALTER TABLE/, error), allowanceFor: () => 100, periodOf: monthOf, requireShared: false, onWarning: (warning) => warnings.push(warning) });
+      await expect(meter.reserve({ accountId: 'a', operationId: 'x', units: 10, now: OCT })).rejects.toBeInstanceOf(SpendMeterUnavailableError);
+      expect(await columnsOf(db, 'agentos_spend_reservations')).not.toContain('settled_units');
+      await meter.reserve({ accountId: 'a', operationId: 'x', units: 10, now: OCT });
+      await meter.settle({ operationId: 'x', outcome: 'consumed', units: 4, now: OCT });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 4, reserved: 0 });
+      expect(warnings).toEqual([]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it.each([
+    ['a role that does not own the table', storeError('must be owner of table agentos_spend_reservations', '42501')],
+    ['a read-only transaction', storeError('cannot execute ALTER TABLE in a read-only transaction', '25006')],
+    ['a read-only SQLite file', storeError('attempt to write a readonly database', 'SQLITE_READONLY')],
+  ])('uses the tables as they are when the store refuses the ALTER for good, for %s: onWarning is told once, the ALTER is not tried again, and a consumed settle takes its whole reservation', async (_name, error) => {
+    const db = await openSqlite();
+    try {
+      await db.exec(unsettledDdl());
+      const warnings: { statement: string; error: unknown }[] = [];
+      const statements: string[] = [];
+      const meter = new SqlSpendMeter({ db: recording(refusing(db, 'exec', /^ALTER TABLE/, error, Infinity), statements), allowanceFor: () => 100, periodOf: monthOf, requireShared: false, onWarning: (warning) => warnings.push(warning) });
+      await meter.reserve({ accountId: 'a', operationId: 'x', units: 10, now: OCT });
+      await meter.settle({ operationId: 'x', outcome: 'consumed', units: 4, now: OCT });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 10, reserved: 0, remaining: 90 });
+      expect(statements.filter((statement) => /^ALTER TABLE/.test(statement))).toHaveLength(1);
+      expect(warnings).toEqual([{ statement: expect.stringMatching(/^ALTER TABLE/), error }]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('settles at the units used when another process added settled_units first: its own ALTER fails, and the read after it finds the column', async () => {
+    const db = await openSqlite();
+    try {
+      await db.exec(unsettledDdl());
+      const raced = new Proxy(db, {
+        get(target, prop, receiver) {
+          if (prop !== 'exec') return Reflect.get(target, prop, receiver);
+          // the other process's ALTER lands first, so this one meets the store's real duplicate-column error
+          return async (statement: string) => {
+            if (/^ALTER TABLE/.test(statement)) await target.exec(statement);
+            return target.exec(statement);
+          };
+        },
+      });
+      const warnings: { statement: string; error: unknown }[] = [];
+      const meter = new SqlSpendMeter({ db: raced, allowanceFor: () => 100, periodOf: monthOf, requireShared: false, onWarning: (warning) => warnings.push(warning) });
+      await meter.reserve({ accountId: 'a', operationId: 'x', units: 10, now: OCT });
+      await meter.settle({ operationId: 'x', outcome: 'consumed', units: 4, now: OCT });
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 4, reserved: 0 });
+      expect(warnings).toEqual([{ statement: expect.stringMatching(/^ALTER TABLE/), error: expect.objectContaining({ message: expect.stringContaining('duplicate column') }) }]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('keeps one row through a refund, as the Settlement docs say: released, outcome replaced, no settled units and no usage, with no separate entry in the meter', async () => {
+    const db = await openSqlite();
+    try {
+      const meter = new SqlSpendMeter({ db, allowanceFor: () => 100, periodOf: monthOf, requireShared: false });
+      await meter.reserve({ accountId: 'a', operationId: 'x', units: 10, now: OCT });
+      await meter.settle({ operationId: 'x', outcome: 'consumed', units: 4, usage: { promptTokens: 1, completionTokens: 2 }, now: OCT });
+      expect(await rowOf(db, 'x')).toMatchObject({ state: 'consumed', outcome: 'consumed' });
+      await meter.settle({ operationId: 'x', outcome: 'replaced', now: OCT });
+      expect(await rowOf(db, 'x')).toEqual({ state: 'released', outcome: 'replaced', settled_units: null, usage_json: null });
+      expect((await rowsUnder(db, 'agentos_spend')).reservations).toBe(1);
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 0 });
     } finally {
       await db.close();
     }

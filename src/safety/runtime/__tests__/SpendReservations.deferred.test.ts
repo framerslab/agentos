@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { InMemorySpendDayStore, releaseExpiredSpend, reserveSpend } from '../SpendReservations.js';
+import { InMemorySpendDayStore, releaseExpiredSpend, releaseSpend, reserveSpend } from '../SpendReservations.js';
 
 const AT = new Date(Date.UTC(2026, 9, 12, 12, 0, 0));
 const later = (ms: number) => new Date(AT.getTime() + ms);
@@ -50,6 +50,17 @@ describe('releaseExpiredSpend with fenced holds', () => {
     const cost: Record<number, number | undefined> = { 500: 200, 300: 900, 100: undefined };
     expect(await releaseExpiredSpend(store, later(2_000), { resolve: async (r) => ({ outcome: 'consumed', units: cost[r.micro] }) })).toBe(3);
     expect(await store.lockDay('2026-10-12')).toBe(600);
+  });
+
+  it.each([-5, -0.5, -Infinity])('settles a consumed decision of %d at the whole amount, the rule releaseSpend keeps for a cost below zero', async (units) => {
+    const swept = new InMemorySpendDayStore();
+    await reserveSpend(swept, { kind: 'call', micro: 500, at: AT, expires: later(1_000), capMicro: 10_000, requireFence: true });
+    expect(await releaseExpiredSpend(swept, later(2_000), { resolve: async () => ({ outcome: 'consumed', units }) })).toBe(1);
+    expect(await swept.lockDay('2026-10-12')).toBe(500);
+    const released = new InMemorySpendDayStore();
+    const id = await reserveSpend(released, { kind: 'call', micro: 500, at: AT, expires: later(1_000), capMicro: 10_000 });
+    expect(await releaseSpend(released, id, units, AT)).toBe(true);
+    expect(await released.lockDay('2026-10-12')).toBe(await swept.lockDay('2026-10-12'));
   });
 
   it('defers on a resolver failure instead of settling at the whole amount', async () => {
