@@ -341,6 +341,45 @@ describe('OpenRouter anthropic/* zero-config cache_control', () => {
     expect(overrideTools[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
+  it('reads caller tool markers from the tools actually sent, after a customModelParams.tools override', async () => {
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'lookup', parameters: { type: 'object' } },
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+      customModelParams: {
+        tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }],
+      },
+    });
+    // The marked tools were replaced, so no caller marker goes out and the
+    // first system message gets the prefix breakpoint.
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(typeof wire.at(-1)!.content).toBe('string');
+  });
+
+  it('cache:false removes a request-level cache_control passed through customModelParams', async () => {
+    const { provider, calls } = await makeProvider();
+    await provider.generateCompletion('anthropic/claude-sonnet-4-6', convo, {
+      cache: false,
+      customModelParams: { cache_control: { type: 'ephemeral' } },
+    });
+    const stream = provider.generateCompletionStream('anthropic/claude-sonnet-4-6', convo, {
+      cache: false,
+      customModelParams: { cache_control: { type: 'ephemeral' } },
+    });
+    for await (const chunk of stream) {
+      void chunk;
+    }
+    const chats = calls().filter((c) => c[0] === '/chat/completions');
+    expect(chats).toHaveLength(2);
+    for (const chat of chats) expect(chat[3]!.cache_control).toBeUndefined();
+  });
+
   it('injects on the streaming path too', async () => {
     const { provider, calls } = await makeProvider();
     const stream = provider.generateCompletionStream(
