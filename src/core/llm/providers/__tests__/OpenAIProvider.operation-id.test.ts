@@ -16,7 +16,7 @@ import type { ChatMessage } from '../IProvider';
 import { OpenAIProvider, type OpenAIProviderConfig } from '../implementations/OpenAIProvider';
 import { startProviderStub, type ProviderStub, type StubAnswer } from './helpers/providerStub';
 
-const HEADER = 'x-rh-operation-id';
+const HEADER = 'x-operation-id';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const API_KEY = 'sk-test-operation-id';
 const CHAT = 'POST /v1/chat/completions';
@@ -94,7 +94,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-async function provider(config: Partial<OpenAIProviderConfig> & { operationIdHeader?: string } = {}): Promise<OpenAIProvider> {
+async function provider(config: Partial<OpenAIProviderConfig> = {}): Promise<OpenAIProvider> {
   const created = new OpenAIProvider();
   await created.initialize({ apiKey: API_KEY, baseURL: `${stub.origin}/v1`, ...config });
   return created;

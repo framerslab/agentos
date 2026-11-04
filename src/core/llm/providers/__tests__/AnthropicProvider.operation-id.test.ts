@@ -17,7 +17,7 @@ import type { ChatMessage } from '../IProvider';
 import { AnthropicProvider, type AnthropicProviderConfig } from '../implementations/AnthropicProvider';
 import { startProviderStub, type ProviderStub, type StubAnswer } from './helpers/providerStub';
 
-const HEADER = 'x-rh-operation-id';
+const HEADER = 'x-operation-id';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const API_KEY = 'sk-ant-test-operation-id';
 const MESSAGES = 'POST /v1/messages';
@@ -92,7 +92,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-async function provider(config: Partial<AnthropicProviderConfig> & { operationIdHeader?: string } = {}): Promise<AnthropicProvider> {
+async function provider(config: Partial<AnthropicProviderConfig> = {}): Promise<AnthropicProvider> {
   const created = new AnthropicProvider();
   await created.initialize({ apiKey: API_KEY, baseURL: stub.origin, ...config });
   return created;

@@ -17,7 +17,7 @@ import type { ChatMessage } from '../IProvider';
 import { OpenRouterProvider, type OpenRouterProviderConfig } from '../implementations/OpenRouterProvider';
 import { startProviderStub, type ProviderStub, type StubAnswer } from './helpers/providerStub';
 
-const HEADER = 'x-rh-operation-id';
+const HEADER = 'x-operation-id';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const API_KEY = 'sk-or-test-operation-id';
 const MODEL = 'openai/gpt-4o';
@@ -96,7 +96,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-async function provider(config: Partial<OpenRouterProviderConfig> & { operationIdHeader?: string } = {}): Promise<OpenRouterProvider> {
+async function provider(config: Partial<OpenRouterProviderConfig> = {}): Promise<OpenRouterProvider> {
   const created = new OpenRouterProvider();
   await created.initialize({ apiKey: API_KEY, baseURL: `${stub.origin}/api/v1`, ...config });
   return created;

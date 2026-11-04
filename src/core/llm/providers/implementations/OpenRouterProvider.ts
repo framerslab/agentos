@@ -41,6 +41,7 @@ import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { errorFields } from '../../../logging/events.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
+import { operationIdHeaders } from './operation-id.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
 /** This module's events, under its fixed diagnostic origin; no runtime name enters telemetry. */
 const log = moduleLogger('llm', 'openrouter_provider');
@@ -70,6 +71,17 @@ export interface OpenRouterProviderConfig {
    * absent); `store` and `id` persist the keys' standing across restarts.
    */
   keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'loadTimeoutMs' | 'storeTimeoutMs' | 'store' | 'id'>;
+  /**
+   * The header each request carries its call's operation id in, a UUID made
+   * once before the call's first attempt and sent on every retry of the call;
+   * the next call, and a request sent again with a changed body (the schema
+   * request's retry without its schema), gets a new one. When this is unset
+   * the provider reads `AGENTOS_OPERATION_ID_HEADER`; with neither, no header
+   * is sent. A name that is not an HTTP header name, or one the provider sets
+   * itself (`Authorization`, `HTTP-Referer`, `X-Title`, ...), fails the call
+   * with a `RangeError` before anything is sent.
+   */
+  operationIdHeader?: string;
 }
 
 /**
@@ -371,7 +383,7 @@ export class OpenRouterProvider implements IProvider {
   public defaultModelId?: string;
 
   // Corrected: Changed type of this.config to satisfy the Readonly<Required<...>> assignment by providing defaults
-  private config!: Readonly<Required<Omit<OpenRouterProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout' | 'keyPool'>> & OpenRouterProviderConfig>;
+  private config!: Readonly<Required<Omit<OpenRouterProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout' | 'keyPool' | 'operationIdHeader'>> & OpenRouterProviderConfig>;
   private keyPool: ApiKeyPool | null = null;
   private client!: AxiosInstance;
   private readonly availableModelsCache: Map<string, ModelInfo> = new Map();
@@ -406,6 +418,7 @@ export class OpenRouterProvider implements IProvider {
       appName: config.appName, // Can be undefined
       requestTimeout: config.requestTimeout || 60000,
       streamRequestTimeout: config.streamRequestTimeout || 180000,
+      operationIdHeader: config.operationIdHeader,
     });
     this.keyPool = keyPool;
     await this.keyPool.ready();
@@ -1306,6 +1319,7 @@ export class OpenRouterProvider implements IProvider {
         timeout: Math.min(this.config.requestTimeout || 10000, 10000),
         headers: {
           Authorization: `Bearer ${apiKey}`,
+          ...operationIdHeaders(this.config.operationIdHeader),
         },
       });
       return { isHealthy: true, details: { message: "Successfully connected to OpenRouter /models endpoint." } };
@@ -1525,7 +1539,9 @@ export class OpenRouterProvider implements IProvider {
    * `maxAttempts` is the call's count of attempts, a first and its retries
    * together, over the provider's own 3; key hops are not counted.
    * A count that is not a whole number of 1 or more throws a `RangeError`
-   * before anything is sent. `tally` is filled with the attempts this
+   * before anything is sent, as does an operation id header name the provider
+   * refuses (`operationIdHeader`). Every attempt and key hop of the request
+   * sends the same operation id. `tally` is filled with the attempts this
    * request sent, so a caller that sends it again without its schema spends
    * only what is left of the call's count.
    */
@@ -1541,6 +1557,8 @@ export class OpenRouterProvider implements IProvider {
   ): Promise<T> {
     let lastError: OpenRouterProviderError | null = null;
     const attempts = resolveAttemptCount(maxAttempts, OpenRouterProvider.MAX_REQUEST_ATTEMPTS);
+    // One operation id for the whole call: every attempt and key hop below sends this same value.
+    const operationHeaders = operationIdHeaders(this.config.operationIdHeader);
 
     // Key hops this request has made: a key-scoped failure moves to the next
     // usable key at once (at most one hop per key) without spending a
@@ -1564,7 +1582,7 @@ export class OpenRouterProvider implements IProvider {
           method,
           data: body,
           timeout: timeout,
-          headers: { Authorization: `Bearer ${apiKey}` },
+          headers: { Authorization: `Bearer ${apiKey}`, ...operationHeaders },
           responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
         });
         if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
@@ -1706,16 +1724,21 @@ export class OpenRouterProvider implements IProvider {
   public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
     const deadline = startKeyProbeDeadline(options);
     const baseURL = options.baseURL || this.config?.baseURL || OPENROUTER_DEFAULT_BASE_URL;
-    const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+    // Each request of the probe is a call of its own, with its own operation id when the host names a header.
+    const headers = (): Record<string, string> => ({
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      ...operationIdHeaders(this.config?.operationIdHeader),
+    });
     try {
       if (options.kind !== 'billing') {
-        return await readKeyProbeAnswer(await fetch(`${baseURL}/key`, { method: 'GET', headers, signal: deadline.signal }), { apiKey, signal: deadline.signal });
+        return await readKeyProbeAnswer(await fetch(`${baseURL}/key`, { method: 'GET', headers: headers(), signal: deadline.signal }), { apiKey, signal: deadline.signal });
       }
       // The provider's catalog is its own endpoint's: a probe of another endpoint lists that one's and keeps it to itself.
       const catalog = baseURL === (this.config?.baseURL || OPENROUTER_DEFAULT_BASE_URL) ? this.availableModelsCache : new Map<string, ModelInfo>();
       let model = options.model || this.defaultModelId || cheapestPricedChatModel(catalog.values());
       if (!model && catalog.size === 0) {
-        const listed = await fetch(`${baseURL}/models`, { method: 'GET', headers, signal: deadline.signal });
+        const listed = await fetch(`${baseURL}/models`, { method: 'GET', headers: headers(), signal: deadline.signal });
         if (!listed.ok) return await readKeyProbeAnswer(listed, { apiKey, signal: deadline.signal });
         const body = (await listed.json().catch((error: unknown) => {
           // A read the deadline or the caller's abort ended is the probe's failure, not an empty catalog.
@@ -1734,7 +1757,7 @@ export class OpenRouterProvider implements IProvider {
       return await readKeyProbeAnswer(
         await fetch(`${baseURL}/chat/completions`, {
           method: 'POST',
-          headers,
+          headers: headers(),
           // 16: OpenRouter's chat reference notes that some providers enforce a minimum of 16 for max_tokens
           // (https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion.md, read 19 October 2026).
           body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
