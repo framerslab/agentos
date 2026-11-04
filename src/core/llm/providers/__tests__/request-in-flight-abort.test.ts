@@ -34,6 +34,8 @@ const LONG_TIMEOUT_MS = 60_000;
 const SETTLE_MS = 2_000;
 /** How long to keep watching for a request sent after the abort (OpenRouter's first backoff is 300 to 500 ms). */
 const QUIET_MS = 1_000;
+/** How long a wait for a request to reach the upstream may take before the test fails at that wait. */
+const ARRIVAL_MS = 5_000;
 
 /**
  * The first event of a streamed answer, as each vendor sends it: OpenRouter's server-sent `data:` line in the
@@ -114,8 +116,26 @@ async function startUpstream(): Promise<Upstream> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
   upstream.url = `http://127.0.0.1:${port}`;
+  // A request that never arrives (the provider failed before sending it) fails the wait after ARRIVAL_MS, so the
+  // test reports there instead of at the suite's timeout.
   const until = (list: string[], count: number) =>
-    list.length >= count ? Promise.resolve() : new Promise<void>((resolve) => waiters.push({ list, count, resolve }));
+    list.length >= count
+      ? Promise.resolve()
+      : new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            waiters = waiters.filter((w) => w !== waiter);
+            reject(new Error(`expected ${count} request(s) at the upstream within ${ARRIVAL_MS} ms, got ${list.length}: ${list.join(', ')}`));
+          }, ARRIVAL_MS);
+          const waiter = {
+            list,
+            count,
+            resolve: () => {
+              clearTimeout(timer);
+              resolve();
+            },
+          };
+          waiters.push(waiter);
+        });
   upstream.untilPosts = (count: number) => until(posts, count);
   upstream.untilGets = (count: number) => until(gets, count);
   upstream.close = () =>
