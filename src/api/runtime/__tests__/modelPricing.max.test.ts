@@ -295,6 +295,22 @@ describe('modelPricing and a host\'s tables', () => {
     expect(modelPricing('openrouter', 'vendor/model')).toBeUndefined();
   });
 
+  it("bounds a cached request at a host row's default-lifetime write rate when the row names no other write rate", () => {
+    // $1 input, $100 for a default-lifetime write, no output: a request marked for caching can write every prompt
+    // token at $100, so the bound counts them all at it.
+    registerModelPricing('openrouter', (id) =>
+      id === 'vendor/model' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 0, defaultCacheWritePerMTokUSD: 100 } : undefined,
+    );
+    const prompt = 'x'.repeat(10_000);
+    const tokens = Buffer.byteLength(prompt) + MAX_COST_TOKENS_PER_MESSAGE;
+    expect(estimateMaxCallCostUSD('openrouter', 'vendor/model', { messages: prompt, maxOutputTokens: 0, cacheMarkers: true })).toBeCloseTo(
+      (tokens * 100) / 1e6,
+      12,
+    );
+    // Without caching asked for, nothing is written and the input rate bounds the prompt.
+    expect(estimateMaxCallCostUSD('openrouter', 'vendor/model', { messages: prompt, maxOutputTokens: 0 })).toBeCloseTo(tokens / 1e6, 12);
+  });
+
   it("keeps the built-in row before a host's table for the same provider, which fills only the models it lacks", () => {
     registerModelPricing('openai', () => ({ inputPerMTokUSD: 999, outputPerMTokUSD: 999 }));
     expect(modelPricing('openai', 'gpt-4o')).toMatchObject({ inputPerMTokUSD: 2.5, outputPerMTokUSD: 10 });

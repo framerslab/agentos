@@ -142,6 +142,15 @@ describe('ANTHROPIC_BASE_URL', () => {
     expect(received).toHaveLength(1);
   });
 
+  it('sends to /v1/messages, never //v1/messages, when the base URL ends with slashes', async () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', `${origin}//`);
+
+    const result = await ask();
+
+    expect(result.text).toBe('Served at the base URL.');
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /v1/messages']);
+  });
+
   it("reads an empty or whitespace-only value as unset, so the call is resolved to Anthropic's own endpoint", () => {
     for (const value of ['', '   ', '\t\n']) {
       vi.stubEnv('ANTHROPIC_BASE_URL', value);
