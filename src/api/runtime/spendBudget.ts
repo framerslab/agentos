@@ -504,18 +504,22 @@ function perThousand(perMillion: number): number {
 /**
  * An estimate of the most a call could cost: its prompt's assumed tokens at the input rate and its output cap at the
  * output rate ({@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} when it names none, or a cap of NaN), a cap above the model's
- * known output ceiling counted at the ceiling. The rates are the model's row's. OpenAI bills a prompt of more than
- * 272,000 tokens on its models with a 1,050,000-token context window at twice the input rate and one and a half times
- * the output rate; OpenAIProvider's reported cost carries those rates and this estimate does not, so such a call can
- * cost up to twice its estimate. Undefined when the provider's model has no price row: the rows are OpenAI's and
- * Anthropic's tables and a table the host registered for the provider ({@link modelPricing}). A bound that holds for
- * any prompt, and every rate a request can reach, is `estimateMaxCallCostUSD`'s (modelPricing.ts).
+ * known output ceiling counted at the ceiling. The rates are the model's row's, and the long-context card's once the
+ * prompt's assumed tokens pass its threshold: OpenAI bills a prompt of more than 272,000 tokens on its models with a
+ * 1,050,000-token context window at twice the input rate and one and a half times the output rate, and Claude Haiku
+ * 5.5 one of more than 100,000 at five times both, on the whole call. A prompt that four characters a token
+ * undercounts (CJK text, emoji, base64) can pass the threshold below it, so such a call can cost more than its
+ * estimate. Undefined when the provider's model has no price row: the rows are OpenAI's and Anthropic's tables and a
+ * table the host registered for the provider ({@link modelPricing}). A bound that holds for any prompt, and every rate
+ * a request can reach, is `estimateMaxCallCostUSD`'s (modelPricing.ts).
  */
 export function estimateCallCostUSD(providerId: string, modelId: string, promptChars: number, maxOutputTokens: number | undefined): number | undefined {
   const price = modelPricing(providerId, modelId);
   if (!price) return undefined;
+  const prompt = tokensOfChars(promptChars);
+  const card: ModelPriceTier = price.longContext && prompt > price.longContext.thresholdTokens ? price.longContext : price;
   const output = outputEstimateTokens(modelId, maxOutputTokens);
-  return (tokensOfChars(promptChars) / 1000) * perThousand(price.inputPerMTokUSD) + (output / 1000) * perThousand(price.outputPerMTokUSD);
+  return (prompt / 1000) * perThousand(card.inputPerMTokUSD) + (output / 1000) * perThousand(card.outputPerMTokUSD);
 }
 
 /**
@@ -564,10 +568,19 @@ function tokenCount(value: unknown): number {
 }
 
 /**
+ * Providers that send their calls through the OpenAI provider, which reports OpenAI's list price for a model id
+ * OpenAI's table holds (`openaiPricing.ts`): a cost the client computed, not one the gateway or the vendor billed.
+ */
+const OPENAI_CLIENT_PRICED = new Set(['groq', 'litellm', 'mistral', 'together', 'xai']);
+
+/**
  * A finished call's cost: the provider's own `costUSD` when it reported one, else its tokens at the table's rates
  * ({@link modelPricing}: OpenAI's and Anthropic's tables and a table the host registered); undefined when neither is
  * known. A reported cost that is not a finite number, zero or more, is not used: a budget would record nothing for a
- * cost of NaN.
+ * cost of NaN. For a provider that sends its calls through the OpenAI provider (Groq, LiteLLM, Mistral, Together,
+ * xAI), a row the host registered prices the call before the cost it reports, which is OpenAI's list price for the
+ * model id: the call is charged at the rate it was estimated at. A bill the provider's API returned (OpenRouter's and
+ * Requesty's `usage.cost`) stands.
  *
  * The prompt is `inclusiveInputTokens` where the report gives it (never fewer than `promptTokens`; for Anthropic, whose
  * prompt tokens leave the cache out, the prompt tokens and the cache counts where it does not), so the cache reads and
@@ -583,9 +596,10 @@ export function costOfUsageUSD(
   usage: UsageForCost | undefined,
   isEmbedding = false,
 ): number | undefined {
+  const hostRow = OPENAI_CLIENT_PRICED.has(providerId) ? modelPricing(providerId, modelId) : undefined;
   const reported = usage?.costUSD;
-  if (typeof reported === 'number' && Number.isFinite(reported) && reported >= 0) return reported;
-  const price = modelPricing(providerId, modelId);
+  if (!hostRow && typeof reported === 'number' && Number.isFinite(reported) && reported >= 0) return reported;
+  const price = hostRow ?? modelPricing(providerId, modelId);
   if (!price || usage === undefined) return undefined;
   const prompt = usage.promptTokens ?? 0;
   if (isEmbedding) return (prompt / 1000) * perThousand(price.inputPerMTokUSD);

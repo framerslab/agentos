@@ -255,6 +255,16 @@ const TEXT_PART_TYPES = new Set([
 /** Tool definition types the request's text describes in full: a function tool and a custom tool. */
 const TEXT_TOOL_TYPES = new Set(['function', 'custom']);
 
+/**
+ * Keys of a part with no `type` (Gemini's `Part`) whose content is billed by a measure its text does not show: inline
+ * media and a file by reference, and a built-in tool's call and response, whose work the provider ran
+ * (https://ai.google.dev/api/caching, `Part`, read 2026-11-04).
+ */
+const UNBOUNDED_PART_KEYS = ['inlineData', 'inline_data', 'fileData', 'file_data', 'toolCall', 'tool_call', 'toolResponse', 'tool_response'];
+
+/** The keys of a Gemini tool with no `type` that the request's text describes in full: its function declarations. */
+const DECLARATION_KEYS = new Set(['functionDeclarations', 'function_declarations']);
+
 /** Keys that mark a request as asking for prompt caching wherever they appear in its text. */
 const CACHE_MARKER = /"(cache_control|prompt_cache_breakpoint)"/;
 
@@ -292,29 +302,44 @@ function textOf(value: unknown): string {
 
 /**
  * Whether a list of content parts (a message's `content`, a tool result's `content`, a function call's `output`, a
- * Responses API `input`) holds a part whose cost its text does not bound. It reads the `type` and `audio` of each part
- * and of the parts listed in that part's own `content` or `output`, never a tool call's arguments, which are data.
+ * Responses API `input`, a Gemini message's `parts`) holds a part whose cost its text does not bound. It reads the
+ * `type`, the `audio` and the keys ({@link UNBOUNDED_PART_KEYS}) of each part, and the parts listed in that part's own
+ * `content`, `output` or `parts` and in a Gemini function response's `parts`, never a tool call's arguments, which are
+ * data.
  */
 function hasUnboundedPart(parts: unknown): boolean {
   if (!Array.isArray(parts)) return false;
   for (const part of parts) {
     if (!part || typeof part !== 'object') continue;
-    const { type, content, output, audio } = part as { type?: unknown; content?: unknown; output?: unknown; audio?: unknown };
+    const fields = part as Record<string, unknown>;
+    const { type, content, output, audio } = fields;
     if (typeof type === 'string' && !TEXT_PART_TYPES.has(type)) return true;
     // A Chat Completions assistant message that replays an earlier audio answer by its id: the audio is billed as
     // audio input, which the few bytes of the reference do not show.
     if (audio !== undefined && audio !== null) return true;
-    if (hasUnboundedPart(content) || hasUnboundedPart(output)) return true;
+    if (UNBOUNDED_PART_KEYS.some((key) => fields[key] !== undefined && fields[key] !== null)) return true;
+    if (hasUnboundedPart(content) || hasUnboundedPart(output) || hasUnboundedPart(fields.parts)) return true;
+    // A Gemini function response lists parts of its own beside its JSON `response`, each of them media or a file.
+    const response = fields.functionResponse ?? fields.function_response;
+    if (response && typeof response === 'object' && hasUnboundedPart((response as { parts?: unknown }).parts)) return true;
   }
   return false;
 }
 
-/** Whether a tool list names a tool the provider defines or runs (any `type` but a function or a custom tool). */
+/**
+ * Whether a tool list names a tool the provider defines or runs: any `type` but a function or a custom tool, and a tool
+ * with no `type` that neither names itself (an Anthropic client tool's `name`) nor lists function declarations alone
+ * (Gemini's `functionDeclarations`). Gemini's built-in tools carry no `type`: `googleSearch`, `codeExecution`,
+ * `urlContext`, `fileSearch`, `mcpServers` and the rest (https://ai.google.dev/api/caching, `Tool`, read 2026-11-04).
+ */
 function hasProviderTool(tools: unknown): boolean {
   if (!Array.isArray(tools)) return false;
   return tools.some((tool) => {
-    const type = tool && typeof tool === 'object' ? (tool as { type?: unknown }).type : undefined;
-    return typeof type === 'string' && !TEXT_TOOL_TYPES.has(type);
+    if (!tool || typeof tool !== 'object') return false;
+    const { type, name } = tool as { type?: unknown; name?: unknown };
+    if (typeof type === 'string') return !TEXT_TOOL_TYPES.has(type);
+    if (typeof name === 'string') return false;
+    return !Object.keys(tool).every((key) => DECLARATION_KEYS.has(key));
   });
 }
 

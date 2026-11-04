@@ -793,10 +793,11 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
               // Compatible endpoints may omit usage after returning vectors.
               usage.promptTokens += result.usage?.prompt_tokens ?? 0;
               usage.totalTokens += result.usage?.total_tokens ?? 0;
-              if (resolved.providerId === 'openai') {
-                const costUSD = costOfUsageUSD(resolved.providerId, resolved.modelId, { promptTokens: usage.promptTokens }, true);
-                if (costUSD !== undefined) usage.costUSD = costUSD;
-              }
+              // These endpoints report tokens and no cost, so the tokens are priced at the model's row: OpenAI's
+              // table, or the table the host registered for the provider (modelPricing), the row the call was
+              // checked against before it was sent.
+              const costUSD = costOfUsageUSD(resolved.providerId, resolved.modelId, { promptTokens: usage.promptTokens }, true);
+              if (costUSD !== undefined) usage.costUSD = costUSD;
               metricUsage = usage;
               opts.abortSignal?.throwIfAborted();
             } while (offset < inputArray.length);
