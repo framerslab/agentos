@@ -1221,6 +1221,7 @@ export class QueryRouter {
 
       // --- 1. Initialise the AI model provider manager ---
       const pm = new AIModelProviderManagerClass();
+      const embeddingBaseUrl = this.getEmbeddingBaseUrl();
       await pm.initialize({
         providers: [
           {
@@ -1228,7 +1229,9 @@ export class QueryRouter {
             enabled: true,
             config: {
               apiKey: embeddingApiKey,
-              ...(this.getEmbeddingBaseUrl() ? { baseUrl: this.getEmbeddingBaseUrl() } : {}),
+              // OpenAI's and OpenRouter's providers read `baseURL`, Ollama's either,
+              // as resolveProvider hands them both.
+              ...(embeddingBaseUrl ? { baseURL: embeddingBaseUrl, baseUrl: embeddingBaseUrl } : {}),
             },
             isDefault: true,
           },
