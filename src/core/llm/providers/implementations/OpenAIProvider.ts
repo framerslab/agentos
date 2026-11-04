@@ -500,6 +500,20 @@ export function isOpenAIResponsesOnlyModel(modelId: string): boolean {
 }
 
 /**
+ * The model a billing probe sends its completion to when none is configured: the first GPT chat model the catalog
+ * lists, else its first o-series model with a price, skipping the Responses-only models
+ * ({@link isOpenAIResponsesOnlyModel}), which have no Chat Completions route, and the embedding, audio, realtime,
+ * image and search models.
+ *
+ * @param ids The model ids `GET /models` listed, in its order.
+ * @returns The model to probe, or `undefined` when the catalog lists none.
+ */
+function probeModelFromCatalog(ids: readonly string[]): string | undefined {
+  const callable = ids.filter((id) => !isOpenAIResponsesOnlyModel(id) && !/embedding|realtime|audio|tts|transcribe|image|search/.test(id));
+  return callable.find((id) => /^gpt-/.test(id)) ?? callable.find((id) => /^o\d/.test(id) && openAIModelPricing(id) !== undefined);
+}
+
+/**
  * Whether a call to `modelId` can be served only by `/v1/responses`:
  *
  *   - any call to a Responses-only model ({@link isOpenAIResponsesOnlyModel});
@@ -1197,8 +1211,9 @@ export class OpenAIProvider implements IProvider {
    * `billing` sends the models list; `kind: 'billing'` sends a one-token
    * completion, since a models list can answer 200 with no credit left. The
    * completion goes to `options.model`, else the default model, else the first
-   * chat model the account lists; with no model to send, the probe has no
-   * verdict (`failure: 'no_model'`). The reasoning families take
+   * GPT chat model the account lists, else its first priced o-series model
+   * (Responses-only models are skipped, having no Chat Completions route);
+   * with no model to send, the probe has no verdict (`failure: 'no_model'`). The reasoning families take
    * `max_completion_tokens`. It works before `initialize()`: the base URL is
    * `options.baseURL`, else the configured one, else OpenAI's own. The key
    * pool's probe of a failed key is this method's verdict.
@@ -1220,7 +1235,7 @@ export class OpenAIProvider implements IProvider {
           if (deadline.signal.aborted) throw error;
           return {};
         })) as Partial<OpenAIAPITypes.ListModelsResponse>;
-        model = (body.data ?? []).map((m) => m.id).find((id) => /^gpt-/.test(id) && !/embedding|realtime|audio|tts|transcribe|image|search/.test(id));
+        model = probeModelFromCatalog((body.data ?? []).map((m) => m.id));
         if (!model) return noModelKeyProbeAnswer();
       }
       const response = await fetch(`${baseURL}/chat/completions`, {

@@ -458,7 +458,7 @@ It sends one key through the same billing probe the provider's key pool sends to
 |--------|---------|--------------|
 | `provider` | (required) | `anthropic`, `openai`, `gemini`, `openrouter` or `requesty` (`PROBEABLE_KEY_PROVIDERS`); any other is refused with a `RangeError`. |
 | `apiKey` | (required) | One key, trimmed; an empty key or a comma-separated list is refused with a `TypeError`. |
-| `model` | the probe's model | Anthropic `claude-haiku-4-5-20251001`, Gemini `gemini-2.5-flash`, OpenAI the first chat model `GET /models` lists, OpenRouter and Requesty the cheapest chat model their catalog lists with a price above zero. |
+| `model` | the probe's model | Anthropic `claude-haiku-4-5-20251001`, Gemini `gemini-2.5-flash`, OpenAI the first GPT chat model `GET /models` lists, else its first o-series model with a price (never a Responses-only one), OpenRouter and Requesty the cheapest chat model their catalog lists with a price above zero. |
 | `baseUrl` | the provider's endpoint | The API base as the provider's `baseURL` takes it; a blank string is unset. |
 | `timeoutMs` | `10000` | How long the probe waits; a value that is not a positive finite number is refused with a `RangeError`, and one past 2147483647, the longest timer Node keeps, is cut to it. |
 | `signal` | | Ends the probe, which reports `unknown`. |

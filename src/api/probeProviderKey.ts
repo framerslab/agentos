@@ -50,8 +50,9 @@ export interface ProbeProviderKeyOptions {
   apiKey: string;
   /**
    * The model the billable request goes to. Default: Anthropic `claude-haiku-4-5-20251001`, Gemini
-   * `gemini-2.5-flash`, OpenAI the first chat model `GET /models` lists, OpenRouter and Requesty the cheapest chat
-   * model their catalog lists with a price above zero. A model the key may not use answers 403 or 404, which reads as
+   * `gemini-2.5-flash`, OpenAI the first GPT chat model `GET /models` lists, else its first o-series model with a
+   * price (never a Responses-only one), OpenRouter and Requesty the cheapest chat model their catalog lists with a price
+   * above zero. A model the key may not use answers 403 or 404, which reads as
    * `unknown`, so name one the account can call.
    */
   model?: string;
