@@ -42,9 +42,9 @@ import {
  * The meter's two tables and their indexes under the default prefix, `agentos_spend`: one index the reconciler reads
  * the due reservations through, one a rolling window counts an account's reservations through, and one a purge finds
  * the settled reservations through, by the time they settled. Every time is epoch milliseconds in a BIGINT. A
- * reservation's `settled_units` holds the units its consumed settle moved to `used` (NULL until then, and on rows an
- * earlier release settled, which took their whole `units`), and comes last, where `ALTER TABLE ... ADD COLUMN` puts it
- * on tables made before it. There is no literal question mark anywhere in the text: the Postgres adapter rewrites each
+ * reservation's `settled_units` holds the units its consumed settle moved to `used` (NULL until then, again once a
+ * release or a refund settles it, and on rows an earlier release settled, which took their whole `units`), and comes
+ * last, where `ALTER TABLE ... ADD COLUMN` puts it on tables made before it. There is no literal question mark anywhere in the text: the Postgres adapter rewrites each
  * one to a numbered parameter. A product that runs its own migrations copies this text, or {@link spendMeterDdl}'s for a
  * prefix of its own, into one of them and passes `ensureSchema: false`; on tables made before `settled_units` its
  * migration adds it with `ALTER TABLE <prefix>_reservations ADD COLUMN settled_units BIGINT`. `spendMeterDdl()` answers
@@ -281,7 +281,7 @@ interface ReservationRow {
   units: number | string;
   state: SpendReservationState;
   attempts: number | string;
-  /** Read only where the table has the column; NULL until a consumed settle, and on rows settled before it. */
+  /** Read only where the table has the column; NULL but while a consumed settle's units count, and on rows settled before it. */
   settled_units?: number | string | null;
 }
 
@@ -631,18 +631,21 @@ export class SqlSpendMeter implements ISpendMeter {
         let moved = reservation;
         if (move.used > 0 && tracked) moved = consumedUnits(reservation, req.units);
         else if (move.used < 0 && tracked && row.settled_units !== null && row.settled_units !== undefined) moved = num(row.settled_units);
-        const recordsUnits = move.used > 0 && tracked;
+        // the row keeps the units only while they count: a release or a refund clears them, so a retry under the same
+        // operation id starts with none even when a meter that does not write the column makes it, and a consumed settle
+        // of that retry there is counted and refunded by its whole reservation
+        const settledUnits = move.used > 0 ? moved : null;
         // the move only from the state just read: a concurrent settle that got there first leaves nothing to change.
         // A reconcile's move also names the attempt it decided about and its lease, and on Postgres a row another
         // transaction changed meanwhile is tested again in its new version, so a deferral that committed first stands.
         const changed = await trx.run(
-          `UPDATE ${reservations} SET state = ?, outcome = ?, settled_at = ?, usage_json = ?${recordsUnits ? ', settled_units = ?' : ''} WHERE operation_id = ? AND state = ?${guard}`,
+          `UPDATE ${reservations} SET state = ?, outcome = ?, settled_at = ?, usage_json = ?${tracked ? ', settled_units = ?' : ''} WHERE operation_id = ? AND state = ?${guard}`,
           [
             move.to,
             req.outcome,
             now,
             req.usage ? JSON.stringify(req.usage) : null,
-            ...(recordsUnits ? [moved] : []),
+            ...(tracked ? [settledUnits] : []),
             req.operationId,
             row.state,
             ...(pass ? [pass.attempt, now] : []),
