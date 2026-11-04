@@ -31,7 +31,7 @@ import { OpenAIProvider } from '../core/llm/providers/implementations/OpenAIProv
 import { OpenRouterProvider } from '../core/llm/providers/implementations/OpenRouterProvider.js';
 import { RequestyProvider } from '../core/llm/providers/implementations/RequestyProvider.js';
 import { keyFingerprint } from '../core/providers/ApiKeyPool.js';
-import { DEFAULT_KEY_PROBE_TIMEOUT_MS, type KeyProbeAnswer, type KeyProbeOptions } from '../core/providers/keyProbe.js';
+import { DEFAULT_KEY_PROBE_TIMEOUT_MS, MAX_KEY_PROBE_TIMEOUT_MS, type KeyProbeAnswer, type KeyProbeOptions } from '../core/providers/keyProbe.js';
 
 /** What a probe found a key to be. */
 export type ProviderKeyState = 'ok' | 'exhausted' | 'invalid' | 'throttled' | 'unknown';
@@ -97,9 +97,6 @@ const PROBES: Record<ProbeableKeyProvider, (apiKey: string, options: KeyProbeOpt
   openrouter: (apiKey, options) => new OpenRouterProvider().probeApiKey(apiKey, options),
   requesty: (apiKey, options) => new RequestyProvider().probeApiKey(apiKey, options),
 };
-
-/** A Node timer's longest delay; a longer one fires after 1 ms. */
-const MAX_TIMER_MS = 2_147_483_647;
 
 /** The state a probe verdict reads as. */
 const STATE_OF_VERDICT: Record<KeyProbeAnswer['verdict'], ProviderKeyState> = {
@@ -188,7 +185,7 @@ export async function probeProviderKey(options: ProbeProviderKeyOptions): Promis
     kind: 'billing',
     ...(baseURL ? { baseURL } : {}),
     ...(options.model ? { model: options.model } : {}),
-    timeoutMs: Math.min(Math.ceil(timeoutMs), MAX_TIMER_MS),
+    timeoutMs: Math.min(Math.ceil(timeoutMs), MAX_KEY_PROBE_TIMEOUT_MS),
     ...(options.signal ? { signal: options.signal } : {}),
   });
   const state = STATE_OF_VERDICT[answer.verdict];

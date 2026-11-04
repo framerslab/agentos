@@ -12,6 +12,7 @@ export {
 export { classifyKeyFailure, isQuotaError, retryAfterMs, statusOfKinds, DEFAULT_MAX_RETRY_AFTER_MS, type KeyFailureKind } from './quotaErrors.js';
 export {
   DEFAULT_KEY_PROBE_TIMEOUT_MS,
+  MAX_KEY_PROBE_TIMEOUT_MS,
   startKeyProbeDeadline,
   readKeyProbeAnswer,
   noModelKeyProbeAnswer,

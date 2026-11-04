@@ -15,6 +15,9 @@ import { redactUrlSecrets } from '../llm/providers/url-secrets.js';
 /** How long a probe waits for its answer by default: 10 seconds. */
 export const DEFAULT_KEY_PROBE_TIMEOUT_MS = 10_000;
 
+/** The longest wait a probe takes, in milliseconds: a Node timer's longest delay, since a longer one fires after 1 ms. */
+export const MAX_KEY_PROBE_TIMEOUT_MS = 2_147_483_647;
+
 /** The longest vendor message a probe answer keeps, in characters. */
 const MAX_MESSAGE_LENGTH = 300;
 
@@ -29,7 +32,7 @@ export interface KeyProbeOptions {
   baseURL?: string;
   /** The model the billable request goes to. Default: the provider's default model, else the probe's fallback model. */
   model?: string;
-  /** How long the probe waits for its answer, in milliseconds. Default: 10 seconds. */
+  /** How long the probe waits for its answer, in milliseconds, at most 2,147,483,647 (a longer wait is cut to it). Default: 10 seconds. */
   timeoutMs?: number;
   /** Ends the probe when it fires. */
   signal?: AbortSignal;
@@ -77,8 +80,9 @@ export interface KeyProbeDeadline {
 }
 
 /**
- * Starts a probe's deadline: a signal that fires after `timeoutMs` (10 seconds by default) or when the caller's
- * signal fires, whichever comes first. A caller's signal that has already fired fires it at once.
+ * Starts a probe's deadline: a signal that fires after `timeoutMs` (10 seconds by default, cut to
+ * {@link MAX_KEY_PROBE_TIMEOUT_MS}) or when the caller's signal fires, whichever comes first. A caller's signal that
+ * has already fired fires it at once.
  */
 export function startKeyProbeDeadline(options: Pick<KeyProbeOptions, 'timeoutMs' | 'signal'> = {}): KeyProbeDeadline {
   const controller = new AbortController();
@@ -86,7 +90,7 @@ export function startKeyProbeDeadline(options: Pick<KeyProbeOptions, 'timeoutMs'
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, options.timeoutMs ?? DEFAULT_KEY_PROBE_TIMEOUT_MS);
+  }, Math.min(options.timeoutMs ?? DEFAULT_KEY_PROBE_TIMEOUT_MS, MAX_KEY_PROBE_TIMEOUT_MS));
   const caller = options.signal;
   const onAbort = () => controller.abort();
   if (caller?.aborted) controller.abort();
