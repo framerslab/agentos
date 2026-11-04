@@ -233,18 +233,23 @@ describe('the estimates', () => {
   });
 
   it("keeps a bill the provider's API reported over the host's row, and the host's row over a cost the OpenAI client computed", () => {
+    // Every provider built on the OpenAI client: Groq, LiteLLM, Mistral, Together and xAI send through it, and MiniMax
+    // extends it. Each reports OpenAI's list price for an id OpenAI's table holds.
+    const throughOpenAI = ['groq', 'litellm', 'mistral', 'together', 'xai', 'minimax'];
     registerModelPricing('openrouter', (id) => (id === 'vendor/model' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 2 } : undefined));
-    registerModelPricing('groq', (id) => (id === 'gpt-4o' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 2 } : undefined));
+    for (const provider of throughOpenAI) {
+      registerModelPricing(provider, (id) => (id === 'gpt-4o' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 2 } : undefined));
+    }
     try {
       // OpenRouter's `usage.cost` is what it charged: it stands.
       expect(costOfUsageUSD('openrouter', 'vendor/model', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.5 })).toBe(0.5);
-      // Groq sends through the OpenAI client, which reports OpenAI's list price for an id OpenAI's table holds.
-      expect(costOfUsageUSD('groq', 'gpt-4o', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.0125 })).toBeCloseTo(0.003, 12);
-      // With no row of the host's, that reported cost is the one there is.
-      expect(costOfUsageUSD('groq', 'other', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.0125 })).toBe(0.0125);
+      for (const provider of throughOpenAI) {
+        expect(costOfUsageUSD(provider, 'gpt-4o', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.0125 })).toBeCloseTo(0.003, 12);
+        // With no row of the host's, that reported cost is the one there is.
+        expect(costOfUsageUSD(provider, 'other', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.0125 })).toBe(0.0125);
+      }
     } finally {
-      registerModelPricing('openrouter', () => undefined);
-      registerModelPricing('groq', () => undefined);
+      for (const provider of ['openrouter', ...throughOpenAI]) registerModelPricing(provider, () => undefined);
     }
   });
 
