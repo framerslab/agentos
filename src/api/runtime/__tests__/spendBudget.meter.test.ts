@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 
-import { CostCapExceededError } from '../../../safety/runtime/CostGuard.js';
+import { CostCapExceededError, CostGuard } from '../../../safety/runtime/CostGuard.js';
 import {
   SpendMeterUnavailableError,
   type ISpendMeter,
@@ -295,6 +295,23 @@ describe('a spend budget when its meter fails', () => {
     expect(await meter.snapshot(ACCOUNT)).toMatchObject({ used: 0, reserved: MAX_MICRO });
   });
 
+  it("settles a call whose charge throws, and rejects with what it threw, since a guard's cap function can throw", async () => {
+    const meter = new MemoryMeter(MAX_MICRO * 2);
+    const thrown = new Error('the cap function threw');
+    const guard = new CostGuard({
+      maxSingleOperationCostUsd: Number.POSITIVE_INFINITY,
+      maxDailyCostUsd: Number.POSITIVE_INFINITY,
+      onCapReached: () => {
+        throw thrown;
+      },
+    });
+    const budget = new SpendBudget({ maxCostUSD: MAX_USD, guard, budgetId: 'run-1', meter, accountId: ACCOUNT });
+    await budget.assertCanSpend('call', callOf('op-1'));
+    const recorded = budget.record(MAX_USD * 2, 10, 'call', { operationId: 'op-1' });
+    expect(await rejectionOf(recorded)).toBe(thrown);
+    expect(await meter.snapshot(ACCOUNT)).toMatchObject({ used: MAX_MICRO, reserved: 0 });
+  });
+
   it('runs a refused call under onLimitReached: warn, holding nothing, and its record settles nothing', async () => {
     const meter = new MemoryMeter(1);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -387,6 +404,19 @@ describe('budgets that draw on a budget with a meter', () => {
     expect(await meter.snapshot(ACCOUNT)).toMatchObject({ used: 100, reserved: 0 });
   });
 
+  it('refuses for a budget set to throw when a parent set to warn names the same meter and account', async () => {
+    const meter = new MemoryMeter(1);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const parent = new SpendBudget({ maxCostUSD: 1, meter, accountId: ACCOUNT, onLimitReached: 'warn' });
+      const child = new SpendBudget({ maxCostUSD: 1, parent, meter, accountId: ACCOUNT });
+      expect(await rejectionOf(child.assertCanSpend('call', callOf('op-1')))).toBeInstanceOf(CostCapExceededError);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('refuses a call two accounts would hold on one meter, leaving neither holding it, since one operation id holds one reservation', async () => {
     const meter = new MemoryMeter(MAX_MICRO * 4);
     const parent = new SpendBudget({ maxCostUSD: 1, meter, accountId: 'acct-parent' });
@@ -425,6 +455,26 @@ describe('budgets that draw on a budget with a meter', () => {
     expect(team.reserved).toBe(0);
     expect(team.used).toBe(0);
     expect(heard).toEqual([{ budgetId: 'member', capType: 'usd', what: 'call', reason: 'allowance_exhausted' }]);
+  });
+
+  it("gives back what an earlier meter holds when a later meter's refusal is let through and another budget's cap then refuses", async () => {
+    const team = new MemoryMeter(MAX_MICRO * 2);
+    const member = new MemoryMeter(MAX_MICRO * 2);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const teamBudget = new SpendBudget({ maxCostUSD: MAX_USD, meter: team, accountId: 'acct-team' });
+      const both = bothBudgets(teamBudget, new SpendBudget({ maxCostUSD: 1, meter: member, accountId: 'acct-member', onLimitReached: 'warn' }));
+      // Another call's cost lands while this one waits on the store, so the look at the caps that reports the refusal
+      // finds the team's budget spent.
+      member.reserve.mockImplementationOnce(async (req) => {
+        teamBudget.record(0.0001, 1, 'other');
+        return { status: 'denied', reason: 'allowance_exhausted', operationId: req.operationId, accountId: req.accountId, period: PERIOD, remaining: 0 };
+      });
+      expect(await rejectionOf(both.assertCanSpend('call', callOf('op-1')))).toBeInstanceOf(CostCapExceededError);
+      expect(team.reserved).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('gives back what an earlier meter holds when a later one cannot answer', async () => {
