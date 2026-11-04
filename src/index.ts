@@ -530,7 +530,7 @@ export type { StreamObjectOptions, StreamObjectResult, StreamObjectElement, Deep
 export { embedText } from './api/embedText.js';
 export type { EmbedTextOptions, EmbedTextResult } from './api/embedText.js';
 export { SpendBudget, UnpricedModelError, asSpendBudget, costOfUsageUSD, estimateCallCostUSD } from './api/runtime/spendBudget.js';
-export type { SpendBudgetOptions, SpendLimitInfo } from './api/runtime/spendBudget.js';
+export type { SpendBudgetCall, SpendBudgetOptions, SpendBudgetSettlement, SpendLimitInfo } from './api/runtime/spendBudget.js';
 export { transferStyle } from './api/transferStyle.js';
 // Convenience re-export: every meaningful generateObject / structured-output
 // example uses Zod schemas, so consumers can `import { z } from '@framers/agentos'`
