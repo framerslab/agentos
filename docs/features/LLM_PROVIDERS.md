@@ -647,6 +647,33 @@ const result = await myAgent.generate(
 );
 ```
 
+### Operation id across retries
+
+`OpenAIProvider`, `AnthropicProvider` and `OpenRouterProvider` can send each call's operation id in a header you name. A server in front of the provider, such as a proxy that meters spend, reads it to tell a retry of a call from a new call.
+
+```bash
+# Every request from these providers carries x-operation-id: <uuid>
+export AGENTOS_OPERATION_ID_HEADER=x-operation-id
+```
+
+```typescript
+import { AnthropicProvider } from '@framers/agentos/core/llm/providers/implementations/AnthropicProvider';
+
+const anthropic = new AnthropicProvider();
+await anthropic.initialize({
+  apiKey: process.env.ANTHROPIC_API_KEY!,
+  baseURL: 'https://proxy.example.com',
+  operationIdHeader: 'x-operation-id', // wins over AGENTOS_OPERATION_ID_HEADER
+});
+```
+
+- The provider makes the id, a UUID, once before a call's first attempt. Every retry of that call sends the same value: a retry after a 429, a 5xx or a network failure, an Anthropic stream that ended before its last event, and a hop to another key of the pool.
+- The next call gets a new id. So does a request sent again with a changed body: the request `generateObject` sends again with a raised token budget after a truncated answer, and OpenRouter's schema request sent again without its schema.
+- Streamed calls, embeddings (OpenAI, OpenRouter), the key probe's requests and OpenRouter's health check carry the header too; each probe request has an id of its own.
+- `operationIdHeader` in the provider's config names the header; when it is unset the provider reads `AGENTOS_OPERATION_ID_HEADER` at each call. A blank value counts as unset. With neither, no header is sent.
+- On OpenAI, the id replaces a `customHeaders` entry of the same name in any case (`X-Operation-Id` for `x-operation-id`), so each request carries one value. The other custom headers are sent as before.
+- A name that is not an HTTP header name, or one the provider sets itself (`Authorization`, `x-api-key`, `Content-Type`, `anthropic-version`, `anthropic-beta`, `OpenAI-Organization`, `HTTP-Referer`, `X-Title`, `User-Agent`), is refused with a `RangeError` before anything is sent: by the provider's `initialize()`, by each call, and by `probeApiKey()` and so `probeProviderKey()`. A key probe answers for the key; a refused name is the host's error, so the probe rejects rather than answering `unknown`.
+
 ---
 
 ## Adding a Custom Provider

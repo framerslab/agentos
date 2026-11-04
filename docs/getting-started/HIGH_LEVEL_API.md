@@ -452,7 +452,7 @@ for (const apiKey of keys) {
 }
 ```
 
-It sends one key through the same billing probe the provider's key pool sends to recheck a key it took out as unpaid. The probe is the smallest billable request, and its answer is read with `classifyKeyFailure()`: `ok` (a 2xx), `exhausted` (no credit left or a spend limit reached), `invalid` (a bad, revoked or expired key), `throttled` (a rate limit, with `retryAfterMs` when the answer sent one) or `unknown` (a 5xx, a 403 or 404 for a model the key may not use, no answer within the timeout, a failed connection, the caller's abort, or no model to send to). It reads nothing from the environment and builds no pool; it never throws for an answer.
+It sends one key through the same billing probe the provider's key pool sends to recheck a key it took out as unpaid. The probe is the smallest billable request, and its answer is read with `classifyKeyFailure()`: `ok` (a 2xx), `exhausted` (no credit left or a spend limit reached), `invalid` (a bad, revoked or expired key), `throttled` (a rate limit, with `retryAfterMs` when the answer sent one) or `unknown` (a 5xx, a 403 or 404 for a model the key may not use, no answer within the timeout, a failed connection, the caller's abort, or no model to send to). It reads no key from the environment and builds no pool; it never throws for an answer. The one variable that changes what it sends is `AGENTOS_OPERATION_ID_HEADER`, which names the header an Anthropic, OpenAI or OpenRouter probe's requests carry an operation id in ([Operation id across retries](../features/LLM_PROVIDERS.md#operation-id-across-retries)); a name those providers refuse rejects with a `RangeError` before any request.
 
 | Option | Default | What it does |
 |--------|---------|--------------|
