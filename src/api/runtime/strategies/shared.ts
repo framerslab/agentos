@@ -141,7 +141,8 @@ export function enforceQuorum(
  * without throwing, and numeric zero values are still counted.
  *
  * @param totalUsage - The strategy's running usage accumulator. Mutated
- *   in place to add costUSD / cacheReadTokens / cacheCreationTokens when
+ *   in place to add costUSD / cacheReadTokens / cacheCreationTokens /
+ *   cacheCreationExtendedTokens when
  *   the per-call snapshot reports them.
  * @param call - The per-call usage snapshot (typically from an Agent
  *   result or generateText-style TokenUsage). May be undefined.
@@ -154,6 +155,7 @@ export function accumulateExtraUsage(
     costUSD?: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
+    cacheCreationExtendedTokens?: number;
   },
   call:
     | {
@@ -163,6 +165,7 @@ export function accumulateExtraUsage(
         costUSD?: number;
         cacheReadTokens?: number;
         cacheCreationTokens?: number;
+        cacheCreationExtendedTokens?: number;
       }
     | undefined,
 ): void {
@@ -175,6 +178,9 @@ export function accumulateExtraUsage(
   }
   if (typeof call.cacheCreationTokens === 'number') {
     totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + call.cacheCreationTokens;
+  }
+  if (typeof call.cacheCreationExtendedTokens === 'number') {
+    totalUsage.cacheCreationExtendedTokens = (totalUsage.cacheCreationExtendedTokens ?? 0) + call.cacheCreationExtendedTokens;
   }
 }
 
@@ -206,6 +212,7 @@ export function buildAgentCallUsage(
         costUSD?: number;
         cacheReadTokens?: number;
         cacheCreationTokens?: number;
+        cacheCreationExtendedTokens?: number;
       }
     | undefined,
 ): {
@@ -215,6 +222,7 @@ export function buildAgentCallUsage(
   costUSD?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  cacheCreationExtendedTokens?: number;
 } {
   const usage = resultUsage ?? {};
   const out: {
@@ -224,6 +232,7 @@ export function buildAgentCallUsage(
     costUSD?: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
+    cacheCreationExtendedTokens?: number;
   } = {
     promptTokens: usage.promptTokens ?? 0,
     completionTokens: usage.completionTokens ?? 0,
@@ -233,6 +242,9 @@ export function buildAgentCallUsage(
   if (typeof usage.cacheReadTokens === 'number') out.cacheReadTokens = usage.cacheReadTokens;
   if (typeof usage.cacheCreationTokens === 'number') {
     out.cacheCreationTokens = usage.cacheCreationTokens;
+  }
+  if (typeof usage.cacheCreationExtendedTokens === 'number') {
+    out.cacheCreationExtendedTokens = usage.cacheCreationExtendedTokens;
   }
   return out;
 }

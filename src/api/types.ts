@@ -900,6 +900,11 @@ export interface AgentCallRecord {
      * Undefined when the provider does not report cache usage.
      */
     cacheCreationTokens?: number;
+    /**
+     * Of `cacheCreationTokens`, the tokens written with the provider's longer cache lifetime (Anthropic's 1 hour,
+     * OpenAI's 12 hours), billed at its higher write rate. Undefined when the provider does not split its writes.
+     */
+    cacheCreationExtendedTokens?: number;
   };
   /** Wall-clock milliseconds for this agent call. */
   durationMs: number;
@@ -1130,6 +1135,7 @@ export type AgencyStreamPart =
         costUSD?: number;
         cacheReadTokens?: number;
         cacheCreationTokens?: number;
+        cacheCreationExtendedTokens?: number;
       };
       agentCalls: AgentCallRecord[];
       parsed?: unknown;
@@ -1170,6 +1176,7 @@ export interface CompiledStrategyStreamResult {
     costUSD?: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
+    cacheCreationExtendedTokens?: number;
   }>;
   /** Final per-agent ledger for the strategy run, when available. */
   agentCalls?: Promise<AgentCallRecord[]>;
@@ -1234,6 +1241,7 @@ export interface AgencyStreamResult<R extends AgencyResult = AgencyResult> {
     costUSD?: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
+    cacheCreationExtendedTokens?: number;
   }>;
   /** Final per-agent execution ledger for the streamed run. */
   agentCalls: Promise<AgentCallRecord[]>;
@@ -2155,7 +2163,7 @@ export interface PanelQuorumRecord {
 /** What `agency().generate()` resolves to. */
 export interface AgencyResult {
   text: string;
-  usage: { promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number; cacheReadTokens?: number; cacheCreationTokens?: number };
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number; cacheReadTokens?: number; cacheCreationTokens?: number; cacheCreationExtendedTokens?: number };
   agentCalls: AgentCallRecord[];
   /**
    * With `output`, the value `text` parses to: after a `beforeReturn`

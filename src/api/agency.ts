@@ -1605,6 +1605,8 @@ type UsageTotals = {
   cacheReadTokens?: number;
   /** Anthropic `cache_creation_input_tokens`. Same undefined convention. */
   cacheCreationTokens?: number;
+  /** Of the cache writes, those made with the longer lifetime (Anthropic's 1 hour, OpenAI's 12 hours). Same convention. */
+  cacheCreationExtendedTokens?: number;
 };
 
 function emptyUsageTotals(): UsageTotals {
@@ -1627,6 +1629,7 @@ function normalizeUsage(raw: unknown): UsageTotals {
     // undefined so consumers distinguish "not reported" from "zero".
     cacheReadTokens: countOf(usage.cacheReadTokens),
     cacheCreationTokens: countOf(usage.cacheCreationTokens),
+    cacheCreationExtendedTokens: countOf(usage.cacheCreationExtendedTokens),
   };
 }
 
@@ -1642,6 +1645,9 @@ function addUsageTotals(target: UsageTotals, usage: UsageTotals): void {
   }
   if (typeof usage.cacheCreationTokens === 'number') {
     target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + usage.cacheCreationTokens;
+  }
+  if (typeof usage.cacheCreationExtendedTokens === 'number') {
+    target.cacheCreationExtendedTokens = (target.cacheCreationExtendedTokens ?? 0) + usage.cacheCreationExtendedTokens;
   }
 }
 

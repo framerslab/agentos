@@ -60,6 +60,7 @@ type StrategyTotalUsage = {
   costUSD?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  cacheCreationExtendedTokens?: number;
 };
 
 type ResultUsageSnapshot = {
@@ -69,6 +70,7 @@ type ResultUsageSnapshot = {
   costUSD?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  cacheCreationExtendedTokens?: number;
 };
 
 /**
