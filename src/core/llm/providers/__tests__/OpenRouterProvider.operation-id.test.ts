@@ -35,6 +35,7 @@ const MODELS = {
 
 const UNAVAILABLE: StubAnswer = { status: 503, json: { error: { message: 'Service Unavailable', code: 503 } } };
 
+/** A chat completion reply carrying `content`, stopped for `finishReason`, with OpenRouter's `cost`. */
 function chatCompletion(content: string, finishReason = 'stop'): StubAnswer {
   return {
     json: {
@@ -48,6 +49,7 @@ function chatCompletion(content: string, finishReason = 'stop'): StubAnswer {
   };
 }
 
+/** A streamed reply: `content`, the stop chunk with its usage, and `[DONE]`. */
 function chatStream(content: string): StubAnswer {
   const chunk = (delta: Record<string, unknown>, finishReason: string | null, usage?: Record<string, unknown>) => ({
     id: 'gen-1',
@@ -96,6 +98,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/** An OpenRouterProvider initialized against the stub (it lists the models), with `config` over the key and base URL. */
 async function provider(config: Partial<OpenRouterProviderConfig> = {}): Promise<OpenRouterProvider> {
   const created = new OpenRouterProvider();
   await created.initialize({ apiKey: API_KEY, baseURL: `${stub.origin}/api/v1`, ...config });

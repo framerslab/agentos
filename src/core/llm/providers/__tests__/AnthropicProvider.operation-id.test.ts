@@ -26,6 +26,7 @@ const messages: ChatMessage[] = [{ role: 'user', content: 'hi' }];
 
 const UNAVAILABLE: StubAnswer = { status: 503, json: { type: 'error', error: { type: 'api_error', message: 'Service Unavailable' } } };
 
+/** The `message_start` event of a streamed reply. */
 function messageStart(): Record<string, unknown> {
   return {
     type: 'message_start',
@@ -92,6 +93,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/** An AnthropicProvider initialized against the stub, with `config` over the key and base URL. */
 async function provider(config: Partial<AnthropicProviderConfig> = {}): Promise<AnthropicProvider> {
   const created = new AnthropicProvider();
   await created.initialize({ apiKey: API_KEY, baseURL: stub.origin, ...config });
@@ -103,6 +105,7 @@ function ids(header = HEADER): Array<string | undefined> {
   return stub.sent(MESSAGES).map((request) => request.headers[header] as string | undefined);
 }
 
+/** A message's content as text, for a `toContain` check. */
 function textOf(content: ChatMessage['content'] | undefined): string {
   return typeof content === 'string' ? content : JSON.stringify(content);
 }

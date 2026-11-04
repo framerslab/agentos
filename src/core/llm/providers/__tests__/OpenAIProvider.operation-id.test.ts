@@ -33,6 +33,7 @@ const MODELS = {
 
 const UNAVAILABLE: StubAnswer = { status: 503, json: { error: { message: 'Service Unavailable', type: 'server_error' } } };
 
+/** A Chat Completions reply carrying `content`, stopped for `finishReason`. */
 function chatCompletion(content: string, finishReason = 'stop'): StubAnswer {
   return {
     json: {
@@ -46,6 +47,7 @@ function chatCompletion(content: string, finishReason = 'stop'): StubAnswer {
   };
 }
 
+/** A streamed Chat Completions reply: `content`, the stop, the usage chunk and `[DONE]`. */
 function chatStream(content: string): StubAnswer {
   const chunk = (delta: Record<string, unknown>, finishReason: string | null) => ({
     id: 'chatcmpl-1',
@@ -94,6 +96,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/** An OpenAIProvider initialized against the stub, with `config` over the key and base URL. */
 async function provider(config: Partial<OpenAIProviderConfig> = {}): Promise<OpenAIProvider> {
   const created = new OpenAIProvider();
   await created.initialize({ apiKey: API_KEY, baseURL: `${stub.origin}/v1`, ...config });
@@ -105,6 +108,7 @@ function ids(key: string, header = HEADER): Array<string | undefined> {
   return stub.sent(key).map((request) => request.headers[header] as string | undefined);
 }
 
+/** Reads a stream to its end and returns its chunks. */
 async function drain<T>(stream: AsyncIterable<T>): Promise<T[]> {
   const chunks: T[] = [];
   for await (const chunk of stream) chunks.push(chunk);
