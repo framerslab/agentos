@@ -1041,7 +1041,11 @@ export class RequestyProvider implements IProvider {
           // each other), so the key was never marked and the request never moved on, and keeping it in the error's
           // details kept the key. Read a bounded prefix with the configured keys masked, then drop the stream.
           if (isReadableStream(errorData)) {
-            const { text, complete } = await readErrorStream(errorData);
+            const { text, complete } = await readErrorStream(errorData, perRequest?.signal);
+            // An abort during the read is the caller's verdict, as above: the answer is not classified, no key is marked.
+            if (perRequest?.signal?.aborted) {
+              throw new RequestyProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+            }
             const secrets = this.configuredSecrets();
             const masked = redactUrlSecrets(text, this.config?.baseURL, secrets);
             errorData = parseErrorBody(complete ? masked : maskCutSecretTail(masked, secrets));

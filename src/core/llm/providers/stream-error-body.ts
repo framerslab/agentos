@@ -32,14 +32,18 @@ export function isReadableStream(value: unknown): value is NodeJS.ReadableStream
 /**
  * Reads up to {@link MAX_STREAM_ERROR_BODY_BYTES} of a streamed error body as
  * UTF-8 text, waiting at most {@link STREAM_ERROR_BODY_TIMEOUT_MS}, then
- * destroys the stream so its socket is released.
+ * destroys the stream so its socket is released. The caller's `signal` ends
+ * the read at once: a body read after an abort is never the whole body, and
+ * the caller then reports the abort instead of classifying the answer.
  *
  * @param stream - The error response body axios returned as a stream.
+ * @param signal - The request's abort signal; its abort ends the read.
  * @returns The text read, possibly empty, and whether it is the whole body
- *   (false when the size limit, the timeout or a stream error cut it short).
+ *   (false when the size limit, the timeout, a stream error or the abort cut it short).
  */
 export async function readErrorStream(
   stream: NodeJS.ReadableStream & { destroy?: () => void },
+  signal?: AbortSignal,
 ): Promise<{ text: string; complete: boolean }> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -52,6 +56,7 @@ export async function readErrorStream(
         stream.removeListener('data', onData);
         stream.removeListener('end', onEnd);
         stream.removeListener('error', finish);
+        signal?.removeEventListener('abort', finish);
         resolve();
       }
       function onEnd(): void {
@@ -64,6 +69,11 @@ export async function readErrorStream(
         size += bytes.length;
         if (size >= MAX_STREAM_ERROR_BODY_BYTES) finish();
       }
+      if (signal?.aborted) {
+        finish();
+        return;
+      }
+      signal?.addEventListener('abort', finish, { once: true });
       stream.on('data', onData);
       stream.once('end', onEnd);
       stream.once('error', finish);
@@ -73,7 +83,7 @@ export async function readErrorStream(
   }
   return {
     text: Buffer.concat(chunks).subarray(0, MAX_STREAM_ERROR_BODY_BYTES).toString('utf8'),
-    complete: ended && size <= MAX_STREAM_ERROR_BODY_BYTES,
+    complete: ended && size <= MAX_STREAM_ERROR_BODY_BYTES && !signal?.aborted,
   };
 }
 

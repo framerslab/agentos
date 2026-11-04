@@ -1638,7 +1638,11 @@ export class OpenRouterProvider implements IProvider {
           // header. Read a bounded prefix and drop the stream, so the
           // message can use the body and nothing keeps the request.
           if (isReadableStream(errorData)) {
-            const { text, complete } = await readErrorStream(errorData);
+            const { text, complete } = await readErrorStream(errorData, signal);
+            // An abort during the read is the caller's verdict, as above: the answer is not classified, no key is marked.
+            if (signal?.aborted) {
+              throw new OpenRouterProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+            }
             // A body cut short can end inside a key, which whole-secret
             // masking would not match. Whole keys are masked first, so a key
             // whose last characters also start a key is not split in two.
