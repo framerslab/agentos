@@ -41,7 +41,7 @@ import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { errorFields } from '../../../logging/events.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
-import { operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
+import { operationIdHeaderNamed, operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
 /** This module's events, under its fixed diagnostic origin; no runtime name enters telemetry. */
 const log = moduleLogger('llm', 'openrouter_provider');
@@ -79,7 +79,8 @@ export interface OpenRouterProviderConfig {
    * the provider reads `AGENTOS_OPERATION_ID_HEADER`; with neither, no header
    * is sent. A name that is not an HTTP header name, or one the provider sets
    * itself (`Authorization`, `HTTP-Referer`, `X-Title`, ...), is refused with a
-   * `RangeError` by `initialize()` and by each call, before anything is sent.
+   * `RangeError` by `initialize()`, by each call and by `probeApiKey()`, before
+   * anything is sent.
    */
   operationIdHeader?: string;
 }
@@ -1779,15 +1780,20 @@ export class OpenRouterProvider implements IProvider {
    * no priced model to send, the probe has no verdict (`failure: 'no_model'`). Every answer goes through the same classifier as a
    * request's. It works before `initialize()`: the base URL is `options.baseURL`, else the configured one, else
    * OpenRouter's own. The key pool's probe of a failed key is this method's verdict.
+   *
+   * @throws {RangeError} When the operation id header's name is refused (`operationIdHeader`, else
+   *   `AGENTOS_OPERATION_ID_HEADER`), before anything is sent: the name is the host's error, not the key's.
    */
   public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
+    // Resolved before the deadline starts and outside the catch below, which turns a failed request into an answer.
+    const operationHeader = resolveOperationIdHeader(this.config?.operationIdHeader);
     const deadline = startKeyProbeDeadline(options);
     const baseURL = options.baseURL || this.config?.baseURL || OPENROUTER_DEFAULT_BASE_URL;
     // Each request of the probe is a call of its own, with its own operation id when the host names a header.
     const headers = (): Record<string, string> => ({
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      ...operationIdHeaders(this.config?.operationIdHeader),
+      ...operationIdHeaderNamed(operationHeader),
     });
     try {
       if (options.kind !== 'billing') {

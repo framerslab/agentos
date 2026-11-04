@@ -65,7 +65,7 @@ import {
 } from './anthropicCatalog.js';
 import { resolveAnthropicEffort } from '../model-effort.js';
 import { computeRetryBackoffMs, resolveAttemptCount, waitForRetry } from './retry-backoff.js';
-import { operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
+import { operationIdHeaderNamed, operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
 import { redactUrlSecrets } from '../url-secrets';
@@ -180,8 +180,8 @@ export interface AnthropicProviderConfig {
    * When this is unset the provider reads `AGENTOS_OPERATION_ID_HEADER`; with
    * neither, no header is sent. A name that is not an HTTP header name, or one
    * the provider sets itself (`x-api-key`, `anthropic-version`, ...), is
-   * refused with a `RangeError` by `initialize()` and by each call, before
-   * anything is sent.
+   * refused with a `RangeError` by `initialize()`, by each call and by
+   * `probeApiKey()`, before anything is sent.
    */
   operationIdHeader?: string;
 }
@@ -3055,8 +3055,13 @@ export class AnthropicProvider implements IProvider {
    * `options.baseURL`, else the configured one, else Anthropic's own. The
    * key pool's probe of a failed key is this method's verdict.
    * `probeProviderKey()` calls it with a key of the caller's.
+   *
+   * @throws {RangeError} When the operation id header's name is refused (`operationIdHeader`, else
+   *   `AGENTOS_OPERATION_ID_HEADER`), before anything is sent: the name is the host's error, not the key's.
    */
   public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
+    // Resolved before the deadline starts and outside the catch below, which turns a failed request into an answer.
+    const operationHeader = resolveOperationIdHeader(this.config?.operationIdHeader);
     const deadline = startKeyProbeDeadline(options);
     const baseURL = options.baseURL || this.config?.baseURL || ANTHROPIC_DEFAULT_BASE_URL;
     try {
@@ -3064,7 +3069,7 @@ export class AnthropicProvider implements IProvider {
       const headers = (): Record<string, string> => ({
         ...this.buildHeaders(apiKey),
         'Content-Type': 'application/json',
-        ...operationIdHeaders(this.config?.operationIdHeader),
+        ...operationIdHeaderNamed(operationHeader),
       });
       if (options.kind === 'billing') {
         const model = options.model || this.defaultModelId || ANTHROPIC_BILLING_PROBE_MODEL;

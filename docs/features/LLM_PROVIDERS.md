@@ -667,7 +667,8 @@ await anthropic.initialize({
 - The next call gets a new id. So does a request sent again with a changed body: the request `generateObject` sends again with a raised token budget after a truncated answer, and OpenRouter's schema request sent again without its schema.
 - Streamed calls, embeddings (OpenAI, OpenRouter), the key probe's requests and OpenRouter's health check carry the header too; each probe request has an id of its own.
 - `operationIdHeader` in the provider's config names the header; when it is unset the provider reads `AGENTOS_OPERATION_ID_HEADER` at each call. A blank value counts as unset. With neither, no header is sent.
-- A name that is not an HTTP header name, or one the provider sets itself (`Authorization`, `x-api-key`, `Content-Type`, `anthropic-version`, `anthropic-beta`, `OpenAI-Organization`, `HTTP-Referer`, `X-Title`, `User-Agent`), is refused with a `RangeError` by the provider's `initialize()` and by each call, before anything is sent.
+- On OpenAI, the id replaces a `customHeaders` entry of the same name in any case (`X-Operation-Id` for `x-operation-id`), so each request carries one value. The other custom headers are sent as before.
+- A name that is not an HTTP header name, or one the provider sets itself (`Authorization`, `x-api-key`, `Content-Type`, `anthropic-version`, `anthropic-beta`, `OpenAI-Organization`, `HTTP-Referer`, `X-Title`, `User-Agent`), is refused with a `RangeError` before anything is sent: by the provider's `initialize()`, by each call, and by `probeApiKey()` and so `probeProviderKey()`. A key probe answers for the key; a refused name is the host's error, so the probe rejects rather than answering `unknown`.
 
 ---
 

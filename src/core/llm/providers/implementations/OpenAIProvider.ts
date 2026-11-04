@@ -50,7 +50,7 @@ import { toOpenAiResponseFormat, toOpenAiResponsesTextFormat } from './openai-re
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
 import { computeRetryBackoffMs, waitForRetry } from './retry-backoff.js';
-import { operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
+import { operationIdHeaderNamed, operationIdHeaders, resolveOperationIdHeader, setOperationIdHeaders } from './operation-id.js';
 import { redactUrlSecrets } from '../url-secrets.js';
 import {
   OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER,
@@ -301,10 +301,12 @@ export interface OpenAIProviderConfig {
    * once before the call's first attempt and sent on every retry of the call;
    * the next call, and a request sent again with a changed body, gets a new
    * one. When this is unset the provider reads `AGENTOS_OPERATION_ID_HEADER`;
-   * with neither, no header is sent. A name that is not an HTTP header name,
-   * or one the provider sets itself (`Authorization`, `Content-Type`, ...),
-   * is refused with a `RangeError` by `initialize()` and by each call, before
-   * anything is sent.
+   * with neither, no header is sent. The id replaces a `customHeaders` entry
+   * of the same name, in any case, so a request carries one value. A name
+   * that is not an HTTP header name, or one the provider sets itself
+   * (`Authorization`, `Content-Type`, ...), is refused with a `RangeError` by
+   * `initialize()`, by each call and by `probeApiKey()`, before anything is
+   * sent.
    */
   operationIdHeader?: string;
 }
@@ -1154,15 +1156,20 @@ export class OpenAIProvider implements IProvider {
    * `initialize()`: the base URL is
    * `options.baseURL`, else the configured one, else OpenAI's own. The key
    * pool's probe of a failed key is this method's verdict.
+   *
+   * @throws {RangeError} When the operation id header's name is refused (`operationIdHeader`, else
+   *   `AGENTOS_OPERATION_ID_HEADER`), before anything is sent: the name is the host's error, not the key's.
    */
   public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
+    // Resolved before the deadline starts and outside the catch below, which turns a failed request into an answer.
+    const operationHeader = resolveOperationIdHeader(this.config?.operationIdHeader);
     const deadline = startKeyProbeDeadline(options);
     const baseURL = options.baseURL || this.config?.baseURL || OPENAI_DEFAULT_BASE_URL;
     try {
       const baseHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
       if (this.config?.organizationId) baseHeaders['OpenAI-Organization'] = this.config.organizationId;
       // Each request of the probe is a call of its own, with its own operation id when the host names a header.
-      const headers = (): Record<string, string> => ({ ...baseHeaders, ...operationIdHeaders(this.config?.operationIdHeader) });
+      const headers = (): Record<string, string> => ({ ...baseHeaders, ...operationIdHeaderNamed(operationHeader) });
       const listModels = () => fetch(`${baseURL}/models`, { method: 'GET', headers: headers(), signal: deadline.signal });
       if (options.kind !== 'billing') return await readKeyProbeAnswer(await listModels(), { apiKey, signal: deadline.signal });
       let model = options.model || this.defaultModelId;
@@ -2687,8 +2694,9 @@ export class OpenAIProvider implements IProvider {
     if (this.config.organizationId) {
       headers['OpenAI-Organization'] = this.config.organizationId;
     }
-    // One operation id for the whole call: every attempt and key hop below sends this same value.
-    Object.assign(headers, operationIdHeaders(this.config.operationIdHeader));
+    // One operation id for the whole call: every attempt and key hop below sends this same value. It replaces a
+    // customHeaders entry of the same name in another case, which fetch would join with it into one field.
+    setOperationIdHeaders(headers, operationIdHeaders(this.config.operationIdHeader));
 
     let lastError: Error = new OpenAIProviderError('Request failed after all retries.', 'MAX_RETRIES_REACHED');
 

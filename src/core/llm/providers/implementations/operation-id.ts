@@ -74,6 +74,43 @@ export function resolveOperationIdHeader(configured: string | undefined): string
  * @throws {RangeError} As {@link resolveOperationIdHeader}.
  */
 export function operationIdHeaders(configured: string | undefined): Record<string, string> {
-  const name = resolveOperationIdHeader(configured);
+  return operationIdHeaderNamed(resolveOperationIdHeader(configured));
+}
+
+/**
+ * A new operation id under `name`, a name {@link resolveOperationIdHeader}
+ * returned, or no header when it is `undefined`. For a caller that resolves
+ * the name once, outside its own error handling, and makes an id for each of
+ * its requests: a key probe, whose catch turns a failed request into an
+ * answer, resolves the name before it so a refused name rejects.
+ *
+ * @param name The resolved header name.
+ */
+export function operationIdHeaderNamed(name: string | undefined): Record<string, string> {
   return name ? { [name]: generateUUID() } : {};
+}
+
+/**
+ * Sets a call's operation id header ({@link operationIdHeaders}) on `headers`,
+ * first removing any header there of the same name in another case, such as a
+ * host's `customHeaders` entry. Fetch joins two such keys into one field
+ * (`host-value, <id>`); after this the request carries one value, the id.
+ * Every other header is kept.
+ *
+ * @param headers The request's headers, changed in place.
+ * @param operationHeaders The call's operation id header, or `{}` for none.
+ * @returns `headers`.
+ */
+export function setOperationIdHeaders(
+  headers: Record<string, string>,
+  operationHeaders: Record<string, string>,
+): Record<string, string> {
+  for (const [name, value] of Object.entries(operationHeaders)) {
+    const lowered = name.toLowerCase();
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === lowered) delete headers[key];
+    }
+    headers[name] = value;
+  }
+  return headers;
 }
