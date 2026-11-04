@@ -645,6 +645,30 @@ describe('probeProviderKey, whatever the provider', () => {
     }
   });
 
+  it('waits out a timeout past the longest timer delay when a provider probe is called directly', async () => {
+    // Node fires a timer set past 2,147,483,647 ms after 1 ms; each answer here comes 100 ms late.
+    const late = (body: unknown) => () => ({ ...json(body), delayMs: 100 });
+    routes['POST /v1/messages'] = late({ id: 'msg_1', type: 'message', content: [{ type: 'text', text: 'p' }] });
+    routes['POST /v1/chat/completions'] = late({ id: 'chatcmpl-1', choices: [] });
+    routes['POST /v1beta/models/probe-model-1:generateContent'] = late({ candidates: [] });
+    routes['POST /api/v1/chat/completions'] = late({ id: 'gen-1', choices: [] });
+    const cases = [
+      [new AnthropicProvider(), origin],
+      [new OpenAIProvider(), `${origin}/v1`],
+      [new GeminiProvider(), `${origin}/v1beta`],
+      [new OpenRouterProvider(), `${origin}/api/v1`],
+      [new RequestyProvider(), `${origin}/v1`],
+    ] as const;
+
+    for (const [provider, baseURL] of cases) {
+      const answer = await provider.probeApiKey(KEY, { kind: 'billing', baseURL, model: 'probe-model-1', timeoutMs: 2 ** 31 });
+
+      expect(answer).toMatchObject({ verdict: 'ok', status: 200 });
+      expect(answer.failure).toBeUndefined();
+    }
+    expect(received).toHaveLength(5);
+  });
+
   it("lets go of a 2xx answer's connection once the status is read", async () => {
     // The status and the headers arrive and the body never finishes: an ok probe must not hold the connection.
     routes['POST /v1/messages'] = () => ({ ...json({ id: 'msg_1', type: 'message', content: [{ type: 'text', text: 'p' }] }), stall: true });
