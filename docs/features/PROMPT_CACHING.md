@@ -127,7 +127,8 @@ await streamText({
 - `cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false` is accepted by
   `generateText`, `streamText`, `generateObject`, `agent({ cache })`, and
   per-hop fallback entries (`FallbackProviderEntry.cache`). `false` strips
-  every marker from the request, including caller markers. A per-call
+  every marker from the request, including caller markers on messages and
+  tool definitions, directly and on OpenRouter `anthropic/*` slugs. A per-call
   `'1h'` also raises caller system-marker TTLs so the request never orders
   a longer-lived breakpoint after a shorter one (Anthropic rejects that).
 - `tail: false` puts no breakpoint on the messages and no request-level
@@ -140,7 +141,9 @@ await streamText({
   with no system goes out unmarked. On
   OpenRouter `anthropic/*` slugs a request that carries a marker of yours
   goes out as you sent it, as it does by default; one with none gets a
-  marker on the first system message and none on the final message. The
+  marker on the first system message and none on the final message; a
+  `customModelParams.messages` override stands in for the messages, and
+  its first system message is marked on a copy. The
   default tail is right for conversations and agent loops, where it is
   what reads the history back; leave it out where the prefix repeats and
   the tail never does. `false` would drop the prefix

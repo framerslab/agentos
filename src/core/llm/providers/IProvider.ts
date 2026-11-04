@@ -40,8 +40,9 @@
  * Represents a part of a multimodal message content.
  */
 export type MessageContentPart =
-  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
-  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto'; }; cache_control?: { type: 'ephemeral' } }
+  /** `cache_control` is an Anthropic prompt-cache breakpoint; `ttl` defaults to `'5m'`. */
+  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' } }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto'; }; cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' } }
   // For Anthropic tool results specifically, fitting their API:
   | { type: 'tool_result'; tool_use_id: string; content?: string | Array<Record<string, any>>; is_error?: boolean; }
   // Fallback for other potential string types for extensibility

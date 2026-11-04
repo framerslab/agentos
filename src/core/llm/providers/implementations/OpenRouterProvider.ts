@@ -564,7 +564,9 @@ export class OpenRouterProvider implements IProvider {
    * the `AGENTOS_ANTHROPIC_AUTO_CACHE=0`/`false` kill switch (same syntax
    * as the direct path). `options.cache === false` goes further, mirroring
    * the direct provider's per-call hard-off: caller markers already in the
-   * message content are stripped as well. Sub-floor prefixes are safe to
+   * message content are stripped as well (tool-definition markers are
+   * stripped by {@link applyAnthropicSlugCacheToPayload}, on the final
+   * `tools`). Sub-floor prefixes are safe to
    * mark: Anthropic silently ignores markers below the model's minimum
    * cacheable length. `options.cache.ttl` rides onto the injected markers.
    */
@@ -679,6 +681,42 @@ export class OpenRouterProvider implements IProvider {
     if (lastIdx >= 0 && lastIdx !== systemIdx) markMessage(orMessages[lastIdx]);
   }
 
+  /**
+   * Runs {@link applyAnthropicSlugCacheControl} on the request as it will be
+   * sent. A `customModelParams.messages` or `customModelParams.tools`
+   * override replaces the arrays built from the call's own messages and
+   * options, so markers placed before that spread would never reach the
+   * wire. The message objects are copied first, because an override array
+   * belongs to the caller. Under `cache: false`, `cache_control` is also
+   * removed from each tool definition in the final `tools` (copies, never
+   * in-place edits), as the direct provider does.
+   */
+  private applyAnthropicSlugCacheToPayload(
+    modelId: string,
+    payload: Record<string, unknown>,
+    options: ModelCompletionOptions,
+  ): void {
+    if (!modelId.toLowerCase().startsWith('anthropic/')) return;
+    const isRecord = (value: unknown): value is Record<string, unknown> =>
+      value !== null && typeof value === 'object';
+
+    if (Array.isArray(payload.messages) && payload.messages.every(isRecord)) {
+      const wireMessages = (payload.messages as Array<Record<string, unknown>>).map(
+        (message) => ({ ...message }),
+      ) as Array<Partial<ChatMessage>>;
+      payload.messages = wireMessages;
+      this.applyAnthropicSlugCacheControl(modelId, wireMessages, options);
+    }
+
+    if (options.cache === false && Array.isArray(payload.tools)) {
+      payload.tools = (payload.tools as unknown[]).map((tool) => {
+        if (!isRecord(tool) || tool.cache_control === undefined) return tool;
+        const { cache_control: _stripped, ...rest } = tool;
+        return rest;
+      });
+    }
+  }
+
   private mapToOpenRouterMessages(messages: ChatMessage[]): Array<Partial<ChatMessage>> {
     return messages.map(msg => {
       const mappedMsg: Partial<ChatMessage> = { role: msg.role, content: msg.content };
@@ -701,7 +739,6 @@ export class OpenRouterProvider implements IProvider {
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
     const openRouterMessages = this.mapToOpenRouterMessages(messages);
-    this.applyAnthropicSlugCacheControl(modelId, openRouterMessages, options);
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -741,6 +778,7 @@ export class OpenRouterProvider implements IProvider {
     };
     this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
+    this.applyAnthropicSlugCacheToPayload(modelId, payload, options);
 
     // The call's count bounds the schema request and its json_object retry together.
     const attempts = resolveAttemptCount(options.maxAttempts, OpenRouterProvider.MAX_REQUEST_ATTEMPTS);
@@ -875,7 +913,6 @@ export class OpenRouterProvider implements IProvider {
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
     const openRouterMessages = this.mapToOpenRouterMessages(messages);
-    this.applyAnthropicSlugCacheControl(modelId, openRouterMessages, options);
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -920,6 +957,7 @@ export class OpenRouterProvider implements IProvider {
     };
     this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
+    this.applyAnthropicSlugCacheToPayload(modelId, payload, options);
 
     const abortSignal = options.abortSignal;
     // `usage` is what a refused turn billed before the abort; a consumer

@@ -313,8 +313,8 @@ const { text } = await generateText({
 
 - Left out (or `{ ttl: '5m' }`): the provider caches the request up to the newest message, so a conversation reads its history back from the cache on the next turn. A system block with `cacheBreakpoint: true` keeps its own marker, and the direct provider marks the newest message after it (OpenRouter sends a request that carries a caller marker as it is).
 - `{ ttl: '1h' }`: the same markers with a one-hour TTL, for loops whose steps are more than five minutes apart.
-- `{ tail: false }`: the markers the caller set go out as set, and the provider puts no breakpoint on the messages. For a call that sends the same long prefix every time and never the same tail (a judge, a classifier): the prefix is read back from the cache, and the tail, which no later call would read, is not written at the cache-write price (1.25x the input price at five minutes, 2x at one hour). With no `cacheBreakpoint` set, the end of the first system message is marked (the end of a `customModelParams.system` override when one replaces the system). It combines with `ttl`.
-- `false`: no marker at all, the caller's included, for a call whose prompt is never sent again.
+- `{ tail: false }`: the markers the caller set go out as set, and the provider puts no breakpoint on the messages. For a call that sends the same long prefix every time and never the same tail (a judge, a classifier): the prefix is read back from the cache, and the tail, which no later call would read, is not written at the cache-write price (1.25x the input price at five minutes, 2x at one hour). With no `cacheBreakpoint` set, the end of the first system message is marked (the end of a `customModelParams.system` override when one replaces the system; on OpenRouter, the first system message of a `customModelParams.messages` override). It combines with `ttl`.
+- `false`: no marker at all, the caller's included (on messages and tool definitions), for a call whose prompt is never sent again.
 
 Prices, floors and the per-provider behavior: [Prompt Caching](../features/PROMPT_CACHING.md).
 
