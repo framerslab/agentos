@@ -302,6 +302,22 @@ describe('probeProviderKey on OpenAI', () => {
     expect(result).toMatchObject({ state: 'ok', model: 'gpt-4o-mini' });
   });
 
+  it('takes an o-series model when the account lists no GPT chat model, and skips the Responses-only models', async () => {
+    routes['POST /v1/chat/completions'] = () => json({ id: 'chatcmpl-1', choices: [] });
+
+    routes['GET /v1/models'] = () => json({ object: 'list', data: [{ id: 'text-embedding-3-small' }, { id: 'o1-pro' }, { id: 'o4-mini' }] });
+    const reasoningOnly = await probe();
+    expect(jsonOf(received[1])).toEqual({ model: 'o4-mini', max_completion_tokens: 16, messages: PING });
+    expect(reasoningOnly).toMatchObject({ state: 'ok', model: 'o4-mini' });
+
+    // A GPT chat model goes first; a Responses-only one has no Chat Completions route to probe.
+    received.length = 0;
+    routes['GET /v1/models'] = () => json({ object: 'list', data: [{ id: 'o3' }, { id: 'gpt-5-pro' }, { id: 'gpt-4o-mini' }] });
+    const mixed = await probe();
+    expect(jsonOf(received[1]).model).toBe('gpt-4o-mini');
+    expect(mixed).toMatchObject({ state: 'ok', model: 'gpt-4o-mini' });
+  });
+
   it('reports the timeout, not a catalog without a chat model, when the models list stops before its end', async () => {
     routes['GET /v1/models'] = () => ({ ...json({ object: 'list', data: [{ id: 'gpt-4o-mini' }] }), stall: true });
 
