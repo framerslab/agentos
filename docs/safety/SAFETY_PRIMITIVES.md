@@ -412,6 +412,47 @@ const { reservations, periods } = await hourly.purge({ before: Date.now() - 3_60
 
 A reservation still reserved is never deleted, and neither is a period meter's period row, which holds the period's count: a month's `snapshot()` reads the same after its settled reservations are purged. For a window meter, a `before` at least one window back keeps every unit the window counts. Once an operation's row is purged the meter no longer knows the operation: a retry of it reserves and counts again, and a refund of it finds nothing, so `before` lies past the time either can come. `purge()` deletes across every account in its meter's two tables, so meters under one prefix share their retention, and a meter under a prefix of its own keeps its own.
 
+### Pricing a call before it is sent
+
+A meter that holds an allowance in money reserves each provider call's largest cost before the call and settles to what it cost after. `estimateMaxCallCostUSD(providerId, modelId, request)` gives that largest cost, an upper bound in US dollars, or `undefined` for a call it cannot bound, which the host refuses:
+
+```typescript
+import { estimateMaxCallCostUSD, registerModelPricing } from '@framers/agentos/safety/runtime';
+
+// OpenRouter's models, refreshed from its models endpoint each day; OpenAI's and Anthropic's tables are built in.
+registerModelPricing('openrouter', (modelId) => openRouterPrices.get(modelId));
+
+const max = estimateMaxCallCostUSD('anthropic', body.model, {
+  messages: body.messages,
+  system: body.system,
+  tools: body.tools,
+  maxOutputTokens: body.max_tokens,
+  cacheMarkers: body.cache_control !== undefined, // a request-level marker its messages do not show
+});
+if (max === undefined) return refuse(400, 'not_priced');
+const held = await meter.reserve({ accountId, operationId, units: Math.ceil(max * 1_000_000), requireFence: true });
+if (held.status !== 'reserved') return refuse(402, held.reason); // the account's allowance cannot hold the call
+// Only now is the call sent; it settles `operationId` once it has finished.
+```
+
+The bound:
+
+| Part | Counted as |
+|---|---|
+| Prompt tokens | One token per UTF-8 byte of the messages (as JSON), the system prompt and the tool definitions (as JSON), plus `MAX_COST_TOKENS_PER_MESSAGE` (8) for each message and for the system prompt, plus `MAX_COST_TOOL_USE_TOKENS` (1,024) once for a request with tools, the tool-use system prompt a provider adds (`maxInputTokens(request)` gives this number) |
+| Input rate | The highest the request reaches: the long-context card's once the token bound passes its threshold (OpenAI over 272,000 tokens on its 1.05M-context models, Claude Haiku 5.5 over 100,000), and the cache-write rate where the request asks for caching (`cacheMarkers`, or a `cache_control` or `prompt_cache_breakpoint` key in its text: Anthropic's 1-hour write at 2x input, OpenAI's 12-hour write at 2.5x) or where the model writes the cache by default (OpenAI's GPT-5.6 and later, at 1.25x) |
+| Output | `maxOutputTokens` as the request sends it, at the highest output rate the request reaches. A host that cuts a cap above the model's ceiling cuts it first and passes the cut cap: a ceiling the library knows bounds what a request is shaped to, never what it is billed |
+
+A byte-level tokenizer's token covers at least one byte, so the prompt bound holds where four characters a token does not: Anthropic's counting endpoint gives base64 0.94 tokens a byte on Claude Opus 5.5, and CJK text and emoji well over a token for every four characters. The test fixture `src/api/runtime/__tests__/fixtures/max-cost-token-counts.json` holds both providers' own counts for CJK text, source code, emoji, base64, many short turns and tool definitions, and the tests hold the bound at or above each.
+
+`undefined` comes back for a model with no price row, a request with no finite output cap, `n` above 1 (each completion bills its own output), a content part that is not text (an image, a document, audio, a file, a server tool's call or result; in Gemini's shape a part with `inlineData` or `fileData`, in its own `parts` or in a function response's, and a built-in tool's `toolCall` or `toolResponse`) or a message that replays an earlier audio answer (Chat Completions' assistant `audio`), a tool the provider defines or runs (any tool `type` but `function` or `custom`, and a Gemini tool with no `type` other than `functionDeclarations`, such as `googleSearch` or `codeExecution`), and a request flagged `nonTextParts`, `providerSideTools`, `priorityTier` (OpenAI's priority or fast tier, Anthropic's fast mode) or `regionalProcessing` (Anthropic's `inference_geo: 'us'`, OpenAI's regional endpoints), each of which bills by a measure or at a rate the text and the table do not show. A replayed thinking block counts by its bytes: its signature carries the whole thinking.
+
+`modelPricing(providerId, modelId)` reads the rates in US dollars per million tokens: OpenAI's table, Anthropic's table, then the table the host registered for the provider with `registerModelPricing(providerId, table)`. For `openai` and `anthropic` the host's table fills only the models the built-in table lacks; registering again replaces a table. A host row with a rate that is NaN, infinite or negative is no price, since a NaN estimate passes every budget check. A spend budget's estimate (`estimateCallCostUSD`) and its cost of a finished call (`costOfUsageUSD`) read the same rows; the estimate takes the long-context card once its prompt's assumed tokens (four characters a token) pass the threshold. A provider built on the OpenAI provider (Groq, LiteLLM, Mistral, Together and xAI send through it, MiniMax extends it) reports OpenAI's list price for a model id OpenAI's table holds; where the host registered a row for that provider, `costOfUsageUSD` prices the call at that row instead, the rate it was estimated at. A bill the provider's API returned (OpenRouter's and Requesty's `usage.cost`) stands. An embedding on an OpenAI-compatible endpoint (`embedText` with Mistral, OpenRouter or Requesty) reports no cost and is priced at the host's row; a batch whose answer reports no prompt tokens is charged at the bound of its inputs, one token per UTF-8 byte and `MAX_COST_TOKENS_PER_MESSAGE` for each input, while the usage `embedText` returns stays what the answers counted. Where the provider reported no cost, `costOfUsageUSD` prices the whole prompt, cache reads and writes included (`inclusiveInputTokens`; Anthropic's prompt tokens leave the cache out), at the long-context card when that prompt is over its threshold: the cache reads at the card's cache-read rate and the writes at its highest write rate.
+
+The bound counts what the request carries. A request that draws in context stored with the provider (OpenAI's `previous_response_id`, `conversation` or a stored `prompt`) is billed for tokens its text does not show, so a host sends that context in `messages` or refuses the request. A request for output that is not text (OpenAI's `modalities` with `audio`) bills audio tokens at their own rates, so a host flags it `nonTextParts`.
+
+An actual cost above the reserved bound is a price-table or estimator defect: the host settles at the reservation, records the difference and alerts.
+
 ## Compound credit
 
 A host that sells metered calls reserves each call's most before any work starts, and settles it once from measured quantities. `@framers/agentos/safety/runtime` carries the arithmetic and the ledger; the host supplies rates, caps and its allocation policy.

@@ -303,6 +303,14 @@ export interface ModelCompletionOptions {
    * Optional AbortSignal for caller-driven cancellation. If aborted:
    *  - Streaming providers MUST emit a terminal chunk with `isFinal: true` and `error.type='abort'`.
    *  - Non-streaming calls SHOULD throw a cancellation error (or return error response if already partially processed).
+   *  - A request already sent ends at the abort, whether it waits for its answer or its headers, and a stream
+   *    whose body has stalled ends with the terminal abort chunk; the OpenAI, Anthropic, Gemini, OpenRouter,
+   *    Requesty and Ollama providers pass the signal to their HTTP client, and their non-streaming calls throw
+   *    `REQUEST_ABORTED`. A call whose signal has already aborted sends nothing, the OpenAI provider's OAuth
+   *    token read included. An abort that lands while OpenRouter or Requesty reads an error answer's body ends that
+   *    read and is reported as the abort; the answer is not classified and marks no key. Ending the request ends the
+   *    caller's wait; whether the vendor stops work and billing is
+   *    the vendor's (OpenRouter stops both only for a stream: https://openrouter.ai/docs/api-reference/streaming).
    *  - A wait between retries (a 429's Retry-After or a backoff) ends at once and no further request is sent; the
    *    OpenAI, Anthropic, Gemini and OpenRouter providers end it. A non-streaming call then throws `REQUEST_ABORTED`;
    *    a stream (`generateCompletionStream`) ends with the terminal abort chunk above instead of throwing.
@@ -526,7 +534,10 @@ export interface ProviderEmbeddingOptions {
   inputType?: 'search_document' | 'search_query' | 'classification' | 'clustering' | string;
   /**
    * Optional AbortSignal for caller-driven cancellation. A provider that reads it cancels the
-   * request in flight when it aborts and sends no further request.
+   * request in flight when it aborts and sends no further request; the OpenAI, OpenRouter, Requesty,
+   * Ollama and Gemini providers read it and throw `REQUEST_ABORTED`. On OpenRouter and Requesty it also
+   * rides the model-list read an embedding call makes for a model it has not listed: an aborted call
+   * sends nothing, and an abort ends that read at once.
    */
   abortSignal?: AbortSignal;
 }

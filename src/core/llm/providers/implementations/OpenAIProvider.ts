@@ -51,13 +51,33 @@ import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
 import { computeRetryBackoffMs, waitForRetry } from './retry-backoff.js';
 import { redactUrlSecrets } from '../url-secrets.js';
-import { OPENAI_MODEL_PRICING, openAIModelPricing } from './openaiPricing.js';
+import {
+  OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER,
+  OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER,
+  OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS,
+  OPENAI_MODEL_PRICING,
+  openAIModelPricing,
+  openAiHasLongContextPricing,
+} from './openaiPricing.js';
+import { isOpenAIReasoningModel, openAiReasoningContextWindow } from './openaiModelFamilies.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { errorFields } from '../../../logging/events.js';
 import { AttemptBudgetExhaustedError, CountingAttemptBudget } from '../../../../safety/runtime/ModelAttemptBudget.js';
 
 /** This module's events, under its fixed diagnostic origin; no runtime name enters telemetry. */
 const log = moduleLogger('llm', 'openai_provider');
+
+// The model-family predicates and the long-context tier live in openaiModelFamilies.ts and openaiPricing.ts, which
+// import nothing of this provider, so `@framers/agentos/safety/runtime` can price a call at its long-context rates
+// without loading the provider. Re-exported here so every import that reached them through this module keeps working.
+export {
+  OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER,
+  OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER,
+  OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS,
+  isOpenAIReasoningModel,
+  openAiHasLongContextPricing,
+  openAiReasoningContextWindow,
+};
 
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
@@ -405,81 +425,6 @@ export function modelRequiresMaxCompletionTokens(modelId: string): boolean {
 }
 
 /**
- * Context-window size for the GPT-5, GPT-6 and o-series reasoning families.
- *
- * From the first-party model pages and GET /v1/models, 2026-09-23 to 29. The
- * family prefix alone does not decide the size: `gpt-5.4` is a 1.05M model
- * while its `-mini` and `-nano` siblings are 400K.
- *
- *   - 1,050,000: the GPT-6 family (`gpt-6.1-sol` included, per the
- *     2026-09-29 changelog), the GPT-5.6 family except `gpt-5.6-cyber`,
- *     `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4` and `gpt-5.4-pro` (max input
- *     922,000 on GPT-6).
- *   - 400,000: `gpt-5.6-cyber`, `gpt-5.4-mini` / `-nano`, `gpt-5.3-codex`,
- *     `gpt-5.2*`, `gpt-5.1*`, `gpt-5`, and `gpt-5-mini` / `-nano` / `-pro`.
- *   - 200,000: the o-series other than `o1-mini` and `o1-preview`.
- *   - 128,000: `o1-mini`, `o1-preview` and the `gpt-5*-chat-latest` snapshots.
- *
- * @param modelId Provider-side model identifier (e.g. `'gpt-6-sol'`).
- * @returns Context window in tokens.
- */
-export function openAiReasoningContextWindow(modelId: string): number {
-  const id = modelId.toLowerCase();
-  if (/^o1-(mini|preview)/.test(id)) return 128000;
-  if (/^o\d/.test(id)) return 200000;
-  if (/^gpt-5(\.\d+)?-chat-latest$/.test(id)) return 128000;
-  if (/^gpt-5\.6-cyber/.test(id)) return 400000;
-  if (/^gpt-6/.test(id)) return 1050000;
-  if (/^gpt-5\.[56]/.test(id)) return 1050000;
-  // gpt-5.4 and gpt-5.4-pro, bare or dated, are 1.05M; -mini and -nano are 400K.
-  if (/^gpt-5\.4(-pro)?(-\d{4}-\d{2}-\d{2})?$/.test(id)) return 1050000;
-  return 400000;
-}
-
-/**
- * Prompt size, in input tokens, above which OpenAI bills a call on a
- * long-context model at the long-context rates. The pricing page splits its
- * flagship table into "<=272K" and ">272K" input tokens, and the comparison is
- * strict: a prompt of exactly 272,000 tokens bills at the standard rates. The
- * count includes cached tokens, and output size never triggers the tier.
- */
-export const OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS = 272_000;
-
-/**
- * Factor OpenAI applies to the input rate of a long-context call. The cached
- * input and cache write rates double as well.
- */
-export const OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER = 2;
-
-/** Factor OpenAI applies to the output rate of a long-context call. */
-export const OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER = 1.5;
-
-/**
- * Whether OpenAI bills `modelId` at the long-context rates when a prompt
- * exceeds {@link OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS} input tokens. Such a
- * call bills its whole input at {@link OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER}
- * times the input rate and its whole output at
- * {@link OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER} times the output rate.
- *
- * OpenAI states the rule for its models with a 1.05M context window, so this
- * reuses {@link openAiReasoningContextWindow}. That covers the GPT-6 family
- * (`gpt-6.1-sol` included), the GPT-5.6 family except `gpt-5.6-cyber`,
- * `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4` and `gpt-5.4-pro`, bare or dated.
- * Everything else bills flat at every prompt size: the GPT-5 models with a
- * smaller window (`gpt-5.6-cyber`, which the pricing page lists without a
- * long-context rate, `gpt-5.4-mini` / `-nano`, `gpt-5.3` and older, and the
- * chat-latest snapshots), the o-series, and the pre-GPT-5 models, `gpt-4.1`
- * included despite its 1M window. Checked against
- * developers.openai.com/api/docs/pricing and the model pages on 2026-09-30.
- *
- * @param modelId Model id as requested or as echoed by the API.
- * @returns `true` when a prompt above the threshold bills at the long-context rates.
- */
-export function openAiHasLongContextPricing(modelId: string): boolean {
-  return isOpenAIReasoningModel(modelId) && openAiReasoningContextWindow(modelId) === 1050000;
-}
-
-/**
  * Whether OpenAI serves `modelId` only through the Responses API. OpenAI lists
  * the `-pro` tiers, the codex models, `gpt-5.6-cyber` and the deep-research
  * models as Responses-only; on /v1/chat/completions they fail (gpt-5.3-codex
@@ -564,35 +509,6 @@ export function openAiReasoningCapabilities(modelId: string): string[] {
   const caps = ['chat', 'json_mode', 'tool_use'];
   if (!/^o3-mini/.test(id)) caps.push('vision_input');
   return caps;
-}
-
-/**
- * Whether `modelId` is an OpenAI reasoning model — the o1/o3/o4 series or the
- * GPT-5 / GPT-6 families. These models reject custom sampling params
- * (`temperature`, `top_p`) with HTTP 400 in addition to requiring
- * `max_completion_tokens`; they run only at their fixed defaults. Single
- * source of truth for the o-series/gpt-5/gpt-6 detection used by both the
- * param guards.
- *
- * GPT-6 live-probed 2026-09-10 (chat.completions, `gpt-6-astra`):
- * `temperature: 0.5` → HTTP 400 `unsupported_value` ("Unsupported value:
- * 'temperature' does not support 0.5 with this model. Only the default (1)
- * value is supported."); `max_tokens: 16` → HTTP 400
- * `unsupported_parameter` ("Unsupported parameter: 'max_tokens' is not
- * supported with this model. Use 'max_completion_tokens' instead."). The
- * family therefore behaves exactly like GPT-5 on both guards.
- *
- * `gpt-6` is matched as a bare family prefix (mirroring `gpt-5`) so dated
- * snapshots of `gpt-6-astra` are covered. It is deliberately NOT generalized
- * to `gpt-\d` — a future family's param contract is unknown, and the
- * conservative default for an unrecognized id is the legacy `max_tokens`
- * path. Widen only for a family that has actually shipped and been probed.
- *
- * @param modelId Provider-side model identifier (e.g. `'o3'`, `'gpt-6-astra'`).
- */
-export function isOpenAIReasoningModel(modelId: string): boolean {
-  // o1 / o3 / o4 reasoning models, plus the GPT-5 and GPT-6 families.
-  return /^(o\d|gpt-5|gpt-6)/i.test(modelId);
 }
 
 /**
@@ -1174,11 +1090,16 @@ export class OpenAIProvider implements IProvider {
    * @param {string | undefined} apiKeyOverride - API key provided directly in request options.
    * @param {AbortSignal | undefined} abortSignal - The caller's signal, which ends a wait on the pool's probes.
    * @returns {Promise<string>} The API key to use.
-   * @throws {OpenAIProviderError} If no API key is available; `REQUEST_ABORTED` when the signal ended the draw.
+   * @throws {OpenAIProviderError} If no API key is available; `REQUEST_ABORTED` when the signal ended the draw, or
+   * had already aborted before an OAuth token read (no token is asked for).
    */
   private async getApiKey(apiKeyOverride?: string, abortSignal?: AbortSignal): Promise<string> {
     if (apiKeyOverride) return apiKeyOverride;
     if (this.config.oauthFlow) {
+      // A token read can be a refresh request to the identity provider, so an aborted call makes none.
+      if (abortSignal?.aborted) {
+        throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       return await this.config.oauthFlow.getAccessToken();
     }
     if (this.keyPool?.hasKeys) {
@@ -1771,7 +1692,7 @@ export class OpenAIProvider implements IProvider {
     if (!texts || texts.length === 0) {
       throw new OpenAIProviderError('Input texts array cannot be empty for embeddings.', 'EMBEDDING_NO_INPUT');
     }
-    const apiKey = await this.getApiKey(options?.apiKeyOverride);
+    const apiKey = await this.getApiKey(options?.apiKeyOverride, options?.abortSignal);
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -1794,6 +1715,7 @@ export class OpenAIProvider implements IProvider {
     }
 
 
+    // The call's signal aborts the fetch in flight (REQUEST_ABORTED), and no attempt is sent after it.
     const apiResponse = await this.makeApiRequest<OpenAIAPITypes.EmbeddingResponse>(
       '/embeddings',
       'POST',
@@ -1801,7 +1723,7 @@ export class OpenAIProvider implements IProvider {
       payload,
       false,
       undefined,
-      undefined,
+      options?.abortSignal,
       undefined,
       this.keySourceOf(options?.apiKeyOverride),
     );

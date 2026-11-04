@@ -11,6 +11,7 @@ import {
   estimateCallCostUSD,
   promptCharsOf,
 } from '../spendBudget.js';
+import { registerModelPricing } from '../modelPricing.js';
 
 /** The error a call throws, or undefined when it throws none. */
 function thrownBy(call: () => void): unknown {
@@ -175,6 +176,98 @@ describe('the estimates', () => {
     const budget = new SpendBudget({ maxCostUSD: 0.001 });
     budget.record(costOfUsageUSD('openai', 'gpt-6-luna', { promptTokens: 1000, completionTokens: 1000, costUSD: Number.NaN }), 2000, 'call');
     expect(budget.spentUSD()).toBeCloseTo(0.0006, 10);
+  });
+
+  it("prices an Anthropic call at its row's rates, so a budget admits it instead of refusing it as unpriced", () => {
+    // claude-sonnet-4-6: $3 input and $15 output per MTok (https://platform.claude.com/docs/en/about-claude/pricing,
+    // read 2026-11-04). 4,000 characters are 1,000 prompt tokens at four characters a token.
+    expect(estimateCallCostUSD('anthropic', 'claude-sonnet-4-6', 4000, 1000)).toBeCloseTo(0.003 + 0.015, 10);
+    const budget = new SpendBudget({ maxCostUSD: 1 });
+    expect(() => assertCallWithinBudget(budget, { providerId: 'anthropic', modelId: 'claude-sonnet-4-6' }, 4000, 1000, 'call')).not.toThrow();
+    expect(() => assertCallWithinBudget(budget, { providerId: 'anthropic', modelId: 'claude-x' }, 4000, 1000, 'call')).toThrow(UnpricedModelError);
+  });
+
+  it("prices an Anthropic call's reported usage, at the long-context rates over the threshold", () => {
+    expect(costOfUsageUSD('anthropic', 'claude-sonnet-4-6', { promptTokens: 1000, completionTokens: 1000 })).toBeCloseTo(0.018, 10);
+    // claude-haiku-5-5 over 100,000 prompt tokens: $0.50 input and $2.50 output per MTok.
+    expect(costOfUsageUSD('anthropic', 'claude-haiku-5-5', { promptTokens: 200_000, completionTokens: 1000 })).toBeCloseTo(0.1 + 0.0025, 10);
+    expect(costOfUsageUSD('anthropic', 'claude-haiku-5-5', { promptTokens: 1000, completionTokens: 1000 })).toBeCloseTo(0.0001 + 0.0005, 10);
+  });
+
+  it("prices the cache reads and writes of usage with no reported cost, which an Anthropic report keeps out of its prompt tokens", () => {
+    // A model the catalog lacks, priced by the host's table, so the provider reports no cost: $3 input, $0.30 cache
+    // read, $6 cache write (the highest, the 1-hour one) and $15 output per MTok; over 10,000 prompt tokens, twice that.
+    registerModelPricing('anthropic', (id) =>
+      id === 'claude-host-1'
+        ? {
+            inputPerMTokUSD: 3,
+            outputPerMTokUSD: 15,
+            cacheReadPerMTokUSD: 0.3,
+            cacheWritePerMTokUSD: 6,
+            longContext: { thresholdTokens: 10_000, inputPerMTokUSD: 6, outputPerMTokUSD: 30, cacheReadPerMTokUSD: 0.6, cacheWritePerMTokUSD: 12 },
+          }
+        : undefined,
+    );
+    try {
+      // AnthropicProvider's report: `promptTokens` is `input_tokens`, which leaves out the cache; the inclusive total
+      // adds the 2,000 read and the 1,000 written back.
+      const usage = { promptTokens: 100, completionTokens: 100, cacheReadInputTokens: 2_000, cacheCreationInputTokens: 1_000, inclusiveInputTokens: 3_100 };
+      expect(costOfUsageUSD('anthropic', 'claude-host-1', usage)).toBeCloseTo((100 * 3 + 2_000 * 0.3 + 1_000 * 6 + 100 * 15) / 1e6, 12);
+      // A report with no inclusive total: Anthropic's prompt tokens leave the cache out, so the cache is added to them.
+      const bare = { promptTokens: 100, completionTokens: 100, cacheReadInputTokens: 2_000, cacheCreationInputTokens: 1_000 };
+      expect(costOfUsageUSD('anthropic', 'claude-host-1', bare)).toBeCloseTo((100 * 3 + 2_000 * 0.3 + 1_000 * 6 + 100 * 15) / 1e6, 12);
+      // A run's totals carry the same counts under the names generateText sums them as.
+      const totals = { promptTokens: 100, completionTokens: 100, cacheReadTokens: 2_000, cacheCreationTokens: 1_000, inclusiveInputTokens: 3_100 };
+      expect(costOfUsageUSD('anthropic', 'claude-host-1', totals)).toBeCloseTo((100 * 3 + 2_000 * 0.3 + 1_000 * 6 + 100 * 15) / 1e6, 12);
+      // The cache counts toward the long-context threshold: 100 prompt tokens and 20,000 read is a 20,100-token prompt.
+      const long = { promptTokens: 100, completionTokens: 100, cacheReadInputTokens: 20_000, inclusiveInputTokens: 20_100 };
+      expect(costOfUsageUSD('anthropic', 'claude-host-1', long)).toBeCloseTo((100 * 6 + 20_000 * 0.6 + 100 * 30) / 1e6, 12);
+    } finally {
+      registerModelPricing('anthropic', () => undefined);
+    }
+    // OpenAI's prompt tokens hold its cached tokens, and its inclusive total is its prompt tokens: gpt-6-sol's table
+    // has no cache-read rate, so the read is priced as input and the cost is the prompt's at the input rate.
+    expect(
+      costOfUsageUSD('openai', 'gpt-6-sol', { promptTokens: 1_000, completionTokens: 1_000, cacheReadInputTokens: 800, inclusiveInputTokens: 1_000 }),
+    ).toBeCloseTo((1_000 * 2 + 1_000 * 10) / 1e6, 12);
+  });
+
+  it("keeps a bill the provider's API reported over the host's row, and the host's row over a cost the OpenAI client computed", () => {
+    // Every provider built on the OpenAI client: Groq, LiteLLM, Mistral, Together and xAI send through it, and MiniMax
+    // extends it. Each reports OpenAI's list price for an id OpenAI's table holds.
+    const throughOpenAI = ['groq', 'litellm', 'mistral', 'together', 'xai', 'minimax'];
+    registerModelPricing('openrouter', (id) => (id === 'vendor/model' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 2 } : undefined));
+    for (const provider of throughOpenAI) {
+      registerModelPricing(provider, (id) => (id === 'gpt-4o' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 2 } : undefined));
+    }
+    try {
+      // OpenRouter's `usage.cost` is what it charged: it stands.
+      expect(costOfUsageUSD('openrouter', 'vendor/model', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.5 })).toBe(0.5);
+      for (const provider of throughOpenAI) {
+        expect(costOfUsageUSD(provider, 'gpt-4o', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.0125 })).toBeCloseTo(0.003, 12);
+        // With no row of the host's, that reported cost is the one there is.
+        expect(costOfUsageUSD(provider, 'other', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.0125 })).toBe(0.0125);
+      }
+    } finally {
+      for (const provider of ['openrouter', ...throughOpenAI]) registerModelPricing(provider, () => undefined);
+    }
+  });
+
+  it('estimates a call at the long-context card once its assumed prompt tokens pass the threshold', () => {
+    // claude-haiku-5-5: 800,000 characters are 200,000 tokens at four a token, over its 100,000, where it bills $0.50
+    // input and $2.50 output per MTok (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-04).
+    expect(estimateCallCostUSD('anthropic', 'claude-haiku-5-5', 800_000, 1000)).toBeCloseTo(0.1 + 0.0025, 10);
+    expect(estimateCallCostUSD('anthropic', 'claude-haiku-5-5', 4000, 1000)).toBeCloseTo(0.0001 + 0.0005, 10);
+    // gpt-6-sol: 1,200,000 characters are 300,000 tokens, over 272,000, where it bills $4 and $15.
+    expect(estimateCallCostUSD('openai', 'gpt-6-sol', 1_200_000, 1000)).toBeCloseTo(1.2 + 0.015, 10);
+    expect(estimateCallCostUSD('openai', 'gpt-6-sol', 4000, 1000)).toBeCloseTo(0.002 + 0.01, 10);
+  });
+
+  it("prices OpenAI's reported usage over 272,000 prompt tokens at the long-context rates, as OpenAIProvider bills it", () => {
+    // gpt-6-sol over 272K input tokens: $4 input and $15 output per MTok (https://developers.openai.com/api/docs/pricing,
+    // read 2026-11-04), twice and one and a half times its $2 and $10.
+    expect(costOfUsageUSD('openai', 'gpt-6-sol', { promptTokens: 300_000, completionTokens: 1000 })).toBeCloseTo(1.2 + 0.015, 10);
+    expect(costOfUsageUSD('openai', 'gpt-6-sol', { promptTokens: 272_000, completionTokens: 1000 })).toBeCloseTo(0.544 + 0.01, 10);
   });
 
   it('counts the characters of the messages and the system prompt', () => {

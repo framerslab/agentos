@@ -286,11 +286,15 @@ export class RequestyProvider implements IProvider {
     }
   }
 
-  private async refreshAvailableModels(): Promise<void> {
+  /** Reads `/models` into the cache. `signal`, when given, ends the read in flight and throws `REQUEST_ABORTED`. */
+  private async refreshAvailableModels(signal?: AbortSignal): Promise<void> {
     const responseData = await this.makeApiRequest<RequestyListModelsAPIResponse>(
       '/models',
       'GET',
-      this.config.requestTimeout
+      this.config.requestTimeout,
+      undefined,
+      false,
+      signal ? { signal } : undefined,
     );
 
     this.availableModelsCache.clear();
@@ -573,7 +577,8 @@ export class RequestyProvider implements IProvider {
       throw new RequestyProviderError('Input texts array cannot be empty for generating embeddings.', 'EMBEDDING_NO_INPUT');
     }
 
-    const modelInfo = await this.getModelInfo(modelId);
+    // The lookup carries the call's signal: an aborted call sends nothing, and an abort ends a refresh in flight.
+    const modelInfo = await this.modelInfoForCall(modelId, options?.abortSignal);
     if (modelInfo && !modelInfo.capabilities.includes('embeddings')) {
       console.warn(`RequestyProvider: Model '${modelId}' is not explicitly listed with embedding capabilities. Attempting anyway.`);
     }
@@ -593,7 +598,8 @@ export class RequestyProvider implements IProvider {
       this.config.requestTimeout,
       payload,
       false,
-      { apiKeyOverride: options?.apiKeyOverride }
+      // The call's signal ends the request in flight (REQUEST_ABORTED).
+      { apiKeyOverride: options?.apiKeyOverride, signal: options?.abortSignal }
     );
 
     if (!Array.isArray(apiResponseData?.data) || !apiResponseData.usage) {
@@ -638,12 +644,27 @@ export class RequestyProvider implements IProvider {
   }
 
   public async getModelInfo(modelId: string): Promise<ModelInfo | undefined> {
+    return this.modelInfoForCall(modelId);
+  }
+
+  /**
+   * The model lookup behind {@link getModelInfo}: a model missing from the cache refreshes the `/models` list first,
+   * and a refresh that fails is logged and the lookup answers from the cache. A call that carries the caller's
+   * signal passes it here: a call whose signal has aborted throws
+   * `REQUEST_ABORTED` before any request, and the `/models` refresh a model missing from the cache starts carries
+   * the signal, so an abort ends it at once with `REQUEST_ABORTED`. Any other refresh failure is logged and the
+   * lookup answers from the cache, as {@link getModelInfo} does.
+   */
+  private async modelInfoForCall(modelId: string, signal?: AbortSignal): Promise<ModelInfo | undefined> {
     this.ensureInitialized();
+    const aborted = () => new RequestyProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+    if (signal?.aborted) throw aborted();
     if (!this.availableModelsCache.has(modelId)) {
       try {
         console.log(`RequestyProvider: Model ${modelId} not in cache. Refreshing model list.`);
-        await this.refreshAvailableModels();
+        await this.refreshAvailableModels(signal);
       } catch (error) {
+        if (signal?.aborted) throw aborted();
         console.warn(`RequestyProvider: Failed to refresh models list while trying to get info for ${modelId}:`, error);
       }
     }
@@ -1016,6 +1037,10 @@ export class RequestyProvider implements IProvider {
         if (this.keyPool?.has(apiKey)) this.keyPool.markSuccess(apiKey, attemptStartedAt);
         return response.data;
       } catch (error: unknown) {
+        // An abort is the caller's verdict, not the provider's or the key's: no key hop, no key marked.
+        if (perRequest?.signal?.aborted) {
+          throw new RequestyProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+        }
         let statusCode: number | undefined;
         let errorData: any;
         let errorMessage = 'Unknown Requesty API error';
@@ -1030,7 +1055,11 @@ export class RequestyProvider implements IProvider {
           // each other), so the key was never marked and the request never moved on, and keeping it in the error's
           // details kept the key. Read a bounded prefix with the configured keys masked, then drop the stream.
           if (isReadableStream(errorData)) {
-            const { text, complete } = await readErrorStream(errorData);
+            const { text, complete } = await readErrorStream(errorData, perRequest?.signal);
+            // An abort during the read is the caller's verdict, as above: the answer is not classified, no key is marked.
+            if (perRequest?.signal?.aborted) {
+              throw new RequestyProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+            }
             const secrets = this.configuredSecrets();
             const masked = redactUrlSecrets(text, this.config?.baseURL, secrets);
             errorData = parseErrorBody(complete ? masked : maskCutSecretTail(masked, secrets));

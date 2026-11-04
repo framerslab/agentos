@@ -16,6 +16,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { embedText, type EmbedTextOptions } from '../../embedText.js';
 import { clearDefaultProvider, setDefaultProvider } from '../global-default.js';
+import { MAX_COST_TOKENS_PER_MESSAGE, registerModelPricing } from '../modelPricing.js';
+import { SpendBudget } from '../spendBudget.js';
 
 /**
  * Every key and base-URL variable a case could read, each case setting the ones
@@ -217,6 +219,52 @@ describe("embedText posts a key to its provider's own embeddings endpoint", () =
     const [body] = bodiesSent();
     expect(body.dimensions).toBe(256);
     expect(body).not.toHaveProperty('output_dimension');
+  });
+});
+
+describe("embedText charges a provider the host prices at the host's rate", () => {
+  it("prices Mistral's reported tokens with the host's table, since Mistral reports no cost", async () => {
+    setEnv({ MISTRAL_API_KEY: 'mistral-test-key' });
+    // The answer reports 1 prompt token, and the host prices mistral-embed at $100 per MTok: the call costs $0.0001.
+    registerModelPricing('mistral', (id) => (id === 'mistral-embed' ? { inputPerMTokUSD: 100, outputPerMTokUSD: 0 } : undefined));
+    try {
+      const budget = new SpendBudget({ maxCostUSD: 1 });
+      const result = await embedText({ provider: 'mistral', model: 'mistral-embed', input: 'hello', budget });
+      expect(result.usage.costUSD).toBeCloseTo(0.0001, 12);
+      expect(budget.spentUSD()).toBeCloseTo(0.0001, 12);
+    } finally {
+      registerModelPricing('mistral', () => undefined);
+    }
+  });
+
+  it('charges an answer that reports no usage at the bound of its inputs, not at nothing', async () => {
+    setEnv({ MISTRAL_API_KEY: 'mistral-test-key' });
+    registerModelPricing('mistral', (id) => (id === 'mistral-embed' ? { inputPerMTokUSD: 100, outputPerMTokUSD: 0 } : undefined));
+    vi.mocked(globalThis.fetch).mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            object: 'list',
+            data: [
+              { object: 'embedding', index: 0, embedding: [0.1] },
+              { object: 'embedding', index: 1, embedding: [0.2] },
+            ],
+            model: 'mistral-embed',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    try {
+      const budget = new SpendBudget({ maxCostUSD: 1 });
+      const result = await embedText({ provider: 'mistral', model: 'mistral-embed', input: ['hello', 'héllo'], budget });
+      // One token per UTF-8 byte of each input and MAX_COST_TOKENS_PER_MESSAGE for each: 5 + 6 bytes and 2 x 8.
+      const bound = Buffer.byteLength('hello') + Buffer.byteLength('héllo') + 2 * MAX_COST_TOKENS_PER_MESSAGE;
+      expect(result.usage.promptTokens).toBe(0);
+      expect(result.usage.costUSD).toBeCloseTo((bound * 100) / 1e6, 12);
+      expect(budget.spentUSD()).toBeCloseTo((bound * 100) / 1e6, 12);
+    } finally {
+      registerModelPricing('mistral', () => undefined);
+    }
   });
 });
 
