@@ -81,7 +81,7 @@ export interface SpendBudgetOptions {
    * and a call held to two budgets, reserves in every meter above it: once for each meter and account, so one call
    * under one operation id cannot be held for two accounts on one meter, and is refused. The synchronous check holds
    * nothing, so on a budget with a meter it refuses the call: the generation helpers (`generateText()`, `streamText()`,
-   * `embedText()`, `agent()`, `gmi()`) make that check and do not reserve. Needs `accountId`.
+   * `generateObject()`, `embedText()`, `agent()`, `gmi()`) make that check and do not reserve. Needs `accountId`.
    */
   meter?: ISpendMeter;
   /** The account a `meter` holds this budget's calls under. Without a meter it is kept here for a host to read. */
@@ -214,8 +214,8 @@ let budgets = 0;
 
 /** What a budget with a meter reads while a reservation's check is in progress. */
 interface ReservationCheck {
-  /** The meter refusals this check is to report, by the budget whose meter refused. */
-  denials?: Map<SpendBudget, SpendDenyReason>;
+  /** The meter refusal this check is to report: every budget that names that meter and account hears of it. */
+  denial?: MeterHold & { reason: SpendDenyReason };
   /** The call's model has a price row, and the request is what has no bound. */
   unbounded: boolean;
 }
@@ -410,7 +410,8 @@ export class SpendBudget {
     }
     const metered = this.options.meter !== undefined;
     if (metered) {
-      const refusal = reservationCheck ? reservationCheck.denials?.get(this) : CHECK_HOLDS_NOTHING;
+      const denial = reservationCheck?.denial;
+      const refusal = !reservationCheck ? CHECK_HOLDS_NOTHING : denial?.meter === this.options.meter && denial?.accountId === this.options.accountId ? denial?.reason : undefined;
       if (refusal !== undefined) {
         this.refuse({ budgetId: this.id, capType: 'usd', what, reason: refusal }, () => {
           // As for the token cap: the guard's cap types and dollar figures do not name a meter, so the message does.
@@ -475,11 +476,21 @@ export class SpendBudget {
    *
    * @throws {SpendMeterUnavailableError} When a meter's store cannot answer. The cost is already charged to the budget's
    *   caps, and the reservation stays held, behind its fence, until a later settle or a reconcile with `resolveExpired`.
+   *   An error the charge throws (a guard's `onCapReached` function) rejects the promise too, after the settle.
    */
   record(costUSD: number | undefined, tokens: number, what: string, settlement: SpendBudgetSettlement): Promise<void>;
   record(costUSD: number | undefined, tokens: number, what: string, settlement?: SpendBudgetSettlement): void | Promise<void> {
+    if (settlement) return this.chargeAndSettle(costUSD, tokens, what, settlement);
     this.charge(costUSD, tokens, what);
-    if (settlement) return settleCall(this, costUSD, settlement);
+  }
+
+  /** The charge, at once, and the settle whatever the charge does: a guard's `onCapReached` function can throw. */
+  private async chargeAndSettle(costUSD: number | undefined, tokens: number, what: string, settlement: SpendBudgetSettlement): Promise<void> {
+    try {
+      this.charge(costUSD, tokens, what);
+    } finally {
+      await settleCall(this, costUSD, settlement);
+    }
   }
 
   /** The synchronous part of {@link SpendBudget.record}, which a call held to two budgets makes on both. */
@@ -590,9 +601,8 @@ class BothBudgets extends SpendBudget {
   }
 }
 
-/** A meter that holds a budget's calls, the account it holds them under, and the budget that names the two. */
+/** A meter that holds a budget's calls, and the account it holds them under. */
 interface MeterHold {
-  budget: SpendBudget;
   meter: ISpendMeter;
   accountId: string;
 }
@@ -612,7 +622,7 @@ function meterHoldsOf(budget: SpendBudget): MeterHold[] {
     const { parent, meter, accountId } = at.options;
     if (parent) visit(parent);
     if (meter && accountId && !holds.some((hold) => hold.meter === meter && hold.accountId === accountId)) {
-      holds.push({ budget: at, meter, accountId });
+      holds.push({ meter, accountId });
     }
   };
   visit(budget);
@@ -632,18 +642,18 @@ async function releaseHolds(holds: MeterHold[], operationId: string): Promise<vo
 
 /**
  * {@link SpendBudget.assertCanSpend} for a named call. The budgets' own caps are checked at the call's largest cost, in
- * one synchronous check, then each meter is asked in turn. A refusal frees what the earlier meters hold, and the same
- * check runs again carrying the refusal, so the budget that names the meter refuses as any budget refuses and the budgets
- * below it hear of it.
+ * one synchronous check, then each meter is asked in turn. On a meter's refusal the same check runs again carrying it,
+ * so every budget that names that meter and account refuses as any budget refuses and the budgets below hear of it; when
+ * that check refuses the call, what the earlier meters hold is freed.
  */
 async function reserveCall(budget: SpendBudget, what: string, call: SpendBudgetCall): Promise<void> {
   const { providerId, modelId, request, operationId } = call;
   const max = estimateMaxCallCostUSD(providerId, modelId, request);
   const tokens = tokensOfChars(promptCharsOf(request.messages, request.system, request.tools)) + outputEstimateTokens(modelId, request.maxOutputTokens);
   const unbounded = max === undefined && modelPricing(providerId, modelId) !== undefined;
-  const check = (denials?: Map<SpendBudget, SpendDenyReason>): void => {
+  const check = (denial?: ReservationCheck['denial']): void => {
     const outer = reservationCheck;
-    reservationCheck = { denials, unbounded };
+    reservationCheck = { denial, unbounded };
     try {
       budget.assertCanSpend(max, tokens, what, { providerId, modelId });
     } finally {
@@ -668,9 +678,13 @@ async function reserveCall(budget: SpendBudget, what: string, call: SpendBudgetC
       held.push(hold);
       continue;
     }
-    // A budget set to warn runs the call, so what the other meters hold for it stays for its settle.
-    if (hold.budget.options.onLimitReached !== 'warn') await releaseHolds(held, operationId);
-    check(new Map([[hold.budget, answer.reason]]));
+    try {
+      check({ ...hold, reason: answer.reason });
+    } catch (error) {
+      await releaseHolds(held, operationId);
+      throw error;
+    }
+    // Every budget that names this meter is set to warn: the call runs, and what the other meters hold stays for its settle.
   }
 }
 
