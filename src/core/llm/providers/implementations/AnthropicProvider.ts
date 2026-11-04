@@ -37,6 +37,13 @@ import { stripParamsForAnthropic } from '../openrouter-only-params';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../../../providers/ApiKeyPool.js';
 import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } from '../../../providers/quotaErrors.js';
+import {
+  failedKeyProbeAnswer,
+  readKeyProbeAnswer,
+  startKeyProbeDeadline,
+  type KeyProbeAnswer,
+  type KeyProbeOptions,
+} from '../../../providers/keyProbe.js';
 import { resolveThinkingOff, resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import {
@@ -582,6 +589,12 @@ function withSchemaRoute<T extends ModelCompletionResponse>(completion: T, paylo
     : { ...completion, schemaRoute };
 }
 
+/** Anthropic's API base, the `baseURL` a provider without one sends to. */
+export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com';
+
+/** The model a billing probe and `checkHealth()` send their one-token request to when the provider has no default model. */
+export const ANTHROPIC_BILLING_PROBE_MODEL = 'claude-haiku-4-5-20251001';
+
 /**
  * @class AnthropicProvider
  * @implements {IProvider}
@@ -649,7 +662,7 @@ export class AnthropicProvider implements IProvider {
     await this.keyPool?.close();
 
     this.config = {
-      baseURL: 'https://api.anthropic.com',
+      baseURL: ANTHROPIC_DEFAULT_BASE_URL,
       // Total attempts (NOT retries-on-top): 1 meant a single shot with the
       // whole retryable-error path (429 / 5xx / 529 overloaded / network) as
       // dead code. 3 matches the OpenAI + Gemini providers and lets the
@@ -1645,7 +1658,7 @@ export class AnthropicProvider implements IProvider {
       // Anthropic has no /health or /models endpoint, so we send a tiny
       // completion request with max_tokens=1 to verify credentials + connectivity.
       await this.makeApiRequest<AnthropicMessagesResponse>('/v1/messages', 'POST', {
-        model: this.defaultModelId || 'claude-haiku-4-5-20251001',
+        model: this.defaultModelId || ANTHROPIC_BILLING_PROBE_MODEL,
         max_tokens: 1,
         messages: [{ role: 'user', content: 'ping' }],
       });
@@ -2996,34 +3009,48 @@ export class AnthropicProvider implements IProvider {
   // -------------------------------------------------------------------------
 
   /**
-   * Probes a key the pool took out of rotation (the pool calls this off the
-   * request path): an auth failure with the cheapest authenticated read, a
-   * billing failure with the smallest billable request, since a models list
-   * can answer 200 with no credit left. The answer goes through the same
-   * classifier as a request's.
+   * Probes one API key and reports what its answer showed: the verdict
+   * (`ok`, the failure kind it still shows, or `unknown`), the HTTP status,
+   * the vendor's message, the model and the Retry-After. `kind: 'billing'`
+   * sends the smallest billable request (`POST /v1/messages`, `max_tokens: 1`,
+   * on `options.model`, else the default model, else
+   * `claude-haiku-4-5-20251001`), since a models list can answer 200 with no
+   * credit left; any other kind sends the cheapest authenticated read
+   * (`GET /v1/models?limit=1`). The answer goes through the same classifier
+   * as a request's. It works before `initialize()`: the base URL is
+   * `options.baseURL`, else the configured one, else Anthropic's own. The
+   * key pool's probe of a failed key is this method's verdict.
+   * `probeProviderKey()` calls it with a key of the caller's.
    */
-  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+  public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
+    const deadline = startKeyProbeDeadline(options);
+    const baseURL = options.baseURL || this.config?.baseURL || ANTHROPIC_DEFAULT_BASE_URL;
     try {
       const headers = { ...this.buildHeaders(apiKey), 'Content-Type': 'application/json' };
-      const response =
-        kind === 'billing'
-          ? await fetch(`${this.config.baseURL}/v1/messages`, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({ model: this.defaultModelId || 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
-              signal: controller.signal,
-            })
-          : await fetch(`${this.config.baseURL}/v1/models?limit=1`, { method: 'GET', headers, signal: controller.signal });
-      if (response.ok) return 'ok';
-      const text = typeof response.text === 'function' ? await response.text().catch(() => '') : '';
-      return classifyKeyFailure(response.status, text) ?? 'unknown';
-    } catch {
-      return 'unknown';
+      if (options.kind === 'billing') {
+        const model = options.model || this.defaultModelId || ANTHROPIC_BILLING_PROBE_MODEL;
+        const response = await fetch(`${baseURL}/v1/messages`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
+          signal: deadline.signal,
+        });
+        return await readKeyProbeAnswer(response, { model, apiKey, signal: deadline.signal });
+      }
+      return await readKeyProbeAnswer(
+        await fetch(`${baseURL}/v1/models?limit=1`, { method: 'GET', headers, signal: deadline.signal }),
+        { apiKey, signal: deadline.signal },
+      );
+    } catch (error) {
+      return failedKeyProbeAnswer(error, deadline, { apiKey, baseURL });
     } finally {
-      clearTimeout(timer);
+      deadline.dispose();
     }
+  }
+
+  /** Probes a key the pool took out of rotation, off the request path: the verdict of `probeApiKey()`. */
+  private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
+    return (await this.probeApiKey(apiKey, { kind })).verdict;
   }
 
   /** The error thrown when every key of the pool is out: no credential is sent again until one returns. */

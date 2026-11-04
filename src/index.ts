@@ -606,6 +606,10 @@ export {
 } from './core/providers/index.js';
 export { setKeyPoolDefaults, getKeyPoolDefaults } from './api/keyPoolDefaults.js';
 export type { KeyPoolDefaults } from './api/keyPoolDefaults.js';
+// One key's standing, by its provider's billing probe: ok, exhausted, invalid, throttled or unknown.
+export { probeProviderKey, PROBEABLE_KEY_PROVIDERS } from './api/probeProviderKey.js';
+export type { ProbeProviderKeyOptions, ProbeProviderKeyResult, ProviderKeyState, ProbeableKeyProvider } from './api/probeProviderKey.js';
+export type { KeyProbeOptions, KeyProbeAnswer, KeyProbeFailure } from './core/providers/index.js';
 export type {
   ApiKeyPoolConfig,
   ProbeResult as KeyProbeResult,

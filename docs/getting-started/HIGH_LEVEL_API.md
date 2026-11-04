@@ -14,6 +14,7 @@ import {
   embedText,                       // Embeddings
   agent,                           // Multi-turn agent sessions
   agency,                          // Multi-agent teams
+  probeProviderKey,                // Whether one API key works
 } from '@framers/agentos';
 ```
 
@@ -35,6 +36,7 @@ import {
 | `gmi()` | `agent({ runtime: 'gmi' })`: sessions served by GMIs, with cognitive memory, sentiment tracking and metaprompts per profile | `const a = gmi({ provider: 'openai', cognition: 'full' })` |
 | `souledAgent()` | Soul-file agent whose long-term memory is its `memory/` wiki | `await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' })` |
 | `agency()` | Multi-agent teams | `const team = agency({ agents: {...}, strategy: 'parallel' })` |
+| `probeProviderKey()` | Whether one API key is live, out of credit, rejected or throttled, by its provider's billing probe | `await probeProviderKey({ provider: 'anthropic', apiKey })` |
 
 All functions accept `provider` as a top-level key.
 
@@ -435,6 +437,33 @@ The built-in provider runs fal's BiRefNet v2 (`fal-ai/birefnet/v2`) with `FAL_AP
 | `provider` | `'fal'` | A provider registered with `registerBackgroundRemovalProvider()`. |
 
 Failures reject with `SegmentationProviderError` (`invalid_request`, `provider_failed` or `timeout`, with the HTTP `status` of a failed answer). See [Image Segmentation](../features/IMAGE_SEGMENTATION.md#background-removal).
+
+## `probeProviderKey()`
+
+```ts
+import { probeProviderKey } from '@framers/agentos';
+
+const keys = process.env.ANTHROPIC_API_KEY!.split(',').map((key) => key.trim()).filter(Boolean);
+for (const apiKey of keys) {
+  const { state, detail, fingerprint } = await probeProviderKey({ provider: 'anthropic', apiKey });
+  console.log(fingerprint, state, detail);
+  // 3f9a1c0b7e2d exhausted no credit or a spend limit reached (HTTP 400): Your credit balance is too low to access the Anthropic API. ...
+  // 81c4e6a90d55 ok key accepted: HTTP 200 on claude-haiku-4-5-20251001
+}
+```
+
+It sends one key through the same billing probe the provider's key pool sends to recheck a key it took out as unpaid. The probe is the smallest billable request, and its answer is read with `classifyKeyFailure()`: `ok` (a 2xx), `exhausted` (no credit left or a spend limit reached), `invalid` (a bad, revoked or expired key), `throttled` (a rate limit, with `retryAfterMs` when the answer sent one) or `unknown` (a 5xx, a 403 or 404 for a model the key may not use, no answer within the timeout, a failed connection, the caller's abort, or no model to send to). It reads nothing from the environment and builds no pool; it never throws for an answer.
+
+| Option | Default | What it does |
+|--------|---------|--------------|
+| `provider` | (required) | `anthropic`, `openai`, `gemini`, `openrouter` or `requesty` (`PROBEABLE_KEY_PROVIDERS`); any other is refused with a `RangeError`. |
+| `apiKey` | (required) | One key, trimmed; an empty key or a comma-separated list is refused with a `TypeError`. |
+| `model` | the probe's model | Anthropic `claude-haiku-4-5-20251001`, Gemini `gemini-2.5-flash`, OpenAI the first GPT chat model `GET /models` lists, else its first o-series model with a price (never a Responses-only one), OpenRouter and Requesty the cheapest chat model their catalog lists with a price above zero. A named OpenAI model that is Responses-only goes to `POST /responses`. |
+| `baseUrl` | the provider's endpoint | The API base as the provider's `baseURL` takes it; a blank string is unset. |
+| `timeoutMs` | `10000` | How long the probe waits; a value that is not a positive finite number is refused with a `RangeError`, and one past 2147483647, the longest timer Node keeps, is cut to it. |
+| `signal` | | Ends the probe, which reports `unknown`. |
+
+The result carries `state`, `detail` (the state, the HTTP status and the vendor's message, at most 300 characters, with the key replaced by `[key]` wherever the vendor echoed it; on a failed connection, fetch's error with the key and the base URL's credentials replaced by `[redacted]`), `provider`, `fingerprint` (the key's `keyFingerprint()`), and `httpStatus`, `model` and `retryAfterMs` when the answer had them. A passing probe costs one request of one output token (16 on OpenRouter, Requesty and OpenAI's reasoning models). See [Key rotation](../KEY_ROTATION.md#probing-one-key).
 
 ## `generateVideo()`
 
