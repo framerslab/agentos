@@ -222,7 +222,7 @@ export interface ModelCompletionOptions {
    *   Caller-placed markers keep their own TTLs untouched.
    * - `{ ttl: '5m' }` or omitted — default behavior (5-minute auto markers).
    */
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
   /**
    * Per-conversation affinity key. OpenRouter forwards it as `session_id`
    * to pin provider sticky routing: upstream prompt caches are host-scoped,

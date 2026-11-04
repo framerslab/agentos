@@ -287,7 +287,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * marker included — right for one-shot extractions); `{ ttl: '1h' }` puts
    * a 1-hour TTL on the provider's auto markers (the moving message-tail).
    */
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
 
   /**
    * TTL for the schema block's own cache marker (the block this call appends

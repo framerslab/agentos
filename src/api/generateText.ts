@@ -264,7 +264,7 @@ export interface PlanningConfig {
    * `{ ttl: '1h' }` caller's planning call keeps the same pacing. A
    * planning-specific value here overrides the inherited one.
    */
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
 
   /**
    * `false` turns model thinking off for the planning completion, on models
@@ -346,7 +346,7 @@ export interface FallbackProviderEntry {
    * writes cost ~2x what the reads saved). A caller-supplied entry keeps
    * full control: omit to inherit, or set a ttl to cache a hop deliberately.
    */
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
   /**
    * Extra output tokens granted ONLY when THIS entry serves the call: the hop
    * runs with `maxTokens = <the original call's maxTokens> + headroom`. For
@@ -389,7 +389,7 @@ export interface FallbackProviderEntry {
 export interface FallbackHopBase {
   maxTokens?: number;
   effort?: string;
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
 }
 
 /**
@@ -584,7 +584,7 @@ export interface GenerateTextOptions {
    *   their own TTLs ({@link SystemContentBlock.cacheTtl}).
    * - omitted / `{ ttl: '5m' }` — default 5-minute auto markers.
    */
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
   /**
    * Per-conversation affinity key, forwarded to providers that support
    * request affinity (OpenRouter sends it as `session_id` for provider
@@ -1845,7 +1845,7 @@ export function fallbackHopOverrides(
 ): {
   maxTokens: number | undefined;
   effort: string | undefined;
-  cache: { ttl?: '5m' | '1h' } | false | undefined;
+  cache: { ttl?: '5m' | '1h'; tail?: boolean } | false | undefined;
   __hopBase: FallbackHopBase;
 } {
   const base: FallbackHopBase = opts.__hopBase ?? {

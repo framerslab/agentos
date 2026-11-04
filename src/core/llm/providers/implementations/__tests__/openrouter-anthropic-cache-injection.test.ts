@@ -133,6 +133,15 @@ describe('OpenRouter anthropic/* zero-config cache_control', () => {
     expect(tailParts.at(-1)!.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
+  it('cache tail:false marks the system message and leaves the final message unmarked', async () => {
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+    });
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
+    for (const m of wire.slice(1)) expect(typeof m.content).toBe('string');
+  });
+
   it('cache:false leaves plain requests untouched', async () => {
     const wire = await capture('anthropic/claude-sonnet-4-6', convo, { cache: false });
     for (const m of wire) expect(typeof m.content).toBe('string');
