@@ -62,7 +62,25 @@ beforeAll(async () => {
         res.end('{"type":"error","error":{"type":"not_found_error","message":"no such route in this case"}}');
         return;
       }
-      const model = (received.at(-1)?.body.model as string | undefined) ?? 'claude-sonnet-4-6';
+      const body = received.at(-1)?.body ?? {};
+      const model = (body.model as string | undefined) ?? 'claude-sonnet-4-6';
+      if (body.stream === true) {
+        // The provider asks for a stream and reads it whole: the events of
+        // https://platform.claude.com/docs/en/build-with-claude/streaming, the usage on message_start but the output
+        // tokens, which message_delta reports.
+        const { output_tokens: outputTokens, ...startUsage } = answerUsage as { output_tokens?: number };
+        const events: Array<[string, unknown]> = [
+          ['message_start', { type: 'message_start', message: { id: 'msg_base_url', type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { ...startUsage, output_tokens: 1 } } }],
+          ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+          ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: answerText } }],
+          ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+          ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: outputTokens ?? 0 } }],
+          ['message_stop', { type: 'message_stop' }],
+        ];
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(''));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
