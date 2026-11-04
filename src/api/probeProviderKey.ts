@@ -161,7 +161,7 @@ function detailOf(state: ProviderKeyState, answer: KeyProbeAnswer, timeoutMs: nu
  *
  * @example
  * ```ts
- * const keys = process.env.ANTHROPIC_API_KEY!.split(',');
+ * const keys = process.env.ANTHROPIC_API_KEY!.split(',').map((key) => key.trim()).filter(Boolean);
  * const states = await Promise.all(keys.map((apiKey) => probeProviderKey({ provider: 'anthropic', apiKey })));
  * // [{ state: 'exhausted', detail: 'no credit or a spend limit reached (HTTP 400): Your credit balance is too low ...', ... },
  * //  { state: 'ok', detail: 'key accepted: HTTP 200 on claude-haiku-4-5-20251001', ... }]

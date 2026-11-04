@@ -95,7 +95,7 @@ await provider.initialize({
 ```ts
 import { probeProviderKey } from '@framers/agentos';
 
-const keys = process.env.ANTHROPIC_API_KEY!.split(',');
+const keys = process.env.ANTHROPIC_API_KEY!.split(',').map((key) => key.trim()).filter(Boolean);
 const readings = await Promise.all(keys.map((apiKey) => probeProviderKey({ provider: 'anthropic', apiKey })));
 for (const { fingerprint, state, detail } of readings) console.log(fingerprint, state, detail);
 ```

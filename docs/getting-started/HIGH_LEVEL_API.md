@@ -443,7 +443,7 @@ Failures reject with `SegmentationProviderError` (`invalid_request`, `provider_f
 ```ts
 import { probeProviderKey } from '@framers/agentos';
 
-const keys = process.env.ANTHROPIC_API_KEY!.split(',');
+const keys = process.env.ANTHROPIC_API_KEY!.split(',').map((key) => key.trim()).filter(Boolean);
 for (const apiKey of keys) {
   const { state, detail, fingerprint } = await probeProviderKey({ provider: 'anthropic', apiKey });
   console.log(fingerprint, state, detail);
