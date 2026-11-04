@@ -36,10 +36,14 @@ const PERIOD = '2026-11';
 
 /** A row whose bound falls between two micro-dollars, for the rounding a reservation takes. */
 const FRACTIONAL_MODEL = 'priced-fractional';
+/** A row a host priced at nothing. */
+const FREE_MODEL = 'priced-free';
 
-registerModelPricing(PROVIDER, (modelId) =>
-  modelId === MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 10 } : modelId === FRACTIONAL_MODEL ? { inputPerMTokUSD: 1.1, outputPerMTokUSD: 10 } : undefined,
-);
+registerModelPricing(PROVIDER, (modelId) => {
+  if (modelId === MODEL) return { inputPerMTokUSD: 1, outputPerMTokUSD: 10 };
+  if (modelId === FRACTIONAL_MODEL) return { inputPerMTokUSD: 1.1, outputPerMTokUSD: 10 };
+  return modelId === FREE_MODEL ? { inputPerMTokUSD: 0, outputPerMTokUSD: 0 } : undefined;
+});
 
 const REQUEST: MaxCostRequest = { messages: [{ role: 'user', content: 'hello' }], maxOutputTokens: 1_000 };
 const MAX_USD = estimateMaxCallCostUSD(PROVIDER, MODEL, REQUEST) as number;
@@ -178,6 +182,13 @@ for (const [name, open] of METERS) {
       await budget.record(MAX_USD * 3, 100, 'call', { operationId: 'op-1' });
       expect(await meter.snapshot(ACCOUNT)).toMatchObject({ used: MAX_MICRO, reserved: 0 });
       expect(budget.spentUSD()).toBeCloseTo(MAX_USD * 3, 10);
+    });
+
+    it('holds nothing for a call whose largest cost is zero, so a spent allowance does not refuse a free model', async () => {
+      const { budget, meter } = await budgetOn(0);
+      await budget.assertCanSpend('call', { ...callOf('op-1'), modelId: FREE_MODEL });
+      await budget.record(0, 10, 'call', { operationId: 'op-1' });
+      expect(await meter.snapshot(ACCOUNT)).toMatchObject({ used: 0, reserved: 0 });
     });
 
     it("names the meter's word for a refusal when a call is reserved twice under one operation id", async () => {
@@ -328,6 +339,43 @@ describe('a spend budget when its meter fails', () => {
   });
 });
 
+describe("a guard's cap function that throws while a cost is counted", () => {
+  const thrown = new Error('the cap function threw');
+  const throwingGuard = () =>
+    new CostGuard({
+      maxSingleOperationCostUsd: Number.POSITIVE_INFINITY,
+      maxDailyCostUsd: Number.POSITIVE_INFINITY,
+      onCapReached: () => {
+        throw thrown;
+      },
+    });
+  /** A budget whose guard throws on any cost at or above 0.00005. */
+  const throwing = (budgetId: string, parent?: SpendBudget) => new SpendBudget({ maxCostUSD: 0.00005, guard: throwingGuard(), budgetId, parent });
+
+  it('leaves the second of two budgets counting the call, and the first error goes on', () => {
+    const second = new SpendBudget({ maxCostUSD: 1 });
+    expect(() => bothBudgets(throwing('first'), second).record(0.0001, 10, 'call')).toThrow(thrown);
+    expect(second.spentUSD()).toBeCloseTo(0.0001, 10);
+    expect(second.tokensUsed()).toBe(10);
+  });
+
+  it('leaves a parent counting the call', () => {
+    const parent = new SpendBudget({ maxCostUSD: 1 });
+    expect(() => throwing('child', parent).record(0.0001, 10, 'call')).toThrow(thrown);
+    expect(parent.spentUSD()).toBeCloseTo(0.0001, 10);
+    expect(parent.tokensUsed()).toBe(10);
+  });
+
+  it('leaves the other budgets counting an outside cost', () => {
+    const parent = new SpendBudget({ maxCostUSD: 1 });
+    expect(() => throwing('child', parent).recordExternal(0.0001, 'minutes')).toThrow(thrown);
+    expect(parent.spentUSD()).toBeCloseTo(0.0001, 10);
+    const second = new SpendBudget({ maxCostUSD: 1 });
+    expect(() => bothBudgets(throwing('first'), second).recordExternal(0.0001, 'minutes')).toThrow(thrown);
+    expect(second.spentUSD()).toBeCloseTo(0.0001, 10);
+  });
+});
+
 describe('a call on a budget with a meter that reserves nothing', () => {
   it('is refused by the synchronous check, so a call never passes a meter unseen', () => {
     const meter = new MemoryMeter(MAX_MICRO * 2);
@@ -336,6 +384,25 @@ describe('a call on a budget with a meter that reserves nothing', () => {
     expect(() => assertCallWithinBudget(budget, { providerId: PROVIDER, modelId: MODEL }, 100, 1_000, 'generate_text.step')).toThrow(CostCapExceededError);
     expect(seen).toMatchObject([{ budgetId: 'run-1', capType: 'usd', what: 'generate_text.step' }]);
     expect(meter.reserve).not.toHaveBeenCalled();
+  });
+
+  it("is refused inside another budget's limit function, which runs during that budget's reservation", async () => {
+    const other = new SpendBudget({ maxCostUSD: 1, meter: new MemoryMeter(MAX_MICRO * 2), accountId: 'acct-other' });
+    let inside: unknown;
+    const budget = new SpendBudget({
+      maxCostUSD: 1,
+      meter: new MemoryMeter(1),
+      accountId: ACCOUNT,
+      onLimitReached: () => {
+        try {
+          other.assertCanSpend(0.001, 10, 'other');
+        } catch (error) {
+          inside = error;
+        }
+      },
+    });
+    expect(await rejectionOf(budget.assertCanSpend('call', callOf('op-1')))).toBeInstanceOf(CostCapExceededError);
+    expect(inside).toBeInstanceOf(CostCapExceededError);
   });
 
   it("is refused for a child that draws on a budget with a meter, whose own function hears of it", () => {
