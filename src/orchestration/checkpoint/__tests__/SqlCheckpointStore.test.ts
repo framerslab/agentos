@@ -79,7 +79,7 @@ function fullCheckpoint(id: string): Checkpoint {
       diagnostics: {
         totalTokensUsed: 412,
         totalDurationMs: 1830,
-        nodeTimings: { draft: { startMs: 1, endMs: 1801, durationMs: 1800 } },
+        nodeTimings: { draft: { startMs: 1, endMs: 1801, tokensUsed: 412 } },
         discoveryResults: {},
         guardrailResults: {},
         checkpointsSaved: 3,
