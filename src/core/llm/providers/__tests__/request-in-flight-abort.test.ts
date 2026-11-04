@@ -241,9 +241,12 @@ async function expectAbortEndsAStalledBody(
   const controller = new AbortController();
   const outcome = track(drain(open(controller.signal), controller));
   await upstream.untilPosts(1);
+  // The settle deadline starts at the abort, once the client has read the first event, not at the POST's arrival.
+  const deliveredBy = Date.now() + ARRIVAL_MS;
+  while (!controller.signal.aborted && outcome.state === 'pending' && Date.now() < deliveredBy) await sleep(10);
+  expect(controller.signal.aborted).toBe(true);
 
   await settledWithin(outcome, SETTLE_MS);
-  expect(controller.signal.aborted).toBe(true);
   expect(outcome.state).toBe('resolved');
   const chunks = outcome.value as ModelCompletionResponse[];
   expect(chunks[0]).toMatchObject({ responseTextDelta: 'Hel' });

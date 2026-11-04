@@ -1295,20 +1295,13 @@ export class OpenRouterProvider implements IProvider {
   }
 
   public async getModelInfo(modelId: string): Promise<ModelInfo | undefined> {
-    this.ensureInitialized();
-    if (!this.availableModelsCache.has(modelId)) {
-      try {
-        log.debug('llm.models_refresh', { provider: 'openrouter' });
-        await this.refreshAvailableModels();
-      } catch (error) {
-        log.warn('llm.models_failed', { provider: 'openrouter', ...errorFields(error) });
-      }
-    }
-    return this.availableModelsCache.get(modelId);
+    return this.modelInfoForCall(modelId);
   }
 
   /**
-   * {@link getModelInfo} for a call that carries the caller's signal. A call whose signal has aborted throws
+   * The model lookup behind {@link getModelInfo}: a model missing from the cache refreshes the `/models` list first,
+   * and a refresh that fails is logged and the lookup answers from the cache. A call that carries the caller's
+   * signal passes it here: a call whose signal has aborted throws
    * `REQUEST_ABORTED` before any request, and the `/models` refresh a model missing from the cache starts carries
    * the signal, so an abort ends it at once with `REQUEST_ABORTED` instead of waiting for its timeout or retries.
    * Any other refresh failure is logged and the lookup answers from the cache, as {@link getModelInfo} does.
