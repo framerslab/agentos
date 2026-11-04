@@ -169,7 +169,7 @@ Both headline results use a per-category reader router (`gpt-4o` answers tempora
 | **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
 | **Multi-Agent Teams** | 7 coordination strategies * manager delegation and specialist spawning * model pools with seating policies and strict per-seat credentials * a panel strategy with a provider and vendor quorum * HITL approval gates |
-| **Orchestration** | `workflow()` DAGs * `AgentGraph` router, personality and discovery edges * `mission()` graphs from plan templates * checkpointing |
+| **Orchestration** | `workflow()` DAGs * `AgentGraph` router, personality and discovery edges * `mission()` graphs from plan templates * checkpointing in memory or in SQLite and Postgres (`SqlCheckpointStore`) |
 | **Guardrails** | 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
 | **Emergent Capabilities** | Runtime tool forging * 4 self-improvement tools * tiered promotion * skill export |
 | **Voice & Telephony** | ElevenLabs, Deepgram, Whisper * Twilio, Telnyx, Plivo |

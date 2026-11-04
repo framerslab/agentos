@@ -479,7 +479,7 @@ const forkId = await store.fork(latest.id, { scratch: { approved: true } });
 const forked = await graph.resume(forkId);
 ```
 
-`AgentGraph` takes `checkpointPolicy` in its constructor (`'none'` by default); `workflow()` and `mission()` checkpoint after every node. Under every policy the runtime also saves a checkpoint when a node fails or interrupts the run. `InMemoryCheckpointStore` keeps checkpoints in process memory and takes no arguments; implement [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) for a durable store. Resume, forks and the policies are in [Checkpointing](./CHECKPOINTING.md).
+`AgentGraph` takes `checkpointPolicy` in its constructor (`'none'` by default); `workflow()` and `mission()` checkpoint after every node. Under every policy the runtime also saves a checkpoint when a node fails or interrupts the run. `InMemoryCheckpointStore` keeps checkpoints in process memory and takes no arguments. [`SqlCheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/SqlCheckpointStore.ts) keeps them in SQLite or Postgres through `@framers/sql-storage-adapter`, so a run resumes after a restart; implement [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) for any other durable store. Resume, forks and the policies are in [Checkpointing](./CHECKPOINTING.md).
 
 ---
 
