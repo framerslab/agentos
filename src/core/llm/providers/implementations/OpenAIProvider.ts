@@ -502,14 +502,14 @@ export function isOpenAIResponsesOnlyModel(modelId: string): boolean {
 /**
  * The model a billing probe sends its completion to when none is configured: the first GPT chat model the catalog
  * lists, else its first o-series model with a price, skipping the Responses-only models
- * ({@link isOpenAIResponsesOnlyModel}), which have no Chat Completions route, and the embedding, audio, realtime,
- * image and search models.
+ * ({@link isOpenAIResponsesOnlyModel}), which have no Chat Completions route, the completions-only `instruct` models,
+ * and the embedding, audio, realtime, image and search models.
  *
  * @param ids The model ids `GET /models` listed, in its order.
  * @returns The model to probe, or `undefined` when the catalog lists none.
  */
 function probeModelFromCatalog(ids: readonly string[]): string | undefined {
-  const callable = ids.filter((id) => !isOpenAIResponsesOnlyModel(id) && !/embedding|realtime|audio|tts|transcribe|image|search/.test(id));
+  const callable = ids.filter((id) => !isOpenAIResponsesOnlyModel(id) && !/embedding|realtime|audio|tts|transcribe|image|search|instruct/.test(id));
   return callable.find((id) => /^gpt-/.test(id)) ?? callable.find((id) => /^o\d/.test(id) && openAIModelPricing(id) !== undefined);
 }
 
@@ -1214,7 +1214,9 @@ export class OpenAIProvider implements IProvider {
    * GPT chat model the account lists, else its first priced o-series model
    * (Responses-only models are skipped, having no Chat Completions route);
    * with no model to send, the probe has no verdict (`failure: 'no_model'`). The reasoning families take
-   * `max_completion_tokens`. It works before `initialize()`: the base URL is
+   * `max_completion_tokens`; a named Responses-only model is sent
+   * `POST /responses` with `max_output_tokens: 16`. It works before
+   * `initialize()`: the base URL is
    * `options.baseURL`, else the configured one, else OpenAI's own. The key
    * pool's probe of a failed key is this method's verdict.
    */
@@ -1238,16 +1240,25 @@ export class OpenAIProvider implements IProvider {
         model = probeModelFromCatalog((body.data ?? []).map((m) => m.id));
         if (!model) return noModelKeyProbeAnswer();
       }
-      const response = await fetch(`${baseURL}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model,
-          ...(modelRequiresMaxCompletionTokens(model) ? { max_completion_tokens: 16 } : { max_tokens: 1 }),
-          messages: [{ role: 'user', content: 'ping' }],
-        }),
-        signal: deadline.signal,
-      });
+      // A Responses-only model has no Chat Completions route: its probe goes to /responses, which takes a plain
+      // string as input (https://developers.openai.com/api/reference/resources/responses/methods/create).
+      const response = isOpenAIResponsesOnlyModel(model)
+        ? await fetch(`${baseURL}/responses`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ model, input: 'ping', max_output_tokens: 16 }),
+            signal: deadline.signal,
+          })
+        : await fetch(`${baseURL}/chat/completions`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              model,
+              ...(modelRequiresMaxCompletionTokens(model) ? { max_completion_tokens: 16 } : { max_tokens: 1 }),
+              messages: [{ role: 'user', content: 'ping' }],
+            }),
+            signal: deadline.signal,
+          });
       return await readKeyProbeAnswer(response, { model, apiKey, signal: deadline.signal });
     } catch (error) {
       return failedKeyProbeAnswer(error, deadline, { apiKey, baseURL });

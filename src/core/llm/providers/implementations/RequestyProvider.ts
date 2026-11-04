@@ -889,8 +889,10 @@ export class RequestyProvider implements IProvider {
    * smallest billable completion, since a list need not refuse a key whose balance is spent: on `options.model`, else
    * the default model, else the cheapest chat model the catalog lists with a price, never a free one. A provider
    * without its catalog (one not initialized, or one that started with every key out) lists it with the probing key
-   * first and keeps it; with no priced model to send, the probe has no verdict (`failure: 'no_model'`). Every answer
-   * goes through the same classifier as a request's. It works before `initialize()`: the base URL is
+   * first and keeps it, when the probe goes to the provider's own endpoint (a probe of another base URL lists that
+   * one's catalog and keeps it to itself); with no priced model to send, the probe has no verdict
+   * (`failure: 'no_model'`). Every answer goes through the same classifier as a request's. It works before
+   * `initialize()`: the base URL is
    * `options.baseURL`, else the configured one, else Requesty's own. The key pool's probe of a failed key is this
    * method's verdict.
    */
@@ -901,8 +903,10 @@ export class RequestyProvider implements IProvider {
     try {
       const listModels = () => fetch(`${baseURL}/models`, { method: 'GET', headers, signal: deadline.signal });
       if (options.kind !== 'billing') return await readKeyProbeAnswer(await listModels(), { apiKey, signal: deadline.signal });
-      let model = options.model || this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
-      if (!model && this.availableModelsCache.size === 0) {
+      // The provider's catalog is its own endpoint's: a probe of another endpoint lists that one's and keeps it to itself.
+      const catalog = baseURL === (this.config?.baseURL || REQUESTY_DEFAULT_BASE_URL) ? this.availableModelsCache : new Map<string, ModelInfo>();
+      let model = options.model || this.defaultModelId || cheapestPricedChatModel(catalog.values());
+      if (!model && catalog.size === 0) {
         const listed = await listModels();
         if (!listed.ok) return await readKeyProbeAnswer(listed, { apiKey, signal: deadline.signal });
         const body = (await listed.json().catch((error: unknown) => {
@@ -910,13 +914,13 @@ export class RequestyProvider implements IProvider {
           if (deadline.signal.aborted) throw error;
           return {};
         })) as Partial<RequestyListModelsAPIResponse>;
-        if (Array.isArray(body.data) && this.availableModelsCache.size === 0) {
+        if (Array.isArray(body.data) && catalog.size === 0) {
           for (const apiModel of body.data) {
             const modelInfo = this.mapApiToModelInfo(apiModel);
-            this.availableModelsCache.set(modelInfo.modelId, modelInfo);
+            catalog.set(modelInfo.modelId, modelInfo);
           }
         }
-        model = cheapestPricedChatModel(this.availableModelsCache.values());
+        model = cheapestPricedChatModel(catalog.values());
       }
       if (!model) return noModelKeyProbeAnswer();
       return await readKeyProbeAnswer(
