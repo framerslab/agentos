@@ -213,6 +213,9 @@ describe('the estimates', () => {
       // adds the 2,000 read and the 1,000 written back.
       const usage = { promptTokens: 100, completionTokens: 100, cacheReadInputTokens: 2_000, cacheCreationInputTokens: 1_000, inclusiveInputTokens: 3_100 };
       expect(costOfUsageUSD('anthropic', 'claude-host-1', usage)).toBeCloseTo((100 * 3 + 2_000 * 0.3 + 1_000 * 6 + 100 * 15) / 1e6, 12);
+      // A report with no inclusive total: Anthropic's prompt tokens leave the cache out, so the cache is added to them.
+      const bare = { promptTokens: 100, completionTokens: 100, cacheReadInputTokens: 2_000, cacheCreationInputTokens: 1_000 };
+      expect(costOfUsageUSD('anthropic', 'claude-host-1', bare)).toBeCloseTo((100 * 3 + 2_000 * 0.3 + 1_000 * 6 + 100 * 15) / 1e6, 12);
       // A run's totals carry the same counts under the names generateText sums them as.
       const totals = { promptTokens: 100, completionTokens: 100, cacheReadTokens: 2_000, cacheCreationTokens: 1_000, inclusiveInputTokens: 3_100 };
       expect(costOfUsageUSD('anthropic', 'claude-host-1', totals)).toBeCloseTo((100 * 3 + 2_000 * 0.3 + 1_000 * 6 + 100 * 15) / 1e6, 12);

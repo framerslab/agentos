@@ -542,16 +542,45 @@ export function assertCallWithinBudget(
 }
 
 /**
+ * The token counts of a finished call {@link costOfUsageUSD} prices: a provider's `ModelUsage` or a run's totals
+ * (`TokenUsage`), which carry the cache counts as `cacheReadInputTokens` and `cacheCreationInputTokens`, and as
+ * `cacheReadTokens` and `cacheCreationTokens`, respectively.
+ */
+export interface UsageForCost {
+  promptTokens?: number;
+  completionTokens?: number;
+  costUSD?: number;
+  /** Every input token, cache reads and writes included: Anthropic's `input_tokens` leave them out, OpenAI's prompt tokens hold them. */
+  inclusiveInputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}
+
+/** A token count a report gave, or 0 for none, a negative count or one that is not a finite number. */
+function tokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
  * A finished call's cost: the provider's own `costUSD` when it reported one, else its tokens at the table's rates
- * ({@link modelPricing}: OpenAI's and Anthropic's tables and a table the host registered), the long-context card's
- * where the prompt is over its threshold (an embedding prices its prompt tokens alone, at the standard card); undefined
- * when neither is known. A reported cost that is not a finite number, zero or more, is not used: a budget would record
- * nothing for a cost of NaN.
+ * ({@link modelPricing}: OpenAI's and Anthropic's tables and a table the host registered); undefined when neither is
+ * known. A reported cost that is not a finite number, zero or more, is not used: a budget would record nothing for a
+ * cost of NaN.
+ *
+ * The prompt is `inclusiveInputTokens` where the report gives it (never fewer than `promptTokens`; for Anthropic, whose
+ * prompt tokens leave the cache out, the prompt tokens and the cache counts where it does not), so the cache reads and
+ * writes an Anthropic report keeps out of its prompt tokens are priced, and they count toward the long-context
+ * threshold; the long-context card prices the whole call where the prompt is over it. Of the prompt, the cache reads are
+ * priced at the card's cache-read rate (the input rate where the card has none) and the writes at its highest write
+ * rate, since a report does not say which lifetime a write was made with; the rest at the input rate. An embedding
+ * prices its prompt tokens alone, at the standard card.
  */
 export function costOfUsageUSD(
   providerId: string,
   modelId: string,
-  usage: { promptTokens?: number; completionTokens?: number; costUSD?: number } | undefined,
+  usage: UsageForCost | undefined,
   isEmbedding = false,
 ): number | undefined {
   const reported = usage?.costUSD;
@@ -560,6 +589,22 @@ export function costOfUsageUSD(
   if (!price || usage === undefined) return undefined;
   const prompt = usage.promptTokens ?? 0;
   if (isEmbedding) return (prompt / 1000) * perThousand(price.inputPerMTokUSD);
-  const card: ModelPriceTier = price.longContext && prompt > price.longContext.thresholdTokens ? price.longContext : price;
-  return (prompt / 1000) * perThousand(card.inputPerMTokUSD) + ((usage.completionTokens ?? 0) / 1000) * perThousand(card.outputPerMTokUSD);
+  const cacheRead = tokenCount(usage.cacheReadInputTokens ?? usage.cacheReadTokens);
+  const cacheWrite = tokenCount(usage.cacheCreationInputTokens ?? usage.cacheCreationTokens);
+  // Anthropic's prompt tokens leave the cache out, so a report of its with no inclusive total is completed with them.
+  const inclusive = Math.max(
+    prompt,
+    usage.inclusiveInputTokens === undefined && providerId === 'anthropic' ? prompt + cacheRead + cacheWrite : tokenCount(usage.inclusiveInputTokens),
+  );
+  const read = Math.min(cacheRead, inclusive);
+  const write = Math.min(cacheWrite, inclusive - read);
+  const card: ModelPriceTier = price.longContext && inclusive > price.longContext.thresholdTokens ? price.longContext : price;
+  const readRate = card.cacheReadPerMTokUSD ?? card.inputPerMTokUSD;
+  const writeRate = Math.max(card.inputPerMTokUSD, card.cacheWritePerMTokUSD ?? 0, card.automaticCacheWritePerMTokUSD ?? 0);
+  return (
+    ((inclusive - read - write) / 1000) * perThousand(card.inputPerMTokUSD) +
+    (read > 0 ? (read / 1000) * perThousand(readRate) : 0) +
+    (write > 0 ? (write / 1000) * perThousand(writeRate) : 0) +
+    ((usage.completionTokens ?? 0) / 1000) * perThousand(card.outputPerMTokUSD)
+  );
 }

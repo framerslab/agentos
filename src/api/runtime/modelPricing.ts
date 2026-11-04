@@ -199,7 +199,11 @@ export interface MaxCostRequest {
    * is not text (OpenAI's `modalities` with `audio`): billed by its own measure.
    */
   nonTextParts?: boolean;
-  /** The request names a tool the provider runs or defines (Anthropic's server tools, the Responses API's built-in tools). */
+  /**
+   * The request names a tool the provider runs or defines (Anthropic's server tools, the Responses API's built-in
+   * tools), or tools the provider fetches itself (Anthropic's `mcp_servers`), whose definitions the request's text does
+   * not hold.
+   */
   providerSideTools?: boolean;
   /** The request asks for a faster tier at a higher price (OpenAI's `service_tier: 'priority'` or fast mode, Anthropic's `speed: 'fast'`). */
   priorityTier?: boolean;
