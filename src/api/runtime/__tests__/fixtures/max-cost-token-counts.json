@@ -1,0 +1,902 @@
+{
+  "countedOn": "2026-11-04",
+  "about": "Each case's input tokens as the provider's own counting endpoint counted them on countedOn. The endpoint was sent the case's messages, its system prompt (OpenAI: instructions) and its tools in that provider's shape; a count keyed ':tool_choice_any' also sent tool_choice {type: 'any'}. Counted once; a case or a model added is counted the same way and dated.",
+  "sources": {
+    "anthropic": "POST https://api.anthropic.com/v1/messages/count_tokens (https://platform.claude.com/docs/en/build-with-claude/token-counting)",
+    "openai": "POST https://api.openai.com/v1/responses/input_tokens (https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count)"
+  },
+  "cases": [
+    {
+      "name": "cjk",
+      "messages": [
+        {
+          "role": "user",
+          "content": "春の朝、川沿いの道を歩いていると、桜の花びらが風に舞って水面に落ちていった。\n古い橋の上で老人が釣り糸を垂れ、子どもたちは石を投げて波紋を数えている。\n我们在山脚下的小村庄里住了三天，每天清晨都能听见公鸡的叫声和远处寺庙的钟声。\n村里的人很热情，常常邀请我们去家里喝茶，聊起他们年轻时在城里打工的故事。\n서울의 겨울은 생각보다 훨씬 추웠다. 우리는 작은 찻집에 들어가 따뜻한 유자차를 마시며 창밖으로 내리는 눈을 바라보았다.\n図書館の三階には誰も使わない閲覧室があり、窓からは港に出入りする船がよく見える。\n他把旧照片一张一张地摊在桌子上，试图按照年份排列，却发现有好几张背面什么也没写。\n한국어와 일본어와 중국어를 섞어 쓴 이 문단은 토크나이저가 다국어 텍스트를 어떻게 나누는지 확인하기 위한 것이다。\n漢字、ひらがな、カタカナ、한글、そして全角の記号！？「」『』【】が混ざった文章です。春の朝、川沿いの道を歩いていると、桜の花びらが風に舞って水面に落ちていった。\n古い橋の上で老人が釣り糸を垂れ、子どもたちは石を投げて波紋を数えている。\n我们在山脚下的小村庄里住了三天，每天清晨都能听见公鸡的叫声和远处寺庙的钟声。\n村里的人很热情，常常邀请我们去家里喝茶，聊起他们年轻时在城里打工的故事。\n서울의 겨울은 생각보다 훨씬 추웠다. 우리는 작은 찻집에 들어가 따뜻한 유자차를 마시며 창밖으로 내리는 눈을 바라보았다.\n図書館の三階には誰も使わない閲覧室があり、窓からは港に出入りする船がよく見える。\n他把旧照片一张一张地摊在桌子上，试图按照年份排列，却发现有好几张背面什么也没写。\n한국어와 일본어와 중국어를 섞어 쓴 이 문단은 토크나이저가 다국어 텍스트를 어떻게 나누는지 확인하기 위한 것이다。\n漢字、ひらがな、カタカナ、한글、そして全角の記号！？「」『』【】が混ざった文章です。春の朝、川沿いの道を歩いていると、桜の花びらが風に舞って水面に落ちていった。\n古い橋の上で老人が釣り糸を垂れ、子どもたちは石を投げて波紋を数えている。\n我们在山脚下的小村庄里住了三天，每天清晨都能听见公鸡的叫声和远处寺庙的钟声。\n村里的人很热情，常常邀请我们去家里喝茶，聊起他们年轻时在城里打工的故事。\n서울의 겨울은 생각보다 훨씬 추웠다. 우리는 작은 찻집에 들어가 따뜻한 유자차를 마시며 창밖으로 내리는 눈을 바라보았다.\n図書館の三階には誰も使わない閲覧室があり、窓からは港に出入りする船がよく見える。\n他把旧照片一张一张地摊在桌子上，试图按照年份排列，却发现有好几张背面什么也没写。\n한국어와 일본어와 중국어를 섞어 쓴 이 문단은 토크나이저가 다국어 텍스트를 어떻게 나누는지 확인하기 위한 것이다。\n漢字、ひらがな、カタカナ、한글、そして全角の記号！？「」『』【】が混ざった文章です。春の朝、川沿いの道を歩いていると、桜の花びらが風に舞って水面に落ちていった。\n古い橋の上で老人が釣り糸を垂れ、子どもたちは石を投げて波紋を数えている。\n我们在山脚下的小村庄里住了三天，每天清晨都能听见公鸡的叫声和远处寺庙的钟声。\n村里的人很热情，常常邀请我们去家里喝茶，聊起他们年轻时在城里打工的故事。\n서울의 겨울은 생각보다 훨씬 추웠다. 우리는 작은 찻집에 들어가 따뜻한 유자차를 마시며 창밖으로 내리는 눈을 바라보았다.\n図書館の三階には誰も使わない閲覧室があり、窓からは港に出入りする船がよく見える。\n他把旧照片一张一张地摊在桌子上，试图按照年份排列，却发现有好几张背面什么也没写。\n한국어와 일본어와 중국어를 섞어 쓴 이 문단은 토크나이저가 다국어 텍스트를 어떻게 나누는지 확인하기 위한 것이다。\n漢字、ひらがな、カタカナ、한글、そして全角の記号！？「」『』【】が混ざった文章です。"
+        }
+      ],
+      "counts": {
+        "anthropic:claude-sonnet-4-6": 1780,
+        "anthropic:claude-opus-5-5": 1780,
+        "anthropic:claude-haiku-5-5": 1780,
+        "openai:gpt-6-sol": 1306,
+        "openai:gpt-4o": 1307
+      }
+    },
+    {
+      "name": "code",
+      "messages": [
+        {
+          "role": "user",
+          "content": "import { createHash } from 'node:crypto';\n\n/** A ring buffer of the last `capacity` samples, with their running mean. */\nexport class RollingMean {\n  private readonly samples: number[] = [];\n  private sum = 0;\n\n  constructor(private readonly capacity: number) {\n    if (!Number.isInteger(capacity) || capacity < 1) throw new RangeError('capacity must be a positive integer');\n  }\n\n  push(value: number): number {\n    this.samples.push(value);\n    this.sum += value;\n    if (this.samples.length > this.capacity) this.sum -= this.samples.shift() ?? 0;\n    return this.mean();\n  }\n\n  mean(): number {\n    return this.samples.length === 0 ? Number.NaN : this.sum / this.samples.length;\n  }\n}\n\nexport function digestOf(parts: readonly (string | Uint8Array)[]): string {\n  const hash = createHash('sha256');\n  for (const part of parts) hash.update(part);\n  return hash.digest('hex').slice(0, 16);\n}\n\nexport async function retry<T>(work: () => Promise<T>, attempts = 3, waitMs = 250): Promise<T> {\n  let last: unknown;\n  for (let attempt = 0; attempt < attempts; attempt += 1) {\n    try {\n      return await work();\n    } catch (error) {\n      last = error;\n      await new Promise((resolve) => setTimeout(resolve, waitMs * 2 ** attempt));\n    }\n  }\n  throw last instanceof Error ? last : new Error(String(last));\n}\n\nconst table = new Map<string, { hits: number; misses: number }>();\nfor (const key of ['alpha', 'beta', 'gamma', 'delta']) table.set(key, { hits: 0, misses: 0 });\nconsole.log(JSON.stringify(Object.fromEntries(table), null, 2));\nimport { createHash } from 'node:crypto';\n\n/** A ring buffer of the last `capacity` samples, with their running mean. */\nexport class RollingMean {\n  private readonly samples: number[] = [];\n  private sum = 0;\n\n  constructor(private readonly capacity: number) {\n    if (!Number.isInteger(capacity) || capacity < 1) throw new RangeError('capacity must be a positive integer');\n  }\n\n  push(value: number): number {\n    this.samples.push(value);\n    this.sum += value;\n    if (this.samples.length > this.capacity) this.sum -= this.samples.shift() ?? 0;\n    return this.mean();\n  }\n\n  mean(): number {\n    return this.samples.length === 0 ? Number.NaN : this.sum / this.samples.length;\n  }\n}\n\nexport function digestOf(parts: readonly (string | Uint8Array)[]): string {\n  const hash = createHash('sha256');\n  for (const part of parts) hash.update(part);\n  return hash.digest('hex').slice(0, 16);\n}\n\nexport async function retry<T>(work: () => Promise<T>, attempts = 3, waitMs = 250): Promise<T> {\n  let last: unknown;\n  for (let attempt = 0; attempt < attempts; attempt += 1) {\n    try {\n      return await work();\n    } catch (error) {\n      last = error;\n      await new Promise((resolve) => setTimeout(resolve, waitMs * 2 ** attempt));\n    }\n  }\n  throw last instanceof Error ? last : new Error(String(last));\n}\n\nconst table = new Map<string, { hits: number; misses: number }>();\nfor (const key of ['alpha', 'beta', 'gamma', 'delta']) table.set(key, { hits: 0, misses: 0 });\nconsole.log(JSON.stringify(Object.fromEntries(table), null, 2));\nimport { createHash } from 'node:crypto';\n\n/** A ring buffer of the last `capacity` samples, with their running mean. */\nexport class RollingMean {\n  private readonly samples: number[] = [];\n  private sum = 0;\n\n  constructor(private readonly capacity: number) {\n    if (!Number.isInteger(capacity) || capacity < 1) throw new RangeError('capacity must be a positive integer');\n  }\n\n  push(value: number): number {\n    this.samples.push(value);\n    this.sum += value;\n    if (this.samples.length > this.capacity) this.sum -= this.samples.shift() ?? 0;\n    return this.mean();\n  }\n\n  mean(): number {\n    return this.samples.length === 0 ? Number.NaN : this.sum / this.samples.length;\n  }\n}\n\nexport function digestOf(parts: readonly (string | Uint8Array)[]): string {\n  const hash = createHash('sha256');\n  for (const part of parts) hash.update(part);\n  return hash.digest('hex').slice(0, 16);\n}\n\nexport async function retry<T>(work: () => Promise<T>, attempts = 3, waitMs = 250): Promise<T> {\n  let last: unknown;\n  for (let attempt = 0; attempt < attempts; attempt += 1) {\n    try {\n      return await work();\n    } catch (error) {\n      last = error;\n      await new Promise((resolve) => setTimeout(resolve, waitMs * 2 ** attempt));\n    }\n  }\n  throw last instanceof Error ? last : new Error(String(last));\n}\n\nconst table = new Map<string, { hits: number; misses: number }>();\nfor (const key of ['alpha', 'beta', 'gamma', 'delta']) table.set(key, { hits: 0, misses: 0 });\nconsole.log(JSON.stringify(Object.fromEntries(table), null, 2));\n"
+        }
+      ],
+      "counts": {
+        "anthropic:claude-sonnet-4-6": 1461,
+        "anthropic:claude-opus-5-5": 1870,
+        "anthropic:claude-haiku-5-5": 1870,
+        "openai:gpt-6-sol": 1182,
+        "openai:gpt-4o": 1183
+      }
+    },
+    {
+      "name": "emoji",
+      "messages": [
+        {
+          "role": "user",
+          "content": "😀😃😄😁😆😅🤣😂🙂🙃😉😊😇🥰😍🤩😘😗☺️😚😙🥲😋😛😜🤪😝🤑🤗🤭🫢🫣🤫🤔🫡 👍🏻👍🏼👍🏽👍🏾👍🏿👋🏻✋🏽🖐🏿🤚🏾👌🏼🤌🏻🤏🏽✌️🤞🏿🫰🏼🤟🏾🤘🏻🤙🏽 👨‍👩‍👧‍👦👩‍👩‍👦👨‍👨‍👧‍👧👩‍❤️‍👨👨‍❤️‍💋‍👨🧑‍🤝‍🧑👩🏽‍💻👨🏿‍🚀🧑🏻‍🍳👩🏾‍🔬🏳️‍🌈🏳️‍⚧️🏴‍☠️ 🇺🇸🇬🇧🇯🇵🇰🇷🇨🇳🇧🇷🇮🇳🇳🇬🇩🇪🇫🇷🇮🇹🇪🇸🇲🇽🇨🇦🇦🇺🇿🇦🏴󠁧󠁢󠁳󠁣󠁴󠁿🏴󠁧󠁢󠁷󠁬󠁳󠁿 1️⃣2️⃣3️⃣#️⃣*️⃣🔟🆗🆒🆕🆓🈁🈂️🈷️🈶🈯🉐🈹🈚🈲🉑🈸🈴🈳㊗️㊙️🈺🈵 🐶🐱🐭🐹🐰🦊🐻🐼🐻‍❄️🐨🐯🦁🐮🐷🐸🐵🙈🙉🙊🐒🐔🐧🐦🐤🐣🐥🦆🦅🦉🦇🐺🐗🐴🦄🫎🐝🪱🐛🦋🐌🐞🐜🪰🪲🪳🦟🦗🕷️😀😃😄😁😆😅🤣😂🙂🙃😉😊😇🥰😍🤩😘😗☺️😚😙🥲😋😛😜🤪😝🤑🤗🤭🫢🫣🤫🤔🫡 👍🏻👍🏼👍🏽👍🏾👍🏿👋🏻✋🏽🖐🏿🤚🏾👌🏼🤌🏻🤏🏽✌️🤞🏿🫰🏼🤟🏾🤘🏻🤙🏽 👨‍👩‍👧‍👦👩‍👩‍👦👨‍👨‍👧‍👧👩‍❤️‍👨👨‍❤️‍💋‍👨🧑‍🤝‍🧑👩🏽‍💻👨🏿‍🚀🧑🏻‍🍳👩🏾‍🔬🏳️‍🌈🏳️‍⚧️🏴‍☠️ 🇺🇸🇬🇧🇯🇵🇰🇷🇨🇳🇧🇷🇮🇳🇳🇬🇩🇪🇫🇷🇮🇹🇪🇸🇲🇽🇨🇦🇦🇺🇿🇦🏴󠁧󠁢󠁳󠁣󠁴󠁿🏴󠁧󠁢󠁷󠁬󠁳󠁿 1️⃣2️⃣3️⃣#️⃣*️⃣🔟🆗🆒🆕🆓🈁🈂️🈷️🈶🈯🉐🈹🈚🈲🉑🈸🈴🈳㊗️㊙️🈺🈵 🐶🐱🐭🐹🐰🦊🐻🐼🐻‍❄️🐨🐯🦁🐮🐷🐸🐵🙈🙉🙊🐒🐔🐧🐦🐤🐣🐥🦆🦅🦉🦇🐺🐗🐴🦄🫎🐝🪱🐛🦋🐌🐞🐜🪰🪲🪳🦟🦗🕷️😀😃😄😁😆😅🤣😂🙂🙃😉😊😇🥰😍🤩😘😗☺️😚😙🥲😋😛😜🤪😝🤑🤗🤭🫢🫣🤫🤔🫡 👍🏻👍🏼👍🏽👍🏾👍🏿👋🏻✋🏽🖐🏿🤚🏾👌🏼🤌🏻🤏🏽✌️🤞🏿🫰🏼🤟🏾🤘🏻🤙🏽 👨‍👩‍👧‍👦👩‍👩‍👦👨‍👨‍👧‍👧👩‍❤️‍👨👨‍❤️‍💋‍👨🧑‍🤝‍🧑👩🏽‍💻👨🏿‍🚀🧑🏻‍🍳👩🏾‍🔬🏳️‍🌈🏳️‍⚧️🏴‍☠️ 🇺🇸🇬🇧🇯🇵🇰🇷🇨🇳🇧🇷🇮🇳🇳🇬🇩🇪🇫🇷🇮🇹🇪🇸🇲🇽🇨🇦🇦🇺🇿🇦🏴󠁧󠁢󠁳󠁣󠁴󠁿🏴󠁧󠁢󠁷󠁬󠁳󠁿 1️⃣2️⃣3️⃣#️⃣*️⃣🔟🆗🆒🆕🆓🈁🈂️🈷️🈶🈯🉐🈹🈚🈲🉑🈸🈴🈳㊗️㊙️🈺🈵 🐶🐱🐭🐹🐰🦊🐻🐼🐻‍❄️🐨🐯🦁🐮🐷🐸🐵🙈🙉🙊🐒🐔🐧🐦🐤🐣🐥🦆🦅🦉🦇🐺🐗🐴🦄🫎🐝🪱🐛🦋🐌🐞🐜🪰🪲🪳🦟🦗🕷️"
+        }
+      ],
+      "counts": {
+        "anthropic:claude-sonnet-4-6": 2192,
+        "anthropic:claude-opus-5-5": 2192,
+        "anthropic:claude-haiku-5-5": 2192,
+        "openai:gpt-6-sol": 1629,
+        "openai:gpt-4o": 1630
+      }
+    },
+    {
+      "name": "base64",
+      "messages": [
+        {
+          "role": "user",
+          "content": "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"
+        }
+      ],
+      "counts": {
+        "anthropic:claude-sonnet-4-6": 3437,
+        "anthropic:claude-opus-5-5": 3774,
+        "anthropic:claude-haiku-5-5": 3774,
+        "openai:gpt-6-sol": 2718,
+        "openai:gpt-4o": 2719
+      }
+    },
+    {
+      "name": "english-prose",
+      "messages": [
+        {
+          "role": "user",
+          "content": "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. "
+        }
+      ],
+      "counts": {
+        "anthropic:claude-sonnet-4-6": 448,
+        "anthropic:claude-opus-5-5": 728,
+        "anthropic:claude-haiku-5-5": 728,
+        "openai:gpt-6-sol": 407,
+        "openai:gpt-4o": 408
+      }
+    },
+    {
+      "name": "one-short-message",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "counts": {
+        "anthropic:claude-sonnet-4-6": 8,
+        "anthropic:claude-opus-5-5": 10,
+        "anthropic:claude-haiku-5-5": 10,
+        "openai:gpt-6-sol": 7,
+        "openai:gpt-4o": 8
+      }
+    },
+    {
+      "name": "many-short-turns-with-system",
+      "system": "Be brief.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        },
+        {
+          "role": "assistant",
+          "content": "ok"
+        },
+        {
+          "role": "user",
+          "content": "ok"
+        }
+      ],
+      "counts": {
+        "anthropic:claude-sonnet-4-6": 108,
+        "anthropic:claude-opus-5-5": 112,
+        "anthropic:claude-haiku-5-5": 112,
+        "openai:gpt-6-sol": 158,
+        "openai:gpt-4o": 135
+      }
+    },
+    {
+      "name": "one-tiny-tool",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "tools": {
+        "anthropic": [
+          {
+            "name": "a",
+            "description": "b",
+            "input_schema": {
+              "type": "object",
+              "properties": {}
+            }
+          }
+        ],
+        "openai": [
+          {
+            "type": "function",
+            "name": "a",
+            "description": "b",
+            "parameters": {
+              "type": "object",
+              "properties": {}
+            }
+          }
+        ]
+      },
+      "counts": {
+        "anthropic:claude-sonnet-4-6": 538,
+        "anthropic:claude-opus-5-5": 337,
+        "anthropic:claude-haiku-5-5": 337,
+        "anthropic:claude-sonnet-4-6:tool_choice_any": 630,
+        "openai:gpt-6-sol": 32,
+        "openai:gpt-4o": 27
+      }
+    },
+    {
+      "name": "twenty-small-tools",
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "tools": {
+        "anthropic": [
+          {
+            "name": "t0",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t1",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t2",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t3",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t4",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t5",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t6",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t7",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t8",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t9",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t10",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t11",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t12",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t13",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t14",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t15",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t16",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t17",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t18",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "name": "t19",
+            "description": "x",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          }
+        ],
+        "openai": [
+          {
+            "type": "function",
+            "name": "t0",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t1",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t2",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t3",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t4",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t5",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t6",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t7",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t8",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t9",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t10",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t11",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t12",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t13",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t14",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t15",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t16",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t17",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t18",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "t19",
+            "description": "x",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "v"
+              ]
+            }
+          }
+        ]
+      },
+      "counts": {
+        "anthropic:claude-sonnet-4-6": 1465,
+        "anthropic:claude-opus-5-5": 1516,
+        "anthropic:claude-haiku-5-5": 1516,
+        "anthropic:claude-sonnet-4-6:tool_choice_any": 1557,
+        "openai:gpt-6-sol": 343,
+        "openai:gpt-4o": 338
+      }
+    }
+  ]
+}

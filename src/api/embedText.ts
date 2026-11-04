@@ -35,6 +35,7 @@ import {
   type SpendBudget,
   type SpendBudgetOptions,
 } from './runtime/spendBudget.js';
+import { MAX_COST_TOKENS_PER_MESSAGE } from './runtime/modelPricing.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -761,6 +762,8 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             return bytes;
           });
           let offset = 0;
+          // Tokens charged for the batches whose answer reported no prompt tokens: the bound of their inputs.
+          let unreportedTokens = 0;
           try {
             // Preserve the provider's handling of an empty input array.
             do {
@@ -791,12 +794,27 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
               for (const item of sorted) embeddings.push(item.embedding);
               reportedModel = result.model;
               // Compatible endpoints may omit usage after returning vectors.
-              usage.promptTokens += result.usage?.prompt_tokens ?? 0;
-              usage.totalTokens += result.usage?.total_tokens ?? 0;
-              if (resolved.providerId === 'openai') {
-                const costUSD = costOfUsageUSD(resolved.providerId, resolved.modelId, { promptTokens: usage.promptTokens }, true);
-                if (costUSD !== undefined) usage.costUSD = costUSD;
+              const reportedPrompt = result.usage?.prompt_tokens;
+              if (typeof reportedPrompt === 'number' && Number.isFinite(reportedPrompt) && reportedPrompt >= 0) {
+                usage.promptTokens += reportedPrompt;
+              } else {
+                // The batch was billed for tokens its answer does not count. It is charged at the bound of its
+                // inputs (one token per UTF-8 byte, a tokenizer's token covering at least one, and
+                // MAX_COST_TOKENS_PER_MESSAGE for each input's markers), never at nothing; the usage reported
+                // stays what the answers counted.
+                unreportedTokens += bytes + MAX_COST_TOKENS_PER_MESSAGE * batch.length;
               }
+              usage.totalTokens += result.usage?.total_tokens ?? 0;
+              // These endpoints report tokens and no cost, so the tokens are priced at the model's row: OpenAI's
+              // table, or the table the host registered for the provider (modelPricing), the row the call was
+              // checked against before it was sent.
+              const costUSD = costOfUsageUSD(
+                resolved.providerId,
+                resolved.modelId,
+                { promptTokens: usage.promptTokens + unreportedTokens },
+                true,
+              );
+              if (costUSD !== undefined) usage.costUSD = costUSD;
               metricUsage = usage;
               opts.abortSignal?.throwIfAborted();
             } while (offset < inputArray.length);
