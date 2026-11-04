@@ -209,12 +209,17 @@ describe('OpenRouterProvider operation id', () => {
   });
 
   it('refuses a header name that is not an HTTP field name, or one the provider sends itself, before anything is sent', async () => {
-    const malformed = await provider({ operationIdHeader: 'x rh operation id' });
-    await expect(malformed.generateCompletion(MODEL, messages, {})).rejects.toBeInstanceOf(RangeError);
-    const reserved = await provider({ operationIdHeader: 'HTTP-Referer' });
-    await expect(reserved.generateCompletion(MODEL, messages, {})).rejects.toBeInstanceOf(RangeError);
+    await expect(provider({ operationIdHeader: 'x operation id' })).rejects.toBeInstanceOf(RangeError);
+    await expect(provider({ operationIdHeader: 'HTTP-Referer' })).rejects.toBeInstanceOf(RangeError);
+    // Neither refused initialize listed the models: the one listing is the next provider's.
+    expect(stub.requests).toEqual([]);
+    const openrouter = await provider();
+    vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', 'x operation id');
+
+    await expect(openrouter.generateCompletion(MODEL, messages, {})).rejects.toBeInstanceOf(RangeError);
 
     expect(stub.sent(CHAT)).toEqual([]);
+    expect(stub.sent(MODELS_LIST)).toHaveLength(1);
   });
 
   it('sends an operation id on the health check', async () => {

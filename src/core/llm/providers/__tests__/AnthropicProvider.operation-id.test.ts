@@ -219,12 +219,16 @@ describe('AnthropicProvider operation id', () => {
   });
 
   it('refuses a header name that is not an HTTP field name, or one the provider sends itself, before anything is sent', async () => {
-    const malformed = await provider({ operationIdHeader: 'x rh operation id' });
-    await expect(malformed.generateCompletion(MODEL, messages, {})).rejects.toBeInstanceOf(RangeError);
-    const reserved = await provider({ operationIdHeader: 'X-Api-Key' });
-    await expect(reserved.generateCompletion(MODEL, messages, {})).rejects.toBeInstanceOf(RangeError);
+    await expect(provider({ operationIdHeader: 'x operation id' })).rejects.toBeInstanceOf(RangeError);
+    await expect(provider({ operationIdHeader: 'X-Api-Key' })).rejects.toBeInstanceOf(RangeError);
+    const anthropic = await provider();
+    vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', 'x operation id');
 
-    expect(stub.sent(MESSAGES)).toEqual([]);
+    await expect(anthropic.generateCompletion(MODEL, messages, {})).rejects.toBeInstanceOf(RangeError);
+    const stream = anthropic.generateCompletionStream(MODEL, messages, {});
+    await expect(stream.next()).rejects.toBeInstanceOf(RangeError);
+
+    expect(stub.requests).toEqual([]);
   });
 
   it("gives a key probe's completion an operation id of its own", async () => {

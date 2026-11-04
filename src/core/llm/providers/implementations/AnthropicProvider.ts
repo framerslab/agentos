@@ -65,7 +65,7 @@ import {
 } from './anthropicCatalog.js';
 import { resolveAnthropicEffort } from '../model-effort.js';
 import { computeRetryBackoffMs, resolveAttemptCount, waitForRetry } from './retry-backoff.js';
-import { operationIdHeaders } from './operation-id.js';
+import { operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
 import { redactUrlSecrets } from '../url-secrets';
@@ -179,8 +179,9 @@ export interface AnthropicProviderConfig {
    * next call, and a request sent again with a changed body, gets a new one.
    * When this is unset the provider reads `AGENTOS_OPERATION_ID_HEADER`; with
    * neither, no header is sent. A name that is not an HTTP header name, or one
-   * the provider sets itself (`x-api-key`, `anthropic-version`, ...), fails the
-   * call with a `RangeError` before anything is sent.
+   * the provider sets itself (`x-api-key`, `anthropic-version`, ...), is
+   * refused with a `RangeError` by `initialize()` and by each call, before
+   * anything is sent.
    */
   operationIdHeader?: string;
 }
@@ -661,6 +662,8 @@ export class AnthropicProvider implements IProvider {
         'INIT_FAILED_MISSING_API_KEY',
       );
     }
+    // A header name every call would refuse is refused here, before anything is sent or replaced.
+    resolveOperationIdHeader(config.operationIdHeader);
     // The new pool is built before anything of the old state is touched: its construction makes no request, so a
     // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
     const keyPool = new ApiKeyPool(config.apiKey, {

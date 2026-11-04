@@ -41,7 +41,7 @@ import { moduleLogger } from '../../../logging/loggerFactory.js';
 import { errorFields } from '../../../logging/events.js';
 import { cheapestPricedChatModel } from './billing-probe-model.js';
 import { resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
-import { operationIdHeaders } from './operation-id.js';
+import { operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
 /** This module's events, under its fixed diagnostic origin; no runtime name enters telemetry. */
 const log = moduleLogger('llm', 'openrouter_provider');
@@ -78,8 +78,8 @@ export interface OpenRouterProviderConfig {
    * request's retry without its schema), gets a new one. When this is unset
    * the provider reads `AGENTOS_OPERATION_ID_HEADER`; with neither, no header
    * is sent. A name that is not an HTTP header name, or one the provider sets
-   * itself (`Authorization`, `HTTP-Referer`, `X-Title`, ...), fails the call
-   * with a `RangeError` before anything is sent.
+   * itself (`Authorization`, `HTTP-Referer`, `X-Title`, ...), is refused with a
+   * `RangeError` by `initialize()` and by each call, before anything is sent.
    */
   operationIdHeader?: string;
 }
@@ -397,6 +397,8 @@ export class OpenRouterProvider implements IProvider {
         'INIT_FAILED_MISSING_API_KEY'
       );
     }
+    // A header name every call would refuse is refused here, before anything is sent or replaced.
+    resolveOperationIdHeader(config.operationIdHeader);
     // The new pool is built before anything of the old state is touched: its construction makes no request, so a
     // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
     const keyPool = new ApiKeyPool(config.apiKey, {

@@ -213,12 +213,17 @@ describe('OpenAIProvider operation id', () => {
   });
 
   it('refuses a header name that is not an HTTP field name, or one the provider sends itself, before anything is sent', async () => {
-    const malformed = await provider({ operationIdHeader: 'x rh operation id' });
-    await expect(malformed.generateCompletion('gpt-4o', messages, {})).rejects.toBeInstanceOf(RangeError);
-    const reserved = await provider({ operationIdHeader: 'Authorization' });
-    await expect(reserved.generateCompletion('gpt-4o', messages, {})).rejects.toBeInstanceOf(RangeError);
+    await expect(provider({ operationIdHeader: 'x operation id' })).rejects.toBeInstanceOf(RangeError);
+    await expect(provider({ operationIdHeader: 'Authorization' })).rejects.toBeInstanceOf(RangeError);
+    // Neither refused initialize listed the models: the one listing is the next provider's.
+    expect(stub.requests).toEqual([]);
+    const openai = await provider();
+    vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', 'x operation id');
+
+    await expect(openai.generateCompletion('gpt-4o', messages, {})).rejects.toBeInstanceOf(RangeError);
 
     expect(stub.sent(CHAT)).toEqual([]);
+    expect(stub.sent('GET /v1/models')).toHaveLength(1);
   });
 
   it("gives a key probe's completion an operation id of its own", async () => {

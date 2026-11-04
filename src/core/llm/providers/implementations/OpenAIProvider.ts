@@ -50,7 +50,7 @@ import { toOpenAiResponseFormat, toOpenAiResponsesTextFormat } from './openai-re
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
 import { computeRetryBackoffMs, waitForRetry } from './retry-backoff.js';
-import { operationIdHeaders } from './operation-id.js';
+import { operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
 import { redactUrlSecrets } from '../url-secrets.js';
 import { OPENAI_MODEL_PRICING, openAIModelPricing } from './openaiPricing.js';
 import { moduleLogger } from '../../../logging/loggerFactory.js';
@@ -283,7 +283,8 @@ export interface OpenAIProviderConfig {
    * one. When this is unset the provider reads `AGENTOS_OPERATION_ID_HEADER`;
    * with neither, no header is sent. A name that is not an HTTP header name,
    * or one the provider sets itself (`Authorization`, `Content-Type`, ...),
-   * fails the call with a `RangeError` before anything is sent.
+   * is refused with a `RangeError` by `initialize()` and by each call, before
+   * anything is sent.
    */
   operationIdHeader?: string;
 }
@@ -990,6 +991,8 @@ export class OpenAIProvider implements IProvider {
         'INIT_FAILED_MISSING_API_KEY'
       );
     }
+    // A header name every call would refuse is refused here, before anything is sent or replaced.
+    resolveOperationIdHeader(config.operationIdHeader);
     // The new pool is built before anything of the old state is touched: its construction makes no request, so a
     // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
     const keyPool = new ApiKeyPool(config.apiKey, {
