@@ -568,17 +568,18 @@ function tokenCount(value: unknown): number {
 }
 
 /**
- * Providers that send their calls through the OpenAI provider, which reports OpenAI's list price for a model id
- * OpenAI's table holds (`openaiPricing.ts`): a cost the client computed, not one the gateway or the vendor billed.
+ * Providers built on the OpenAI provider (Groq, LiteLLM, Mistral, Together and xAI send through it, MiniMax extends
+ * it), which reports OpenAI's list price for a model id OpenAI's table holds (`openaiPricing.ts`): a cost the client
+ * computed, not one the gateway or the vendor billed.
  */
-const OPENAI_CLIENT_PRICED = new Set(['groq', 'litellm', 'mistral', 'together', 'xai']);
+const OPENAI_CLIENT_PRICED = new Set(['groq', 'litellm', 'mistral', 'together', 'xai', 'minimax']);
 
 /**
  * A finished call's cost: the provider's own `costUSD` when it reported one, else its tokens at the table's rates
  * ({@link modelPricing}: OpenAI's and Anthropic's tables and a table the host registered); undefined when neither is
  * known. A reported cost that is not a finite number, zero or more, is not used: a budget would record nothing for a
- * cost of NaN. For a provider that sends its calls through the OpenAI provider (Groq, LiteLLM, Mistral, Together,
- * xAI), a row the host registered prices the call before the cost it reports, which is OpenAI's list price for the
+ * cost of NaN. For a provider built on the OpenAI provider (Groq, LiteLLM, Mistral, Together, xAI, MiniMax), a row
+ * the host registered prices the call before the cost it reports, which is OpenAI's list price for the
  * model id: the call is charged at the rate it was estimated at. A bill the provider's API returned (OpenRouter's and
  * Requesty's `usage.cost`) stands.
  *
