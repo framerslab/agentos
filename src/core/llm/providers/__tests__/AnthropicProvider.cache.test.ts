@@ -1230,15 +1230,64 @@ describe('AnthropicProvider per-call cache option (options.cache)', () => {
     expect(collectMarkers(payload)).toEqual([]);
   });
 
-  it('cache tail:false with an unmarked customModelParams system override sends no request-level marker', async () => {
+  it('cache tail:false with an unmarked customModelParams system override marks the end of the override, not the tail', async () => {
+    const messages = [
+      { role: 'system', content: 'Original system that the override replaces.' },
+      { role: 'user', content: 'hi' },
+    ];
     const payload = await buildPayload(
-      [
-        { role: 'system', content: 'Original system that the override replaces.' },
-        { role: 'user', content: 'hi' },
-      ],
+      messages,
       { cache: { tail: false }, customModelParams: { system: 'CUSTOM OVERRIDE SYSTEM' } },
     );
-    expect(payload.system).toBe('CUSTOM OVERRIDE SYSTEM');
+    expect(payload.cache_control).toBeUndefined();
+    expect(payload.system).toEqual([
+      { type: 'text', text: 'CUSTOM OVERRIDE SYSTEM', cache_control: { type: 'ephemeral' } },
+    ]);
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+
+    const overrideBlocks = [
+      { type: 'text', text: 'Stable override rubric' },
+      { type: 'text', text: 'Override tail block' },
+    ];
+    const hour = await buildPayload(
+      messages,
+      { cache: { ttl: '1h', tail: false }, customModelParams: { system: overrideBlocks } },
+    );
+    expect(hour.cache_control).toBeUndefined();
+    expect(hour.system).toEqual([
+      { type: 'text', text: 'Stable override rubric' },
+      { type: 'text', text: 'Override tail block', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ]);
+    expect(collectMarkers(hour)).toEqual([{ type: 'ephemeral', ttl: '1h' }]);
+    // The caller's own customModelParams objects are never mutated.
+    expect(overrideBlocks[1]).toEqual({ type: 'text', text: 'Override tail block' });
+  });
+
+  it('cache tail:false with an unmarked customModelParams messages override marks the end of the first system message only', async () => {
+    const payload = await buildPayload(
+      [
+        { role: 'system', content: 'Stable system prompt.' },
+        { role: 'system', content: 'Per-turn recall appended by a memory hook' },
+        { role: 'user', content: 'replaced' },
+      ],
+      {
+        cache: { tail: false },
+        customModelParams: { messages: [{ role: 'user', content: [{ type: 'text', text: 'override turn' }] }] },
+      },
+    );
+    expect(payload.cache_control).toBeUndefined();
+    expect(payload.system).toEqual([
+      { type: 'text', text: 'Stable system prompt.', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Per-turn recall appended by a memory hook' },
+    ]);
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+  });
+
+  it('cache tail:false with an empty customModelParams system override and no caller markers sends no marker at all', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      { cache: { tail: false }, customModelParams: { system: '' } },
+    );
     expect(collectMarkers(payload)).toEqual([]);
   });
 });
