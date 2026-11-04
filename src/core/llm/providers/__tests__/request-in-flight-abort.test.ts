@@ -12,7 +12,9 @@
  * OpenRouter, Requesty and Ollama, fetch for OpenAI). The server answers every
  * GET (the model listings the providers read at start) and holds every POST
  * open without answering, so only a request that carries the caller's signal
- * ends at the abort. Nothing leaves the machine.
+ * ends at the abort; a test can also hold the GETs, so the model-list refresh
+ * an embedding call starts for a model it has not listed stalls the same way.
+ * Nothing leaves the machine.
  */
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -47,36 +49,70 @@ const OPENROUTER_FIRST_EVENT =
     model: 'anthropic/claude-sonnet-5.5',
     choices: [{ index: 0, delta: { role: 'assistant', content: 'Hel' }, finish_reason: null }],
   })}\n\n`;
+/** OpenRouter's finish event (`finish_reason` set, no text) and the usage-only event that follows it before `[DONE]`. */
+const OPENROUTER_FINISH_EVENT =
+  `data: ${JSON.stringify({
+    id: 'gen-1',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'anthropic/claude-sonnet-5.5',
+    choices: [{ index: 0, delta: { content: 'lo' }, finish_reason: 'stop' }],
+  })}\n\n`;
+const OPENROUTER_USAGE_EVENT =
+  `data: ${JSON.stringify({
+    id: 'gen-1',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'anthropic/claude-sonnet-5.5',
+    choices: [],
+    usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+  })}\n\n`;
 const OLLAMA_FIRST_EVENT =
   `${JSON.stringify({ model: 'llama3', created_at: '2026-11-03T00:00:00Z', message: { role: 'assistant', content: 'Hel' }, done: false })}\n`;
 
-/** A local upstream: every GET answers 200, every POST is held open (or sends its first event and then stalls). */
+/**
+ * A local upstream: every GET answers 200 (or is held open once `holdGets` is set), every POST is held open (or
+ * sends its first events and then stalls).
+ */
 interface Upstream {
   url: string;
   /** Paths of the POSTs received, in order. */
   posts: string[];
-  /** Set to the first event a POST answers with before it stalls; null holds the POST before its headers. */
+  /** Paths of the GETs received, in order. */
+  gets: string[];
+  /** When true, a GET is held open without an answer, as a POST is. */
+  holdGets: boolean;
+  /** Set to the first events a POST answers with before it stalls; null holds the POST before its headers. */
   firstEvent: { contentType: string; body: string } | null;
   /** Resolves once `count` POSTs have arrived. */
   untilPosts(count: number): Promise<void>;
+  /** Resolves once `count` GETs have arrived. */
+  untilGets(count: number): Promise<void>;
   close(): Promise<void>;
 }
 
 async function startUpstream(): Promise<Upstream> {
   const posts: string[] = [];
-  let waiters: Array<{ count: number; resolve: () => void }> = [];
-  const upstream = { posts, firstEvent: null } as unknown as Upstream;
+  const gets: string[] = [];
+  let waiters: Array<{ list: string[]; count: number; resolve: () => void }> = [];
+  const arrived = (list: string[], path: string) => {
+    list.push(path);
+    const ready = waiters.filter((w) => w.list.length >= w.count);
+    waiters = waiters.filter((w) => w.list.length < w.count);
+    ready.forEach((w) => w.resolve());
+  };
+  const upstream = { posts, gets, holdGets: false, firstEvent: null } as unknown as Upstream;
   const server: Server = createServer((req, res: ServerResponse) => {
     if (req.method !== 'POST') {
+      arrived(gets, req.url ?? '');
+      // A held GET is never answered: only the caller's abort can end it.
+      if (upstream.holdGets) return;
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ object: 'list', data: [], models: [] }));
       return;
     }
     req.resume();
-    posts.push(req.url ?? '');
-    const ready = waiters.filter((w) => posts.length >= w.count);
-    waiters = waiters.filter((w) => posts.length < w.count);
-    ready.forEach((w) => w.resolve());
+    arrived(posts, req.url ?? '');
     if (upstream.firstEvent) {
       res.writeHead(200, { 'content-type': upstream.firstEvent.contentType });
       res.write(upstream.firstEvent.body);
@@ -86,8 +122,10 @@ async function startUpstream(): Promise<Upstream> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
   upstream.url = `http://127.0.0.1:${port}`;
-  upstream.untilPosts = (count: number) =>
-    posts.length >= count ? Promise.resolve() : new Promise<void>((resolve) => waiters.push({ count, resolve }));
+  const until = (list: string[], count: number) =>
+    list.length >= count ? Promise.resolve() : new Promise<void>((resolve) => waiters.push({ list, count, resolve }));
+  upstream.untilPosts = (count: number) => until(posts, count);
+  upstream.untilGets = (count: number) => until(gets, count);
   upstream.close = () =>
     new Promise<void>((resolve) => {
       server.closeAllConnections();
@@ -193,6 +231,44 @@ async function expectAbortEndsAStalledBody(
   expect(chunks[1]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
 }
 
+/**
+ * Holds the upstream's GETs, sends an embedding for a model the provider has not listed (so it refreshes its model
+ * list first), aborts while that refresh waits, and expects REQUEST_ABORTED within SETTLE_MS with no embedding
+ * request sent.
+ */
+async function expectAbortEndsTheModelRefresh(upstream: Upstream, send: (signal: AbortSignal) => Promise<unknown>): Promise<void> {
+  const getsBefore = upstream.gets.length;
+  upstream.holdGets = true;
+  const controller = new AbortController();
+  const outcome = track(send(controller.signal));
+  await upstream.untilGets(getsBefore + 1);
+  expect(outcome.state).toBe('pending');
+
+  controller.abort();
+  await settledWithin(outcome, SETTLE_MS);
+  expect(outcome.state).toBe('rejected');
+  expect(outcome.error).toMatchObject({ code: 'REQUEST_ABORTED' });
+
+  await sleep(QUIET_MS);
+  expect(upstream.gets).toHaveLength(getsBefore + 1);
+  expect(upstream.posts).toHaveLength(0);
+}
+
+/** Sends an embedding whose signal has already aborted and expects REQUEST_ABORTED with no request of any kind sent. */
+async function expectAbortedEmbeddingSendsNothing(upstream: Upstream, send: (signal: AbortSignal) => Promise<unknown>): Promise<void> {
+  const getsBefore = upstream.gets.length;
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = track(send(controller.signal));
+  await settledWithin(outcome, SETTLE_MS);
+  expect(outcome.state).toBe('rejected');
+  expect(outcome.error).toMatchObject({ code: 'REQUEST_ABORTED' });
+
+  await sleep(QUIET_MS);
+  expect(upstream.gets).toHaveLength(getsBefore);
+  expect(upstream.posts).toHaveLength(0);
+}
+
 describe("a request already sent ends when the caller's signal aborts", () => {
   let upstream: Upstream;
 
@@ -249,6 +325,61 @@ describe("a request already sent ends when the caller's signal aborts", () => {
       );
       expect(upstream.posts).toEqual(['/api/v1/embeddings']);
     });
+
+    it('rejects an embedding with REQUEST_ABORTED while its model-list refresh waits, and sends no embedding request', async () => {
+      const p = await openRouter();
+      await expectAbortEndsTheModelRefresh(upstream, (signal) =>
+        p.generateEmbeddings('openai/text-embedding-3-small', ['hello'], { abortSignal: signal }),
+      );
+    });
+
+    it('sends nothing for an embedding whose signal has already aborted', async () => {
+      const p = await openRouter();
+      await expectAbortedEmbeddingSendsNothing(upstream, (signal) =>
+        p.generateEmbeddings('openai/text-embedding-3-small', ['hello'], { abortSignal: signal }),
+      );
+    });
+
+    it('ends a stream aborted after its finish event and before [DONE] with the abort chunk as its only final chunk', async () => {
+      upstream.firstEvent = { contentType: 'text/event-stream', body: OPENROUTER_FIRST_EVENT + OPENROUTER_FINISH_EVENT };
+      const p = await openRouter();
+      const controller = new AbortController();
+      const outcome = track(drain(p.generateCompletionStream('anthropic/claude-sonnet-5.5', messages, { abortSignal: controller.signal })));
+      await upstream.untilPosts(1);
+      // Both events have arrived and the body has stalled before its usage line and [DONE].
+      await sleep(300);
+      controller.abort();
+      await settledWithin(outcome, SETTLE_MS);
+
+      expect(outcome.state).toBe('resolved');
+      const chunks = outcome.value as ModelCompletionResponse[];
+      expect(chunks[0]).toMatchObject({ responseTextDelta: 'Hel', isFinal: false });
+      expect(chunks.filter((chunk) => chunk.isFinal)).toHaveLength(1);
+      expect(chunks[chunks.length - 1]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
+    });
+
+    it('ends a stream that reaches [DONE] with one final chunk carrying the finish and the usage', async () => {
+      upstream.firstEvent = {
+        contentType: 'text/event-stream',
+        body: OPENROUTER_FIRST_EVENT + OPENROUTER_FINISH_EVENT + OPENROUTER_USAGE_EVENT + 'data: [DONE]\n\n',
+      };
+      const p = await openRouter();
+      const outcome = track(drain(p.generateCompletionStream('anthropic/claude-sonnet-5.5', messages, {})));
+      await upstream.untilPosts(1);
+      await settledWithin(outcome, SETTLE_MS);
+
+      expect(outcome.state).toBe('resolved');
+      const chunks = outcome.value as ModelCompletionResponse[];
+      const finals = chunks.filter((chunk) => chunk.isFinal);
+      expect(finals).toHaveLength(1);
+      expect(chunks[chunks.length - 1]).toBe(finals[0]);
+      expect(finals[0]).toMatchObject({
+        responseTextDelta: 'lo',
+        choices: [{ finishReason: 'stop' }],
+        usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+      });
+      expect(finals[0].error).toBeUndefined();
+    });
   });
 
   describe('RequestyProvider', () => {
@@ -273,6 +404,20 @@ describe("a request already sent ends when the caller's signal aborts", () => {
     it('rejects an embedding request with REQUEST_ABORTED at the abort', async () => {
       const p = await requesty();
       await expectAbortEndsTheRequest(upstream, (signal) =>
+        p.generateEmbeddings('openai/text-embedding-3-small', ['hello'], { abortSignal: signal }),
+      );
+    });
+
+    it('rejects an embedding with REQUEST_ABORTED while its model-list refresh waits, and sends no embedding request', async () => {
+      const p = await requesty();
+      await expectAbortEndsTheModelRefresh(upstream, (signal) =>
+        p.generateEmbeddings('openai/text-embedding-3-small', ['hello'], { abortSignal: signal }),
+      );
+    });
+
+    it('sends nothing for an embedding whose signal has already aborted', async () => {
+      const p = await requesty();
+      await expectAbortedEmbeddingSendsNothing(upstream, (signal) =>
         p.generateEmbeddings('openai/text-embedding-3-small', ['hello'], { abortSignal: signal }),
       );
     });
