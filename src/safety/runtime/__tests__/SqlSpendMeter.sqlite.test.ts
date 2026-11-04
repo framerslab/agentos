@@ -322,6 +322,49 @@ describe('SqlSpendMeter on SQLite, beyond the contract', () => {
     }
   });
 
+  it('leaves no settled units on a refunded reservation, so a retry by a meter that does not write the column is counted and refunded by its whole reservation', async () => {
+    const db = await openSqlite();
+    try {
+      // two meters on one store: one started before the column was added, as a process of an earlier release or one
+      // whose start read the table before the product's migration ran, and one that added it
+      const WINDOW_PREFIX = 'stale_window';
+      await db.exec(unsettledDdl());
+      await db.exec(unsettledDdl(WINDOW_PREFIX));
+      const options = { db, allowanceFor: () => 10, requireShared: false } as const;
+      const unaware = new SqlSpendMeter({ ...options, periodOf: monthOf, ensureSchema: false });
+      const unawareWindow = new SqlSpendMeter({ ...options, tablePrefix: WINDOW_PREFIX, windowMs: HOUR, ensureSchema: false });
+      await unaware.ensureSchema();
+      await unawareWindow.ensureSchema();
+      const aware = new SqlSpendMeter({ ...options, periodOf: monthOf });
+      const awareWindow = new SqlSpendMeter({ ...options, tablePrefix: WINDOW_PREFIX, windowMs: HOUR });
+      await aware.ensureSchema();
+      await awareWindow.ensureSchema();
+      expect(lastOf(await columnsOf(db, 'agentos_spend_reservations'))).toBe('settled_units');
+      expect(lastOf(await columnsOf(db, `${WINDOW_PREFIX}_reservations`))).toBe('settled_units');
+      for (const [first, retry] of [
+        [aware, unaware],
+        [awareWindow, unawareWindow],
+      ] as const) {
+        // the first attempt used 4 of its 10 units and was refunded
+        await first.reserve({ accountId: 'a', operationId: 'call', units: 10, now: OCT });
+        await first.settle({ operationId: 'call', outcome: 'consumed', units: 4, now: OCT });
+        expect(await first.settle({ operationId: 'call', outcome: 'replaced', now: OCT })).toEqual({ status: 'settled', state: 'released' });
+        expect(await first.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 0, remaining: 10 });
+        // the retry, under the same operation id, consumes its whole reservation through the meter without the column
+        expect(await retry.reserve({ accountId: 'a', operationId: 'call', units: 10, now: OCT })).toMatchObject({ status: 'reserved', attempt: 2 });
+        expect(await retry.settle({ operationId: 'call', outcome: 'consumed', now: OCT })).toEqual({ status: 'settled', state: 'consumed' });
+        // it counts by its whole reservation: the allowance holds no more
+        expect(await first.snapshot('a', OCT)).toMatchObject({ used: 10, reserved: 0, remaining: 0 });
+        expect(await first.reserve({ accountId: 'a', operationId: 'more', units: 1, now: OCT })).toMatchObject({ status: 'denied', reason: 'allowance_exhausted' });
+        // and its refund gives back the whole reservation it took
+        expect(await first.settle({ operationId: 'call', outcome: 'replaced', now: OCT })).toEqual({ status: 'settled', state: 'released' });
+        expect(await first.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 0, remaining: 10 });
+      }
+    } finally {
+      await db.close();
+    }
+  });
+
   it('reports to onWarning an index statement the store refuses, with its error, makes the indexes nothing stands in the way of, and counts on the tables as they are', async () => {
     const db = await openSqlite();
     try {
