@@ -483,5 +483,38 @@ describe("a request already sent ends when the caller's signal aborts", () => {
       );
       expect(upstream.posts).toEqual(['/v1/embeddings']);
     });
+
+    it('asks the OAuth flow for no token for a call whose signal has already aborted, and sends nothing', async () => {
+      // A token read can be a refresh request to the identity provider: an aborted call makes none.
+      let tokenReads = 0;
+      const p = new OpenAIProvider();
+      await p.initialize({
+        apiKey: '',
+        baseURL: `${upstream.url}/v1`,
+        requestTimeout: LONG_TIMEOUT_MS,
+        oauthFlow: {
+          getAccessToken: async () => {
+            tokenReads += 1;
+            return 'oauth-access-token';
+          },
+        },
+      });
+      const readsAtStart = tokenReads;
+      const controller = new AbortController();
+      controller.abort();
+
+      const embedding = track(p.generateEmbeddings('text-embedding-3-small', ['hello'], { abortSignal: controller.signal }));
+      const completion = track(p.generateCompletion('gpt-4o-mini', messages, { abortSignal: controller.signal }));
+      await settledWithin(embedding, SETTLE_MS);
+      await settledWithin(completion, SETTLE_MS);
+
+      expect(embedding.state).toBe('rejected');
+      expect(embedding.error).toMatchObject({ code: 'REQUEST_ABORTED' });
+      expect(completion.state).toBe('rejected');
+      expect(completion.error).toMatchObject({ code: 'REQUEST_ABORTED' });
+      expect(tokenReads).toBe(readsAtStart);
+      await sleep(QUIET_MS);
+      expect(upstream.posts).toHaveLength(0);
+    });
   });
 });
