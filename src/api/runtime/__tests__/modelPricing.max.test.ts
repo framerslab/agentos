@@ -141,10 +141,23 @@ describe('the rate the bound is priced at', () => {
     expect(estimateMaxCallCostUSD('openai', 'gpt-6-sol', { ...plain, cacheMarkers: true })).toBeCloseTo((maxInputTokens(plain)! * 5 + CAP * 10) / 1e6, 12);
   });
 
-  it('holds the output cap to the ceiling the model is known to have', () => {
-    // gpt-4o writes at most 16,384 tokens: $2.50 input, $10 output.
+  it('prices the output cap the request sends, never a lower ceiling a table knows for the model', () => {
+    // gpt-4o: $2.50 input, $10 output. The provider refuses a cap above its own ceiling unbilled, so the cap as sent is
+    // the most the call can write.
     const req = { messages: [{ role: 'user', content: 'hello' }], maxOutputTokens: 32_000 };
-    expect(estimateMaxCallCostUSD('openai', 'gpt-4o', req)).toBeCloseTo((maxInputTokens(req)! * 2.5 + 16_384 * 10) / 1e6, 12);
+    expect(estimateMaxCallCostUSD('openai', 'gpt-4o', req)).toBeCloseTo((maxInputTokens(req)! * 2.5 + 32_000 * 10) / 1e6, 12);
+    // An OpenRouter variant whose id a gpt-4o ceiling of 16,384 matches writes up to 64,000: a bound held to the
+    // ceiling would reserve a quarter of its output.
+    registerModelPricing('openrouter', (id) => (id === 'openai/gpt-4o:extended' ? { inputPerMTokUSD: 6, outputPerMTokUSD: 18 } : undefined));
+    try {
+      const extended = { messages: [{ role: 'user', content: 'hello' }], maxOutputTokens: 64_000 };
+      expect(estimateMaxCallCostUSD('openrouter', 'openai/gpt-4o:extended', extended)).toBeCloseTo(
+        (maxInputTokens(extended)! * 6 + 64_000 * 18) / 1e6,
+        12,
+      );
+    } finally {
+      registerModelPricing('openrouter', () => undefined);
+    }
   });
 });
 
@@ -166,6 +179,17 @@ describe('what the bound cannot price', () => {
     expect(estimateMaxCallCostUSD('anthropic', 'claude-sonnet-4-6', { ...base, messages: [{ role: 'user', content: [result] }] })).toBeUndefined();
     const openaiImage = { type: 'input_image', image_url: 'https://example.com/a.png' };
     expect(estimateMaxCallCostUSD('openai', 'gpt-6-sol', { ...base, messages: [{ role: 'user', content: [openaiImage] }] })).toBeUndefined();
+  });
+
+  it('is undefined for an assistant message that replays an earlier audio answer by its id', () => {
+    // Chat Completions sends the answer's audio again as audio input; the reference is a few bytes of text.
+    const messages = [
+      { role: 'user', content: 'say hello' },
+      { role: 'assistant', content: null, audio: { id: 'audio_abc123' } },
+      { role: 'user', content: 'again' },
+    ];
+    expect(estimateMaxCallCostUSD('openai', 'gpt-4o', { ...base, messages })).toBeUndefined();
+    expect(estimateMaxCallCostUSD('openai', 'gpt-4o', { ...base, messages: [{ role: 'assistant', content: 'hi', audio: null }] })).toBeDefined();
   });
 
   it("prices a replayed tool turn: its thinking block, and a tool call whose arguments are data, not content parts", () => {
