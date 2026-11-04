@@ -256,12 +256,15 @@ export interface SqlSpendMeterOptions {
   /**
    * Told of each statement that failed while {@link SqlSpendMeter.ensureSchema} brought tables that exist up to the
    * meter's indexes and its `settled_units` column, with the statement and the error the store threw: the
-   * `CREATE INDEX` of an index the tables lack or the `ALTER TABLE` that adds the column (refused, for example, to a
-   * role that does not own them, or stopped by a lock or statement timeout), or the read of the catalogue before them.
-   * With `ensureSchema: false` it is told, once, of the read that found the reservations table without the column.
-   * Such a failure is not fatal: the indexes speed the meter's reads and change none of its answers, so the meter uses
-   * the tables as they are, and without the column a consumed settle takes its whole reservation, as it did before
-   * {@link SpendSettleRequest.units}. An error the callback throws is dropped. Without a callback, nothing is reported.
+   * `CREATE INDEX` of an index the tables lack (refused, for example, to a role that does not own them, or stopped by a
+   * lock or statement timeout), the read of the catalogue before them, or the `ALTER TABLE` that adds the column when
+   * another process added it first or the store refuses it for good (a role that does not own the table, a read-only
+   * store). With `ensureSchema: false` it is told, once, of the read that found the reservations table without the
+   * column. Such a failure is not fatal: the indexes speed the meter's reads and change none of its answers, so the meter
+   * uses the tables as they are, and without the column a consumed settle takes its whole reservation, as it did before
+   * {@link SpendSettleRequest.units}. An `ALTER` or a read of the column that fails for any other reason (a timeout, a
+   * lock, a dropped connection) changes what is charged, so it is not reported here: it fails the statement, and the next
+   * statement tries again. An error the callback throws is dropped. Without a callback, nothing is reported.
    */
   onWarning?(warning: { statement: string; error: unknown }): void;
 }
@@ -303,6 +306,38 @@ class AllowanceExhausted extends Error {
 }
 
 const num = (v: unknown): number => (typeof v === 'number' ? v : Number(v ?? 0));
+
+/** The code of a store's error, for the drivers that give one. */
+const errorCode = (error: unknown): string => {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : '';
+};
+
+/** The message of a store's error. */
+const errorMessage = (error: unknown): string => {
+  const message = (error as { message?: unknown } | null)?.message;
+  return typeof message === 'string' ? message : '';
+};
+
+/** A statement that names a column the table lacks: Postgres's undefined_column, 42703, or SQLite's "no such column". */
+function isMissingColumnError(error: unknown): boolean {
+  return errorCode(error) === '42703' || /no such column/i.test(errorMessage(error));
+}
+
+/**
+ * A refusal of a table change that another try will not change: Postgres's insufficient_privilege, 42501, which a role
+ * that does not own the table gets, and read_only_sql_transaction, 25006; SQLite's read-only file and its authorizer.
+ */
+function isLastingRefusal(error: unknown): boolean {
+  const code = errorCode(error);
+  return (
+    code === '42501' ||
+    code === '25006' ||
+    code.startsWith('SQLITE_READONLY') ||
+    code === 'SQLITE_AUTH' ||
+    /attempt to write a readonly database|not authorized/i.test(errorMessage(error))
+  );
+}
 
 /**
  * The units a consumed settle moves to `used`: the units the work used, held to the reservation. More than it reserved
@@ -373,9 +408,11 @@ export class SqlSpendMeter implements ISpendMeter {
    * on the reservations table, which holds back the table's writes, before it looks for the index's name. It then reads
    * whether the reservations table holds `settled_units`, and on one an earlier release made, which lacks it, runs
    * `ALTER TABLE <prefix>_reservations ADD COLUMN settled_units BIGINT`; a table that holds it gets no `ALTER`, whose
-   * lock would hold back every statement on the table. An index statement or an `ALTER` that fails is reported to
-   * {@link SqlSpendMeterOptions.onWarning}, and the meter uses the tables as they are. Called before the first
-   * statement; safe to call again. With `ensureSchema: false` it runs no DDL and only reads whether the column is there.
+   * lock would hold back every statement on the table. An index statement that fails, or an `ALTER` the store refuses
+   * for good, is reported to {@link SqlSpendMeterOptions.onWarning}, and the meter uses the tables as they are. A read
+   * of the column or an `ALTER` that fails for any other reason rejects, and the next statement starts again. Called
+   * before the first statement; safe to call again. With `ensureSchema: false` it runs no DDL and only reads whether the
+   * column is there.
    */
   ensureSchema(): Promise<void> {
     this.schemaReady ??= this.prepareSchema().catch((e) => {
@@ -409,8 +446,9 @@ export class SqlSpendMeter implements ISpendMeter {
 
   /**
    * Whether the reservations table holds `settled_units`: `true`, or the read that found it missing with the store's
-   * error. A transient error is thrown, and so is the error of a reservations table that is not there at all, so the
-   * start is read again at the next statement rather than taken for a table without the column.
+   * error. Only an error that names a missing column says so. Every other error says nothing about the column (a
+   * timeout, a lock, a dropped connection, a reservations table that is not there at all) and is thrown, so the statement
+   * that started the read fails closed and the next one reads again, since the answer holds for the process's life.
    */
   private async readSettledUnits(): Promise<true | { statement: string; error: unknown }> {
     const statement = `SELECT settled_units FROM ${this.tables.reservations} WHERE 1 = 0`;
@@ -418,22 +456,29 @@ export class SqlSpendMeter implements ISpendMeter {
       await this.db.get(statement);
       return true;
     } catch (error) {
-      if (isTransientStorageError(error)) throw error;
-      // throws while the table is missing: the meter's own statements would fail on it as well
-      await this.db.get(`SELECT 1 FROM ${this.tables.reservations} LIMIT 1`);
+      if (!isMissingColumnError(error)) throw error;
       return { statement, error };
     }
   }
 
   /**
-   * Adds `settled_units` to a reservations table that lacks it, and answers whether the table holds it afterwards. An
-   * `ALTER` the store refuses goes to {@link SqlSpendMeterOptions.onWarning}; one another process ran first leaves the
-   * column in place all the same, which the second read finds.
+   * Adds `settled_units` to a reservations table that lacks it, and answers whether the table holds it afterwards. A
+   * failed `ALTER` goes to {@link SqlSpendMeterOptions.onWarning} when another process ran one first, which leaves the
+   * column in place for the second read to find, or when the store refuses it for good, which leaves whole settles.
+   * Any other failure is thrown: `run()` retries a transient one, and the next statement runs the `ALTER` again after a
+   * timeout, so a passing lock never settles a process's reservations whole for its whole life.
    */
   private async addSettledUnits(): Promise<boolean> {
     if ((await this.readSettledUnits()) === true) return true;
     const statement = `ALTER TABLE ${this.tables.reservations} ADD COLUMN settled_units BIGINT`;
-    await this.db.exec(statement).catch((error: unknown) => this.warn(statement, error));
+    try {
+      await this.db.exec(statement);
+    } catch (error) {
+      const found = (await this.readSettledUnits()) === true;
+      if (!found && !isLastingRefusal(error)) throw error;
+      this.warn(statement, error);
+      return found;
+    }
     return (await this.readSettledUnits()) === true;
   }
 

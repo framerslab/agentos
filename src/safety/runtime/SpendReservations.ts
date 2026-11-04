@@ -266,20 +266,22 @@ export function releaseSpend(store: SpendDayStore, id: string, settledMicro: num
 }
 
 /**
- * What a consumed decision settles a listed reservation at: the micro-dollars its `units` name (a negative figure as
- * none, a fraction by its whole part), which the store holds to the amount reserved, or the reservation's listed amount
- * when it names none or NaN.
+ * What a consumed decision settles a listed reservation at: the micro-dollars its `units` name, a fraction by its whole
+ * part, which the store holds to the amount reserved, or the reservation's listed amount when it names none. A figure
+ * that is not a finite number, zero or more, was never known, so it settles at the listed amount, the rule
+ * {@link releaseSpend} keeps for a cost: a cost below zero settled at nothing would take the reservation's whole amount
+ * out of the day's total.
  */
 function consumedMicro(listed: number, units: number | undefined): number {
-  if (typeof units !== 'number' || Number.isNaN(units)) return listed;
-  return Math.min(Math.max(0, Math.trunc(units)), Number.MAX_SAFE_INTEGER);
+  if (typeof units !== 'number' || !Number.isFinite(units) || units < 0) return listed;
+  return Math.min(Math.trunc(units), Number.MAX_SAFE_INTEGER);
 }
 
 /**
  * Settles each reservation whose time is up and answers how many it settled. Without a resolver, an ordinary one
  * settles at its whole amount, since its use was never confirmed, and one made with `requireFence` is left reserved.
  * With `resolve`, each is decided by the host: consumed (at the micro-dollars its decision's `units` name, which the
- * store holds to the amount reserved, or at its listed amount without them), released (nothing), or deferred until
+ * store holds to the amount reserved, or at its listed amount without them or with a figure below zero), released (nothing), or deferred until
  * `retryAt`, still open and counted; a resolver that throws defers for 15 seconds, never settling on a failure.
  * A sweep with `resolve` throws on a store that does not hold fenced reservations, and a reservation another process
  * settled in the meantime is not counted. An operation's row is listed only once its time is up and no run holds a
