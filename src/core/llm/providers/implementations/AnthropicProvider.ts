@@ -685,7 +685,6 @@ export class AnthropicProvider implements IProvider {
     await this.keyPool?.close();
 
     this.config = {
-      baseURL: ANTHROPIC_DEFAULT_BASE_URL,
       // Total attempts (NOT retries-on-top): 1 meant a single shot with the
       // whole retryable-error path (429 / 5xx / 529 overloaded / network) as
       // dead code. 3 matches the OpenAI + Gemini providers and lets the
