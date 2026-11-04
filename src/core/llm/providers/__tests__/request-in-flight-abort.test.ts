@@ -13,8 +13,9 @@
  * GET (the model listings the providers read at start) and holds every POST
  * open without answering, so only a request that carries the caller's signal
  * ends at the abort; a test can also hold the GETs, so the model-list refresh
- * an embedding call starts for a model it has not listed stalls the same way.
- * Nothing leaves the machine.
+ * an embedding call starts for a model it has not listed stalls the same way,
+ * and a POST can answer with an error whose body stalls, so an abort lands
+ * while the provider reads that body. Nothing leaves the machine.
  */
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -74,10 +75,15 @@ interface Upstream {
   posts: string[];
   /** Paths of the GETs received, in order. */
   gets: string[];
+  /** The Authorization header of each POST received, in order. */
+  authorizations: string[];
   /** When true, a GET is held open without an answer, as a POST is. */
   holdGets: boolean;
-  /** Set to the first events a POST answers with before it stalls; null holds the POST before its headers. */
-  firstEvent: { contentType: string; body: string } | null;
+  /**
+   * Set to the first events a POST answers with before it stalls (with `status`, an error answer whose body stalls);
+   * null holds the POST before its headers.
+   */
+  firstEvent: { contentType: string; body: string; status?: number } | null;
   /** Resolves once `count` POSTs have arrived. */
   untilPosts(count: number): Promise<void>;
   /** Resolves once `count` GETs have arrived. */
@@ -95,7 +101,8 @@ async function startUpstream(): Promise<Upstream> {
     waiters = waiters.filter((w) => w.list.length < w.count);
     ready.forEach((w) => w.resolve());
   };
-  const upstream = { posts, gets, holdGets: false, firstEvent: null } as unknown as Upstream;
+  const authorizations: string[] = [];
+  const upstream = { posts, gets, authorizations, holdGets: false, firstEvent: null } as unknown as Upstream;
   const server: Server = createServer((req, res: ServerResponse) => {
     if (req.method !== 'POST') {
       arrived(gets, req.url ?? '');
@@ -106,9 +113,10 @@ async function startUpstream(): Promise<Upstream> {
       return;
     }
     req.resume();
+    authorizations.push(req.headers.authorization ?? '');
     arrived(posts, req.url ?? '');
     if (upstream.firstEvent) {
-      res.writeHead(200, { 'content-type': upstream.firstEvent.contentType });
+      res.writeHead(upstream.firstEvent.status ?? 200, { 'content-type': upstream.firstEvent.contentType });
       res.write(upstream.firstEvent.body);
     }
     // The POST is never answered (or never finished): only the caller's abort can end it.
@@ -281,6 +289,45 @@ async function expectAbortedEmbeddingSendsNothing(upstream: Upstream, send: (sig
   expect(upstream.posts).toHaveLength(0);
 }
 
+/** The start of a 401 answer's JSON body, cut before it ends: the body stalls after it. */
+const UNAUTHORIZED_BODY_START = '{"error":{"message":"Invalid API key","code":401';
+
+/**
+ * Opens a stream on a pool of two keys taken in order, against an upstream that answers 401 and stalls inside the
+ * error body; aborts while the provider reads that body, and expects the abort chunk within SETTLE_MS, no request on
+ * the second key, and the first key still in rotation: the next stream goes out with it.
+ */
+async function expectAbortDuringTheErrorBodyKeepsTheKey(
+  upstream: Upstream,
+  open: (signal: AbortSignal) => AsyncGenerator<ModelCompletionResponse, void, undefined>,
+): Promise<void> {
+  upstream.firstEvent = { status: 401, contentType: 'application/json', body: UNAUTHORIZED_BODY_START };
+  const controller = new AbortController();
+  const outcome = track(drain(open(controller.signal)));
+  await upstream.untilPosts(1);
+  // The 401's head and the start of its body have arrived; the body has stalled.
+  await sleep(300);
+  expect(outcome.state).toBe('pending');
+
+  controller.abort();
+  await settledWithin(outcome, SETTLE_MS);
+  expect(outcome.state).toBe('resolved');
+  const chunks = outcome.value as ModelCompletionResponse[];
+  expect(chunks).toHaveLength(1);
+  expect(chunks[0]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
+  await sleep(QUIET_MS);
+  expect(upstream.authorizations).toEqual(['Bearer key-a']);
+
+  // The abort marked no key: the next stream is sent with the first key again.
+  upstream.firstEvent = null;
+  const next = new AbortController();
+  const second = track(drain(open(next.signal)));
+  await upstream.untilPosts(2);
+  expect(upstream.authorizations).toEqual(['Bearer key-a', 'Bearer key-a']);
+  next.abort();
+  await settledWithin(second, SETTLE_MS);
+}
+
 describe("a request already sent ends when the caller's signal aborts", () => {
   let upstream: Upstream;
 
@@ -377,6 +424,20 @@ describe("a request already sent ends when the caller's signal aborts", () => {
       });
       expect(chunks[2]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
     });
+
+    it('ends a stream aborted while its 401 error body is read, and keeps the key in rotation', async () => {
+      const p = new OpenRouterProvider();
+      await p.initialize({
+        apiKey: 'key-a,key-b',
+        keyPool: { strategy: 'ordered' },
+        baseURL: `${upstream.url}/api/v1`,
+        requestTimeout: LONG_TIMEOUT_MS,
+        streamRequestTimeout: LONG_TIMEOUT_MS,
+      });
+      await expectAbortDuringTheErrorBodyKeepsTheKey(upstream, (signal) =>
+        p.generateCompletionStream('anthropic/claude-sonnet-5.5', messages, { abortSignal: signal }),
+      );
+    });
   });
 
   describe('RequestyProvider', () => {
@@ -416,6 +477,20 @@ describe("a request already sent ends when the caller's signal aborts", () => {
       const p = await requesty();
       await expectAbortedEmbeddingSendsNothing(upstream, (signal) =>
         p.generateEmbeddings('openai/text-embedding-3-small', ['hello'], { abortSignal: signal }),
+      );
+    });
+
+    it('ends a stream aborted while its 401 error body is read, and keeps the key in rotation', async () => {
+      const p = new RequestyProvider();
+      await p.initialize({
+        apiKey: 'key-a,key-b',
+        keyPool: { strategy: 'ordered' },
+        baseURL: `${upstream.url}/v1`,
+        requestTimeout: LONG_TIMEOUT_MS,
+        streamRequestTimeout: LONG_TIMEOUT_MS,
+      });
+      await expectAbortDuringTheErrorBodyKeepsTheKey(upstream, (signal) =>
+        p.generateCompletionStream('openai/gpt-4o-mini', messages, { abortSignal: signal }),
       );
     });
   });
