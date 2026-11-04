@@ -192,6 +192,26 @@ describe('what the bound cannot price', () => {
     expect(estimateMaxCallCostUSD('openai', 'gpt-4o', { ...base, messages: [{ role: 'assistant', content: 'hi', audio: null }] })).toBeDefined();
   });
 
+  it("is undefined for a Gemini part that carries a file or inline data, and for a tool that is not a function's definition", () => {
+    // A host that prices Gemini sends its messages in Gemini's shape: `parts`, with a file by reference or inline.
+    registerModelPricing('gemini', (id) => (id === 'gemini-x' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 2 } : undefined));
+    try {
+      const text = [{ role: 'user', parts: [{ text: 'describe it' }] }];
+      expect(estimateMaxCallCostUSD('gemini', 'gemini-x', { messages: text, maxOutputTokens: 10 })).toBeDefined();
+      const file = [{ role: 'user', parts: [{ text: 'describe it' }, { file_data: { mime_type: 'video/mp4', file_uri: 'https://example.com/files/abc' } }] }];
+      expect(estimateMaxCallCostUSD('gemini', 'gemini-x', { messages: file, maxOutputTokens: 10 })).toBeUndefined();
+      const inline = [{ role: 'user', parts: [{ inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo' } }] }];
+      expect(estimateMaxCallCostUSD('gemini', 'gemini-x', { messages: inline, maxOutputTokens: 10 })).toBeUndefined();
+      // Gemini's search and code-execution tools carry no `type`; a function's definition is described in full.
+      expect(estimateMaxCallCostUSD('gemini', 'gemini-x', { messages: text, tools: [{ google_search: {} }], maxOutputTokens: 10 })).toBeUndefined();
+      expect(estimateMaxCallCostUSD('gemini', 'gemini-x', { messages: text, tools: [{ codeExecution: {} }], maxOutputTokens: 10 })).toBeUndefined();
+      const declared = [{ function_declarations: [{ name: 'look', description: 'Look.', parameters: { type: 'object' } }] }];
+      expect(estimateMaxCallCostUSD('gemini', 'gemini-x', { messages: text, tools: declared, maxOutputTokens: 10 })).toBeDefined();
+    } finally {
+      registerModelPricing('gemini', () => undefined);
+    }
+  });
+
   it("prices a replayed tool turn: its thinking block, and a tool call whose arguments are data, not content parts", () => {
     const thinking = { type: 'thinking', thinking: '', signature: 'EqQBCkYIBxgCKkA' };
     const call = { type: 'tool_use', id: 't1', name: 'look', input: { type: 'image', path: 'a.png' } };

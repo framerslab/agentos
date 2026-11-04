@@ -16,6 +16,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { embedText, type EmbedTextOptions } from '../../embedText.js';
 import { clearDefaultProvider, setDefaultProvider } from '../global-default.js';
+import { registerModelPricing } from '../modelPricing.js';
+import { SpendBudget } from '../spendBudget.js';
 
 /**
  * Every key and base-URL variable a case could read, each case setting the ones
@@ -217,6 +219,22 @@ describe("embedText posts a key to its provider's own embeddings endpoint", () =
     const [body] = bodiesSent();
     expect(body.dimensions).toBe(256);
     expect(body).not.toHaveProperty('output_dimension');
+  });
+});
+
+describe("embedText charges a provider the host prices at the host's rate", () => {
+  it("prices Mistral's reported tokens with the host's table, since Mistral reports no cost", async () => {
+    setEnv({ MISTRAL_API_KEY: 'mistral-test-key' });
+    // The answer reports 1 prompt token, and the host prices mistral-embed at $100 per MTok: the call costs $0.0001.
+    registerModelPricing('mistral', (id) => (id === 'mistral-embed' ? { inputPerMTokUSD: 100, outputPerMTokUSD: 0 } : undefined));
+    try {
+      const budget = new SpendBudget({ maxCostUSD: 1 });
+      const result = await embedText({ provider: 'mistral', model: 'mistral-embed', input: 'hello', budget });
+      expect(result.usage.costUSD).toBeCloseTo(0.0001, 12);
+      expect(budget.spentUSD()).toBeCloseTo(0.0001, 12);
+    } finally {
+      registerModelPricing('mistral', () => undefined);
+    }
   });
 });
 

@@ -232,6 +232,16 @@ describe('the estimates', () => {
     ).toBeCloseTo((1_000 * 2 + 1_000 * 10) / 1e6, 12);
   });
 
+  it('estimates a call at the long-context card once its assumed prompt tokens pass the threshold', () => {
+    // claude-haiku-5-5: 800,000 characters are 200,000 tokens at four a token, over its 100,000, where it bills $0.50
+    // input and $2.50 output per MTok (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-04).
+    expect(estimateCallCostUSD('anthropic', 'claude-haiku-5-5', 800_000, 1000)).toBeCloseTo(0.1 + 0.0025, 10);
+    expect(estimateCallCostUSD('anthropic', 'claude-haiku-5-5', 4000, 1000)).toBeCloseTo(0.0001 + 0.0005, 10);
+    // gpt-6-sol: 1,200,000 characters are 300,000 tokens, over 272,000, where it bills $4 and $15.
+    expect(estimateCallCostUSD('openai', 'gpt-6-sol', 1_200_000, 1000)).toBeCloseTo(1.2 + 0.015, 10);
+    expect(estimateCallCostUSD('openai', 'gpt-6-sol', 4000, 1000)).toBeCloseTo(0.002 + 0.01, 10);
+  });
+
   it("prices OpenAI's reported usage over 272,000 prompt tokens at the long-context rates, as OpenAIProvider bills it", () => {
     // gpt-6-sol over 272K input tokens: $4 input and $15 output per MTok (https://developers.openai.com/api/docs/pricing,
     // read 2026-11-04), twice and one and a half times its $2 and $10.
