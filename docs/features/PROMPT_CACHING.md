@@ -188,7 +188,7 @@ await generateText({
 
 ## Usage normalization and telemetry
 
-Every provider reports cache activity in the same two fields of its
+Every provider reports cache activity in the same fields of its
 `ModelUsage`, and `generateText()` / `streamText()` sum them over a call's
 steps into the result's `usage`:
 
@@ -196,6 +196,7 @@ steps into the result's `usage`:
 |---|---|---|
 | `cacheReadInputTokens` | `cacheReadTokens` | Prompt tokens served from cache |
 | `cacheCreationInputTokens` | `cacheCreationTokens` | Prompt tokens written to cache |
+| `cacheCreationExtendedInputTokens` | `cacheCreationExtendedTokens` | Of the writes, those made with the longer lifetime: Anthropic's 1 hour (`cache_creation.ephemeral_1h_input_tokens`), OpenAI's 12 hours (`cache_write_tokens_details.ttl_12h_tokens`). Absent when the response does not split its writes by lifetime |
 | `inclusiveInputTokens` | `inclusiveInputTokens` | All input tokens, cached ones included |
 
 `promptTokens` follows the provider: Anthropic's excludes the cached tokens,
@@ -206,7 +207,7 @@ Sources: Anthropic `usage.cache_read_input_tokens` /
 `cache_creation_input_tokens`; OpenAI and OpenAI-compatible
 `prompt_tokens_details.cached_tokens`, plus `cache_write_tokens` where
 reported (GPT-5.6+ families) and the Responses API's
-`input_tokens_details`; OpenRouter unified usage; Gemini
+`input_tokens_details` with its `cache_write_tokens_details` split; OpenRouter unified usage; Gemini
 `usageMetadata.cachedContentTokenCount`. An explicit zero is preserved (an
 observed miss); the fields are absent when a provider reports nothing.
 

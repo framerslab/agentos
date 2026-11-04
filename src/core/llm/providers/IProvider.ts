@@ -401,6 +401,14 @@ export interface ModelUsage {
   costUSD?: number;
   /** Tokens written to the prompt cache on this call (Anthropic: 25% surcharge at 5m TTL; OpenAI GPT-5.6+: 25% surcharge, from `cache_write_tokens`). */
   cacheCreationInputTokens?: number;
+  /**
+   * Of {@link ModelUsage.cacheCreationInputTokens}, the tokens written with the provider's longer cache lifetime,
+   * which bill at a higher rate: Anthropic's 1-hour writes at 2x input (`usage.cache_creation.ephemeral_1h_input_tokens`),
+   * OpenAI's 12-hour writes at 2.5x input (`cache_write_tokens_details.ttl_12h_tokens`). The rest were written with the
+   * default lifetime (Anthropic's 5 minutes at 1.25x, OpenAI's 30 minutes at 1.25x). Absent when the provider did not
+   * split its writes by lifetime.
+   */
+  cacheCreationExtendedInputTokens?: number;
   /** Tokens read from the prompt cache on this call (Anthropic: 90% discount). */
   cacheReadInputTokens?: number;
   /**

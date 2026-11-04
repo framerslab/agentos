@@ -604,8 +604,46 @@ function withSchemaRoute<T extends ModelCompletionResponse>(completion: T, paylo
     : { ...completion, schemaRoute };
 }
 
+/**
+ * The 1-hour share of a response's cache writes, as {@link ModelUsage.cacheCreationExtendedInputTokens}: the
+ * `ephemeral_1h_input_tokens` of its `usage.cache_creation` split
+ * (https://platform.claude.com/docs/en/build-with-claude/prompt-caching). Nothing when the response has no split, or
+ * a count that is not a number zero or more.
+ */
+function oneHourCacheWrites(split: AnthropicCacheCreationBreakdown | null | undefined): { cacheCreationExtendedInputTokens?: number } {
+  const oneHour = split?.ephemeral_1h_input_tokens;
+  return typeof oneHour === 'number' && Number.isFinite(oneHour) && oneHour >= 0 ? { cacheCreationExtendedInputTokens: oneHour } : {};
+}
+
+/**
+ * The tokens a response wrote to the prompt cache: `cache_creation_input_tokens`, or, when the response gives only the
+ * `cache_creation` split (as some gateways do), the sum of its 5-minute and 1-hour counts, as
+ * `estimateAnthropicCostUSD` reads it. Undefined when the response reports neither.
+ */
+function cacheWriteTotal(
+  total: number | undefined,
+  split: AnthropicCacheCreationBreakdown | null | undefined,
+): number | undefined {
+  if (total !== undefined) return total;
+  if (!split) return undefined;
+  const count = (value: number | undefined): number => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0);
+  return count(split.ephemeral_5m_input_tokens) + count(split.ephemeral_1h_input_tokens);
+}
+
 /** Anthropic's API base, the `baseURL` a provider without one sends to. */
 export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com';
+
+/**
+ * The base a request's endpoint (`/v1/messages`) is appended to: `baseURL` trimmed and without its trailing slashes, so
+ * `https://gateway.example/` sends to `https://gateway.example/v1/messages` and not to `//v1/messages`, or
+ * {@link ANTHROPIC_DEFAULT_BASE_URL} when none is given or nothing is left.
+ */
+function anthropicBase(baseURL: string | undefined): string {
+  const base = (baseURL ?? '').trim();
+  let end = base.length;
+  while (end > 0 && base.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return end > 0 ? base.slice(0, end) : ANTHROPIC_DEFAULT_BASE_URL;
+}
 
 /** The model a billing probe and `checkHealth()` send their one-token request to when the provider has no default model. */
 export const ANTHROPIC_BILLING_PROBE_MODEL = 'claude-haiku-4-5-20251001';
@@ -679,7 +717,6 @@ export class AnthropicProvider implements IProvider {
     await this.keyPool?.close();
 
     this.config = {
-      baseURL: ANTHROPIC_DEFAULT_BASE_URL,
       // Total attempts (NOT retries-on-top): 1 meant a single shot with the
       // whole retryable-error path (429 / 5xx / 529 overloaded / network) as
       // dead code. 3 matches the OpenAI + Gemini providers and lets the
@@ -701,6 +738,9 @@ export class AnthropicProvider implements IProvider {
       // shorten-retry loop.
       defaultMaxTokens: 16000,
       ...config,
+      // Every endpoint is appended to the base (`/v1/messages`), so a base given with trailing slashes
+      // (`https://gateway.example/`) would send to `//v1/messages`, which a gateway can refuse.
+      baseURL: anthropicBase(config.baseURL),
     };
     this.keyPool = keyPool;
     await this.keyPool.ready();
@@ -1358,9 +1398,10 @@ export class AnthropicProvider implements IProvider {
             // input_tokens excludes cached tokens — capture the cache
             // counts so the final chunk's usage prices them (the
             // accumulate path at streamToCompletion does the same).
-            cacheCreationTokens = event.message.usage?.cache_creation_input_tokens;
-            cacheReadTokens = event.message.usage?.cache_read_input_tokens;
             cacheCreationSplit = event.message.usage?.cache_creation;
+            // A usage with the write split alone counts its writes from the split.
+            cacheCreationTokens = cacheWriteTotal(event.message.usage?.cache_creation_input_tokens, cacheCreationSplit);
+            cacheReadTokens = event.message.usage?.cache_read_input_tokens;
             // Cache diagnostics ride message_start in streaming responses
             // (mirrors the streamToCompletion aggregate path).
             streamDiagnostics = event.message.diagnostics;
@@ -1499,6 +1540,7 @@ export class AnthropicProvider implements IProvider {
               ...(cacheCreationTokens !== undefined && {
                 cacheCreationInputTokens: cacheCreationTokens,
               }),
+              ...oneHourCacheWrites(cacheCreationSplit),
               ...(cacheReadTokens !== undefined && {
                 cacheReadInputTokens: cacheReadTokens,
               }),
@@ -2894,12 +2936,16 @@ export class AnthropicProvider implements IProvider {
       .map(block => block.text!);
     let fullText = textParts.join('');
 
+    const cacheWritten = cacheWriteTotal(apiResponse.usage.cache_creation_input_tokens, apiResponse.usage.cache_creation);
     const usage: ModelUsage = {
       promptTokens: apiResponse.usage.input_tokens,
       completionTokens: apiResponse.usage.output_tokens,
       totalTokens: apiResponse.usage.input_tokens + apiResponse.usage.output_tokens,
       costUSD: estimateAnthropicCostUSD(pricedModelId, apiResponse.usage),
-      cacheCreationInputTokens: apiResponse.usage.cache_creation_input_tokens,
+      cacheCreationInputTokens: cacheWritten,
+      // The 1-hour share of the writes, which bill at 2x input where the
+      // 5-minute ones bill at 1.25x: a cost counted from the tokens needs it.
+      ...oneHourCacheWrites(apiResponse.usage.cache_creation),
       cacheReadInputTokens: apiResponse.usage.cache_read_input_tokens,
       // Anthropic's input_tokens EXCLUDES cache reads/writes; the
       // provider-independent inclusive input total adds them back
@@ -2907,7 +2953,7 @@ export class AnthropicProvider implements IProvider {
       inclusiveInputTokens:
         apiResponse.usage.input_tokens
         + (apiResponse.usage.cache_read_input_tokens ?? 0)
-        + (apiResponse.usage.cache_creation_input_tokens ?? 0),
+        + (cacheWritten ?? 0),
     };
 
     // A refused turn is discarded whole, even when the model wrote text or
@@ -3145,7 +3191,7 @@ export class AnthropicProvider implements IProvider {
     // Resolved before the deadline starts and outside the catch below, which turns a failed request into an answer.
     const operationHeader = resolveOperationIdHeader(this.config?.operationIdHeader);
     const deadline = startKeyProbeDeadline(options);
-    const baseURL = options.baseURL || this.config?.baseURL || ANTHROPIC_DEFAULT_BASE_URL;
+    const baseURL = anthropicBase(options.baseURL || this.config?.baseURL);
     try {
       // Each request of the probe is a call of its own, with its own operation id when the host names a header.
       const headers = (): Record<string, string> => ({

@@ -737,6 +737,10 @@ export async function generateObject<T extends ZodType>(
       totalUsage.cacheCreationTokens =
         (totalUsage.cacheCreationTokens ?? 0) + result.usage.cacheCreationTokens;
     }
+    if (typeof result.usage.cacheCreationExtendedTokens === 'number') {
+      totalUsage.cacheCreationExtendedTokens =
+        (totalUsage.cacheCreationExtendedTokens ?? 0) + result.usage.cacheCreationExtendedTokens;
+    }
 
     lastRawText = result.text;
 

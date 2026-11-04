@@ -66,6 +66,13 @@ describe('GmiTurnFolder', () => {
     expect(f.failedAttempts()).toEqual([{ providerId: 'anthropic', modelId: 'claude-x', usage: u(40, 0) }]);
   });
 
+  it("keeps the 1-hour share of a failed attempt's cache writes in the turn's usage, so a cost counted from it prices that share at the 1-hour rate", () => {
+    const f = new GmiTurnFolder();
+    f.push(c(GMIOutputChunkType.USAGE_UPDATE, { ...u(40, 0), cacheCreationInputTokens: 1_000, cacheCreationExtendedInputTokens: 400 }, { metadata: { attemptFailed: true, hop: 0, providerId: 'anthropic', modelId: 'claude-x' } }));
+    f.push(step(0, 'From the fallback.', 'stop', { ...u(12, 3), cacheCreationInputTokens: 100, cacheCreationExtendedInputTokens: 50 }));
+    expect(f.usage()).toMatchObject({ cacheCreationTokens: 1_100, cacheCreationExtendedTokens: 450 });
+  });
+
   it('outstanding tool calls and no text end as tool-calls, as streamText reports', () => {
     const f = new GmiTurnFolder();
     [c(GMIOutputChunkType.TOOL_CALL_REQUEST, [{ id: 'c1', name: 'lookup', arguments: {} }]), step(0, '', 'tool_calls'), c(GMIOutputChunkType.TOOL_RESULT, { toolCallId: 'c1', name: 'lookup', result: 1, isError: false })].forEach((x) => f.push(x));
