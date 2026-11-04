@@ -83,6 +83,17 @@ export type { OpenAIModelPrice } from '../../core/llm/providers/implementations/
 // Claude's prices in the same shape, from the catalog module, which loads no provider either.
 export { anthropicModelPricing } from '../../core/llm/providers/implementations/anthropicCatalog.js';
 export type { AnthropicModelPrice } from '../../core/llm/providers/implementations/anthropicCatalog.js';
+// Every provider's prices in one shape (the built-in tables and a host's), and the most a call can cost before it is
+// sent, for a host that reserves it on a spend meter; the module loads no provider.
+export {
+  MAX_COST_TOKENS_PER_MESSAGE,
+  MAX_COST_TOOL_USE_TOKENS,
+  estimateMaxCallCostUSD,
+  maxInputTokens,
+  modelPricing,
+  registerModelPricing,
+} from '../../api/runtime/modelPricing.js';
+export type { MaxCostRequest, ModelPrice, ModelPriceTable, ModelPriceTier } from '../../api/runtime/modelPricing.js';
 export {
   DEEPGRAM_PRE_RECORDED_PRICING,
   DEEPGRAM_STREAMING_PRICING,

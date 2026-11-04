@@ -9,8 +9,8 @@
  */
 import { CostCapExceededError, CostGuard } from '../../safety/runtime/CostGuard.js';
 import type { CostCapType } from '../../safety/runtime/CostGuard.js';
-import { openAIModelPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
 import { clampMaxOutputTokens } from '../../core/llm/providers/model-output-limits.js';
+import { modelPricing, type ModelPriceTier } from './modelPricing.js';
 import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
@@ -496,20 +496,26 @@ export function tokensOfChars(chars: number): number {
   return Math.ceil(chars / 4);
 }
 
+/** USD per 1K tokens from per million, at twelve significant digits, so a table's per-1K rate reads back as listed. */
+function perThousand(perMillion: number): number {
+  return Number((perMillion / 1000).toPrecision(12));
+}
+
 /**
  * An estimate of the most a call could cost: its prompt's assumed tokens at the input rate and its output cap at the
  * output rate ({@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} when it names none, or a cap of NaN), a cap above the model's
  * known output ceiling counted at the ceiling. The rates are the model's row's. OpenAI bills a prompt of more than
  * 272,000 tokens on its models with a 1,050,000-token context window at twice the input rate and one and a half times
  * the output rate; OpenAIProvider's reported cost carries those rates and this estimate does not, so such a call can
- * cost up to twice its estimate. Undefined when the provider's model has no price row (only OpenAI's table is known
- * here).
+ * cost up to twice its estimate. Undefined when the provider's model has no price row: the rows are OpenAI's and
+ * Anthropic's tables and a table the host registered for the provider ({@link modelPricing}). A bound that holds for
+ * any prompt, and every rate a request can reach, is `estimateMaxCallCostUSD`'s (modelPricing.ts).
  */
 export function estimateCallCostUSD(providerId: string, modelId: string, promptChars: number, maxOutputTokens: number | undefined): number | undefined {
-  const price = providerId === 'openai' ? openAIModelPricing(modelId) : undefined;
+  const price = modelPricing(providerId, modelId);
   if (!price) return undefined;
   const output = outputEstimateTokens(modelId, maxOutputTokens);
-  return (tokensOfChars(promptChars) / 1000) * price.input + (output / 1000) * price.output;
+  return (tokensOfChars(promptChars) / 1000) * perThousand(price.inputPerMTokUSD) + (output / 1000) * perThousand(price.outputPerMTokUSD);
 }
 
 /**
@@ -537,8 +543,10 @@ export function assertCallWithinBudget(
 
 /**
  * A finished call's cost: the provider's own `costUSD` when it reported one, else its tokens at the table's rates
- * (an embedding prices its prompt tokens alone); undefined when neither is known. A reported cost that is not a finite
- * number, zero or more, is not used: a budget would record nothing for a cost of NaN.
+ * ({@link modelPricing}: OpenAI's and Anthropic's tables and a table the host registered), the long-context card's
+ * where the prompt is over its threshold (an embedding prices its prompt tokens alone, at the standard card); undefined
+ * when neither is known. A reported cost that is not a finite number, zero or more, is not used: a budget would record
+ * nothing for a cost of NaN.
  */
 export function costOfUsageUSD(
   providerId: string,
@@ -548,8 +556,10 @@ export function costOfUsageUSD(
 ): number | undefined {
   const reported = usage?.costUSD;
   if (typeof reported === 'number' && Number.isFinite(reported) && reported >= 0) return reported;
-  const price = providerId === 'openai' ? openAIModelPricing(modelId) : undefined;
+  const price = modelPricing(providerId, modelId);
   if (!price || usage === undefined) return undefined;
   const prompt = usage.promptTokens ?? 0;
-  return isEmbedding ? (prompt / 1000) * price.input : (prompt / 1000) * price.input + ((usage.completionTokens ?? 0) / 1000) * price.output;
+  if (isEmbedding) return (prompt / 1000) * perThousand(price.inputPerMTokUSD);
+  const card: ModelPriceTier = price.longContext && prompt > price.longContext.thresholdTokens ? price.longContext : price;
+  return (prompt / 1000) * perThousand(card.inputPerMTokUSD) + ((usage.completionTokens ?? 0) / 1000) * perThousand(card.outputPerMTokUSD);
 }

@@ -48,7 +48,9 @@ export interface AnthropicCacheCreationBreakdown {
  * Prices are USD per 1M tokens, verified against Anthropic's pricing page and
  * model pages on 2026-09-30; the Sonnet 5.5 cache rate and the Claude Haiku
  * 5.5 row were read from the pricing page
- * (https://platform.claude.com/docs/en/about-claude/pricing) on 2026-10-18.
+ * (https://platform.claude.com/docs/en/about-claude/pricing) on 2026-10-18,
+ * and every row's input, output, cache-write and cache-hit rates, with the
+ * Haiku 5.5 long-context rates, were read against it again on 2026-11-04.
  * A cache hit costs 0.1x the input price except where a row sets
  * `pricePer1MTokensCacheRead`: Opus 5.5 and Sonnet 5.5 (0.05x) and Fable 5.1
  * (0.025x) differ, and Fable 5 states its standard 0.1x rate explicitly so
@@ -472,23 +474,42 @@ export function estimateAnthropicCostUSD(
   return microDollars / 1_000_000;
 }
 
+/** Factor Anthropic applies to the input rate for a prompt-cache write with the 5-minute TTL, on every model. */
+export const ANTHROPIC_CACHE_WRITE_MULTIPLIER = 1.25;
+
+/** Factor Anthropic applies to the input rate for a prompt-cache write with the 1-hour TTL, on every model. */
+export const ANTHROPIC_ONE_HOUR_CACHE_WRITE_MULTIPLIER = 2;
+
 /**
  * A Claude model's list prices in USD per 1K tokens, the shape a host's spend
  * guard reads for OpenAI from `openAIModelPricing`: `input` for prompt tokens,
- * `output` for completion tokens, `cacheRead` for prompt-cache hits, and
- * `longContext` on a model Anthropic prices by prompt length, with the prompt
- * size above which its `input` and `output` rates apply.
+ * `output` for completion tokens, `cacheRead` for prompt-cache hits,
+ * `cacheWrite` and `cacheWriteOneHour` for prompt-cache writes with the
+ * 5-minute and the 1-hour TTL ({@link ANTHROPIC_CACHE_WRITE_MULTIPLIER} and
+ * {@link ANTHROPIC_ONE_HOUR_CACHE_WRITE_MULTIPLIER} times `input`: "5-minute
+ * cache write 1.25x base input price", "1-hour cache write 2x base input
+ * price", https://platform.claude.com/docs/en/about-claude/pricing, read
+ * 2026-11-04), and `longContext` on a model Anthropic prices by prompt length,
+ * with the prompt size above which its rates apply.
  */
 export interface AnthropicModelPrice {
   readonly input: number;
   readonly output: number;
   readonly cacheRead: number;
+  /** A prompt-cache write with the 5-minute TTL. */
+  readonly cacheWrite: number;
+  /** A prompt-cache write with the 1-hour TTL (`cache_control.ttl: '1h'`). */
+  readonly cacheWriteOneHour: number;
   readonly longContext?: {
     readonly fromTokens: number;
     readonly input: number;
     readonly output: number;
     /** The cache-read rate over `fromTokens`: the base rate scaled as the input rate is. */
     readonly cacheRead: number;
+    /** The 5-minute cache-write rate over `fromTokens`: 1.25x the long input rate. */
+    readonly cacheWrite: number;
+    /** The 1-hour cache-write rate over `fromTokens`: 2x the long input rate. */
+    readonly cacheWriteOneHour: number;
   };
 }
 
@@ -539,9 +560,11 @@ function catalogRowForPricing(modelId: string): AnthropicModelInfo | undefined {
  * as another model.
  *
  * @returns Prices in USD per 1K tokens, `cacheRead` being the row's cache-read
- *   rate or 0.1x its input price, and `longContext` (its own `input`, `output`
- *   and `cacheRead` over `fromTokens`) on a model priced by prompt length;
- *   `undefined` for an empty, unknown or unpriced id.
+ *   rate or 0.1x its input price, `cacheWrite` and `cacheWriteOneHour` 1.25x
+ *   and 2x its input price, and `longContext` (its own `input`, `output`,
+ *   `cacheRead`, `cacheWrite` and `cacheWriteOneHour` over `fromTokens`) on a
+ *   model priced by prompt length; `undefined` for an empty, unknown or
+ *   unpriced id.
  */
 export function anthropicModelPricing(modelId: string | undefined): AnthropicModelPrice | undefined {
   if (!modelId) return undefined;
@@ -551,6 +574,8 @@ export function anthropicModelPricing(modelId: string | undefined): AnthropicMod
     input: perThousand(row.pricePer1MTokensInput),
     output: perThousand(row.pricePer1MTokensOutput),
     cacheRead: perThousand(row.pricePer1MTokensCacheRead ?? row.pricePer1MTokensInput * 0.1),
+    cacheWrite: perThousand(row.pricePer1MTokensInput * ANTHROPIC_CACHE_WRITE_MULTIPLIER),
+    cacheWriteOneHour: perThousand(row.pricePer1MTokensInput * ANTHROPIC_ONE_HOUR_CACHE_WRITE_MULTIPLIER),
     ...(row.longContextFromTokens !== undefined &&
     row.pricePer1MTokensInputLongContext !== undefined &&
     row.pricePer1MTokensOutputLongContext !== undefined
@@ -563,6 +588,8 @@ export function anthropicModelPricing(modelId: string | undefined): AnthropicMod
               (row.pricePer1MTokensCacheRead ?? row.pricePer1MTokensInput * 0.1) *
                 (row.pricePer1MTokensInputLongContext / row.pricePer1MTokensInput),
             ),
+            cacheWrite: perThousand(row.pricePer1MTokensInputLongContext * ANTHROPIC_CACHE_WRITE_MULTIPLIER),
+            cacheWriteOneHour: perThousand(row.pricePer1MTokensInputLongContext * ANTHROPIC_ONE_HOUR_CACHE_WRITE_MULTIPLIER),
           },
         }
       : {}),

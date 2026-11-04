@@ -50,6 +50,8 @@ export { streamObject } from './streamObject.js';
 export { embedText } from './embedText.js';
 export { SpendBudget, UnpricedModelError, asSpendBudget, costOfUsageUSD, estimateCallCostUSD } from './runtime/spendBudget.js';
 export type { SpendBudgetOptions, SpendLimitInfo } from './runtime/spendBudget.js';
+export { estimateMaxCallCostUSD, maxInputTokens, modelPricing, registerModelPricing } from './runtime/modelPricing.js';
+export type { MaxCostRequest, ModelPrice, ModelPriceTable, ModelPriceTier } from './runtime/modelPricing.js';
 export { generateImage } from './generateImage.js';
 export { transferStyle } from './transferStyle.js';
 
