@@ -406,10 +406,89 @@ function runCheckpointStoreCases(open: () => Promise<OpenDatabase>): void {
     await Promise.all(ids.map((id) => store.save(makeCheckpoint({ id, runId: 'run-batch', timestamp: 7000 }))));
 
     const listed = (await store.list('graph-1', { runId: 'run-batch' })).map((meta) => meta.id);
-    expect([...listed].sort()).toEqual([...ids].sort());
-    // Every read gives the overlapping saves one order.
-    expect((await store.list('graph-1', { runId: 'run-batch' })).map((meta) => meta.id)).toEqual(listed);
-    expect((await store.latest('run-batch'))!.id).toBe(listed[0]);
+    // One store runs its saves in the order they were called, so the save called last is the most recent.
+    expect(listed).toEqual([...ids].reverse());
+    expect((await store.latest('run-batch'))!.id).toBe('cp-batch-11');
+  });
+
+  it('a slow save called first stays older than a save called after it, as a parallel batch\'s branch saves need', async () => {
+    // Branch A's save is slow to reach the database; branch B, done after A, saves what both wrote. A process that
+    // stops before the batch's merged checkpoint resumes from the latest, which has to be B's, or B runs again.
+    let inserts = 0;
+    const slowFirstInsert = new Proxy(database.db, {
+      get(target, key, receiver) {
+        if (key === 'run') {
+          return async (statement: string, parameters?: unknown[]) => {
+            if (statement.startsWith('INSERT') && (inserts += 1) === 1) await new Promise((resolve) => setTimeout(resolve, 50));
+            return target.run(statement, parameters);
+          };
+        }
+        const value = Reflect.get(target, key, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const batch = new SqlCheckpointStore({ db: slowFirstInsert, tablePrefix: table });
+    const memory = new InMemoryCheckpointStore();
+    const branchA = makeCheckpoint({ id: 'cp-z-branch-a', runId: 'run-par', nodeId: 'a', timestamp: 9000, visitedNodes: ['a'] });
+    const branchB = makeCheckpoint({ id: 'cp-a-branch-b', runId: 'run-par', nodeId: 'b', timestamp: 9000, visitedNodes: ['a', 'b'] });
+
+    await Promise.all([batch.save(branchA), batch.save(branchB)]);
+    await Promise.all([memory.save(branchA), memory.save(branchB)]);
+
+    expect((await batch.latest('run-par'))!.visitedNodes).toEqual(['a', 'b']);
+    expect((await batch.latest('run-par'))!.id).toBe((await memory.latest('run-par'))!.id);
+    expect((await batch.list('graph-1', { runId: 'run-par' })).map((meta) => meta.id)).toEqual(
+      (await memory.list('graph-1', { runId: 'run-par' })).map((meta) => meta.id),
+    );
+  });
+
+  it('a save the database fails does not stop the saves queued behind it', async () => {
+    let inserts = 0;
+    const firstInsertFails = new Proxy(database.db, {
+      get(target, key, receiver) {
+        if (key === 'run') {
+          return async (statement: string, parameters?: unknown[]) => {
+            if (statement.startsWith('INSERT') && (inserts += 1) === 1) {
+              await new Promise((resolve) => setTimeout(resolve, 20));
+              throw new Error('connection reset');
+            }
+            return target.run(statement, parameters);
+          };
+        }
+        const value = Reflect.get(target, key, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const queued = new SqlCheckpointStore({ db: firstInsertFails, tablePrefix: table });
+
+    const failed = queued.save(makeCheckpoint({ id: 'cp-lost', runId: 'run-queue' }));
+    const saved = queued.save(makeCheckpoint({ id: 'cp-kept', runId: 'run-queue' }));
+    await expect(failed).rejects.toThrow('connection reset');
+    await saved;
+    expect(await queued.get('cp-lost')).toBeNull();
+    expect((await queued.latest('run-queue'))!.id).toBe('cp-kept');
+  });
+
+  it('keeps checkpoints under a prefix that is an SQL keyword', async () => {
+    for (const keyword of ['check', 'order', 'select']) {
+      await database.db.exec(`DROP TABLE IF EXISTS "${keyword}"`);
+      try {
+        const keywordStore = new SqlCheckpointStore({ db: database.db, tablePrefix: keyword });
+        await keywordStore.save(makeCheckpoint({ id: 'cp-1', runId: 'run-kw', timestamp: 1000 }));
+        await keywordStore.save(makeCheckpoint({ id: 'cp-2', runId: 'run-kw', timestamp: 2000 }));
+        await keywordStore.save((await keywordStore.get('cp-1'))!);
+
+        expect((await keywordStore.latest('run-kw'))!.id).toBe('cp-2');
+        expect((await keywordStore.load('run-kw', 'node-a'))!.id).toBe('cp-2');
+        expect((await keywordStore.list('graph-1', { limit: 1 })).map((meta) => meta.id)).toEqual(['cp-2']);
+        const forkRun = await keywordStore.fork('cp-1');
+        expect((await keywordStore.latest(forkRun))!.runId).toBe(forkRun);
+        await keywordStore.delete('cp-2');
+        expect(await keywordStore.get('cp-2')).toBeNull();
+      } finally {
+        await database.db.exec(`DROP TABLE IF EXISTS "${keyword}"`);
+      }
+    }
   });
 
   it('records the checkpoint a fork was made from, and none for a checkpoint saved', async () => {
@@ -465,7 +544,7 @@ describe.skipIf(!POSTGRES_URL)('SqlCheckpointStore over Postgres', () => {
 
   afterAll(async () => {
     if (!postgres) return;
-    for (const prefix of postgresPrefixes) await postgres.exec(`DROP TABLE IF EXISTS ${prefix}`);
+    for (const prefix of postgresPrefixes) await postgres.exec(`DROP TABLE IF EXISTS "${prefix}"`);
     await postgres.close();
   });
 });
@@ -487,13 +566,13 @@ describe('SqlCheckpointStore: its table', () => {
 
   it('checkpointDdl names one table and its indexes under a prefix, and refuses a prefix that does not fit an identifier', () => {
     const ddl = checkpointDdl('acme_checkpoints');
-    expect(ddl).toContain('CREATE TABLE IF NOT EXISTS acme_checkpoints (');
+    expect(ddl).toContain('CREATE TABLE IF NOT EXISTS "acme_checkpoints" (');
     for (const column of ['id', 'graph_id', 'run_id', 'node_id', 'parent_id', 'created_at', 'save_seq', 'state_json', 'metadata_json']) {
       expect(ddl).toMatch(new RegExp(`\\n  ${column} `));
     }
-    expect(ddl).toContain('CREATE INDEX IF NOT EXISTS idx_acme_checkpoints_run ON acme_checkpoints');
-    expect(ddl).toContain('CREATE INDEX IF NOT EXISTS idx_acme_checkpoints_graph ON acme_checkpoints');
-    expect(ddl).toContain('CREATE INDEX IF NOT EXISTS idx_acme_checkpoints_seq ON acme_checkpoints');
+    expect(ddl).toContain('CREATE INDEX IF NOT EXISTS "idx_acme_checkpoints_run" ON "acme_checkpoints"');
+    expect(ddl).toContain('CREATE INDEX IF NOT EXISTS "idx_acme_checkpoints_graph" ON "acme_checkpoints"');
+    expect(ddl).toContain('CREATE INDEX IF NOT EXISTS "idx_acme_checkpoints_seq" ON "acme_checkpoints"');
     // The Postgres adapter rewrites every question mark to a numbered parameter.
     expect(ddl).not.toContain('?');
     expect(checkpointDdl()).toBe(checkpointDdl('agentos_checkpoints'));
@@ -555,17 +634,21 @@ describe('SqlCheckpointStore: its table', () => {
     await expect(store.save(makeCheckpoint())).rejects.toThrow(/no row/);
   });
 
-  it('saves when another process made the table between its read and its DDL, and the DDL failed on that', async () => {
-    // Two processes start on an empty database: both reads find no table, the other process's DDL wins, and this
-    // one's fails. On Postgres two concurrent CREATE TABLE IF NOT EXISTS can fail so, on the catalogue's unique index.
+  it('saves when another session made the table between its read and its DDL, and makes the indexes that session had not', async () => {
+    // Two stores start on an empty database: both reads find no table, the other session commits the table first,
+    // and this one's CREATE TABLE IF NOT EXISTS fails on the catalogue's unique index, as Postgres fails it.
     let ddlRuns = 0;
     const losesTheRace = new Proxy(db, {
       get(target, key, receiver) {
         if (key === 'exec') {
-          return async () => {
+          return async (script: string) => {
             ddlRuns += 1;
-            await target.exec(checkpointDdl('raced_checkpoints'));
-            throw new Error('duplicate key value violates unique constraint "pg_type_typname_nsp_index"');
+            if (ddlRuns > 1) return target.exec(script);
+            await target.exec(checkpointDdl('raced_checkpoints').split(';')[0]!);
+            throw Object.assign(new Error('duplicate key value violates unique constraint "pg_type_typname_nsp_index"'), {
+              code: '23505',
+              schema: 'pg_catalog',
+            });
           };
         }
         const value = Reflect.get(target, key, receiver);
@@ -576,10 +659,18 @@ describe('SqlCheckpointStore: its table', () => {
 
     await store.save(makeCheckpoint({ id: 'cp-raced' }));
     expect((await store.get('cp-raced'))!.id).toBe('cp-raced');
-    expect(ddlRuns).toBe(1);
+    expect(ddlRuns).toBe(2);
+    const indexes = await db.all<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'raced_checkpoints' AND name LIKE 'idx_%' ORDER BY name`,
+    );
+    expect(indexes.map((index) => index.name)).toEqual([
+      'idx_raced_checkpoints_graph',
+      'idx_raced_checkpoints_run',
+      'idx_raced_checkpoints_seq',
+    ]);
   });
 
-  it('rejects with the DDL error when the table is still missing after the DDL failed, and tries again on the next call', async () => {
+  it('rejects with the DDL error when the DDL fails for any other reason, and tries again on the next call', async () => {
     let failNext = true;
     const failsOnce = new Proxy(db, {
       get(target, key, receiver) {
