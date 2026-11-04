@@ -427,9 +427,17 @@ export class OllamaProvider implements IProvider {
       ...(ollamaTools.length > 0 && { tools: ollamaTools }),
     };
 
+    // A call whose signal has already aborted sends nothing.
+    if (options.abortSignal?.aborted) {
+      throw new OllamaProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+    }
     try {
-      // CR8: honor a per-call requestTimeout override over the client default.
-      const response = await this.client.post('/chat', payload, { timeout: options.requestTimeout ?? this.config.requestTimeout });
+      // CR8: honor a per-call requestTimeout override over the client default. The caller's signal ends the
+      // request in flight: axios rejects with a CanceledError at the abort.
+      const response = await this.client.post('/chat', payload, {
+        timeout: options.requestTimeout ?? this.config.requestTimeout,
+        ...(options.abortSignal ? { signal: options.abortSignal } : {}),
+      });
       const data = response.data as OllamaChatResponseChunk;
 
       if (data.error) {
@@ -471,6 +479,9 @@ export class OllamaProvider implements IProvider {
         usage,
       };
     } catch (error: unknown) {
+      if (options.abortSignal?.aborted) {
+        throw new OllamaProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       const axiosError = error as AxiosError;
       const status = axiosError.response?.status;
       const errorData = axiosError.response?.data;
@@ -512,11 +523,27 @@ export class OllamaProvider implements IProvider {
       ...(ollamaTools.length > 0 && { tools: ollamaTools }),
     };
 
+    const abortSignal = options.abortSignal;
+    if (abortSignal?.aborted) {
+      // The caller aborted before the call: no request is sent.
+      yield { id: `ollama-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted prior to first chunk', type: 'abort' }, isFinal: true };
+      return;
+    }
+
     let responseStream;
     try {
-      // CR8: honor a per-call requestTimeout override over the client default.
-      responseStream = await this.client.post('/chat', payload, { responseType: 'stream', timeout: options.requestTimeout ?? this.config.requestTimeout });
+      // CR8: honor a per-call requestTimeout override over the client default. The caller's signal ends the
+      // request in flight while it waits for the headers, and errors the body once it is open.
+      responseStream = await this.client.post('/chat', payload, {
+        responseType: 'stream',
+        timeout: options.requestTimeout ?? this.config.requestTimeout,
+        ...(abortSignal ? { signal: abortSignal } : {}),
+      });
     } catch (error: unknown) {
+      if (abortSignal?.aborted) {
+        yield { id: `ollama-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted prior to first chunk', type: 'abort' }, isFinal: true };
+        return;
+      }
       const axiosError = error as AxiosError;
       const status = axiosError.response?.status;
       const errorData = axiosError.response?.data as (OllamaChatResponseChunk | undefined);
@@ -535,8 +562,9 @@ export class OllamaProvider implements IProvider {
     let finalUsage: ModelUsage | undefined;
     let responseId = `ollama-stream-${modelId}-${Date.now()}`;
 
-    const abortSignal = options.abortSignal;
     if (abortSignal?.aborted) {
+      // The response is already open and nothing below reads it, so it is closed here.
+      stream?.destroy?.();
       yield { id: `ollama-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted prior to first chunk', type: 'abort' }, isFinal: true };
       return;
     }
@@ -639,6 +667,12 @@ export class OllamaProvider implements IProvider {
         }
       }
     } catch (streamError: unknown) {
+      // The request carries the caller's signal, so an abort errors the body's read: a body that stalled ends here
+      // with the terminal abort chunk, not a stream error.
+      if (abortSignal?.aborted) {
+        yield { id: `ollama-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted by caller', type: 'abort' }, isFinal: true };
+        return;
+      }
       const message = streamError instanceof Error ? streamError.message : 'Ollama stream processing error';
       console.error(`OllamaProvider stream error for model ${modelId}:`, message, streamError);
       // Yield a final error chunk to the consumer
@@ -677,8 +711,16 @@ export class OllamaProvider implements IProvider {
         options: stripForeignVendorParams(options?.customModelParams),
       };
 
+      // The call's signal ends the request in flight, and no text is sent after it.
+      if (options?.abortSignal?.aborted) {
+        throw new OllamaProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       try {
-        const response = await this.client.post('/embeddings', payload);
+        const response = await this.client.post(
+          '/embeddings',
+          payload,
+          options?.abortSignal ? { signal: options.abortSignal } : undefined,
+        );
         const embeddingResponse = response.data as OllamaEmbeddingResponse;
         embeddingsData.push({
           object: 'embedding',
@@ -687,6 +729,9 @@ export class OllamaProvider implements IProvider {
         });
         // totalPromptTokens += calculate_tokens_for(text); // Hypothetical token calculation
       } catch (error: unknown) {
+        if (options?.abortSignal?.aborted) {
+          throw new OllamaProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+        }
         const axiosError = error as AxiosError;
         const status = axiosError.response?.status;
         const errorData = axiosError.response?.data as Record<string, unknown> | undefined;
