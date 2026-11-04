@@ -574,6 +574,7 @@ export class OpenRouterProvider implements IProvider {
     modelId: string,
     orMessages: Array<Partial<ChatMessage>>,
     options: ModelCompletionOptions,
+    wireTools: unknown,
   ): void {
     if (!modelId.toLowerCase().startsWith('anthropic/')) return;
 
@@ -605,9 +606,10 @@ export class OpenRouterProvider implements IProvider {
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
     if (autoCacheEnv === '0' || autoCacheEnv === 'false') return;
 
-    // Caller placement wins: a marker already present in messages, tool
-    // definitions, or customModelParams tool overrides means the caller
-    // owns breakpoint placement — injecting two more could exceed
+    // Caller placement wins: a marker already present in the messages or
+    // the tool definitions being sent (a customModelParams.tools override
+    // included, in place of the call's tools) means the caller owns
+    // breakpoint placement — injecting two more could exceed
     // Anthropic's 4-breakpoint cap or order a longer TTL after a shorter
     // one (both reject with 400).
     const holdsMarker = (value: unknown): boolean =>
@@ -618,13 +620,7 @@ export class OpenRouterProvider implements IProvider {
           typeof entry === 'object' &&
           (entry as Record<string, unknown>).cache_control !== undefined,
       );
-    const customTools = (options.customModelParams as Record<string, unknown> | undefined)
-      ?.tools;
-    if (
-      orMessages.some((m) => holdsMarker(m.content)) ||
-      holdsMarker(options.tools) ||
-      holdsMarker(customTools)
-    ) {
+    if (orMessages.some((m) => holdsMarker(m.content)) || holdsMarker(wireTools)) {
       return;
     }
 
@@ -687,9 +683,11 @@ export class OpenRouterProvider implements IProvider {
    * override replaces the arrays built from the call's own messages and
    * options, so markers placed before that spread would never reach the
    * wire. The message objects are copied first, because an override array
-   * belongs to the caller. Under `cache: false`, `cache_control` is also
-   * removed from each tool definition in the final `tools` (copies, never
-   * in-place edits), as the direct provider does.
+   * belongs to the caller. Whether the caller placed a tool marker is read
+   * from the final `tools` too. Under `cache: false`, `cache_control` is
+   * also removed from the request root and from each tool definition in
+   * the final `tools` (copies, never in-place edits), as the direct
+   * provider does.
    */
   private applyAnthropicSlugCacheToPayload(
     modelId: string,
@@ -705,8 +703,12 @@ export class OpenRouterProvider implements IProvider {
         (message) => ({ ...message }),
       ) as Array<Partial<ChatMessage>>;
       payload.messages = wireMessages;
-      this.applyAnthropicSlugCacheControl(modelId, wireMessages, options);
+      this.applyAnthropicSlugCacheControl(modelId, wireMessages, options, payload.tools);
     }
+
+    // A request-level marker (passed through customModelParams) would let
+    // the API place a breakpoint on the last cacheable block.
+    if (options.cache === false) delete payload.cache_control;
 
     if (options.cache === false && Array.isArray(payload.tools)) {
       payload.tools = (payload.tools as unknown[]).map((tool) => {

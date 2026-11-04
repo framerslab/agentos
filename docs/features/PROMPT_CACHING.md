@@ -128,7 +128,10 @@ await streamText({
   `generateText`, `streamText`, `generateObject`, `agent({ cache })`, and
   per-hop fallback entries (`FallbackProviderEntry.cache`). `false` strips
   every marker from the request, including caller markers on messages and
-  tool definitions, directly and on OpenRouter `anthropic/*` slugs. A per-call
+  tool definitions and a request-level `cache_control` passed through
+  `customModelParams`, directly and on OpenRouter `anthropic/*` slugs. A
+  caller tool marker is read from the tools actually sent, so a
+  `customModelParams.tools` override decides it. A per-call
   `'1h'` also raises caller system-marker TTLs so the request never orders
   a longer-lived breakpoint after a shorter one (Anthropic rejects that).
 - `tail: false` puts no breakpoint on the messages and no request-level
