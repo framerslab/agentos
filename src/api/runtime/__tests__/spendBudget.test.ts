@@ -232,6 +232,22 @@ describe('the estimates', () => {
     ).toBeCloseTo((1_000 * 2 + 1_000 * 10) / 1e6, 12);
   });
 
+  it("keeps a bill the provider's API reported over the host's row, and the host's row over a cost the OpenAI client computed", () => {
+    registerModelPricing('openrouter', (id) => (id === 'vendor/model' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 2 } : undefined));
+    registerModelPricing('groq', (id) => (id === 'gpt-4o' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 2 } : undefined));
+    try {
+      // OpenRouter's `usage.cost` is what it charged: it stands.
+      expect(costOfUsageUSD('openrouter', 'vendor/model', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.5 })).toBe(0.5);
+      // Groq sends through the OpenAI client, which reports OpenAI's list price for an id OpenAI's table holds.
+      expect(costOfUsageUSD('groq', 'gpt-4o', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.0125 })).toBeCloseTo(0.003, 12);
+      // With no row of the host's, that reported cost is the one there is.
+      expect(costOfUsageUSD('groq', 'other', { promptTokens: 1000, completionTokens: 1000, costUSD: 0.0125 })).toBe(0.0125);
+    } finally {
+      registerModelPricing('openrouter', () => undefined);
+      registerModelPricing('groq', () => undefined);
+    }
+  });
+
   it('estimates a call at the long-context card once its assumed prompt tokens pass the threshold', () => {
     // claude-haiku-5-5: 800,000 characters are 200,000 tokens at four a token, over its 100,000, where it bills $0.50
     // input and $2.50 output per MTok (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-04).

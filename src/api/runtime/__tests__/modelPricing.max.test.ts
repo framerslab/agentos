@@ -212,6 +212,27 @@ describe('what the bound cannot price', () => {
     }
   });
 
+  it("is undefined for a Gemini function response that carries media in its parts, and for a built-in tool's replayed response", () => {
+    // A FunctionResponse has `parts` of its own, each inline media or a file by reference, and a Part's union holds
+    // `toolCall` and `toolResponse`, a built-in tool's turn (https://ai.google.dev/api/caching, read 2026-11-04).
+    registerModelPricing('gemini', (id) => (id === 'gemini-x' ? { inputPerMTokUSD: 1, outputPerMTokUSD: 2 } : undefined));
+    try {
+      const respond = (response: Record<string, unknown>) => [
+        { role: 'user', parts: [{ text: 'look' }] },
+        { role: 'model', parts: [{ functionCall: { name: 'look', args: { inlineData: 'a.png' } } }] },
+        { role: 'user', parts: [{ functionResponse: { name: 'look', ...response } }] },
+      ];
+      // A function call's arguments are data, whatever their keys; a response's JSON output is text.
+      expect(estimateMaxCallCostUSD('gemini', 'gemini-x', { messages: respond({ response: { seen: 'a cat' } }), maxOutputTokens: 10 })).toBeDefined();
+      const media = { response: {}, parts: [{ inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo' } }] };
+      expect(estimateMaxCallCostUSD('gemini', 'gemini-x', { messages: respond(media), maxOutputTokens: 10 })).toBeUndefined();
+      const builtIn = [{ role: 'model', parts: [{ toolResponse: { id: 'r1', response: {} } }] }];
+      expect(estimateMaxCallCostUSD('gemini', 'gemini-x', { messages: builtIn, maxOutputTokens: 10 })).toBeUndefined();
+    } finally {
+      registerModelPricing('gemini', () => undefined);
+    }
+  });
+
   it("prices a replayed tool turn: its thinking block, and a tool call whose arguments are data, not content parts", () => {
     const thinking = { type: 'thinking', thinking: '', signature: 'EqQBCkYIBxgCKkA' };
     const call = { type: 'tool_use', id: 't1', name: 'look', input: { type: 'image', path: 'a.png' } };
