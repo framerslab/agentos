@@ -49,7 +49,7 @@ const OPENROUTER_FIRST_EVENT =
     model: 'anthropic/claude-sonnet-5.5',
     choices: [{ index: 0, delta: { role: 'assistant', content: 'Hel' }, finish_reason: null }],
   })}\n\n`;
-/** OpenRouter's finish event (`finish_reason` set, no text) and the usage-only event that follows it before `[DONE]`. */
+/** OpenRouter's finish event: the last text, `finish_reason` set, and the usage that line reports. */
 const OPENROUTER_FINISH_EVENT =
   `data: ${JSON.stringify({
     id: 'gen-1',
@@ -57,15 +57,7 @@ const OPENROUTER_FINISH_EVENT =
     created: 1,
     model: 'anthropic/claude-sonnet-5.5',
     choices: [{ index: 0, delta: { content: 'lo' }, finish_reason: 'stop' }],
-  })}\n\n`;
-const OPENROUTER_USAGE_EVENT =
-  `data: ${JSON.stringify({
-    id: 'gen-1',
-    object: 'chat.completion.chunk',
-    created: 1,
-    model: 'anthropic/claude-sonnet-5.5',
-    choices: [],
-    usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+    usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
   })}\n\n`;
 const OLLAMA_FIRST_EVENT =
   `${JSON.stringify({ model: 'llama3', created_at: '2026-11-03T00:00:00Z', message: { role: 'assistant', content: 'Hel' }, done: false })}\n`;
@@ -340,7 +332,9 @@ describe("a request already sent ends when the caller's signal aborts", () => {
       );
     });
 
-    it('ends a stream aborted after its finish event and before [DONE] with the abort chunk as its only final chunk', async () => {
+    it('ends a stream aborted after its finish event and before [DONE] at the abort, the finish already out with its usage', async () => {
+      // The finish chunk goes out as its line arrives, carrying the usage that line reports, so a caller that stops the
+      // call before the usage-only line still meters what the finish billed; the abort then ends the stalled body.
       upstream.firstEvent = { contentType: 'text/event-stream', body: OPENROUTER_FIRST_EVENT + OPENROUTER_FINISH_EVENT };
       const p = await openRouter();
       const controller = new AbortController();
@@ -353,32 +347,15 @@ describe("a request already sent ends when the caller's signal aborts", () => {
 
       expect(outcome.state).toBe('resolved');
       const chunks = outcome.value as ModelCompletionResponse[];
+      expect(chunks).toHaveLength(3);
       expect(chunks[0]).toMatchObject({ responseTextDelta: 'Hel', isFinal: false });
-      expect(chunks.filter((chunk) => chunk.isFinal)).toHaveLength(1);
-      expect(chunks[chunks.length - 1]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
-    });
-
-    it('ends a stream that reaches [DONE] with one final chunk carrying the finish and the usage', async () => {
-      upstream.firstEvent = {
-        contentType: 'text/event-stream',
-        body: OPENROUTER_FIRST_EVENT + OPENROUTER_FINISH_EVENT + OPENROUTER_USAGE_EVENT + 'data: [DONE]\n\n',
-      };
-      const p = await openRouter();
-      const outcome = track(drain(p.generateCompletionStream('anthropic/claude-sonnet-5.5', messages, {})));
-      await upstream.untilPosts(1);
-      await settledWithin(outcome, SETTLE_MS);
-
-      expect(outcome.state).toBe('resolved');
-      const chunks = outcome.value as ModelCompletionResponse[];
-      const finals = chunks.filter((chunk) => chunk.isFinal);
-      expect(finals).toHaveLength(1);
-      expect(chunks[chunks.length - 1]).toBe(finals[0]);
-      expect(finals[0]).toMatchObject({
+      expect(chunks[1]).toMatchObject({
         responseTextDelta: 'lo',
+        isFinal: true,
         choices: [{ finishReason: 'stop' }],
-        usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+        usage: { promptTokens: 5, completionTokens: 1, totalTokens: 6 },
       });
-      expect(finals[0].error).toBeUndefined();
+      expect(chunks[2]).toMatchObject({ isFinal: true, error: { type: 'abort' } });
     });
   });
 

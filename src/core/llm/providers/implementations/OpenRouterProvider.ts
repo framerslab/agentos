@@ -1001,18 +1001,6 @@ export class OpenRouterProvider implements IProvider {
     // Set when the body's read ended because the caller aborted: the request carries the signal, so axios errors
     // the body at the abort, and a body that stalled ends there with the abort chunk instead of a read error.
     let readCutByAbort = false as boolean;
-    // A stream has one final chunk (StreamingReconstructor). OpenRouter sends the finish_reason event and then, before
-    // [DONE], the usage-only event; both map to final chunks. The finish chunk is held here, the usage-only chunk is
-    // merged into it, and the one final chunk goes out at [DONE] or the end of the body. An abort before then drops
-    // it: the abort chunk, carrying the usage read so far, is the stream's only final chunk.
-    let pendingFinal = undefined as ModelCompletionResponse | undefined;
-    // An error event, a decline or a read error after the finish keeps the order it had: the held finish goes out
-    // first, then the error.
-    const flushPendingFinal = (): ModelCompletionResponse | undefined => {
-      const out = pendingFinal;
-      pendingFinal = undefined;
-      return out;
-    };
     const quietClose = (): boolean => {
       if (pendingWaitEnded) return true;
       if (abortSignal?.aborted) {
@@ -1034,11 +1022,7 @@ export class OpenRouterProvider implements IProvider {
             if (held) held.usage = lineUsage ?? held.usage;
             const pendingAtAbort: ModelCompletionResponse | null = pendingError;
             if (pendingAtAbort) pendingError = { ...pendingAtAbort, usage: lineUsage ?? pendingAtAbort.usage };
-            const finalAtAbort = flushPendingFinal();
-            yield abortChunk(
-              'Stream aborted by caller',
-              held?.usage ?? (pendingError as ModelCompletionResponse | null)?.usage ?? lineUsage ?? finalAtAbort?.usage,
-            );
+            yield abortChunk('Stream aborted by caller', held?.usage ?? (pendingError as ModelCompletionResponse | null)?.usage ?? lineUsage);
             return;
           }
           if (!rawChunk.startsWith('data: ')) continue;
@@ -1079,8 +1063,6 @@ export class OpenRouterProvider implements IProvider {
           // and ends the stream.
           const streamError = streamChunkError(apiChunk);
           if (streamError) {
-            const finishBeforeError = flushPendingFinal();
-            if (finishBeforeError) yield finishBeforeError;
             // The stream is an HTTP 200, so the in-body 403 row applies here too.
             const decline = classifyOpenRouterDecline(streamError, { inBody: true });
             if (decline) {
@@ -1166,8 +1148,6 @@ export class OpenRouterProvider implements IProvider {
           }
           const choice = apiChunk.choices?.[0];
           if (choice && choice.finish_reason === 'content_filter') {
-            const finishBeforeFilter = flushPendingFinal();
-            if (finishBeforeFilter) yield finishBeforeFilter;
             held = {
               decline: { code: 'content_filter', nativeType: 'content_filter_finish' },
               refusal: choice.delta?.refusal ?? choice.message?.refusal ?? null,
@@ -1190,36 +1170,17 @@ export class OpenRouterProvider implements IProvider {
           if (mapped.responseTextDelta && yieldedText.length < yieldedTextCap) {
             yieldedText = (yieldedText + mapped.responseTextDelta).slice(0, yieldedTextCap);
           }
-          const output: ModelCompletionResponse = schemaLeftPayload ? { ...mapped, schemaInPayload: false } : mapped;
+          // The finish chunk goes out at once, with the usage its line reports, so a caller that stops the call
+          // before the usage-only line still meters what the finish billed; an abort after it ends the stream with
+          // the abort chunk, which carries the usage line when that line is what shows the abort.
+          yield schemaLeftPayload ? { ...mapped, schemaInPayload: false } : mapped;
           // Don't break on finish_reason: with stream_options.include_usage,
           // OpenRouter (like OpenAI) emits a trailing usage-only chunk AFTER
           // the finish_reason chunk and BEFORE [DONE]. The [DONE] marker
-          // check above is the right termination signal; the final chunk is
-          // held until then (see pendingFinal).
-          if (output.isFinal && !output.error) {
-            if (pendingFinal && output.choices.length === 0) {
-              // The usage-only chunk: its usage (and the serving provider it names) rides the held finish.
-              pendingFinal = {
-                ...pendingFinal,
-                usage: output.usage ?? pendingFinal.usage,
-                ...(output.servingProvider ? { servingProvider: output.servingProvider } : {}),
-              };
-            } else {
-              const earlier = flushPendingFinal();
-              if (earlier) yield earlier;
-              pendingFinal = output;
-            }
-            continue;
-          }
-          const earlierFinal = flushPendingFinal();
-          if (earlierFinal) yield earlierFinal;
-          yield output;
+          // check above is the right termination signal.
         }
       } catch (error: unknown) {
         if (isDecline(error)) throw error;
-        // A read error after the finish keeps the answer: the held finish goes out before the error.
-        const finishBeforeReadError = abortSignal?.aborted ? undefined : flushPendingFinal();
-        if (finishBeforeReadError) yield finishBeforeReadError;
         // A read error after a content_filter finish does not lose the
         // decline: it is thrown below with the usage held so far.
         if (held) readError = error;
@@ -1254,12 +1215,9 @@ export class OpenRouterProvider implements IProvider {
         });
       }
       if (readCutByAbort) {
-        // The held finish, if any, is dropped: the abort chunk is the stream's one final chunk.
-        yield abortChunk('Stream aborted by caller', flushPendingFinal()?.usage);
+        yield abortChunk('Stream aborted by caller');
         return;
       }
-      const finalChunk = flushPendingFinal();
-      if (finalChunk) yield finalChunk;
     } finally {
       if (pendingWaitTimer !== undefined) clearTimeout(pendingWaitTimer);
       abortSignal?.removeEventListener('abort', abortHandler);
