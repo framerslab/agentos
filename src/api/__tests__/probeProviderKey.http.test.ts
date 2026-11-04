@@ -318,6 +318,32 @@ describe('probeProviderKey on OpenAI', () => {
     expect(mixed).toMatchObject({ state: 'ok', model: 'gpt-4o-mini' });
   });
 
+  it('skips the completions-only instruct models when it picks from the catalog', async () => {
+    routes['GET /v1/models'] = () => json({ object: 'list', data: [{ id: 'gpt-3.5-turbo-instruct' }, { id: 'gpt-3.5-turbo-instruct-0914' }, { id: 'gpt-4o-mini' }] });
+    routes['POST /v1/chat/completions'] = () => json({ id: 'chatcmpl-1', choices: [] });
+
+    const result = await probe();
+
+    expect(jsonOf(received[1]).model).toBe('gpt-4o-mini');
+    expect(result).toMatchObject({ state: 'ok', model: 'gpt-4o-mini' });
+  });
+
+  it('sends the billable request for a named Responses-only model to /responses', async () => {
+    // gpt-5.3-codex has no Chat Completions route; the Responses API takes a plain string as input
+    // (https://developers.openai.com/api/reference/resources/responses/methods/create, read 4 November 2026).
+    routes['POST /v1/responses'] = () => json({ id: 'resp_1', object: 'response', status: 'incomplete', output: [] });
+
+    const result = await probe({ model: 'gpt-5.3-codex' });
+
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /v1/responses']);
+    expect(received[0].headers.authorization).toBe(`Bearer ${KEY}`);
+    expect(jsonOf(received[0])).toEqual({ model: 'gpt-5.3-codex', input: 'ping', max_output_tokens: 16 });
+    expect(result).toMatchObject({ state: 'ok', provider: 'openai', httpStatus: 200, model: 'gpt-5.3-codex' });
+
+    routes['POST /v1/responses'] = () => json({ error: { message: 'You exceeded your current quota.', type: 'insufficient_quota', param: null, code: 'insufficient_quota' } }, 429);
+    expect((await probe({ model: 'gpt-5.3-codex' })).state).toBe('exhausted');
+  });
+
   it('reports the timeout, not a catalog without a chat model, when the models list stops before its end', async () => {
     routes['GET /v1/models'] = () => ({ ...json({ object: 'list', data: [{ id: 'gpt-4o-mini' }] }), stall: true });
 
@@ -486,6 +512,28 @@ describe('probeProviderKey on OpenRouter', () => {
     expect(result).toMatchObject({ state: 'ok', provider: 'openrouter', httpStatus: 200, model: 'openai/gpt-4o-mini' });
   });
 
+  it("keeps one endpoint's catalog out of a probe of another endpoint", async () => {
+    // Each base URL is its own catalog: what one endpoint listed is neither reused for another nor kept.
+    routes['GET /api/v1/models'] = () => json({ data: [catalogModel('first/cheap', '0.0000001', '0.0000001')] });
+    routes['POST /api/v1/chat/completions'] = () => json({ id: 'gen-1', choices: [] });
+    routes['GET /second/api/v1/models'] = () => json({ data: [catalogModel('second/cheap', '0.0000001', '0.0000001')] });
+    routes['POST /second/api/v1/chat/completions'] = () => json({ id: 'gen-2', choices: [] });
+    const provider = new OpenRouterProvider();
+
+    const first = await provider.probeApiKey(KEY, { kind: 'billing', baseURL: `${origin}/api/v1` });
+    const second = await provider.probeApiKey(KEY, { kind: 'billing', baseURL: `${origin}/second/api/v1` });
+
+    expect(first).toMatchObject({ verdict: 'ok', model: 'first/cheap' });
+    expect(second).toMatchObject({ verdict: 'ok', model: 'second/cheap' });
+    expect(received.map((r) => `${r.method} ${r.path}`)).toEqual([
+      'GET /api/v1/models',
+      'POST /api/v1/chat/completions',
+      'GET /second/api/v1/models',
+      'POST /second/api/v1/chat/completions',
+    ]);
+    expect(jsonOf(received[3]).model).toBe('second/cheap');
+  });
+
   it('sends the completion to the named model without listing the catalog', async () => {
     routes['POST /api/v1/chat/completions'] = () => json({ id: 'gen-1', choices: [] });
 
@@ -542,6 +590,21 @@ describe('probeProviderKey on Requesty', () => {
     expect(jsonOf(received[1])).toEqual({ model: 'google/gemini-2.5-flash', max_tokens: 16, messages: PING });
     expect(received[1].headers.authorization).toBe(`Bearer ${KEY}`);
     expect(result).toMatchObject({ state: 'ok', provider: 'requesty', model: 'google/gemini-2.5-flash' });
+  });
+
+  it("keeps one endpoint's catalog out of a probe of another endpoint", async () => {
+    routes['GET /v1/models'] = () => json({ data: [{ id: 'first/cheap', input_price: 0.0000001, output_price: 0.0000001 }] });
+    routes['POST /v1/chat/completions'] = () => json({ id: 'req-1', choices: [] });
+    routes['GET /second/v1/models'] = () => json({ data: [{ id: 'second/cheap', input_price: 0.0000001, output_price: 0.0000001 }] });
+    routes['POST /second/v1/chat/completions'] = () => json({ id: 'req-2', choices: [] });
+    const provider = new RequestyProvider();
+
+    const first = await provider.probeApiKey(KEY, { kind: 'billing', baseURL: `${origin}/v1` });
+    const second = await provider.probeApiKey(KEY, { kind: 'billing', baseURL: `${origin}/second/v1` });
+
+    expect(first).toMatchObject({ verdict: 'ok', model: 'first/cheap' });
+    expect(second).toMatchObject({ verdict: 'ok', model: 'second/cheap' });
+    expect(received.map((r) => r.path)).toEqual(['/v1/models', '/v1/chat/completions', '/second/v1/models', '/second/v1/chat/completions']);
   });
 
   it('reads a 402 for a spent balance as exhausted and the 403 bad-token answer as invalid', async () => {
