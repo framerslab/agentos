@@ -259,8 +259,8 @@ export const hitl = {
    * delegated to a fallback handler (default: {@link hitl.autoReject}).
    *
    * @param config - LLM judge configuration including optional `model`,
-   *   `provider`, `criteria`, `confidenceThreshold`, `fallback`, and `apiKey`
-   *   overrides.
+   *   `provider`, `criteria`, `confidenceThreshold`, `fallback`, `apiKey` and
+   *   `baseUrl` overrides.
    * @returns A {@link HitlHandler} that auto-decides via LLM.
    *
    * @example
@@ -300,6 +300,12 @@ export const hitl = {
     fallback?: HitlHandler;
     /** API key override. */
     apiKey?: string;
+    /**
+     * Base URL the judge call is sent to, read as every call reads one: an empty or whitespace-only value is unset,
+     * so the provider's base-URL variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, ...) applies, and with none the
+     * provider's own endpoint.
+     */
+    baseUrl?: string;
   } = {}): HitlHandler {
     const judgeSel = resolveJudgeLlm({ model: config.model, provider: config.provider, effort: config.effort });
     const model = judgeSel.model;
@@ -346,6 +352,7 @@ export const hitl = {
           temperature: 0.1,
           ...(judgeSel.effort !== undefined ? { effort: judgeSel.effort } : {}),
           apiKey: config.apiKey,
+          ...(config.baseUrl !== undefined ? { baseUrl: config.baseUrl } : {}),
         });
 
         // Parse the JSON from the LLM response, tolerating surrounding text.

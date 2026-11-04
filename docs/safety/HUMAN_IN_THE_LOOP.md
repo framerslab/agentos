@@ -117,7 +117,7 @@ handler: hitl.slack({ channel: '#approvals', token: process.env.SLACK_BOT_TOKEN!
 
 ### `hitl.llmJudge({ ... })`
 
-Delegates the decision to a model (OpenAI and the central judge model by default). The judge replies with a structured `{approved, confidence, reasoning}` JSON object. When `confidence < confidenceThreshold` (default `0.7`), the reply lacks those fields, or the call fails, the request goes to the `fallback` handler, which rejects by default. The judge sees the request's type, agent, action, description and details.
+Delegates the decision to a model (OpenAI and the central judge model by default). `provider`, `model`, `apiKey` and `baseUrl` route the judge call as they route a `generateText()` call: a `baseUrl` sends it to that endpoint, and without one the provider's base-URL variable applies (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`). The judge replies with a structured `{approved, confidence, reasoning}` JSON object. When `confidence < confidenceThreshold` (default `0.7`), the reply lacks those fields, or the call fails, the request goes to the `fallback` handler, which rejects by default. The judge sees the request's type, agent, action, description and details.
 
 ```typescript
 handler: hitl.llmJudge({

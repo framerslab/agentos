@@ -547,8 +547,9 @@ export function assertCallWithinBudget(
 
 /**
  * The token counts of a finished call {@link costOfUsageUSD} prices: a provider's `ModelUsage` or a run's totals
- * (`TokenUsage`), which carry the cache counts as `cacheReadInputTokens` and `cacheCreationInputTokens`, and as
- * `cacheReadTokens` and `cacheCreationTokens`, respectively.
+ * (`TokenUsage`), which carry the cache counts as `cacheReadInputTokens`, `cacheCreationInputTokens` and
+ * `cacheCreationExtendedInputTokens`, and as `cacheReadTokens`, `cacheCreationTokens` and
+ * `cacheCreationExtendedTokens`, respectively.
  */
 export interface UsageForCost {
   promptTokens?: number;
@@ -558,8 +559,16 @@ export interface UsageForCost {
   inclusiveInputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  /**
+   * Of the cache writes, those made with the provider's longer lifetime: Anthropic's 1-hour writes
+   * (`usage.cache_creation.ephemeral_1h_input_tokens`), OpenAI's 12-hour writes
+   * (`cache_write_tokens_details.ttl_12h_tokens`).
+   */
+  cacheCreationExtendedInputTokens?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  /** {@link UsageForCost.cacheCreationExtendedInputTokens} under the name a run's totals carry it. */
+  cacheCreationExtendedTokens?: number;
 }
 
 /** A token count a report gave, or 0 for none, a negative count or one that is not a finite number. */
@@ -587,9 +596,15 @@ const OPENAI_CLIENT_PRICED = new Set(['groq', 'litellm', 'mistral', 'together', 
  * prompt tokens leave the cache out, the prompt tokens and the cache counts where it does not), so the cache reads and
  * writes an Anthropic report keeps out of its prompt tokens are priced, and they count toward the long-context
  * threshold; the long-context card prices the whole call where the prompt is over it. Of the prompt, the cache reads are
- * priced at the card's cache-read rate (the input rate where the card has none) and the writes at its highest write
- * rate, since a report does not say which lifetime a write was made with; the rest at the input rate. An embedding
- * prices its prompt tokens alone, at the standard card.
+ * priced at the card's cache-read rate (the input rate where the card has none); the writes the report names as made
+ * with the longer lifetime (`cacheCreationExtendedInputTokens`: Anthropic's `cache_creation.ephemeral_1h_input_tokens`,
+ * OpenAI's `cache_write_tokens_details.ttl_12h_tokens`) at the card's highest write rate (`cacheWritePerMTokUSD`:
+ * Anthropic's 1-hour write at 2x input, OpenAI's 12-hour write at 2.5x); every other write at the rate of a write with
+ * the provider's default lifetime (`defaultCacheWritePerMTokUSD`: Anthropic's 5-minute write and OpenAI's 30-minute
+ * write, both 1.25x input), the rate each provider bills a write at when the request names no lifetime. A report that
+ * does not split its writes by lifetime is thus priced as if every write had the default lifetime; a host row that
+ * names a single write rate (`cacheWritePerMTokUSD` alone) prices every write at that rate. The rest of the prompt is
+ * priced at the input rate. An embedding prices its prompt tokens alone, at the standard card.
  */
 export function costOfUsageUSD(
   providerId: string,
@@ -606,6 +621,7 @@ export function costOfUsageUSD(
   if (isEmbedding) return (prompt / 1000) * perThousand(price.inputPerMTokUSD);
   const cacheRead = tokenCount(usage.cacheReadInputTokens ?? usage.cacheReadTokens);
   const cacheWrite = tokenCount(usage.cacheCreationInputTokens ?? usage.cacheCreationTokens);
+  const cacheWriteExtended = tokenCount(usage.cacheCreationExtendedInputTokens ?? usage.cacheCreationExtendedTokens);
   // Anthropic's prompt tokens leave the cache out, so a report of its with no inclusive total is completed with them.
   const inclusive = Math.max(
     prompt,
@@ -613,13 +629,21 @@ export function costOfUsageUSD(
   );
   const read = Math.min(cacheRead, inclusive);
   const write = Math.min(cacheWrite, inclusive - read);
+  const writeExtended = Math.min(cacheWriteExtended, write);
+  const writeDefault = write - writeExtended;
   const card: ModelPriceTier = price.longContext && inclusive > price.longContext.thresholdTokens ? price.longContext : price;
   const readRate = card.cacheReadPerMTokUSD ?? card.inputPerMTokUSD;
-  const writeRate = Math.max(card.inputPerMTokUSD, card.cacheWritePerMTokUSD ?? 0, card.automaticCacheWritePerMTokUSD ?? 0);
+  const extendedWriteRate = Math.max(card.inputPerMTokUSD, card.cacheWritePerMTokUSD ?? 0, card.automaticCacheWritePerMTokUSD ?? 0);
+  // A card that names no default-lifetime rate (a host row with one write rate) prices every write at the one it has.
+  const defaultWriteRate = Math.max(
+    card.inputPerMTokUSD,
+    card.defaultCacheWritePerMTokUSD ?? card.automaticCacheWritePerMTokUSD ?? card.cacheWritePerMTokUSD ?? 0,
+  );
   return (
     ((inclusive - read - write) / 1000) * perThousand(card.inputPerMTokUSD) +
     (read > 0 ? (read / 1000) * perThousand(readRate) : 0) +
-    (write > 0 ? (write / 1000) * perThousand(writeRate) : 0) +
+    (writeDefault > 0 ? (writeDefault / 1000) * perThousand(defaultWriteRate) : 0) +
+    (writeExtended > 0 ? (writeExtended / 1000) * perThousand(extendedWriteRate) : 0) +
     ((usage.completionTokens ?? 0) / 1000) * perThousand(card.outputPerMTokUSD)
   );
 }

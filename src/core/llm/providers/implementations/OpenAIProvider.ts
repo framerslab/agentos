@@ -57,6 +57,7 @@ import {
   OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER,
   OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS,
   OPENAI_MODEL_PRICING,
+  estimateOpenAICostUSD,
   openAIModelPricing,
   openAiHasLongContextPricing,
 } from './openaiPricing.js';
@@ -102,9 +103,10 @@ namespace OpenAIAPITypes {
      * tokens written to cache (billed 1.25x). Normalized into
      * {@link ModelUsage.cacheReadInputTokens} / cacheCreationInputTokens
      * so caching is visible platform-wide (OpenRouterProvider already
-     * normalizes the same fields).
+     * normalizes the same fields). `cache_write_tokens_details` splits the
+     * writes by lifetime where the request could ask for the 12-hour one.
      */
-    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+    prompt_tokens_details?: CacheTokenDetails;
   }
   /** Complete tool call as returned on a non-streaming message. */
   export interface ToolCall {
@@ -198,12 +200,22 @@ namespace OpenAIAPITypes {
   // `output_text` parts, function_call items carry `call_id`/`name`/
   // `arguments`, usage uses input_tokens/output_tokens, `created_at` +
   // `status` + `incomplete_details` are top-level.
+  /**
+   * The prompt-cache detail of a usage report: `cached_tokens` read, `cache_write_tokens` written (on GPT-5.6 and
+   * later), and, on a Responses API model with `prompt_cache_options`, the writes by lifetime, which add up to
+   * `cache_write_tokens` (https://developers.openai.com/api/docs/guides/prompt-caching, read 2026-11-04).
+   */
+  export interface CacheTokenDetails {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+    cache_write_tokens_details?: { ttl_30m_tokens?: number; ttl_12h_tokens?: number };
+  }
   export interface ResponsesUsage {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
     /** Responses-API spelling of the cached-prompt-token detail. */
-    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+    input_tokens_details?: CacheTokenDetails;
   }
   export interface ResponsesOutputContentPart {
     type: string; // 'output_text' | …
@@ -2333,6 +2345,7 @@ export class OpenAIProvider implements IProvider {
               prompt_tokens_details: {
                 cached_tokens: usage.input_tokens_details.cached_tokens,
                 cache_write_tokens: usage.input_tokens_details.cache_write_tokens,
+                cache_write_tokens_details: usage.input_tokens_details.cache_write_tokens_details,
               },
             }
           : {}),
@@ -2534,7 +2547,7 @@ export class OpenAIProvider implements IProvider {
       prompt_tokens: number;
       completion_tokens: number;
       total_tokens: number;
-      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+      prompt_tokens_details?: OpenAIAPITypes.CacheTokenDetails;
     },
     modelId: string
   ): ModelUsage {
@@ -2542,18 +2555,24 @@ export class OpenAIProvider implements IProvider {
     // fields (reads AND — on GPT-5.6+, billed 1.25x — writes; both remain
     // INCLUDED in prompt_tokens, unlike Anthropic's exclusive accounting).
     // Normalize into cacheReadInputTokens / cacheCreationInputTokens so
-    // caching stops being invisible in platform telemetry; cost stays
-    // computed off the full prompt_tokens (the discount/premium is a
-    // billing-side rate, not a token-count change). Because prompt_tokens
-    // is already inclusive here, inclusiveInputTokens is prompt_tokens
-    // as-is (Anthropic computes input + cache_read + cache_creation).
+    // caching is visible in platform telemetry, and price them at their own
+    // rates: reads at the model's cached-input rate, writes at 1.25x input
+    // for the 30-minute lifetime and 2.5x for the 12-hour one
+    // (estimateOpenAICostUSD). Because prompt_tokens is already inclusive
+    // here, inclusiveInputTokens is prompt_tokens as-is (Anthropic computes
+    // input + cache_read + cache_creation).
     const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
     const cacheWriteTokens = usage.prompt_tokens_details?.cache_write_tokens;
+    const extendedWriteTokens = usage.prompt_tokens_details?.cache_write_tokens_details?.ttl_12h_tokens;
     return {
       promptTokens: usage.prompt_tokens,
       completionTokens: usage.completion_tokens,
       totalTokens: usage.total_tokens,
-      costUSD: this.calculateCost(usage.prompt_tokens, usage.completion_tokens, modelId),
+      costUSD: this.calculateCost(usage.prompt_tokens, usage.completion_tokens, modelId, false, {
+        cachedTokens,
+        cacheWriteTokens,
+        cacheWriteExtendedTokens: extendedWriteTokens,
+      }),
       ...(typeof usage.prompt_tokens === 'number'
         ? { inclusiveInputTokens: usage.prompt_tokens }
         : {}),
@@ -2562,6 +2581,9 @@ export class OpenAIProvider implements IProvider {
         : {}),
       ...(typeof cacheWriteTokens === 'number' && cacheWriteTokens >= 0
         ? { cacheCreationInputTokens: cacheWriteTokens }
+        : {}),
+      ...(typeof extendedWriteTokens === 'number' && extendedWriteTokens >= 0
+        ? { cacheCreationExtendedInputTokens: extendedWriteTokens }
         : {}),
     };
   }
@@ -2583,11 +2605,13 @@ export class OpenAIProvider implements IProvider {
 
   /**
    * Estimated USD cost of one API call, from the per-1K rates in
-   * `modelPricing`. When the model has long-context pricing
-   * ({@link openAiHasLongContextPricing}) and the prompt exceeds
-   * {@link OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS} input tokens, the whole call
-   * bills at the long-context rates: every input token at 2x and every output
-   * token at 1.5x.
+   * `modelPricing` ({@link estimateOpenAICostUSD}): cache reads at the model's
+   * cached-input rate, cache writes at 1.25x input for the 30-minute lifetime
+   * and 2.5x for the 12-hour one on GPT-5.6 and later. When the model has
+   * long-context pricing ({@link openAiHasLongContextPricing}) and the prompt
+   * exceeds {@link OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS} input tokens, the
+   * whole call bills at the long-context rates: every input rate at 2x and the
+   * output at 1.5x.
    *
    * @param promptTokens Input tokens, cached tokens included. OpenAI compares
    *   this same count against the long-context threshold.
@@ -2595,6 +2619,8 @@ export class OpenAIProvider implements IProvider {
    * @param modelId Model id as echoed by the API; a dated snapshot without its
    *   own row resolves to its base row.
    * @param isEmbedding Prices `promptTokens` alone at the embedding rate.
+   * @param cache The usage's cache counts: tokens read, written, and written
+   *   for 12 hours.
    * @returns Cost in USD, or undefined when the model has no price row.
    * @private
    */
@@ -2602,7 +2628,8 @@ export class OpenAIProvider implements IProvider {
     promptTokens: number,
     completionTokens: number,
     modelId: string,
-    isEmbedding: boolean = false
+    isEmbedding: boolean = false,
+    cache: { cachedTokens?: number; cacheWriteTokens?: number; cacheWriteExtendedTokens?: number } = {}
   ): number | undefined {
     const pricing = this.resolvePricing(modelId);
     if (!pricing) return undefined; // Pricing info not available
@@ -2610,13 +2637,7 @@ export class OpenAIProvider implements IProvider {
     if (isEmbedding) {
       return (promptTokens / 1000) * pricing.input;
     }
-    // A long prompt moves the output onto the higher rate too, because
-    // OpenAI prices the full request at the long-context tier.
-    const isLong =
-      promptTokens > OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS && openAiHasLongContextPricing(modelId);
-    const inputRate = isLong ? pricing.input * OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER : pricing.input;
-    const outputRate = isLong ? pricing.output * OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER : pricing.output;
-    return (promptTokens / 1000) * inputRate + (completionTokens / 1000) * outputRate;
+    return estimateOpenAICostUSD(modelId, { promptTokens, completionTokens, ...cache });
   }
 
   /**

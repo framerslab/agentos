@@ -1099,6 +1099,7 @@ const qualityGated = agency({
 | `confidenceThreshold` | `number` | `0.7` | Confidence threshold (0-1). Below this the fallback handler is used. |
 | `fallback` | [`HitlHandler`](https://github.com/framerslab/agentos/blob/master/src/api/hitl.ts) | `hitl.autoReject(...)` | Handler invoked when confidence is below threshold or LLM call fails. |
 | `apiKey` | `string` | - | Optional API key override. |
+| `baseUrl` | `string` | - | Endpoint the judge call is sent to. Without one, the provider's base-URL variable applies (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`); an empty or whitespace-only value is unset. |
 
 ---
 

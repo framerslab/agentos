@@ -54,6 +54,7 @@ type StrategyTotalUsage = {
   costUSD?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  cacheCreationExtendedTokens?: number;
 };
 
 /**
@@ -129,6 +130,7 @@ export function compileSequential(
           costUSD?: number;
           cacheReadTokens?: number;
           cacheCreationTokens?: number;
+          cacheCreationExtendedTokens?: number;
         }) ?? {};
         const resultToolCalls = (result.toolCalls as Array<{ name: string; args: unknown; result?: unknown; error?: string }>) ?? [];
 
@@ -211,6 +213,7 @@ export function compileSequential(
             costUSD?: number;
             cacheReadTokens?: number;
             cacheCreationTokens?: number;
+            cacheCreationExtendedTokens?: number;
           } = {};
           let resultToolCalls: Array<{ name: string; args: unknown; result?: unknown; error?: string }> = [];
           let recordExtras: ReturnType<typeof callRecordExtras>;
@@ -230,6 +233,7 @@ export function compileSequential(
                 costUSD?: number;
                 cacheReadTokens?: number;
                 cacheCreationTokens?: number;
+                cacheCreationExtendedTokens?: number;
               }>;
               toolCalls?: Promise<Array<{ name: string; args: unknown; result?: unknown; error?: string }>>;
               provider?: Promise<string>;

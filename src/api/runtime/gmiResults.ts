@@ -49,6 +49,9 @@ function addTokenUsage(target: TokenUsage, add: TokenUsage): void {
   if (add.costUSD !== undefined) target.costUSD = (target.costUSD ?? 0) + add.costUSD;
   if (add.cacheReadTokens !== undefined) target.cacheReadTokens = (target.cacheReadTokens ?? 0) + add.cacheReadTokens;
   if (add.cacheCreationTokens !== undefined) target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + add.cacheCreationTokens;
+  if (add.cacheCreationExtendedTokens !== undefined) {
+    target.cacheCreationExtendedTokens = (target.cacheCreationExtendedTokens ?? 0) + add.cacheCreationExtendedTokens;
+  }
   if (add.inclusiveInputTokens !== undefined) target.inclusiveInputTokens = (target.inclusiveInputTokens ?? 0) + add.inclusiveInputTokens;
 }
 

@@ -74,6 +74,11 @@ const ENV_KEY_MAP: Record<string, string> = {
 const ENV_URL_MAP: Record<string, string> = {
   minimax: 'MINIMAX_BASE_URL',
   openai: 'OPENAI_BASE_URL',
+  // The variable Anthropic's TypeScript SDK reads for its `baseURL`
+  // (https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/client.ts,
+  // `readEnv('ANTHROPIC_BASE_URL')`), in the form AnthropicProvider takes it:
+  // `https://api.anthropic.com`, no `/v1`.
+  anthropic: 'ANTHROPIC_BASE_URL',
   openrouter: 'OPENROUTER_BASE_URL',
   requesty: 'REQUESTY_BASE_URL',
   stability: 'STABILITY_BASE_URL',
@@ -95,8 +100,9 @@ export function providerEnvVars(providerId: string): { key?: string; url?: strin
 }
 
 /**
- * `value` when it is a base URL that is set; undefined for an unset one, which
- * is an undefined, empty or whitespace-only string. Every place that reads a
+ * `value` with surrounding whitespace removed when it is a base URL that is
+ * set; undefined for an unset one, which is an undefined, empty or
+ * whitespace-only string. Every place that reads a
  * base URL to decide the endpoint a provider's key is sent to reads it this
  * way: a blank value is read as absent, so the next source applies (the global
  * default's URL, then the provider's base-URL variable), and with none the
@@ -109,11 +115,17 @@ export function providerEnvVars(providerId: string): { key?: string; url?: strin
  * constructor), and Node's fetch, with no page to parse against, rejects it as
  * unparseable (both read 2026-10-25).
  *
+ * A set value is returned trimmed, so the URL a request is built on is the
+ * one the reader means: a variable written `OPENAI_BASE_URL=" https://x/v1"`
+ * or with a trailing newline from a secrets file sends to `https://x/v1`.
+ *
  * @param value - A base URL from a call, a global default or a variable.
- * @returns The value when it is set, else undefined.
+ * @returns The trimmed value when it is set, else undefined.
  */
 export function baseUrlIfSet(value: string | undefined): string | undefined {
-  return value !== undefined && value.trim() !== '' ? value : undefined;
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed !== '' ? trimmed : undefined;
 }
 
 /**
@@ -329,8 +341,9 @@ export function resolveProvider(
 
   // Anthropic fallback: when ANTHROPIC_API_KEY is missing, fall back to OpenRouter
   // if available. This is a convenience — OpenRouter proxies Anthropic models.
-  // Not when the call or the global default gave a base URL: that is where
-  // the caller sends Anthropic requests, and OpenRouter would drop it.
+  // Not when a base URL is set (the call's, the global default's or
+  // ANTHROPIC_BASE_URL): that is where the caller sends Anthropic requests,
+  // and OpenRouter would drop it.
   // A strict caller fails below instead: its key must be Anthropic's own.
   if (providerId === 'anthropic' && !apiKey && !baseUrl && !overrides?.strict) {
     const orKey = process.env['OPENROUTER_API_KEY'];
@@ -619,6 +632,7 @@ const PROVIDER_API_ROOTS: Record<string, readonly string[]> = {
     ...['us', 'eu', 'au', 'ca', 'jp', 'in', 'sg', 'kr', 'gb', 'ae'].map((region) => `https://${region}.api.openai.com/v1`),
   ],
   minimax: ['https://api.minimax.io/v1', 'https://api.minimax.cn/v1', 'https://api.minimaxi.com/v1'],
+  anthropic: ['https://api.anthropic.com'],
 };
 
 /**

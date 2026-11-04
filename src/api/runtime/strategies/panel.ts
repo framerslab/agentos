@@ -51,6 +51,7 @@ type Usage = {
   costUSD?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  cacheCreationExtendedTokens?: number;
 };
 
 type UsageSnapshot = Parameters<typeof buildAgentCallUsage>[0];

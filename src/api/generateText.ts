@@ -222,6 +222,17 @@ export interface TokenUsage {
    * numbers.
    */
   cacheCreationTokens?: number;
+  /**
+   * Of {@link TokenUsage.cacheCreationTokens}, the tokens written with the
+   * provider's longer cache lifetime, billed at its higher write rate:
+   * Anthropic's 1-hour writes at 2x input
+   * (`usage.cache_creation.ephemeral_1h_input_tokens`), OpenAI's 12-hour
+   * writes at 2.5x (`cache_write_tokens_details.ttl_12h_tokens`). The rest
+   * were written with the default lifetime (5 minutes on Anthropic, 30 on
+   * OpenAI, 1.25x input each). Absent when no step's provider split its
+   * writes by lifetime.
+   */
+  cacheCreationExtendedTokens?: number;
 }
 
 /**
@@ -1311,6 +1322,10 @@ export async function createPlan(
     if (typeof cacheCreate === 'number') {
       totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + cacheCreate;
     }
+    const planCacheCreateExtended = (response.usage as { cacheCreationExtendedInputTokens?: number }).cacheCreationExtendedInputTokens;
+    if (typeof planCacheCreateExtended === 'number') {
+      totalUsage.cacheCreationExtendedTokens = (totalUsage.cacheCreationExtendedTokens ?? 0) + planCacheCreateExtended;
+    }
     const planInclusiveIn = (response.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
     if (typeof planInclusiveIn === 'number') {
       totalUsage.inclusiveInputTokens = (totalUsage.inclusiveInputTokens ?? 0) + planInclusiveIn;
@@ -1452,6 +1467,10 @@ export function addModelUsage(target: TokenUsage, usage: unknown): void {
   if (cacheRead !== undefined) target.cacheReadTokens = (target.cacheReadTokens ?? 0) + cacheRead;
   const cacheWrite = num(u.cacheCreationInputTokens);
   if (cacheWrite !== undefined) target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + cacheWrite;
+  const cacheWriteExtended = num(u.cacheCreationExtendedInputTokens);
+  if (cacheWriteExtended !== undefined) {
+    target.cacheCreationExtendedTokens = (target.cacheCreationExtendedTokens ?? 0) + cacheWriteExtended;
+  }
   const inclusive = num(u.inclusiveInputTokens);
   if (inclusive !== undefined) target.inclusiveInputTokens = (target.inclusiveInputTokens ?? 0) + inclusive;
 }
@@ -1488,6 +1507,7 @@ function sumTokenUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   const inclusiveInputTokens = optional(a.inclusiveInputTokens, b.inclusiveInputTokens);
   const cacheReadTokens = optional(a.cacheReadTokens, b.cacheReadTokens);
   const cacheCreationTokens = optional(a.cacheCreationTokens, b.cacheCreationTokens);
+  const cacheCreationExtendedTokens = optional(a.cacheCreationExtendedTokens, b.cacheCreationExtendedTokens);
   return {
     promptTokens: a.promptTokens + b.promptTokens,
     completionTokens: a.completionTokens + b.completionTokens,
@@ -1496,6 +1516,7 @@ function sumTokenUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     ...(inclusiveInputTokens !== undefined ? { inclusiveInputTokens } : {}),
     ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
     ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
+    ...(cacheCreationExtendedTokens !== undefined ? { cacheCreationExtendedTokens } : {}),
   };
 }
 
@@ -2698,6 +2719,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               if (typeof r.usage.cacheCreationInputTokens === 'number') {
                 totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + r.usage.cacheCreationInputTokens;
               }
+              if (typeof r.usage.cacheCreationExtendedInputTokens === 'number') {
+                totalUsage.cacheCreationExtendedTokens = (totalUsage.cacheCreationExtendedTokens ?? 0) + r.usage.cacheCreationExtendedInputTokens;
+              }
               if (typeof r.usage.inclusiveInputTokens === 'number') {
                 totalUsage.inclusiveInputTokens = (totalUsage.inclusiveInputTokens ?? 0) + r.usage.inclusiveInputTokens;
               }
@@ -2953,6 +2977,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           }
           if (typeof cacheCreate === 'number') {
             totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + cacheCreate;
+          }
+          const stepCacheCreateExtended = (response.usage as { cacheCreationExtendedInputTokens?: number }).cacheCreationExtendedInputTokens;
+          if (typeof stepCacheCreateExtended === 'number') {
+            totalUsage.cacheCreationExtendedTokens = (totalUsage.cacheCreationExtendedTokens ?? 0) + stepCacheCreateExtended;
           }
           const stepInclusiveIn = (response.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
           if (typeof stepInclusiveIn === 'number') {
