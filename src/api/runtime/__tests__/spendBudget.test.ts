@@ -177,6 +177,29 @@ describe('the estimates', () => {
     expect(budget.spentUSD()).toBeCloseTo(0.0006, 10);
   });
 
+  it("prices an Anthropic call at its row's rates, so a budget admits it instead of refusing it as unpriced", () => {
+    // claude-sonnet-4-6: $3 input and $15 output per MTok (https://platform.claude.com/docs/en/about-claude/pricing,
+    // read 2026-11-04). 4,000 characters are 1,000 prompt tokens at four characters a token.
+    expect(estimateCallCostUSD('anthropic', 'claude-sonnet-4-6', 4000, 1000)).toBeCloseTo(0.003 + 0.015, 10);
+    const budget = new SpendBudget({ maxCostUSD: 1 });
+    expect(() => assertCallWithinBudget(budget, { providerId: 'anthropic', modelId: 'claude-sonnet-4-6' }, 4000, 1000, 'call')).not.toThrow();
+    expect(() => assertCallWithinBudget(budget, { providerId: 'anthropic', modelId: 'claude-x' }, 4000, 1000, 'call')).toThrow(UnpricedModelError);
+  });
+
+  it("prices an Anthropic call's reported usage, at the long-context rates over the threshold", () => {
+    expect(costOfUsageUSD('anthropic', 'claude-sonnet-4-6', { promptTokens: 1000, completionTokens: 1000 })).toBeCloseTo(0.018, 10);
+    // claude-haiku-5-5 over 100,000 prompt tokens: $0.50 input and $2.50 output per MTok.
+    expect(costOfUsageUSD('anthropic', 'claude-haiku-5-5', { promptTokens: 200_000, completionTokens: 1000 })).toBeCloseTo(0.1 + 0.0025, 10);
+    expect(costOfUsageUSD('anthropic', 'claude-haiku-5-5', { promptTokens: 1000, completionTokens: 1000 })).toBeCloseTo(0.0001 + 0.0005, 10);
+  });
+
+  it("prices OpenAI's reported usage over 272,000 prompt tokens at the long-context rates, as OpenAIProvider bills it", () => {
+    // gpt-6-sol over 272K input tokens: $4 input and $15 output per MTok (https://developers.openai.com/api/docs/pricing,
+    // read 2026-11-04), twice and one and a half times its $2 and $10.
+    expect(costOfUsageUSD('openai', 'gpt-6-sol', { promptTokens: 300_000, completionTokens: 1000 })).toBeCloseTo(1.2 + 0.015, 10);
+    expect(costOfUsageUSD('openai', 'gpt-6-sol', { promptTokens: 272_000, completionTokens: 1000 })).toBeCloseTo(0.544 + 0.01, 10);
+  });
+
   it('counts the characters of the messages and the system prompt', () => {
     expect(promptCharsOf([{ role: 'user', content: 'hello' }], 'be brief')).toBeGreaterThan(13);
   });
