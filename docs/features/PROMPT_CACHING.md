@@ -143,7 +143,9 @@ await streamText({
   for that message, and its last text block is marked on a copy. A request
   with no system goes out unmarked. On
   OpenRouter `anthropic/*` slugs a request that carries a marker of yours
-  goes out as you sent it, as it does by default; one with none gets a
+  (on a message, a tool definition or the request root, a
+  `customModelParams.cache_control` included) goes out as you sent it, as
+  it does by default; one with none gets a
   marker on the first system message and none on the final message; a
   `customModelParams.messages` override stands in for the messages, and
   its first system message is marked on a copy. The

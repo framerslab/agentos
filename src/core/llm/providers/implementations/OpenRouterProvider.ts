@@ -560,7 +560,8 @@ export class OpenRouterProvider implements IProvider {
    *   nothing reads back.
    *
    * Stands down entirely when the caller already placed any cache_control
-   * marker on messages or tool definitions (caller placement wins), or on
+   * marker on messages, tool definitions or the request root (caller
+   * placement wins, as on the direct path), or on
    * the `AGENTOS_ANTHROPIC_AUTO_CACHE=0`/`false` kill switch (same syntax
    * as the direct path). `options.cache === false` goes further, mirroring
    * the direct provider's per-call hard-off: caller markers already in the
@@ -575,6 +576,7 @@ export class OpenRouterProvider implements IProvider {
     orMessages: Array<Partial<ChatMessage>>,
     options: ModelCompletionOptions,
     wireTools: unknown,
+    rootMarker?: unknown,
   ): void {
     if (!modelId.toLowerCase().startsWith('anthropic/')) return;
 
@@ -606,10 +608,11 @@ export class OpenRouterProvider implements IProvider {
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
     if (autoCacheEnv === '0' || autoCacheEnv === 'false') return;
 
-    // Caller placement wins: a marker already present in the messages or
+    // Caller placement wins: a marker already present in the messages, in
     // the tool definitions being sent (a customModelParams.tools override
-    // included, in place of the call's tools) means the caller owns
-    // breakpoint placement — injecting two more could exceed
+    // included, in place of the call's tools) or on the request root (a
+    // customModelParams.cache_control) means the caller owns breakpoint
+    // placement — injecting two more could exceed
     // Anthropic's 4-breakpoint cap or order a longer TTL after a shorter
     // one (both reject with 400).
     const holdsMarker = (value: unknown): boolean =>
@@ -620,7 +623,11 @@ export class OpenRouterProvider implements IProvider {
           typeof entry === 'object' &&
           (entry as Record<string, unknown>).cache_control !== undefined,
       );
-    if (orMessages.some((m) => holdsMarker(m.content)) || holdsMarker(wireTools)) {
+    if (
+      rootMarker !== undefined ||
+      orMessages.some((m) => holdsMarker(m.content)) ||
+      holdsMarker(wireTools)
+    ) {
       return;
     }
 
@@ -684,7 +691,8 @@ export class OpenRouterProvider implements IProvider {
    * options, so markers placed before that spread would never reach the
    * wire. The message objects are copied first, because an override array
    * belongs to the caller. Whether the caller placed a tool marker is read
-   * from the final `tools` too. Under `cache: false`, `cache_control` is
+   * from the final `tools` too, and a request-level `cache_control` from
+   * `customModelParams` counts as caller placement. Under `cache: false`, `cache_control` is
    * also removed from the request root and from each tool definition in
    * the final `tools` (copies, never in-place edits), as the direct
    * provider does.
@@ -703,7 +711,13 @@ export class OpenRouterProvider implements IProvider {
         (message) => ({ ...message }),
       ) as Array<Partial<ChatMessage>>;
       payload.messages = wireMessages;
-      this.applyAnthropicSlugCacheControl(modelId, wireMessages, options, payload.tools);
+      this.applyAnthropicSlugCacheControl(
+        modelId,
+        wireMessages,
+        options,
+        payload.tools,
+        payload.cache_control,
+      );
     }
 
     // A request-level marker (passed through customModelParams) would let
