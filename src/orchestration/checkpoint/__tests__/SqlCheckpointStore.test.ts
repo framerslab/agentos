@@ -258,6 +258,24 @@ function runCheckpointStoreCases(open: () => Promise<OpenDatabase>): void {
     expect(await store.list('graph-1', { limit: 0 })).toHaveLength(5);
   });
 
+  it('list with a limit beyond any whole number the database binds leaves the list whole, as InMemoryCheckpointStore does', async () => {
+    const memory = new InMemoryCheckpointStore();
+    const base = Date.now();
+    for (let i = 0; i < 3; i++) {
+      const checkpoint = makeCheckpoint({ id: `cp-${i}`, graphId: 'graph-1', runId: 'run-1', timestamp: base + i });
+      await store.save(checkpoint);
+      await memory.save(checkpoint);
+    }
+
+    // SQLite refuses a LIMIT it cannot hold as a 64-bit integer, and Postgres a BIGINT out of range.
+    for (const limit of [1e21, Number.MAX_VALUE, Number.POSITIVE_INFINITY]) {
+      expect((await store.list('graph-1', { limit })).map((m) => m.id)).toEqual(
+        (await memory.list('graph-1', { limit })).map((m) => m.id),
+      );
+    }
+    expect(await store.list('graph-1', { limit: Number.MAX_SAFE_INTEGER })).toHaveLength(3);
+  });
+
   it('list with runId filter returns only checkpoints for that run', async () => {
     await store.save(makeCheckpoint({ id: 'cp-1', graphId: 'graph-1', runId: 'run-A' }));
     await store.save(makeCheckpoint({ id: 'cp-2', graphId: 'graph-1', runId: 'run-B' }));
@@ -535,6 +553,54 @@ describe('SqlCheckpointStore: its table', () => {
     const store = new SqlCheckpointStore({ db: dropsWrites });
 
     await expect(store.save(makeCheckpoint())).rejects.toThrow(/no row/);
+  });
+
+  it('saves when another process made the table between its read and its DDL, and the DDL failed on that', async () => {
+    // Two processes start on an empty database: both reads find no table, the other process's DDL wins, and this
+    // one's fails. On Postgres two concurrent CREATE TABLE IF NOT EXISTS can fail so, on the catalogue's unique index.
+    let ddlRuns = 0;
+    const losesTheRace = new Proxy(db, {
+      get(target, key, receiver) {
+        if (key === 'exec') {
+          return async () => {
+            ddlRuns += 1;
+            await target.exec(checkpointDdl('raced_checkpoints'));
+            throw new Error('duplicate key value violates unique constraint "pg_type_typname_nsp_index"');
+          };
+        }
+        const value = Reflect.get(target, key, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const store = new SqlCheckpointStore({ db: losesTheRace, tablePrefix: 'raced_checkpoints' });
+
+    await store.save(makeCheckpoint({ id: 'cp-raced' }));
+    expect((await store.get('cp-raced'))!.id).toBe('cp-raced');
+    expect(ddlRuns).toBe(1);
+  });
+
+  it('rejects with the DDL error when the table is still missing after the DDL failed, and tries again on the next call', async () => {
+    let failNext = true;
+    const failsOnce = new Proxy(db, {
+      get(target, key, receiver) {
+        if (key === 'exec') {
+          return async (script: string) => {
+            if (failNext) {
+              failNext = false;
+              throw new Error('disk I/O error');
+            }
+            return target.exec(script);
+          };
+        }
+        const value = Reflect.get(target, key, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const store = new SqlCheckpointStore({ db: failsOnce, tablePrefix: 'flaky_checkpoints' });
+
+    await expect(store.save(makeCheckpoint({ id: 'cp-first' }))).rejects.toThrow('disk I/O error');
+    await store.save(makeCheckpoint({ id: 'cp-second' }));
+    expect((await store.get('cp-second'))!.id).toBe('cp-second');
   });
 
   it('serialises to a marker, never its adapter', () => {
