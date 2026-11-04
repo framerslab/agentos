@@ -65,6 +65,7 @@ import {
 } from './anthropicCatalog.js';
 import { resolveAnthropicEffort } from '../model-effort.js';
 import { computeRetryBackoffMs, resolveAttemptCount, waitForRetry } from './retry-backoff.js';
+import { operationIdHeaderNamed, operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
 import { redactUrlSecrets } from '../url-secrets';
@@ -171,6 +172,18 @@ export interface AnthropicProviderConfig {
    * pool took out is probed off the request path before it returns.
    */
   keyPool?: Pick<ApiKeyPoolConfig, 'strategy' | 'cooldownMs' | 'recheckMs' | 'maxRecheckMs' | 'maxRetryAfterMs' | 'loadTimeoutMs' | 'storeTimeoutMs' | 'store' | 'id'>;
+  /**
+   * The header each request carries its call's operation id in, a UUID made
+   * once before the call's first attempt and sent on every retry of the call
+   * (after a 429, a 5xx, a network failure or a stream that ended early); the
+   * next call, and a request sent again with a changed body, gets a new one.
+   * When this is unset the provider reads `AGENTOS_OPERATION_ID_HEADER`; with
+   * neither, no header is sent. A name that is not an HTTP header name, or one
+   * the provider sets itself (`x-api-key`, `anthropic-version`, ...), is
+   * refused with a `RangeError` by `initialize()`, by each call and by
+   * `probeApiKey()`, before anything is sent.
+   */
+  operationIdHeader?: string;
 }
 
 /** The kind of key failure an in-stream `error` event names, or null when it is not the key's fault. */
@@ -651,6 +664,8 @@ export class AnthropicProvider implements IProvider {
         'INIT_FAILED_MISSING_API_KEY',
       );
     }
+    // A header name every call would refuse is refused here, before anything is sent or replaced.
+    resolveOperationIdHeader(config.operationIdHeader);
     // The new pool is built before anything of the old state is touched: its construction makes no request, so a
     // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
     const keyPool = new ApiKeyPool(config.apiKey, {
@@ -842,7 +857,8 @@ export class AnthropicProvider implements IProvider {
    *   together; key hops are not counted.
    * @throws {AnthropicProviderError} `REQUEST_ABORTED` when the caller's signal
    *   ends the request.
-   * @throws {RangeError} When `maxAttempts` is not a whole number of 1 or more.
+   * @throws {RangeError} When `maxAttempts` is not a whole number of 1 or more,
+   *   or the operation id header's name is refused (`operationIdHeader`).
    * @private
    */
   private async streamMessagesToResponse(
@@ -858,6 +874,8 @@ export class AnthropicProvider implements IProvider {
     );
 
     const attempts = resolveAttemptCount(maxAttempts, Math.max(1, this.config.maxRetries ?? 1));
+    // One operation id for the whole call: every attempt and key hop below sends this same value.
+    const operationHeaders = operationIdHeaders(this.config.operationIdHeader);
     // Key hops this request has made: a key-scoped failure hops to the next
     // usable key at once without spending a transient attempt, at most once
     // per key of the pool.
@@ -868,7 +886,14 @@ export class AnthropicProvider implements IProvider {
       }
       const attemptInfo: { apiKey?: string; startedAt?: number } = {};
       try {
-        const stream = await this.makeStreamRequest('/v1/messages', payload, requestTimeoutOverride, abortSignal, attemptInfo);
+        const stream = await this.makeStreamRequest(
+          '/v1/messages',
+          payload,
+          requestTimeoutOverride,
+          abortSignal,
+          attemptInfo,
+          operationHeaders,
+        );
         const accumulated = await this.accumulateMessagesStream(stream, schemaToolName);
         if (attemptInfo.apiKey) this.keyPool?.markSuccess(attemptInfo.apiKey, attemptInfo.startedAt);
         return accumulated;
@@ -1242,13 +1267,22 @@ export class AnthropicProvider implements IProvider {
     // caller, moves to the next usable key; after content has streamed an
     // error surfaces as before and the key stays marked for the next request.
     const streamAttempt: { apiKey?: string; startedAt?: number } = {};
+    // One operation id for the stream's request: a key hop below sends the same value.
+    const operationHeaders = operationIdHeaders(this.config.operationIdHeader);
     let keyHops = 0;
     let stream: ReadableStream<Uint8Array> | undefined;
     while (stream === undefined) {
       try {
         // The caller's signal ends a draw that waits on the pool's probes, the connection and the body's reads.
         // The per-call requestTimeout bounds the connection (the request and its headers), as on the generate path.
-        stream = await this.makeStreamRequest('/v1/messages', payload, options.requestTimeout, abortSignal, streamAttempt);
+        stream = await this.makeStreamRequest(
+          '/v1/messages',
+          payload,
+          options.requestTimeout,
+          abortSignal,
+          streamAttempt,
+          operationHeaders,
+        );
       } catch (error: unknown) {
         // An abort before the first event, while the draw waited on the probes or the connection was opening,
         // ends the stream with the abort chunk, as an abort before the request does.
@@ -3103,24 +3137,34 @@ export class AnthropicProvider implements IProvider {
    * `options.baseURL`, else the configured one, else Anthropic's own. The
    * key pool's probe of a failed key is this method's verdict.
    * `probeProviderKey()` calls it with a key of the caller's.
+   *
+   * @throws {RangeError} When the operation id header's name is refused (`operationIdHeader`, else
+   *   `AGENTOS_OPERATION_ID_HEADER`), before anything is sent: the name is the host's error, not the key's.
    */
   public async probeApiKey(apiKey: string, options: KeyProbeOptions = {}): Promise<KeyProbeAnswer> {
+    // Resolved before the deadline starts and outside the catch below, which turns a failed request into an answer.
+    const operationHeader = resolveOperationIdHeader(this.config?.operationIdHeader);
     const deadline = startKeyProbeDeadline(options);
     const baseURL = options.baseURL || this.config?.baseURL || ANTHROPIC_DEFAULT_BASE_URL;
     try {
-      const headers = { ...this.buildHeaders(apiKey), 'Content-Type': 'application/json' };
+      // Each request of the probe is a call of its own, with its own operation id when the host names a header.
+      const headers = (): Record<string, string> => ({
+        ...this.buildHeaders(apiKey),
+        'Content-Type': 'application/json',
+        ...operationIdHeaderNamed(operationHeader),
+      });
       if (options.kind === 'billing') {
         const model = options.model || this.defaultModelId || ANTHROPIC_BILLING_PROBE_MODEL;
         const response = await fetch(`${baseURL}/v1/messages`, {
           method: 'POST',
-          headers,
+          headers: headers(),
           body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }),
           signal: deadline.signal,
         });
         return await readKeyProbeAnswer(response, { model, apiKey, signal: deadline.signal });
       }
       return await readKeyProbeAnswer(
-        await fetch(`${baseURL}/v1/models?limit=1`, { method: 'GET', headers, signal: deadline.signal }),
+        await fetch(`${baseURL}/v1/models?limit=1`, { method: 'GET', headers: headers(), signal: deadline.signal }),
         { apiKey, signal: deadline.signal },
       );
     } catch (error) {
@@ -3173,7 +3217,8 @@ export class AnthropicProvider implements IProvider {
    * @returns {Promise<T>} Parsed JSON response.
    * @throws {AnthropicProviderError} On authentication, validation, rate-limit, or network errors;
    *   `REQUEST_ABORTED` when the caller's signal ends the request.
-   * @throws {RangeError} When `maxAttempts` is not a whole number of 1 or more.
+   * @throws {RangeError} When `maxAttempts` is not a whole number of 1 or more, or the operation id header's name is
+   *   refused (`operationIdHeader`); nothing is sent.
    * @private
    */
   private async makeApiRequest<T>(
@@ -3186,6 +3231,8 @@ export class AnthropicProvider implements IProvider {
   ): Promise<T> {
     const url = `${this.config.baseURL}${endpoint}`;
     const attempts = resolveAttemptCount(maxAttempts, this.config.maxRetries!);
+    // One operation id for the whole call: every attempt and key hop below sends this same value.
+    const operationHeaders = operationIdHeaders(this.config.operationIdHeader);
 
     // Per-call request-timeout override. Large-output callers (e.g. codegen
     // structured-output that emits long TSX) pass a longer requestTimeout so
@@ -3228,7 +3275,7 @@ export class AnthropicProvider implements IProvider {
         // race guarantees the await resolves within requestTimeout + 500ms.
         const fetchPromise = fetch(url, {
           method,
-          headers: { ...headers, ...this.betaHeaders(body), 'Content-Type': 'application/json', connection: 'close' },
+          headers: { ...headers, ...this.betaHeaders(body), 'Content-Type': 'application/json', connection: 'close', ...operationHeaders },
           body: JSON.stringify(body),
           // The caller's signal aborts this attempt's fetch as the timer does.
           signal: abortSignal ? AbortSignal.any([controller.signal, abortSignal]) : controller.signal,
@@ -3379,6 +3426,9 @@ export class AnthropicProvider implements IProvider {
    * @param {number} [requestTimeoutOverride] - Per-call connection timeout in ms, over the configured default.
    * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the request in flight, the
    *   returned body's reads included.
+   * @param [attemptOut] - Filled with the key this attempt drew and when it started.
+   * @param [operationHeaders] - The call's operation id header ({@link operationIdHeaders}), made once by the caller
+   *   so every attempt of the call sends the same value.
    * @returns {Promise<ReadableStream<Uint8Array>>} The response body stream.
    * @throws {AnthropicProviderError} On connection errors; `REQUEST_ABORTED` when the caller's
    *   signal ends the request before the body is returned.
@@ -3390,6 +3440,7 @@ export class AnthropicProvider implements IProvider {
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
     attemptOut?: { apiKey?: string; startedAt?: number },
+    operationHeaders: Record<string, string> = {},
   ): Promise<ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
     const apiKey = await this.drawApiKey(abortSignal);
@@ -3423,7 +3474,7 @@ export class AnthropicProvider implements IProvider {
       // guarantees the await ends even when the signal is ignored.
       const fetchPromise = fetch(url, {
         method: 'POST',
-        headers: { ...headers, ...this.betaHeaders(body), 'Content-Type': 'application/json' },
+        headers: { ...headers, ...this.betaHeaders(body), 'Content-Type': 'application/json', ...operationHeaders },
         body: JSON.stringify(body),
         // The caller's signal aborts the request as the connection timer does,
         // and the body's reads after the headers have arrived.

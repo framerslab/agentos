@@ -78,6 +78,18 @@ export function runSpendMeterWindowSuite(name: string, factory: SpendMeterWindow
       expect(await meter.snapshot('a', at(1, 500))).toEqual({ accountId: 'a', period: 'window', allowance: 2, used: 0, reserved: 2, remaining: 0 });
     });
 
+    it('counts a reservation consumed at fewer units than it held by the units it used, and none of them once refunded', async () => {
+      const { meter } = await open({ a: 5 });
+      await meter.reserve({ accountId: 'a', operationId: 'big', units: 4, now: at(0) });
+      expect(await meter.settle({ operationId: 'big', outcome: 'consumed', units: 1, now: at(0) })).toEqual({ status: 'settled', state: 'consumed' });
+      expect(await meter.snapshot('a', at(0))).toEqual({ accountId: 'a', period: 'window', allowance: 5, used: 1, reserved: 0, remaining: 4 });
+      // the three units it did not use are free inside the hour
+      expect(await meter.reserve({ accountId: 'a', operationId: 'more', units: 4, now: at(1) })).toMatchObject({ status: 'reserved', remaining: 0 });
+      // refunded: the unit it used leaves the window at once
+      expect(await meter.settle({ operationId: 'big', outcome: 'replaced', now: at(2) })).toEqual({ status: 'settled', state: 'released' });
+      expect(await meter.snapshot('a', at(2))).toEqual({ accountId: 'a', period: 'window', allowance: 5, used: 0, reserved: 4, remaining: 1 });
+    });
+
     it('answers a snapshot from the window: the units consumed and reserved inside it, what remains, and the period `window`', async () => {
       const { meter } = await open({ a: 5, b: 1 });
       // an account that never reserved shows its whole allowance

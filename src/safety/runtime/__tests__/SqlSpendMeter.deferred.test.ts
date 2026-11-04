@@ -79,6 +79,19 @@ function suite(name: string, open: () => Promise<{ db: StorageAdapter; prefix: s
       expect(asked).toEqual([{ deferredCount: 0, requireFence: true }, { deferredCount: 1, requireFence: true }, { deferredCount: 2, requireFence: true }]);
     });
 
+    it('consumes an expired reservation at the units resolveExpired says its work used, never more than it reserved', async () => {
+      const { db, prefix } = await open();
+      // the host's evidence: the call row of `call` reports one unit's usage, and `over` reports more than it reserved
+      const m = meter(db, prefix, { allowanceFor: () => 10, resolveExpired: async (r) => ({ outcome: 'consumed', units: r.operationId === 'over' ? 9 : 1 }) });
+      await m.reserve({ accountId: 'a', operationId: 'call', units: 3, requireFence: true, now: at(0) });
+      await m.reserve({ accountId: 'a', operationId: 'over', units: 2, requireFence: true, now: at(0) });
+      expect(await m.reconcile({ now: at(1) })).toEqual({ consumed: 2, released: 0, pending: 0, deferred: 0 });
+      expect(await m.snapshot('a', at(1))).toMatchObject({ used: 3, reserved: 0, remaining: 7 });
+      // a refund of either gives back what it took
+      await m.settle({ operationId: 'call', outcome: 'replaced', now: at(2) });
+      expect(await m.snapshot('a', at(2))).toMatchObject({ used: 2, reserved: 0, remaining: 8 });
+    });
+
     it('counts a reservation still reserved in a rolling window whatever its age', async () => {
       const { db, prefix } = await open();
       const m = meter(db, `${prefix}w`, { windowMs: HOUR, periodOf: undefined, allowanceFor: () => 1, resolveExpired: async () => ({ outcome: 'deferred', retryAt: at(180) }) });

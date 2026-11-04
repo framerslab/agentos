@@ -148,10 +148,12 @@ function detailOf(state: ProviderKeyState, answer: KeyProbeAnswer, timeoutMs: nu
  * `classifyKeyFailure()`, as a request's is in the key pool. A probe costs one request of one or a few output
  * tokens on a passing key.
  *
- * Nothing is read from the environment and no pool takes part: the probe sends the key it is given to the provider's
- * own endpoint, or to `baseUrl`. It never throws for an answer; it throws before any request for a provider it has
- * no probe for (`RangeError`), a missing key or a comma-separated list (`TypeError`), and a `timeoutMs` that is not a
- * positive finite number (`RangeError`).
+ * No key is read from the environment and no pool takes part: the probe sends the key it is given to the provider's
+ * own endpoint, or to `baseUrl`. The one variable that changes what it sends is `AGENTOS_OPERATION_ID_HEADER`: on
+ * Anthropic, OpenAI and OpenRouter it names the header each of the probe's requests carries an operation id in. It
+ * never throws for an answer; it throws before any request for a provider it has no probe for (`RangeError`), a
+ * missing key or a comma-separated list (`TypeError`), a `timeoutMs` that is not a positive finite number
+ * (`RangeError`), and an `AGENTOS_OPERATION_ID_HEADER` those three providers refuse as a header name (`RangeError`).
  *
  * @param options The provider, the key, and optionally the model, the base URL, the timeout and an abort signal.
  * @returns The state, a detail line without the key, the key's fingerprint, and the status, model and Retry-After
