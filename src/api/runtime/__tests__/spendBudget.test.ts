@@ -11,7 +11,7 @@ import {
   estimateCallCostUSD,
   promptCharsOf,
 } from '../spendBudget.js';
-import { registerModelPricing } from '../modelPricing.js';
+import { modelPricing, registerModelPricing } from '../modelPricing.js';
 
 /** The error a call throws, or undefined when it throws none. */
 function thrownBy(call: () => void): unknown {
@@ -196,7 +196,8 @@ describe('the estimates', () => {
 
   it("prices the cache reads and writes of usage with no reported cost, which an Anthropic report keeps out of its prompt tokens", () => {
     // A model the catalog lacks, priced by the host's table, so the provider reports no cost: $3 input, $0.30 cache
-    // read, $6 cache write (the highest, the 1-hour one) and $15 output per MTok; over 10,000 prompt tokens, twice that.
+    // read, $6 cache write and $15 output per MTok; over 10,000 prompt tokens, twice that. The row names one write rate
+    // and no default-lifetime rate, so every write is priced at that one.
     registerModelPricing('anthropic', (id) =>
       id === 'claude-host-1'
         ? {
@@ -225,11 +226,83 @@ describe('the estimates', () => {
     } finally {
       registerModelPricing('anthropic', () => undefined);
     }
-    // OpenAI's prompt tokens hold its cached tokens, and its inclusive total is its prompt tokens: gpt-6-sol's table
-    // has no cache-read rate, so the read is priced as input and the cost is the prompt's at the input rate.
+    // OpenAI's prompt tokens hold its cached tokens, and its inclusive total is its prompt tokens. gpt-6-sol bills $2
+    // input, $0.20 cached input and $10 output per MTok (https://developers.openai.com/api/docs/pricing, read
+    // 2026-11-04): 200 tokens at $2, the 800 read at $0.20 and 1,000 output at $10 is $0.01056, not the $0.012 the
+    // prompt costs at the input rate.
     expect(
       costOfUsageUSD('openai', 'gpt-6-sol', { promptTokens: 1_000, completionTokens: 1_000, cacheReadInputTokens: 800, inclusiveInputTokens: 1_000 }),
-    ).toBeCloseTo((1_000 * 2 + 1_000 * 10) / 1e6, 12);
+    ).toBeCloseTo((200 * 2 + 800 * 0.2 + 1_000 * 10) / 1e6, 12);
+  });
+
+  it("carries OpenAI's cached-input rate on every model its pricing page lists one for, doubled over 272,000 tokens", () => {
+    // https://developers.openai.com/api/docs/pricing, standard tier, read 2026-11-04 (USD per MTok).
+    const listed: Array<[string, number]> = [
+      ['gpt-6-astra', 1],
+      ['gpt-6.1-sol', 0.1],
+      ['gpt-6-luna', 0.01],
+      ['gpt-6-sol', 0.2],
+      ['gpt-5.6-sol', 0.4],
+      ['gpt-5.6-terra', 0.2],
+      ['gpt-5.6-luna', 0.02],
+      ['gpt-5.5', 0.5],
+      ['gpt-5.4', 0.25],
+      ['gpt-5.4-mini', 0.075],
+      ['gpt-5.4-nano', 0.02],
+      ['gpt-5.3-codex', 0.175],
+      ['gpt-5.2', 0.175],
+      ['gpt-5.1', 0.125],
+      ['gpt-5', 0.125],
+      ['gpt-5-mini', 0.025],
+      ['gpt-5-nano', 0.005],
+      ['gpt-4.1', 0.5],
+      ['gpt-4.1-mini', 0.1],
+      ['gpt-4o', 1.25],
+      ['gpt-4o-mini', 0.075],
+      ['o3', 0.5],
+    ];
+    for (const [model, cached] of listed) {
+      expect(modelPricing('openai', model)?.cacheReadPerMTokUSD, model).toBeCloseTo(cached, 12);
+    }
+    // A dated snapshot without a row of its own takes its base model's.
+    expect(modelPricing('openai', 'gpt-6-sol-2026-09-03')?.cacheReadPerMTokUSD).toBeCloseTo(0.2, 12);
+    // The long-context card doubles the cached-input rate as it doubles the input rate.
+    expect(modelPricing('openai', 'gpt-6-sol')?.longContext?.cacheReadPerMTokUSD).toBeCloseTo(0.4, 12);
+    // The page lists no cached-input rate for the pro models: their reads are billed as input.
+    expect(modelPricing('openai', 'gpt-5.5-pro')?.cacheReadPerMTokUSD).toBeUndefined();
+    expect(modelPricing('openai', 'o3-pro')?.cacheReadPerMTokUSD).toBeUndefined();
+  });
+
+  it("prices an Anthropic cache write at the 5-minute rate when the report gives no lifetime, and the 1-hour share at the 1-hour rate", () => {
+    // claude-sonnet-4-6: $3 input per MTok; a 5-minute write is 1.25x ($3.75), a 1-hour write 2x ($6)
+    // (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-04). The default lifetime is 5 minutes
+    // (https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+    const written = { promptTokens: 0, completionTokens: 0, cacheCreationInputTokens: 1_000_000 };
+    // No split: the write is priced at the rate Anthropic bills by default, the 5-minute one.
+    expect(costOfUsageUSD('anthropic', 'claude-sonnet-4-6', written)).toBeCloseTo(3.75, 12);
+    // usage.cache_creation { ephemeral_5m_input_tokens: 1_000_000, ephemeral_1h_input_tokens: 0 }.
+    expect(costOfUsageUSD('anthropic', 'claude-sonnet-4-6', { ...written, cacheCreationExtendedInputTokens: 0 })).toBeCloseTo(3.75, 12);
+    // Every token written for an hour.
+    expect(costOfUsageUSD('anthropic', 'claude-sonnet-4-6', { ...written, cacheCreationExtendedInputTokens: 1_000_000 })).toBeCloseTo(6, 12);
+    // 600,000 for 5 minutes and 400,000 for an hour: 0.6 x $3.75 + 0.4 x $6.
+    expect(costOfUsageUSD('anthropic', 'claude-sonnet-4-6', { ...written, cacheCreationExtendedInputTokens: 400_000 })).toBeCloseTo(2.25 + 2.4, 12);
+    // A run's totals carry the count under the name generateText sums it as.
+    expect(
+      costOfUsageUSD('anthropic', 'claude-sonnet-4-6', { promptTokens: 0, completionTokens: 0, cacheCreationTokens: 1_000_000, cacheCreationExtendedTokens: 400_000 }),
+    ).toBeCloseTo(2.25 + 2.4, 12);
+    // A 1-hour count above the write total is held to the total.
+    expect(costOfUsageUSD('anthropic', 'claude-sonnet-4-6', { ...written, cacheCreationExtendedInputTokens: 2_000_000 })).toBeCloseTo(6, 12);
+    // The card names both rates.
+    expect(modelPricing('anthropic', 'claude-sonnet-4-6')).toMatchObject({ defaultCacheWritePerMTokUSD: 3.75, cacheWritePerMTokUSD: 6 });
+  });
+
+  it("prices an OpenAI cache write at the 30-minute rate, and the 12-hour share the report names at the 12-hour rate", () => {
+    // gpt-6-sol: $2 input, a 30-minute write $2.50 and a 12-hour write $5 per MTok
+    // (https://developers.openai.com/api/docs/pricing, read 2026-11-04). 1,000 prompt tokens, all of them written.
+    const written = { promptTokens: 1_000, completionTokens: 0, cacheCreationInputTokens: 1_000, inclusiveInputTokens: 1_000 };
+    expect(costOfUsageUSD('openai', 'gpt-6-sol', written)).toBeCloseTo((1_000 * 2.5) / 1e6, 12);
+    // cache_write_tokens_details { ttl_30m_tokens: 600, ttl_12h_tokens: 400 }.
+    expect(costOfUsageUSD('openai', 'gpt-6-sol', { ...written, cacheCreationExtendedInputTokens: 400 })).toBeCloseTo((600 * 2.5 + 400 * 5) / 1e6, 12);
   });
 
   it("keeps a bill the provider's API reported over the host's row, and the host's row over a cost the OpenAI client computed", () => {

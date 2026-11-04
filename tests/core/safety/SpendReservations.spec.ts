@@ -22,7 +22,8 @@ import {
 const AT = new Date('2026-10-12T10:00:00Z');
 const LATER = new Date('2026-10-12T11:00:00Z');
 const LIMIT = 60_000_000;
-const LUNA = { input: 0.0001, output: 0.0005 };
+/** gpt-6-luna's row, per 1K: $0.10 input, $0.50 output and $0.01 cached input per MTok (https://developers.openai.com/api/docs/pricing, read 2026-11-04). */
+const LUNA = { input: 0.0001, output: 0.0005, cachedInput: 0.00001 };
 
 describe('the arithmetic', () => {
   it('prices seconds by the minute, a part rounded up to the micro-dollar', () => {
