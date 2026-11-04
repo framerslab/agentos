@@ -380,6 +380,46 @@ describe('OpenRouter anthropic/* zero-config cache_control', () => {
     for (const chat of chats) expect(chat[3]!.cache_control).toBeUndefined();
   });
 
+  it('stands down when a request-level cache_control comes through customModelParams, with a messages override', async () => {
+    const { provider, calls } = await makeProvider();
+    const override = () => [
+      { role: 'system', content: 'override rules '.repeat(10) },
+      { role: 'user', content: 'override turn' },
+    ];
+    await provider.generateCompletion('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+      customModelParams: { cache_control: { type: 'ephemeral' }, messages: override() },
+    });
+    const stream = provider.generateCompletionStream('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+      customModelParams: { cache_control: { type: 'ephemeral' }, messages: override() },
+    });
+    for await (const chunk of stream) {
+      void chunk;
+    }
+    const chats = calls().filter((c) => c[0] === '/chat/completions');
+    expect(chats).toHaveLength(2);
+    for (const chat of chats) {
+      // The caller owns placement: the root marker goes out as set and no
+      // message breakpoint is added beside it.
+      expect(chat[3]!.cache_control).toEqual({ type: 'ephemeral' });
+      const wire = (chat[3] as { messages: WireMessage[] }).messages;
+      expect(wire[0].content).toBe('override rules '.repeat(10));
+      expect(wire[1].content).toBe('override turn');
+    }
+  });
+
+  it('stands down when a request-level cache_control comes through customModelParams', async () => {
+    const { provider, calls } = await makeProvider();
+    await provider.generateCompletion('anthropic/claude-sonnet-4-6', convo, {
+      customModelParams: { cache_control: { type: 'ephemeral' } },
+    });
+    const chat = calls().filter((c) => c[0] === '/chat/completions').at(-1)!;
+    expect(chat[3]!.cache_control).toEqual({ type: 'ephemeral' });
+    const wire = (chat[3] as { messages: WireMessage[] }).messages;
+    for (const message of wire) expect(typeof message.content).toBe('string');
+  });
+
   it('injects on the streaming path too', async () => {
     const { provider, calls } = await makeProvider();
     const stream = provider.generateCompletionStream(
