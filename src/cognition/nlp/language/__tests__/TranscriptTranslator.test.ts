@@ -108,6 +108,19 @@ describe('TranscriptTranslator.translateLine', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('skips a line whose source is the target in another case or with a region, and translates one in another script', async () => {
+    answer(jsonResponse(chatCompletion('你好。')));
+    const translator = new TranscriptTranslator();
+    const upper = await translator.translateLine(line('Hello.', { code: 'EN', provenance: 'detected' }), 'en', OPTIONS);
+    const regional = await translator.translateLine(line('Hello.', { code: 'en-US', provenance: 'configured' }), 'en', OPTIONS);
+    const underscored = await translator.translateLine(line('Olá.', { code: 'pt_BR', provenance: 'detected' }), 'pt', OPTIONS);
+    expect([upper.status, regional.status, underscored.status]).toEqual(['skipped', 'skipped', 'skipped']);
+    expect(posts()).toHaveLength(0);
+    const script = await translator.translateLine(line('你好。', { code: 'zh-Hans', provenance: 'detected' }), 'zh-Hant', OPTIONS);
+    expect(script.status).toBe('translated');
+    expect(posts()).toHaveLength(1);
+  });
+
   it('translates a line of unknown provenance whatever its words, with source null', async () => {
     answer(jsonResponse(chatCompletion('Good morning.')), jsonResponse(chatCompletion('Buenos días.')));
     const got = await new TranscriptTranslator().translateLine(line('Buenos días.', { code: null, provenance: 'unknown' }), 'en', OPTIONS);

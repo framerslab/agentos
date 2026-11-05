@@ -152,6 +152,16 @@ describe('LiveKitTranslationOutput', () => {
     expect(sent(room).map(({ options }) => options.destinationIdentities)).toEqual([['p-1'], ['p-9']]);
   });
 
+  it('sends a message on the topic it was given, though the caller changes its options before the send', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranslationOutput({ room });
+    const to = { topic: 'lk.status', destinationIdentities: ['p-1'] };
+    const first = output.send('{"kind":"status"}', to);
+    to.topic = 'lk.other';
+    await first;
+    expect(sent(room).map(({ options }) => options.topic)).toEqual(['lk.status']);
+  });
+
   it('sends and replays a line as it was written, though the caller changes the object afterwards', async () => {
     const room = new FakeRoom();
     const output = new LiveKitTranslationOutput({ room });
