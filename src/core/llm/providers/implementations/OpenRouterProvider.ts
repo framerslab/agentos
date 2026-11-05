@@ -554,14 +554,20 @@ export class OpenRouterProvider implements IProvider {
    * - the first system message (stable prefix — later system messages can
    *   be volatile per-turn recall appended by memory hooks), and
    * - the last text block of the final message (moving tail, so multi-turn
-   *   history is read back on the next turn).
+   *   history is read back on the next turn). `options.cache.tail === false`
+   *   leaves this one out, as the direct path does: a call that re-sends a
+   *   stable prefix and never the same tail twice would pay to write a tail
+   *   nothing reads back.
    *
    * Stands down entirely when the caller already placed any cache_control
-   * marker on messages or tool definitions (caller placement wins), or on
+   * marker on messages, tool definitions or the request root (caller
+   * placement wins, as on the direct path), or on
    * the `AGENTOS_ANTHROPIC_AUTO_CACHE=0`/`false` kill switch (same syntax
    * as the direct path). `options.cache === false` goes further, mirroring
    * the direct provider's per-call hard-off: caller markers already in the
-   * message content are stripped as well. Sub-floor prefixes are safe to
+   * message content are stripped as well (tool-definition markers are
+   * stripped by {@link applyAnthropicSlugCacheToPayload}, on the final
+   * `tools`). Sub-floor prefixes are safe to
    * mark: Anthropic silently ignores markers below the model's minimum
    * cacheable length. `options.cache.ttl` rides onto the injected markers.
    */
@@ -569,6 +575,8 @@ export class OpenRouterProvider implements IProvider {
     modelId: string,
     orMessages: Array<Partial<ChatMessage>>,
     options: ModelCompletionOptions,
+    wireTools: unknown,
+    rootMarker?: unknown,
   ): void {
     if (!modelId.toLowerCase().startsWith('anthropic/')) return;
 
@@ -600,9 +608,11 @@ export class OpenRouterProvider implements IProvider {
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
     if (autoCacheEnv === '0' || autoCacheEnv === 'false') return;
 
-    // Caller placement wins: a marker already present in messages, tool
-    // definitions, or customModelParams tool overrides means the caller
-    // owns breakpoint placement — injecting two more could exceed
+    // Caller placement wins: a marker already present in the messages, in
+    // the tool definitions being sent (a customModelParams.tools override
+    // included, in place of the call's tools) or on the request root (a
+    // customModelParams.cache_control) means the caller owns breakpoint
+    // placement — injecting two more could exceed
     // Anthropic's 4-breakpoint cap or order a longer TTL after a shorter
     // one (both reject with 400).
     const holdsMarker = (value: unknown): boolean =>
@@ -613,12 +623,10 @@ export class OpenRouterProvider implements IProvider {
           typeof entry === 'object' &&
           (entry as Record<string, unknown>).cache_control !== undefined,
       );
-    const customTools = (options.customModelParams as Record<string, unknown> | undefined)
-      ?.tools;
     if (
+      rootMarker !== undefined ||
       orMessages.some((m) => holdsMarker(m.content)) ||
-      holdsMarker(options.tools) ||
-      holdsMarker(customTools)
+      holdsMarker(wireTools)
     ) {
       return;
     }
@@ -669,9 +677,60 @@ export class OpenRouterProvider implements IProvider {
     if (systemIdx >= 0) markMessage(orMessages[systemIdx]);
 
     // Moving tail: the final message, unless it IS the system message we
-    // just marked (single-message requests keep one breakpoint).
+    // just marked (single-message requests keep one breakpoint), or the
+    // call asked for no tail (`cache: { tail: false }`).
+    if (options.cache && options.cache.tail === false) return;
     const lastIdx = orMessages.length - 1;
     if (lastIdx >= 0 && lastIdx !== systemIdx) markMessage(orMessages[lastIdx]);
+  }
+
+  /**
+   * Runs {@link applyAnthropicSlugCacheControl} on the request as it will be
+   * sent. A `customModelParams.messages` or `customModelParams.tools`
+   * override replaces the arrays built from the call's own messages and
+   * options, so markers placed before that spread would never reach the
+   * wire. The message objects are copied first, because an override array
+   * belongs to the caller. Whether the caller placed a tool marker is read
+   * from the final `tools` too, and a request-level `cache_control` from
+   * `customModelParams` counts as caller placement. Under `cache: false`, `cache_control` is
+   * also removed from the request root and from each tool definition in
+   * the final `tools` (copies, never in-place edits), as the direct
+   * provider does.
+   */
+  private applyAnthropicSlugCacheToPayload(
+    modelId: string,
+    payload: Record<string, unknown>,
+    options: ModelCompletionOptions,
+  ): void {
+    if (!modelId.toLowerCase().startsWith('anthropic/')) return;
+    const isRecord = (value: unknown): value is Record<string, unknown> =>
+      value !== null && typeof value === 'object';
+
+    if (Array.isArray(payload.messages) && payload.messages.every(isRecord)) {
+      const wireMessages = (payload.messages as Array<Record<string, unknown>>).map(
+        (message) => ({ ...message }),
+      ) as Array<Partial<ChatMessage>>;
+      payload.messages = wireMessages;
+      this.applyAnthropicSlugCacheControl(
+        modelId,
+        wireMessages,
+        options,
+        payload.tools,
+        payload.cache_control,
+      );
+    }
+
+    // A request-level marker (passed through customModelParams) would let
+    // the API place a breakpoint on the last cacheable block.
+    if (options.cache === false) delete payload.cache_control;
+
+    if (options.cache === false && Array.isArray(payload.tools)) {
+      payload.tools = (payload.tools as unknown[]).map((tool) => {
+        if (!isRecord(tool) || tool.cache_control === undefined) return tool;
+        const { cache_control: _stripped, ...rest } = tool;
+        return rest;
+      });
+    }
   }
 
   private mapToOpenRouterMessages(messages: ChatMessage[]): Array<Partial<ChatMessage>> {
@@ -696,7 +755,6 @@ export class OpenRouterProvider implements IProvider {
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
     const openRouterMessages = this.mapToOpenRouterMessages(messages);
-    this.applyAnthropicSlugCacheControl(modelId, openRouterMessages, options);
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -736,6 +794,7 @@ export class OpenRouterProvider implements IProvider {
     };
     this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
+    this.applyAnthropicSlugCacheToPayload(modelId, payload, options);
 
     // The call's count bounds the schema request and its json_object retry together.
     const attempts = resolveAttemptCount(options.maxAttempts, OpenRouterProvider.MAX_REQUEST_ATTEMPTS);
@@ -870,7 +929,6 @@ export class OpenRouterProvider implements IProvider {
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
     const openRouterMessages = this.mapToOpenRouterMessages(messages);
-    this.applyAnthropicSlugCacheControl(modelId, openRouterMessages, options);
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -915,6 +973,7 @@ export class OpenRouterProvider implements IProvider {
     };
     this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
+    this.applyAnthropicSlugCacheToPayload(modelId, payload, options);
 
     const abortSignal = options.abortSignal;
     // `usage` is what a refused turn billed before the abort; a consumer

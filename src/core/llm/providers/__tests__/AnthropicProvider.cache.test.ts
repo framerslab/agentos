@@ -1157,6 +1157,186 @@ describe('AnthropicProvider per-call cache option (options.cache)', () => {
     expect(payload.cache_control).toEqual({ type: 'ephemeral' });
     expect(typeof payload.system).toBe('string');
   });
+
+  /**
+   * `cache: { tail: false }` is for a call that reuses a long prefix and never
+   * sends the same tail twice (a judge, a classifier). The markers the caller
+   * set stay as they are, and the provider puts no breakpoint on the messages:
+   * a breakpoint there writes the call's unique suffix at the write premium and
+   * nothing ever reads it back.
+   */
+  const judgeSystem = () => ({
+    role: 'system',
+    content: [
+      { type: 'text', text: 'Stable rubric', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Per-call note' },
+    ],
+  });
+
+  it('cache tail:false keeps the caller system markers verbatim and puts no breakpoint on the last message', async () => {
+    const payload = await buildPayload(
+      [judgeSystem(), { role: 'user', content: 'candidate' }],
+      { cache: { tail: false } },
+    );
+    expect(payload.cache_control).toBeUndefined();
+    expect(payload.system).toEqual([
+      { type: 'text', text: 'Stable rubric', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Per-call note' },
+    ]);
+    const messages = payload.messages as Array<{ content: unknown }>;
+    expect(messages[messages.length - 1].content).toBe('candidate');
+  });
+
+  it('cache tail:false under thinking keeps the caller system marker and puts no breakpoint on the last message', async () => {
+    const payload = await buildPayload(
+      [judgeSystem(), { role: 'user', content: 'candidate' }],
+      { thinking: { budgetTokens: 1 }, cache: { tail: false } },
+      'claude-opus-4-8',
+    );
+    expect(payload.thinking).toBeDefined();
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+    expect((payload.system as Array<{ cache_control?: unknown }>)[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('cache tail:false with ttl 1h leaves a caller 5m system marker as set: no tail follows it, so no order to keep', async () => {
+    const payload = await buildPayload(
+      [judgeSystem(), { role: 'user', content: 'candidate' }],
+      { cache: { ttl: '1h', tail: false } },
+    );
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+  });
+
+  it('cache tail:false with no caller markers marks the end of the first system message only, with the call TTL', async () => {
+    const messages = [
+      { role: 'system', content: 'Stable system prompt.' },
+      { role: 'system', content: 'Per-turn recall appended by a memory hook' },
+      { role: 'user', content: 'hi' },
+    ];
+    const payload = await buildPayload(messages, { cache: { tail: false } });
+    expect(payload.cache_control).toBeUndefined();
+    expect(payload.system).toEqual([
+      { type: 'text', text: 'Stable system prompt.', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Per-turn recall appended by a memory hook' },
+    ]);
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+
+    const hour = await buildPayload(messages, { cache: { ttl: '1h', tail: false } });
+    expect(collectMarkers(hour)).toEqual([{ type: 'ephemeral', ttl: '1h' }]);
+    expect((hour.system as Array<{ cache_control?: unknown }>)[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache tail:false with no system and no caller markers sends no marker at all', async () => {
+    const payload = await buildPayload([{ role: 'user', content: 'hi' }], { cache: { tail: false } });
+    expect(collectMarkers(payload)).toEqual([]);
+  });
+
+  it('cache tail:false with an unmarked customModelParams system override marks the end of the override, not the tail', async () => {
+    const messages = [
+      { role: 'system', content: 'Original system that the override replaces.' },
+      { role: 'user', content: 'hi' },
+    ];
+    const payload = await buildPayload(
+      messages,
+      { cache: { tail: false }, customModelParams: { system: 'CUSTOM OVERRIDE SYSTEM' } },
+    );
+    expect(payload.cache_control).toBeUndefined();
+    expect(payload.system).toEqual([
+      { type: 'text', text: 'CUSTOM OVERRIDE SYSTEM', cache_control: { type: 'ephemeral' } },
+    ]);
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+
+    const overrideBlocks = [
+      { type: 'text', text: 'Stable override rubric' },
+      { type: 'text', text: 'Override tail block' },
+    ];
+    const hour = await buildPayload(
+      messages,
+      { cache: { ttl: '1h', tail: false }, customModelParams: { system: overrideBlocks } },
+    );
+    expect(hour.cache_control).toBeUndefined();
+    expect(hour.system).toEqual([
+      { type: 'text', text: 'Stable override rubric' },
+      { type: 'text', text: 'Override tail block', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ]);
+    expect(collectMarkers(hour)).toEqual([{ type: 'ephemeral', ttl: '1h' }]);
+    // The caller's own customModelParams objects are never mutated.
+    expect(overrideBlocks[1]).toEqual({ type: 'text', text: 'Override tail block' });
+  });
+
+  it('cache tail:false with an unmarked customModelParams messages override marks the end of the first system message only', async () => {
+    const payload = await buildPayload(
+      [
+        { role: 'system', content: 'Stable system prompt.' },
+        { role: 'system', content: 'Per-turn recall appended by a memory hook' },
+        { role: 'user', content: 'replaced' },
+      ],
+      {
+        cache: { tail: false },
+        customModelParams: { messages: [{ role: 'user', content: [{ type: 'text', text: 'override turn' }] }] },
+      },
+    );
+    expect(payload.cache_control).toBeUndefined();
+    expect(payload.system).toEqual([
+      { type: 'text', text: 'Stable system prompt.', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Per-turn recall appended by a memory hook' },
+    ]);
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+  });
+
+  it('cache tail:false keeps a caller cache_control on options.tools (both tool formats) and adds no marker of its own', async () => {
+    const hourMarker = { type: 'ephemeral', ttl: '1h' };
+    const agentosTool = { name: 'lookup', description: 'Look a word up', inputSchema: { type: 'object' }, cache_control: hourMarker };
+    const openAiTool = {
+      type: 'function',
+      function: { name: 'search', description: 'Search', parameters: { type: 'object' } },
+      cache_control: hourMarker,
+    };
+    for (const tool of [agentosTool, openAiTool]) {
+      const payload = await buildPayload(
+        [
+          { role: 'system', content: 'Stable system prompt.' },
+          { role: 'user', content: 'hi' },
+        ],
+        { cache: { tail: false }, tools: [tool] },
+      );
+      const tools = payload.tools as Array<{ cache_control?: unknown }>;
+      expect(tools[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+      expect(typeof payload.system).toBe('string');
+      expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral', ttl: '1h' }]);
+    }
+  });
+
+  it('cache tail:false keeps a caller cache_control on an image part (data URL and external URL) and adds no marker of its own', async () => {
+    for (const url of ['data:image/png;base64,iVBORw0KGgo=', 'https://example.com/chart.png']) {
+      const payload = await buildPayload(
+        [
+          { role: 'system', content: 'Stable system prompt.' },
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url }, cache_control: { type: 'ephemeral' } },
+              { type: 'text', text: 'What does the chart show?' },
+            ],
+          },
+        ],
+        { cache: { tail: false } },
+      );
+      const messages = payload.messages as Array<{ content: Array<{ type: string; cache_control?: unknown }> }>;
+      const image = messages[messages.length - 1].content[0];
+      expect(image.type).toBe('image');
+      expect(image.cache_control).toEqual({ type: 'ephemeral' });
+      expect(typeof payload.system).toBe('string');
+      expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+    }
+  });
+
+  it('cache tail:false with an empty customModelParams system override and no caller markers sends no marker at all', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      { cache: { tail: false }, customModelParams: { system: '' } },
+    );
+    expect(collectMarkers(payload)).toEqual([]);
+  });
 });
 
 describe('AnthropicProvider cache:false sanitizes customModelParams-injected regions', () => {

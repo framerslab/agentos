@@ -285,6 +285,10 @@ export interface AgentOptions extends BaseAgentConfig {
    * loops whose steps gap past the 5-minute default cache TTL (multi-minute
    * tool executions between LLM steps), where the default-paced history
    * marker expires between steps and every step re-writes the whole prefix.
+   * `{ tail: false }` keeps the system-prefix markers and places no
+   * breakpoint on the messages, for a one-call-per-input agent (a judge, a
+   * classifier) whose prefix repeats and whose tail never does; a multi-turn
+   * session wants the tail, which is what reads its history back.
    * Unset -> the provider's default marker pacing.
    */
   cache?: import('./generateText.js').GenerateTextOptions['cache'];

@@ -50,11 +50,14 @@ grown history is read back next turn. Caller markers compose with it:
 
 - Caller **system** markers (via `SystemContentBlock.cacheBreakpoint`) keep
   the auto tail marker — your custom prefix split and history caching work
-  together.
+  together. `cache: { tail: false }` leaves the tail out and sends your
+  markers alone ([Per-call controls](#per-call-controls)).
 - Caller **message** markers stand the auto path down entirely — if you are
   placing markers inside `messages`, you own placement.
 - Marked **tool definitions** count toward Anthropic's 4-breakpoint request
-  cap; the auto path drops its tail marker rather than exceed it.
+  cap; the auto path drops its tail marker rather than exceed it. A
+  top-level `cache_control` on an entry of `tools`, or on an `image_url`
+  message part, is sent as set, TTL included.
 
 Costs and floors (Anthropic pricing rules):
 
@@ -90,12 +93,22 @@ await generateText({
   sessionId: jobId,
 });
 
-// One-shots (judges, classifiers, single-question calls): opt out so the
-// call never pays a cache-write premium it cannot amortize.
+// Judges and classifiers: the same long rubric on every call, a new
+// candidate each time. The rubric stays cached; no breakpoint goes on the
+// candidate, which no later call would read back.
+await generateText({
+  model: 'anthropic:claude-haiku-4-5-20251001',
+  system: [{ text: judgeRubric, cacheBreakpoint: true }],
+  prompt: candidate,
+  cache: { tail: false },
+});
+
+// True one-shots (nothing in the request is sent again): opt out so the call
+// never pays a cache-write premium it cannot amortize.
 await generateText({
   model: 'anthropic:claude-sonnet-4-6',
-  system: judgeRubric,
-  prompt: candidate,
+  system: oneOffInstructions,
+  prompt: question,
   cache: false,
 });
 
@@ -111,12 +124,36 @@ await streamText({
 });
 ```
 
-- `cache?: { ttl?: '5m' | '1h' } | false` is accepted by `generateText`,
-  `streamText`, `generateObject`, `agent({ cache })`, and
+- `cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false` is accepted by
+  `generateText`, `streamText`, `generateObject`, `agent({ cache })`, and
   per-hop fallback entries (`FallbackProviderEntry.cache`). `false` strips
-  every marker from the request, including caller markers. A per-call
+  every marker from the request, including caller markers on messages and
+  tool definitions and a request-level `cache_control` passed through
+  `customModelParams`, directly and on OpenRouter `anthropic/*` slugs. A
+  caller tool marker is read from the tools actually sent, so a
+  `customModelParams.tools` override decides it. A per-call
   `'1h'` also raises caller system-marker TTLs so the request never orders
   a longer-lived breakpoint after a shorter one (Anthropic rejects that).
+- `tail: false` puts no breakpoint on the messages and no request-level
+  `cache_control` (Anthropic places that one on the last cacheable block,
+  which is the tail). Your system, message and tool markers go out exactly
+  as you set them, TTLs included, since no tail follows them. With no
+  marker of yours anywhere, the end of the first system message is marked
+  (with `ttl` when given); a `customModelParams.system` override stands in
+  for that message, and its last text block is marked on a copy. A request
+  with no system goes out unmarked. On
+  OpenRouter `anthropic/*` slugs a request that carries a marker of yours
+  (on a message, a tool definition or the request root, a
+  `customModelParams.cache_control` included) goes out as you sent it, as
+  it does by default; one with none gets a
+  marker on the first system message and none on the final message; a
+  `customModelParams.messages` override stands in for the messages, and
+  its first system message is marked on a copy. The
+  default tail is right for conversations and agent loops, where it is
+  what reads the history back; leave it out where the prefix repeats and
+  the tail never does. `false` would drop the prefix
+  marker too, so the rubric would be billed at the full input price on
+  every call.
 - `generateObject` additionally takes `schemaCacheTtl` for its
   schema-instruction block.
 - `sessionId` is the cross-provider affinity key: OpenRouter forwards it as

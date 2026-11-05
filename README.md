@@ -163,7 +163,7 @@ Both headline results use a per-category reader router (`gpt-4o` answers tempora
 | Category | Highlights |
 |---|---|
 | **LLM Providers** | 13 (11 by API key or base URL + 2 local CLI): OpenAI, Anthropic, Gemini, Groq, Ollama, OpenRouter, Requesty, LiteLLM, Together, Mistral, xAI, Claude CLI, Gemini CLI. Plus image/video/audio generation providers. |
-| **Prompt Caching** | Zero config on every provider: automatic Anthropic breakpoints incl. multi-turn history (direct + OpenRouter) * OpenAI cache-key routing * normalized cache usage + leak detection * per-call TTL/opt-out * [guide](https://docs.agentos.sh/features/prompt-caching) |
+| **Prompt Caching** | Zero config on every provider: automatic Anthropic breakpoints incl. multi-turn history (direct + OpenRouter) * OpenAI cache-key routing * normalized cache usage + leak detection * per-call TTL, prefix-only and opt-out * [guide](https://docs.agentos.sh/features/prompt-caching) |
 | **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
 | **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |

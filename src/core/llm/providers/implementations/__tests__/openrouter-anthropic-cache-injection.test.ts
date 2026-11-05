@@ -133,6 +133,15 @@ describe('OpenRouter anthropic/* zero-config cache_control', () => {
     expect(tailParts.at(-1)!.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
+  it('cache tail:false marks the system message and leaves the final message unmarked', async () => {
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+    });
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
+    for (const m of wire.slice(1)) expect(typeof m.content).toBe('string');
+  });
+
   it('cache:false leaves plain requests untouched', async () => {
     const wire = await capture('anthropic/claude-sonnet-4-6', convo, { cache: false });
     for (const m of wire) expect(typeof m.content).toBe('string');
@@ -243,6 +252,172 @@ describe('OpenRouter anthropic/* zero-config cache_control', () => {
     expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
     const tailParts = wire.at(-1)!.content as WirePart[];
     expect(tailParts.every((p) => p.cache_control === undefined)).toBe(true);
+  });
+
+  it('marks a customModelParams.messages override, not the replaced array', async () => {
+    const override = [
+      { role: 'system', content: 'override rules '.repeat(10) },
+      { role: 'user', content: 'override turn' },
+    ];
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo, {
+      customModelParams: { messages: override },
+    });
+    expect(wire).toHaveLength(2);
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(systemParts[0].text).toBe('override rules '.repeat(10));
+    const tailParts = wire[1].content as WirePart[];
+    expect(tailParts.at(-1)!.cache_control).toEqual({ type: 'ephemeral' });
+    // The caller's override array is left as it was given.
+    expect(override[0].content).toBe('override rules '.repeat(10));
+    expect(override[1].content).toBe('override turn');
+  });
+
+  it('cache tail:false marks the system message of a customModelParams.messages override', async () => {
+    const override = [
+      { role: 'system', content: 'override rules '.repeat(10) },
+      { role: 'user', content: 'override turn' },
+    ];
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false, ttl: '1h' },
+      customModelParams: { messages: override },
+    });
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(typeof wire[1].content).toBe('string');
+    expect(override[0].content).toBe('override rules '.repeat(10));
+  });
+
+  it('cache tail:false marks a customModelParams.messages override on the streaming path', async () => {
+    const { provider, calls } = await makeProvider();
+    const stream = provider.generateCompletionStream('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+      customModelParams: {
+        messages: [
+          { role: 'system', content: 'override rules' },
+          { role: 'user', content: 'override turn' },
+        ],
+      },
+    });
+    for await (const chunk of stream) {
+      void chunk;
+    }
+    const wire = lastChatMessages(calls());
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(typeof wire[1].content).toBe('string');
+  });
+
+  it('cache:false strips cache_control from tool definitions, including a customModelParams.tools override', async () => {
+    const markedTool = () => ({
+      type: 'function',
+      function: { name: 'lookup', parameters: { type: 'object' } },
+      cache_control: { type: 'ephemeral', ttl: '1h' },
+    });
+    const callerTools = [markedTool()];
+    const { provider, calls } = await makeProvider();
+    await provider.generateCompletion('anthropic/claude-sonnet-4-6', convo, {
+      cache: false,
+      tools: callerTools as never,
+    });
+    const overrideTools = [markedTool()];
+    const stream = provider.generateCompletionStream('anthropic/claude-sonnet-4-6', convo, {
+      cache: false,
+      customModelParams: { tools: overrideTools },
+    });
+    for await (const chunk of stream) {
+      void chunk;
+    }
+    const chats = calls().filter((c) => c[0] === '/chat/completions');
+    expect(chats).toHaveLength(2);
+    for (const chat of chats) {
+      const tools = (chat[3] as { tools: Array<Record<string, unknown>> }).tools;
+      expect(tools).toHaveLength(1);
+      expect(tools[0].cache_control).toBeUndefined();
+      expect((tools[0].function as { name: string }).name).toBe('lookup');
+    }
+    // The caller's tool arrays keep their markers (copies are stripped).
+    expect(callerTools[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(overrideTools[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('reads caller tool markers from the tools actually sent, after a customModelParams.tools override', async () => {
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'lookup', parameters: { type: 'object' } },
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+      customModelParams: {
+        tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }],
+      },
+    });
+    // The marked tools were replaced, so no caller marker goes out and the
+    // first system message gets the prefix breakpoint.
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(typeof wire.at(-1)!.content).toBe('string');
+  });
+
+  it('cache:false removes a request-level cache_control passed through customModelParams', async () => {
+    const { provider, calls } = await makeProvider();
+    await provider.generateCompletion('anthropic/claude-sonnet-4-6', convo, {
+      cache: false,
+      customModelParams: { cache_control: { type: 'ephemeral' } },
+    });
+    const stream = provider.generateCompletionStream('anthropic/claude-sonnet-4-6', convo, {
+      cache: false,
+      customModelParams: { cache_control: { type: 'ephemeral' } },
+    });
+    for await (const chunk of stream) {
+      void chunk;
+    }
+    const chats = calls().filter((c) => c[0] === '/chat/completions');
+    expect(chats).toHaveLength(2);
+    for (const chat of chats) expect(chat[3]!.cache_control).toBeUndefined();
+  });
+
+  it('stands down when a request-level cache_control comes through customModelParams, with a messages override', async () => {
+    const { provider, calls } = await makeProvider();
+    const override = () => [
+      { role: 'system', content: 'override rules '.repeat(10) },
+      { role: 'user', content: 'override turn' },
+    ];
+    await provider.generateCompletion('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+      customModelParams: { cache_control: { type: 'ephemeral' }, messages: override() },
+    });
+    const stream = provider.generateCompletionStream('anthropic/claude-sonnet-4-6', convo, {
+      cache: { tail: false },
+      customModelParams: { cache_control: { type: 'ephemeral' }, messages: override() },
+    });
+    for await (const chunk of stream) {
+      void chunk;
+    }
+    const chats = calls().filter((c) => c[0] === '/chat/completions');
+    expect(chats).toHaveLength(2);
+    for (const chat of chats) {
+      // The caller owns placement: the root marker goes out as set and no
+      // message breakpoint is added beside it.
+      expect(chat[3]!.cache_control).toEqual({ type: 'ephemeral' });
+      const wire = (chat[3] as { messages: WireMessage[] }).messages;
+      expect(wire[0].content).toBe('override rules '.repeat(10));
+      expect(wire[1].content).toBe('override turn');
+    }
+  });
+
+  it('stands down when a request-level cache_control comes through customModelParams', async () => {
+    const { provider, calls } = await makeProvider();
+    await provider.generateCompletion('anthropic/claude-sonnet-4-6', convo, {
+      customModelParams: { cache_control: { type: 'ephemeral' } },
+    });
+    const chat = calls().filter((c) => c[0] === '/chat/completions').at(-1)!;
+    expect(chat[3]!.cache_control).toEqual({ type: 'ephemeral' });
+    const wire = (chat[3] as { messages: WireMessage[] }).messages;
+    for (const message of wire) expect(typeof message.content).toBe('string');
   });
 
   it('injects on the streaming path too', async () => {

@@ -40,8 +40,9 @@
  * Represents a part of a multimodal message content.
  */
 export type MessageContentPart =
-  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
-  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto'; } }
+  /** `cache_control` is an Anthropic prompt-cache breakpoint; `ttl` defaults to `'5m'`. */
+  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' } }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto'; }; cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' } }
   // For Anthropic tool results specifically, fitting their API:
   | { type: 'tool_result'; tool_use_id: string; content?: string | Array<Record<string, any>>; is_error?: boolean; }
   // Fallback for other potential string types for extensibility
@@ -219,10 +220,23 @@ export interface ModelCompletionOptions {
    *   the auto path uses explicit block placement so the TTL reaches the
    *   wire. For slow loops whose step gaps exceed 5 minutes (codegen
    *   orchestrator/tool calls, human-paced conversation turns).
-   *   Caller-placed markers keep their own TTLs untouched.
+   *   Caller-placed markers keep their own TTLs, except that a caller's
+   *   shorter system markers are raised to `'1h'` when a 1-hour tail follows
+   *   them (Anthropic rejects a longer TTL after a shorter one).
+   * - `{ tail: false }` — no breakpoint on the messages and no request-level
+   *   marker (the API places that one on the last cacheable block): the
+   *   markers the caller set go out exactly as set, TTLs included, and with
+   *   no caller marker anywhere the end of the first system message is
+   *   marked (carrying `ttl` when given), or the last text block of a
+   *   `customModelParams.system` override (on a copy); with no system
+   *   nothing is. For
+   *   calls that re-send a long stable prefix and never the same tail twice
+   *   (judges, classifiers): the prefix is still read back from the cache,
+   *   while the unique tail is not written at the write premium. Combines
+   *   with `ttl`.
    * - `{ ttl: '5m' }` or omitted — default behavior (5-minute auto markers).
    */
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
   /**
    * Per-conversation affinity key. OpenRouter forwards it as `session_id`
    * to pin provider sticky routing: upstream prompt caches are host-scoped,
@@ -307,7 +321,11 @@ export interface ModelCompletionOptions {
   abortSignal?: AbortSignal;
   /** Indicates if a streaming response is expected. */
   stream?: boolean;
-  /** Schemas of tools the model can call. */
+  /**
+   * Schemas of tools the model can call. On Anthropic, a top-level
+   * `cache_control` (`{ type: 'ephemeral', ttl?: '5m' | '1h' }`) on an entry
+   * is sent on that tool definition as the caller's cache breakpoint.
+   */
   tools?: Array<Record<string, unknown>>;
   /** Controls how the model uses tools. */
   toolChoice?: string | Record<string, unknown>;

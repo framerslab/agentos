@@ -275,7 +275,7 @@ export interface PlanningConfig {
    * `{ ttl: '1h' }` caller's planning call keeps the same pacing. A
    * planning-specific value here overrides the inherited one.
    */
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
 
   /**
    * `false` turns model thinking off for the planning completion, on models
@@ -357,7 +357,7 @@ export interface FallbackProviderEntry {
    * writes cost ~2x what the reads saved). A caller-supplied entry keeps
    * full control: omit to inherit, or set a ttl to cache a hop deliberately.
    */
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
   /**
    * Extra output tokens granted ONLY when THIS entry serves the call: the hop
    * runs with `maxTokens = <the original call's maxTokens> + headroom`. For
@@ -400,7 +400,7 @@ export interface FallbackProviderEntry {
 export interface FallbackHopBase {
   maxTokens?: number;
   effort?: string;
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
 }
 
 /**
@@ -592,10 +592,21 @@ export interface GenerateTextOptions {
    *   orchestrator/tool steps gap 2-14 minutes and human-paced conversation
    *   turns regularly exceed 5 minutes, so the default-TTL entry expires
    *   between steps and every turn re-writes. Caller-placed markers keep
-   *   their own TTLs ({@link SystemContentBlock.cacheTtl}).
+   *   their own TTLs ({@link SystemContentBlock.cacheTtl}), except that
+   *   shorter system markers are raised to 1 hour when a 1-hour tail follows
+   *   them (Anthropic rejects a longer TTL after a shorter one).
+   * - `{ tail: false }` — the provider places no breakpoint on the messages
+   *   (no moving tail, no request-level marker), and the markers the caller
+   *   set ({@link SystemContentBlock.cacheBreakpoint}) go out exactly as set.
+   *   With no caller marker anywhere, the end of the first system message is
+   *   marked instead (carrying `ttl` when given). Set this on calls that
+   *   re-send a long stable prefix and never the same tail twice (judges,
+   *   classifiers): the prefix is still read back from the cache, and the
+   *   unique tail is not written at the 1.25x/2x premium. `cache: false`
+   *   would drop the prefix marker as well.
    * - omitted / `{ ttl: '5m' }` — default 5-minute auto markers.
    */
-  cache?: { ttl?: '5m' | '1h' } | false;
+  cache?: { ttl?: '5m' | '1h'; tail?: boolean } | false;
   /**
    * Per-conversation affinity key, forwarded to providers that support
    * request affinity (OpenRouter sends it as `session_id` for provider
@@ -1866,7 +1877,7 @@ export function fallbackHopOverrides(
 ): {
   maxTokens: number | undefined;
   effort: string | undefined;
-  cache: { ttl?: '5m' | '1h' } | false | undefined;
+  cache: { ttl?: '5m' | '1h'; tail?: boolean } | false | undefined;
   __hopBase: FallbackHopBase;
 } {
   const base: FallbackHopBase = opts.__hopBase ?? {

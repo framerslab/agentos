@@ -294,6 +294,30 @@ console.log(text, outcomes); // ... [{ attempt: 1, status: 200, ok: true }]
 
 A caller settles against the report: a request whose usage never arrived (a timeout, an error after it was sent, a cut stream) is one the caller knows was sent.
 
+## Prompt caching
+
+```ts
+import { generateText } from '@framers/agentos';
+
+// A judge: the same rubric on every call, a new candidate each time.
+const { text } = await generateText({
+  model: 'anthropic:claude-haiku-4-5-20251001',
+  system: [{ text: rubric, cacheBreakpoint: true }],
+  prompt: candidate,
+  // Keep the rubric's cache marker; put no breakpoint on the candidate.
+  cache: { tail: false },
+});
+```
+
+`generateText()`, `streamText()`, `generateObject()`, `agent({ cache })` and a fallback entry take `cache`, which reaches the provider as `ModelCompletionOptions.cache`. On Claude, directly and through OpenRouter's `anthropic/*` slugs, it decides the `cache_control` breakpoints a request carries:
+
+- Left out (or `{ ttl: '5m' }`): the provider caches the request up to the newest message, so a conversation reads its history back from the cache on the next turn. A system block with `cacheBreakpoint: true` keeps its own marker, and the direct provider marks the newest message after it (OpenRouter sends a request that carries a caller marker as it is, a request-level `cache_control` in `customModelParams` included).
+- `{ ttl: '1h' }`: the same markers with a one-hour TTL, for loops whose steps are more than five minutes apart.
+- `{ tail: false }`: the markers the caller set go out as set, and the provider puts no breakpoint on the messages. For a call that sends the same long prefix every time and never the same tail (a judge, a classifier): the prefix is read back from the cache, and the tail, which no later call would read, is not written at the cache-write price (1.25x the input price at five minutes, 2x at one hour). With no `cacheBreakpoint` set, the end of the first system message is marked (the end of a `customModelParams.system` override when one replaces the system; on OpenRouter, the first system message of a `customModelParams.messages` override). It combines with `ttl`.
+- `false`: no marker at all, the caller's included (on messages, tool definitions and a request-level `cache_control` in `customModelParams`), for a call whose prompt is never sent again.
+
+Prices, floors and the per-provider behavior: [Prompt Caching](../features/PROMPT_CACHING.md).
+
 ## `agency().stream()`
 
 `streamText()` is a single-call raw stream. `agency().stream()` separates raw

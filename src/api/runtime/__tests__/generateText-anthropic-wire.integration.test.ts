@@ -12,7 +12,7 @@ import { z } from 'zod';
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
-import { buildFallbackChain, generateText, isContentPolicyRefusal } from '../../generateText.js';
+import { buildFallbackChain, generateText, isContentPolicyRefusal, type GenerateTextOptions } from '../../generateText.js';
 import { generateObject, ObjectGenerationError } from '../../generateObject.js';
 import { streamObject } from '../../streamObject.js';
 import { streamText, type StreamPart } from '../../streamText.js';
@@ -449,6 +449,59 @@ describe('Anthropic catalog and pricing through the public API', () => {
 
     // $0.004 input + $0.02 cache reads + $0.01 output.
     expect(result.usage.costUSD).toBeCloseTo(0.034, 6);
+  });
+});
+
+describe('the prompt-cache modes on the wire', () => {
+  // A judge's call: a long rubric sent on every call and marked for caching,
+  // and a candidate that is new each time.
+  const rubric = [{ text: 'Grade the candidate against this rubric. '.repeat(40), cacheBreakpoint: true }];
+
+  /** The cache_control markers a request body carries, by where they sit. */
+  function cacheMarkers(body: Json): { request: unknown; system: unknown[]; messages: unknown[][] } {
+    const markersOf = (content: unknown): unknown[] =>
+      Array.isArray(content) ? (content as Json[]).map((block) => block.cache_control).filter(Boolean) : [];
+    return {
+      request: body.cache_control,
+      system: markersOf(body.system),
+      messages: (body.messages as Json[]).map((message) => markersOf(message.content)),
+    };
+  }
+
+  /** One judge call on Claude Haiku 4.5 with `cache`, and the request body it sent. */
+  async function judge(cache: GenerateTextOptions['cache']): Promise<Json> {
+    route({ 'claude-haiku-4-5-20251001': [textTurn('claude-haiku-4-5-20251001', 'pass')] });
+    const result = await generateText({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001',
+      system: rubric,
+      prompt: 'Candidate 41: the answer is 12.',
+      ...(cache !== undefined ? { cache } : {}),
+      fallbackProviders: [],
+    });
+    expect(result.text).toBe('pass');
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(1);
+    return bodies[0];
+  }
+
+  it('cache { tail: false } sends the marker on the caller\'s system prefix and none on the last message', async () => {
+    const body = await judge({ tail: false });
+    expect(cacheMarkers(body)).toEqual({ request: undefined, system: [{ type: 'ephemeral' }], messages: [[]] });
+  });
+
+  it('the default sends the marker on the caller\'s system prefix and one on the last message', async () => {
+    const body = await judge(undefined);
+    expect(cacheMarkers(body)).toEqual({
+      request: undefined,
+      system: [{ type: 'ephemeral' }],
+      messages: [[{ type: 'ephemeral' }]],
+    });
+  });
+
+  it('cache: false sends neither', async () => {
+    const body = await judge(false);
+    expect(cacheMarkers(body)).toEqual({ request: undefined, system: [], messages: [[]] });
   });
 });
 

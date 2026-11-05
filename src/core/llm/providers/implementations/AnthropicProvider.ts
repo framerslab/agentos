@@ -355,6 +355,8 @@ interface AnthropicToolDef {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  /** A caller-placed cache breakpoint, carried through from the input tool. */
+  cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
 }
 
 /** Anthropic API error envelope. */
@@ -2356,12 +2358,23 @@ export class AnthropicProvider implements IProvider {
     //    the TTL reaches the wire. For loops whose step gaps exceed the
     //    5-minute default TTL (codegen tool calls run 2-14 min; human
     //    think-time between conversation turns regularly exceeds 5m).
+    //  - `cache: { tail: false }` — no breakpoint on the messages and no
+    //    request-level marker (the API places that one on the last
+    //    cacheable block, which is the tail). Caller markers pass through
+    //    as set, TTLs included: with no tail after them there is no TTL
+    //    order to keep. With no caller marker anywhere, the end of the
+    //    first system message is marked (with the call's ttl); with no
+    //    system, nothing is. For calls that re-send a long stable prefix
+    //    and never the same tail twice (judges, classifiers): the tail
+    //    write is the unique suffix at 1.25x/2x, never read back, while
+    //    `cache: false` would also drop the prefix that IS read back.
     //
     // Process-global kill switch (single-shot batch processes):
     // AGENTOS_ANTHROPIC_AUTO_CACHE=0 — disables the auto path only; caller
     // markers still pass through there (use `cache: false` for a per-call
     // hard-off including caller markers).
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
+    const writeTail = !(options.cache && options.cache.tail === false);
     if (options.cache === false) {
       // customModelParams passthrough ran above and may have injected ANY
       // marked region — raw tools, a request-level cache_control, or even a
@@ -2407,7 +2420,12 @@ export class AnthropicProvider implements IProvider {
         // Never restructure here. Count markers on the ACTUAL payload:
         // any marker means the caller owns the wire (full stand-down);
         // none means the request-level auto marker — valid on any payload
-        // shape — keeps the pre-override caching behavior.
+        // shape — keeps the pre-override caching behavior. That marker sits
+        // on the last cacheable block, so `tail: false` places a block-level
+        // marker on the end of the system prefix instead: the override
+        // system as a whole (it stands in for the first system message), or
+        // the provider's own first system message when only the messages
+        // were replaced.
         const overrideMarkers =
           this.countWireBlockMarkers(payload.system) +
           this.countMessageCacheMarkers(
@@ -2417,7 +2435,21 @@ export class AnthropicProvider implements IProvider {
           ) +
           this.countWireBlockMarkers(payload.tools);
         if (overrideMarkers === 0) {
-          payload.cache_control = { type: 'ephemeral' };
+          if (writeTail) {
+            payload.cache_control = { type: 'ephemeral' };
+          } else {
+            const prefixMarker: { type: 'ephemeral'; ttl?: '1h' } = {
+              type: 'ephemeral',
+              ...(options.cache && options.cache.ttl === '1h' ? { ttl: '1h' as const } : {}),
+            };
+            if (customSystemOverride) {
+              const marked = this.markWireSystemEnd(payload.system, prefixMarker);
+              if (marked !== undefined) payload.system = marked;
+            } else if (firstSystemMsgBlockEnd > 0) {
+              systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = prefixMarker;
+              payload.system = systemBlocks;
+            }
+          }
         }
         return payload;
       }
@@ -2427,12 +2459,12 @@ export class AnthropicProvider implements IProvider {
       // caching), and those markers count against Anthropic's hard
       // 4-breakpoint-per-request cap. Fold them into the accounting so a
       // request with e.g. 3 marked system blocks + 1 marked tool (4, at the
-      // cap) does not get a 5th tail marker here and 400. agentos does not
-      // emit marked tools today (adaptTools adds none, and a customModelParams
-      // tools override is raw), so toolBreakpoints is 0 for every current
-      // caller — this is forward-safety, not a behavior change. Any caller
-      // that DOES mark tools also stands the auto path down entirely (below),
-      // matching the caller-owns-the-region philosophy.
+      // cap) does not get a 5th tail marker here and 400. A marked tool
+      // arrives either as a top-level cache_control on an `options.tools`
+      // entry (convertToolDefs carries it through) or in a raw
+      // customModelParams tools override. A caller that marks tools and
+      // nothing else stands the auto path down entirely (below), matching
+      // the caller-owns-the-region philosophy.
       const toolBreakpoints = Array.isArray(payload.tools)
         ? (payload.tools as Array<{ cache_control?: unknown }>).filter(
             (t) => t && typeof t === 'object' && (t as { cache_control?: unknown }).cache_control,
@@ -2444,8 +2476,8 @@ export class AnthropicProvider implements IProvider {
       const autoTtl: '1h' | undefined =
         options.cache && options.cache.ttl === '1h' ? '1h' : undefined;
       if (explicitBreakpoints === 0 && messageBreakpoints === 0 && toolBreakpoints === 0) {
-        if (payload.thinking !== undefined || autoTtl !== undefined) {
-          // Two reasons to use explicit block-level breakpoints instead of
+        if (payload.thinking !== undefined || autoTtl !== undefined || !writeTail) {
+          // Three reasons to use explicit block-level breakpoints instead of
           // the request-level auto marker:
           //
           //  - Extended thinking: the request-level auto marker measurably
@@ -2456,6 +2488,9 @@ export class AnthropicProvider implements IProvider {
           //    block-level attribute, so honoring it requires explicit
           //    placement. Opt-in only — callers without a TTL keep the
           //    request-level marker exactly as before.
+          //  - `cache: { tail: false }`: the request-level marker lands on
+          //    the last cacheable block, the tail this mode leaves out, so
+          //    only the system-end breakpoint (1. below) is placed.
           //
           // Placement:
           //
@@ -2484,19 +2519,21 @@ export class AnthropicProvider implements IProvider {
             payload.system = systemBlocks;
             placed = true;
           }
-          if (this.markLastCacheableMessageBlock(anthropicMessages, autoTtl)) {
+          if (writeTail && this.markLastCacheableMessageBlock(anthropicMessages, autoTtl)) {
             placed = true;
           }
-          if (!placed) {
+          if (!placed && writeTail) {
             // Degenerate request (no system, no markable message block):
             // fall back to the top-level marker rather than sending
-            // nothing at all.
+            // nothing at all. Under `tail: false` that marker would be the
+            // tail, so such a request goes out unmarked.
             payload.cache_control = { type: 'ephemeral' };
           }
         } else {
           payload.cache_control = { type: 'ephemeral' };
         }
       } else if (
+        writeTail &&
         messageBreakpoints === 0 &&
         explicitBreakpoints > 0 &&
         explicitBreakpoints + toolBreakpoints < 4
@@ -2504,7 +2541,8 @@ export class AnthropicProvider implements IProvider {
         // Caller marked the system prefix only: keep their placement
         // verbatim and pin just the moving message tail (the API cap is 4
         // breakpoints per request — the tail adds one, so require headroom
-        // across ALL wire markers, tools included).
+        // across ALL wire markers, tools included). Under `tail: false` the
+        // caller's markers go out exactly as set and nothing is added.
         // Applies on thinking AND non-thinking requests alike — the streamed
         // conversation surfaces (caller-marked system, no thinking) were the
         // last shape whose per-turn history went permanently uncached.
@@ -2535,6 +2573,37 @@ export class AnthropicProvider implements IProvider {
     }
 
     return payload;
+  }
+
+  /**
+   * Put a cache breakpoint on the last text block of a `customModelParams`
+   * system override, for `cache: { tail: false }` with no caller marker on
+   * the wire. A string becomes a one-block array so the marker reaches the
+   * wire; an array is copied, never mutated, since it may be the caller's
+   * own object.
+   *
+   * @param system - The `system` region as it will hit the wire.
+   * @param marker - The `cache_control` value to place.
+   * @returns The marked copy, or `undefined` when there is no text block to mark.
+   * @private
+   */
+  private markWireSystemEnd(
+    system: unknown,
+    marker: { type: 'ephemeral'; ttl?: '1h' },
+  ): unknown[] | undefined {
+    if (typeof system === 'string') {
+      return system ? [{ type: 'text', text: system, cache_control: marker }] : undefined;
+    }
+    if (!Array.isArray(system)) return undefined;
+    for (let i = system.length - 1; i >= 0; i -= 1) {
+      const block = system[i];
+      if (block && typeof block === 'object' && (block as Record<string, unknown>).type === 'text') {
+        const copy = system.slice();
+        copy[i] = { ...(block as Record<string, unknown>), cache_control: marker };
+        return copy;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -2738,6 +2807,9 @@ export class AnthropicProvider implements IProvider {
           const url = (part as { image_url: { url: string } }).image_url.url;
           // Extract base64 data from data: URLs
           const dataMatch = url.match(/^data:(image\/\w+);base64,(.+)$/);
+          // A caller-placed breakpoint on the image rides along, as it does
+          // on text parts: image blocks in user turns are cacheable.
+          const imageCc = (part as { cache_control?: unknown }).cache_control;
           if (dataMatch) {
             anthropicContent.push({
               type: 'image',
@@ -2746,12 +2818,14 @@ export class AnthropicProvider implements IProvider {
                 media_type: dataMatch[1],
                 data: dataMatch[2],
               },
+              ...(imageCc ? { cache_control: imageCc } : {}),
             });
           } else {
             // For external URLs, Anthropic supports URL source type
             anthropicContent.push({
               type: 'image',
               source: { type: 'url', url },
+              ...(imageCc ? { cache_control: imageCc } : {}),
             });
           }
         }
@@ -2770,7 +2844,9 @@ export class AnthropicProvider implements IProvider {
    * Converts OpenAI-style tool definitions to Anthropic's format.
    *
    * OpenAI uses `{ type: 'function', function: { name, description, parameters } }`
-   * while Anthropic uses `{ name, description, input_schema }`.
+   * while Anthropic uses `{ name, description, input_schema }`. A top-level
+   * `cache_control` on an input tool, in either format, is copied onto the
+   * converted definition.
    *
    * @param {Array<Record<string, unknown>>} [tools] - OpenAI-formatted tool defs.
    * @returns {AnthropicToolDef[]} Anthropic-formatted tool definitions.
@@ -2779,6 +2855,10 @@ export class AnthropicProvider implements IProvider {
   private convertToolDefs(tools?: Array<Record<string, unknown>>): AnthropicToolDef[] {
     if (!tools || tools.length === 0) return [];
     return tools.map(tool => {
+      // A top-level cache_control on the input tool is the caller's
+      // breakpoint for the tools prefix; it goes out as set, TTL included.
+      const cacheControl = (tool as { cache_control?: AnthropicToolDef['cache_control'] }).cache_control;
+      const marker = cacheControl ? { cache_control: cacheControl } : {};
       // OpenAI format: { type: 'function', function: { name, description, parameters } }
       const fn = (tool as any)?.function;
       if (fn?.name) {
@@ -2787,6 +2867,7 @@ export class AnthropicProvider implements IProvider {
           description: (fn.description ?? '') as string,
           // Anthropic calls it input_schema, OpenAI calls it parameters
           input_schema: fn.parameters ?? { type: 'object' },
+          ...marker,
         };
       }
       // AgentOS ITool format: { name, description, inputSchema }
@@ -2794,6 +2875,7 @@ export class AnthropicProvider implements IProvider {
         name: (tool as any).name ?? 'unknown',
         description: (tool as any).description ?? '',
         input_schema: (tool as any).inputSchema ?? (tool as any).parameters ?? { type: 'object' },
+        ...marker,
       };
     });
   }
