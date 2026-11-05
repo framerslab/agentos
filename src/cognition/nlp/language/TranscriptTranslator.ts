@@ -24,7 +24,6 @@
 import { addModelUsage, generateText, hasBillableUsage, usageOfError, type TokenUsage } from '../../../api/generateText.js';
 import { estimateMaxCallCostUSD } from '../../../api/runtime/modelPricing.js';
 import { tokensOfChars } from '../../../api/runtime/spendBudget.js';
-import { toMicro } from '../../../safety/runtime/SpendReservations.js';
 import { TranslationProviderError } from './interfaces.js';
 import { logTranslationFailed, statusOf } from './log.js';
 
@@ -159,7 +158,8 @@ export class TranscriptTranslator {
       maxOutputTokens,
     });
     if (usd === undefined) throw new Error(`TranscriptTranslator: no bound for ${options.provider} ${options.model}`);
-    return Math.ceil(toMicro(usd)) * (options.maxAttempts ?? DEFAULTS.maxAttempts);
+    // Up to the micro-dollar from the dollars themselves: a bound never rounds an attempt's fraction away.
+    return Math.ceil(usd * 1_000_000) * (options.maxAttempts ?? DEFAULTS.maxAttempts);
   }
 
   /**
@@ -200,7 +200,7 @@ export class TranscriptTranslator {
     let noAnswer = 0;
     let succeeded = 0;
     // `read` is how many successful attempts' bodies the call accounts for: the answer's, or the one whose usage an
-    // error carries.
+    // error raised on a success carries.
     const unanswered = (read: number): number => noAnswer + Math.max(0, succeeded - read);
     const controller = new AbortController();
     // The timeout's error is made when it fires, so it carries the attempts that got no usable answer by then. The
@@ -252,6 +252,9 @@ export class TranscriptTranslator {
       }
       const status = statusOf(error);
       const billed = billedUsageOf(error);
+      // Usage on an error accounts for a successful attempt's body only when the error is not an HTTP failure of its
+      // own: a 500's usage says nothing of the answer an earlier 200 may have been billed for.
+      const fromSuccess = billed !== null && (status === undefined || (status >= 200 && status < 300));
       logTranslationFailed('openai', 'request_failed', status, error);
       throw new TranslationProviderError(
         `translation failed${status ? ` with HTTP ${status}` : ''}`,
@@ -260,7 +263,7 @@ export class TranscriptTranslator {
         status,
         error,
         billed,
-        unanswered(billed ? 1 : 0),
+        unanswered(fromSuccess ? 1 : 0),
       );
     } finally {
       clearTimeout(timer);
