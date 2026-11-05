@@ -173,6 +173,30 @@ describe('LiveKitTranslationOutput', () => {
     }
   });
 
+  it('sends and replays a line as it was written, though the encode option changes the line it is given', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranslationOutput({
+      room,
+      encode: (line, seq) => {
+        const text = JSON.stringify({ ...line, seq });
+        line.itemId = 'z';
+        line.status = 'failed';
+        return text;
+      },
+    });
+    await output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] });
+    expect(await output.replayAfter(null, 'en', 'p-1')).toBe(1);
+    const attributes = sent(room).map(({ text, options }) => [
+      JSON.parse(text).itemId,
+      options.attributes[LIVEKIT_TRANSLATION_ATTRIBUTES.itemId],
+      options.attributes[LIVEKIT_TRANSLATION_ATTRIBUTES.status],
+    ]);
+    expect(attributes).toEqual([
+      ['a', 'a', 'translated'],
+      ['a', 'a', 'translated'],
+    ]);
+  });
+
   it('rejects a write whose encode throws, sending nothing and numbering nothing for it', async () => {
     const room = new FakeRoom();
     let broken = true;
