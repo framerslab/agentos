@@ -18,12 +18,18 @@ vi.mock('axios', () => {
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
+// The real price table, with the bound's estimate open to one test that sets it.
+vi.mock('../../../../api/runtime/modelPricing', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../api/runtime/modelPricing')>();
+  return { ...actual, estimateMaxCallCostUSD: vi.fn(actual.estimateMaxCallCostUSD) };
+});
+
 import { setLogger, resetLoggerFactory } from '../../../../core/logging/loggerFactory.js';
 import { globalLLMProviderHealth } from '../../../../core/safety/LLMProviderHealthRegistry';
 import { TranslationProviderError } from '../interfaces';
 import { TRANSLATOR_VERSION, TranscriptTranslator, type TranscriptLineInput } from '../TranscriptTranslator';
 import { openAiRequiresResponsesApi } from '../../../../core/llm/providers/implementations/OpenAIProvider';
-import { modelPricing } from '../../../../api/runtime/modelPricing';
+import { estimateMaxCallCostUSD, modelPricing } from '../../../../api/runtime/modelPricing';
 import { estimateCallCostUSD } from '../../../../api/runtime/spendBudget';
 import { toMicro } from '../../../../safety/runtime/SpendReservations';
 
@@ -312,6 +318,32 @@ describe('TranscriptTranslator.translateLine', () => {
     }
   });
 
+  it('counts a lost success body though the HTTP error after it reports usage of its own', async () => {
+    // The shortest backoff before the retry.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const cut = async (): Promise<Response> =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(stream) {
+              stream.error(new TypeError('terminated'));
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      // The 500's usage is its own: it says nothing of the answer the first attempt may have been billed for.
+      answer(cut, jsonResponse({ error: { message: 'server error', type: 'server_error' }, usage: { prompt_tokens: 40, completion_tokens: 0, total_tokens: 40 } }, 500));
+      const translator = new TranscriptTranslator();
+      const options = { ...OPTIONS, maxAttempts: 2, timeoutMs: 10_000 };
+      const bound = translator.boundMicro(line('Hola.'), 'en', options);
+      const failed = await translator.translateLine(line('Hola.'), 'en', options).then(() => undefined, (error: unknown) => error);
+      expect(failed).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED', status: 500, unansweredAttempts: 1 });
+      expect(TranscriptTranslator.failedCallMicro(failed, bound, (usage) => usage.promptTokens + usage.completionTokens)).toBe(bound);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
   it('carries the usage a failed call reported and records the call at it', async () => {
     // A Responses body with no output items: the provider refuses it, and its error holds the body's usage.
     answer(jsonResponse({ id: 'resp_2', object: 'response', status: 'completed', model: RESPONSES_MODEL, output: [], usage: { input_tokens: 40, output_tokens: 0, total_tokens: 40 } }));
@@ -344,6 +376,12 @@ describe('TranscriptTranslator.boundMicro', () => {
     expect(one).toBeGreaterThan(0);
     expect(two).toBe(one * 2);
     expect(() => translator.boundMicro(line('x'), 'en', { ...OPTIONS, model: 'no-such-model' })).toThrow();
+  });
+
+  it("rounds each attempt's bound up to the micro-dollar, never to the nearest", () => {
+    // An attempt whose most is 1.4 micro-dollars is bounded at 2, so two attempts at 4.
+    vi.mocked(estimateMaxCallCostUSD).mockReturnValueOnce(0.000_001_4);
+    expect(new TranscriptTranslator().boundMicro(line('Hola.'), 'en', { ...OPTIONS, maxAttempts: 2 })).toBe(4);
   });
 
   it('bounds a CJK-heavy prompt at no less than one token a byte, above the four-characters-a-token estimate', () => {
