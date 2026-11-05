@@ -9,6 +9,8 @@
  * while retaining consistent negotiation, auditing, and fallback behavior.
  */
 
+import type { TokenUsage } from '../../../api/generateText.js';
+
 /**
  * Represents a single language confidence result.
  * Code SHOULD be a BCP-47 or ISO 639-1 code (e.g. "en", "en-US", "es", "fr-FR").
@@ -192,9 +194,12 @@ export function recombineCodeAndProse(translatedProse: string, codeBlocks: strin
 
 /**
  * Why a translation provider refused to return a translation: the request failed (an HTTP
- * status other than 2xx, a network error or a timeout), or the provider answered with no text.
+ * status other than 2xx, a network error or the provider layer's own timeout), the provider
+ * answered with no text, the call was aborted at the translator's own timeout
+ * (`TRANSLATION_TIMEOUT`, which `TranscriptTranslator` throws), or the answer stopped at
+ * the output cap with a `length` finish (`TRANSLATION_TRUNCATED`).
  */
-export type TranslationErrorCode = 'TRANSLATION_REQUEST_FAILED' | 'TRANSLATION_EMPTY_OUTPUT';
+export type TranslationErrorCode = 'TRANSLATION_REQUEST_FAILED' | 'TRANSLATION_EMPTY_OUTPUT' | 'TRANSLATION_TIMEOUT' | 'TRANSLATION_TRUNCATED';
 
 /**
  * Thrown by a translation provider, and so by every `LanguageService` method that translates,
@@ -222,14 +227,21 @@ export class TranslationProviderError extends Error {
   public readonly status?: number;
   /** The underlying error, when there was one. */
   public readonly cause?: unknown;
+  /**
+   * The tokens the provider reported for an answer it billed and the translator refused (an
+   * empty answer, a `length` finish), so the caller records what the failed call cost; null
+   * when no answer came back or the provider reported none.
+   */
+  public readonly usage: TokenUsage | null;
 
-  constructor(message: string, providerId: string, code: TranslationErrorCode, status?: number, cause?: unknown) {
+  constructor(message: string, providerId: string, code: TranslationErrorCode, status?: number, cause?: unknown, usage: TokenUsage | null = null) {
     super(message);
     this.name = 'TranslationProviderError';
     this.code = code;
     this.providerId = providerId;
     this.status = status;
     this.cause = cause;
+    this.usage = usage;
   }
 }
 

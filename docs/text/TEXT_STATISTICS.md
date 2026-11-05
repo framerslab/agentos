@@ -248,6 +248,40 @@ Each failure writes one `language.translation_failed` line through the AgentOS l
 
 Detection runs the built-in heuristic alone. `WhisperDetectionProvider` (`whisper_stub`) throws `LanguageDetectionUnsupportedError` (`LANGUAGE_DETECTION_UNSUPPORTED`) from `detect(text)` and makes no call: Whisper is a speech model that names a language only while transcribing audio, and with no confidence. `LanguageService` does not build it or any other `detectionProviderConfigs` entry; it writes one `language.detector_unsupported` line for each. A detector that throws writes `language.detection_failed` and the others' results stand.
 
+## TranscriptTranslator
+
+[`TranscriptTranslator`](../../src/cognition/nlp/language/TranscriptTranslator.ts) translates a live transcript's final lines, one line into one target a call, for a reader who asked for that language. It is exported from the package root and from `@framers/agentos/cognition/nlp/language`, runs in Node, and calls OpenAI through `generateText` with the key the host passes.
+
+```ts
+import { TranscriptTranslator, TranslationProviderError } from '@framers/agentos';
+
+const translator = new TranscriptTranslator();
+const options = { provider: 'openai', model: 'gpt-4o-mini', apiKey: process.env.OPENAI_API_KEY! } as const;
+const line = {
+  itemId: 'item_7',
+  text: 'El presupuesto se cierra el viernes.',
+  source: { code: 'es', provenance: 'detected' },
+  context: [{ text: 'Hola a todos.', speaker: 'Ana' }],
+} as const;
+
+const most = translator.boundMicro(line, 'en', options); // micro-dollars, every attempt included
+try {
+  const result = await translator.translateLine(line, 'en', options);
+  if (result.status === 'translated') console.log(result.text, result.usage); // 'The budget closes on Friday.', { promptTokens, ... }
+} catch (err) {
+  if (!(err instanceof TranslationProviderError)) throw err;
+  const spent = TranscriptTranslator.failedCallMicro(err, most, (usage) => priceOf(usage)); // what the failed call cost
+}
+```
+
+- **The call.** One request to the provider and model the options name, with `fallbackProviders: []`, `source: 'transcript_translation'`, the output cap `maxOutputTokens` (by default 64 tokens plus three times the line's estimated tokens, at most 2,048), `maxAttempts` (default 2: a first try and one retry) and the translator's own timeout `timeoutMs` (default 15,000 ms). A model OpenAI serves on `/v1/responses` alone goes there with `store: false`, as every Responses call of the OpenAI provider does. The system message asks for the newest line in the target, keeping names, numbers, times and the speaker's register, and for the translation alone; the user message holds up to `maxContextLines` earlier lines (default 6), each after its speaker when it has one, under "Earlier lines:", then the line under "Line to translate:". `TRANSLATOR_VERSION` (`'v1'`) names that prompt and context rule, so a stored translation can say which words made it.
+- **The source.** A line whose source `code` is `configured` or `detected` and equals the target is answered `{ status: 'skipped', reason: 'same_language' }` with no call. A line whose provenance is `unknown` is translated from its own language whatever code it carries, and its result's `source` is null.
+- **The result.** `{ status: 'translated', text, source, target, usage, model, providerId, version }`, the text trimmed, `usage` the call's token counts with `costUSD` where the provider layer priced it.
+- **Failures.** A failed call throws `TranslationProviderError` and never returns the input: `TRANSLATION_REQUEST_FAILED` with the HTTP `status` when the provider answered, `TRANSLATION_TIMEOUT` past `timeoutMs`, `TRANSLATION_EMPTY_OUTPUT` for an answer with no text and `TRANSLATION_TRUNCATED` for an answer that stopped at the output cap (a `length` finish). The last two were billed: the error's `usage` carries the tokens the provider reported. A call ended through `abortSignal` rejects with the signal's reason, and an aborted signal sends nothing. Each failure but an abort writes one `language.translation_failed` line with the reason `request_failed`, `timeout`, `empty_output` or `truncated`, never the text.
+- **Spend.** `boundMicro(line, target, options)` answers the most one `translateLine` with those options can cost, in micro-dollars, times `maxAttempts`: `estimateMaxCallCostUSD` over the system and user messages as they are sent, which counts a prompt at up to a token a byte (four characters a token undercounts CJK text, emoji and base64), and the output cap at the output rate. It throws for a model with no price row. `TranscriptTranslator.failedCallMicro(error, bound, price)` answers what a failed call is recorded as costing: the billed `usage` priced by `price` where the error carries it, nothing for a refusal with an HTTP status and no usage, and the bound otherwise (a timeout, a network error, an abort).
+
+[`LiveKitTranslationOutput`](../features/VOICE_PIPELINE.md#translations-to-the-participants-that-read-them) writes the results into a LiveKit room for the participants that read each target.
+
 ## Helpers that are not exported
 
 [`src/core/utils/text-utils.ts`](../../src/core/utils/text-utils.ts) holds six small text helpers; inside the package only `estimateTokens` is called, by the session history. Neither the package root nor a named entry of the `exports` map exports them; the map's catch-all `./*` entry resolves `@framers/agentos/core/utils/text-utils` to the built file, outside the documented surface. The table names the exported counterpart of each where there is one.
