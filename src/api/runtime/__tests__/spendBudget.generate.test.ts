@@ -20,6 +20,8 @@ import { agent } from '../../agent.js';
 import { embedText } from '../../embedText.js';
 import { generateObject } from '../../generateObject.js';
 import { generateText } from '../../generateText.js';
+import type { SpendReserveRequest, SpendReserveResult, SpendSettleRequest, SpendSettleResult } from '../../../safety/runtime/SpendMeter.js';
+import { toMicro } from '../../../safety/runtime/SpendReservations.js';
 import { SpendBudget, UnpricedModelError } from '../spendBudget.js';
 import { resolveModelOption } from '../../model.js';
 import type { Mock } from 'vitest';
@@ -53,14 +55,24 @@ describe('a spend budget through the call paths', () => {
     expect(budget.spentUSD()).toBeCloseTo(0.0006, 10);
   });
 
-  it('refuses generateText on a budget with a meter before the provider or the meter is called, since it reserves nothing', async () => {
-    hoisted.generateCompletion.mockResolvedValue(reply('ok', 0.0006));
-    const reserve = vi.fn();
-    const meter = { reserve, settle: vi.fn(), heartbeat: vi.fn(), reconcile: vi.fn(), snapshot: vi.fn(), setAllowance: vi.fn() };
+  it('reserves generateText on a budget with a meter before the provider is called, and settles it at what it cost', async () => {
+    const order: string[] = [];
+    hoisted.generateCompletion.mockImplementation(async () => {
+      order.push('provider');
+      return reply('ok', 0.0006);
+    });
+    const reserve = vi.fn(async (req: SpendReserveRequest): Promise<SpendReserveResult> => {
+      order.push('reserve');
+      return { status: 'reserved', operationId: req.operationId, accountId: req.accountId, period: '2026-11', units: req.units ?? 1, attempt: 1, remaining: 0, expiresAt: Date.now() + 60_000 };
+    });
+    const settle = vi.fn(async (_req: SpendSettleRequest): Promise<SpendSettleResult> => ({ status: 'settled', state: 'consumed' }));
+    const meter = { reserve, settle, heartbeat: vi.fn(), reconcile: vi.fn(), snapshot: vi.fn(), setAllowance: vi.fn() };
     const budget = new SpendBudget({ maxCostUSD: 1, meter, accountId: 'acct-1' });
-    await expect(generateText({ provider: 'openai', model: 'gpt-6-luna', prompt: 'hello', maxTokens: 100, budget })).rejects.toBeInstanceOf(CostCapExceededError);
-    expect(hoisted.generateCompletion).not.toHaveBeenCalled();
-    expect(reserve).not.toHaveBeenCalled();
+    await generateText({ provider: 'openai', model: 'gpt-6-luna', prompt: 'hello', maxTokens: 100, budget });
+    expect(order).toEqual(['reserve', 'provider']);
+    expect(reserve).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'acct-1', requireFence: true }));
+    expect(settle).toHaveBeenCalledWith({ operationId: reserve.mock.calls[0][0].operationId, outcome: 'consumed', units: toMicro(0.0006) });
+    expect(budget.spentUSD()).toBeCloseTo(0.0006, 10);
   });
 
   it('stops generateObject at the cap without another attempt', async () => {
