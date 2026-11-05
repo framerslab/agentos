@@ -268,6 +268,37 @@ describe('TranscriptTranslator.translateLine', () => {
     }
   });
 
+  it('counts an attempt whose success status came and whose body was lost: a refusal after it is recorded at the bound, and a translation after it says so', async () => {
+    // The shortest backoff before the retry.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      // A 200 whose connection drops while its body is read: the provider may have billed the answer nobody got.
+      const cut = async (): Promise<Response> =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(stream) {
+              stream.error(new TypeError('terminated'));
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      answer(cut, jsonResponse({ error: { message: 'busy' } }, 503), cut, jsonResponse(chatCompletion('Hello.', 40, 3)));
+      const translator = new TranscriptTranslator();
+      const options = { ...OPTIONS, maxAttempts: 2, timeoutMs: 10_000 };
+      const bound = translator.boundMicro(line('Hola.'), 'en', options);
+      const price = (usage: { promptTokens: number; completionTokens: number }) => usage.promptTokens + usage.completionTokens;
+      const refused = await translator.translateLine(line('Hola.'), 'en', options).then(() => undefined, (error: unknown) => error);
+      expect(refused).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED', status: 503, usage: null, unansweredAttempts: 1 });
+      expect(TranscriptTranslator.failedCallMicro(refused, bound, price)).toBe(bound);
+      globalLLMProviderHealth.reset();
+      const translated = await translator.translateLine(line('Hola.'), 'en', options);
+      expect(translated).toMatchObject({ status: 'translated', text: 'Hello.', usage: { promptTokens: 40, completionTokens: 3 }, unansweredAttempts: 1 });
+      expect(posts()).toHaveLength(4);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
   it('carries the usage a failed call reported and records the call at it', async () => {
     // A Responses body with no output items: the provider refuses it, and its error holds the body's usage.
     answer(jsonResponse({ id: 'resp_2', object: 'response', status: 'completed', model: RESPONSES_MODEL, output: [], usage: { input_tokens: 40, output_tokens: 0, total_tokens: 40 } }));
