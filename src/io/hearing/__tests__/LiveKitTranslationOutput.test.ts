@@ -126,6 +126,39 @@ describe('LiveKitTranslationOutput', () => {
     await expect(output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] })).rejects.toThrow(/no local participant/);
   });
 
+  it('sends a write to the identities it was given, though the caller changes its list before the send', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranslationOutput({ room });
+    const readers = ['p-1'];
+    const first = output.write(made('a', 'One.'), { destinationIdentities: readers });
+    readers.splice(0, readers.length, 'p-9');
+    const second = output.write(made('b', 'Two.'), { destinationIdentities: readers });
+    readers.length = 0;
+    await Promise.all([first, second]);
+    expect(sent(room).map(({ options }) => options.destinationIdentities)).toEqual([['p-1'], ['p-9']]);
+  });
+
+  it('sends and replays a line as it was written, though the caller changes the object afterwards', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranslationOutput({ room });
+    const line = made('a', 'One.');
+    const pending = output.write(line, { destinationIdentities: ['p-1'] });
+    Object.assign(line, { itemId: 'z', target: 'fr', status: 'failed', text: null });
+    await pending;
+    expect(await output.replayAfter(null, 'en', 'p-1')).toBe(1);
+    expect(await output.replayAfter(null, 'fr', 'p-1')).toBe(0);
+    const calls = sent(room);
+    expect(calls).toHaveLength(2);
+    for (const { text, options } of calls) {
+      expect(JSON.parse(text)).toMatchObject({ itemId: 'a', target: 'en', status: 'translated', text: 'One.', seq: 1 });
+      expect(options.attributes).toMatchObject({
+        [LIVEKIT_TRANSLATION_ATTRIBUTES.itemId]: 'a',
+        [LIVEKIT_TRANSLATION_ATTRIBUTES.target]: 'en',
+        [LIVEKIT_TRANSLATION_ATTRIBUTES.status]: 'translated',
+      });
+    }
+  });
+
   it('is exported from the livekit entry', async () => {
     const entry = await import('../livekit.js');
     expect(typeof entry.LiveKitTranslationOutput).toBe('function');

@@ -198,6 +198,75 @@ describe('TranscriptTranslator.translateLine', () => {
     expect(failures()).toHaveLength(1);
   });
 
+  it('ends the call at timeoutMs and at the caller\'s abort while the provider is still starting, and sends nothing once it has started', async () => {
+    let listed!: () => void;
+    const listing = new Promise<void>((resolve) => {
+      listed = resolve;
+    });
+    // The provider lists its models before its first call; this listing hangs until the test lets it answer.
+    fetchMock.mockImplementation(async (_url: unknown, init?: { method?: string }) => {
+      if ((init?.method ?? 'GET') === 'GET') {
+        await listing;
+        return jsonResponse({ object: 'list', data: [{ id: 'gpt-4o-mini', object: 'model', created: 1, owned_by: 'openai' }] });
+      }
+      return jsonResponse(chatCompletion('Hello.'));
+    });
+    const within = <T>(pending: Promise<T>): Promise<T> =>
+      Promise.race([pending, new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('still pending after 1,000 ms')), 1_000))]);
+    // A key the provider cache has not seen, so each call starts its own provider.
+    await expect(within(new TranscriptTranslator().translateLine(line('Hola.'), 'en', { ...OPTIONS, apiKey: 'starting-key-1', timeoutMs: 50, maxAttempts: 1 }))).rejects.toMatchObject({ code: 'TRANSLATION_TIMEOUT' });
+    const controller = new AbortController();
+    const pending = new TranscriptTranslator().translateLine(line('Hola.'), 'en', { ...OPTIONS, apiKey: 'starting-key-2', abortSignal: controller.signal });
+    setTimeout(() => controller.abort(new Error('page left')), 20);
+    await expect(within(pending)).rejects.toThrow('page left');
+    expect(failures().map((entry) => entry.reason)).toEqual(['timeout']);
+    listed();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('counts an attempt that got no answer: a refusal after it is recorded at the bound, and a translation after it says so', async () => {
+    // The shortest backoff before the retry.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const lost = async (): Promise<Response> => {
+        throw new TypeError('fetch failed');
+      };
+      answer(lost, jsonResponse({ error: { message: 'busy' } }, 503), lost, jsonResponse(chatCompletion('Hello.', 40, 3)));
+      const translator = new TranscriptTranslator();
+      const options = { ...OPTIONS, maxAttempts: 2, timeoutMs: 10_000 };
+      const bound = translator.boundMicro(line('Hola.'), 'en', options);
+      const price = (usage: { promptTokens: number; completionTokens: number }) => usage.promptTokens + usage.completionTokens;
+      const refused = await translator.translateLine(line('Hola.'), 'en', options).then(() => undefined, (error: unknown) => error);
+      // The first attempt may have been billed for a whole answer; the 503 after it does not show that it was not.
+      expect(refused).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED', status: 503, usage: null, unansweredAttempts: 1 });
+      expect(TranscriptTranslator.failedCallMicro(refused, bound, price)).toBe(bound);
+      globalLLMProviderHealth.reset();
+      const translated = await translator.translateLine(line('Hola.'), 'en', options);
+      expect(translated).toMatchObject({ status: 'translated', text: 'Hello.', usage: { promptTokens: 40, completionTokens: 3 }, unansweredAttempts: 1 });
+      expect(posts()).toHaveLength(4);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it('carries the usage a failed call reported and records the call at it', async () => {
+    // A Responses body with no output items: the provider refuses it, and its error holds the body's usage.
+    answer(jsonResponse({ id: 'resp_2', object: 'response', status: 'completed', model: RESPONSES_MODEL, output: [], usage: { input_tokens: 40, output_tokens: 0, total_tokens: 40 } }));
+    const failed = await new TranscriptTranslator()
+      .translateLine(line('Hola.'), 'en', { ...OPTIONS, model: RESPONSES_MODEL, maxAttempts: 1 })
+      .then(() => undefined, (error: unknown) => error);
+    expect(failed).toMatchObject({ name: 'TranslationProviderError', code: 'TRANSLATION_REQUEST_FAILED', usage: { promptTokens: 40, completionTokens: 0, totalTokens: 40 } });
+    expect(TranscriptTranslator.failedCallMicro(failed, 9_999, (usage) => usage.promptTokens + usage.completionTokens)).toBe(40);
+    expect(posts()).toHaveLength(1);
+  });
+
+  it('throws TRANSLATION_INCOMPLETE for an answer a filter stopped, partial text and all, with its billed usage', async () => {
+    answer(jsonResponse({ ...chatCompletion('Good', 30, 1), choices: [{ index: 0, message: { role: 'assistant', content: 'Good' }, finish_reason: 'content_filter' }] }));
+    await expect(new TranscriptTranslator().translateLine(line('Hola.'), 'en', OPTIONS)).rejects.toMatchObject({ name: 'TranslationProviderError', code: 'TRANSLATION_INCOMPLETE', status: 200, usage: { promptTokens: 30, completionTokens: 1 } });
+    expect(failures()).toEqual([expect.objectContaining({ provider: 'openai', reason: 'incomplete', status: 200 })]);
+  });
+
   it('is exported from the package root', async () => {
     const root = await import('../../../../index');
     expect(typeof root.TranscriptTranslator).toBe('function');
