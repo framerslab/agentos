@@ -25,6 +25,8 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   maxAttempts: 'allow', onAttempt: 'allow',
   // Added later, and denied: streamObject sets it on its own streamText call; a panel call would hand every seat one callback.
   __onUsageReport: 'deny',
+  // Added later, and allowed: accountIdOf names the account a usage event reports; it changes nothing a seat sends.
+  accountIdOf: 'allow',
 };
 
 describe('the pooled guard (deny list, presence not value)', () => {
@@ -58,13 +60,14 @@ describe('the panel guard (allow list)', () => {
 });
 
 describe('per-call options added on master after the lists were written', () => {
-  it('lets a spend budget, hookErrors, an abort signal, maxAttempts and onAttempt through, under panel and in a pooled agency', () => {
+  it('lets a spend budget, hookErrors, an abort signal, maxAttempts, onAttempt and accountIdOf through, under panel and in a pooled agency', () => {
     const opts = {
       budget: { maxCostUSD: 1 },
       hookErrors: 'throw',
       abortSignal: new AbortController().signal,
       maxAttempts: 2,
       onAttempt: () => undefined,
+      accountIdOf: () => 'acct-1',
     };
     expect(() => guardPerCallOptions(opts, 'panel')).not.toThrow();
     expect(() => guardPerCallOptions(opts, 'pool')).not.toThrow();

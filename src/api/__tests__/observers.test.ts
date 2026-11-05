@@ -396,6 +396,53 @@ describe('the account on a call\'s usage event, over the real Anthropic provider
     warned.mockRestore();
   });
 
+  it('an accountIdOf whose error carries a name of its own logs a fixed type, never that name', async () => {
+    route({ [PRIMARY]: [textReply(PRIMARY, 'One.'), textReply(PRIMARY, 'Two.')] });
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await generateText({
+      ...call,
+      accountIdOf: () => {
+        const err = new Error('fixture-private-message');
+        err.name = 'fixture-private-name';
+        throw err;
+      },
+    });
+    await generateText({
+      ...call,
+      accountIdOf: () => {
+        const err = new TypeError('fixture-private-message');
+        err.name = 'fixture-private-typed-name';
+        throw err;
+      },
+    });
+    expect(events).toHaveLength(2);
+    for (const event of events) expect(event).not.toHaveProperty('accountId');
+    const logged = warned.mock.calls.map((args) => args.join(' ')).join(' ');
+    expect(logged).toContain('accountIdOf threw Error');
+    expect(logged).toContain('accountIdOf threw TypeError');
+    expect(logged).not.toContain('fixture-private');
+    warned.mockRestore();
+  });
+
+  it('an accountIdOf that returns a promise which rejects leaves the field absent, and the rejection is handled', async () => {
+    route({ [PRIMARY]: [textReply(PRIMARY, 'One.')] });
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const result = await generateText({
+        ...call,
+        accountIdOf: (() => Promise.reject(new Error('fixture-private-rejection'))) as unknown as () => string,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(result.text).toBe('One.');
+      expect(events).toHaveLength(1);
+      expect(events[0]).not.toHaveProperty('accountId');
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
   it('an accountIdOf that answers undefined, an empty string or something other than a string leaves the field absent', async () => {
     route({ [PRIMARY]: [textReply(PRIMARY, 'One.'), textReply(PRIMARY, 'Two.'), textReply(PRIMARY, 'Three.')] });
     await generateText({ ...call, accountIdOf: () => undefined });
