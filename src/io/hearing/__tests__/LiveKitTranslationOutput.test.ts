@@ -159,6 +159,31 @@ describe('LiveKitTranslationOutput', () => {
     }
   });
 
+  it('rejects a write whose encode throws, sending nothing and numbering nothing for it', async () => {
+    const room = new FakeRoom();
+    let broken = true;
+    const output = new LiveKitTranslationOutput({
+      room,
+      encode: (line, seq) => {
+        if (broken) throw new Error('cannot encode');
+        return JSON.stringify({ ...line, seq });
+      },
+    });
+    // A caller that writes `output.write(...).catch(...)` gets the failure as a rejection, never as a throw.
+    let outcome: unknown;
+    try {
+      outcome = output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] });
+    } catch (error) {
+      outcome = error;
+    }
+    expect(outcome).toBeInstanceOf(Promise);
+    await expect(outcome).rejects.toThrow('cannot encode');
+    broken = false;
+    await output.write(made('b', 'Two.'), { destinationIdentities: ['p-1'] });
+    expect(sent(room)).toHaveLength(1);
+    expect(sent(room)[0].options.attributes[LIVEKIT_TRANSLATION_ATTRIBUTES.seq]).toBe('1');
+  });
+
   it('is exported from the livekit entry', async () => {
     const entry = await import('../livekit.js');
     expect(typeof entry.LiveKitTranslationOutput).toBe('function');
