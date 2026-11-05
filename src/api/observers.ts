@@ -240,15 +240,21 @@ function accountIdOfEvent(event: LlmUsageEvent, account: LlmUsageAccountSource):
  * set on its error, can hold the account or a person's details.
  */
 function warnResolverFailed(how: 'threw' | 'rejected', err: unknown): void {
-  const kind =
-    err instanceof TypeError ? 'TypeError'
-    : err instanceof RangeError ? 'RangeError'
-    : err instanceof SyntaxError ? 'SyntaxError'
-    : err instanceof ReferenceError ? 'ReferenceError'
-    : err instanceof URIError ? 'URIError'
-    : err instanceof EvalError ? 'EvalError'
-    : err instanceof Error ? 'Error'
-    : typeof err;
+  let kind: string;
+  try {
+    kind =
+      err instanceof TypeError ? 'TypeError'
+      : err instanceof RangeError ? 'RangeError'
+      : err instanceof SyntaxError ? 'SyntaxError'
+      : err instanceof ReferenceError ? 'ReferenceError'
+      : err instanceof URIError ? 'URIError'
+      : err instanceof EvalError ? 'EvalError'
+      : err instanceof Error ? 'Error'
+      : typeof err;
+  } catch {
+    // `instanceof` throws for a revoked proxy; `typeof` never throws.
+    kind = typeof err;
+  }
   // eslint-disable-next-line no-console
   console.warn(`[agentos.onUsage] accountIdOf ${how} ${kind}; the event carries no accountId`);
 }
