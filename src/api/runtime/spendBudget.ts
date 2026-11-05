@@ -14,7 +14,9 @@ import { CostCapExceededError, CostGuard } from '../../safety/runtime/CostGuard.
 import type { CostCapType } from '../../safety/runtime/CostGuard.js';
 import type { ISpendMeter, SpendDenyReason, SpendReserveResult } from '../../safety/runtime/SpendMeter.js';
 import { toMicro } from '../../safety/runtime/SpendReservations.js';
+import type { AttemptOutcome, ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
 import { clampMaxOutputTokens } from '../../core/llm/providers/model-output-limits.js';
+import { generateUUID } from '../../core/utils/uuid.js';
 import { estimateMaxCallCostUSD, modelPricing, type MaxCostRequest, type ModelPriceTier } from './modelPricing.js';
 import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
 
@@ -80,8 +82,9 @@ export interface SpendBudgetOptions {
    * a fence, and {@link SpendBudget.record} given a {@link SpendBudgetSettlement} settles it. A budget with a parent,
    * and a call held to two budgets, reserves in every meter above it: once for each meter and account, so one call
    * under one operation id cannot be held for two accounts on one meter, and is refused. The synchronous check holds
-   * nothing, so on a budget with a meter it refuses the call: the generation helpers (`generateText()`, `streamText()`,
-   * `generateObject()`, `embedText()`, `agent()`, `gmi()`) make that check and do not reserve. Needs `accountId`.
+   * nothing, so on a budget with a meter it refuses the call. The generation helpers (`generateText()`, `streamText()`,
+   * `generateObject()`, `embedText()`, `agent()`, `gmi()` and a launched team's seats) reserve each provider call they
+   * make on such a budget and settle it by how the call ended ({@link withReservation}). Needs `accountId`.
    */
   meter?: ISpendMeter;
   /**
@@ -747,6 +750,379 @@ async function settleCall(budget: SpendBudget, costUSD: number | undefined, sett
   );
   const failed = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (failed) throw failed.reason;
+}
+
+/**
+ * The fields of a provider call's options that change what it can cost beyond its messages, tools and output cap, as
+ * a generation helper hands them to its provider.
+ */
+export interface HelperCallOptions {
+  /** `false` sends no cache markers; anything else lets the provider write the prompt cache. */
+  cache?: unknown;
+  /** OpenAI's prompt-cache retention, which writes the cache at its lifetime's rate. */
+  promptCacheRetention?: unknown;
+  /** OpenAI's service tier: `'priority'` bills at a higher rate. */
+  serviceTier?: unknown;
+  /** Provider-specific body fields, which the provider spreads onto its request after its own. */
+  customModelParams?: Record<string, unknown>;
+  /** A structured-output format the request carries (a JSON schema, or a schema tool), billed as input. */
+  responseFormat?: unknown;
+}
+
+/**
+ * A provider call a generation helper makes on a budget: what a budget without a meter checks it by, as
+ * {@link assertCallWithinBudget} does, and what a budget with a meter reserves for it ({@link withReservation}).
+ */
+export interface HelperCall {
+  /** What the call is in the budget's records: `generate_text.step`, `stream_text`, `embed_text` and the like. */
+  what: string;
+  /** The provider and the model the call goes to. */
+  route: { providerId: string; modelId: string };
+  /** The messages the provider is sent, system messages included; an embedding's inputs. */
+  messages: unknown;
+  /** The tool definitions the provider is sent. */
+  tools?: unknown;
+  /** The output cap the call names; 0 for an embedding. */
+  maxTokens: number | undefined;
+  /** The options that change what the call can cost. */
+  options?: HelperCallOptions;
+  /** The caller's own attempt report, which each attempt the provider reports goes on to. */
+  onAttempt?: (outcome: AttemptOutcome) => void;
+  /** The caller's signal: a call on a budget with a meter whose signal fired while it was reserved is not sent. */
+  abortSignal?: AbortSignal;
+  /** The characters a budget without a meter checks the call by: `promptCharsOf(messages, undefined, tools)` when left out. */
+  promptChars?: number;
+  /** An embedding, whose usage is priced as one ({@link costOfUsageUSD}). */
+  embedding?: boolean;
+}
+
+/**
+ * Body fields that change what a request sends beyond its messages and tools, or draw in what it does not carry:
+ * messages or tools in place of the call's own, a stored prompt or conversation, tools and plugins the provider runs,
+ * audio output. A call whose `customModelParams` sets one has no bound.
+ */
+const UNBOUNDED_BODY_FIELDS = [
+  'messages', 'input', 'contents', 'prompt', 'system', 'instructions', 'tools', 'functions', 'mcp_servers', 'plugins',
+  'web_search_options', 'previous_response_id', 'conversation', 'modalities', 'audio',
+];
+
+/** Body fields that set a request's output cap: spread after the call's own, they are the cap it sends. */
+const OUTPUT_CAP_FIELDS = ['max_tokens', 'max_completion_tokens', 'max_output_tokens'];
+
+/** Body fields that ask for prompt caching. */
+const CACHE_BODY_FIELDS = ['prompt_cache_retention', 'prompt_cache_options', 'cache_control'];
+
+/**
+ * What a helper's provider call sends, for {@link estimateMaxCallCostUSD}: its messages and tools, its output cap (the
+ * largest of the call's `maxTokens` and a cap its `customModelParams` set), a structured-output format as one more tool
+ * definition (its schema is billed as input, and a schema the provider forces as a tool brings the tool-use prompt),
+ * and the flags its options set: prompt caching unless `cache` is `false`, a priority or fast tier, regional
+ * processing, more than one completion, and a body field that replaces what the call sends, which leaves it unbounded.
+ *
+ * @internal Exported for the generation helpers and their tests.
+ */
+export function maxCostRequestOf(call: Pick<HelperCall, 'messages' | 'tools' | 'maxTokens' | 'options'>): MaxCostRequest {
+  const options = call.options ?? {};
+  const body = options.customModelParams ?? {};
+  const generation = (body.generationConfig ?? body.generation_config) as Record<string, unknown> | null | undefined;
+  const caps = [call.maxTokens, ...OUTPUT_CAP_FIELDS.map((field) => body[field]), generation?.maxOutputTokens, generation?.max_output_tokens].filter(
+    (cap): cap is number => typeof cap === 'number',
+  );
+  const completions = [body.n, body.best_of].filter((n): n is number => typeof n === 'number');
+  const listed = Array.isArray(call.tools) ? call.tools : call.tools === undefined ? [] : [call.tools];
+  const tools =
+    options.responseFormat === undefined ? call.tools : [...listed, { type: 'function', function: { name: 'response_format', parameters: options.responseFormat } }];
+  return {
+    messages: call.messages,
+    ...(tools !== undefined ? { tools } : {}),
+    // Math.max holds a cap of NaN as NaN, which has no bound, as a provider sends it as no cap.
+    ...(caps.length > 0 ? { maxOutputTokens: Math.max(...caps) } : {}),
+    ...(completions.length > 0 ? { n: Math.max(...completions) } : {}),
+    cacheMarkers: options.cache !== false || options.promptCacheRetention !== undefined || CACHE_BODY_FIELDS.some((field) => body[field] !== undefined),
+    nonTextParts: UNBOUNDED_BODY_FIELDS.some((field) => body[field] !== undefined),
+    priorityTier: options.serviceTier === 'priority' || body.service_tier === 'priority' || body.speed === 'fast',
+    regionalProcessing: body.inference_geo !== undefined && body.inference_geo !== 'global',
+  };
+}
+
+/** How a held call ended, which decides how its reservation settles ({@link CallHold.settle}). */
+export type CallEnd =
+  /** It was never sent. */
+  | { kind: 'unsent' }
+  /** It answered: with the usage its answer reported, when it reported one. */
+  | { kind: 'completed'; usage?: unknown }
+  /** It failed with `error`; `afterOutput` when some of its output came first; `usage` when a report came with it. */
+  | { kind: 'failed'; error: unknown; afterOutput: boolean; usage?: unknown }
+  /** Its reader stopped reading after its request was sent. */
+  | { kind: 'left'; usage?: unknown };
+
+/** A provider call's hold in its budget, from its check to its settle ({@link holdCall}). */
+export interface CallHold {
+  /** The attempt report to hand the provider: the caller's own, which a hold in a meter reads on the way. */
+  readonly onAttempt: ((outcome: AttemptOutcome) => void) | undefined;
+  /** Sends an unstreamed call and settles by its answer's usage (`usageOf`, its `usage` by default) or by its failure. */
+  run<T>(send: () => Promise<T>, usageOf?: (result: T) => unknown): Promise<T>;
+  /** Passes a provider stream on, and settles once it ends, fails or is left. */
+  stream(chunks: AsyncIterable<ModelCompletionResponse>): AsyncIterable<ModelCompletionResponse>;
+  /**
+   * What the call's requests that answered were billed in all so far (embedText's batches): a later failure settles at
+   * that when it is known to have billed nothing more, and only the attempts reported after it decide that.
+   */
+  billedSoFar(usage: unknown): void;
+  /** Settles the reservation by how the call ended. The first settle stands; a deferred one waits for evidence. */
+  settle(end: CallEnd): Promise<void>;
+  /** Usage reported for the call after it ended (a stream left running after an abort): settles a deferred hold at it. */
+  lateUsage(usage: unknown): void;
+}
+
+/** The hold of a call on no budget, or on one without a meter: the check was all, and nothing is held. */
+function unheld(call: HelperCall): CallHold {
+  return {
+    onAttempt: call.onAttempt,
+    run: (send) => send(),
+    stream: (chunks) => chunks,
+    billedSoFar: () => undefined,
+    settle: async () => undefined,
+    lateUsage: () => undefined,
+  };
+}
+
+/** Statuses a provider or a gateway answers when a request may have reached the model before it gave up: timeouts. */
+const TIMEOUT_STATUSES = new Set([408, 504, 524]);
+
+/** Whether `status` refused a request before any output: a 4xx or a 5xx, a timeout's status aside. */
+function refusedBeforeOutput(status: unknown): boolean {
+  return typeof status === 'number' && status >= 400 && status <= 599 && !TIMEOUT_STATUSES.has(status);
+}
+
+/** The HTTP status an error carries, in the fields provider errors and stream error chunks use. */
+function statusOfFailure(error: unknown): unknown {
+  if (!error || typeof error !== 'object') return undefined;
+  const e = error as { httpStatus?: unknown; status?: unknown; statusCode?: unknown; code?: unknown };
+  return [e.httpStatus, e.status, e.statusCode, e.code].find((value) => typeof value === 'number');
+}
+
+/** Whether an error says its request timed out or was stopped, which leaves open whether the provider billed it. */
+function stoppedOrTimedOut(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { name, code, type } = error as { name?: unknown; code?: unknown; type?: unknown };
+  return [name, code, type].some((word) => typeof word === 'string' && /abort|timeout|timed_?out/i.test(word));
+}
+
+/**
+ * How a call that failed with no usage reported settles: `released` when it is known to have been billed nothing,
+ * `deferred` when it may have been. Known when no output came before the failure and every attempt the provider
+ * reported was refused with a status before any output; for a provider that reports no attempts, when the error
+ * carries such a status and does not say its request timed out or was stopped, or is the `RangeError` the providers
+ * refuse a request they cannot send with, before anything is sent.
+ */
+function failedCallSettles(error: unknown, attempts: readonly AttemptOutcome[], afterOutput: boolean): 'released' | 'deferred' {
+  if (afterOutput) return 'deferred';
+  if (attempts.length > 0) {
+    return attempts.every((attempt) => !attempt.ok && refusedBeforeOutput(attempt.status)) ? 'released' : 'deferred';
+  }
+  if (stoppedOrTimedOut(error)) return 'deferred';
+  if (refusedBeforeOutput(statusOfFailure(error))) return 'released';
+  return error instanceof RangeError ? 'released' : 'deferred';
+}
+
+/** A usage report: an object with a token count or a cost that is a finite number. */
+function usageReport(value: unknown): UsageForCost | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { promptTokens, completionTokens, totalTokens, costUSD } = value as Record<string, unknown>;
+  return [promptTokens, completionTokens, totalTokens, costUSD].some((n) => typeof n === 'number' && Number.isFinite(n)) ? (value as UsageForCost) : undefined;
+}
+
+/** The usage a provider error reports for the request it ended (`details.usage`, a refused turn's bill). */
+function usageOfFailure(error: unknown): unknown {
+  return (error as { details?: { usage?: unknown } } | null | undefined)?.details?.usage;
+}
+
+/** A settle a held call's end decides: the outcome, and for `consumed` the cost (undefined, the whole reservation). */
+type HoldSettle = { outcome: 'consumed'; costUSD: number | undefined } | { outcome: 'released' };
+
+/**
+ * A call held in its budget's meters under one operation id, the call's own across the provider's retries, settled by
+ * how the call ended ({@link CallHold.settle}).
+ */
+class MeteredHold implements CallHold {
+  /** The attempts the provider reported since the last {@link MeteredHold.billedSoFar}. */
+  private readonly attempts: AttemptOutcome[] = [];
+  private billed: unknown;
+  /** Usage reported after the call ended, before its end was settled. */
+  private late: unknown;
+  private state: 'open' | 'deferred' | 'settled' = 'open';
+
+  readonly onAttempt = (outcome: AttemptOutcome): void => {
+    this.attempts.push(outcome);
+    this.call.onAttempt?.(outcome);
+  };
+
+  constructor(
+    private readonly budget: SpendBudget,
+    private readonly call: HelperCall,
+    private readonly operationId: string,
+  ) {}
+
+  /** Frees the reservation of a call whose signal fired while it was held, and throws the signal's reason: nothing is sent. */
+  async sendable(): Promise<void> {
+    const signal = this.call.abortSignal;
+    if (!signal?.aborted) return;
+    await this.settle({ kind: 'unsent' });
+    signal.throwIfAborted();
+  }
+
+  async run<T>(send: () => Promise<T>, usageOf: (result: T) => unknown = (result) => (result as { usage?: unknown } | null | undefined)?.usage): Promise<T> {
+    await this.sendable();
+    let result: T;
+    try {
+      result = await send();
+    } catch (error) {
+      await this.settle({ kind: 'failed', error, afterOutput: false });
+      throw error;
+    }
+    await this.settle({ kind: 'completed', usage: usageOf(result) });
+    return result;
+  }
+
+  async *stream(chunks: AsyncIterable<ModelCompletionResponse>): AsyncGenerator<ModelCompletionResponse, void, undefined> {
+    // A signal that fired before the stream was opened: the provider ends the stream with its abort chunk and sends
+    // nothing (the provider contract, IProvider), so the reservation is freed.
+    if (this.call.abortSignal?.aborted) await this.settle({ kind: 'unsent' });
+    let usage: unknown;
+    let output = false;
+    let failure: { error: unknown; afterOutput: boolean } | undefined;
+    let ended = false;
+    try {
+      for await (const chunk of chunks) {
+        if (chunk.usage) usage = chunk.usage;
+        if (chunk.error) failure ??= { error: chunk.error, afterOutput: output };
+        else output = true;
+        yield chunk;
+      }
+      ended = true;
+    } catch (error) {
+      failure = { error, afterOutput: output };
+      throw error;
+    } finally {
+      await this.settle(failure ? { kind: 'failed', ...failure, usage } : ended ? { kind: 'completed', usage } : { kind: 'left', usage });
+    }
+  }
+
+  billedSoFar(usage: unknown): void {
+    this.billed = usage;
+    this.attempts.length = 0;
+  }
+
+  lateUsage(usage: unknown): void {
+    if (!usageReport(usage)) return;
+    if (this.state === 'deferred') void this.settle({ kind: 'left', usage });
+    else if (this.state === 'open') this.late = usage;
+  }
+
+  async settle(end: CallEnd): Promise<void> {
+    if (this.state === 'settled') return;
+    const decided = this.decide(end);
+    if (decided === 'deferred') {
+      if (this.state === 'open') {
+        this.state = 'deferred';
+        console.warn(`[agentos] spend budget: ${this.call.what} brought no usage back after its request was sent; its reservation stays held until a reconcile settles it`);
+      }
+      return;
+    }
+    this.state = 'settled';
+    try {
+      await settleCall(this.budget, decided.outcome === 'consumed' ? decided.costUSD : undefined, { operationId: this.operationId, outcome: decided.outcome });
+    } catch {
+      // The call's own answer or error goes on: its reservation stays held, behind its fence, and counted.
+      console.warn(`[agentos] spend budget: the reservation of ${this.call.what} could not be settled; it stays held until a later settle or reconcile`);
+    }
+  }
+
+  /**
+   * The settle `end` calls for: a call whose usage came back is consumed at it, a finished one with no usage at its
+   * whole reservation, one never sent or known to have been billed nothing at what its earlier requests were billed (or
+   * freed), and every other one deferred: its reservation stays held and counted until a reconcile decides from evidence.
+   */
+  private decide(end: CallEnd): HoldSettle | 'deferred' {
+    if (end.kind === 'unsent') return this.billedOnly();
+    const reported = usageReport(end.usage) ?? (end.kind === 'failed' ? usageReport(usageOfFailure(end.error)) : undefined) ?? usageReport(this.late);
+    if (end.kind === 'completed') return { outcome: 'consumed', costUSD: reported ? this.costOf(reported) : undefined };
+    if (reported) return { outcome: 'consumed', costUSD: end.kind === 'failed' ? this.costOf(reported, this.billed) : this.costOf(reported) };
+    if (end.kind === 'failed' && failedCallSettles(end.error, this.attempts, end.afterOutput) === 'released') return this.billedOnly();
+    return 'deferred';
+  }
+
+  /** What the requests that answered were billed, consumed, or the reservation freed when none was. */
+  private billedOnly(): HoldSettle {
+    const billed = usageReport(this.billed);
+    return billed ? { outcome: 'consumed', costUSD: this.costOf(billed) } : { outcome: 'released' };
+  }
+
+  /** What `reports` cost together at the call's rates; undefined when one has no price, which settles the whole reservation. */
+  private costOf(...reports: unknown[]): number | undefined {
+    let total = 0;
+    for (const report of reports) {
+      const usage = usageReport(report);
+      if (!usage) continue;
+      const cost = costOfUsageUSD(this.call.route.providerId, this.call.route.modelId, usage, this.call.embedding === true);
+      if (cost === undefined) return undefined;
+      total += cost;
+    }
+    return total;
+  }
+}
+
+/** Whether a call on `budget` is held in a spend meter: the budget's own, or one a budget it draws on names. */
+export function holdsInMeter(budget: SpendBudget): boolean {
+  return meterHoldsOf(budget).length > 0;
+}
+
+/**
+ * Checks a helper's provider call against `budget` before it is sent and, on a budget with a meter, holds it. Without a
+ * budget, nothing. On a budget without a meter, the synchronous check, as {@link assertCallWithinBudget} makes it, and
+ * nothing held. On a budget with a meter (its own or one a budget it draws on names), the call's largest cost
+ * ({@link maxCostRequestOf}) reserved under an operation id of its own, which spans the provider's retries of it,
+ * through {@link SpendBudget.assertCanSpend}; a call whose signal fired meanwhile is freed and not sent. The hold
+ * settles the reservation by how the call ends: consumed at its usage when usage came back (a finished call with none
+ * takes its whole reservation), released when it never left or the provider refused it before any output, and
+ * otherwise deferred, held and counted until a reconcile with `resolveExpired` decides from evidence: a timeout, a
+ * dropped connection, a stream aborted or left after its request was sent. A settle the meter cannot answer is logged,
+ * and the reservation stays held for a later settle or reconcile; the call's answer or error goes on.
+ *
+ * @throws {CostCapExceededError} At a cap, or when a meter refuses the call.
+ * @throws {UnpricedModelError} For a model with no price row, or, on a budget with a meter, a call whose cost has no
+ *   bound: one that names no output cap, carries a part that is not text, or asks for what the bound cannot price.
+ * @throws {SpendMeterUnavailableError} When a meter's store cannot answer: nothing is sent.
+ * @internal Called by the generation helpers before each provider call.
+ */
+export async function holdCall(budget: SpendBudget | undefined, call: HelperCall): Promise<CallHold> {
+  if (!budget) return unheld(call);
+  if (!holdsInMeter(budget)) {
+    assertCallWithinBudget(budget, call.route, call.promptChars ?? promptCharsOf(call.messages, undefined, call.tools), call.maxTokens, call.what);
+    return unheld(call);
+  }
+  const operationId = generateUUID();
+  await budget.assertCanSpend(call.what, { providerId: call.route.providerId, modelId: call.route.modelId, request: maxCostRequestOf(call), operationId });
+  const hold = new MeteredHold(budget, call, operationId);
+  await hold.sendable();
+  return hold;
+}
+
+/**
+ * Sends one unstreamed provider call of a generation helper inside its budget's hold ({@link holdCall}): checked, and on
+ * a budget with a meter reserved, before `run` sends it, and settled by its answer's usage or by how it failed. `run`
+ * is handed the attempt report to give the provider.
+ *
+ * @internal Called by the generation helpers around each unstreamed provider call.
+ */
+export async function withReservation<T>(
+  budget: SpendBudget | undefined,
+  call: HelperCall,
+  run: (onAttempt: ((outcome: AttemptOutcome) => void) | undefined) => Promise<T>,
+): Promise<T> {
+  const hold = await holdCall(budget, call);
+  return hold.run(() => run(hold.onAttempt));
 }
 
 /**

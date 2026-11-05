@@ -47,9 +47,10 @@ import { checkContextFit } from './runtime/contextWindowFit.js';
 import { responseFormatCarriesSchema } from './runtime/responseFormatForProvider.js';
 import {
   asSpendBudget,
-  assertCallWithinBudget,
   costOfUsageUSD,
-  promptCharsOf,
+  holdCall,
+  withReservation,
+  type HelperCall,
   type SpendBudget,
   type SpendBudgetOptions,
 } from './runtime/spendBudget.js';
@@ -1295,17 +1296,24 @@ export async function createPlan(
     planMessages.push(msg);
   }
 
-  if (spend) {
-    assertCallWithinBudget(spend.budget, { providerId: spend.providerId, modelId }, promptCharsOf(planMessages), maxTokens, spend.what);
-  }
-  const response = await provider.generateCompletion(modelId, planMessages, {
+  // The run's budget checks the planning call before it is sent; a budget with a meter reserves it and settles it.
+  const planCall: HelperCall = {
+    what: spend?.what ?? 'generate_text.plan',
+    route: { providerId: spend?.providerId ?? '', modelId },
+    messages: planMessages,
+    maxTokens,
+    options: { cache: config?.cache, customModelParams: inheritedParams },
+    onAttempt: config?.onAttempt,
+    abortSignal: config?.abortSignal,
+  };
+  const response = await withReservation(spend?.budget, planCall, (onAttempt) => provider.generateCompletion(modelId, planMessages, {
     temperature,
     maxTokens,
     ...(requestTimeout !== undefined ? { requestTimeout } : {}),
     ...(config?.abortSignal ? { abortSignal: config.abortSignal } : {}),
     // The call's attempt count and its report hold for the planning request too.
     ...(config?.maxAttempts !== undefined ? { maxAttempts: config.maxAttempts } : {}),
-    ...(config?.onAttempt ? { onAttempt: config.onAttempt } : {}),
+    ...(onAttempt ? { onAttempt } : {}),
     // Inherited (or planning-specific) cache control: a cache:false root
     // call's planning sub-call must not auto-cache behind the caller's back.
     ...(config?.cache !== undefined ? { cache: config.cache } : {}),
@@ -1313,7 +1321,7 @@ export async function createPlan(
     // Of the caller's provider-specific fields, the routing ones (OpenRouter's
     // provider preferences and plugins) apply to the planning call too.
     ...(inheritedParams ? { customModelParams: inheritedParams } : {}),
-  });
+  }));
 
   spend?.budget.record(costOfUsageUSD(spend.providerId, modelId, response.usage), response.usage?.totalTokens ?? 0, spend.what);
 
@@ -2679,8 +2687,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               shimSendChecked = true;
               assertFitsContextWindow({ messages: msgs });
             }
-            if (budget) assertCallWithinBudget(budget, resolved, promptCharsOf(msgs), opts.maxTokens, 'generate_text.shim');
-            const r = await provider.generateCompletion(resolved.modelId, msgs as any, {
+            const shimCall: HelperCall = { what: 'generate_text.shim', route: resolved, messages: msgs, maxTokens: opts.maxTokens, options: opts, onAttempt: opts.onAttempt, abortSignal: opts.abortSignal };
+            const r = await withReservation(budget, shimCall, (onAttempt) => provider.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
@@ -2719,8 +2727,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
               // The call's attempt count and its report, as on the native step loop below.
               ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-              ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
-            } as any);
+              ...(onAttempt ? { onAttempt } : {}),
+            } as any));
             budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, r.usage), r.usage?.totalTokens ?? 0, 'generate_text.shim');
             // Aggregate the COMPLETE normalized usage from every shim
             // roundtrip (spec batch-1 review fold) as each call returns, so
@@ -2856,11 +2864,19 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // A continuation leg's first send carries its completed tool rounds.
         // Later steps are not checked again.
         if (step === 0) assertFitsContextWindow({ messages: effectiveMessages, tools: toolSchemas });
-        if (budget) {
-          assertCallWithinBudget(budget, resolved, promptCharsOf(effectiveMessages, undefined, toolSchemas), opts.maxTokens, 'generate_text.step');
-        }
+        // Checked against the budget before it is sent; a budget with a meter reserves the step and settles it.
+        const stepHold = await holdCall(budget, {
+          what: 'generate_text.step',
+          route: resolved,
+          messages: effectiveMessages,
+          tools: toolSchemas,
+          maxTokens: opts.maxTokens,
+          options: { ...opts, responseFormat: opts._responseFormat },
+          onAttempt: opts.onAttempt,
+          abortSignal: opts.abortSignal,
+        });
 
-        const response = await withAgentOSSpan(
+        const response = await stepHold.run(() => withAgentOSSpan(
           'agentos.api.generate_text.step',
           async (stepSpan) => {
             stepSpan?.setAttribute('llm.provider', resolved.providerId);
@@ -2921,7 +2937,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
                 // The most requests this step sends and the report of each, so a caller can settle the attempts it paid for.
                 ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-                ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
+                ...(stepHold.onAttempt ? { onAttempt: stepHold.onAttempt } : {}),
                 ...(opts._responseFormat ? { responseFormat: opts._responseFormat }: {}),
               } as any
             );
@@ -2955,7 +2971,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             });
             return stepResponse;
           }
-        );
+        ));
 
         if (typeof response.servingProvider === 'string' && response.servingProvider.length > 0) {
           lastServingProvider = response.servingProvider;

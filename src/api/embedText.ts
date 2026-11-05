@@ -30,8 +30,9 @@ import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/
 import { redactUrlSecrets } from '../core/llm/providers/url-secrets.js';
 import {
   asSpendBudget,
-  assertCallWithinBudget,
   costOfUsageUSD,
+  holdCall,
+  type CallHold,
   type SpendBudget,
   type SpendBudgetOptions,
 } from './runtime/spendBudget.js';
@@ -630,6 +631,8 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
   let metricModelId: string | undefined;
   let metricUsage: { promptTokens: number; totalTokens: number; costUSD?: number } | undefined;
   const budget = asSpendBudget(opts.budget);
+  // The request's hold in the budget, once it is checked: on a budget with a meter, its reservation.
+  let hold: CallHold | undefined;
 
   try {
     return await withAgentOSSpan(
@@ -668,8 +671,19 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         const inputArray = Array.isArray(opts.input) ? opts.input : [opts.input];
         span?.setAttribute('agentos.api.embed_input_count', inputArray.length);
         // Checked once for the whole request, whichever branch below sends it:
-        // its input's assumed tokens at the model's input rate.
-        if (budget) assertCallWithinBudget(budget, resolved, inputArray.join('').length, 0, 'embed_text');
+        // its input's assumed tokens at the model's input rate. A budget with
+        // a meter reserves the bound of its input and settles it at the end.
+        const held = await holdCall(budget, {
+          what: 'embed_text',
+          route: resolved,
+          messages: inputArray,
+          maxTokens: 0,
+          promptChars: inputArray.join('').length,
+          embedding: true,
+          onAttempt: opts.onAttempt,
+          abortSignal: opts.abortSignal,
+        });
+        hold = held;
 
         let embeddings: number[][];
         let reportedModel: string;
@@ -690,6 +704,8 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           // texts per call). A gateway or Google's OpenAI-compatible base URL
           // takes the OpenAI-compatible branch below instead.
           if (!resolved.apiKey) {
+            // Nothing was sent: a reservation held for the request is freed.
+            await held.settle({ kind: 'unsent' });
             throw new Error('No API key available for embedding provider "gemini".');
           }
           const gemini = new GeminiProvider();
@@ -713,6 +729,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                   ...(partial.costUSD !== undefined ? { costUSD: partial.costUSD } : {}),
                 };
                 budget?.record(partial.costUSD, partial.total_tokens, 'embed_text');
+                held.billedSoFar(metricUsage);
               }
               throw error;
             });
@@ -734,6 +751,8 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           // its own, so its key goes only to a base URL the caller set.
           const baseUrl = resolved.baseUrl ?? EMBEDDINGS_BASE_URLS.get(resolved.providerId);
           if (baseUrl === undefined) {
+            // Nothing was sent: a reservation held for the request is freed.
+            await held.settle({ kind: 'unsent' });
             throw new Error(
               `No embeddings endpoint is known for provider "${resolved.providerId}"; pass baseUrl, the ` +
                 `OpenAI-compatible endpoint its key is for, or embed with ${embeddingProviderList()}.`,
@@ -741,6 +760,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           }
 
           if (!resolved.apiKey) {
+            await held.settle({ kind: 'unsent' });
             throw new Error(`No API key available for embedding provider "${resolved.providerId}".`);
           }
 
@@ -764,10 +784,16 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           let offset = 0;
           // Tokens charged for the batches whose answer reported no prompt tokens: the bound of their inputs.
           let unreportedTokens = 0;
+          // Between batches nothing is in flight: a stop there settles the hold at what the batches so far were billed.
+          const stopIfAborted = async (): Promise<void> => {
+            if (!opts.abortSignal?.aborted) return;
+            await held.settle({ kind: 'unsent' });
+            opts.abortSignal.throwIfAborted();
+          };
           try {
             // Preserve the provider's handling of an empty input array.
             do {
-              opts.abortSignal?.throwIfAborted();
+              await stopIfAborted();
               const batch: string[] = [];
               let bytes = 0;
               while (offset < inputArray.length && batch.length < maxInputs) {
@@ -785,7 +811,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                 batch,
                 opts.dimensions,
                 opts.abortSignal,
-                opts.onAttempt,
+                held.onAttempt,
                 DIMENSIONS_FIELDS.get(resolved.providerId),
               );
 
@@ -816,7 +842,9 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
               );
               if (costUSD !== undefined) usage.costUSD = costUSD;
               metricUsage = usage;
-              opts.abortSignal?.throwIfAborted();
+              // The batches so far answered and were billed this.
+              held.billedSoFar(usage);
+              await stopIfAborted();
             } while (offset < inputArray.length);
           } catch (error) {
             // Earlier successful batches remain billed if a later one fails.
@@ -828,6 +856,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
 
         metricUsage = usage;
         budget?.record(usage.costUSD, usage.totalTokens, 'embed_text');
+        await held.settle({ kind: 'completed', usage });
         span?.setAttribute('agentos.api.embed_dimensions', embeddings[0]?.length ?? 0);
         attachUsageAttributes(span, {
           promptTokens: usage.promptTokens,
@@ -860,6 +889,8 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
     );
   } catch (error) {
     metricStatus = 'error';
+    // A held request that failed settles by how it failed: a settled hold is left as it is.
+    await hold?.settle({ kind: 'failed', error, afterOutput: false });
     // The caller's signal ended the call: it rejects with the signal's reason,
     // whatever the request failed with (a body read the abort cut off, a
     // provider's own abort error).
