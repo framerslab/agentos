@@ -1,0 +1,266 @@
+/**
+ * @fileoverview A generation helper's hold on a budget with a spend meter, at its edges, on SqlSpendMeter over SQLite:
+ * what a call's `customModelParams` send counts in its bound (a Gemini `generationConfig`, which replaces the one the
+ * provider builds; an output cap a field removes; a raw structured-output schema; context a field draws in), an
+ * embedding's bound, and how a held call settles when the provider retried it, reported only a total, failed before
+ * sending anything, or ran past the meter's lease, and when its signal fired before its stream was read.
+ *
+ * The seat cases call a launched seat's provider (`meteredProviderManager`) with a provider object of the test's own.
+ */
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
+
+import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager.js';
+import type { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse, ModelUsage } from '../../../core/llm/providers/IProvider.js';
+import { SqlSpendMeter, type SqlSpendMeterOptions } from '../../../safety/runtime/SqlSpendMeter.js';
+import { toMicro } from '../../../safety/runtime/SpendReservations.js';
+import { meteredProviderManager } from '../agencyLaunch/meteredProviderManager.js';
+import { MAX_COST_TOOL_USE_TOKENS, estimateMaxCallCostUSD, maxInputTokens, registerModelPricing, utf8ByteLength } from '../modelPricing.js';
+import { SpendBudget, UnpricedModelError, costOfUsageUSD, holdCall, maxCostRequestOf, type HelperCall } from '../spendBudget.js';
+
+const ACCOUNT = 'acct-hold';
+const PERIOD = '2026-11';
+/** The chat model the OpenAI cases name, priced by the table this file registers. */
+const MODEL = 'stub-model';
+/** The Gemini model the Gemini cases name, priced by the table this file registers. */
+const GEMINI_MODEL = 'stub-gemini';
+const MAX_TOKENS = 100;
+const MESSAGES: ChatMessage[] = [{ role: 'user', content: 'Say hello.' }];
+/** The usage a finished seat call reports. */
+const CHAT_USAGE: ModelUsage = { promptTokens: 12, completionTokens: 3, totalTokens: 15 };
+
+interface MeterFixture {
+  meter: SqlSpendMeter;
+  figures(): Promise<{ used: number; reserved: number }>;
+  close(): Promise<void>;
+}
+
+async function openMeter(extra: Partial<SqlSpendMeterOptions> = {}): Promise<MeterFixture> {
+  const db = await resolveStorageAdapter({ filePath: ':memory:', priority: ['better-sqlite3', 'sqljs'], quiet: true });
+  const meter = new SqlSpendMeter({
+    db,
+    allowanceFor: () => 1_000_000,
+    periodOf: () => PERIOD,
+    requireShared: false,
+    resolveExpired: () => ({ outcome: 'deferred', retryAt: Date.now() + 1_000 }),
+    ...extra,
+  });
+  return {
+    meter,
+    async figures() {
+      const { used, reserved } = await meter.snapshot(ACCOUNT);
+      return { used, reserved };
+    },
+    close: () => db.close(),
+  };
+}
+
+/** A promise the test opens. */
+function opening(): { promise: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+
+/** A chat call to `providerId`, as a helper holds it. */
+function chatCall(providerId: string, modelId: string, customModelParams?: Record<string, unknown>): HelperCall {
+  return {
+    what: 'test.call',
+    route: { providerId, modelId },
+    messages: MESSAGES,
+    maxTokens: MAX_TOKENS,
+    ...(customModelParams ? { options: { customModelParams } } : {}),
+  };
+}
+
+/** A reply in the unstreamed shape, reporting `usage`. */
+const completion = (usage: unknown = CHAT_USAGE): ModelCompletionResponse =>
+  ({
+    id: 'seat-1',
+    object: 'chat.completion',
+    created: 0,
+    modelId: MODEL,
+    choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finishReason: 'stop' }],
+    usage,
+  }) as unknown as ModelCompletionResponse;
+
+/** A launched seat's provider on `budget`, over a provider whose unstreamed answer `answer` gives. */
+function seat(budget: SpendBudget, answer: (options: ModelCompletionOptions) => Promise<ModelCompletionResponse>): IProvider {
+  const provider = {
+    providerId: 'openai',
+    generateCompletion: (_modelId: string, _messages: ChatMessage[], options: ModelCompletionOptions) => answer(options),
+  } as unknown as IProvider;
+  const base = { getProvider: () => provider, getDefaultProvider: () => provider, getProviderForModel: () => provider } as unknown as AIModelProviderManager;
+  return meteredProviderManager(base, budget).getProvider('openai') as IProvider;
+}
+
+beforeAll(() => {
+  registerModelPricing('openai', (modelId) => (modelId === MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 10 } : undefined));
+  registerModelPricing('gemini', (modelId) => (modelId === GEMINI_MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 10 } : undefined));
+});
+
+afterAll(() => {
+  registerModelPricing('openai', () => undefined);
+  registerModelPricing('gemini', () => undefined);
+});
+
+describe('what a call sends, as its bound counts it', () => {
+  let fx: MeterFixture;
+  beforeEach(async () => {
+    fx = await openMeter();
+  });
+  afterEach(async () => {
+    await fx.close();
+  });
+
+  it("has no bound for a Gemini call whose generationConfig, which replaces the provider's own, names no output cap, and holds nothing for it", async () => {
+    const call = chatCall('gemini', GEMINI_MODEL, { generationConfig: { temperature: 0.2 } });
+    expect(maxCostRequestOf(call).maxOutputTokens).toBeUndefined();
+    const budget = new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: fx.meter, accountId: ACCOUNT });
+    await expect(holdCall(budget, call)).rejects.toBeInstanceOf(UnpricedModelError);
+    expect(await fx.figures()).toEqual({ used: 0, reserved: 0 });
+  });
+
+  it("takes a Gemini generationConfig's output cap in place of the call's own", () => {
+    expect(maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, { generationConfig: { maxOutputTokens: 4_000 } })).maxOutputTokens).toBe(4_000);
+  });
+
+  it('counts the candidates a Gemini generationConfig asks for, so more than one has no bound', () => {
+    const req = maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, { generationConfig: { maxOutputTokens: MAX_TOKENS, candidateCount: 2 } }));
+    expect(req.n).toBe(2);
+    expect(estimateMaxCallCostUSD('gemini', GEMINI_MODEL, req)).toBeUndefined();
+  });
+
+  it("keeps the call's own cap on a provider that drops a generationConfig", () => {
+    expect(maxCostRequestOf(chatCall('openai', MODEL, { generationConfig: { temperature: 0.2 } })).maxOutputTokens).toBe(MAX_TOKENS);
+  });
+
+  it('has no bound for a call whose fields send an output cap that is not a number', () => {
+    expect(maxCostRequestOf(chatCall('openai', MODEL, { max_completion_tokens: null })).maxOutputTokens).toBeUndefined();
+  });
+
+  it('counts a structured-output schema sent through customModelParams, with the tool-use prompt', () => {
+    const schema = { type: 'json_schema', json_schema: { name: 'answer', schema: { type: 'object', description: 'd'.repeat(4_000) } } };
+    const without = maxInputTokens(maxCostRequestOf(chatCall('openai', MODEL))) as number;
+    const withSchema = maxInputTokens(maxCostRequestOf(chatCall('openai', MODEL, { response_format: schema }))) as number;
+    expect(withSchema).toBeGreaterThanOrEqual(without + utf8ByteLength(JSON.stringify(schema)) + MAX_COST_TOOL_USE_TOKENS);
+  });
+
+  it('has no bound for a Gemini call that draws in cached content', () => {
+    const req = maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, { cachedContent: 'cachedContents/abc' }));
+    expect(estimateMaxCallCostUSD('gemini', GEMINI_MODEL, req)).toBeUndefined();
+  });
+
+  it('prices an embedding at its input rate, never at a cache-write rate it does not ask for', () => {
+    const call: HelperCall = { what: 'embed_text', route: { providerId: 'openai', modelId: MODEL }, messages: ['x'.repeat(100)], maxTokens: 0, embedding: true };
+    expect(maxCostRequestOf(call).cacheMarkers).toBe(false);
+  });
+});
+
+describe('how a held seat call settles', () => {
+  let fx: MeterFixture;
+  const metered = (meter: SqlSpendMeter = fx.meter): SpendBudget => new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter, accountId: ACCOUNT });
+  afterEach(async () => {
+    await fx.close();
+  });
+
+  it('keeps a call held when an earlier attempt of it got no answer, which the provider may have billed', async () => {
+    fx = await openMeter();
+    const provider = seat(metered(), async (options) => {
+      options.onAttempt?.({ attempt: 1, status: null, ok: false });
+      options.onAttempt?.({ attempt: 2, status: 200, ok: true });
+      return completion();
+    });
+    await provider.generateCompletion(MODEL, MESSAGES, { maxTokens: MAX_TOKENS });
+    const figures = await fx.figures();
+    expect(figures.used).toBe(0);
+    expect(figures.reserved).toBeGreaterThan(0);
+  });
+
+  it('settles at its usage when the earlier attempts were refused before any output', async () => {
+    fx = await openMeter();
+    const provider = seat(metered(), async (options) => {
+      options.onAttempt?.({ attempt: 1, status: 503, ok: false });
+      options.onAttempt?.({ attempt: 2, status: 200, ok: true });
+      return completion();
+    });
+    await provider.generateCompletion(MODEL, MESSAGES, { maxTokens: MAX_TOKENS });
+    expect(await fx.figures()).toEqual({ used: toMicro(costOfUsageUSD('openai', MODEL, CHAT_USAGE) as number), reserved: 0 });
+  });
+
+  it('takes the whole reservation for an answer whose usage names only a total, which no rate prices', async () => {
+    fx = await openMeter();
+    const gate = opening();
+    const provider = seat(metered(), async () => {
+      await gate.promise;
+      return completion({ totalTokens: 100 });
+    });
+    const pending = provider.generateCompletion(MODEL, MESSAGES, { maxTokens: MAX_TOKENS });
+    let held = 0;
+    for (let i = 0; i < 200 && held === 0; i++) {
+      held = (await fx.figures()).reserved;
+      if (held === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(held).toBeGreaterThan(0);
+    gate.open();
+    await pending;
+    expect(await fx.figures()).toEqual({ used: held, reserved: 0 });
+  });
+
+  it('frees a call the provider refused before building its request, with no attempt reported', async () => {
+    fx = await openMeter();
+    const provider = seat(metered(), async () => {
+      throw Object.assign(new Error('the provider is not initialized'), { code: 'PROVIDER_NOT_INITIALIZED' });
+    });
+    await expect(provider.generateCompletion(MODEL, MESSAGES, { maxTokens: MAX_TOKENS })).rejects.toThrow('not initialized');
+    expect(await fx.figures()).toEqual({ used: 0, reserved: 0 });
+  });
+
+  it("renews the reservation's lease while the request runs, so a reconcile past the lease leaves it to the call", async () => {
+    // A host whose resolver frees what it has no stored reply for: a lease that ran out mid-call would be freed.
+    fx = await openMeter({ leaseMs: 300, resolveExpired: () => ({ outcome: 'released' }) });
+    const gate = opening();
+    const provider = seat(metered(), async () => {
+      await gate.promise;
+      return completion();
+    });
+    const pending = provider.generateCompletion(MODEL, MESSAGES, { maxTokens: MAX_TOKENS });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await fx.meter.reconcile();
+    expect((await fx.figures()).reserved).toBeGreaterThan(0);
+    gate.open();
+    await pending;
+    expect(await fx.figures()).toEqual({ used: toMicro(costOfUsageUSD('openai', MODEL, CHAT_USAGE) as number), reserved: 0 });
+  });
+});
+
+describe('a held stream whose signal fired before it was read', () => {
+  let fx: MeterFixture;
+  beforeEach(async () => {
+    fx = await openMeter();
+  });
+  afterEach(async () => {
+    await fx.close();
+  });
+
+  it('reads nothing from the provider, ends with the abort chunk and frees the reservation', async () => {
+    const controller = new AbortController();
+    const budget = new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: fx.meter, accountId: ACCOUNT });
+    const hold = await holdCall(budget, { ...chatCall('openai', MODEL), abortSignal: controller.signal });
+    expect((await fx.figures()).reserved).toBeGreaterThan(0);
+    controller.abort();
+    let reads = 0;
+    async function* source(): AsyncGenerator<ModelCompletionResponse, void, undefined> {
+      reads += 1;
+      yield completion();
+    }
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of hold.stream(source())) chunks.push(chunk);
+    expect(reads).toBe(0);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].error?.type).toBe('abort');
+    expect(await fx.figures()).toEqual({ used: 0, reserved: 0 });
+  });
+});
