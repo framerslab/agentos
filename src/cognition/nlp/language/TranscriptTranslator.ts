@@ -3,8 +3,9 @@
  * on the configured OpenAI provider with no fallback, the last lines as context, the result priced by the caller from
  * its usage. A line whose source reliably equals the target is skipped with no call; a line whose language is unknown
  * is translated from its own language. A failed call throws {@link TranslationProviderError}, never returning the
- * input, and carries the usage of an answer the provider billed. `boundMicro` answers the most one call can cost, for
- * a caller's spend check; `failedCallMicro` what a failed call is recorded as costing.
+ * input, and carries the usage of an answer the provider billed and the count of attempts that got no answer.
+ * `boundMicro` answers the most one call can cost, for a caller's spend check; `failedCallMicro` what a failed call is
+ * recorded as costing.
  *
  * @example
  * ```ts
@@ -20,7 +21,7 @@
  *
  * @module agentos/cognition/nlp/language/TranscriptTranslator
  */
-import { generateText, type TokenUsage } from '../../../api/generateText.js';
+import { addModelUsage, generateText, hasBillableUsage, usageOfError, type TokenUsage } from '../../../api/generateText.js';
 import { estimateMaxCallCostUSD } from '../../../api/runtime/modelPricing.js';
 import { tokensOfChars } from '../../../api/runtime/spendBudget.js';
 import { toMicro } from '../../../safety/runtime/SpendReservations.js';
@@ -60,7 +61,24 @@ export interface TranscriptTranslatorOptions {
 
 /** A translated line, or a line skipped because its source is the target, with no call made. */
 export type TranslatedLine =
-  | { itemId: string; target: string; source: string | null; text: string; status: 'translated'; usage: TokenUsage | null; model: string; providerId: string; version: typeof TRANSLATOR_VERSION }
+  | {
+      itemId: string;
+      target: string;
+      source: string | null;
+      text: string;
+      status: 'translated';
+      /** The answer's tokens, as the provider reported them. */
+      usage: TokenUsage | null;
+      /**
+       * The attempts before the answer that got none (a network failure, the provider layer's own timeout). Each may
+       * have been billed for a whole answer nobody saw, so a caller that records the call's cost records its bound
+       * (`boundMicro`) when this is above 0, and the priced `usage` otherwise.
+       */
+      unansweredAttempts: number;
+      model: string;
+      providerId: string;
+      version: typeof TRANSLATOR_VERSION;
+    }
   | { itemId: string; target: string; source: string; status: 'skipped'; reason: 'same_language'; usage: null; model: string; providerId: string; version: typeof TRANSLATOR_VERSION };
 
 const DEFAULTS = { maxContextLines: 6, timeoutMs: 15_000, maxAttempts: 2 } as const;
@@ -75,6 +93,29 @@ function systemFor(target: string, source: string | null): string {
 /** The source the prompt names: none for a line of unknown provenance, so it is translated from its own language. */
 function sourceOf(line: TranscriptLineInput): string | null {
   return line.source.provenance === 'unknown' ? null : line.source.code;
+}
+
+/**
+ * The tokens a provider error reported for the request it ended (`details.usage`): in the provider layer's form, or as
+ * the wire spells them on a body the provider could not use (the Responses API's `input_tokens` and `output_tokens`,
+ * Chat Completions' `prompt_tokens` and `completion_tokens`). Null when it reported none.
+ */
+function billedUsageOf(error: unknown): TokenUsage | null {
+  const reported = usageOfError(error);
+  if (!reported || typeof reported !== 'object') return null;
+  const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  addModelUsage(usage, reported);
+  if (!hasBillableUsage(usage)) {
+    const wire = reported as Record<string, unknown>;
+    const count = (...values: unknown[]): number => {
+      for (const value of values) if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+      return 0;
+    };
+    usage.promptTokens = count(wire.input_tokens, wire.prompt_tokens);
+    usage.completionTokens = count(wire.output_tokens, wire.completion_tokens);
+    usage.totalTokens = usage.promptTokens + usage.completionTokens;
+  }
+  return hasBillableUsage(usage) ? usage : null;
 }
 
 /** The user message: the last `maxContextLines` lines, each after its speaker when it has one, then the line itself. */
@@ -113,11 +154,14 @@ export class TranscriptTranslator {
   /**
    * What a failed call is recorded as costing, in micro-dollars: the tokens the provider reported for an answer it billed
    * and the translator refused (`error.usage`, priced by the caller's `price`); the bound where the bill is unknown (a
-   * timeout, a network error, a caller's abort, anything not a `TranslationProviderError`); nothing where the provider
-   * refused with an HTTP status and reported no tokens, since it wrote nothing.
+   * timeout, a network error, a caller's abort, an attempt of the call that got no answer, anything not a
+   * `TranslationProviderError`); nothing where the provider refused every attempt with an HTTP status and reported no
+   * tokens, since it wrote nothing. The bound covers an unanswered attempt and the answer after it together: it is a
+   * whole answer's bound for every attempt the call may make.
    */
   static failedCallMicro(error: unknown, boundMicro: number, price: (usage: TokenUsage) => number): number {
     if (!(error instanceof TranslationProviderError)) return boundMicro;
+    if (error.unansweredAttempts > 0) return boundMicro;
     if (error.usage) return price(error.usage);
     return error.code === 'TRANSLATION_REQUEST_FAILED' && error.status !== undefined ? 0 : boundMicro;
   }
@@ -125,9 +169,11 @@ export class TranscriptTranslator {
   /**
    * Translates `line` into `target`, or skips it when its configured or detected source is the target.
    *
-   * @throws {TranslationProviderError} `TRANSLATION_REQUEST_FAILED` (with the HTTP `status` when the provider answered),
-   *   `TRANSLATION_TIMEOUT` past `timeoutMs`, `TRANSLATION_EMPTY_OUTPUT` and `TRANSLATION_TRUNCATED` (each with the
-   *   billed `usage`). A call ended through `abortSignal` rejects with the signal's reason.
+   * @throws {TranslationProviderError} `TRANSLATION_REQUEST_FAILED` (with the HTTP `status` when the provider answered,
+   *   and the `usage` the provider's error reported), `TRANSLATION_TIMEOUT` past `timeoutMs`, while the provider is
+   *   still starting included, `TRANSLATION_EMPTY_OUTPUT`, `TRANSLATION_TRUNCATED` and `TRANSLATION_INCOMPLETE` (each
+   *   with the billed `usage`); each carries `unansweredAttempts`. A call ended through `abortSignal` rejects with the
+   *   signal's reason at once.
    */
   async translateLine(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): Promise<TranslatedLine> {
     options.abortSignal?.throwIfAborted();
@@ -144,9 +190,16 @@ export class TranscriptTranslator {
     );
     const onCallerAbort = () => controller.abort(options.abortSignal?.reason);
     options.abortSignal?.addEventListener('abort', onCallerAbort, { once: true });
+    // generateText starts the provider (its model listing) before the first send without the signal, so the call is
+    // ended here as well, the moment the signal aborts; the request is never sent, since no step starts after it.
+    const stopped = new Promise<never>((_resolve, reject) => {
+      controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
+    });
+    // Attempts that got no answer may each have been billed for a whole answer.
+    let unansweredAttempts = 0;
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
-      result = await generateText({
+      const call = generateText({
         provider: options.provider,
         model: options.model,
         apiKey: options.apiKey,
@@ -158,8 +211,12 @@ export class TranscriptTranslator {
         source: 'transcript_translation',
         maxTokens: maxOutputTokens,
         maxAttempts: options.maxAttempts ?? DEFAULTS.maxAttempts,
+        onAttempt: (outcome) => {
+          if (outcome.status === null && !outcome.ok) unansweredAttempts += 1;
+        },
         abortSignal: controller.signal,
       });
+      result = await Promise.race([call, stopped]);
     } catch (error) {
       if (options.abortSignal?.aborted) throw error;
       if (controller.signal.aborted && controller.signal.reason instanceof TranslationProviderError) {
@@ -168,21 +225,35 @@ export class TranscriptTranslator {
       }
       const status = statusOf(error);
       logTranslationFailed('openai', 'request_failed', status, error);
-      throw new TranslationProviderError(`translation failed${status ? ` with HTTP ${status}` : ''}`, options.provider, 'TRANSLATION_REQUEST_FAILED', status, error);
+      throw new TranslationProviderError(
+        `translation failed${status ? ` with HTTP ${status}` : ''}`,
+        options.provider,
+        'TRANSLATION_REQUEST_FAILED',
+        status,
+        error,
+        billedUsageOf(error),
+        unansweredAttempts,
+      );
     } finally {
       clearTimeout(timer);
       options.abortSignal?.removeEventListener('abort', onCallerAbort);
     }
     // A refused answer was still billed: its usage rides the error, so the caller records its cost (failedCallMicro).
+    const usage = result.usage ?? null;
     if (result.finishReason === 'length') {
       logTranslationFailed('openai', 'truncated', 200);
-      throw new TranslationProviderError('translation was cut at the output cap', options.provider, 'TRANSLATION_TRUNCATED', 200, undefined, result.usage ?? null);
+      throw new TranslationProviderError('translation was cut at the output cap', options.provider, 'TRANSLATION_TRUNCATED', 200, undefined, usage, unansweredAttempts);
+    }
+    // Only a `stop` finish is a whole answer: text a content filter stopped is part of one.
+    if (result.finishReason !== 'stop') {
+      logTranslationFailed('openai', 'incomplete', 200);
+      throw new TranslationProviderError(`translation stopped before its end (${String(result.finishReason)})`, options.provider, 'TRANSLATION_INCOMPLETE', 200, undefined, usage, unansweredAttempts);
     }
     const text = typeof result.text === 'string' ? result.text.trim() : '';
     if (text === '') {
       logTranslationFailed('openai', 'empty_output', 200);
-      throw new TranslationProviderError('translation answered with no text', options.provider, 'TRANSLATION_EMPTY_OUTPUT', 200, undefined, result.usage ?? null);
+      throw new TranslationProviderError('translation answered with no text', options.provider, 'TRANSLATION_EMPTY_OUTPUT', 200, undefined, usage, unansweredAttempts);
     }
-    return { ...base, source, text, status: 'translated', usage: result.usage ?? null };
+    return { ...base, source, text, status: 'translated', usage, unansweredAttempts };
   }
 }

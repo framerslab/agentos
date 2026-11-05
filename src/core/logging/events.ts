@@ -82,8 +82,8 @@ export const AGENTOS_EVENTS = {
   'llm.fallback_succeeded': fallback,
   'llm.fallback_failed_after_output': fallback,
   'llm.fallback_exhausted': { api, primaryProvider: provider, attempts: 'int', type: 'word', code: 'word' },
-  // A translation failed, answered with no text, ran past the transcript translator's own timeout or stopped at its output cap; it throws TranslationProviderError, and status is 0 when no HTTP status came back.
-  'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated'] }, status: 'int', type: 'word', code: 'word' },
+  // A translation failed, answered with no text, ran past the transcript translator's own timeout, stopped at its output cap or stopped for another reason (a content filter); it throws TranslationProviderError, and status is 0 when no HTTP status came back.
+  'language.translation_failed': { provider: { enum: ['openai', 'deepl'] }, reason: { enum: ['request_failed', 'empty_output', 'timeout', 'truncated', 'incomplete'] }, status: 'int', type: 'word', code: 'word' },
   // A configured detection provider id LanguageService does not build (whisper_stub, or an id it does not know).
   'language.detector_unsupported': { detector: 'word' },
   // A detection provider threw; LanguageService goes on with the others.

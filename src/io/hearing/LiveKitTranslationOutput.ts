@@ -75,17 +75,21 @@ export class LiveKitTranslationOutput {
 
   /**
    * Numbers the line for its target and sends it to the identities; an empty list sends nothing, numbers nothing and
-   * resolves. A send that fails rejects this write and leaves the line in the ledger, so a replay sends it.
+   * resolves. The line and the identities are copied as they are when it is called, so a caller that changes either
+   * afterwards changes neither this send nor a replay of it. A send that fails rejects this write and leaves the line
+   * in the ledger, so a replay sends it.
    */
   write(line: TranslationOutputLine, to: { destinationIdentities: readonly string[] }): Promise<void> {
     if (to.destinationIdentities.length === 0) return Promise.resolve();
-    const ledger = this.ledgers.get(line.target) ?? [];
-    this.ledgers.set(line.target, ledger);
+    const kept: TranslationOutputLine = { ...line };
+    const destinationIdentities = [...to.destinationIdentities];
+    const ledger = this.ledgers.get(kept.target) ?? [];
+    this.ledgers.set(kept.target, ledger);
     const last = ledger[ledger.length - 1];
     const seq = (last?.seq ?? 0) + 1;
-    const written: Written = { seq, line, text: this.encode(line, seq) };
+    const written: Written = { seq, line: kept, text: this.encode(kept, seq) };
     ledger.push(written);
-    return this.enqueue(() => this.sendLine(written, [...to.destinationIdentities]));
+    return this.enqueue(() => this.sendLine(written, destinationIdentities));
   }
 
   /** Sends again every line of the target numbered above `afterSeq` (every line when null) to one identity, in order; resolves how many. */

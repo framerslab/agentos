@@ -431,7 +431,7 @@ await output.write(
 );
 ```
 
-Sends go out one at a time in the order they were asked for; a send that fails rejects its own write and leaves the line in the ledger, so `replayAfter` sends it. Like the transcription output, it takes the room through a structural type and imports no LiveKit package.
+Sends go out one at a time in the order they were asked for; a send that fails rejects its own write and leaves the line in the ledger, so `replayAfter` sends it. A write copies the line and the identity list when it is called, so a caller that changes either while an earlier send is still going changes neither that write's send nor its replays. Like the transcription output, it takes the room through a structural type and imports no LiveKit package.
 
 ## Listening without speaking
 

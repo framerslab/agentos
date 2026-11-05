@@ -196,10 +196,16 @@ export function recombineCodeAndProse(translatedProse: string, codeBlocks: strin
  * Why a translation provider refused to return a translation: the request failed (an HTTP
  * status other than 2xx, a network error or the provider layer's own timeout), the provider
  * answered with no text, the call was aborted at the translator's own timeout
- * (`TRANSLATION_TIMEOUT`, which `TranscriptTranslator` throws), or the answer stopped at
- * the output cap with a `length` finish (`TRANSLATION_TRUNCATED`).
+ * (`TRANSLATION_TIMEOUT`, which `TranscriptTranslator` throws), the answer stopped at
+ * the output cap with a `length` finish (`TRANSLATION_TRUNCATED`), or it stopped for
+ * another reason before its end, a content filter among them (`TRANSLATION_INCOMPLETE`).
  */
-export type TranslationErrorCode = 'TRANSLATION_REQUEST_FAILED' | 'TRANSLATION_EMPTY_OUTPUT' | 'TRANSLATION_TIMEOUT' | 'TRANSLATION_TRUNCATED';
+export type TranslationErrorCode =
+  | 'TRANSLATION_REQUEST_FAILED'
+  | 'TRANSLATION_EMPTY_OUTPUT'
+  | 'TRANSLATION_TIMEOUT'
+  | 'TRANSLATION_TRUNCATED'
+  | 'TRANSLATION_INCOMPLETE';
 
 /**
  * Thrown by a translation provider, and so by every `LanguageService` method that translates,
@@ -229,12 +235,29 @@ export class TranslationProviderError extends Error {
   public readonly cause?: unknown;
   /**
    * The tokens the provider reported for an answer it billed and the translator refused (an
-   * empty answer, a `length` finish), so the caller records what the failed call cost; null
-   * when no answer came back or the provider reported none.
+   * empty answer, a `length` finish, an answer a filter stopped, a body the provider could not
+   * use), so the caller records what the failed call cost; null when no answer came back or
+   * the provider reported none.
    */
   public readonly usage: TokenUsage | null;
+  /**
+   * The attempts of the call that got no answer (a network failure, the provider layer's own
+   * timeout) before the one this error reports. Each may have been billed for a whole answer
+   * nobody saw, so a caller records such a call at its bound rather than at `usage` or at
+   * nothing; 0 when every attempt was answered, and from every provider but the transcript
+   * translator.
+   */
+  public readonly unansweredAttempts: number;
 
-  constructor(message: string, providerId: string, code: TranslationErrorCode, status?: number, cause?: unknown, usage: TokenUsage | null = null) {
+  constructor(
+    message: string,
+    providerId: string,
+    code: TranslationErrorCode,
+    status?: number,
+    cause?: unknown,
+    usage: TokenUsage | null = null,
+    unansweredAttempts = 0,
+  ) {
     super(message);
     this.name = 'TranslationProviderError';
     this.code = code;
@@ -242,6 +265,7 @@ export class TranslationProviderError extends Error {
     this.status = status;
     this.cause = cause;
     this.usage = usage;
+    this.unansweredAttempts = unansweredAttempts;
   }
 }
 
