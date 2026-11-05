@@ -58,7 +58,21 @@ describe('LiveKitTranslationOutput', () => {
     await output.write(made('item_a', 'Hello.'), { destinationIdentities: [] });
     await output.send('{"kind":"status"}', { destinationIdentities: [] });
     expect(room.localParticipant.sendText).not.toHaveBeenCalled();
-    expect(await output.replayAfter(null, 'en', 'p-1')).toBe(0);
+  });
+
+  it('numbers and keeps a line written while its target had no reader, so a reader that comes back is sent it', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranslationOutput({ room });
+    await output.write(made('a', 'Un.', 'fr'), { destinationIdentities: ['p-2'] });
+    // p-2, the only reader of French, is away: the host names nobody for the next line.
+    await output.write(made('b', 'Deux.', 'fr'), { destinationIdentities: [] });
+    expect(sent(room)).toHaveLength(1);
+    room.localParticipant.sendText.mockClear();
+    expect(await output.replayAfter(1, 'fr', 'p-2')).toBe(1);
+    const replayed = sent(room).map(({ text, options }) => [JSON.parse(text).itemId, options.attributes[LIVEKIT_TRANSLATION_ATTRIBUTES.seq], options.destinationIdentities]);
+    expect(replayed).toEqual([['b', '2', ['p-2']]]);
+    await output.write(made('c', 'Trois.', 'fr'), { destinationIdentities: ['p-2'] });
+    expect(sent(room)[1].options.attributes[LIVEKIT_TRANSLATION_ATTRIBUTES.seq]).toBe('3');
   });
 
   it('sends a message that is not a line to the identities alone, on the topic unless another is named', async () => {

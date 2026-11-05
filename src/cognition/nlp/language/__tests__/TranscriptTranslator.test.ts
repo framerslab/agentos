@@ -250,6 +250,24 @@ describe('TranscriptTranslator.translateLine', () => {
     }
   });
 
+  it('counts an attempt that got no answer before a later attempt ran past timeoutMs', async () => {
+    // The shortest backoff before the retry (500 ms), so the second attempt is sent and hangs until the timeout.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const lost = async (): Promise<Response> => {
+        throw new TypeError('fetch failed');
+      };
+      answer(lost, hang);
+      const options = { ...OPTIONS, maxAttempts: 2, timeoutMs: 1_500 };
+      const timedOut = await new TranscriptTranslator().translateLine(line('Hola.'), 'en', options).then(() => undefined, (error: unknown) => error);
+      // The first attempt may have been billed for a whole answer; the timed-out one is the attempt the error reports.
+      expect(timedOut).toMatchObject({ name: 'TranslationProviderError', code: 'TRANSLATION_TIMEOUT', usage: null, unansweredAttempts: 1 });
+      expect(posts()).toHaveLength(2);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
   it('carries the usage a failed call reported and records the call at it', async () => {
     // A Responses body with no output items: the provider refuses it, and its error holds the body's usage.
     answer(jsonResponse({ id: 'resp_2', object: 'response', status: 'completed', model: RESPONSES_MODEL, output: [], usage: { input_tokens: 40, output_tokens: 0, total_tokens: 40 } }));
