@@ -147,7 +147,8 @@ export interface LlmUsageAccountContext {
 /**
  * Names the account of a call whose spend budget names none. Asked for each usage event that is about to reach an
  * observer, so it runs on the LLM call path and returns at once. Returning `undefined` or an empty string leaves
- * {@link LlmUsageEvent.accountId} absent, and so does throwing: the throw is logged and the call goes on.
+ * {@link LlmUsageEvent.accountId} absent, and so does throwing: the throw is logged by its built-in error type alone
+ * and the call goes on. A promise is no account either; one that rejects is handled and logged the same way.
  */
 export type LlmUsageAccountResolver = (context: LlmUsageAccountContext) => string | undefined;
 
@@ -222,13 +223,34 @@ function accountIdOfEvent(event: LlmUsageEvent, account: LlmUsageAccountSource):
       ...(event.source !== undefined ? { source: event.source } : {}),
       surface: event.surface,
     });
+    if (named !== null && (typeof named === 'object' || typeof named === 'function') && typeof (named as { then?: unknown }).then === 'function') {
+      // A promise is no account, and a rejected one must not become an unhandled rejection.
+      void Promise.resolve(named).catch((err: unknown) => warnResolverFailed('rejected', err));
+      return undefined;
+    }
     return typeof named === 'string' && named !== '' ? named : undefined;
   } catch (err) {
-    // The error's type alone: a host's message can hold the account or a person's details.
-    // eslint-disable-next-line no-console
-    console.warn(`[agentos.onUsage] accountIdOf threw ${err instanceof Error ? err.name : typeof err}; the event carries no accountId`);
+    warnResolverFailed('threw', err);
     return undefined;
   }
+}
+
+/**
+ * Logs one line for a failed `accountIdOf`, naming a fixed error type alone: the message, and the `name` a host can
+ * set on its error, can hold the account or a person's details.
+ */
+function warnResolverFailed(how: 'threw' | 'rejected', err: unknown): void {
+  const kind =
+    err instanceof TypeError ? 'TypeError'
+    : err instanceof RangeError ? 'RangeError'
+    : err instanceof SyntaxError ? 'SyntaxError'
+    : err instanceof ReferenceError ? 'ReferenceError'
+    : err instanceof URIError ? 'URIError'
+    : err instanceof EvalError ? 'EvalError'
+    : err instanceof Error ? 'Error'
+    : typeof err;
+  // eslint-disable-next-line no-console
+  console.warn(`[agentos.onUsage] accountIdOf ${how} ${kind}; the event carries no accountId`);
 }
 
 /**

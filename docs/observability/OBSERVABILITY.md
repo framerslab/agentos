@@ -217,15 +217,15 @@ When enabled, AgentOS adds the active span's ids to `METADATA_UPDATE`, `FINAL_RE
 ```ts
 import { generateText, setGlobalLlmObserver } from '@framers/agentos';
 
-setGlobalLlmObserver((event) => {
+setGlobalLlmObserver((event) =>
   usageRows.insert({
     account: event.accountId,
     meter: event.source ?? 'llm.call',
     provider: event.provider,
     model: event.model,
     costUSD: event.usage.costUSD ?? 0,
-  });
-});
+  }),
+);
 
 await generateText({
   provider: 'anthropic',
@@ -243,7 +243,7 @@ await generateText({
 | No such budget, and `accountIdOf` | What `accountIdOf({ provider, model, source, surface })` answers |
 | Neither | Absent |
 
-`accountIdOf` is an option of `generateText()`, `streamText()`, `generateObject()`, `streamObject()`, `agent()` and `gmi()`, and an agent's `generate()` and `stream()` calls take their own in its place. It suits a host that holds the account in its own request context and puts no budget on the call. It runs on the call path and returns a string at once; an answer that is not a non-empty string leaves the field absent. One that throws does too, logs one warning naming the error's type, and the model call goes on. It is asked only for an event an observer will hear, and never when the budget already names the account.
+`accountIdOf` is an option of `generateText()`, `streamText()`, `generateObject()`, `streamObject()`, `agent()` and `gmi()`, and an agent's `generate()` and `stream()` calls take their own in its place. It suits a host that holds the account in its own request context and puts no budget on the call. It runs on the call path and returns a string at once; an answer that is not a non-empty string leaves the field absent. One that throws does too, logs one warning naming the error's built-in type (`TypeError`, `RangeError` and the rest, otherwise `Error`; never the error's message or a `name` the host set), and the model call goes on. A promise is not an account: the field is absent, and a promise that rejects logs the same warning and is never left unhandled. It is asked only for an event an observer will hear, and never when the budget already names the account.
 
 The observer is not called while content-safe telemetry is on; read usage from the call's result instead.
 
