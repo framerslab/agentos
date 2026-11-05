@@ -63,6 +63,7 @@ import {
 } from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
 import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
+import type { LlmUsageAccountResolver } from './observers.js';
 import {
   SessionHistoryBuffer,
   SESSION_HISTORY_DEFAULTS,
@@ -136,6 +137,11 @@ export interface AgentOptions extends BaseAgentConfig {
    * `observability.usageLedger` internally.
    */
   usageLedger?: AgentOSUsageLedgerOptions;
+  /**
+   * Names the account of a call whose budget names none, on every generate, stream and session call this agent makes
+   * ({@link GenerateTextOptions.accountIdOf}): the global LLM usage observer's events carry it as `accountId`.
+   */
+  accountIdOf?: LlmUsageAccountResolver;
   /**
    * Chain-of-thought reasoning instruction.
    * - `false` — disable CoT injection.
@@ -1037,6 +1043,9 @@ export function agent(opts: AgentOptions): Agent {
     // (each spreads baseOpts). A `budget` passed to generate() or stream()
     // replaces it for that call.
     ...(agentBudget ? { budget: agentBudget } : {}),
+    // Names the account on the usage events of every generate / stream /
+    // session call (each spreads baseOpts) whose budget names none.
+    ...(opts.accountIdOf ? { accountIdOf: opts.accountIdOf } : {}),
   };
 
   /**

@@ -84,7 +84,10 @@ export interface SpendBudgetOptions {
    * `generateObject()`, `embedText()`, `agent()`, `gmi()`) make that check and do not reserve. Needs `accountId`.
    */
   meter?: ISpendMeter;
-  /** The account a `meter` holds this budget's calls under. Without a meter it is kept here for a host to read. */
+  /**
+   * The account a `meter` holds this budget's calls under, and the account a call's usage event names
+   * (`LlmUsageEvent.accountId`). Without a meter it holds nothing.
+   */
   accountId?: string;
 }
 
@@ -356,6 +359,11 @@ export class SpendBudget {
     return this.tokens;
   }
 
+  /** The account a call on this budget ran for: its own `accountId`, or the nearest one up the `parent` chain. */
+  accountIdForUsage(): string | undefined {
+    return this.options.accountId || this.options.parent?.accountIdForUsage();
+  }
+
   /**
    * What is left under this budget's own caps (a parent's are not counted): the dollars under `maxCostUSD` (Infinity
    * for a budget with no dollar cap) and, when `maxTotalTokens` is set, the tokens under it. Never below zero: a record
@@ -591,6 +599,10 @@ class BothBudgets extends SpendBudget {
 
   override tokensUsed(): number {
     return this.first.tokensUsed();
+  }
+
+  override accountIdForUsage(): string | undefined {
+    return this.first.accountIdForUsage() ?? this.second.accountIdForUsage();
   }
 
   override remaining(): { usd: number; tokens?: number } {

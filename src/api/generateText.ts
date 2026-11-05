@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { resolveModelOption, resolveProvider, createProviderManager, knownProviderPrefixOf } from './model.js';
 import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
-import { fireLlmUsageObserver } from './observers.js';
+import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource } from './observers.js';
 import {
   hostPolicyToRouteParams,
   mergeRequiredCapabilities,
@@ -757,6 +757,12 @@ export interface GenerateTextOptions {
    * Has no effect when no observer is registered.
    */
   source?: string;
+  /**
+   * Names the account of a call whose {@link GenerateTextOptions.budget} names none, for the global LLM usage observer
+   * (`LlmUsageEvent.accountId`). Asked for each usage event that is about to reach an observer, with the event's
+   * provider, model, source and surface. A budget that names an account wins, and this is not asked.
+   */
+  accountIdOf?: LlmUsageAccountResolver;
   /**
    * Internal — DO NOT set from application code. The outermost call's
    * `Date.now()` start, threaded into the provider-fallback recursion so
@@ -2228,6 +2234,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
   // is charged to the same budget.
   const budget = asSpendBudget(opts.budget);
   if (budget) opts = { ...opts, budget };
+  // Where this call's usage events read their account.
+  const usageAccount: LlmUsageAccountSource = { budget, accountIdOf: opts.accountIdOf };
   const startedAt = Date.now();
   // Root-of-call start for observer `durationMs`. On a provider-fallback the
   // primary attempt fails and generateText recurses (below) targeting the
@@ -2771,7 +2779,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           finishReason: loopResult.finishReason,
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
-        });
+        }, usageAccount);
         // The shim's final assistant text lives in loopResult, never on the
         // messages array — push it so the transcript delta ends on the reply.
         messages.push({ role: 'assistant', content: loopResult.text });
@@ -3074,7 +3082,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             surface: 'generateText',
             durationMs: Date.now() - rootStartedAt,
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
-          });
+          }, usageAccount);
           // Final assistant turn is not on the loop's messages array at a stop
           // terminal; push it so the transcript delta ends on the reply (a
           // session history must never end on a tool result).
@@ -3284,7 +3292,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
-        });
+        }, usageAccount);
         // Final assistant turn is not on the loop's messages array at a stop
         // terminal; push it so the transcript delta ends on the reply (a
         // session history must never end on a tool result).
@@ -3345,7 +3353,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         surface: 'generateText',
         durationMs: Date.now() - rootStartedAt,
         ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
-      });
+      }, usageAccount);
       return {
         transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
         provider: resolved.providerId,
@@ -3424,7 +3432,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         finishReason: 'error',
         surface: 'generateText',
         durationMs: Date.now() - rootStartedAt,
-      });
+      }, usageAccount);
     }
     // An aborted call walks no fallback chain: it rejects with the signal's
     // reason, unwrapped, so the caller gets the error it can test for.

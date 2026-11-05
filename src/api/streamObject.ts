@@ -206,6 +206,12 @@ export interface StreamObjectOptions<T extends ZodType, K extends string = strin
    * only another vendor accepts.
    */
   customModelParams?: Record<string, unknown>;
+
+  /**
+   * Names the account of the call, forwarded to {@link GenerateTextOptions.accountIdOf} and surfaced on the global LLM
+   * usage observer event as `accountId`.
+   */
+  accountIdOf?: GenerateTextOptions['accountIdOf'];
 }
 
 /**
@@ -840,6 +846,7 @@ export function streamObject<T extends ZodType, K extends string = never>(
           ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
           ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
           ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
+          ...(opts.accountIdOf !== undefined ? { accountIdOf: opts.accountIdOf } : {}),
           __onUsageReport: () => {
             usageReported = true;
           },

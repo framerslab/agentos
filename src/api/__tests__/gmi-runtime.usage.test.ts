@@ -142,6 +142,35 @@ describe("agent({ runtime: 'gmi' }) usage", () => {
     expect(events.map((e) => [e.finishReason, e.usage.totalTokens, e.surface])).toEqual([['stop', 15, 'streamText']]);
   });
 
+  it("each model call of a turn carries the account the agent's budget names, on send and stream; with none the field is absent", async () => {
+    const k = key(); script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'x' } }]), reply.text('Found.'), reply.text('Streamed.'), reply.text('Plain.')] });
+    const session = agent(base(k, { tools: [lookup], budget: { maxCostUSD: 100, unpriced: 'allow', accountId: 'acct-1' } })).session('s');
+
+    await session.send('find x');
+    expect(await session.stream('again').text).toBe('Streamed.');
+    expect(events.map((e) => [e.finishReason, e.accountId])).toEqual([
+      ['tool-calls', 'acct-1'],
+      ['stop', 'acct-1'],
+      ['stop', 'acct-1'],
+    ]);
+
+    events.length = 0;
+    await session.send('once more', { budget: { maxCostUSD: 100, unpriced: 'allow' } });
+    expect(events).toHaveLength(1);
+    expect(events[0]).not.toHaveProperty('accountId');
+  });
+
+  it("accountIdOf names a turn's account: the agent's, a generate() or stream() call's in its place, and a budget's account wins", async () => {
+    const k = key(); script('openai', k, { replies: [reply.text('One.'), reply.text('Two.'), reply.text('Three.'), reply.text('Four.')] });
+    const a = agent(base(k, { accountIdOf: () => 'acct-agent' }));
+
+    await a.session('s').send('hi');
+    await a.generate('hi', { accountIdOf: () => 'acct-call' });
+    expect(await a.stream('hi', { accountIdOf: () => 'acct-stream' }).text).toBe('Three.');
+    await a.generate('hi', { budget: { maxCostUSD: 100, unpriced: 'allow', accountId: 'acct-budget' } });
+    expect(events.map((e) => e.accountId)).toEqual(['acct-agent', 'acct-call', 'acct-stream', 'acct-budget']);
+  });
+
   it('an attempt that failed before any output and was billed is metered once, beside the hop that answered', async () => {
     const k = key(); const fb = key();
     const billedFailure = Object.assign(new Error('overloaded'), { httpStatus: 529, details: { usage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 } } });
@@ -160,6 +189,21 @@ describe("agent({ runtime: 'gmi' }) usage", () => {
     expect((await a.usage('s')).totalTokens).toBe(31);
   });
 
+  it("a billed failed attempt and the hop that answered both carry the account", async () => {
+    const k = key(); const fb = key();
+    const billedFailure = Object.assign(new Error('overloaded'), { httpStatus: 529, details: { usage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 } } });
+    script('anthropic', k, { replies: [billedFailure] });
+    script('openai', fb, { replies: [reply.text('Recovered.')] });
+    vi.stubEnv('OPENAI_API_KEY', fb);
+    const a = agent({ ...base(k), provider: 'anthropic', model: 'claude-x', fallbackProviders: [{ provider: 'openai', model: 'stub-model' }], accountIdOf: () => 'acct-1' });
+
+    await a.session('s').send('hi');
+    expect(events.map((e) => [e.provider, e.finishReason, e.accountId])).toEqual([
+      ['anthropic', 'error', 'acct-1'],
+      ['openai', 'stop', 'acct-1'],
+    ]);
+  });
+
   it("a model call that close() stopped keeps its bill: the usage OpenRouter reports after close() returned is metered and counted", async () => {
     // OpenRouter streams text, then ends the answer on a content_filter finish, which it holds
     // while it waits for the usage-only line; close() runs 50 ms after the finish, and the
@@ -175,7 +219,7 @@ describe("agent({ runtime: 'gmi' }) usage", () => {
         'data: [DONE]',
       ]),
     );
-    const a = agent({ runtime: 'gmi', provider: 'openrouter', model: OR_MODEL, apiKey: key(), fallbackProviders: [] } as unknown as AgentOptions);
+    const a = agent({ runtime: 'gmi', provider: 'openrouter', model: OR_MODEL, apiKey: key(), fallbackProviders: [], accountIdOf: () => 'acct-late' } as unknown as AgentOptions);
     const session = a.session('s');
     try {
       const outcome = session.send('hi').then(() => 'resolved', (error: unknown) => error);
@@ -190,6 +234,7 @@ describe("agent({ runtime: 'gmi' }) usage", () => {
       await vi.waitFor(() =>
         expect(events.map((e) => [e.provider, e.model, e.finishReason, e.usage.promptTokens, e.usage.completionTokens])).toEqual([['openrouter', OR_MODEL, 'error', 12, 4]]),
       );
+      expect(events[0]).toMatchObject({ accountId: 'acct-late' });
       expect(await session.usage()).toMatchObject({ promptTokens: 12, completionTokens: 4, totalTokens: 16 });
       expect(await a.usage()).toMatchObject({ promptTokens: 12, completionTokens: 4, totalTokens: 16 });
     } finally {

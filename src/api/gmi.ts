@@ -93,12 +93,12 @@ export type GmiHandle = Agent;
 const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
 /**
  * Per-call overrides generate() and stream() accept on the GMI path: the completion options, the route,
- * the step limit, the ledger, the call's stop and budget, and the tool-approval gate `agency()` passes with every
- * call to a member.
+ * the step limit, the ledger, the call's stop, budget and usage account, and the tool-approval gate `agency()` passes
+ * with every call to a member.
  */
-const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget']);
-/** Per-call overrides that pick the route, the step limit, the ledger, the stop, the budget or the gate rather than a completion option. */
-const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget']);
+const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf']);
+/** Per-call overrides that pick the route, the step limit, the ledger, the stop, the budget, the usage account or the gate rather than a completion option. */
+const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget', 'accountIdOf']);
 /** `agent()`'s step limit. */
 const DEFAULT_MAX_STEPS = 5;
 
@@ -950,13 +950,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
     };
   }
 
-  /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, and its gate. */
-  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'callerSignal' | 'budget' | 'approvalGate'> => {
+  /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, its usage account and its gate. */
+  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'callerSignal' | 'budget' | 'accountIdOf' | 'approvalGate'> => {
     const budget = asSpendBudget(extra?.budget) ?? agentBudget;
     return {
       // The call's signal is its only stop, and the caller's own.
       ...(extra?.abortSignal ? { abortSignal: extra.abortSignal, callerSignal: extra.abortSignal } : {}),
       ...(budget ? { budget } : {}),
+      ...(extra?.accountIdOf ? { accountIdOf: extra.accountIdOf } : {}),
       ...(extra?.__approvalGate ? { approvalGate: extra.__approvalGate } : {}),
     };
   };

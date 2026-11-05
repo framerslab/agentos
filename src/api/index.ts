@@ -58,6 +58,8 @@ export { transferStyle } from './transferStyle.js';
 // --- LLM usage observer (global cost / telemetry hook) ---
 export {
   setGlobalLlmObserver,
+  type LlmUsageAccountContext,
+  type LlmUsageAccountResolver,
   type LlmUsageEvent,
   type LlmUsageObserver,
 } from './observers.js';

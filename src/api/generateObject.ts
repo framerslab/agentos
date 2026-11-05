@@ -342,6 +342,12 @@ export interface GenerateObjectOptions<T extends ZodType> {
   source?: string;
 
   /**
+   * Names the account of a call whose `budget` names none, forwarded to {@link GenerateTextOptions.accountIdOf} and
+   * surfaced on the global LLM usage observer event as `accountId`.
+   */
+  accountIdOf?: GenerateTextOptions['accountIdOf'];
+
+  /**
    * A spend budget for this call and, when the same {@link SpendBudget} instance is passed to several calls, for all of
    * them: each attempt's provider call is checked against what is left before it is made and recorded after it, so a
    * refused attempt ends the call with no further attempt.
@@ -702,6 +708,7 @@ export async function generateObject<T extends ZodType>(
       ...(opts.customModelParams !== undefined ? { customModelParams: opts.customModelParams } : {}),
       // Observer source label (see GenerateObjectOptions.source).
       ...(opts.source !== undefined ? { source: opts.source } : {}),
+      ...(opts.accountIdOf !== undefined ? { accountIdOf: opts.accountIdOf } : {}),
       _responseFormat: responseFormat,
       // Fallback legs rebuild the payload for THEIR provider via this
       // callback (see generateText's fallback loop) instead of inheriting
