@@ -3,8 +3,10 @@
  *
  * Writes a transcript's translations into a LiveKit room as text streams on `lk.translation`, each to the identities
  * the caller names and never to the room: a list left empty sends nothing. Lines are numbered per target from 1 and
- * kept in a ledger per target, so a participant that reconnects is sent again every line of its target above the
- * number it holds. `send` carries a message that is not a line (a status) to the same identities under the same rule.
+ * kept in a ledger per target, a line written to nobody among them, so a participant that reconnects is sent again
+ * every line of its target above the number it holds. The ledger lives as long as the output and is never trimmed, so
+ * a replay reaches back to the first line: a host makes one output per room session and drops it with the session.
+ * `send` carries a message that is not a line (a status) to the same identities under the same rule.
  * The output takes the room through a structural type and imports no LiveKit package.
  *
  * @example
@@ -74,14 +76,14 @@ export class LiveKitTranslationOutput {
   }
 
   /**
-   * Numbers the line for its target and sends it to the identities; an empty list sends nothing, numbers nothing and
-   * resolves. The line and the identities are copied as they are when it is called, so a caller that changes either
-   * afterwards changes neither this send nor a replay of it. A send that fails rejects this write and leaves the line
-   * in the ledger, so a replay sends it. An `encode` that throws rejects this write too, never throwing at the caller,
-   * and the line is neither numbered nor kept.
+   * Numbers the line for its target, keeps it and sends it to the identities. An empty list sends nothing and resolves,
+   * and the line is still numbered and kept, so a reader of the target that was away while nobody was named is sent
+   * it by `replayAfter`. The line and the identities are copied as they are when it is called, so a caller that changes
+   * either afterwards changes neither this send nor a replay of it. A send that fails rejects this write and leaves the
+   * line in the ledger, so a replay sends it. An `encode` that throws rejects this write too, never throwing at the
+   * caller, and the line is neither numbered nor kept.
    */
   async write(line: TranslationOutputLine, to: { destinationIdentities: readonly string[] }): Promise<void> {
-    if (to.destinationIdentities.length === 0) return;
     const kept: TranslationOutputLine = { ...line };
     const destinationIdentities = [...to.destinationIdentities];
     const ledger = this.ledgers.get(kept.target) ?? [];
@@ -90,6 +92,8 @@ export class LiveKitTranslationOutput {
     const seq = (last?.seq ?? 0) + 1;
     const written: Written = { seq, line: kept, text: this.encode(kept, seq) };
     ledger.push(written);
+    // Never to the room: LiveKit sends a stream with no destination identities to every participant.
+    if (destinationIdentities.length === 0) return;
     return this.enqueue(() => this.sendLine(written, destinationIdentities));
   }
 

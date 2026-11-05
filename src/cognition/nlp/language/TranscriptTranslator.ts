@@ -183,20 +183,26 @@ export class TranscriptTranslator {
     }
     const source = sourceOf(line);
     const maxOutputTokens = options.maxOutputTokens ?? TranscriptTranslator.defaultMaxOutputTokens(line.text);
+    // Attempts that got no answer may each have been billed for a whole answer.
+    let unansweredAttempts = 0;
     const controller = new AbortController();
+    // The timeout's error is made when it fires, so it carries the attempts that went unanswered before the one it
+    // ends; the attempt it ends reports itself only after the abort, and is the one the error reports.
     const timer = setTimeout(
-      () => controller.abort(new TranslationProviderError('translation timed out', options.provider, 'TRANSLATION_TIMEOUT')),
+      () =>
+        controller.abort(
+          new TranslationProviderError('translation timed out', options.provider, 'TRANSLATION_TIMEOUT', undefined, undefined, null, unansweredAttempts),
+        ),
       options.timeoutMs ?? DEFAULTS.timeoutMs,
     );
     const onCallerAbort = () => controller.abort(options.abortSignal?.reason);
     options.abortSignal?.addEventListener('abort', onCallerAbort, { once: true });
     // generateText starts the provider (its model listing) before the first send without the signal, so the call is
-    // ended here as well, the moment the signal aborts; the request is never sent, since no step starts after it.
+    // ended here as well, the moment the signal aborts; the request is never sent, since no step starts after it. The
+    // listing itself runs to its end: the provider is cached per key and base URL and shared by every caller of them.
     const stopped = new Promise<never>((_resolve, reject) => {
       controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
     });
-    // Attempts that got no answer may each have been billed for a whole answer.
-    let unansweredAttempts = 0;
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
       const call = generateText({
