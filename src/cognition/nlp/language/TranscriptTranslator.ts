@@ -97,6 +97,16 @@ function sourceOf(line: TranscriptLineInput): string | null {
 }
 
 /**
+ * A language code as the same-language skip compares it: without case and without a region, so `EN`, `en-US` and
+ * `en_us` are `en`; a script subtag is kept, so `zh-Hans` and `zh-Hant` stay two languages to translate between.
+ */
+function languageOf(code: string): string {
+  const [primary = '', ...rest] = code.trim().toLowerCase().split(/[-_]/);
+  const script = rest.find((part) => /^[a-z]{4}$/.test(part));
+  return script ? `${primary}-${script}` : primary;
+}
+
+/**
  * The tokens a provider error reported for the request it ended (`details.usage`): in the provider layer's form, or as
  * the wire spells them on a body the provider could not use (the Responses API's `input_tokens` and `output_tokens`,
  * Chat Completions' `prompt_tokens` and `completion_tokens`). Null when it reported none.
@@ -168,7 +178,8 @@ export class TranscriptTranslator {
   }
 
   /**
-   * Translates `line` into `target`, or skips it when its configured or detected source is the target.
+   * Translates `line` into `target`, or skips it when its configured or detected source is the target's language,
+   * compared without case or region (`en-US` is `en`, `zh-Hant` is not `zh-Hans`).
    *
    * @throws {TranslationProviderError} `TRANSLATION_REQUEST_FAILED` (with the HTTP `status` when the provider answered,
    *   and the `usage` the provider's error reported), `TRANSLATION_TIMEOUT` past `timeoutMs`, while the provider is
@@ -179,7 +190,7 @@ export class TranscriptTranslator {
   async translateLine(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): Promise<TranslatedLine> {
     options.abortSignal?.throwIfAborted();
     const base = { itemId: line.itemId, target, model: options.model, providerId: options.provider, version: TRANSLATOR_VERSION } as const;
-    if (line.source.code !== null && line.source.provenance !== 'unknown' && line.source.code === target) {
+    if (line.source.code !== null && line.source.provenance !== 'unknown' && languageOf(line.source.code) === languageOf(target)) {
       return { ...base, source: line.source.code, status: 'skipped', reason: 'same_language', usage: null };
     }
     const source = sourceOf(line);

@@ -107,13 +107,18 @@ export class LiveKitTranslationOutput {
     });
   }
 
-  /** Sends a message that is not a line, such as a status, to the identities alone; an empty list sends nothing. */
+  /**
+   * Sends a message that is not a line, such as a status, to the identities alone, on `topic` or the output's own; an
+   * empty list sends nothing. The topic and the identities are read when it is called.
+   */
   send(text: string, to: { topic?: string; destinationIdentities: readonly string[] }): Promise<void> {
     if (to.destinationIdentities.length === 0) return Promise.resolve();
+    // Read when it is called, as the identities are, so a caller that reuses its options changes no queued send.
+    const topic = to.topic ?? this.topic;
     const destinationIdentities = [...to.destinationIdentities];
     return this.enqueue(() =>
       this.local()
-        .sendText(text, { topic: to.topic ?? this.topic, destinationIdentities })
+        .sendText(text, { topic, destinationIdentities })
         .then(() => undefined)
     );
   }
