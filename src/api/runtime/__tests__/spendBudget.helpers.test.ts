@@ -12,7 +12,9 @@
  * the embeddings endpoint, and a provider object for the seat's provider manager.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-vi.mock('../../../core/llm/providers/implementations/OpenAIProvider', async () => ({
+// The stub replaces the provider class alone: embedText also reads the module's other exports (its base URL).
+vi.mock('../../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   OpenAIProvider: (await import('../../__tests__/helpers/stubProviders')).stubProviderClass('openai'),
 }));
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
