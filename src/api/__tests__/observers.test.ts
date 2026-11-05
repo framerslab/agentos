@@ -443,6 +443,37 @@ describe('the account on a call\'s usage event, over the real Anthropic provider
     }
   });
 
+  it('an accountIdOf that throws or rejects with a revoked proxy still lets the event through, with no unhandled rejection', async () => {
+    route({ [PRIMARY]: [textReply(PRIMARY, 'One.'), textReply(PRIMARY, 'Two.')] });
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const revoked = (): object => {
+        const { proxy, revoke } = Proxy.revocable({}, {});
+        revoke();
+        return proxy;
+      };
+      await generateText({
+        ...call,
+        accountIdOf: () => {
+          throw revoked();
+        },
+      });
+      await generateText({ ...call, accountIdOf: (() => Promise.reject(revoked())) as unknown as () => string });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(events).toHaveLength(2);
+      for (const event of events) expect(event).not.toHaveProperty('accountId');
+      expect(unhandled).not.toHaveBeenCalled();
+      const logged = warned.mock.calls.map((args) => args.join(' ')).join(' ');
+      expect(logged).toContain('accountIdOf threw object');
+      expect(logged).toContain('accountIdOf rejected object');
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      warned.mockRestore();
+    }
+  });
+
   it('an accountIdOf that answers undefined, an empty string or something other than a string leaves the field absent', async () => {
     route({ [PRIMARY]: [textReply(PRIMARY, 'One.'), textReply(PRIMARY, 'Two.'), textReply(PRIMARY, 'Three.')] });
     await generateText({ ...call, accountIdOf: () => undefined });
