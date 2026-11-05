@@ -35,6 +35,7 @@
  * @module agentos/api/observers
  */
 import type { TokenUsage } from './generateText.js';
+import type { SpendBudget } from './runtime/spendBudget.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 import { isContentSafeTelemetryEnabled } from '../core/logging/contentSafeTelemetry.js';
 
@@ -122,6 +123,44 @@ export interface LlmUsageEvent {
    * and surfaces that don't track it.
    */
   servingProvider?: string;
+  /**
+   * The account the call ran for: the account its spend budget names
+   * (`SpendBudgetOptions.accountId`, the nearest one up the `parent` chain), or
+   * else what the call's `accountIdOf` option answers. Absent when neither names one,
+   * so a host can tag its rows without inferring the account.
+   */
+  accountId?: string;
+}
+
+/** What a call's `accountIdOf` option is told about the usage event it names an account for. */
+export interface LlmUsageAccountContext {
+  /** The event's provider id. */
+  provider: string;
+  /** The event's model id. */
+  model: string;
+  /** The event's source label, when the call set one. */
+  source?: string;
+  /** The surface firing the event. */
+  surface: LlmUsageEvent['surface'];
+}
+
+/**
+ * Names the account of a call whose spend budget names none. Asked for each usage event that is about to reach an
+ * observer, so it runs on the LLM call path and returns at once. Returning `undefined` or an empty string leaves
+ * {@link LlmUsageEvent.accountId} absent, and so does throwing: the throw is logged and the call goes on.
+ */
+export type LlmUsageAccountResolver = (context: LlmUsageAccountContext) => string | undefined;
+
+/**
+ * Where a call's usage events read their account.
+ *
+ * @internal
+ */
+export interface LlmUsageAccountSource {
+  /** The call's spend budget. */
+  budget?: SpendBudget;
+  /** The call's `accountIdOf` option. */
+  accountIdOf?: LlmUsageAccountResolver;
 }
 
 /**
@@ -172,6 +211,26 @@ export function getGlobalLlmObserver(): LlmUsageObserver | null {
   return globalObserver;
 }
 
+/** The account an event's call names: its budget's, or else its resolver's, whose failure leaves the event without one. */
+function accountIdOfEvent(event: LlmUsageEvent, account: LlmUsageAccountSource): string | undefined {
+  const fromBudget = account.budget?.accountIdForUsage();
+  if (fromBudget !== undefined || !account.accountIdOf) return fromBudget;
+  try {
+    const named: unknown = account.accountIdOf({
+      provider: event.provider,
+      model: event.model,
+      ...(event.source !== undefined ? { source: event.source } : {}),
+      surface: event.surface,
+    });
+    return typeof named === 'string' && named !== '' ? named : undefined;
+  } catch (err) {
+    // The error's type alone: a host's message can hold the account or a person's details.
+    // eslint-disable-next-line no-console
+    console.warn(`[agentos.onUsage] accountIdOf threw ${err instanceof Error ? err.name : typeof err}; the event carries no accountId`);
+    return undefined;
+  }
+}
+
 /**
  * Internal dispatcher called by every agentos LLM-resolving surface
  * (generateText/generateObject/etc.) immediately before returning to
@@ -181,14 +240,19 @@ export function getGlobalLlmObserver(): LlmUsageObserver | null {
  *
  * No-op when no observer is registered, and while content-safe telemetry is on.
  *
+ * @param event - The event. An `accountId` set on it stays.
+ * @param account - Where the event reads its account when it carries none: read only here, past the no-op checks, so a
+ *   host's `accountIdOf` is not asked for an event nothing will hear.
+ *
  * @internal
  */
-export function fireLlmUsageObserver(event: LlmUsageEvent): void {
+export function fireLlmUsageObserver(event: LlmUsageEvent, account?: LlmUsageAccountSource): void {
   if (isContentSafeTelemetryEnabled()) return;
   const cb = globalObserver;
   if (!cb) return;
   try {
-    const result = cb(event);
+    const accountId = event.accountId === undefined && account ? accountIdOfEvent(event, account) : undefined;
+    const result = cb(accountId === undefined ? event : { ...event, accountId });
     if (result && typeof (result as Promise<void>).then === 'function') {
       void (result as Promise<void>).catch((err) => {
         // eslint-disable-next-line no-console

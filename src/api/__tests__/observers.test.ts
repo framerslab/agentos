@@ -16,8 +16,9 @@ import type { LlmUsageEvent } from '../observers.js';
 import { agent } from '../agent.js';
 import { generateObject } from '../generateObject.js';
 import { generateText } from '../generateText.js';
+import { streamObject } from '../streamObject.js';
 import { streamText } from '../streamText.js';
-import { SpendBudget } from '../runtime/spendBudget.js';
+import { SpendBudget, bothBudgets } from '../runtime/spendBudget.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 
 function makeEvent(overrides?: Partial<LlmUsageEvent>): LlmUsageEvent {
@@ -355,5 +356,106 @@ describe('the account on a call\'s usage event, over the real Anthropic provider
     expect(events.slice(0, 3).map((e) => e.surface)).toEqual(['generateText', 'streamText', 'generateText']);
     for (const event of events.slice(0, 3)) expect(event).toMatchObject({ accountId: 'acct-agent' });
     expect(events[3]).toMatchObject({ accountId: 'acct-send' });
+  });
+
+  it("accountIdOf names the account of a call with no budget's account, and is told the event's provider, model, source and surface", async () => {
+    route({ [PRIMARY]: [textReply(PRIMARY, 'One.'), textReply(PRIMARY, 'Two.')] });
+    const accountIdOf = vi.fn(() => 'acct-host');
+    await generateText({ ...call, source: 'narrator_turn', accountIdOf });
+    await drain(streamText({ ...call, budget: { maxCostUSD: 100 }, accountIdOf }).fullStream);
+    expect(accountIdOf.mock.calls).toEqual([
+      [{ provider: 'anthropic', model: PRIMARY, source: 'narrator_turn', surface: 'generateText' }],
+      [{ provider: 'anthropic', model: PRIMARY, surface: 'streamText' }],
+    ]);
+    for (const event of events) expect(event).toMatchObject({ accountId: 'acct-host' });
+  });
+
+  it("a budget's account wins, and accountIdOf is not asked", async () => {
+    route({ [PRIMARY]: [textReply(PRIMARY, 'One.')] });
+    const accountIdOf = vi.fn(() => 'acct-host');
+    await generateText({ ...call, budget: { maxCostUSD: 100, accountId: 'acct-1' }, accountIdOf });
+    expect(events[0]).toMatchObject({ accountId: 'acct-1' });
+    expect(accountIdOf).not.toHaveBeenCalled();
+  });
+
+  it('an accountIdOf that throws leaves the field absent, logs its error type alone, and fails nothing', async () => {
+    route({ [PRIMARY]: [textReply(PRIMARY, 'One.')] });
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await generateText({
+      ...call,
+      accountIdOf: () => {
+        throw new TypeError('fixture-private-account-detail');
+      },
+    });
+    expect(result.text).toBe('One.');
+    expect(events).toHaveLength(1);
+    expect(events[0]).not.toHaveProperty('accountId');
+    const logged = warned.mock.calls.map((args) => args.join(' ')).join(' ');
+    expect(logged).toContain('accountIdOf threw TypeError');
+    expect(logged).not.toContain('fixture-private-account-detail');
+    warned.mockRestore();
+  });
+
+  it('an accountIdOf that answers undefined, an empty string or something other than a string leaves the field absent', async () => {
+    route({ [PRIMARY]: [textReply(PRIMARY, 'One.'), textReply(PRIMARY, 'Two.'), textReply(PRIMARY, 'Three.')] });
+    await generateText({ ...call, accountIdOf: () => undefined });
+    await generateText({ ...call, accountIdOf: () => '' });
+    await generateText({ ...call, accountIdOf: (async () => 'acct-late') as unknown as () => string });
+    expect(events).toHaveLength(3);
+    for (const event of events) expect(event).not.toHaveProperty('accountId');
+  });
+
+  it('accountIdOf is not asked with no observer registered', async () => {
+    setGlobalLlmObserver(null);
+    route({ [PRIMARY]: [textReply(PRIMARY, 'One.')] });
+    const accountIdOf = vi.fn(() => 'acct-host');
+    await generateText({ ...call, accountIdOf });
+    expect(accountIdOf).not.toHaveBeenCalled();
+  });
+
+  it('generateObject and streamObject forward accountIdOf', async () => {
+    route({ [PRIMARY]: [textReply(PRIMARY, '{"answer":"yes"}'), textReply(PRIMARY, '{"answer":"no"}')] });
+    const schema = z.object({ answer: z.string() });
+    await generateObject({ ...call, schema, accountIdOf: () => 'acct-object' });
+    const streamed = streamObject({ provider: 'anthropic', model: PRIMARY, prompt: 'Hello?', apiKey: 'sk-ant-usage-test', schema, accountIdOf: () => 'acct-stream' });
+    await drain(streamed.partialObjectStream);
+    expect(await streamed.object).toEqual({ answer: 'no' });
+    expect(events.map((e) => e.accountId)).toEqual(['acct-object', 'acct-stream']);
+  });
+
+  it("agent(): the agent's accountIdOf names the account, a call's own replaces it, and a budget's account wins over both", async () => {
+    route({ [PRIMARY]: [textReply(PRIMARY, 'One.'), textReply(PRIMARY, 'Two.'), textReply(PRIMARY, 'Three.'), textReply(PRIMARY, 'Four.')] });
+    const a = agent({ provider: 'anthropic', model: PRIMARY, apiKey: 'sk-ant-usage-test', fallbackProviders: [], accountIdOf: () => 'acct-agent' });
+    await a.generate('Hello?');
+    await a.generate('Hello?', { accountIdOf: () => 'acct-call' });
+    await a.session('s').send('Hello?');
+    await a.generate('Hello?', { budget: { maxCostUSD: 100, accountId: 'acct-budget' } });
+    expect(events.map((e) => e.accountId)).toEqual(['acct-agent', 'acct-call', 'acct-agent', 'acct-budget']);
+  });
+});
+
+describe('the budget a usage event reads', () => {
+  it("a call held to two budgets names the first's account, or else the second's", () => {
+    const named = new SpendBudget({ maxCostUSD: 1, accountId: 'acct-first' });
+    const other = new SpendBudget({ maxCostUSD: 1, accountId: 'acct-second' });
+    const unnamed = new SpendBudget({ maxCostUSD: 1 });
+    expect(bothBudgets(named, other).accountIdForUsage()).toBe('acct-first');
+    expect(bothBudgets(unnamed, other).accountIdForUsage()).toBe('acct-second');
+    expect(bothBudgets(unnamed, new SpendBudget({ maxCostUSD: 1 })).accountIdForUsage()).toBeUndefined();
+  });
+
+  it('an empty accountId names no account, and the parent is read', () => {
+    const parent = new SpendBudget({ maxCostUSD: 1, accountId: 'acct-parent' });
+    expect(new SpendBudget({ maxCostUSD: 1, accountId: '' }).accountIdForUsage()).toBeUndefined();
+    expect(new SpendBudget({ maxCostUSD: 1, accountId: '', parent }).accountIdForUsage()).toBe('acct-parent');
+  });
+
+  it('an event fired with its own accountId keeps it, and the source given is not read', () => {
+    const obs = vi.fn();
+    setGlobalLlmObserver(obs);
+    const accountIdOf = vi.fn(() => 'acct-host');
+    fireLlmUsageObserver(makeEvent({ accountId: 'acct-own' }), { budget: new SpendBudget({ maxCostUSD: 1, accountId: 'acct-1' }), accountIdOf });
+    expect(obs.mock.calls[0][0].accountId).toBe('acct-own');
+    expect(accountIdOf).not.toHaveBeenCalled();
   });
 });

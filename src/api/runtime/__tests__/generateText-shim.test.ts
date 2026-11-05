@@ -13,6 +13,7 @@ vi.mock('../../model.js', () => ({
 }));
 
 import { generateText } from '../generateText.js';
+import { setGlobalLlmObserver, type LlmUsageEvent } from '../../observers.js';
 
 const recall = {
   id: 'r', name: 'recall', displayName: 'R', description: 'recall past messages',
@@ -66,4 +67,23 @@ it('toolMode:auto falls back to the shim when the native call rejects tool use',
   // the native attempt passed tools; the shim retries did not
   expect(hoisted.generateCompletion.mock.calls[0][2]?.tools).toBeDefined();
   expect(hoisted.generateCompletion.mock.calls[1][2]?.tools).toBeUndefined();
+});
+
+it("toolMode:prompt: the call's usage event carries the account its budget names", async () => {
+  hoisted.generateCompletion.mockResolvedValueOnce(okStep('You went to the beach.'));
+  const events: LlmUsageEvent[] = [];
+  setGlobalLlmObserver((event) => {
+    events.push(event);
+  });
+  try {
+    await generateText({
+      model: 'openai:uncensored-x', prompt: 'where did I go?',
+      tools: [recall] as any, toolMode: 'prompt', maxSteps: 5,
+      budget: { maxCostUSD: 100, unpriced: 'allow', accountId: 'acct-1' },
+    });
+  } finally {
+    setGlobalLlmObserver(null);
+  }
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({ accountId: 'acct-1' });
 });

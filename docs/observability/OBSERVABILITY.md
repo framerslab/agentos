@@ -14,10 +14,11 @@ The implementation lives in [`src/safety/evaluation/observability/otel.ts`](http
 4. [Enable via Environment Variables](#enable-via-environment-variables)
 5. [Host Setup (Node.js Example)](#host-setup-nodejs-example)
 6. [What AgentOS Emits](#what-agentos-emits)
-7. [Logging (Pino + OTEL Logs)](#logging-pino--otel-logs)
-8. [Privacy & Cardinality](#privacy--cardinality)
-9. [Performance Notes](#performance-notes)
-10. [Practices](#practices)
+7. [The Usage Observer](#the-usage-observer)
+8. [Logging (Pino + OTEL Logs)](#logging-pino--otel-logs)
+9. [Privacy & Cardinality](#privacy--cardinality)
+10. [Performance Notes](#performance-notes)
+11. [Practices](#practices)
 
 ---
 
@@ -206,6 +207,45 @@ When enabled, AgentOS adds the active span's ids to `METADATA_UPDATE`, `FINAL_RE
   }
 }
 ```
+
+---
+
+## The Usage Observer
+
+`setGlobalLlmObserver()` registers one process-wide callback that hears each finished model call of `generateText()`, `streamText()`, `generateObject()`, `streamObject()`, `agent()` and `gmi()`, with no wrapper at any call site. A host tags its rows from the event:
+
+```ts
+import { generateText, setGlobalLlmObserver } from '@framers/agentos';
+
+setGlobalLlmObserver((event) => {
+  usageRows.insert({
+    account: event.accountId,
+    meter: event.source ?? 'llm.call',
+    provider: event.provider,
+    model: event.model,
+    costUSD: event.usage.costUSD ?? 0,
+  });
+});
+
+await generateText({
+  provider: 'anthropic',
+  prompt: 'Summarize QUIC in one sentence.',
+  source: 'digest',
+  budget: { maxCostUSD: 1, accountId: 'acct-1' },
+});
+```
+
+`event.accountId` is the account the call ran for:
+
+| The call has | `accountId` |
+|---|---|
+| A budget that names an account | The budget's `accountId`, or the nearest one up its `parent` chain. A call held to two budgets (a seat's turn on `gmi()`) reads the one its team's call carries, then the agent's own |
+| No such budget, and `accountIdOf` | What `accountIdOf({ provider, model, source, surface })` answers |
+| Neither | Absent |
+
+`accountIdOf` is an option of `generateText()`, `streamText()`, `generateObject()`, `streamObject()`, `agent()` and `gmi()`, and an agent's `generate()` and `stream()` calls take their own in its place. It suits a host that holds the account in its own request context and puts no budget on the call. It runs on the call path and returns a string at once; an answer that is not a non-empty string leaves the field absent. One that throws does too, logs one warning naming the error's type, and the model call goes on. It is asked only for an event an observer will hear, and never when the budget already names the account.
+
+The observer is not called while content-safe telemetry is on; read usage from the call's result instead.
 
 ---
 

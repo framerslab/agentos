@@ -76,6 +76,7 @@ When the reply does not parse or does not validate, the reply (shortened) and a 
 | `serviceTier` | OpenAI's service tier (`'auto'`, `'default'`, `'flex'` or `'priority'`), sent as `service_tier` on every attempt; other providers ignore it ([OpenAI typed cache options](../features/PROMPT_CACHING.md#openai-typed-cache-options)) |
 | `customModelParams` | Provider-specific request fields spread onto every attempt's request body, as on `generateText()`; a fallback leg gets them minus the fields only another vendor accepts ([Fallback Behavior](../features/LLM_PROVIDERS.md#fallback-behavior)) |
 | `source` | A label passed to the usage observer |
+| `accountIdOf` | Names the account on the usage observer's events when `budget` names none ([The usage observer](../observability/OBSERVABILITY.md#the-usage-observer)); `streamObject()` takes it too |
 
 ---
 

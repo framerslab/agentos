@@ -587,7 +587,7 @@ export {
   getGlobalLlmObserver,
   fireLlmUsageObserver,
 } from './api/observers.js';
-export type { LlmUsageEvent, LlmUsageObserver } from './api/observers.js';
+export type { LlmUsageAccountContext, LlmUsageAccountResolver, LlmUsageEvent, LlmUsageObserver } from './api/observers.js';
 // CI retrigger
 // API key pools: several keys per provider from one comma-separated string,
 // failover to the next usable key when one is revoked, unpaid or throttled,

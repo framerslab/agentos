@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { resolveModelOption, resolveProvider, createProviderManager } from './model.js';
 import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
-import { fireLlmUsageObserver } from './observers.js';
+import { fireLlmUsageObserver, type LlmUsageAccountSource } from './observers.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/hostPolicy.js';
 import { adaptTools, isSingleUseToolInput, toolInputNames } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
@@ -378,6 +378,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   // same budget.
   const budget = asSpendBudget(opts.budget);
   if (budget) opts = { ...opts, budget };
+  // Where this stream's usage events read their account.
+  const usageAccount: LlmUsageAccountSource = { budget, accountIdOf: opts.accountIdOf };
   let resolveText: (v: string) => void;
   let resolveUsage: (v: TokenUsage) => void;
   let resolveResponseModel: (v: string | undefined) => void;
@@ -2046,7 +2048,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           finishReason: 'error',
           surface: 'streamText',
           durationMs: Date.now() - startedAt,
-        });
+        }, usageAccount);
       }
       if (!fallbackLegRan && (metricStatus !== 'error' || accruedBillableUsage)) {
         fireLlmUsageObserver({
@@ -2065,7 +2067,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           surface: 'streamText',
           durationMs: Date.now() - startedAt,
           ...(firstPartAt !== undefined ? { ttfbMs: firstPartAt - startedAt } : {}),
-        });
+        }, usageAccount);
       }
     }
   }

@@ -112,11 +112,13 @@ describe('content-safe server telemetry', () => {
     recordAgentOSTurnMetrics({ durationMs: 1, status: 'error', personaId: 'fixture-secret-id' });
     const observer = vi.fn();
     setGlobalLlmObserver(observer);
+    const accountIdOf = vi.fn(() => 'fixture-secret-account');
     fireLlmUsageObserver({
       provider: 'fixture-secret-provider', model: 'fixture-secret-model', surface: 'generateText',
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-    });
+    }, { accountIdOf });
     expect(observer).not.toHaveBeenCalled();
+    expect(accountIdOf).not.toHaveBeenCalled();
     for (const fn of Object.values(otel)) expect(fn).not.toHaveBeenCalled();
   });
 });

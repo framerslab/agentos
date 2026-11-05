@@ -25,7 +25,7 @@ import {
 import { addModelUsage, extractTextFromContent, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
 import { normalizeStreamFinishReason, type StreamTextResult } from '../streamText.js';
 import { ObjectGenerationError } from '../generateObject.js';
-import { fireLlmUsageObserver, type LlmUsageEvent } from '../observers.js';
+import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource, type LlmUsageEvent } from '../observers.js';
 import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
 import type { AgentMemoryProvider, AgentOptions } from '../agent.js';
@@ -84,6 +84,8 @@ export interface GmiTurnOptions {
    * finished step, each billed failed attempt and each late usage report into it.
    */
   budget?: SpendBudget;
+  /** Names the account of the turn's usage events when its budget names none, in place of the agent's `accountIdOf`. */
+  accountIdOf?: LlmUsageAccountResolver;
   /** The approval gate the turn's tool calls are asked (agency()'s, or the one a launch carries). */
   approvalGate?: ApprovalGateFn;
   /** A seat's tool names: the only tools the turn lists and runs. */
@@ -267,10 +269,11 @@ interface MeteredCall {
  * one, each with the provider and model that served it, so a turn that moved
  * to a fallback hop or ran a tool loop reports every request it was billed for.
  *
+ * @param account - Where the usage event reads its account.
  * @returns A promise that settles once the ledger row is written, or was not:
  *   a ledger failure is never the caller's error, so it never rejects.
  */
-function meterCall(ledger: AgentOSUsageLedgerOptions | undefined, surface: GmiTurnSurface, call: MeteredCall): Promise<void> {
+function meterCall(ledger: AgentOSUsageLedgerOptions | undefined, surface: GmiTurnSurface, call: MeteredCall, account: LlmUsageAccountSource): Promise<void> {
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   addModelUsage(usage, call.usage);
   fireLlmUsageObserver({
@@ -281,7 +284,7 @@ function meterCall(ledger: AgentOSUsageLedgerOptions | undefined, surface: GmiTu
     finishReason: call.finishReason,
     surface,
     durationMs: Date.now() - call.startedAt,
-  });
+  }, account);
   // Imported on use, as agent() imports it: the ledger reads and writes files.
   return import('./usageLedger.js')
     .then(({ recordAgentOSUsage }) => recordAgentOSUsage({ providerId: call.providerId, modelId: call.modelId, usage, options: ledger }))
@@ -381,6 +384,8 @@ export async function* runGmiTurn(
     // When the model call in progress started: the turn's start, the end of the
     // tool round before it, or the failure of the attempt it replaces.
     let callStartedAt = Date.now();
+    // Where the turn's usage events read their account.
+    const usageAccount: LlmUsageAccountSource = { budget: turn.budget, accountIdOf: turn.accountIdOf ?? deps.opts.accountIdOf };
     served.prepare?.({
       prompt: typeof input === 'string' ? input : undefined,
       memoryContext,
@@ -404,7 +409,7 @@ export async function* runGmiTurn(
           hop: report.hop,
           finishReason: 'error',
           startedAt: callStartedAt,
-        });
+        }, usageAccount);
         const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         addModelUsage(usage, report.usage);
         deps.onUsage(usage);
@@ -454,7 +459,7 @@ export async function* runGmiTurn(
               // A schema answer is the step's reply, whatever stop reason carried it.
               finishReason: step.structuredOutput !== undefined ? 'stop' : normalizeStreamFinishReason(step.finishReason),
               startedAt: callStartedAt,
-            }),
+            }, usageAccount),
           );
           chargeBudget(turn.budget, step.providerId, step.modelId, step.usage, 'gmi.step');
           callStartedAt = Date.now();
@@ -476,7 +481,7 @@ export async function* runGmiTurn(
                 hop: meta.hop,
                 finishReason: 'error',
                 startedAt: callStartedAt,
-              }),
+              }, usageAccount),
             );
             chargeBudget(turn.budget, meta.providerId, meta.modelId, chunk.content, 'gmi.step');
             callStartedAt = Date.now();
