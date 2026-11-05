@@ -77,10 +77,11 @@ export class LiveKitTranslationOutput {
    * Numbers the line for its target and sends it to the identities; an empty list sends nothing, numbers nothing and
    * resolves. The line and the identities are copied as they are when it is called, so a caller that changes either
    * afterwards changes neither this send nor a replay of it. A send that fails rejects this write and leaves the line
-   * in the ledger, so a replay sends it.
+   * in the ledger, so a replay sends it. An `encode` that throws rejects this write too, never throwing at the caller,
+   * and the line is neither numbered nor kept.
    */
-  write(line: TranslationOutputLine, to: { destinationIdentities: readonly string[] }): Promise<void> {
-    if (to.destinationIdentities.length === 0) return Promise.resolve();
+  async write(line: TranslationOutputLine, to: { destinationIdentities: readonly string[] }): Promise<void> {
+    if (to.destinationIdentities.length === 0) return;
     const kept: TranslationOutputLine = { ...line };
     const destinationIdentities = [...to.destinationIdentities];
     const ledger = this.ledgers.get(kept.target) ?? [];
