@@ -3,7 +3,7 @@
  * on the configured OpenAI provider with no fallback, the last lines as context, the result priced by the caller from
  * its usage. A line whose source reliably equals the target is skipped with no call; a line whose language is unknown
  * is translated from its own language. A failed call throws {@link TranslationProviderError}, never returning the
- * input, and carries the usage of an answer the provider billed and the count of attempts that got no answer.
+ * input, and carries the usage of an answer the provider billed and the count of attempts that got no usable answer.
  * `boundMicro` answers the most one call can cost, for a caller's spend check; `failedCallMicro` what a failed call is
  * recorded as costing.
  *
@@ -70,9 +70,10 @@ export type TranslatedLine =
       /** The answer's tokens, as the provider reported them. */
       usage: TokenUsage | null;
       /**
-       * The attempts before the answer that got none (a network failure, the provider layer's own timeout). Each may
-       * have been billed for a whole answer nobody saw, so a caller that records the call's cost records its bound
-       * (`boundMicro`) when this is above 0, and the priced `usage` otherwise.
+       * The attempts before the answer that got no usable one: no HTTP answer (a network failure, the provider layer's
+       * own timeout), or a success status whose body was lost while it was read. Each may have been billed for a whole
+       * answer nobody saw, so a caller that records the call's cost records its bound (`boundMicro`) when this is above
+       * 0, and the priced `usage` otherwise.
        */
       unansweredAttempts: number;
       model: string;
@@ -154,7 +155,7 @@ export class TranscriptTranslator {
   /**
    * What a failed call is recorded as costing, in micro-dollars: the tokens the provider reported for an answer it billed
    * and the translator refused (`error.usage`, priced by the caller's `price`); the bound where the bill is unknown (a
-   * timeout, a network error, a caller's abort, an attempt of the call that got no answer, anything not a
+   * timeout, a network error, a caller's abort, an attempt of the call that got no usable answer, anything not a
    * `TranslationProviderError`); nothing where the provider refused every attempt with an HTTP status and reported no
    * tokens, since it wrote nothing. The bound covers an unanswered attempt and the answer after it together: it is a
    * whole answer's bound for every attempt the call may make.
@@ -183,15 +184,21 @@ export class TranscriptTranslator {
     }
     const source = sourceOf(line);
     const maxOutputTokens = options.maxOutputTokens ?? TranscriptTranslator.defaultMaxOutputTokens(line.text);
-    // Attempts that got no answer may each have been billed for a whole answer.
-    let unansweredAttempts = 0;
+    // Attempts that got no usable answer may each have been billed for a whole answer: those that got no HTTP answer,
+    // and those whose success status came and whose body never became the answer (a connection cut while it was read).
+    let noAnswer = 0;
+    let succeeded = 0;
+    // `read` is how many successful attempts' bodies the call accounts for: the answer's, or the one whose usage an
+    // error carries.
+    const unanswered = (read: number): number => noAnswer + Math.max(0, succeeded - read);
     const controller = new AbortController();
-    // The timeout's error is made when it fires, so it carries the attempts that went unanswered before the one it
-    // ends; the attempt it ends reports itself only after the abort, and is the one the error reports.
+    // The timeout's error is made when it fires, so it carries the attempts that got no usable answer by then. The
+    // attempt it ends counts when its success status had come, since its body is lost with it; one still waiting for
+    // its status reports itself only after the abort, and is the attempt the error reports.
     const timer = setTimeout(
       () =>
         controller.abort(
-          new TranslationProviderError('translation timed out', options.provider, 'TRANSLATION_TIMEOUT', undefined, undefined, null, unansweredAttempts),
+          new TranslationProviderError('translation timed out', options.provider, 'TRANSLATION_TIMEOUT', undefined, undefined, null, unanswered(0)),
         ),
       options.timeoutMs ?? DEFAULTS.timeoutMs,
     );
@@ -217,8 +224,11 @@ export class TranscriptTranslator {
         source: 'transcript_translation',
         maxTokens: maxOutputTokens,
         maxAttempts: options.maxAttempts ?? DEFAULTS.maxAttempts,
+        // The provider reports each attempt once, when its status comes or when none came; a body lost after a
+        // success status is not reported again, so it is counted here as a success the answer did not come from.
         onAttempt: (outcome) => {
-          if (outcome.status === null && !outcome.ok) unansweredAttempts += 1;
+          if (outcome.ok) succeeded += 1;
+          else if (outcome.status === null) noAnswer += 1;
         },
         abortSignal: controller.signal,
       });
@@ -230,6 +240,7 @@ export class TranscriptTranslator {
         throw controller.signal.reason;
       }
       const status = statusOf(error);
+      const billed = billedUsageOf(error);
       logTranslationFailed('openai', 'request_failed', status, error);
       throw new TranslationProviderError(
         `translation failed${status ? ` with HTTP ${status}` : ''}`,
@@ -237,8 +248,8 @@ export class TranscriptTranslator {
         'TRANSLATION_REQUEST_FAILED',
         status,
         error,
-        billedUsageOf(error),
-        unansweredAttempts,
+        billed,
+        unanswered(billed ? 1 : 0),
       );
     } finally {
       clearTimeout(timer);
@@ -246,6 +257,7 @@ export class TranscriptTranslator {
     }
     // A refused answer was still billed: its usage rides the error, so the caller records its cost (failedCallMicro).
     const usage = result.usage ?? null;
+    const unansweredAttempts = unanswered(1);
     if (result.finishReason === 'length') {
       logTranslationFailed('openai', 'truncated', 200);
       throw new TranslationProviderError('translation was cut at the output cap', options.provider, 'TRANSLATION_TRUNCATED', 200, undefined, usage, unansweredAttempts);

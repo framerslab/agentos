@@ -241,11 +241,11 @@ export class TranslationProviderError extends Error {
    */
   public readonly usage: TokenUsage | null;
   /**
-   * The attempts of the call that got no answer (a network failure, the provider layer's own
-   * timeout) before the one this error reports. Each may have been billed for a whole answer
-   * nobody saw, so a caller records such a call at its bound rather than at `usage` or at
-   * nothing; 0 when every attempt was answered, and from every provider but the transcript
-   * translator.
+   * The attempts of the call that got no usable answer before the one this error reports: no
+   * HTTP answer (a network failure, the provider layer's own timeout), or a success status
+   * whose body was lost while it was read. Each may have been billed for a whole answer nobody
+   * saw, so a caller records such a call at its bound rather than at `usage` or at nothing; 0
+   * when every attempt was answered, and from every provider but the transcript translator.
    */
   public readonly unansweredAttempts: number;
 
