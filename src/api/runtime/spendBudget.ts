@@ -5,12 +5,17 @@
  * it, the cost the provider reported (or its token counts at the model's
  * listed price) is recorded. The spending is held by a CostGuard under the
  * budget's id, so budgets that share a guard and an id share one total, and a
- * guard's own daily cap holds across all of them.
+ * guard's own daily cap holds across all of them. A budget given a spend meter
+ * also reserves each call's largest cost in it before the call and settles the
+ * call at what it cost after it, so a run's concurrent calls cannot overrun an
+ * allowance several processes share.
  */
 import { CostCapExceededError, CostGuard } from '../../safety/runtime/CostGuard.js';
 import type { CostCapType } from '../../safety/runtime/CostGuard.js';
+import type { ISpendMeter, SpendDenyReason, SpendReserveResult } from '../../safety/runtime/SpendMeter.js';
+import { toMicro } from '../../safety/runtime/SpendReservations.js';
 import { clampMaxOutputTokens } from '../../core/llm/providers/model-output-limits.js';
-import { modelPricing, type ModelPriceTier } from './modelPricing.js';
+import { estimateMaxCallCostUSD, modelPricing, type MaxCostRequest, type ModelPriceTier } from './modelPricing.js';
 import { createContentSafeConsole } from '../../core/logging/contentSafeConsole.js';
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
@@ -20,11 +25,17 @@ const console = createContentSafeConsole('spend_budget');
 export interface SpendLimitInfo {
   /** The budget's id. */
   budgetId: string;
-  /** Which cap: the guard's session, daily or single-call cap, the token budget, or a model with no price row. */
-  capType: CostCapType | 'tokens' | 'unpriced';
+  /**
+   * Which cap: the guard's session, daily or single-call cap, the token budget, a model or a request with no price it
+   * can be held to (`unpriced`), or the budget's spend meter (`usd`).
+   */
+  capType: CostCapType | 'tokens' | 'unpriced' | 'usd';
   /** What the call was: `generate_text.step`, `stream_text`, `embed_text` and the like. */
   what: string;
-  /** Why, in one sentence. */
+  /**
+   * Why, in one sentence. For a reservation the meter refused, the meter's word for it: `allowance_exhausted`,
+   * `in_flight`, `already_consumed` or `retries_exhausted`.
+   */
   reason: string;
 }
 
@@ -51,7 +62,8 @@ export interface SpendBudgetOptions {
   /**
    * A call on a model with no price row: `'refuse'` (the default) refuses it with {@link UnpricedModelError},
    * since its cost could not be counted; `'allow'` lets it run and counts its cost as nothing, while the token
-   * budget and a budget already past its cap still refuse it.
+   * budget and a budget already past its cap still refuse it. A budget with a `meter` refuses it either way: a meter
+   * cannot hold a cost nothing bounds.
    */
   unpriced?: 'refuse' | 'allow';
   /**
@@ -62,9 +74,47 @@ export interface SpendBudgetOptions {
    * and `budgetId` as this one is refused: the two would keep one total and charge every call to it twice.
    */
   parent?: SpendBudget;
+  /**
+   * A persisted allowance this budget holds its calls in, beside its in-memory caps. {@link SpendBudget.assertCanSpend}
+   * given a {@link SpendBudgetCall} reserves the call's largest cost (`estimateMaxCallCostUSD`) in micro-dollars, behind
+   * a fence, and {@link SpendBudget.record} given a {@link SpendBudgetSettlement} settles it. A budget with a parent,
+   * and a call held to two budgets, reserves in every meter above it: once for each meter and account, so one call
+   * under one operation id cannot be held for two accounts on one meter, and is refused. The synchronous check holds
+   * nothing, so on a budget with a meter it refuses the call: the generation helpers (`generateText()`, `streamText()`,
+   * `generateObject()`, `embedText()`, `agent()`, `gmi()`) make that check and do not reserve. Needs `accountId`.
+   */
+  meter?: ISpendMeter;
+  /** The account a `meter` holds this budget's calls under. Without a meter it is kept here for a host to read. */
+  accountId?: string;
 }
 
-/** Refused because the model has no price row, so the call's cost could not be counted. */
+/** A provider call a budget checks, and reserves for on a budget with a meter, before it is sent. */
+export interface SpendBudgetCall {
+  /** The provider the call goes to. */
+  providerId: string;
+  /** The model the call names. */
+  modelId: string;
+  /** What the call sends, which bounds what it can cost ({@link estimateMaxCallCostUSD}). */
+  request: MaxCostRequest;
+  /**
+   * The host's durable id for the call, which {@link SpendBudgetSettlement.operationId} names again after it. One id
+   * holds one reservation: a second call under it while it is held, or after it counted, is refused.
+   */
+  operationId: string;
+}
+
+/** The reservation a finished call settles. */
+export interface SpendBudgetSettlement {
+  /** The id the call was reserved under. */
+  operationId: string;
+  /**
+   * `'consumed'` (the default) takes what the call cost and frees the rest; a call whose cost is not known takes its
+   * whole reservation. `'released'` frees it all, for a call that failed before any output and was billed nothing.
+   */
+  outcome?: 'consumed' | 'released';
+}
+
+/** Refused because the model has no price row, or the request's cost has no bound, so the call's cost could not be counted. */
 export class UnpricedModelError extends Error {
   constructor(
     public readonly providerId: string,
@@ -145,11 +195,16 @@ function withinCheck(work: () => void): void {
  * refusal, so the budgets below still hear of it.
  */
 function runLimitFunction(on: (info: SpendLimitInfo) => void, info: SpendLimitInfo): void {
+  // The host's code runs outside the reservation in progress: a check it makes on a budget with a meter holds nothing.
+  const outer = reservationCheck;
+  reservationCheck = undefined;
   try {
     on(info);
   } catch (error) {
     markRefusal(error, info);
     throw error;
+  } finally {
+    reservationCheck = outer;
   }
 }
 
@@ -161,6 +216,23 @@ function hearRefusal(budget: SpendBudget, error: unknown): void {
 }
 
 let budgets = 0;
+
+/** What a budget with a meter reads while a reservation's check is in progress. */
+interface ReservationCheck {
+  /** The meter refusal this check is to report: every budget that names that meter and account hears of it. */
+  denial?: MeterHold & { reason: SpendDenyReason };
+  /** The call's model has a price row, and the request is what has no bound. */
+  unbounded: boolean;
+}
+
+/**
+ * The check of a reservation in progress ({@link reserveCall}), which runs synchronously; unset outside one. A budget
+ * with a meter refuses a check made without one, since that check holds nothing in the meter.
+ */
+let reservationCheck: ReservationCheck | undefined;
+
+/** The reason a budget with a meter gives a check that holds nothing in it. */
+const CHECK_HOLDS_NOTHING = 'a call on a budget with a meter is checked with assertCanSpend(what, call), which reserves it in the meter';
 
 /** What the check, or the record, of a call held to two budgets ({@link bothBudgets}) has reached so far. */
 interface Reach {
@@ -195,6 +267,22 @@ function totalChargedBefore(guard: CostGuard, id: string): boolean {
   return false;
 }
 
+/**
+ * Runs every one of `steps`, then throws the first error any threw. A cost is counted in every budget a call is held to,
+ * though a guard's `onCapReached` function throws on the way.
+ */
+function runAll(...steps: (() => void)[]): void {
+  let failure: { error: unknown } | undefined;
+  for (const step of steps) {
+    try {
+      step();
+    } catch (error) {
+      failure ??= { error };
+    }
+  }
+  if (failure) throw failure.error;
+}
+
 /** Runs `work` as one two-budget check or record, or as part of the one in progress. */
 function reachOnce(kind: 'check' | 'charge', work: () => void): void {
   const outer = reaching[kind];
@@ -218,8 +306,9 @@ export class SpendBudget {
   /**
    * @param options - The budget's settings.
    * @throws {RangeError} When `maxCostUSD`, or a `maxTotalTokens` that is set, is not a number zero or more.
-   *   `maxCostUSD` may be `Number.POSITIVE_INFINITY` (a budget with no dollar cap). Also when a budget in the
-   *   `parent` chain keeps its spending on the given `guard` under the same id; the guard is left as it was.
+   *   `maxCostUSD` may be `Number.POSITIVE_INFINITY` (a budget with no dollar cap). Also when a `meter` has no
+   *   `accountId` to hold the calls under, and when a budget in the `parent` chain keeps its spending on the given
+   *   `guard` under the same id; the guard is left as it was.
    */
   constructor(options: SpendBudgetOptions) {
     if (!(options.maxCostUSD >= 0)) throw new RangeError('maxCostUSD must be zero or more');
@@ -228,6 +317,7 @@ export class SpendBudget {
     if (options.maxTotalTokens !== undefined && !(options.maxTotalTokens >= 0)) {
       throw new RangeError('maxTotalTokens must be zero or more');
     }
+    if (options.meter && !options.accountId) throw new RangeError('A spend budget with a meter needs an accountId');
     this.options = options;
     this.id = options.budgetId ?? `budget-${Date.now()}-${++budgets}`;
     if (options.guard) {
@@ -295,7 +385,33 @@ export class SpendBudget {
     estimateTokens: number,
     what: string,
     model?: { providerId: string; modelId: string },
-  ): void {
+  ): void;
+  /**
+   * Checks a call by what it sends, at its largest cost, and holds that cost in the budget's meter under its operation
+   * id: the budget's own caps first, then the meter of every budget it draws on and its own. The promise resolves once
+   * the call is held, and the call is sent only then. A meter's refusal runs `onLimitReached` with
+   * `capType: 'usd'` and the meter's word as the `reason`. Under `'warn'` the call runs with nothing held for that
+   * meter, and a call whose largest cost is zero holds nothing. {@link SpendBudget.record} with the same operation id
+   * settles it. Without a meter it is the check alone, at the call's largest cost.
+   *
+   * @throws {CostCapExceededError} At a cap, or when a meter refuses; its message names the meter's word.
+   * @throws {UnpricedModelError} For a model with no price row or a request whose cost has no bound
+   *   ({@link estimateMaxCallCostUSD}): a budget with a meter refuses either whatever `unpriced` says.
+   * @throws {SpendMeterUnavailableError} When a meter's store cannot answer: no call runs.
+   */
+  assertCanSpend(what: string, call: SpendBudgetCall): Promise<void>;
+  assertCanSpend(
+    first: number | undefined | string,
+    second: number | SpendBudgetCall,
+    what?: string,
+    model?: { providerId: string; modelId: string },
+  ): void | Promise<void> {
+    if (typeof first === 'string') return reserveCall(this, first, second as SpendBudgetCall);
+    this.assertWithinCaps(first, second as number, what as string, model);
+  }
+
+  /** The synchronous check of {@link SpendBudget.assertCanSpend}, which a call held to two budgets makes on both. */
+  protected assertWithinCaps(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
     withinCheck(() => this.check(estimateUSD, estimateTokens, what, model));
   }
 
@@ -313,10 +429,28 @@ export class SpendBudget {
         throw error;
       }
     }
-    if (estimateUSD === undefined && this.options.unpriced !== 'allow') {
-      const reason = model ? `${model.providerId}:${model.modelId} has no price row` : 'the model has no price row';
+    const metered = this.options.meter !== undefined;
+    if (metered) {
+      const denial = reservationCheck?.denial;
+      const refusal = !reservationCheck ? CHECK_HOLDS_NOTHING : denial?.meter === this.options.meter && denial?.accountId === this.options.accountId ? denial?.reason : undefined;
+      if (refusal !== undefined) {
+        this.refuse({ budgetId: this.id, capType: 'usd', what, reason: refusal }, () => {
+          // As for the token cap: the guard's cap types and dollar figures do not name a meter, so the message does.
+          const error = new CostCapExceededError(this.id, 'session', this.spentUSD(), this.options.maxCostUSD);
+          error.message = `Spend meter refused a call for budget '${this.id}': ${refusal}`;
+          throw error;
+        });
+        return;
+      }
+    }
+    if (estimateUSD === undefined && (this.options.unpriced !== 'allow' || metered)) {
+      const named = model ? `${model.providerId}:${model.modelId}` : 'the model';
+      const unbounded = reservationCheck?.unbounded === true;
+      const reason = unbounded ? `what a request to ${named} can cost cannot be bounded` : `${named} has no price row`;
       this.refuse({ budgetId: this.id, capType: 'unpriced', what, reason }, () => {
-        throw new UnpricedModelError(model?.providerId ?? 'unknown', model?.modelId ?? what);
+        const error = new UnpricedModelError(model?.providerId ?? 'unknown', model?.modelId ?? what);
+        if (unbounded) error.message = `${reason}, so a call to it cannot be counted against the budget`;
+        throw error;
       });
       return;
     }
@@ -355,16 +489,46 @@ export class SpendBudget {
    * never reaches `maxTotalTokens`, since every comparison with NaN is false. A budget with a `parent` records the call
    * there too, after itself.
    */
-  record(costUSD: number | undefined, tokens: number, what: string): void {
+  record(costUSD: number | undefined, tokens: number, what: string): void;
+  /**
+   * Records a finished call as above, at once, and settles the reservation {@link SpendBudget.assertCanSpend} made for
+   * it in every meter that holds it: at `costUSD` in micro-dollars, the meter holding that to the reservation and freeing
+   * the rest, at the whole reservation when the cost is not known, or freed whole when `outcome` is `'released'`.
+   *
+   * @throws {SpendMeterUnavailableError} When a meter's store cannot answer. The cost is already charged to the budget's
+   *   caps, and the reservation stays held, behind its fence, until a later settle or a reconcile with `resolveExpired`.
+   *   An error the charge throws (a guard's `onCapReached` function) rejects the promise too, after the settle.
+   */
+  record(costUSD: number | undefined, tokens: number, what: string, settlement: SpendBudgetSettlement): Promise<void>;
+  record(costUSD: number | undefined, tokens: number, what: string, settlement?: SpendBudgetSettlement): void | Promise<void> {
+    if (settlement) return this.chargeAndSettle(costUSD, tokens, what, settlement);
+    this.charge(costUSD, tokens, what);
+  }
+
+  /** The charge, at once, and the settle whatever the charge does: a guard's `onCapReached` function can throw. */
+  private async chargeAndSettle(costUSD: number | undefined, tokens: number, what: string, settlement: SpendBudgetSettlement): Promise<void> {
+    try {
+      this.charge(costUSD, tokens, what);
+    } finally {
+      await settleCall(this, costUSD, settlement);
+    }
+  }
+
+  /** The synchronous part of {@link SpendBudget.record}, which a call held to two budgets makes on both. */
+  protected charge(costUSD: number | undefined, tokens: number, what: string): void {
     // Under a call held to two budgets, a budget both draw on is charged once, and so is a total that budgets on one
     // guard and one id keep.
     if (reachedBefore('charge', this)) return;
     const counted = Math.max(0, tokens);
     this.tokens += Number.isNaN(counted) ? 0 : counted;
-    if (costUSD !== undefined && costUSD > 0 && !totalChargedBefore(this.guard, this.id)) {
-      this.guard.recordCost(this.id, costUSD, undefined, { what });
-    }
-    this.options.parent?.record(costUSD, tokens, what);
+    runAll(
+      () => {
+        if (costUSD !== undefined && costUSD > 0 && !totalChargedBefore(this.guard, this.id)) {
+          this.guard.recordCost(this.id, costUSD, undefined, { what });
+        }
+      },
+      () => this.options.parent?.record(costUSD, tokens, what),
+    );
   }
 
   /**
@@ -379,8 +543,12 @@ export class SpendBudget {
       throw new RangeError(`An outside cost must be a number of US dollars, not ${String(costUSD)}`);
     }
     if (reachedBefore('charge', this)) return;
-    if (costUSD > 0 && !totalChargedBefore(this.guard, this.id)) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
-    this.options.parent?.recordExternal(costUSD, kind);
+    runAll(
+      () => {
+        if (costUSD > 0 && !totalChargedBefore(this.guard, this.id)) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
+      },
+      () => this.options.parent?.recordExternal(costUSD, kind),
+    );
   }
 
   private refuse(info: SpendLimitInfo, thrower: () => never): void {
@@ -410,8 +578,8 @@ export class SpendBudget {
  */
 class BothBudgets extends SpendBudget {
   constructor(
-    private readonly first: SpendBudget,
-    private readonly second: SpendBudget,
+    readonly first: SpendBudget,
+    readonly second: SpendBudget,
   ) {
     // No cap of its own: every check and record goes to the two budgets.
     super({ maxCostUSD: Number.POSITIVE_INFINITY, unpriced: 'allow', budgetId: first.id });
@@ -433,7 +601,7 @@ class BothBudgets extends SpendBudget {
     return { usd, tokens: b.tokens === undefined ? a.tokens : Math.min(a.tokens, b.tokens) };
   }
 
-  override assertCanSpend(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
+  protected override assertWithinCaps(estimateUSD: number | undefined, estimateTokens: number, what: string, model?: { providerId: string; modelId: string }): void {
     // One check over both budgets: a refusal by the second is named in the run the first then hears of it in.
     withinCheck(() => reachOnce('check', () => {
       this.first.assertCanSpend(estimateUSD, estimateTokens, what, model);
@@ -447,19 +615,126 @@ class BothBudgets extends SpendBudget {
     }));
   }
 
-  override record(costUSD: number | undefined, tokens: number, what: string): void {
-    reachOnce('charge', () => {
-      this.first.record(costUSD, tokens, what);
-      this.second.record(costUSD, tokens, what);
-    });
+  protected override charge(costUSD: number | undefined, tokens: number, what: string): void {
+    reachOnce('charge', () =>
+      runAll(
+        () => this.first.record(costUSD, tokens, what),
+        () => this.second.record(costUSD, tokens, what),
+      ),
+    );
   }
 
   override recordExternal(costUSD: number, kind: string): void {
-    reachOnce('charge', () => {
-      this.first.recordExternal(costUSD, kind);
-      this.second.recordExternal(costUSD, kind);
-    });
+    reachOnce('charge', () =>
+      runAll(
+        () => this.first.recordExternal(costUSD, kind),
+        () => this.second.recordExternal(costUSD, kind),
+      ),
+    );
   }
+}
+
+/** A meter that holds a budget's calls, and the account it holds them under. */
+interface MeterHold {
+  meter: ISpendMeter;
+  accountId: string;
+}
+
+/**
+ * The meters a call on `budget` is held in, those above it first, as a check asks a parent first: one hold for each
+ * meter and account, however many budgets in the chain name that pair.
+ */
+function meterHoldsOf(budget: SpendBudget): MeterHold[] {
+  const holds: MeterHold[] = [];
+  const visit = (at: SpendBudget): void => {
+    if (at instanceof BothBudgets) {
+      visit(at.first);
+      visit(at.second);
+      return;
+    }
+    const { parent, meter, accountId } = at.options;
+    if (parent) visit(parent);
+    if (meter && accountId && !holds.some((hold) => hold.meter === meter && hold.accountId === accountId)) {
+      holds.push({ meter, accountId });
+    }
+  };
+  visit(budget);
+  return holds;
+}
+
+/**
+ * Frees what a call holds in `holds`, on the way to refusing it. A meter that cannot answer keeps its reservation,
+ * counted, until a later settle or reconcile: the refusal goes on, with a warning line.
+ */
+async function releaseHolds(holds: MeterHold[], operationId: string): Promise<void> {
+  const released = await Promise.allSettled(holds.map((hold) => hold.meter.settle({ operationId, outcome: 'released' })));
+  if (released.some((result) => result.status === 'rejected')) {
+    console.warn('[agentos] spend budget: a refused call\'s reservation could not be freed; it stays held until a later settle or reconcile');
+  }
+}
+
+/**
+ * {@link SpendBudget.assertCanSpend} for a named call. The budgets' own caps are checked at the call's largest cost, in
+ * one synchronous check, then each meter is asked in turn. On a meter's refusal the same check runs again carrying it,
+ * so every budget that names that meter and account refuses as any budget refuses and the budgets below hear of it; when
+ * that check refuses the call, what the earlier meters hold is freed.
+ */
+async function reserveCall(budget: SpendBudget, what: string, call: SpendBudgetCall): Promise<void> {
+  const { providerId, modelId, request, operationId } = call;
+  const max = estimateMaxCallCostUSD(providerId, modelId, request);
+  const tokens = tokensOfChars(promptCharsOf(request.messages, request.system, request.tools)) + outputEstimateTokens(modelId, request.maxOutputTokens);
+  const unbounded = max === undefined && modelPricing(providerId, modelId) !== undefined;
+  const check = (denial?: ReservationCheck['denial']): void => {
+    const outer = reservationCheck;
+    reservationCheck = { denial, unbounded };
+    try {
+      budget.assertCanSpend(max, tokens, what, { providerId, modelId });
+    } finally {
+      reservationCheck = outer;
+    }
+  };
+  check();
+  // Only a budget set to warn, or one with no meter that allows the call, gets here with no bound: nothing to hold.
+  // Nor is there anything to hold for a call that costs nothing at most (a row a host priced at nothing), which a meter
+  // would count as one unit of the allowance.
+  if (max === undefined || max === 0) return;
+  // Rounded up, so the reservation stays at or above the bound; settling frees what it holds beyond the call's cost.
+  const units = Math.ceil(max * 1_000_000);
+  const held: MeterHold[] = [];
+  for (const hold of meterHoldsOf(budget)) {
+    let answer: SpendReserveResult;
+    try {
+      answer = await hold.meter.reserve({ accountId: hold.accountId, operationId, units, requireFence: true });
+    } catch (error) {
+      await releaseHolds(held, operationId);
+      throw error;
+    }
+    if (answer.status === 'reserved') {
+      held.push(hold);
+      continue;
+    }
+    try {
+      check({ ...hold, reason: answer.reason });
+    } catch (error) {
+      await releaseHolds(held, operationId);
+      throw error;
+    }
+    // Every budget that names this meter is set to warn: the call runs, and what the other meters hold stays for its settle.
+  }
+}
+
+/**
+ * {@link SpendBudget.record}'s settle. A cost that is not a finite number, zero or more, is left out, which a meter
+ * takes as the whole reservation. Every meter is told, whichever of them fails; the first failure then goes on.
+ */
+async function settleCall(budget: SpendBudget, costUSD: number | undefined, settlement: SpendBudgetSettlement): Promise<void> {
+  const { operationId, outcome = 'consumed' } = settlement;
+  const units = outcome === 'consumed' && typeof costUSD === 'number' && Number.isFinite(costUSD) && costUSD >= 0 ? toMicro(costUSD) : undefined;
+  const settled = await Promise.allSettled(
+    meterHoldsOf(budget).map((hold) => hold.meter.settle({ operationId, outcome, ...(units === undefined ? {} : { units }) })),
+  );
+  const failed = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failed) throw failed.reason;
 }
 
 /**
