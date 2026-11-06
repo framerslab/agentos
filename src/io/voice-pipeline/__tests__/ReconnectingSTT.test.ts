@@ -315,6 +315,24 @@ describe('ReconnectingSTT', () => {
     expect(closed).toHaveBeenCalledTimes(1);
     expect(sessions.length).toBe(1); // no reconnect after the caller's close
   });
+  it('opens no new session when the session reports its flush ended the stream, though audio and a final followed the flush', async () => {
+    const { stt, sessions } = scripted();
+    const session = await new ReconnectingSTT(stt, { clock: () => 0 }).startSession();
+    const closed = vi.fn();
+    session.on('close', closed);
+
+    await session.flush();
+    Object.defineProperty(sessions[0], 'inputEnded', { value: true });
+    session.pushAudio(frame(0));
+    sessions[0].emit('transcript', final('the last words', 0, 100));
+    sessions[0].emit('close');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(sessions.length).toBe(1);
+    expect(closed).toHaveBeenCalledTimes(1);
+    expect(session.inputEnded).toBe(true);
+  });
+
   it('ends without a reconnect when the provider closes its stream after a flush, and reconnects when audio followed the flush', async () => {
     const a = scripted();
     const ending = await new ReconnectingSTT(a.stt, { clock: () => 0 }).startSession();
