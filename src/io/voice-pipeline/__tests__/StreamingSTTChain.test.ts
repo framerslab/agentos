@@ -390,6 +390,22 @@ describe('StreamingSTTChain: mid-utterance failover and close', () => {
     expect(session.inputEnded).toBe(true);
   });
 
+  it('keeps the report that a flush ended the stream when the caller closes the facade before the provider closes', async () => {
+    const sessionA = Object.assign(mkClosingSession('a'), { inputEnded: false });
+    const chain = new StreamingSTTChain(
+      [mkProvider('a', 10, async () => sessionA), mkProvider('b', 20, async () => mkClosingSession('b'))],
+      { enableMidUtteranceFailover: true }
+    );
+    const session = await chain.startSession();
+
+    await session.flush();
+    sessionA.inputEnded = true;
+    expect(session.inputEnded).toBe(true);
+    session.close();
+
+    expect(session.inputEnded).toBe(true);
+  });
+
   it('still fails over on a close after a frame when the session reports that its flush left the stream open', async () => {
     const sessionA = Object.assign(mkClosingSession('a'), { inputEnded: false });
     const startB = vi.fn(async () => mkClosingSession('b'));
