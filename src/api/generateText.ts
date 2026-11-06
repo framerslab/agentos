@@ -1306,14 +1306,14 @@ export async function createPlan(
     onAttempt: config?.onAttempt,
     abortSignal: config?.abortSignal,
   };
-  const response = await withReservation(spend?.budget, planCall, (onAttempt) => provider.generateCompletion(modelId, planMessages, {
+  const response = await withReservation(spend?.budget, planCall, (held) => provider.generateCompletion(modelId, planMessages, {
     temperature,
     maxTokens,
     ...(requestTimeout !== undefined ? { requestTimeout } : {}),
     ...(config?.abortSignal ? { abortSignal: config.abortSignal } : {}),
     // The call's attempt count and its report hold for the planning request too.
     ...(config?.maxAttempts !== undefined ? { maxAttempts: config.maxAttempts } : {}),
-    ...(onAttempt ? { onAttempt } : {}),
+    ...held,
     // Inherited (or planning-specific) cache control: a cache:false root
     // call's planning sub-call must not auto-cache behind the caller's back.
     ...(config?.cache !== undefined ? { cache: config.cache } : {}),
@@ -2688,7 +2688,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               assertFitsContextWindow({ messages: msgs });
             }
             const shimCall: HelperCall = { what: 'generate_text.shim', route: resolved, messages: msgs, maxTokens: opts.maxTokens, options: opts, onAttempt: opts.onAttempt, abortSignal: opts.abortSignal };
-            const r = await withReservation(budget, shimCall, (onAttempt) => provider.generateCompletion(resolved.modelId, msgs as any, {
+            const r = await withReservation(budget, shimCall, (held) => provider.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
@@ -2727,7 +2727,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
               // The call's attempt count and its report, as on the native step loop below.
               ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-              ...(onAttempt ? { onAttempt } : {}),
+              ...held,
             } as any));
             budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, r.usage), r.usage?.totalTokens ?? 0, 'generate_text.shim');
             // Aggregate the COMPLETE normalized usage from every shim
@@ -2937,7 +2937,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
                 // The most requests this step sends and the report of each, so a caller can settle the attempts it paid for.
                 ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-                ...(stepHold.onAttempt ? { onAttempt: stepHold.onAttempt } : {}),
+                ...stepHold.providerOptions,
                 ...(opts._responseFormat ? { responseFormat: opts._responseFormat }: {}),
               } as any
             );

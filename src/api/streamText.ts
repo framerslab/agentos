@@ -892,7 +892,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             const shimCall: HelperCall = { what: 'stream_text.shim', route: resolved, messages: msgs, maxTokens: opts.maxTokens, options: opts, onAttempt: opts.onAttempt, abortSignal: opts.abortSignal };
             // provider is guaranteed non-undefined by the `if (!provider) throw`
             // guard above; the closure just loses TS's flow-narrowing.
-            const r = await withReservation(budget, shimCall, (onAttempt) => provider!.generateCompletion(resolved.modelId, msgs as any, {
+            const r = await withReservation(budget, shimCall, (held) => provider!.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               maxTokens: opts.maxTokens,
               // Forward per-call requestTimeout on the shim path too so the
@@ -902,7 +902,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
               // The call's attempt count and its report, as on the stream path below.
               ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-              ...(onAttempt ? { onAttempt } : {}),
+              ...held,
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
               ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
@@ -1065,7 +1065,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
             // The most requests the stream's call sends and the report of each, so a caller can settle the attempts it paid for.
             ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-            ...(streamHold.onAttempt ? { onAttempt: streamHold.onAttempt } : {}),
+            ...streamHold.providerOptions,
             // Mirror generateText: forward the sampling controls so a
             // streaming caller's topP / frequency / presence penalties
             // actually reach the provider instead of being silently

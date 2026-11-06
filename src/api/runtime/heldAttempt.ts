@@ -4,9 +4,9 @@
  * refused, which sends nothing, and an attempt held in the budget's spend meter from before its request is sent until
  * it ends.
  */
-import type { AttemptOutcome, ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
+import type { ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
 import { reportLateUsage, type CompletionAttempt, type CompletionOutcome, type LateAttemptUsage } from './completionGateway.js';
-import { holdCall, type CallEnd, type CallHold, type HelperCall, type SpendBudget } from './spendBudget.js';
+import { holdCall, type CallEnd, type CallHold, type HeldCallOptions, type HelperCall, type SpendBudget } from './spendBudget.js';
 
 /** How an attempt the budget refused ends: its hop fails with no retry, so the GMI ends the turn with the refusal. */
 function refusedOutcome(refusal: unknown): CompletionOutcome {
@@ -60,13 +60,14 @@ async function endOf(attempt: CompletionAttempt, finished: boolean, seen: Seen):
  *
  * @param budget - The turn's budget.
  * @param call - The attempt's call, as the budget holds it.
- * @param send - Makes the gateway's attempt with the attempt report and the late-usage listener to give it.
+ * @param send - Makes the gateway's attempt with the options to give the provider (the attempt report, and the operation
+ *   id the reservation is under, which the provider sends in its operation id header) and the late-usage listener.
  * @param onLateUsage - The turn's own late-usage listener.
  */
 export function heldAttempt(
   budget: SpendBudget,
   call: HelperCall,
-  send: (onAttempt: ((outcome: AttemptOutcome) => void) | undefined, onLateUsage: (report: LateAttemptUsage) => void) => CompletionAttempt,
+  send: (held: HeldCallOptions, onLateUsage: (report: LateAttemptUsage) => void) => CompletionAttempt,
   onLateUsage: ((report: LateAttemptUsage) => void) | undefined,
 ): CompletionAttempt {
   let inner: CompletionAttempt | undefined;
@@ -87,7 +88,7 @@ export function heldAttempt(
       // Stopped while the reservation was made, which holdCall freed: the gateway ends the attempt as stopped.
     }
     const held = hold;
-    const attempt = send(held ? held.onAttempt : call.onAttempt, (report) => {
+    const attempt = send(held ? held.providerOptions : call.onAttempt ? { onAttempt: call.onAttempt } : {}, (report) => {
       held?.lateUsage(report.usage);
       reportLateUsage(report, onLateUsage);
     });

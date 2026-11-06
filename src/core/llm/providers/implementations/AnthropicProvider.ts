@@ -807,6 +807,7 @@ export class AnthropicProvider implements IProvider {
         options.requestTimeout,
         options.abortSignal,
         options.maxAttempts,
+        options.operationId,
       );
       this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
       return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
@@ -827,6 +828,7 @@ export class AnthropicProvider implements IProvider {
       options.abortSignal,
       structuredOutputName,
       options.maxAttempts,
+      options.operationId,
     );
     this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
     return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
@@ -895,6 +897,8 @@ export class AnthropicProvider implements IProvider {
    *   the schema as that tool ({@link accumulateMessagesStream}).
    * @param maxAttempts The call's attempt count, a first and its retries
    *   together; key hops are not counted.
+   * @param operationId The call's own operation id, sent in the operation id
+   *   header in place of one this request makes.
    * @throws {AnthropicProviderError} `REQUEST_ABORTED` when the caller's signal
    *   ends the request.
    * @throws {RangeError} When `maxAttempts` is not a whole number of 1 or more,
@@ -907,6 +911,7 @@ export class AnthropicProvider implements IProvider {
     abortSignal?: AbortSignal,
     schemaToolName?: string,
     maxAttempts?: number,
+    operationId?: string,
   ): Promise<AnthropicMessagesResponse> {
     let lastError: AnthropicProviderError = new AnthropicProviderError(
       'Streaming completion failed after all retries.',
@@ -914,8 +919,9 @@ export class AnthropicProvider implements IProvider {
     );
 
     const attempts = resolveAttemptCount(maxAttempts, Math.max(1, this.config.maxRetries ?? 1));
-    // One operation id for the whole call: every attempt and key hop below sends this same value.
-    const operationHeaders = operationIdHeaders(this.config.operationIdHeader);
+    // One operation id for the whole call, the call's own when it names one: every attempt and key hop below sends
+    // this same value.
+    const operationHeaders = operationIdHeaders(this.config.operationIdHeader, operationId);
     // Key hops this request has made: a key-scoped failure hops to the next
     // usable key at once without spending a transient attempt, at most once
     // per key of the pool.
@@ -1307,8 +1313,8 @@ export class AnthropicProvider implements IProvider {
     // caller, moves to the next usable key; after content has streamed an
     // error surfaces as before and the key stays marked for the next request.
     const streamAttempt: { apiKey?: string; startedAt?: number } = {};
-    // One operation id for the stream's request: a key hop below sends the same value.
-    const operationHeaders = operationIdHeaders(this.config.operationIdHeader);
+    // One operation id for the stream's request, the call's own when it names one: a key hop below sends the same value.
+    const operationHeaders = operationIdHeaders(this.config.operationIdHeader, options.operationId);
     let keyHops = 0;
     let stream: ReadableStream<Uint8Array> | undefined;
     while (stream === undefined) {
@@ -3260,6 +3266,8 @@ export class AnthropicProvider implements IProvider {
    *   is sent.
    * @param {number} [maxAttempts] - The call's attempt count, a first and its retries together, over
    *   `config.maxRetries`; key hops are not counted, and no backoff is waited after the last attempt.
+   * @param {string} [operationId] - The call's own operation id, sent in the operation id header in place of one
+   *   this request makes.
    * @returns {Promise<T>} Parsed JSON response.
    * @throws {AnthropicProviderError} On authentication, validation, rate-limit, or network errors;
    *   `REQUEST_ABORTED` when the caller's signal ends the request.
@@ -3274,11 +3282,13 @@ export class AnthropicProvider implements IProvider {
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
     maxAttempts?: number,
+    operationId?: string,
   ): Promise<T> {
     const url = `${this.config.baseURL}${endpoint}`;
     const attempts = resolveAttemptCount(maxAttempts, this.config.maxRetries!);
-    // One operation id for the whole call: every attempt and key hop below sends this same value.
-    const operationHeaders = operationIdHeaders(this.config.operationIdHeader);
+    // One operation id for the whole call, the call's own when it names one: every attempt and key hop below sends
+    // this same value.
+    const operationHeaders = operationIdHeaders(this.config.operationIdHeader, operationId);
 
     // Per-call request-timeout override. Large-output callers (e.g. codegen
     // structured-output that emits long TSX) pass a longer requestTimeout so
