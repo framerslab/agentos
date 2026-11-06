@@ -197,6 +197,15 @@ describe('OpenAIProvider operation id', () => {
     expect(sent[1]).toBe(sent[0]);
   });
 
+  it('sends the operation id an embeddings call names on both attempts of a call that a 503 retried', async () => {
+    stub.queue(EMBEDDINGS, UNAVAILABLE, EMBEDDING);
+    const openai = await provider({ operationIdHeader: HEADER });
+
+    await openai.generateEmbeddings('text-embedding-3-small', ['hi'], { operationId: 'op-embed' });
+
+    expect(ids(EMBEDDINGS)).toEqual(['op-embed', 'op-embed']);
+  });
+
   it('takes the header name from AGENTOS_OPERATION_ID_HEADER when the config names none, and the config name over it', async () => {
     vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', HEADER);
     stub.queue(CHAT, chatCompletion('from the variable'), chatCompletion('from the option'));
