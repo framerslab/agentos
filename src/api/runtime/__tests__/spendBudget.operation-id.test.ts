@@ -300,7 +300,7 @@ describe("a metered call's operation id", () => {
 
 /** An embeddings answer as OpenAI's API gives it, one vector for each input. */
 function embeddingsAnswer(request: StubRequest): StubAnswer {
-  const input = Array.isArray(request.json.input) ? request.json.input : [request.json.input];
+  const input: unknown[] = Array.isArray(request.json.input) ? request.json.input : [request.json.input];
   return {
     json: {
       object: 'list',

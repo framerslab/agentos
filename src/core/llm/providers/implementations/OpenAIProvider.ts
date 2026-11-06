@@ -1759,7 +1759,8 @@ export class OpenAIProvider implements IProvider {
       false,
       undefined,
       options?.abortSignal,
-      undefined,
+      // The call's own operation id, when it names one, in place of the id this request makes.
+      options?.operationId ? { operationId: options.operationId } : undefined,
       this.keySourceOf(options?.apiKeyOverride),
     );
 

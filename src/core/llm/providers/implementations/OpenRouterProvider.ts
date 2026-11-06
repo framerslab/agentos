@@ -1350,6 +1350,10 @@ export class OpenRouterProvider implements IProvider {
       payload,
       false,
       options?.abortSignal,
+      undefined,
+      undefined,
+      // The call's own operation id, when it names one, in place of the id this request makes.
+      options?.operationId,
     );
 
     return {
