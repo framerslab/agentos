@@ -361,6 +361,23 @@ describe('TranscriptTranslator.translateLine', () => {
     expect(failures()).toEqual([expect.objectContaining({ provider: 'openai', reason: 'incomplete', status: 200 })]);
   });
 
+  it('reads an answer that reported no usage as no report, so the call is recorded at its bound and never at nothing', async () => {
+    const reportsNoUsage = (body: Record<string, unknown>): Record<string, unknown> => {
+      delete body.usage;
+      return body;
+    };
+    answer(jsonResponse(reportsNoUsage(chatCompletion('Good morning.'))));
+    const got = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', OPTIONS);
+    expect(got).toMatchObject({ status: 'translated', text: 'Good morning.', usage: null });
+
+    const cut = { ...chatCompletion('Good'), choices: [{ index: 0, message: { role: 'assistant', content: 'Good' }, finish_reason: 'length' }] };
+    answer(jsonResponse(reportsNoUsage(cut)));
+    const failure = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', OPTIONS).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: 'TRANSLATION_TRUNCATED', usage: null });
+    const price = (usage: { promptTokens?: number; completionTokens?: number }) => (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
+    expect(TranscriptTranslator.failedCallMicro(failure, 9_999, price)).toBe(9_999);
+  });
+
   it('refuses a Responses answer marked failed, though it holds text, and records the call at the usage it reported', async () => {
     answer(
       jsonResponse({
