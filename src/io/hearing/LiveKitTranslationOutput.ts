@@ -81,7 +81,8 @@ export class LiveKitTranslationOutput {
    * it by `replayAfter`. The line and the identities are copied as they are when it is called, so a caller that changes
    * either afterwards changes neither this send nor a replay of it, and `encode` is given a copy of its own. A send
    * that fails rejects this write and leaves the line in the ledger, so a replay sends it. An `encode` that throws
-   * rejects this write too, never throwing at the caller, and the line is neither numbered nor kept.
+   * rejects this write too, never throwing at the caller, and the line is neither numbered nor kept. A write made from
+   * inside `encode` takes the next number, so its target's numbers stay distinct and a replay tells the lines apart.
    */
   async write(line: TranslationOutputLine, to: { destinationIdentities: readonly string[] }): Promise<void> {
     const kept: TranslationOutputLine = { ...line };
@@ -90,9 +91,16 @@ export class LiveKitTranslationOutput {
     this.ledgers.set(kept.target, ledger);
     const last = ledger[ledger.length - 1];
     const seq = (last?.seq ?? 0) + 1;
-    // The encode option is given a copy, so one that changes or keeps its argument never reaches the ledger's line.
-    const written: Written = { seq, line: kept, text: this.encode({ ...kept }, seq) };
+    // Kept before encode runs, so a write made from inside it takes the next number rather than this one.
+    const written: Written = { seq, line: kept, text: '' };
     ledger.push(written);
+    try {
+      // The encode option is given a copy, so one that changes or keeps its argument never reaches the ledger's line.
+      written.text = this.encode({ ...kept }, seq);
+    } catch (error) {
+      ledger.splice(ledger.indexOf(written), 1);
+      throw error;
+    }
     // Never to the room: LiveKit sends a stream with no destination identities to every participant.
     if (destinationIdentities.length === 0) return;
     return this.enqueue(() => this.sendLine(written, destinationIdentities));
