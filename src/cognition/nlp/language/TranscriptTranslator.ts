@@ -22,6 +22,7 @@
  * @module agentos/cognition/nlp/language/TranscriptTranslator
  */
 import { addModelUsage, generateText, hasBillableUsage, usageOfError, type TokenUsage } from '../../../api/generateText.js';
+import { resolveModelOption } from '../../../api/model.js';
 import { estimateMaxCallCostUSD } from '../../../api/runtime/modelPricing.js';
 import { tokensOfChars } from '../../../api/runtime/spendBudget.js';
 import { TranslationProviderError } from './interfaces.js';
@@ -145,14 +146,16 @@ export class TranscriptTranslator {
   /**
    * The most one `translateLine` with these options can cost, in micro-dollars, times the attempts: the request as
    * `generateText` sends it, bounded by `estimateMaxCallCostUSD`, which counts a prompt at up to a token a byte, where
-   * `estimateCallCostUSD`'s four characters a token undercounts CJK text, emoji and base64.
+   * `estimateCallCostUSD`'s four characters a token undercounts CJK text, emoji and base64. The model is read as the
+   * call reads it: `openai:gpt-4o-mini` is priced as the `gpt-4o-mini` it sends.
    *
-   * @throws {Error} For a model with no price row or a request it cannot bound.
+   * @throws {Error} For a model with no price row, a model of another provider, or a request it cannot bound.
    */
   boundMicro(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): number {
     const maxContextLines = options.maxContextLines ?? DEFAULTS.maxContextLines;
     const maxOutputTokens = options.maxOutputTokens ?? TranscriptTranslator.defaultMaxOutputTokens(line.text);
-    const usd = estimateMaxCallCostUSD(options.provider, options.model, {
+    const { modelId } = resolveModelOption(options, 'text');
+    const usd = estimateMaxCallCostUSD(options.provider, modelId, {
       system: systemFor(target, sourceOf(line)),
       messages: [{ role: 'user', content: promptFor(line, maxContextLines) }],
       maxOutputTokens,
