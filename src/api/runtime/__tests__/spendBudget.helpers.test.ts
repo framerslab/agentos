@@ -196,6 +196,9 @@ const gmiSurface = stubbed('gmi()', true, (k, budget, options) => {
   return readParts(session.stream(PROMPT, { abortSignal: controller.signal, budget }).fullStream, controller, options);
 });
 
+/** The header embedText's own requests carry the operation id in, which the embedText case names. */
+const OPERATION_ID_HEADER = 'x-op';
+
 const embedTextSurface: Surface = {
   name: 'embedText',
   streams: false,
@@ -204,10 +207,14 @@ const embedTextSurface: Surface = {
     const k = key();
     const queue = [...replies];
     let sent = 0;
+    // embedText sends its requests itself, so the operation id is read off the wire, in the header the variable names.
+    vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', OPERATION_ID_HEADER);
+    const operationIds: unknown[] = [];
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => {
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
         sent += 1;
+        operationIds.push(new Headers(init?.headers).get(OPERATION_ID_HEADER));
         const next = queue.shift();
         if (!next) throw new Error('an embedding request the test did not script');
         if (next.kind === 'timed_out') throw Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' });
@@ -220,7 +227,7 @@ const embedTextSurface: Surface = {
         });
       }),
     );
-    return { sent: () => sent, operationIds: () => [], call: (budget) => embedText({ provider: 'openai', model: EMBED_MODEL, apiKey: k, input: EMBED_INPUT, budget }) };
+    return { sent: () => sent, operationIds: () => operationIds, call: (budget) => embedText({ provider: 'openai', model: EMBED_MODEL, apiKey: k, input: EMBED_INPUT, budget }) };
   },
 };
 
@@ -380,6 +387,7 @@ describe.each(SURFACES)('$name on a budget with a spend meter', (surface) => {
   });
   afterEach(async () => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     await fx.close();
   });
   const metered = (): SpendBudget => new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: fx.meter, accountId: ACCOUNT });
@@ -446,8 +454,8 @@ describe.each(SURFACES)('$name on a budget with a spend meter', (surface) => {
     await expectHeldUntilEvidence(fx);
   });
 
-  // embedText's own requests send no operation id header; the provider calls of the other helpers carry the id.
-  it.skipIf(surface === embedTextSurface)('hands the provider the operation id its reservation is under', async () => {
+  // embedText sends its own requests: its case reads the id from the header they carry.
+  it('hands the provider the operation id its reservation is under', async () => {
     const { operationIds, call } = surface.prepare([{ kind: 'answer' }]);
     const reserve = vi.spyOn(fx.meter, 'reserve');
     await call(metered());

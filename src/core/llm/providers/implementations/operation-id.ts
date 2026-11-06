@@ -30,6 +30,7 @@ const FIELD_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const RESERVED_HEADERS: ReadonlySet<string> = new Set([
   'authorization',
   'x-api-key',
+  'x-goog-api-key',
   'content-type',
   'content-length',
   'host',

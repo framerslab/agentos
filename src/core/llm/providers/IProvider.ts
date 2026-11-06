@@ -563,6 +563,14 @@ export interface ProviderEmbeddingOptions {
    * sends nothing, and an abort ends that read at once.
    */
   abortSignal?: AbortSignal;
+  /**
+   * The id the call sends in its operation id header (`AGENTOS_OPERATION_ID_HEADER`, or the provider's
+   * `operationIdHeader`) on every request and retry of it. OpenAI and OpenRouter send it in place of the id they make
+   * for each embeddings request; Gemini sends a header only when the call names this id. `embedText()` on a budget
+   * with a spend meter passes the id the call's reservation is under. Sends nothing by itself: with no header named,
+   * or on a provider that sends none, it is ignored.
+   */
+  operationId?: string;
 }
 
 /**

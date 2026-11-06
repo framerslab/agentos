@@ -8,6 +8,11 @@
  * The real providers, against a local server that answers as each provider's API does (OpenRouter's axios client does
  * not go through fetch); the first case stubs fetch instead. `gmi()`, `agent()` and `generateObject()` pass the id to
  * their provider in spendBudget.helpers.test.ts.
+ *
+ * `embedText()` sends its own requests: on its OpenAI-compatible path (every batch), to Ollama, and through
+ * GeminiProvider's batchEmbedContents, each request carries the id its reservation is under, and none carries a header
+ * when the variable is unset or the call has no budget. Gemini's native path is reached only at Google's own host, so
+ * its case stubs fetch.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
@@ -26,6 +31,8 @@ import { TogetherProvider } from '../../../core/llm/providers/implementations/To
 import { XAIProvider } from '../../../core/llm/providers/implementations/XAIProvider.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import { SqlSpendMeter } from '../../../safety/runtime/SqlSpendMeter.js';
+import type { ISpendMeter } from '../../../safety/runtime/SpendMeter.js';
+import { embedText } from '../../embedText.js';
 import { generateText } from '../../generateText.js';
 import { streamText } from '../../streamText.js';
 import { meteredProviderManager } from '../agencyLaunch/meteredProviderManager.js';
@@ -289,5 +296,140 @@ describe("a metered call's operation id", () => {
       // read and dropped
     }
     expect(stub.sent('POST /v1/chat/completions').map((request) => request.headers[HEADER])).toEqual(['op-whole', 'op-stream']);
+  });
+});
+
+/** An embeddings answer as OpenAI's API gives it, one vector for each input. */
+function embeddingsAnswer(request: StubRequest): StubAnswer {
+  const input: unknown[] = Array.isArray(request.json.input) ? request.json.input : [request.json.input];
+  return {
+    json: {
+      object: 'list',
+      data: input.map((_text, index) => ({ object: 'embedding', index, embedding: [0.1, 0.2] })),
+      model: String(request.json.model),
+      usage: { prompt_tokens: input.length, total_tokens: input.length },
+    },
+  };
+}
+
+/** One path embedText sends its own requests on. */
+interface EmbedPath {
+  name: string;
+  /** One embedText call on `budget`, or on none. */
+  run(budget: SpendBudget | undefined): Promise<unknown>;
+  /** The operation id header's value on each request the call sent, in order; undefined where it carried none. */
+  sent(): Array<string | undefined>;
+}
+
+/** Each path's requests as fetch saw them, for the path whose host the stub server cannot stand in for. */
+let fetched: Array<string | undefined> = [];
+
+const EMBED_PATHS: EmbedPath[] = [
+  {
+    name: 'the OpenAI-compatible path, one request a batch',
+    run: (budget) =>
+      embedText({ provider: 'openai', model: 'text-embedding-3-small', apiKey: API_KEY, baseUrl: `${stub.origin}/v1`, input: ['first', 'second'], maxInputsPerRequest: 1, ...(budget ? { budget } : {}) }),
+    sent: () => stub.sent('POST /v1/embeddings').map((request) => request.headers[HEADER] as string | undefined),
+  },
+  {
+    name: 'Ollama',
+    run: (budget) => embedText({ provider: 'ollama', model: 'nomic-embed-text', baseUrl: stub.origin, input: 'first', ...(budget ? { budget } : {}) }),
+    sent: () => stub.sent('POST /api/embed').map((request) => request.headers[HEADER] as string | undefined),
+  },
+  {
+    name: "Gemini's batchEmbedContents",
+    run: (budget) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+          if (!String(url).includes(':batchEmbedContents')) throw new Error(`a request the case did not script: ${String(url)}`);
+          fetched.push(new Headers(init?.headers).get(HEADER) ?? undefined);
+          const { requests } = JSON.parse(String(init?.body)) as { requests: unknown[] };
+          return new Response(JSON.stringify({ embeddings: requests.map(() => ({ values: [0.1, 0.2] })), usageMetadata: { promptTokenCount: requests.length } }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }),
+      );
+      return embedText({ provider: 'gemini', model: 'gemini-embedding-2', apiKey: API_KEY, input: 'first', ...(budget ? { budget } : {}) });
+    },
+    sent: () => fetched,
+  },
+];
+
+describe("embedText's own requests", () => {
+  beforeAll(() => {
+    registerModelPricing('ollama', (modelId) => (modelId === 'nomic-embed-text' ? PRICE : undefined));
+    registerModelPricing('gemini', (modelId) => (modelId === 'gemini-embedding-2' ? PRICE : undefined));
+  });
+  afterAll(() => {
+    registerModelPricing('ollama', () => undefined);
+    registerModelPricing('gemini', () => undefined);
+  });
+  beforeEach(() => {
+    fetched = [];
+    stub.queue('POST /v1/embeddings', embeddingsAnswer, embeddingsAnswer);
+    stub.queue('POST /api/embed', { json: { model: 'nomic-embed-text', embeddings: [[0.1, 0.2]] } });
+  });
+
+  it.each(EMBED_PATHS)('send the id their reservation is under: $name', async (path) => {
+    const reserve = vi.spyOn(meter, 'reserve');
+    await path.run(metered());
+    expect(reserve).toHaveBeenCalledTimes(1);
+    const { operationId } = reserve.mock.calls[0]![0];
+    expect(operationId).toBeTruthy();
+    const sent = path.sent();
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent).toEqual(sent.map(() => operationId));
+  });
+
+  it.each(EMBED_PATHS)('send no header when the call has no budget: $name', async (path) => {
+    await path.run(undefined);
+    const sent = path.sent();
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.every((value) => value === undefined)).toBe(true);
+  });
+
+  // The name is read once, before the reservation: a variable changed while the meter reserves moves no header.
+  it.each(EMBED_PATHS)('keep the header named before the reservation when the variable changes during it: $name', async (path) => {
+    const reserved: string[] = [];
+    const inner = meter;
+    const shifting: ISpendMeter = {
+      reserve: async (request) => {
+        reserved.push(request.operationId);
+        vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', 'x-other');
+        return inner.reserve(request);
+      },
+      settle: (request) => inner.settle(request),
+      heartbeat: (operationId, now) => inner.heartbeat(operationId, now),
+      reconcile: (options) => inner.reconcile(options),
+      snapshot: (accountId, now) => inner.snapshot(accountId, now),
+      setAllowance: (accountId, allowance, now) => inner.setAllowance(accountId, allowance, now),
+    };
+    await path.run(new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: shifting, accountId: ACCOUNT }));
+    expect(reserved).toHaveLength(1);
+    const sent = path.sent();
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent).toEqual(sent.map(() => reserved[0]));
+  });
+
+  // Gemini sends its key in x-goog-api-key: an id there would take the key's place.
+  it.each(['x goog', 'x-goog-api-key', 'Authorization'])('refuse the header name %s before anything is reserved or sent', async (name) => {
+    vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', name);
+    const reserve = vi.spyOn(meter, 'reserve');
+    const gemini = EMBED_PATHS[2]!;
+    await expect(gemini.run(metered())).rejects.toThrow(RangeError);
+    expect(reserve).not.toHaveBeenCalled();
+    expect(gemini.sent()).toEqual([]);
+  });
+
+  it.each(EMBED_PATHS)('send no header when the variable is unset: $name', async (path) => {
+    vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', '');
+    const reserve = vi.spyOn(meter, 'reserve');
+    await path.run(metered());
+    expect(reserve).toHaveBeenCalledTimes(1);
+    const sent = path.sent();
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.every((value) => value === undefined)).toBe(true);
   });
 });
