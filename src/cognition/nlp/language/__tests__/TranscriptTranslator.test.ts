@@ -396,6 +396,15 @@ describe('TranscriptTranslator.boundMicro', () => {
     expect(bound).toBeGreaterThan(Math.ceil(toMicro(estimateCallCostUSD(OPTIONS.provider, OPTIONS.model, cjk.length * 7, 200)!)));
   });
 
+  it("prices a prefixed model as the call sends it, and refuses another provider's model as the call does", () => {
+    const translator = new TranscriptTranslator();
+    const bare = translator.boundMicro(line('Buenos días.'), 'en', OPTIONS);
+    for (const model of ['openai:gpt-4o-mini', 'openai/gpt-4o-mini']) {
+      expect(translator.boundMicro(line('Buenos días.'), 'en', { ...OPTIONS, model })).toBe(bare);
+    }
+    expect(() => translator.boundMicro(line('Buenos días.'), 'en', { ...OPTIONS, model: 'anthropic:claude-opus-4-1' })).toThrow("names provider 'anthropic'");
+  });
+
   it("defaults maxOutputTokens to the smaller of 2,048 and 64 plus three times the line's tokens", () => {
     expect(TranscriptTranslator.defaultMaxOutputTokens('Buenos días.')).toBe(64 + 3 * Math.ceil('Buenos días.'.length / 4));
     expect(TranscriptTranslator.defaultMaxOutputTokens('x'.repeat(40_000))).toBe(2_048);
