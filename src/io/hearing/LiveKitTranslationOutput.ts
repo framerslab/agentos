@@ -69,7 +69,7 @@ export class LiveKitTranslationOutput {
   private readonly encode: (line: TranslationOutputLine, seq: number) => string;
   private readonly ledgers = new Map<string, Written[]>();
   private chain: Promise<unknown> = Promise.resolve();
-  /** Whether `encode` is running, so a write made from inside it waits for the line being encoded. */
+  /** Whether `encode` is running, so a write, a send or a replay asked for from inside it waits for the line being encoded. */
   private encoding = false;
 
   constructor(private readonly options: LiveKitTranslationOutputOptions) {
@@ -104,8 +104,12 @@ export class LiveKitTranslationOutput {
     return this.enqueue(() => this.sendLine(written, destinationIdentities));
   }
 
-  /** Sends again every line of the target numbered above `afterSeq` (every line when null) to one identity, in order; resolves how many. */
-  replayAfter(afterSeq: number | null, target: string, participantIdentity: string): Promise<number> {
+  /**
+   * Sends again every line of the target numbered above `afterSeq` (every line when null) to one identity, in order;
+   * resolves how many. Asked for from inside `encode`, it waits for the line being encoded, as a write does.
+   */
+  async replayAfter(afterSeq: number | null, target: string, participantIdentity: string): Promise<number> {
+    if (this.encoding) await Promise.resolve();
     const lines = (this.ledgers.get(target) ?? []).filter((each) => afterSeq === null || each.seq > afterSeq);
     return this.enqueue(async () => {
       for (const each of lines) await this.sendLine(each, [participantIdentity]);
@@ -115,13 +119,15 @@ export class LiveKitTranslationOutput {
 
   /**
    * Sends a message that is not a line, such as a status, to the identities alone, on `topic` or the output's own; an
-   * empty list sends nothing. The topic and the identities are read when it is called.
+   * empty list sends nothing. The topic and the identities are read when it is called. Asked for from inside `encode`,
+   * it waits for the line being encoded, as a write does.
    */
-  send(text: string, to: { topic?: string; destinationIdentities: readonly string[] }): Promise<void> {
-    if (to.destinationIdentities.length === 0) return Promise.resolve();
+  async send(text: string, to: { topic?: string; destinationIdentities: readonly string[] }): Promise<void> {
+    if (to.destinationIdentities.length === 0) return;
     // Read when it is called, as the identities are, so a caller that reuses its options changes no queued send.
     const topic = to.topic ?? this.topic;
     const destinationIdentities = [...to.destinationIdentities];
+    if (this.encoding) await Promise.resolve();
     return this.enqueue(() =>
       this.local()
         .sendText(text, { topic, destinationIdentities })
