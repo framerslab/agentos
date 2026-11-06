@@ -67,13 +67,13 @@ export type TranslatedLine =
       source: string | null;
       text: string;
       status: 'translated';
-      /** The answer's tokens, as the provider reported them. */
+      /** The answer's tokens, as the provider reported them; null when it reported none, so a caller records the bound. */
       usage: TokenUsage | null;
       /**
        * The attempts before the answer that got no usable one: no HTTP answer (a network failure, the provider layer's
        * own timeout), or a success status whose body was lost while it was read. Each may have been billed for a whole
        * answer nobody saw, so a caller that records the call's cost records its bound (`boundMicro`) when this is above
-       * 0, and the priced `usage` otherwise.
+       * 0 or `usage` is null, and the priced `usage` otherwise.
        */
       unansweredAttempts: number;
       model: string;
@@ -276,7 +276,9 @@ export class TranscriptTranslator {
       options.abortSignal?.removeEventListener('abort', onCallerAbort);
     }
     // A refused answer was still billed: its usage rides the error, so the caller records its cost (failedCallMicro).
-    const usage = result.usage ?? null;
+    // generateText counts up from zeros, so an answer that reported no usage reads as zeros: that is no report, not a
+    // bill of nothing, and it is null here so the call is recorded at its bound.
+    const usage = result.usage && hasBillableUsage(result.usage) ? result.usage : null;
     const unansweredAttempts = unanswered(1);
     if (result.finishReason === 'length') {
       logTranslationFailed('openai', 'truncated', 200);
