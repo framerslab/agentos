@@ -234,6 +234,29 @@ describe('LiveKitTranslationOutput', () => {
     expect(numbered(room)).toEqual([['b', '2']]);
   });
 
+  it('sends a status or a replay asked for from inside the encode option after the line being encoded', async () => {
+    const room = new FakeRoom();
+    let status: Promise<void> | undefined;
+    let replay: Promise<number> | undefined;
+    const output: LiveKitTranslationOutput = new LiveKitTranslationOutput({
+      room,
+      encode: (line, seq) => {
+        status = output.send('{"itemId":"status"}', { destinationIdentities: ['p-1'] });
+        replay = output.replayAfter(null, 'en', 'p-2');
+        return JSON.stringify({ ...line, seq });
+      },
+    });
+    await output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] });
+    await status;
+    const replayed = await replay;
+    expect(sent(room).map(({ text, options }) => [JSON.parse(text).itemId, options.destinationIdentities])).toEqual([
+      ['a', ['p-1']],
+      ['status', ['p-1']],
+      ['a', ['p-2']],
+    ]);
+    expect(replayed).toBe(1);
+  });
+
   it('gives the first number to a line written from inside an encode that then throws', async () => {
     const room = new FakeRoom();
     let nested: Promise<void> | undefined;
