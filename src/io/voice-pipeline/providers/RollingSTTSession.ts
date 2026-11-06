@@ -33,7 +33,11 @@ export interface FundedSocketSession extends StreamingSTTSession {
  * ends the facade there, and no successor is authorized or opened. A
  * successor whose authorization is refused, or whose ceiling
  * holds no audio, ends the facade with a {@link SttConnectionAuthorizationError}:
- * no frame is sent past a funded ceiling and no other vendor is tried.
+ * no frame is sent past a funded ceiling and no other vendor is tried. A
+ * caller's `flush()` that ends the stream of the socket in use ends the
+ * facade's: a frame pushed from then on is dropped and opens no successor, at a
+ * ceiling as well, and `inputEnded` reports it. The drain of a socket at its
+ * ceiling is the facade's own and ends no stream.
  */
 export class RollingSTTSession extends EventEmitter implements StreamingSTTSession {
   private active: FundedSocketSession | undefined;
@@ -41,6 +45,8 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
   /** The socket the facade is closing: the transcripts it emits as it closes still go out. */
   private retiring: FundedSocketSession | undefined;
   private closed = false;
+  /** The stream had ended at a caller's flush as the facade closed: {@link inputEnded} outlives the socket. */
+  private endedAtClose = false;
   private offsetMs = 0;
   private tail: Promise<void> = Promise.resolve();
 
@@ -58,6 +64,13 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
     const session = new RollingSTTSession(open);
     await session.adopt();
     return session;
+  }
+
+  /** Whether a caller's `flush()` ended the stream of the socket in use; a drain at a ceiling is no end of the stream. */
+  get inputEnded(): boolean {
+    if (this.endedAtClose) return true;
+    const socket = this.active;
+    return socket !== undefined && socket !== this.draining && socket.inputEnded === true;
   }
 
   /** Opens the next funded socket and makes it the one in use, forwarding its events onto the facade's clock. */
@@ -103,10 +116,12 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
 
   /**
    * Hands one frame on, draining, letting go of and replacing each socket whose funded ceiling it reaches. A close
-   * made while a socket is let go of ends the frame there, with no successor.
+   * made while a socket is let go of ends the frame there, with no successor. A frame after a flush that ended the
+   * stream is dropped.
    */
   private async send(frame: AudioFrame): Promise<void> {
     if (!Number.isSafeInteger(frame.sampleRate) || frame.sampleRate <= 0) throw new RangeError('invalid input sample rate');
+    if (this.inputEnded) return;
     let consumed = 0;
     while (consumed < frame.samples.length && !this.closed) {
       const current = this.active;
@@ -183,6 +198,7 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
    */
   close(): void {
     if (this.closed) return;
+    this.endedAtClose = this.inputEnded;
     this.closed = true;
     const current = this.active;
     this.active = undefined;

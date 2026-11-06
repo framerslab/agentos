@@ -174,7 +174,9 @@ export interface OpenAIRealtimeTranscriptionRollover {
   /**
    * Called before a rollover opens the next connection. Resolve `false`, or
    * throw, to refuse it: the session keeps its current connection until
-   * `hardStopMs`, finishes the items it holds, and closes. An answer that has
+   * `hardStopMs`, finishes the items it holds, and ends with `'error'`, then
+   * `'close'`, as a stop nobody asked for: a chain with failover moves to the
+   * next provider, and a session with no chain fails. An answer that has
    * not come by `hardStopMs` counts as a refusal, and a later one opens
    * nothing. It is a policy check beside the funding: a host that pays for
    * audio per connection reserves each one, rollovers included, through
@@ -1694,9 +1696,11 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    * connection is drained with a commit, or, when it already stopped taking
    * audio (a client-commit rollover stops it before the approval), waited for
    * and retired. When no connection follows it, the session ends after the
-   * drain, with the error of a rollover that could not open its connection, or
-   * with `'close'` alone. A next connection that dropped during its overlap
-   * counts as following it: the reconnect after the drain takes its place.
+   * drain with `'error'`, then `'close'`: the error of a rollover that could not
+   * open its connection, or one that names the hard stop. It is no end the host
+   * asked for, though a `flush()` came before it. A next connection that dropped
+   * during its overlap counts as following it: the reconnect after the drain
+   * takes its place.
    */
   private hardStop(connection: TranscriptionConnection): void {
     if (this.closed || connection.isClosed()) return;
@@ -1708,8 +1712,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     if (!followed) this.ending = true;
     void this.drain(connection, true).then(() => {
       if (followed || this.closed) return;
-      if (connection.rolloverFailure) this.fail(connection.rolloverFailure);
-      else this.close();
+      this.fail(connection.rolloverFailure ?? new Error('openai realtime transcription: the connection reached its hard stop with no next connection'));
     });
   }
 

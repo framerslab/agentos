@@ -79,7 +79,10 @@ const frameMs = (f: AudioFrame): number => (f.samples.length / f.sampleRate) * 1
  * closes. `flush()` during a reconnect waits for the replacement, replay and
  * queued audio before flushing it. A close during that flush, or after it with
  * no further provider activity or pushed audio, ends the stream without a
- * reconnect. Activity after a completed flush makes a later close a failure.
+ * reconnect, and so does the close of a session whose `inputEnded` reports that
+ * the flush ended its stream, whatever came after the flush. For any other
+ * session, activity after a completed flush makes a later close a failure. The
+ * session's `inputEnded` reports what the provider's session in use reports.
  *
  * A session opened with `config.call` is scoped instead ({@link openScopedReconnect}): it takes
  * `pushAudioScoped()` frames that carry its current identity, replays them with that identity into a new
@@ -227,7 +230,7 @@ export class ReconnectingSTT implements IStreamingSTT {
       });
       session.on('close', () => {
         if (closedByCaller || session !== current || reconnecting) return;
-        if (flushed || flushing === session) {
+        if (flushed || flushing === session || session.inputEnded === true) {
           // the provider sent its last final and ended its stream, as the caller's flush asked
           finish();
           return;
@@ -367,6 +370,7 @@ export class ReconnectingSTT implements IStreamingSTT {
       },
     }) as StreamingSTTSession;
     Object.defineProperty(session, 'droppedFrames', { get: () => dropped, enumerable: true });
+    Object.defineProperty(session, 'inputEnded', { get: () => current.inputEnded === true, enumerable: true });
     return session;
   }
 }

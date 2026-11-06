@@ -123,7 +123,11 @@ export interface StreamingSTTChainOptions {
    * retracts an open line's interim text, still reach the facade's listeners:
    * on a switch, before the backup's; when the facade ends, before its
    * `'close'`. A provider close after flush and before the next frame emits one
-   * facade close; later audio is ignored. A backup whose opening fails during
+   * facade close, and so does the close of a provider session whose `inputEnded`
+   * reports that the flush ended its stream, whatever frames came after the
+   * flush: no backup opens and no failure is recorded. The facade's `inputEnded`
+   * reports what the provider session in use reports, and keeps that after the
+   * close. Later audio is ignored. A backup whose opening fails during
    * the switch, or that fails as it takes the replay (an `'error'` or a
    * `'close'`, or a frame it refuses), is reported through `onProviderFailed`
    * and `provider_failed` as one whose opening fails at startup is, recorded
@@ -328,6 +332,8 @@ export class StreamingSTTChain implements IStreamingSTT {
     // The provider session the facade is closing: the transcripts it emits as it closes still go out.
     let retiring: StreamingSTTSession | undefined;
     let flushed = false;
+    // The provider session in use closed with its stream ended by a flush: the facade's report outlives that session.
+    let streamEnded = false;
     let switching: Promise<void> | undefined;
     const pending: AudioFrame[] = [];
     let lostMs = 0;
@@ -442,8 +448,10 @@ export class StreamingSTTChain implements IStreamingSTT {
           lost ??= new Error('provider closed');
           return;
         }
-        // A provider may end its stream once flushed, as the session contract has it (a final, then 'close').
-        if (flushed) {
+        // A provider may end its stream once flushed, as the session contract has it (a final, then 'close'). A session
+        // that reports the end of its stream is read here, at its close: a frame after that flush was no new input.
+        streamEnded = session.inputEnded === true;
+        if (flushed || streamEnded) {
           current = undefined;
           finish();
         } else begin(new Error('provider closed'));
@@ -611,6 +619,7 @@ export class StreamingSTTChain implements IStreamingSTT {
         finish(old);
       },
     });
+    Object.defineProperty(wrapped, 'inputEnded', { get: () => streamEnded || current?.inputEnded === true, enumerable: true });
     const scoped = initial as Partial<ScopedStreamingSTTSession>;
     if (scoped.pushAudioScoped && scoped.reset) {
       Object.assign(wrapped, {

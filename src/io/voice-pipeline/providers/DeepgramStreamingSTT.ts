@@ -258,7 +258,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
   private openItemSpeechEnded = false;
   private usageTimer: ReturnType<typeof setInterval> | undefined;
   private keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
-  /** Whether `flush()` sent `CloseStream`: the stream is ending, so no `KeepAlive` follows. */
+  /** Whether `flush()` sent `CloseStream`: the stream is ending, so no audio and no `KeepAlive` follow. */
   private draining = false;
 
   /** Wire seconds sent on this socket so far. */
@@ -280,6 +280,14 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
   /** The socket is open and takes audio. */
   get isOpen(): boolean {
     return !this.closed && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Whether `flush()` sent `CloseStream`: the stream has ended, audio pushed from then on is dropped, and the socket's
+   * close is the end the flush asked for.
+   */
+  get inputEnded(): boolean {
+    return this.draining;
   }
 
   constructor(
@@ -445,13 +453,14 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
 
   /**
    * Converts a live or replayed frame to 16 kHz PCM16 and sends it, counting
-   * the samples sent.
+   * the samples sent. A frame pushed after `flush()` sent `CloseStream` is
+   * dropped: no audio goes out after the close frame.
    *
    * @throws {RangeError} For a frame whose rate differs from `inputSampleRate`, or that is not a positive whole
    *   number, or a sample that is not finite; nothing of the frame is sent or counted.
    */
   pushAudio(frame: AudioFrame): void {
-    if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.closed || this.draining || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     if (this.config.inputSampleRate !== undefined && frame.sampleRate !== this.config.inputSampleRate) {
       throw new RangeError('unexpected input sample rate');
     }
@@ -488,10 +497,10 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
   /** Requests final results; the existing 200 ms drain bound is preserved. */
   async flush(): Promise<void> {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    // The stream ends here: a frame pushed during the drain arms no KeepAlive.
+    this.ws.send(JSON.stringify({ type: 'CloseStream' }));
+    // The stream ends here, once the close frame went out: a send that throws ends nothing.
     this.draining = true;
     this.clearKeepAlive();
-    this.ws.send(JSON.stringify({ type: 'CloseStream' }));
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
   }
 
@@ -521,8 +530,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
    * Rescheduled by every frame actually sent (`pushAudio`) and by each
    * `KeepAlive` itself, so the frame goes out only while audio pauses; a
    * session that has ended, a socket that is no longer open, or a stream
-   * `flush` ended with `CloseStream` arms nothing, even when audio still
-   * arrives during the drain.
+   * `flush` ended with `CloseStream` arms nothing.
    */
   private scheduleKeepAlive(): void {
     this.clearKeepAlive();
