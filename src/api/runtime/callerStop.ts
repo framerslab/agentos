@@ -1,7 +1,8 @@
 /**
  * @file callerStop.ts
- * @description A call the caller stopped: refused by its spend budget, or
- * stopped by a generation or tool hook under `hookErrors: 'throw'`. Such an
+ * @description A call the caller stopped: refused by its spend budget (a
+ * spend meter that cannot answer included), or stopped by a generation or
+ * tool hook under `hookErrors: 'throw'`. Such an
  * error says nothing about the provider, so the generation helpers neither
  * count it against the provider's health nor try the call on a fallback
  * provider.
@@ -30,8 +31,9 @@ export function markHookStop(error: unknown): unknown {
 
 /**
  * Whether the caller stopped the call: its spend budget refused it
- * (`CostCapExceededError`, `UnpricedModelError`) or a hook stopped it
- * ({@link markHookStop}).
+ * (`CostCapExceededError`, `UnpricedModelError`, or
+ * `SpendMeterUnavailableError` when the budget's meter could not answer, so
+ * nothing was sent) or a hook stopped it ({@link markHookStop}).
  *
  * @internal Shared by generateText and streamText.
  */
@@ -41,6 +43,7 @@ export function isCallerStop(error: unknown): boolean {
   return (
     name === 'CostCapExceededError' ||
     name === 'UnpricedModelError' ||
+    name === 'SpendMeterUnavailableError' ||
     (error as Record<symbol, unknown>)[STOPPED_BY_HOOK] === true
   );
 }

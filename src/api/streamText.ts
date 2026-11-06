@@ -51,7 +51,7 @@ import {
 } from './generateText.js';
 import { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';
 import { checkContextFit } from './runtime/contextWindowFit.js';
-import { asSpendBudget, assertCallWithinBudget, costOfUsageUSD, promptCharsOf } from './runtime/spendBudget.js';
+import { asSpendBudget, costOfUsageUSD, holdCall, withReservation, type HelperCall } from './runtime/spendBudget.js';
 import { isCallerStop, markHookStop } from './runtime/callerStop.js';
 import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
 import { toProviderReplayMessage } from './sessionTranscript.js';
@@ -889,10 +889,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               shimSendChecked = true;
               assertFitsContextWindow({ messages: msgs });
             }
-            if (budget) assertCallWithinBudget(budget, resolved, promptCharsOf(msgs), opts.maxTokens, 'stream_text.shim');
+            const shimCall: HelperCall = { what: 'stream_text.shim', route: resolved, messages: msgs, maxTokens: opts.maxTokens, options: opts, onAttempt: opts.onAttempt, abortSignal: opts.abortSignal };
             // provider is guaranteed non-undefined by the `if (!provider) throw`
             // guard above; the closure just loses TS's flow-narrowing.
-            const r = await provider!.generateCompletion(resolved.modelId, msgs as any, {
+            const r = await withReservation(budget, shimCall, (onAttempt) => provider!.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               maxTokens: opts.maxTokens,
               // Forward per-call requestTimeout on the shim path too so the
@@ -902,7 +902,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
               // The call's attempt count and its report, as on the stream path below.
               ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-              ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
+              ...(onAttempt ? { onAttempt } : {}),
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
               ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
@@ -932,7 +932,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...(opts.customModelParams !== undefined
                 ? { customModelParams: opts.customModelParams }
                 : {}),
-            } as any);
+            } as any));
             budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, r.usage), r.usage?.totalTokens ?? 0, 'stream_text.shim');
             // Aggregate the COMPLETE normalized usage from every shim
             // roundtrip (spec batch-1 review fold) as each call returns, so
@@ -1027,7 +1027,18 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // A leg's first send is checked against its model's window; later
         // steps are not checked again.
         if (step === 0) assertFitsContextWindow({ messages: effectiveMessages, tools: toolSchemas });
-        if (budget) assertCallWithinBudget(budget, resolved, promptCharsOf(effectiveMessages, undefined, toolSchemas), opts.maxTokens, 'stream_text');
+        // Checked against the budget before it is sent; a budget with a meter reserves the stream and settles it
+        // when it ends, fails or is left.
+        const streamHold = await holdCall(budget, {
+          what: 'stream_text',
+          route: resolved,
+          messages: effectiveMessages,
+          tools: toolSchemas,
+          maxTokens: opts.maxTokens,
+          options: opts,
+          onAttempt: opts.onAttempt,
+          abortSignal: opts.abortSignal,
+        });
 
         const stepSpan = startAgentOSSpan('agentos.api.stream_text.step', {
           attributes: {
@@ -1037,7 +1048,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             'agentos.api.tool_count': tools.length,
           },
         });
-        const stream = provider.generateCompletionStream(
+        const stream = streamHold.stream(provider.generateCompletionStream(
           resolved.modelId,
           effectiveMessages as any,
           {
@@ -1054,7 +1065,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
             // The most requests the stream's call sends and the report of each, so a caller can settle the attempts it paid for.
             ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-            ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
+            ...(streamHold.onAttempt ? { onAttempt: streamHold.onAttempt } : {}),
             // Mirror generateText: forward the sampling controls so a
             // streaming caller's topP / frequency / presence penalties
             // actually reach the provider instead of being silently
@@ -1097,7 +1108,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ? { customModelParams: opts.customModelParams }
               : {}),
           } as any
-        );
+        ));
 
         const reconstructor = new StreamingReconstructor();
         let stepReasoningText = '';

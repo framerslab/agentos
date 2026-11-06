@@ -461,8 +461,12 @@ function usageBeyond(latest: ModelUsage, counted: ModelUsage | undefined): Model
   return Object.values(beyond).some((count) => count > 0) ? (beyond as unknown as ModelUsage) : undefined;
 }
 
-/** Hands a late usage report to `onLateUsage`; without one, or when it throws, logs it with its token counts. */
-function reportLateUsage(report: LateAttemptUsage, onLateUsage: ((report: LateAttemptUsage) => void) | undefined): void {
+/**
+ * Hands a late usage report to `onLateUsage`; without one, or when it throws, logs it with its token counts.
+ *
+ * @internal Also called by an attempt held in a spend meter (heldAttempt.ts), which reads the report on the way.
+ */
+export function reportLateUsage(report: LateAttemptUsage, onLateUsage: ((report: LateAttemptUsage) => void) | undefined): void {
   if (onLateUsage) {
     try {
       onLateUsage(report);
