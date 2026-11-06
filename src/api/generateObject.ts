@@ -13,7 +13,7 @@
  */
 import { z, type ZodType, type ZodError } from 'zod';
 
-import { generateText } from './generateText.js';
+import { generateText, sumTokenUsage } from './generateText.js';
 import type { GenerateTextOptions, Message, SystemContentBlock, TokenUsage } from './generateText.js';
 import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { resolveModelOption } from './model.js';
@@ -367,7 +367,11 @@ export interface GenerateObjectResult<T> {
   /** The raw LLM output text before parsing. */
   text: string;
 
-  /** Aggregated token usage across all attempts (including retries). */
+  /**
+   * Aggregated token usage across all attempts (including retries), summed as
+   * {@link generateText} sums its steps: every counter it reports, the cache
+   * reads and writes and `inclusiveInputTokens` among them.
+   */
   usage: TokenUsage;
 
   /**
@@ -632,7 +636,7 @@ export async function generateObject<T extends ZodType>(
   }
 
   // Aggregate usage across all attempts (including retries)
-  const totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let lastRawText = '';
   let lastValidationError: ZodError | undefined;
 
@@ -717,37 +721,17 @@ export async function generateObject<T extends ZodType>(
       ...(budget ? { budget } : {}),
     });
 
-    // Accumulate token usage across attempts
-    totalUsage.promptTokens += result.usage.promptTokens;
-    totalUsage.completionTokens += result.usage.completionTokens;
-    totalUsage.totalTokens += result.usage.totalTokens;
-    if (typeof result.usage.costUSD === 'number') {
-      totalUsage.costUSD = (totalUsage.costUSD ?? 0) + result.usage.costUSD;
-    }
+    // Accumulate token usage across attempts with generateText's own sum, so
+    // every counter it reports is carried: the cost, the prompt-cache reads
+    // and writes, and the inclusive input total (Anthropic's promptTokens
+    // leaves the cached prompt out). An optional counter stays undefined
+    // when no attempt reported it, so callers can tell "not reported" from
+    // a reported zero.
+    totalUsage = sumTokenUsage(totalUsage, result.usage);
 
     // Accumulate the fallback trail across attempts (see anyFallbackFired above).
     if (result.fallback?.fired) anyFallbackFired = true;
     if (result.fallback?.hops?.length) accumulatedFallbackHops.push(...result.fallback.hops);
-    // Prompt-cache metrics. generateText propagates these from the
-    // provider layer (Anthropic's cache_read_input_tokens /
-    // cache_creation_input_tokens); without this accumulation every
-    // generateObject caller saw usage.cacheReadTokens as undefined even
-    // on hits, blinding cost trackers to prompt-cache savings.
-    // Only set the aggregate when the provider actually reported a
-    // value — leaving it undefined for OpenAI (whose auto-cache does
-    // not surface per-call counters) so callers can distinguish
-    // "not reported" from "zero hits".
-    if (typeof result.usage.cacheReadTokens === 'number') {
-      totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + result.usage.cacheReadTokens;
-    }
-    if (typeof result.usage.cacheCreationTokens === 'number') {
-      totalUsage.cacheCreationTokens =
-        (totalUsage.cacheCreationTokens ?? 0) + result.usage.cacheCreationTokens;
-    }
-    if (typeof result.usage.cacheCreationExtendedTokens === 'number') {
-      totalUsage.cacheCreationExtendedTokens =
-        (totalUsage.cacheCreationExtendedTokens ?? 0) + result.usage.cacheCreationExtendedTokens;
-    }
 
     lastRawText = result.text;
 

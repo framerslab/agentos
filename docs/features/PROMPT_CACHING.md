@@ -198,7 +198,8 @@ await generateText({
 
 Every provider reports cache activity in the same fields of its
 `ModelUsage`, and `generateText()` / `streamText()` sum them over a call's
-steps into the result's `usage`:
+steps into the result's `usage`; `generateObject()` sums its attempts the same
+way, a validation retry included:
 
 | Provider response (`ModelUsage`) | Result (`usage`) | Meaning |
 |---|---|---|
@@ -209,7 +210,9 @@ steps into the result's `usage`:
 
 `promptTokens` follows the provider: Anthropic's excludes the cached tokens,
 while OpenAI's and OpenRouter's include them. Use `inclusiveInputTokens` for a
-total that means the same on every provider.
+total that means the same on every provider. On Anthropic it is
+`input_tokens + cache_creation_input_tokens + cache_read_input_tokens`, so a
+cached call priced from `promptTokens` is priced on its uncached tail alone.
 
 Sources: Anthropic `usage.cache_read_input_tokens` /
 `cache_creation_input_tokens`; OpenAI and OpenAI-compatible

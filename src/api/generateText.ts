@@ -191,10 +191,14 @@ export interface TokenUsage {
   costUSD?: number;
   /**
    * Provider-independent total input tokens INCLUDING cached reads/writes,
-   * summed across steps (spec batch-1 C1). Anthropic reports input
-   * exclusive of cache (this field adds it back); OpenAI/OpenRouter report
-   * prompt tokens already inclusive (used as-is). Tri-state: undefined =
-   * no step reported enough to compute; a reported 0 is preserved.
+   * summed across steps, and across attempts in `generateObject` (spec
+   * batch-1 C1). Anthropic's `promptTokens` is `input_tokens` alone, which
+   * leaves the cache out, so this field is `input_tokens +
+   * cache_creation_input_tokens + cache_read_input_tokens`; OpenAI and
+   * OpenRouter report prompt tokens already inclusive (used as-is). Price
+   * input from this field: on a cached Anthropic call `promptTokens` counts
+   * only the uncached tail. Tri-state: undefined = no step reported enough
+   * to compute; a reported 0 is preserved.
    */
   inclusiveInputTokens?: number;
   /**
@@ -1524,8 +1528,12 @@ export function hasBillableUsage(usage: TokenUsage): boolean {
   );
 }
 
-/** The sum of two usage reports; an optional counter stays absent when neither has it. */
-function sumTokenUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+/**
+ * The sum of two usage reports; an optional counter stays absent when neither has it.
+ *
+ * @internal Shared with generateObject, which sums its attempts with it.
+ */
+export function sumTokenUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   const optional = (x: number | undefined, y: number | undefined): number | undefined =>
     x === undefined && y === undefined ? undefined : (x ?? 0) + (y ?? 0);
   const costUSD = optional(a.costUSD, b.costUSD);
