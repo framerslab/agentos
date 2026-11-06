@@ -31,6 +31,8 @@ const GEMINI_MODEL = 'stub-gemini';
 const GEMINI_EMBED_MODEL = 'gemini-embedding-001';
 /** The Mistral embedding model the embedding cases name, priced by the table this file registers. */
 const MISTRAL_EMBED_MODEL = 'stub-mistral-embed';
+/** The Ollama embedding model the embedding case names, priced by the table this file registers. */
+const OLLAMA_EMBED_MODEL = 'stub-ollama-embed';
 const MAX_TOKENS = 100;
 const MESSAGES: ChatMessage[] = [{ role: 'user', content: 'Say hello.' }];
 /** The usage a finished seat call reports. */
@@ -107,12 +109,14 @@ beforeAll(() => {
   registerModelPricing('openai', (modelId) => (modelId === MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 10 } : undefined));
   registerModelPricing('gemini', (modelId) => (modelId === GEMINI_MODEL || modelId === GEMINI_EMBED_MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 10 } : undefined));
   registerModelPricing('mistral', (modelId) => (modelId === MISTRAL_EMBED_MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 0 } : undefined));
+  registerModelPricing('ollama', (modelId) => (modelId === OLLAMA_EMBED_MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 0 } : undefined));
 });
 
 afterAll(() => {
   registerModelPricing('openai', () => undefined);
   registerModelPricing('gemini', () => undefined);
   registerModelPricing('mistral', () => undefined);
+  registerModelPricing('ollama', () => undefined);
 });
 
 describe('what a call sends, as its bound counts it', () => {
@@ -347,6 +351,31 @@ describe('how a held embedding settles when its answers leave out their tokens',
       embedText({ provider: 'mistral', model: MISTRAL_EMBED_MODEL, apiKey: 'mistral-later-refused', input, maxInputsPerRequest: 1, budget: metered() }),
     ).rejects.toThrow('Embedding request failed (400)');
     expect(await fx.figures()).toEqual({ used: boundOf(input[0]), reserved: 0 });
+  });
+
+  it("renews an Ollama request's lease while it runs, so a reconcile past the lease leaves it to the call", async () => {
+    const leased = await openMeter({ leaseMs: 300, resolveExpired: () => ({ outcome: 'released' }) });
+    try {
+      const gate = opening();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => {
+          await gate.promise;
+          return json({ model: OLLAMA_EMBED_MODEL, embeddings: [[0.1]] });
+        }),
+      );
+      const budget = new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: leased.meter, accountId: ACCOUNT });
+      const pending = embedText({ provider: 'ollama', model: OLLAMA_EMBED_MODEL, baseUrl: 'http://ollama.test', input: 'x'.repeat(1_000), budget });
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await leased.meter.reconcile();
+      const held = (await leased.figures()).reserved;
+      expect(held).toBeGreaterThan(0);
+      gate.open();
+      await pending;
+      expect(await leased.figures()).toEqual({ used: held, reserved: 0 });
+    } finally {
+      await leased.close();
+    }
   });
 
   it('takes the whole reservation for a Gemini request whose answers count no tokens', async () => {
