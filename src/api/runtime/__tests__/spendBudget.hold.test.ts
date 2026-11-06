@@ -1,21 +1,24 @@
 /**
  * @fileoverview A generation helper's hold on a budget with a spend meter, at its edges, on SqlSpendMeter over SQLite:
  * what a call's `customModelParams` send counts in its bound (a Gemini `generationConfig`, which replaces the one the
- * provider builds; an output cap a field removes; a raw structured-output schema; context a field draws in), an
- * embedding's bound, and how a held call settles when the provider retried it, reported only a total, failed before
- * sending anything, or ran past the meter's lease, and when its signal fired before its stream was read.
+ * provider builds; an output cap a field removes; a raw structured-output schema; context a field draws in; a model a
+ * field names), an embedding's bound, how a held call settles when the provider retried it, reported only a total,
+ * failed before sending anything, or ran past the meter's lease, when its signal fired before its stream was read and
+ * when its reader held a chunk past the lease, and how an embedding settles when its answers leave out their tokens.
  *
- * The seat cases call a launched seat's provider (`meteredProviderManager`) with a provider object of the test's own.
+ * The seat cases call a launched seat's provider (`meteredProviderManager`) with a provider object of the test's own;
+ * the embedding cases stub fetch.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager.js';
 import type { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse, ModelUsage } from '../../../core/llm/providers/IProvider.js';
 import { SqlSpendMeter, type SqlSpendMeterOptions } from '../../../safety/runtime/SqlSpendMeter.js';
 import { toMicro } from '../../../safety/runtime/SpendReservations.js';
+import { embedText } from '../../embedText.js';
 import { meteredProviderManager } from '../agencyLaunch/meteredProviderManager.js';
-import { MAX_COST_TOOL_USE_TOKENS, estimateMaxCallCostUSD, maxInputTokens, registerModelPricing, utf8ByteLength } from '../modelPricing.js';
+import { MAX_COST_TOKENS_PER_MESSAGE, MAX_COST_TOOL_USE_TOKENS, estimateMaxCallCostUSD, maxInputTokens, registerModelPricing, utf8ByteLength } from '../modelPricing.js';
 import { SpendBudget, UnpricedModelError, costOfUsageUSD, holdCall, maxCostRequestOf, type HelperCall } from '../spendBudget.js';
 
 const ACCOUNT = 'acct-hold';
@@ -24,6 +27,10 @@ const PERIOD = '2026-11';
 const MODEL = 'stub-model';
 /** The Gemini model the Gemini cases name, priced by the table this file registers. */
 const GEMINI_MODEL = 'stub-gemini';
+/** The Gemini embedding model the embedding cases name: it counts no tokens, and a host's table prices it. */
+const GEMINI_EMBED_MODEL = 'gemini-embedding-001';
+/** The Mistral embedding model the embedding cases name, priced by the table this file registers. */
+const MISTRAL_EMBED_MODEL = 'stub-mistral-embed';
 const MAX_TOKENS = 100;
 const MESSAGES: ChatMessage[] = [{ role: 'user', content: 'Say hello.' }];
 /** The usage a finished seat call reports. */
@@ -98,12 +105,14 @@ function seat(budget: SpendBudget, answer: (options: ModelCompletionOptions) => 
 
 beforeAll(() => {
   registerModelPricing('openai', (modelId) => (modelId === MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 10 } : undefined));
-  registerModelPricing('gemini', (modelId) => (modelId === GEMINI_MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 10 } : undefined));
+  registerModelPricing('gemini', (modelId) => (modelId === GEMINI_MODEL || modelId === GEMINI_EMBED_MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 10 } : undefined));
+  registerModelPricing('mistral', (modelId) => (modelId === MISTRAL_EMBED_MODEL ? { inputPerMTokUSD: 1, outputPerMTokUSD: 0 } : undefined));
 });
 
 afterAll(() => {
   registerModelPricing('openai', () => undefined);
   registerModelPricing('gemini', () => undefined);
+  registerModelPricing('mistral', () => undefined);
 });
 
 describe('what a call sends, as its bound counts it', () => {
@@ -131,6 +140,20 @@ describe('what a call sends, as its bound counts it', () => {
     const req = maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, { generationConfig: { maxOutputTokens: MAX_TOKENS, candidateCount: 2 } }));
     expect(req.n).toBe(2);
     expect(estimateMaxCallCostUSD('gemini', GEMINI_MODEL, req)).toBeUndefined();
+  });
+
+  it("counts the call's own cap beside a Gemini generation_config, which leaves the provider's in the request", () => {
+    expect(maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, { generation_config: { maxOutputTokens: 50 } })).maxOutputTokens).toBe(MAX_TOKENS);
+  });
+
+  it('has no bound for a completion count that is not a number, which a provider may read as one', () => {
+    const req = maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, { generationConfig: { maxOutputTokens: MAX_TOKENS, candidateCount: '2' } }));
+    expect(estimateMaxCallCostUSD('gemini', GEMINI_MODEL, req)).toBeUndefined();
+  });
+
+  it.each([{ model: 'a-dearer-model' }, { models: ['a-dearer-model'] }])('has no bound for a call whose fields name a model of their own: %j', (fields) => {
+    const req = maxCostRequestOf(chatCall('openai', MODEL, fields));
+    expect(estimateMaxCallCostUSD('openai', MODEL, req)).toBeUndefined();
   });
 
   it("keeps the call's own cap on a provider that drops a generationConfig", () => {
@@ -262,5 +285,100 @@ describe('a held stream whose signal fired before it was read', () => {
     expect(chunks).toHaveLength(1);
     expect(chunks[0].error?.type).toBe('abort');
     expect(await fx.figures()).toEqual({ used: 0, reserved: 0 });
+  });
+
+  it('renews its lease again once a reader that held one chunk past the lease reads on', async () => {
+    const leased = await openMeter({ leaseMs: 300, resolveExpired: () => ({ outcome: 'released' }) });
+    try {
+      const budget = new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: leased.meter, accountId: ACCOUNT });
+      const hold = await holdCall(budget, chatCall('openai', MODEL));
+      const gate = opening();
+      async function* source(): AsyncGenerator<ModelCompletionResponse, void, undefined> {
+        yield { ...completion(), usage: undefined };
+        await gate.promise;
+        yield completion();
+      }
+      const reader = hold.stream(source())[Symbol.asyncIterator]();
+      await reader.next();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const waiting = reader.next();
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await leased.meter.reconcile();
+      expect((await leased.figures()).reserved).toBeGreaterThan(0);
+      gate.open();
+      await waiting;
+      await reader.next();
+      expect(await leased.figures()).toEqual({ used: toMicro(costOfUsageUSD('openai', MODEL, CHAT_USAGE) as number), reserved: 0 });
+    } finally {
+      await leased.close();
+    }
+  });
+});
+
+describe('how a held embedding settles when its answers leave out their tokens', () => {
+  let fx: MeterFixture;
+  const metered = (): SpendBudget => new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: fx.meter, accountId: ACCOUNT });
+  const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  /** What a Mistral answer with no usage is charged, at the bound of its one input. */
+  const boundOf = (input: string): number =>
+    toMicro(costOfUsageUSD('mistral', MISTRAL_EMBED_MODEL, { promptTokens: utf8ByteLength(input) + MAX_COST_TOKENS_PER_MESSAGE }, true) as number);
+  const noUsage = { data: [{ index: 0, embedding: [0.1] }], model: MISTRAL_EMBED_MODEL };
+
+  beforeEach(async () => {
+    fx = await openMeter();
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await fx.close();
+  });
+
+  it("settles at the bound of its inputs on a host's price row when an answer omits its prompt tokens", async () => {
+    const input = 'x'.repeat(1_000);
+    vi.stubGlobal('fetch', vi.fn(async () => json(noUsage)));
+    await embedText({ provider: 'mistral', model: MISTRAL_EMBED_MODEL, apiKey: 'mistral-omits-usage', input, budget: metered() });
+    expect(await fx.figures()).toEqual({ used: boundOf(input), reserved: 0 });
+  });
+
+  it('settles a later batch the provider refused at the bound of the batch that answered with no count', async () => {
+    const input = ['x'.repeat(1_000), 'y'.repeat(1_000)];
+    const answers = [json(noUsage), json({ error: { message: 'bad request' } }, 400)];
+    vi.stubGlobal('fetch', vi.fn(async () => answers.shift() as Response));
+    await expect(
+      embedText({ provider: 'mistral', model: MISTRAL_EMBED_MODEL, apiKey: 'mistral-later-refused', input, maxInputsPerRequest: 1, budget: metered() }),
+    ).rejects.toThrow('Embedding request failed (400)');
+    expect(await fx.figures()).toEqual({ used: boundOf(input[0]), reserved: 0 });
+  });
+
+  it('takes the whole reservation for a Gemini request whose answers count no tokens', async () => {
+    let held = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        held = (await fx.figures()).reserved;
+        return json({ embeddings: [{ values: [0.1] }] });
+      }),
+    );
+    await embedText({ provider: 'gemini', model: GEMINI_EMBED_MODEL, apiKey: 'gemini-counts-nothing', input: 'x'.repeat(1_000), budget: metered() });
+    expect(held).toBeGreaterThan(0);
+    expect(await fx.figures()).toEqual({ used: held, reserved: 0 });
+  });
+
+  it('takes the whole reservation for a Gemini request refused after a batch that counted no tokens', async () => {
+    let held = 0;
+    const input = Array.from({ length: 101 }, (_, i) => `text ${i}`);
+    let sent = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        sent += 1;
+        held = (await fx.figures()).reserved;
+        return sent === 1 ? json({ embeddings: input.slice(0, 100).map(() => ({ values: [0.1] })) }) : json({ error: { message: 'bad request' } }, 400);
+      }),
+    );
+    await expect(
+      embedText({ provider: 'gemini', model: GEMINI_EMBED_MODEL, apiKey: 'gemini-later-refused', input, budget: metered() }),
+    ).rejects.toThrow();
+    expect(held).toBeGreaterThan(0);
+    expect(await fx.figures()).toEqual({ used: held, reserved: 0 });
   });
 });
