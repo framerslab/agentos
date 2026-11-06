@@ -309,6 +309,30 @@ describe('a frame in flight after the flush that ended the stream', () => {
     expect(voice.stt.inputEnded).toBe(true);
   });
 
+  it('drops a frame after the flush that ended the stream over funded sockets before checking it', async () => {
+    const hooks: SttConnectionHooks = {
+      authorize: async () => {},
+      usage: () => {},
+      audioCeiling: () => 60,
+    };
+    const voice = await startVoiceSession(deepgram(), { connectionHooks: hooks });
+    voice.frame();
+    await turns();
+    const flushing = voice.stt.flush();
+    await turns();
+    // A frame the stream no longer takes: its rate is not checked, so it fails nothing.
+    void voice.stt.pushAudio({ samples: new Float32Array(160), sampleRate: 0, timestamp: 0 });
+    await vi.advanceTimersByTimeAsync(200);
+    await flushing;
+    await turns();
+    sockets.instances[0]!.drop();
+    await turns();
+
+    expect(sockets.instances).toHaveLength(1);
+    expect(voice.orchestrator.state).toBe('listening');
+    expect(voice.failed()).toBe(false);
+  });
+
   it('does not take a ceiling drain of funded sockets for the end of the stream', async () => {
     const hooks: SttConnectionHooks = {
       authorize: async () => {},

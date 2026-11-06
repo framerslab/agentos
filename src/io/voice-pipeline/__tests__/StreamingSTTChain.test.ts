@@ -390,6 +390,40 @@ describe('StreamingSTTChain: mid-utterance failover and close', () => {
     expect(session.inputEnded).toBe(true);
   });
 
+  it('drops a frame after the flush that ended the stream before checking it: an empty or oversized one ends nothing', async () => {
+    const sessionA = Object.assign(mkClosingSession('a'), { inputEnded: false });
+    const startB = vi.fn(async () => mkClosingSession('b'));
+    const chain = new StreamingSTTChain(
+      [mkProvider('a', 10, async () => sessionA), mkProvider('b', 20, startB)],
+      { enableMidUtteranceFailover: true }
+    );
+    const session = await chain.startSession();
+    const errors: Error[] = [];
+    session.on('error', (error: Error) => errors.push(error));
+    const closed = vi.fn();
+    session.on('close', closed);
+
+    await session.flush();
+    sessionA.inputEnded = true;
+    await session.pushAudio({ samples: new Float32Array(0), sampleRate: 16_000, timestamp: 0 });
+    await session.pushAudio({ samples: new Float32Array(16_000 * 4), sampleRate: 16_000, timestamp: 0 });
+    await settle();
+
+    // The provider is still draining: it is not closed, and its last final can still go out.
+    expect(errors).toEqual([]);
+    expect(closed).not.toHaveBeenCalled();
+    expect(sessionA.close).not.toHaveBeenCalled();
+    expect(sessionA.pushAudio).not.toHaveBeenCalled();
+    sessionA.emit('transcript', { text: 'last words', confidence: 1, words: [], isFinal: true });
+    sessionA.emit('close');
+    await settle();
+
+    expect(startB).not.toHaveBeenCalled();
+    expect(errors).toEqual([]);
+    expect(closed).toHaveBeenCalledTimes(1);
+    expect(session.inputEnded).toBe(true);
+  });
+
   it('keeps the report that a flush ended the stream when the caller closes the facade before the provider closes', async () => {
     const sessionA = Object.assign(mkClosingSession('a'), { inputEnded: false });
     const chain = new StreamingSTTChain(
