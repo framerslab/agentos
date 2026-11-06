@@ -125,8 +125,9 @@ describe('AnthropicProvider operation id', () => {
     expect(sent[1]).toBe(sent[0]);
   });
 
+  // The stream path sends its request once (a key hop aside), so only the two other paths retry the 503.
   it('sends the operation id the call names on every attempt, in place of one of its own, on all three paths', async () => {
-    stub.queue(MESSAGES, UNAVAILABLE, textTurn('whole'), UNAVAILABLE, textTurn('stream'), UNAVAILABLE, messageJson('json'));
+    stub.queue(MESSAGES, UNAVAILABLE, textTurn('whole'), textTurn('stream'), UNAVAILABLE, messageJson('json'));
     const anthropic = await provider({ operationIdHeader: HEADER });
 
     await anthropic.generateCompletion(MODEL, messages, { operationId: 'op-whole' });
@@ -136,7 +137,7 @@ describe('AnthropicProvider operation id', () => {
     const overJson = await provider({ operationIdHeader: HEADER, streamCompletions: false });
     await overJson.generateCompletion(MODEL, messages, { operationId: 'op-json' });
 
-    expect(ids()).toEqual(['op-whole', 'op-whole', 'op-stream', 'op-stream', 'op-json', 'op-json']);
+    expect(ids()).toEqual(['op-whole', 'op-whole', 'op-stream', 'op-json', 'op-json']);
   });
 
   it('sends the same operation id again when a stream ended before its last event and the call is retried', async () => {
