@@ -82,7 +82,8 @@ const frameMs = (f: AudioFrame): number => (f.samples.length / f.sampleRate) * 1
  * reconnect, and so does the close of a session whose `inputEnded` reports that
  * the flush ended its stream, whatever came after the flush. For any other
  * session, activity after a completed flush makes a later close a failure. The
- * session's `inputEnded` reports what the provider's session in use reports.
+ * session's `inputEnded` reports what the provider's session in use reports,
+ * and a frame pushed while it does is dropped before the replay ring keeps it.
  *
  * A session opened with `config.call` is scoped instead ({@link openScopedReconnect}): it takes
  * `pushAudioScoped()` frames that carry its current identity, replays them with that identity into a new
@@ -319,6 +320,9 @@ export class ReconnectingSTT implements IStreamingSTT {
     const session = Object.assign(facade, {
       pushAudio: (frame: AudioFrame): void => {
         if (ended || closedByCaller) return;
+        // A frame sent to a stream a flush ended is no input: it stays out of the ring, so a reconnect during the
+        // provider's drain does not replay it.
+        if (current.inputEnded === true) return;
         flushed = false;
         flushing = undefined;
         pushedMs += frameMs(frame);
