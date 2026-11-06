@@ -361,6 +361,43 @@ describe('TranscriptTranslator.translateLine', () => {
     expect(failures()).toEqual([expect.objectContaining({ provider: 'openai', reason: 'incomplete', status: 200 })]);
   });
 
+  it('refuses a Responses answer marked failed, though it holds text, and records the call at the usage it reported', async () => {
+    answer(
+      jsonResponse({
+        id: 'resp_1',
+        object: 'response',
+        model: RESPONSES_MODEL,
+        status: 'failed',
+        error: { code: 'server_error', message: 'The model failed.' },
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'Good mor' }] }],
+        usage: { input_tokens: 40, output_tokens: 3, total_tokens: 43 },
+      }),
+    );
+    const failure = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', { ...OPTIONS, model: RESPONSES_MODEL }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TranslationProviderError);
+    expect(failure).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED', unansweredAttempts: 0, usage: { promptTokens: 40, completionTokens: 3 } });
+    const price = (usage: { promptTokens?: number; completionTokens?: number }) => (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
+    expect(TranscriptTranslator.failedCallMicro(failure, 9_999, price)).toBe(43);
+  });
+
+  it('refuses a Responses answer cut off with no reason, though it holds text', async () => {
+    answer(
+      jsonResponse({
+        id: 'resp_1',
+        object: 'response',
+        model: RESPONSES_MODEL,
+        status: 'incomplete',
+        incomplete_details: null,
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'Good mor' }] }],
+        usage: { input_tokens: 40, output_tokens: 3, total_tokens: 43 },
+      }),
+    );
+    await expect(new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', { ...OPTIONS, model: RESPONSES_MODEL })).rejects.toMatchObject({
+      code: 'TRANSLATION_TRUNCATED',
+      usage: { promptTokens: 40, completionTokens: 3 },
+    });
+  });
+
   it('is exported from the package root', async () => {
     const root = await import('../../../../index');
     expect(typeof root.TranscriptTranslator).toBe('function');
