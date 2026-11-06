@@ -697,7 +697,8 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         if (resolved.providerId === 'ollama') {
           // Ollama uses its own /api/embed endpoint format
           const baseUrl = resolved.baseUrl ?? 'http://localhost:11434';
-          const result = await callOllamaEmbed(baseUrl, resolved.modelId, inputArray, opts.abortSignal);
+          // The hold renews its reservation's lease while the request runs.
+          const result = await held.during(() => callOllamaEmbed(baseUrl, resolved.modelId, inputArray, opts.abortSignal));
 
           embeddings = result.embeddings;
           reportedModel = result.model;
