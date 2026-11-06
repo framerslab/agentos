@@ -102,7 +102,8 @@ export function heldAttempt(
     const seen: Seen = { usage: undefined, output: false };
     let finished = false;
     try {
-      for await (const chunk of attempt) {
+      // Read through the hold, which renews the reservation's lease while the attempt runs.
+      for await (const chunk of held.reading(attempt)) {
         if (chunk.usage) seen.usage = chunk.usage;
         if (chunk.error) seen.failure ??= { error: chunk.error, afterOutput: seen.output };
         else seen.output = true;

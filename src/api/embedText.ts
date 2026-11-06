@@ -688,6 +688,11 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         let embeddings: number[][];
         let reportedModel: string;
         let usage: { promptTokens: number; totalTokens: number; costUSD?: number };
+        // Tokens charged for the batches whose answer reported no prompt tokens: the bound of their inputs.
+        let unreportedTokens = 0;
+        // What the hold prices the answers at: the tokens they counted and the bound of those they did not. A host's
+        // price row reprices the tokens and passes over `costUSD`.
+        const billedUsage = () => ({ ...usage, promptTokens: usage.promptTokens + unreportedTokens });
 
         if (resolved.providerId === 'ollama') {
           // Ollama uses its own /api/embed endpoint format
@@ -713,11 +718,14 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             apiKey: resolved.apiKey,
             ...(resolved.baseUrl ? { baseURL: resolved.baseUrl } : {}),
           });
-          const result = await gemini
-            .generateEmbeddings(resolved.modelId, inputArray, {
-              ...(opts.dimensions ? { dimensions: opts.dimensions } : {}),
-              ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
-            })
+          // The hold renews its reservation's lease while the batches run.
+          const result = await held
+            .during(() =>
+              gemini.generateEmbeddings(resolved.modelId, inputArray, {
+                ...(opts.dimensions ? { dimensions: opts.dimensions } : {}),
+                ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+              }),
+            )
             .catch((error: unknown) => {
               // A batch that fails after earlier ones succeeded still leaves
               // those billed; record their usage before the error propagates.
@@ -729,7 +737,9 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                   ...(partial.costUSD !== undefined ? { costUSD: partial.costUSD } : {}),
                 };
                 budget?.record(partial.costUSD, partial.total_tokens, 'embed_text');
-                held.billedSoFar(metricUsage);
+                // A model that counts no tokens (gemini-embedding-001) was billed for what its report leaves out: a
+                // report of a total alone settles the whole reservation.
+                held.billedSoFar(partial.prompt_tokens > 0 ? metricUsage : { totalTokens: partial.total_tokens });
               }
               throw error;
             });
@@ -782,8 +792,6 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             return bytes;
           });
           let offset = 0;
-          // Tokens charged for the batches whose answer reported no prompt tokens: the bound of their inputs.
-          let unreportedTokens = 0;
           // Between batches nothing is in flight: a stop there settles the hold at what the batches so far were billed.
           const stopIfAborted = async (): Promise<void> => {
             if (!opts.abortSignal?.aborted) return;
@@ -804,15 +812,20 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                 bytes += inputBytes;
                 offset++;
               }
-              const result = await callOpenAIEmbedding(
-                baseUrl,
-                resolved.apiKey,
-                resolved.modelId,
-                batch,
-                opts.dimensions,
-                opts.abortSignal,
-                held.onAttempt,
-                DIMENSIONS_FIELDS.get(resolved.providerId),
+              // The hold renews its reservation's lease while the batch's request runs.
+              const endpoint = baseUrl;
+              const apiKey = resolved.apiKey;
+              const result = await held.during(() =>
+                callOpenAIEmbedding(
+                  endpoint,
+                  apiKey,
+                  resolved.modelId,
+                  batch,
+                  opts.dimensions,
+                  opts.abortSignal,
+                  held.onAttempt,
+                  DIMENSIONS_FIELDS.get(resolved.providerId),
+                ),
               );
 
               // Each response's indices start at zero for its own batch.
@@ -843,7 +856,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
               if (costUSD !== undefined) usage.costUSD = costUSD;
               metricUsage = usage;
               // The batches so far answered and were billed this.
-              held.billedSoFar(usage);
+              held.billedSoFar(billedUsage());
               await stopIfAborted();
             } while (offset < inputArray.length);
           } catch (error) {
@@ -856,7 +869,9 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
 
         metricUsage = usage;
         budget?.record(usage.costUSD, usage.totalTokens, 'embed_text');
-        await held.settle({ kind: 'completed', usage });
+        // An answer that counts no tokens for its input says nothing of its bill: the call takes its whole reservation.
+        const counted = inputArray.length === 0 || billedUsage().promptTokens > 0;
+        await held.settle({ kind: 'completed', usage: counted ? billedUsage() : undefined });
         span?.setAttribute('agentos.api.embed_dimensions', embeddings[0]?.length ?? 0);
         attachUsageAttributes(span, {
           promptTokens: usage.promptTokens,
