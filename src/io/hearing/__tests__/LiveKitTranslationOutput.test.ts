@@ -213,7 +213,8 @@ describe('LiveKitTranslationOutput', () => {
     const output: LiveKitTranslationOutput = new LiveKitTranslationOutput({
       room,
       encode: (line, seq) => {
-        nested ??= output.write(made('b', 'Two.'), { destinationIdentities: ['p-1'] });
+        // Only the outer line writes: `write` runs this synchronously, before any assignment of its result could stop it.
+        if (line.itemId === 'a') nested = output.write(made('b', 'Two.'), { destinationIdentities: ['p-1'] });
         return JSON.stringify({ ...line, seq });
       },
     });
