@@ -69,6 +69,8 @@ export class LiveKitTranslationOutput {
   private readonly encode: (line: TranslationOutputLine, seq: number) => string;
   private readonly ledgers = new Map<string, Written[]>();
   private chain: Promise<unknown> = Promise.resolve();
+  /** Whether `encode` is running, so a write made from inside it waits for the line being encoded. */
+  private encoding = false;
 
   constructor(private readonly options: LiveKitTranslationOutputOptions) {
     this.topic = options.topic ?? LIVEKIT_TRANSLATION_TOPIC;
@@ -82,25 +84,21 @@ export class LiveKitTranslationOutput {
    * either afterwards changes neither this send nor a replay of it, and `encode` is given a copy of its own. A send
    * that fails rejects this write and leaves the line in the ledger, so a replay sends it. An `encode` that throws
    * rejects this write too, never throwing at the caller, and the line is neither numbered nor kept. A write made from
-   * inside `encode` takes the next number, so its target's numbers stay distinct and a replay tells the lines apart.
+   * inside `encode` waits for the line being encoded, so it goes out after that line with the next number, or takes
+   * that line's number when the encode throws; the ledger holds finished lines alone, so a replay never sees one being
+   * encoded.
    */
   async write(line: TranslationOutputLine, to: { destinationIdentities: readonly string[] }): Promise<void> {
     const kept: TranslationOutputLine = { ...line };
     const destinationIdentities = [...to.destinationIdentities];
+    // `encode` is synchronous, so by the next microtask the line it was given is numbered, kept and queued, or refused.
+    if (this.encoding) await Promise.resolve();
     const ledger = this.ledgers.get(kept.target) ?? [];
     this.ledgers.set(kept.target, ledger);
     const last = ledger[ledger.length - 1];
     const seq = (last?.seq ?? 0) + 1;
-    // Kept before encode runs, so a write made from inside it takes the next number rather than this one.
-    const written: Written = { seq, line: kept, text: '' };
+    const written: Written = { seq, line: kept, text: this.encoded(kept, seq) };
     ledger.push(written);
-    try {
-      // The encode option is given a copy, so one that changes or keeps its argument never reaches the ledger's line.
-      written.text = this.encode({ ...kept }, seq);
-    } catch (error) {
-      ledger.splice(ledger.indexOf(written), 1);
-      throw error;
-    }
     // Never to the room: LiveKit sends a stream with no destination identities to every participant.
     if (destinationIdentities.length === 0) return;
     return this.enqueue(() => this.sendLine(written, destinationIdentities));
@@ -129,6 +127,17 @@ export class LiveKitTranslationOutput {
         .sendText(text, { topic, destinationIdentities })
         .then(() => undefined)
     );
+  }
+
+  /** The line's stream text, with `encoding` set while the option runs. */
+  private encoded(line: TranslationOutputLine, seq: number): string {
+    this.encoding = true;
+    try {
+      // The encode option is given a copy, so one that changes or keeps its argument never reaches the ledger's line.
+      return this.encode({ ...line }, seq);
+    } finally {
+      this.encoding = false;
+    }
   }
 
   private local(): NonNullable<LiveKitTranscriptionRoomLike['localParticipant']> {
