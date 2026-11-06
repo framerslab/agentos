@@ -207,6 +207,26 @@ describe('LiveKitTranslationOutput', () => {
     ]);
   });
 
+  it('gives a line written from inside the encode option a number of its own, so a replay tells the two apart', async () => {
+    const room = new FakeRoom();
+    let nested: Promise<void> | undefined;
+    const output: LiveKitTranslationOutput = new LiveKitTranslationOutput({
+      room,
+      encode: (line, seq) => {
+        nested ??= output.write(made('b', 'Two.'), { destinationIdentities: ['p-1'] });
+        return JSON.stringify({ ...line, seq });
+      },
+    });
+    await output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] });
+    await nested;
+    const numberOf = (itemId: string) =>
+      sent(room).find(({ text }) => JSON.parse(text).itemId === itemId)?.options.attributes[LIVEKIT_TRANSLATION_ATTRIBUTES.seq];
+    expect([numberOf('a'), numberOf('b')]).toEqual(['1', '2']);
+    room.localParticipant.sendText.mockClear();
+    expect(await output.replayAfter(1, 'en', 'p-1')).toBe(1);
+    expect(JSON.parse(sent(room)[0].text).itemId).toBe('b');
+  });
+
   it('rejects a write whose encode throws, sending nothing and numbering nothing for it', async () => {
     const room = new FakeRoom();
     let broken = true;
