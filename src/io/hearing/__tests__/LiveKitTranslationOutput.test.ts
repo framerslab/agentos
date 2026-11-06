@@ -15,6 +15,10 @@ interface SentOptions {
 const sent = (room: FakeRoom) =>
   room.localParticipant.sendText.mock.calls.map(([text, options]) => ({ text, options: options as SentOptions }));
 
+/** Each stream's line and number, in the order they were sent. */
+const numbered = (room: FakeRoom) =>
+  sent(room).map(({ text, options }) => [JSON.parse(text).itemId, options.attributes[LIVEKIT_TRANSLATION_ATTRIBUTES.seq]]);
+
 describe('LiveKitTranslationOutput', () => {
   it('sends one stream per line on lk.translation to the given identities alone, numbered per target from 1', async () => {
     const room = new FakeRoom();
@@ -207,7 +211,7 @@ describe('LiveKitTranslationOutput', () => {
     ]);
   });
 
-  it('gives a line written from inside the encode option a number of its own, so a replay tells the two apart', async () => {
+  it('sends a line written from inside the encode option after the line being encoded, with the next number', async () => {
     const room = new FakeRoom();
     let nested: Promise<void> | undefined;
     const output: LiveKitTranslationOutput = new LiveKitTranslationOutput({
@@ -220,12 +224,45 @@ describe('LiveKitTranslationOutput', () => {
     });
     await output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] });
     await nested;
-    const numberOf = (itemId: string) =>
-      sent(room).find(({ text }) => JSON.parse(text).itemId === itemId)?.options.attributes[LIVEKIT_TRANSLATION_ATTRIBUTES.seq];
-    expect([numberOf('a'), numberOf('b')]).toEqual(['1', '2']);
+    // In number order, so a reader that saves its place at 2 has read 1.
+    expect(numbered(room)).toEqual([
+      ['a', '1'],
+      ['b', '2'],
+    ]);
     room.localParticipant.sendText.mockClear();
     expect(await output.replayAfter(1, 'en', 'p-1')).toBe(1);
-    expect(JSON.parse(sent(room)[0].text).itemId).toBe('b');
+    expect(numbered(room)).toEqual([['b', '2']]);
+  });
+
+  it('gives the first number to a line written from inside an encode that then throws', async () => {
+    const room = new FakeRoom();
+    let nested: Promise<void> | undefined;
+    const output: LiveKitTranslationOutput = new LiveKitTranslationOutput({
+      room,
+      encode: (line, seq) => {
+        if (line.itemId !== 'a') return JSON.stringify({ ...line, seq });
+        nested = output.write(made('b', 'Two.'), { destinationIdentities: ['p-1'] });
+        throw new Error('cannot encode');
+      },
+    });
+    await expect(output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] })).rejects.toThrow('cannot encode');
+    await nested;
+    expect(numbered(room)).toEqual([['b', '1']]);
+  });
+
+  it('sends no replay of a line whose encode asked for the replay and then threw', async () => {
+    const room = new FakeRoom();
+    let replay: Promise<number> | undefined;
+    const output: LiveKitTranslationOutput = new LiveKitTranslationOutput({
+      room,
+      encode: () => {
+        replay = output.replayAfter(null, 'en', 'p-2');
+        throw new Error('cannot encode');
+      },
+    });
+    await expect(output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] })).rejects.toThrow('cannot encode');
+    expect(await replay).toBe(0);
+    expect(sent(room)).toHaveLength(0);
   });
 
   it('rejects a write whose encode throws, sending nothing and numbering nothing for it', async () => {
