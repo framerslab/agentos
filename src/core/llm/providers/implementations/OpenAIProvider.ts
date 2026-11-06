@@ -800,22 +800,40 @@ function responsesErrorStatus(code: string | null | undefined): number | undefin
 }
 
 /**
+ * The error a `/v1/responses` result marked `failed` throws, streamed or not,
+ * as a failed HTTP request does: the status of a retryable error code and the
+ * billed usage in `details.usage`, so callers can fail over and meter the
+ * attempt. Output the result holds is not an answer.
+ */
+function responsesFailedError(
+  response: OpenAIAPITypes.ResponsesResponse | undefined,
+  usage: ModelUsage | undefined,
+): OpenAIProviderError {
+  return new OpenAIProviderError(
+    response?.error?.message ?? 'OpenAI /responses reported the response as failed',
+    'RESPONSES_FAILED',
+    response?.error?.code ?? undefined,
+    'response_failed',
+    responsesErrorStatus(response?.error?.code),
+    { error: response?.error, ...(usage ? { usage } : {}) },
+  );
+}
+
+/**
  * The chat-style finish reason of a `/v1/responses` result, shared by the
  * streamed and non-streamed mappings. An incomplete response reports why it
  * stopped, as Chat Completions does, even when it holds a function call (the
- * call may be cut off): `length` when the output budget ran out and
- * `content_filter` when a filter stopped it. Otherwise `tool_calls` when the
- * turn called tools, else `stop`.
+ * call may be cut off): `content_filter` when a filter stopped it, and `length`
+ * otherwise, the output budget's or any reason this does not know or none,
+ * since `stop` would present the part as the whole. Otherwise `tool_calls` when
+ * the turn called tools, else `stop`.
  */
 function responsesFinishReason(
   status: string | undefined,
   incompleteReason: string | undefined,
   hasToolCalls: boolean,
 ): string {
-  if (status === 'incomplete') {
-    if (incompleteReason === 'max_output_tokens' || incompleteReason === 'max_tokens') return 'length';
-    if (incompleteReason === 'content_filter') return 'content_filter';
-  }
+  if (status === 'incomplete') return incompleteReason === 'content_filter' ? 'content_filter' : 'length';
   return hasToolCalls ? 'tool_calls' : 'stop';
 }
 
@@ -1642,16 +1660,7 @@ export class OpenAIProvider implements IProvider {
           noteResponse(response);
           const message = response?.error?.message ?? 'OpenAI /responses reported the response as failed';
           const usage = response?.usage ? this.mapResponsesUsage(response.usage, response.model ?? modelId) : undefined;
-          if (!deliveredOutput()) {
-            throw new OpenAIProviderError(
-              message,
-              'RESPONSES_FAILED',
-              response?.error?.code ?? undefined,
-              'response_failed',
-              responsesErrorStatus(response?.error?.code),
-              { error: response?.error, ...(usage ? { usage } : {}) },
-            );
-          }
+          if (!deliveredOutput()) throw responsesFailedError(response, usage);
           yield chunk({
             choices: [],
             error: {
@@ -2257,6 +2266,10 @@ export class OpenAIProvider implements IProvider {
     apiResponse: OpenAIAPITypes.ResponsesResponse,
     modelId: string
   ): ModelCompletionResponse {
+    if (apiResponse.status === 'failed') {
+      const usage = apiResponse.usage ? this.mapResponsesUsage(apiResponse.usage, apiResponse.model ?? modelId) : undefined;
+      throw responsesFailedError(apiResponse, usage);
+    }
     const { text: assistantText, toolCalls, itemCount } = summarizeResponsesOutput(apiResponse.output);
     const finishReason = responsesFinishReason(
       apiResponse.status,

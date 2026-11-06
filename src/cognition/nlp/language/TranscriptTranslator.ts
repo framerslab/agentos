@@ -202,6 +202,7 @@ export class TranscriptTranslator {
     // and those whose success status came and whose body never became the answer (a connection cut while it was read).
     let noAnswer = 0;
     let succeeded = 0;
+    let lastSucceeded = false;
     // `read` is how many successful attempts' bodies the call accounts for: the answer's, or the one whose usage an
     // error raised on a success carries.
     const unanswered = (read: number): number => noAnswer + Math.max(0, succeeded - read);
@@ -241,6 +242,7 @@ export class TranscriptTranslator {
         // The provider reports each attempt once, when its status comes or when none came; a body lost after a
         // success status is not reported again, so it is counted here as a success the answer did not come from.
         onAttempt: (outcome) => {
+          lastSucceeded = outcome.ok;
           if (outcome.ok) succeeded += 1;
           else if (outcome.status === null) noAnswer += 1;
         },
@@ -255,9 +257,10 @@ export class TranscriptTranslator {
       }
       const status = statusOf(error);
       const billed = billedUsageOf(error);
-      // Usage on an error accounts for a successful attempt's body only when the error is not an HTTP failure of its
-      // own: a 500's usage says nothing of the answer an earlier 200 may have been billed for.
-      const fromSuccess = billed !== null && (status === undefined || (status >= 200 && status < 300));
+      // Usage on an error accounts for a successful attempt's body only when that attempt was the last. A 500's usage
+      // says nothing of the answer an earlier 200 may have been billed for, and the error of a response marked failed
+      // can read a status of 500 though the attempt that brought it answered 200.
+      const fromSuccess = billed !== null && lastSucceeded;
       logTranslationFailed('openai', 'request_failed', status, error);
       throw new TranslationProviderError(
         `translation failed${status ? ` with HTTP ${status}` : ''}`,
