@@ -801,8 +801,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               return heldAttempt(
                 budget,
                 call,
-                (onAttempt, onLate) =>
-                  gateway.stream(resolution, messages, onAttempt ? { ...options, onAttempt } : options, responseSchema, schemaName, schemaInPrompt, onLate),
+                (held, onLate) => gateway.stream(resolution, messages, { ...options, ...held }, responseSchema, schemaName, schemaInPrompt, onLate),
                 onLateUsage,
               );
             }

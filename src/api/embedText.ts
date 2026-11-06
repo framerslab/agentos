@@ -737,10 +737,11 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                   totalTokens: partial.total_tokens,
                   ...(partial.costUSD !== undefined ? { costUSD: partial.costUSD } : {}),
                 };
-                budget?.record(partial.costUSD, partial.total_tokens, 'embed_text');
                 // A model that counts no tokens (gemini-embedding-001) was billed for what its report leaves out: a
-                // report of a total alone settles the whole reservation.
+                // report of a total alone settles the whole reservation. Told to the hold before the charge, which a
+                // guard's `onCapReached` function can throw from.
                 held.billedSoFar(partial.prompt_tokens > 0 ? metricUsage : { totalTokens: partial.total_tokens });
+                budget?.record(partial.costUSD, partial.total_tokens, 'embed_text');
               }
               throw error;
             });
@@ -869,10 +870,12 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         }
 
         metricUsage = usage;
-        budget?.record(usage.costUSD, usage.totalTokens, 'embed_text');
         // An answer that counts no tokens for its input says nothing of its bill: the call takes its whole reservation.
         const counted = inputArray.length === 0 || billedUsage().promptTokens > 0;
+        // Settled before the charge, which a guard's `onCapReached` function can throw from: the hold is consumed at
+        // the call's usage whatever the charge does, as SpendBudget.record's settle is.
         await held.settle({ kind: 'completed', usage: counted ? billedUsage() : undefined });
+        budget?.record(usage.costUSD, usage.totalTokens, 'embed_text');
         span?.setAttribute('agentos.api.embed_dimensions', embeddings[0]?.length ?? 0);
         attachUsageAttributes(span, {
           promptTokens: usage.promptTokens,

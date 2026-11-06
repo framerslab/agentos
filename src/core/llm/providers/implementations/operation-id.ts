@@ -3,8 +3,9 @@
  *
  * The operation id a provider sends with a call, in a header the host names.
  * A server in front of the provider (a metering proxy) reads it to tell a
- * retry of one call from a new call: the provider makes one id before a
- * call's first attempt and sends that value on every attempt of the call (a
+ * retry of one call from a new call: the provider takes the call's
+ * `operationId` option, or makes one id, before a call's first attempt and
+ * sends that value on every attempt of the call (a
  * retry after a 429, a 5xx, a network failure or a stream that ended early,
  * and a hop to another key of the pool). A request sent again with a changed
  * body, such as `generateObject`'s request with a raised token budget, is a
@@ -65,29 +66,34 @@ export function resolveOperationIdHeader(configured: string | undefined): string
 }
 
 /**
- * The header one call sends on each of its attempts: the resolved name with a
- * new UUID, or no header when neither the option nor the variable names one.
- * Call it once per call, before the first attempt, and send the same object on
- * every attempt.
+ * The header one call sends on each of its attempts: the resolved name with
+ * the call's own id (`id`, the call's `operationId` option) or else a new UUID,
+ * or no header when neither the option nor the variable names one. Call it
+ * once per call, before the first attempt, and send the same object on every
+ * attempt.
  *
  * @param configured The provider's `operationIdHeader` option.
+ * @param id The id the call names (`ModelCompletionOptions.operationId`); a blank one counts as unset.
  * @throws {RangeError} As {@link resolveOperationIdHeader}.
  */
-export function operationIdHeaders(configured: string | undefined): Record<string, string> {
-  return operationIdHeaderNamed(resolveOperationIdHeader(configured));
+export function operationIdHeaders(configured: string | undefined, id?: string): Record<string, string> {
+  return operationIdHeaderNamed(resolveOperationIdHeader(configured), id);
 }
 
 /**
- * A new operation id under `name`, a name {@link resolveOperationIdHeader}
- * returned, or no header when it is `undefined`. For a caller that resolves
- * the name once, outside its own error handling, and makes an id for each of
- * its requests: a key probe, whose catch turns a failed request into an
- * answer, resolves the name before it so a refused name rejects.
+ * An operation id under `name`, a name {@link resolveOperationIdHeader}
+ * returned: `id` when the call names one, else a new one; no header when
+ * `name` is `undefined`. For a caller that resolves the name once, outside its
+ * own error handling, and makes an id for each of its requests: a key probe,
+ * whose catch turns a failed request into an answer, resolves the name before
+ * it so a refused name rejects.
  *
  * @param name The resolved header name.
+ * @param id The id the call names; a blank one counts as unset.
  */
-export function operationIdHeaderNamed(name: string | undefined): Record<string, string> {
-  return name ? { [name]: generateUUID() } : {};
+export function operationIdHeaderNamed(name: string | undefined, id?: string): Record<string, string> {
+  if (!name) return {};
+  return { [name]: typeof id === 'string' && id.trim() !== '' ? id : generateUUID() };
 }
 
 /**

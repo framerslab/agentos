@@ -1267,7 +1267,7 @@ export class OpenAIProvider implements IProvider {
         false,
         options.requestTimeout,
         options.abortSignal,
-        { max: options.maxAttempts, onAttempt: options.onAttempt },
+        { max: options.maxAttempts, onAttempt: options.onAttempt, operationId: options.operationId },
         this.keySourceOf(options.apiKeyOverride),
       );
       return this.mapResponsesToCompletionResponse(responsesApiResponse, modelId);
@@ -1283,7 +1283,7 @@ export class OpenAIProvider implements IProvider {
       false,
       options.requestTimeout,
       options.abortSignal,
-      { max: options.maxAttempts, onAttempt: options.onAttempt },
+      { max: options.maxAttempts, onAttempt: options.onAttempt, operationId: options.operationId },
       this.keySourceOf(options.apiKeyOverride),
     );
 
@@ -1334,7 +1334,7 @@ export class OpenAIProvider implements IProvider {
         true,
         options.requestTimeout,
         abortSignal,
-        { max: options.maxAttempts, onAttempt: options.onAttempt },
+        { max: options.maxAttempts, onAttempt: options.onAttempt, operationId: options.operationId },
         this.keySourceOf(options.apiKeyOverride),
       );
     } catch (error: unknown) {
@@ -2655,7 +2655,8 @@ export class OpenAIProvider implements IProvider {
    * @param [attempts] - The call's attempt count (`max`, the configured `maxRetries` when left out) and its
    *   report (`onAttempt`, called once for each attempt sent, with the answer of its last send). A
    *   {@link CountingAttemptBudget} authorizes each attempt before it is sent, so one past the count is refused
-   *   first; a key hop re-sends inside its attempt and is not counted.
+   *   first; a key hop re-sends inside its attempt and is not counted. `operationId`, the call's own id, goes in
+   *   the operation id header in place of one this request makes.
    * @returns {Promise<T | ReadableStream<Uint8Array>>} The API response or stream.
    * @throws {OpenAIProviderError} If the request fails after retries or for non-retryable errors;
    *   `REQUEST_ABORTED` when the caller's signal ends it.
@@ -2670,7 +2671,7 @@ export class OpenAIProvider implements IProvider {
     expectStream?: false,
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
-    attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void },
+    attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void; operationId?: string },
     keySource?: 'pool' | 'override' | 'oauth',
   ): Promise<T>;
   private async makeApiRequest(
@@ -2681,7 +2682,7 @@ export class OpenAIProvider implements IProvider {
     expectStream: true,
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
-    attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void },
+    attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void; operationId?: string },
     keySource?: 'pool' | 'override' | 'oauth',
   ): Promise<ReadableStream<Uint8Array>>;
   private async makeApiRequest<T = unknown>(
@@ -2692,7 +2693,7 @@ export class OpenAIProvider implements IProvider {
     expectStream: boolean = false,
     requestTimeoutOverride?: number,
     abortSignal?: AbortSignal,
-    attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void },
+    attempts?: { max?: number; onAttempt?: (outcome: AttemptOutcome) => void; operationId?: string },
     keySource?: 'pool' | 'override' | 'oauth',
   ): Promise<T | ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
@@ -2715,9 +2716,10 @@ export class OpenAIProvider implements IProvider {
     if (this.config.organizationId) {
       headers['OpenAI-Organization'] = this.config.organizationId;
     }
-    // One operation id for the whole call: every attempt and key hop below sends this same value. It replaces a
-    // customHeaders entry of the same name in another case, which fetch would join with it into one field.
-    setOperationIdHeaders(headers, operationIdHeaders(this.config.operationIdHeader));
+    // One operation id for the whole call, the call's own when it names one: every attempt and key hop below sends
+    // this same value. It replaces a customHeaders entry of the same name in another case, which fetch would join with
+    // it into one field.
+    setOperationIdHeaders(headers, operationIdHeaders(this.config.operationIdHeader, attempts?.operationId));
 
     let lastError: Error = new OpenAIProviderError('Request failed after all retries.', 'MAX_RETRIES_REACHED');
 
