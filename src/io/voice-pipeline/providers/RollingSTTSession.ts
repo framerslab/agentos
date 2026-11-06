@@ -117,11 +117,11 @@ export class RollingSTTSession extends EventEmitter implements StreamingSTTSessi
   /**
    * Hands one frame on, draining, letting go of and replacing each socket whose funded ceiling it reaches. A close
    * made while a socket is let go of ends the frame there, with no successor. A frame after a flush that ended the
-   * stream is dropped.
+   * stream is dropped before it is checked.
    */
   private async send(frame: AudioFrame): Promise<void> {
-    if (!Number.isSafeInteger(frame.sampleRate) || frame.sampleRate <= 0) throw new RangeError('invalid input sample rate');
     if (this.inputEnded) return;
+    if (!Number.isSafeInteger(frame.sampleRate) || frame.sampleRate <= 0) throw new RangeError('invalid input sample rate');
     let consumed = 0;
     while (consumed < frame.samples.length && !this.closed) {
       const current = this.active;

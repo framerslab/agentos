@@ -127,7 +127,9 @@ export interface StreamingSTTChainOptions {
    * reports that the flush ended its stream, whatever frames came after the
    * flush: no backup opens and no failure is recorded. The facade's `inputEnded`
    * reports what the provider session in use reports, and keeps that after the
-   * close, the provider session's or the caller's. Later audio is ignored. A backup whose opening fails during
+   * close, the provider session's or the caller's. A frame pushed while the
+   * provider session in use reports it is dropped before it is checked, so an
+   * empty or oversized one ends nothing. Later audio is ignored. A backup whose opening fails during
    * the switch, or that fails as it takes the replay (an `'error'` or a
    * `'close'`, or a frame it refuses), is reported through `onProviderFailed`
    * and `provider_failed` as one whose opening fails at startup is, recorded
@@ -572,6 +574,9 @@ export class StreamingSTTChain implements IStreamingSTT {
     const wrapped: StreamingSTTSession = Object.assign(facade, {
       pushAudio: async (frame: AudioFrame): Promise<void> => {
         if (closed) return;
+        // A frame sent to a stream a flush ended is no input: it is dropped before it is checked, so it neither fails
+        // the provider session while it drains its last final nor enters the ring or a replay.
+        if (current?.inputEnded === true) return;
         flushed = false;
         const ms = frame.samples.length / frame.sampleRate * 1000;
         if (!Number.isFinite(ms) || ms <= 0 || ms > (this.opts.ringBufferCapacityMs ?? 3000)) {
