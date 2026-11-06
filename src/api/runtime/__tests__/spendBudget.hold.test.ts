@@ -4,20 +4,24 @@
  * provider builds; an output cap a field removes; a raw structured-output schema; context a field draws in; a model a
  * field names), an embedding's bound, how a held call settles when the provider retried it, reported only a total,
  * failed before sending anything, or ran past the meter's lease, when its signal fired before its stream was read and
- * when its reader held a chunk past the lease, and how an embedding settles when its answers leave out their tokens.
+ * when its reader held a chunk past the lease, how a held call settles at usage reported after it stopped, and how an
+ * embedding settles when its answers leave out their tokens or a guard's cap function throws at its charge.
  *
  * The seat cases call a launched seat's provider (`meteredProviderManager`) with a provider object of the test's own;
- * the embedding cases stub fetch.
+ * the late-usage case runs the real completion gateway over such a provider; the embedding cases stub fetch.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager.js';
 import type { ChatMessage, IProvider, ModelCompletionOptions, ModelCompletionResponse, ModelUsage } from '../../../core/llm/providers/IProvider.js';
+import { CostGuard } from '../../../safety/runtime/CostGuard.js';
 import { SqlSpendMeter, type SqlSpendMeterOptions } from '../../../safety/runtime/SqlSpendMeter.js';
 import { toMicro } from '../../../safety/runtime/SpendReservations.js';
 import { embedText } from '../../embedText.js';
 import { meteredProviderManager } from '../agencyLaunch/meteredProviderManager.js';
+import { createCompletionGateway, type CompletionResolution } from '../completionGateway.js';
+import { heldAttempt } from '../heldAttempt.js';
 import { MAX_COST_TOKENS_PER_MESSAGE, MAX_COST_TOOL_USE_TOKENS, estimateMaxCallCostUSD, maxInputTokens, registerModelPricing, utf8ByteLength } from '../modelPricing.js';
 import { SpendBudget, UnpricedModelError, costOfUsageUSD, holdCall, maxCostRequestOf, type HelperCall } from '../spendBudget.js';
 
@@ -150,6 +154,34 @@ describe('what a call sends, as its bound counts it', () => {
     expect(maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, { generation_config: { maxOutputTokens: 50 } })).maxOutputTokens).toBe(MAX_TOKENS);
   });
 
+  it.each([
+    { generationConfig: { maxOutputTokens: MAX_TOKENS, responseModalities: ['IMAGE'] } },
+    { generationConfig: { maxOutputTokens: MAX_TOKENS, responseModalities: ['TEXT', 'IMAGE'] } },
+    { generationConfig: { maxOutputTokens: MAX_TOKENS, responseModalities: ['AUDIO'] } },
+    { generationConfig: { maxOutputTokens: MAX_TOKENS, responseModalities: 'IMAGE' } },
+    { generationConfig: { maxOutputTokens: MAX_TOKENS, response_modalities: ['IMAGE'] } },
+    { generationConfig: { maxOutputTokens: MAX_TOKENS, speechConfig: { voiceConfig: {} } } },
+    { generationConfig: { maxOutputTokens: MAX_TOKENS, speech_config: {} } },
+    { generation_config: { responseModalities: ['IMAGE'] } },
+    { generation_config: { speechConfig: {} } },
+  ])('has no bound for a Gemini call that asks for output other than text: %j', (fields) => {
+    const req = maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, fields));
+    expect(estimateMaxCallCostUSD('gemini', GEMINI_MODEL, req)).toBeUndefined();
+  });
+
+  it.each([{ responseModalities: ['TEXT'] }, { responseModalities: ['text'] }, { responseModalities: [] }])(
+    'keeps the bound of a Gemini call that asks for text alone: %j',
+    (fields) => {
+      const req = maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, { generationConfig: { maxOutputTokens: MAX_TOKENS, ...fields } }));
+      expect(estimateMaxCallCostUSD('gemini', GEMINI_MODEL, req)).toBeGreaterThan(0);
+    },
+  );
+
+  it('keeps the bound of a call to a provider that drops a generationConfig, whatever output it names', () => {
+    const req = maxCostRequestOf(chatCall('openai', MODEL, { generationConfig: { responseModalities: ['IMAGE'], speechConfig: {} } }));
+    expect(estimateMaxCallCostUSD('openai', MODEL, req)).toBeGreaterThan(0);
+  });
+
   it('has no bound for a completion count that is not a number, which a provider may read as one', () => {
     const req = maxCostRequestOf(chatCall('gemini', GEMINI_MODEL, { generationConfig: { maxOutputTokens: MAX_TOKENS, candidateCount: '2' } }));
     expect(estimateMaxCallCostUSD('gemini', GEMINI_MODEL, req)).toBeUndefined();
@@ -209,12 +241,47 @@ describe('how a held seat call settles', () => {
   it('settles at its usage when the earlier attempts were refused before any output', async () => {
     fx = await openMeter();
     const provider = seat(metered(), async (options) => {
-      options.onAttempt?.({ attempt: 1, status: 503, ok: false });
+      options.onAttempt?.({ attempt: 1, status: 429, ok: false });
       options.onAttempt?.({ attempt: 2, status: 200, ok: true });
       return completion();
     });
     await provider.generateCompletion(MODEL, MESSAGES, { maxTokens: MAX_TOKENS });
     expect(await fx.figures()).toEqual({ used: toMicro(costOfUsageUSD('openai', MODEL, CHAT_USAGE) as number), reserved: 0 });
+  });
+
+  it('keeps a call held when an earlier attempt of it was answered with a 5xx, which does not show what was billed', async () => {
+    fx = await openMeter();
+    const provider = seat(metered(), async (options) => {
+      options.onAttempt?.({ attempt: 1, status: 503, ok: false });
+      options.onAttempt?.({ attempt: 2, status: 200, ok: true });
+      return completion();
+    });
+    await provider.generateCompletion(MODEL, MESSAGES, { maxTokens: MAX_TOKENS });
+    const figures = await fx.figures();
+    expect(figures.used).toBe(0);
+    expect(figures.reserved).toBeGreaterThan(0);
+  });
+
+  it.each([500, 502, 503, 504, 529])('keeps a call held that the provider reported and threw as a %i with no usage', async (status) => {
+    fx = await openMeter();
+    const provider = seat(metered(), async (options) => {
+      options.onAttempt?.({ attempt: 1, status, ok: false });
+      throw Object.assign(new Error('bad gateway'), { httpStatus: status });
+    });
+    await expect(provider.generateCompletion(MODEL, MESSAGES, { maxTokens: MAX_TOKENS })).rejects.toThrow('bad gateway');
+    const figures = await fx.figures();
+    expect(figures.used).toBe(0);
+    expect(figures.reserved).toBeGreaterThan(0);
+  });
+
+  it('keeps a call held that timed out with a 408, a status that says nothing of what ran', async () => {
+    fx = await openMeter();
+    const provider = seat(metered(), async (options) => {
+      options.onAttempt?.({ attempt: 1, status: 408, ok: false });
+      throw Object.assign(new Error('request timeout'), { httpStatus: 408 });
+    });
+    await expect(provider.generateCompletion(MODEL, MESSAGES, { maxTokens: MAX_TOKENS })).rejects.toThrow('request timeout');
+    expect((await fx.figures()).reserved).toBeGreaterThan(0);
   });
 
   it('takes the whole reservation for an answer whose usage names only a total, which no rate prices', async () => {
@@ -319,6 +386,87 @@ describe('a held stream whose signal fired before it was read', () => {
   });
 });
 
+describe('usage reported after a held call stopped', () => {
+  let fx: MeterFixture;
+  const metered = (): SpendBudget => new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: fx.meter, accountId: ACCOUNT });
+  const answerMicro = (): number => toMicro(costOfUsageUSD('openai', MODEL, CHAT_USAGE) as number);
+
+  beforeEach(async () => {
+    fx = await openMeter();
+  });
+  afterEach(async () => {
+    await fx.close();
+  });
+
+  it('settles a held reservation at that usage', async () => {
+    const hold = await holdCall(metered(), chatCall('openai', MODEL));
+    await hold.settle({ kind: 'left' });
+    const held = await fx.figures();
+    expect(held.used).toBe(0);
+    expect(held.reserved).toBeGreaterThan(0);
+    hold.lateUsage(CHAT_USAGE);
+    await vi.waitFor(async () => expect(await fx.figures()).toEqual({ used: answerMicro(), reserved: 0 }));
+  });
+
+  it('settles at usage reported before the end of the call was settled', async () => {
+    const hold = await holdCall(metered(), chatCall('openai', MODEL));
+    hold.lateUsage(CHAT_USAGE);
+    await hold.settle({ kind: 'left' });
+    expect(await fx.figures()).toEqual({ used: answerMicro(), reserved: 0 });
+  });
+
+  it('leaves a reservation held when what came is not a usage report', async () => {
+    const hold = await holdCall(metered(), chatCall('openai', MODEL));
+    await hold.settle({ kind: 'left' });
+    const held = await fx.figures();
+    hold.lateUsage({ note: 'no counts' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await fx.figures()).toEqual(held);
+  });
+
+  it('settles an attempt the caller stopped when its provider reports the bill on the way out, through the real gateway', async () => {
+    const opened = opening();
+    const controller = new AbortController();
+    const provider = {
+      providerId: 'openai',
+      // Reads the signal when its next event arrives: its abort chunk carries the request's bill.
+      async *generateCompletionStream(_modelId: string, _messages: ChatMessage[], options: ModelCompletionOptions) {
+        const chunk = { id: 'seat-1', object: 'chat.completion.chunk', created: 0, modelId: MODEL, choices: [] };
+        yield { ...chunk, responseTextDelta: 'Partial' };
+        await opened.promise;
+        if (options.abortSignal?.aborted) yield { ...chunk, isFinal: true, usage: CHAT_USAGE, error: { message: 'Stream aborted by caller', type: 'abort' } };
+      },
+    };
+    const resolution = {
+      providerId: 'openai',
+      modelId: MODEL,
+      hop: 0,
+      maxContextTokens: 128_000,
+      capabilities: ['tool_use'],
+      toolFormat: 'openai_functions',
+      optionOverrides: {},
+      chain: [{ provider: 'openai', model: MODEL }],
+      providerManager: { getProvider: () => provider } as unknown as AIModelProviderManager,
+    } as unknown as CompletionResolution;
+    const gateway = createCompletionGateway();
+    const onLateUsage = vi.fn();
+    const attempt = heldAttempt(
+      metered(),
+      { ...chatCall('openai', MODEL), abortSignal: controller.signal },
+      (held, onLate) =>
+        gateway.stream(resolution, MESSAGES, { maxTokens: MAX_TOKENS, abortSignal: controller.signal, ...held }, undefined, undefined, false, onLate),
+      onLateUsage,
+    );
+    for await (const _chunk of attempt) controller.abort();
+    const held = await fx.figures();
+    expect(held.used).toBe(0);
+    expect(held.reserved).toBeGreaterThan(0);
+    opened.open();
+    await vi.waitFor(async () => expect(await fx.figures()).toEqual({ used: answerMicro(), reserved: 0 }));
+    expect(onLateUsage).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('how a held embedding settles when its answers leave out their tokens', () => {
   let fx: MeterFixture;
   const metered = (): SpendBudget => new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: fx.meter, accountId: ACCOUNT });
@@ -351,6 +499,30 @@ describe('how a held embedding settles when its answers leave out their tokens',
       embedText({ provider: 'mistral', model: MISTRAL_EMBED_MODEL, apiKey: 'mistral-later-refused', input, maxInputsPerRequest: 1, budget: metered() }),
     ).rejects.toThrow('Embedding request failed (400)');
     expect(await fx.figures()).toEqual({ used: boundOf(input[0]), reserved: 0 });
+  });
+
+  it("settles at its usage when a guard's cap function throws at the charge", async () => {
+    const thrown = new Error('the cap function threw');
+    const guard = new CostGuard({
+      maxSingleOperationCostUsd: Number.POSITIVE_INFINITY,
+      maxDailyCostUsd: Number.POSITIVE_INFINITY,
+      onCapReached: () => {
+        throw thrown;
+      },
+    });
+    // Under 'warn' a call past the cap runs, so the charge is what reaches it.
+    const budget = new SpendBudget({ maxCostUSD: 0.0001, guard, meter: fx.meter, accountId: ACCOUNT, onLimitReached: 'warn' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => json({ ...noUsage, usage: { prompt_tokens: 250, total_tokens: 250 } })),
+      );
+      await expect(embedText({ provider: 'mistral', model: MISTRAL_EMBED_MODEL, apiKey: 'mistral-guard-throws', input: 'x'.repeat(1_000), budget })).rejects.toBe(thrown);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await fx.figures()).toEqual({ used: toMicro(costOfUsageUSD('mistral', MISTRAL_EMBED_MODEL, { promptTokens: 250 }, true) as number), reserved: 0 });
   });
 
   it("renews an Ollama request's lease while it runs, so a reconcile past the lease leaves it to the call", async () => {

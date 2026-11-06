@@ -176,6 +176,14 @@ export interface ModelCompletionOptions {
    */
   onAttempt?: (outcome: AttemptOutcome) => void;
   /**
+   * The id the call sends in its operation id header (`operationIdHeader`, `AGENTOS_OPERATION_ID_HEADER`), on every
+   * attempt and key hop, and on OpenRouter's request sent again without its schema, in place of the id the provider
+   * makes for each request. A generation helper on a budget with a spend meter passes the id the call's reservation is
+   * under, so a server in front of the provider and the meter name the call alike. Sends nothing by itself: with no
+   * header named, or on a provider that sends none, it is ignored.
+   */
+  operationId?: string;
+  /**
    * Anthropic extended-thinking switch. `{ budgetTokens }` turns thinking on:
    * on a thinking-capable Claude model the provider sends
    * `thinking: { type: 'adaptive' }` (the budget number is not sent and

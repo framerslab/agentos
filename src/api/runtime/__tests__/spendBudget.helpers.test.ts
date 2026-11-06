@@ -5,8 +5,9 @@
  * a second call whose largest cost the allowance cannot hold beside the first's is refused before its provider is
  * asked; a finished call settles at what its usage cost and frees the rest; a provider's refusal before any output
  * frees the whole reservation; a call whose request went out and brought no usage back (a timeout, a stream aborted
- * after it was sent) stays reserved and counted until a reconcile with evidence settles it; and a budget with no meter
- * holds nothing.
+ * after it was sent, a 5xx, which does not show what the provider billed) stays reserved and counted until a reconcile
+ * with evidence settles it; each provider call carries the operation id its reservation is under; and a budget with no
+ * meter holds nothing.
  *
  * Only the provider is stubbed: the OpenAI provider class at its module boundary (helpers/stubProviders.ts), fetch for
  * the embeddings endpoint, and a provider object for the seat's provider manager.
@@ -81,8 +82,10 @@ type Reply =
   | { kind: 'answer' }
   /** Answers once `gate` opens. */
   | { kind: 'held'; gate: Promise<void> }
-  /** Refuses the request before any output, with HTTP 400. */
-  | { kind: 'refused' }
+  /** Refuses the request before any output, with HTTP `status`, 400 unless it names one. */
+  | { kind: 'refused'; status?: number }
+  /** Fails the request with a 5xx and no usage. */
+  | { kind: 'server_error'; status: number }
   /** Sends no answer back after the request went out: a timeout. */
   | { kind: 'timed_out' }
   /** Streams one delta, then keeps the request open until the caller aborts it. */
@@ -98,6 +101,8 @@ interface CallOptions {
 interface Prepared {
   /** How many requests reached the provider. */
   sent(): number;
+  /** The operation id each provider call was handed, in order. */
+  operationIds(): unknown[];
   /** One call through the helper: resolves once it answered, rejects with what it failed with. */
   call(budget: SpendBudget, options?: CallOptions): Promise<unknown>;
 }
@@ -112,7 +117,8 @@ interface Surface {
   prepare(replies: Reply[]): Prepared;
 }
 
-const refusal = (): Error => Object.assign(new Error('the provider refused the request'), { httpStatus: 400 });
+const refusal = (status = 400): Error => Object.assign(new Error('the provider refused the request'), { httpStatus: status });
+const serverError = (status: number): Error => Object.assign(new Error('bad gateway'), { httpStatus: status });
 const timeout = (): Error => Object.assign(new Error('the request timed out'), { code: 'REQUEST_TIMEOUT' });
 const delta = { id: 'stub', object: 'chat.completion.chunk', created: 0, modelId: MODEL, choices: [], responseTextDelta: 'part ' };
 /** A gate nothing opens: a request held on it ends only when it is aborted. */
@@ -123,7 +129,8 @@ function stubReplies(replies: Reply[], streamed: boolean): Array<Array<Record<st
   return replies.map((r) => {
     if (r.kind === 'answer') return reply.text(ANSWER);
     if (r.kind === 'held') return streamed ? reply.hold([], r.gate, reply.text(ANSWER)) : reply.hold(reply.text(ANSWER), r.gate);
-    if (r.kind === 'refused') return refusal();
+    if (r.kind === 'refused') return refusal(r.status);
+    if (r.kind === 'server_error') return serverError(r.status);
     if (r.kind === 'timed_out') return timeout();
     return reply.hold([delta], never);
   });
@@ -137,16 +144,19 @@ async function readParts(parts: AsyncIterable<{ type: string; error?: unknown }>
   }
 }
 
-/** A helper whose calls reach the stubbed OpenAI provider class. */
-function stubbed(name: string, streams: boolean, run: (k: string, budget: SpendBudget, options?: CallOptions) => Promise<unknown>): Surface {
+/**
+ * A helper whose calls reach the stubbed OpenAI provider class. `whole` when an ordinary call to it is unstreamed, as a
+ * helper that does not stream makes it; a helper that does both streams only the call that aborts.
+ */
+function stubbed(name: string, streams: boolean, run: (k: string, budget: SpendBudget, options?: CallOptions) => Promise<unknown>, whole = !streams): Surface {
   return {
     name,
     streams,
     answerMicro: () => toMicro(costOfUsageUSD('openai', MODEL, CHAT_USAGE) as number),
     prepare(replies) {
       const k = key();
-      const s = script('openai', k, { replies: stubReplies(replies, streams), whole: !streams });
-      return { sent: () => s.seen.length, call: (budget, options) => run(k, budget, options) };
+      const s = script('openai', k, { replies: stubReplies(replies, !whole), whole });
+      return { sent: () => s.seen.length, operationIds: () => s.seen.map(({ options }) => options.operationId), call: (budget, options) => run(k, budget, options) };
     },
   };
 }
@@ -161,8 +171,16 @@ const generateObjectSurface = stubbed('generateObject', false, (k, budget) =>
   generateObject({ provider: 'openai', model: MODEL, apiKey: k, schema: z.object({ a: z.string() }), prompt: PROMPT, maxTokens: MAX_TOKENS, budget, fallbackProviders: [] }),
 );
 
-const agentSurface = stubbed('agent()', false, (k, budget) =>
-  agent({ provider: 'openai', model: MODEL, apiKey: k, maxTokens: MAX_TOKENS, fallbackProviders: [] }).session(`s-${++sessions}`).send(PROMPT, { budget }),
+const agentSurface = stubbed(
+  'agent()',
+  true,
+  (k, budget, options) => {
+    const session = agent({ provider: 'openai', model: MODEL, apiKey: k, maxTokens: MAX_TOKENS, fallbackProviders: [] }).session(`s-${++sessions}`);
+    if (!options?.abortAfterFirstText) return session.send(PROMPT, { budget });
+    const controller = new AbortController();
+    return readParts(session.stream(PROMPT, { abortSignal: controller.signal, budget }).fullStream, controller, options);
+  },
+  true,
 );
 
 const streamTextSurface = stubbed('streamText', true, (k, budget, options) => {
@@ -193,7 +211,8 @@ const embedTextSurface: Surface = {
         const next = queue.shift();
         if (!next) throw new Error('an embedding request the test did not script');
         if (next.kind === 'timed_out') throw Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' });
-        if (next.kind === 'refused') return new Response(JSON.stringify({ error: { message: 'bad request' } }), { status: 400 });
+        if (next.kind === 'refused') return new Response(JSON.stringify({ error: { message: 'bad request' } }), { status: next.status ?? 400 });
+        if (next.kind === 'server_error') return new Response(JSON.stringify({ error: { message: 'bad gateway' } }), { status: next.status });
         if (next.kind === 'held') await next.gate;
         return new Response(JSON.stringify({ data: [{ index: 0, embedding: [0.1, 0.2] }], model: EMBED_MODEL, usage: EMBED_USAGE }), {
           status: 200,
@@ -201,7 +220,7 @@ const embedTextSurface: Surface = {
         });
       }),
     );
-    return { sent: () => sent, call: (budget) => embedText({ provider: 'openai', model: EMBED_MODEL, apiKey: k, input: EMBED_INPUT, budget }) };
+    return { sent: () => sent, operationIds: () => [], call: (budget) => embedText({ provider: 'openai', model: EMBED_MODEL, apiKey: k, input: EMBED_INPUT, budget }) };
   },
 };
 
@@ -240,24 +259,28 @@ const seatSurface: Surface = {
   prepare(replies) {
     const queue = [...replies];
     let sent = 0;
-    const next = (): Reply => {
+    const operationIds: unknown[] = [];
+    const next = (options: ModelCompletionOptions): Reply => {
       sent += 1;
+      operationIds.push(options.operationId);
       const r = queue.shift();
       if (!r) throw new Error('a model call the test did not script');
       return r;
     };
     const provider = {
       providerId: 'openai',
-      async generateCompletion(): Promise<ModelCompletionResponse> {
-        const r = next();
-        if (r.kind === 'refused') throw refusal();
+      async generateCompletion(_modelId: string, _messages: ChatMessage[], options: ModelCompletionOptions): Promise<ModelCompletionResponse> {
+        const r = next(options);
+        if (r.kind === 'refused') throw refusal(r.status);
+        if (r.kind === 'server_error') throw serverError(r.status);
         if (r.kind === 'timed_out') throw timeout();
         if (r.kind === 'held') await r.gate;
         return completion();
       },
       async *generateCompletionStream(_modelId: string, _messages: ChatMessage[], options: ModelCompletionOptions): AsyncGenerator<ModelCompletionResponse, void, undefined> {
-        const r = next();
-        if (r.kind === 'refused') throw refusal();
+        const r = next(options);
+        if (r.kind === 'refused') throw refusal(r.status);
+        if (r.kind === 'server_error') throw serverError(r.status);
         if (r.kind === 'timed_out') throw timeout();
         if (r.kind === 'cut') {
           yield { ...delta } as ModelCompletionResponse;
@@ -273,6 +296,7 @@ const seatSurface: Surface = {
     const messages: ChatMessage[] = [{ role: 'user', content: PROMPT }];
     return {
       sent: () => sent,
+      operationIds: () => operationIds,
       async call(budget, options) {
         const seat = meteredProviderManager(base, budget).getProvider('openai') as IProvider;
         if (!options?.abortAfterFirstText) return seat.generateCompletion(MODEL, messages, { maxTokens: MAX_TOKENS });
@@ -392,6 +416,22 @@ describe.each(SURFACES)('$name on a budget with a spend meter', (surface) => {
     expect(await fx.figures()).toEqual({ used: 0, reserved: 0 });
   });
 
+  // A rate limit and a refused model: the provider itself answered, so nothing ran.
+  it.each([429, 403, 404])('frees the whole reservation when the provider answers %i before any output', async (status) => {
+    const { sent, call } = surface.prepare([{ kind: 'refused', status }]);
+    await expect(call(metered())).rejects.toBeDefined();
+    expect(sent()).toBe(1);
+    expect(await fx.figures()).toEqual({ used: 0, reserved: 0 });
+  });
+
+  // A 5xx does not show that nothing ran.
+  it.each([500, 502, 503])('keeps a call the provider answered with a %i reserved and counted until a reconcile with evidence settles it', async (status) => {
+    const { sent, call } = surface.prepare([{ kind: 'server_error', status }]);
+    await expect(call(metered())).rejects.toBeDefined();
+    expect(sent()).toBe(1);
+    await expectHeldUntilEvidence(fx);
+  });
+
   it('keeps a call that timed out after its request was sent reserved and counted until a reconcile with evidence settles it', async () => {
     const { sent, call } = surface.prepare([{ kind: 'timed_out' }]);
     await expect(call(metered())).rejects.toBeDefined();
@@ -404,6 +444,16 @@ describe.each(SURFACES)('$name on a budget with a spend meter', (surface) => {
     await call(metered(), { abortAfterFirstText: true }).catch(() => undefined);
     expect(sent()).toBe(1);
     await expectHeldUntilEvidence(fx);
+  });
+
+  // embedText's own requests send no operation id header; the provider calls of the other helpers carry the id.
+  it.skipIf(surface === embedTextSurface)('hands the provider the operation id its reservation is under', async () => {
+    const { operationIds, call } = surface.prepare([{ kind: 'answer' }]);
+    const reserve = vi.spyOn(fx.meter, 'reserve');
+    await call(metered());
+    const reserved = reserve.mock.calls.map(([request]) => request.operationId);
+    expect(reserved).toHaveLength(1);
+    expect(operationIds()).toEqual(reserved);
   });
 
   it('holds nothing for a budget without a meter, which checks and charges the call as before', async () => {
