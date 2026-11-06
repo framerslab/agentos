@@ -748,6 +748,8 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           await gemini.initialize({
             apiKey: resolved.apiKey,
             ...(resolved.baseUrl ? { baseURL: resolved.baseUrl } : {}),
+            // The name read before the reservation, so a variable changed since moves no header.
+            ...(operationHeader ? { operationIdHeader: operationHeader } : {}),
           });
           // The hold renews its reservation's lease while the batches run.
           const result = await held
@@ -755,9 +757,9 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
               gemini.generateEmbeddings(resolved.modelId, inputArray, {
                 ...(opts.dimensions ? { dimensions: opts.dimensions } : {}),
                 ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
-                // The reservation's id, which GeminiProvider sends in the header AGENTOS_OPERATION_ID_HEADER names on
-                // every batch and retry; none without a reservation or a named header.
-                ...(held.providerOptions.operationId ? { operationId: held.providerOptions.operationId } : {}),
+                // The reservation's id, which GeminiProvider sends in the header named above on every batch and retry;
+                // none without a reservation or a named header.
+                ...(operationHeader && held.providerOptions.operationId ? { operationId: held.providerOptions.operationId } : {}),
               }),
             )
             .catch((error: unknown) => {

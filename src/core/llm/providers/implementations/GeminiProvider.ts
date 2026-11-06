@@ -46,7 +46,7 @@ import {
 } from '../../../providers/keyProbe.js';
 import { computeRetryBackoffMs, resolveAttemptCount, waitForRetry, type AttemptTally } from './retry-backoff.js';
 import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
-import { operationIdHeaders } from './operation-id.js';
+import { operationIdHeaders, resolveOperationIdHeader } from './operation-id.js';
 import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js';
 
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
@@ -107,6 +107,14 @@ export interface GeminiProviderConfig {
    * @default 60000
    */
   requestTimeout?: number;
+  /**
+   * The header an embeddings call's `operationId` goes in, on every batch and retry of the call. When this is unset
+   * the provider reads `AGENTOS_OPERATION_ID_HEADER` at each call; with neither, no header is sent. Gemini sends the
+   * header on embeddings only, and only for a call that names an `operationId`. A name that is not an HTTP header
+   * name, or one a provider sets itself (`x-goog-api-key`, `Content-Type`, ...), is refused with a `RangeError` by
+   * `initialize()` and by such a call, before anything is sent.
+   */
+  operationIdHeader?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -845,6 +853,9 @@ export class GeminiProvider implements IProvider {
         'INIT_FAILED_MISSING_API_KEY',
       );
     }
+    // A refused operation id header name is the host's error, refused before anything changes. Only a configured name
+    // is checked here: the variable is read by the embeddings call that names an id.
+    if (config.operationIdHeader?.trim()) resolveOperationIdHeader(config.operationIdHeader);
     // The new pool is built before anything of the old state is touched: its construction makes no request, so a
     // timing it refuses (a RangeError) leaves this provider as it was, its pool and its recheck timer included.
     const keyPool = new ApiKeyPool(config.apiKey, {
@@ -1266,9 +1277,9 @@ export class GeminiProvider implements IProvider {
    * model's calls count zero tokens (probed 2026-09-30). When a later batch
    * fails, the thrown error carries the earlier batches' usage as
    * `partialUsage`, since those calls were billed. An `operationId` the call
-   * names goes in the header `AGENTOS_OPERATION_ID_HEADER` names, on every
-   * batch and every retry of it; with no id named, or no header named, the
-   * requests carry none.
+   * names goes in the header `operationIdHeader` names, else the one
+   * `AGENTOS_OPERATION_ID_HEADER` names, on every batch and every retry of it;
+   * with no id named, or no header named, the requests carry none.
    *
    * @param {string} modelId - Embedding model (e.g., "gemini-embedding-001").
    * @param {string[]} texts - Input texts to embed.
@@ -1287,7 +1298,7 @@ export class GeminiProvider implements IProvider {
   ): Promise<ProviderEmbeddingResponse> {
     this.ensureInitialized();
     // One header for the whole call, made before its first batch: every batch and retry sends the same id.
-    const operationHeaders = options?.operationId ? operationIdHeaders(undefined, options.operationId) : {};
+    const operationHeaders = options?.operationId ? operationIdHeaders(this.config.operationIdHeader, options.operationId) : {};
 
     const endpoint = `/models/${modelId}:batchEmbedContents`;
     const pricePer1M = GEMINI_MODELS.find(m => m.modelId === modelId)?.pricePer1MTokensInput;
