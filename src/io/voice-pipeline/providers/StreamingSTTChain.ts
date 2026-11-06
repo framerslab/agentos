@@ -127,7 +127,7 @@ export interface StreamingSTTChainOptions {
    * reports that the flush ended its stream, whatever frames came after the
    * flush: no backup opens and no failure is recorded. The facade's `inputEnded`
    * reports what the provider session in use reports, and keeps that after the
-   * close. Later audio is ignored. A backup whose opening fails during
+   * close, the provider session's or the caller's. Later audio is ignored. A backup whose opening fails during
    * the switch, or that fails as it takes the replay (an `'error'` or a
    * `'close'`, or a frame it refuses), is reported through `onProviderFailed`
    * and `provider_failed` as one whose opening fails at startup is, recorded
@@ -394,6 +394,8 @@ export class StreamingSTTChain implements IStreamingSTT {
         if (facade.listenerCount('error')) facade.emit('error', error);
       } finally {
         const old = current;
+        // The facade's report that a flush ended the stream outlives the session it lets go of.
+        streamEnded ||= old?.inputEnded === true;
         current = undefined;
         // Terminal cleanup goes on though the session's close() throws.
         finish(old, true);
@@ -615,6 +617,8 @@ export class StreamingSTTChain implements IStreamingSTT {
       close: (): void => {
         if (closed) return;
         const old = current;
+        // Read before the session is let go of: a close after the flush that ended the stream keeps that report.
+        streamEnded ||= old?.inputEnded === true;
         current = undefined;
         finish(old);
       },
