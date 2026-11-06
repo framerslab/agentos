@@ -31,6 +31,7 @@ import { TogetherProvider } from '../../../core/llm/providers/implementations/To
 import { XAIProvider } from '../../../core/llm/providers/implementations/XAIProvider.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import { SqlSpendMeter } from '../../../safety/runtime/SqlSpendMeter.js';
+import type { ISpendMeter } from '../../../safety/runtime/SpendMeter.js';
 import { embedText } from '../../embedText.js';
 import { generateText } from '../../generateText.js';
 import { streamText } from '../../streamText.js';
@@ -387,6 +388,29 @@ describe("embedText's own requests", () => {
     const sent = path.sent();
     expect(sent.length).toBeGreaterThan(0);
     expect(sent.every((value) => value === undefined)).toBe(true);
+  });
+
+  // The name is read once, before the reservation: a variable changed while the meter reserves moves no header.
+  it.each(EMBED_PATHS)('keep the header named before the reservation when the variable changes during it: $name', async (path) => {
+    const reserved: string[] = [];
+    const inner = meter;
+    const shifting: ISpendMeter = {
+      reserve: async (request) => {
+        reserved.push(request.operationId);
+        vi.stubEnv('AGENTOS_OPERATION_ID_HEADER', 'x-other');
+        return inner.reserve(request);
+      },
+      settle: (request) => inner.settle(request),
+      heartbeat: (operationId, now) => inner.heartbeat(operationId, now),
+      reconcile: (options) => inner.reconcile(options),
+      snapshot: (accountId, now) => inner.snapshot(accountId, now),
+      setAllowance: (accountId, allowance, now) => inner.setAllowance(accountId, allowance, now),
+    };
+    await path.run(new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, meter: shifting, accountId: ACCOUNT }));
+    expect(reserved).toHaveLength(1);
+    const sent = path.sent();
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent).toEqual(sent.map(() => reserved[0]));
   });
 
   // Gemini sends its key in x-goog-api-key: an id there would take the key's place.
