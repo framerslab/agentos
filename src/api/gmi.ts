@@ -39,9 +39,21 @@ import { ExtensionRegistry } from '../extensions/ExtensionRegistry.js';
 import { EXTENSION_KIND_TOOL } from '../extensions/types.js';
 import { APPROVAL_GRANTED, askApprovalGate, composeReceivedGate, type ApprovalGateFn } from './runtime/approval-gate.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
-import { createCompletionGateway, type CompletionAttempt, type CompletionGateway } from './runtime/completionGateway.js';
+import { createCompletionGateway, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
-import { asSpendBudget, assertCallWithinBudget, bothBudgets, outputEstimateTokens, promptCharsOf, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
+import {
+  asSpendBudget,
+  assertCallWithinBudget,
+  bothBudgets,
+  holdsInMeter,
+  outputEstimateTokens,
+  promptCharsOf,
+  type HelperCall,
+  type SpendBudget,
+  type SpendBudgetOptions,
+} from './runtime/spendBudget.js';
+import { heldAttempt, refusedAttempt } from './runtime/heldAttempt.js';
+import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { adaptTools } from './runtime/toolAdapter.js';
 import { withMembers } from './runtime/withMembers.js';
 import { LAUNCH_AGENCY_TOOL_NAME, MIN_LAUNCH_TOKENS, resolveLaunchLimits, type AgencyLaunchFrame, type CallerTurnContext, type ToolCallHook } from './runtime/agencyLaunch/types.js';
@@ -309,20 +321,6 @@ function gatewayFor(opts: AgentOptions): CompletionGateway {
 function mergeLedger(...parts: Array<AgentOSUsageLedgerOptions | undefined>): AgentOSUsageLedgerOptions | undefined {
   const merged: AgentOSUsageLedgerOptions = Object.assign({}, ...parts.filter(Boolean));
   return Object.keys(merged).length > 0 ? merged : undefined;
-}
-
-/**
- * An attempt the turn's budget refused: it sends no request and fails its hop with no retry, so the GMI ends the
- * turn (`LLM_PROVIDER_ERROR`, the budget's message) without trying a fallback hop.
- */
-function refusedAttempt(refusal: unknown): CompletionAttempt {
-  const error = refusal instanceof Error ? refusal : new Error(String(refusal));
-  return {
-    async *[Symbol.asyncIterator]() {
-      // Nothing is sent.
-    },
-    outcome: Promise.resolve({ kind: 'hopFailed' as const, error, retryable: false }),
-  };
 }
 
 async function recordedUsage(ledger: AgentOSUsageLedgerOptions | undefined, sessionId?: string): Promise<AgentOSUsageAggregate> {
@@ -778,18 +776,43 @@ export function gmi(opts: GmiOptions): GmiHandle {
           // stopped (a session's close() or the caller's signal during a tool round) is not checked: the gateway sends
           // nothing and ends it with the stop, and the budget hears of no refusal for a call that would not be sent.
           const budget = turn.budget;
+          const onLateUsage = turn.onLateUsage;
           if (budget && !options.abortSignal?.aborted) {
             // The options the gateway sends for this hop: a fallback hop's overrides raise maxTokens by its headroom
             // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap. A structured request goes
             // without the tool definitions, so they are not counted.
             const sent = { ...options, ...resolution.optionOverrides };
+            const tools = responseSchema ? undefined : sent.tools;
+            if (holdsInMeter(budget)) {
+              // A budget with a spend meter holds the attempt from before its request until it ends. Its bound counts
+              // what a structured request sends in place of the tools: the schema, as the payload carries it or as the
+              // instructions the gateway adds to the system prompt.
+              const instruction = responseSchema && !schemaInPrompt ? gateway.schemaInstruction?.(resolution, responseSchema, schemaName) : undefined;
+              const call: HelperCall = {
+                what: 'gmi.step',
+                route: { providerId: resolution.providerId, modelId: resolution.modelId },
+                messages: instruction ? [...messages, { role: 'system', content: instruction }] : messages,
+                tools,
+                maxTokens: sent.maxTokens,
+                options: responseSchema ? { ...sent, responseFormat: lowerZodToJsonSchema(responseSchema) } : sent,
+                onAttempt: options.onAttempt,
+                abortSignal: options.abortSignal,
+              };
+              return heldAttempt(
+                budget,
+                call,
+                (onAttempt, onLate) =>
+                  gateway.stream(resolution, messages, onAttempt ? { ...options, onAttempt } : options, responseSchema, schemaName, schemaInPrompt, onLate),
+                onLateUsage,
+              );
+            }
             try {
-              assertCallWithinBudget(budget, resolution, promptCharsOf(messages, undefined, responseSchema ? undefined : sent.tools), sent.maxTokens, 'gmi.step');
+              assertCallWithinBudget(budget, resolution, promptCharsOf(messages, undefined, tools), sent.maxTokens, 'gmi.step');
             } catch (refusal) {
               return refusedAttempt(refusal);
             }
           }
-          return gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, turn.onLateUsage);
+          return gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, onLateUsage);
         },
         schemaInstruction: gateway.schemaInstruction,
       },
