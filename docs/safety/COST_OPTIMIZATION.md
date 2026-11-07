@@ -290,7 +290,7 @@ const assistant = agent({ provider: 'openai', model: 'gpt-4o-mini' });
 const hard = await assistant.generate('Work through this proof.', { model: 'gpt-4o' });
 ```
 
-To choose per request in code, pass a `router`. `generateText()`, `streamText()` and `agent()` call its `selectModel()` at the start of a call with the task hint, required capabilities and `routerParams`, and use the provider and model it returns. A router that returns `null` or throws leaves the configured model in place. [`IModelRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/IModelRouter.ts) is the interface, and [`ModelRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/ModelRouter.ts) is a rule-based implementation.
+To choose per request in code, pass a `router`. `generateText()`, `streamText()` and `agent()` call its `selectModel()` at the start of a call with the task hint, required capabilities and `routerParams`, and use the provider and model it returns. A router that returns `null` or throws leaves the configured model in place. A structured session send the router moves to another provider or model is sent the structured-output format of the router's pick, as a fallback provider is ([Tool Calling Support](../features/LLM_PROVIDERS.md#tool-calling-support)). [`IModelRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/IModelRouter.ts) is the interface, and [`ModelRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/ModelRouter.ts) is a rule-based implementation.
 
 Two providers cost nothing per token: the [CLI providers](../getting-started/CLI_PROVIDERS.md) run on a Claude or Google subscription, and Ollama runs models on your own hardware.
 
