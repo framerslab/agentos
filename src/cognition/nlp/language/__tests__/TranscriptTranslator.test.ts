@@ -323,6 +323,26 @@ describe('TranscriptTranslator.translateLine', () => {
     }
   });
 
+  it("carries the tokens an earlier attempt's error status reported on a timeout's error, and records the timeout at its bound", async () => {
+    // The shortest backoff before the retry (500 ms), so the second attempt is sent and hangs until the timeout.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      answer(
+        jsonResponse({ error: { message: 'server error', type: 'server_error' }, usage: { prompt_tokens: 40, completion_tokens: 7, total_tokens: 47 } }, 500),
+        hang,
+      );
+      const options = { ...OPTIONS, maxAttempts: 2, timeoutMs: 1_500 };
+      const timedOut = await new TranscriptTranslator().translateLine(line('Hola.'), 'en', options).then(() => undefined, (error: unknown) => error);
+      expect(timedOut).toMatchObject({ code: 'TRANSLATION_TIMEOUT', unansweredAttempts: 0, usage: { promptTokens: 40, completionTokens: 7, totalTokens: 47 } });
+      expect(posts()).toHaveLength(2);
+      // The attempt the timeout ended may have been billed for a whole answer, so the tokens are not the call's cost.
+      const price = (usage: { promptTokens?: number; completionTokens?: number }) => (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
+      expect(TranscriptTranslator.failedCallMicro(timedOut, 9_999, price)).toBe(9_999);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
   it('counts an attempt whose success status came and whose body was lost: a refusal after it is recorded at the bound, and a translation after it says so', async () => {
     // The shortest backoff before the retry.
     const random = vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -510,8 +530,8 @@ describe('TranscriptTranslator.translateLine', () => {
       );
       const got = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', options);
       // The failed answer's 200 brought a body that never became the answer, so it counts as unanswered and the call
-      // is recorded at its bound.
-      expect(got).toMatchObject({ status: 'translated', text: 'Good morning.', unansweredAttempts: 1 });
+      // is recorded at its bound; the tokens it reported are on the translation with the answer's.
+      expect(got).toMatchObject({ status: 'translated', text: 'Good morning.', unansweredAttempts: 1, usage: { promptTokens: 50, completionTokens: 3, totalTokens: 53 } });
       expect(posts()).toHaveLength(2);
 
       answer(failed('invalid_prompt'), jsonResponse(chatCompletion('unused')));

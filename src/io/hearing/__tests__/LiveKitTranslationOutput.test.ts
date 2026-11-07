@@ -234,6 +234,48 @@ describe('LiveKitTranslationOutput', () => {
     expect(numbered(room)).toEqual([['b', '2']]);
   });
 
+  it('numbers and sends a line written from inside the encode option before a line or a replay the caller asks for next', async () => {
+    const room = new FakeRoom();
+    let nested: Promise<void> | undefined;
+    const output: LiveKitTranslationOutput = new LiveKitTranslationOutput({
+      room,
+      encode: (line, seq) => {
+        if (line.itemId === 'a') nested = output.write(made('b', 'Two.'), { destinationIdentities: ['p-1'] });
+        return JSON.stringify({ ...line, seq });
+      },
+    });
+    // Neither awaited: the caller's next write and replay are asked for after the write from inside encode was.
+    const first = output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] });
+    const next = output.write(made('c', 'Three.'), { destinationIdentities: ['p-1'] });
+    const replay = output.replayAfter(null, 'en', 'p-2');
+    await Promise.all([first, nested, next]);
+    expect(await replay).toBe(3);
+    expect(sent(room).map(({ text, options }) => [JSON.parse(text).itemId, options.attributes[LIVEKIT_TRANSLATION_ATTRIBUTES.seq], options.destinationIdentities])).toEqual([
+      ['a', '1', ['p-1']],
+      ['b', '2', ['p-1']],
+      ['c', '3', ['p-1']],
+      ['a', '1', ['p-2']],
+      ['b', '2', ['p-2']],
+      ['c', '3', ['p-2']],
+    ]);
+  });
+
+  it('sends a status asked for from inside the encode option before a status the caller sends next', async () => {
+    const room = new FakeRoom();
+    let inner: Promise<void> | undefined;
+    const output: LiveKitTranslationOutput = new LiveKitTranslationOutput({
+      room,
+      encode: (line, seq) => {
+        inner = output.send('{"itemId":"inner"}', { destinationIdentities: ['p-1'] });
+        return JSON.stringify({ ...line, seq });
+      },
+    });
+    const first = output.write(made('a', 'One.'), { destinationIdentities: ['p-1'] });
+    const outer = output.send('{"itemId":"outer"}', { destinationIdentities: ['p-1'] });
+    await Promise.all([first, inner, outer]);
+    expect(sent(room).map(({ text }) => JSON.parse(text).itemId)).toEqual(['a', 'inner', 'outer']);
+  });
+
   it('sends a status or a replay asked for from inside the encode option after the line being encoded', async () => {
     const room = new FakeRoom();
     let status: Promise<void> | undefined;
