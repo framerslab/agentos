@@ -49,7 +49,7 @@ export interface TranscriptTranslatorOptions {
   model: string;
   apiKey: string;
   baseUrl?: string;
-  /** How many context lines are sent; default 6. */
+  /** How many context lines are sent, a whole number of 0 or more; default 6. */
   maxContextLines?: number;
   /** The call's own timeout; default 15,000 ms. */
   timeoutMs?: number;
@@ -190,6 +190,17 @@ function attemptsOf(options: TranscriptTranslatorOptions): number {
   return attempts;
 }
 
+/**
+ * The earlier lines the call sends at most, the option's or the default. A count that is not a whole number of 0 or more
+ * is refused with a `RangeError`: `slice` truncates a fraction, so `0.5` would send every earlier line, and the bound
+ * would price them all.
+ */
+function contextLinesOf(options: TranscriptTranslatorOptions): number {
+  const lines = options.maxContextLines ?? DEFAULTS.maxContextLines;
+  if (!Number.isInteger(lines) || lines < 0) throw new RangeError('maxContextLines is a whole number, 0 or more');
+  return lines;
+}
+
 /** The output cap the call sends: the host's, or the default with room for a reasoning model's reasoning. */
 function capOf(line: TranscriptLineInput, options: TranscriptTranslatorOptions, modelId: string): number {
   if (options.maxOutputTokens !== undefined) return options.maxOutputTokens;
@@ -221,12 +232,13 @@ export class TranscriptTranslator {
    * sends, a reasoning model's room for its reasoning included. The model is read as the call reads it:
    * `openai:gpt-4o-mini` is priced as the `gpt-4o-mini` it sends.
    *
-   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more.
+   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more, or a `maxContextLines` that is not
+   *   a whole number of 0 or more.
    * @throws {Error} For a model with no price row, a model of another provider, or a request it cannot bound.
    */
   boundMicro(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): number {
     const attempts = attemptsOf(options);
-    const maxContextLines = options.maxContextLines ?? DEFAULTS.maxContextLines;
+    const maxContextLines = contextLinesOf(options);
     const { modelId } = resolveModelOption(options, 'text');
     const maxOutputTokens = capOf(line, options, modelId);
     const usd = estimateMaxCallCostUSD(options.provider, modelId, {
@@ -266,11 +278,13 @@ export class TranscriptTranslator {
    *   still starting included (with the `usage` earlier attempts answered with an error status reported),
    *   `TRANSLATION_EMPTY_OUTPUT`, `TRANSLATION_TRUNCATED` and `TRANSLATION_INCOMPLETE` (each with the billed `usage`);
    *   each carries `unansweredAttempts`. A call ended through `abortSignal` rejects with the signal's reason at once.
-   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more, before anything is sent.
+   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more, or a `maxContextLines` that is not
+   *   a whole number of 0 or more, before anything is sent.
    */
   async translateLine(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): Promise<TranslatedLine> {
     options.abortSignal?.throwIfAborted();
     const attempts = attemptsOf(options);
+    const maxContextLines = contextLinesOf(options);
     // The model the call sends, so a result names what made it: `openai:gpt-4o-mini` is `gpt-4o-mini`.
     const modelId = modelIdOf(options);
     const base = { itemId: line.itemId, target, model: modelId, providerId: options.provider, version: TRANSLATOR_VERSION } as const;
@@ -322,7 +336,7 @@ export class TranscriptTranslator {
         apiKey: options.apiKey,
         ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
         system: systemFor(target, source),
-        prompt: promptFor(line, options.maxContextLines ?? DEFAULTS.maxContextLines),
+        prompt: promptFor(line, maxContextLines),
         // A translation goes to the provider the host configured, never to another vendor's key.
         fallbackProviders: [],
         source: 'transcript_translation',
