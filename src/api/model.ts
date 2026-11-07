@@ -288,7 +288,9 @@ function refuseMisdirectedCredentials(opts: ModelOption, task: TaskType): void {
  * (e.g. `OPENAI_API_KEY`, `OLLAMA_BASE_URL`) and merges caller-supplied
  * `overrides`.  Applies the Anthropic → OpenRouter fallback when
  * `ANTHROPIC_API_KEY` is absent but `OPENROUTER_API_KEY` is set; that
- * resolution carries `OPENROUTER_BASE_URL` as its base URL when it is set.
+ * resolution carries the key and base URL a call that names OpenRouter
+ * resolves: a global default's that names OpenRouter, else
+ * `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`.
  *
  * @param providerId - Provider identifier (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
  * @param modelId - Model identifier within the provider.
@@ -360,16 +362,21 @@ export function resolveProvider(
           `(routed as "anthropic/${orModelId}"). Set ANTHROPIC_API_KEY for direct access.`
         );
       }
-      // The key comes from OPENROUTER_API_KEY, so the URL comes from
-      // OPENROUTER_BASE_URL, read as a direct OpenRouter call reads it; with
-      // none set the call goes to OpenRouter's own endpoint.
-      const orBaseUrl = resolveBaseUrl('openrouter', undefined, undefined);
+      // Sent with the key and base URL a call that names OpenRouter is sent
+      // with: a global default that names OpenRouter lends its key and base
+      // URL, else OPENROUTER_API_KEY and OPENROUTER_BASE_URL, so the default's
+      // gateway is not bypassed and the environment's key never goes to a
+      // gateway configured with another. An empty key in the default is none,
+      // and with no base URL set the call goes to OpenRouter's own endpoint.
+      const orDefault = def?.provider === 'openrouter' ? def : undefined;
+      const orDefaultKey = orDefault?.apiKey ? orDefault.apiKey : undefined;
+      const orBaseUrl = resolveBaseUrl('openrouter', undefined, orDefault?.baseUrl);
       return {
         providerId: 'openrouter',
         modelId: `anthropic/${orModelId}`,
-        apiKey: orKey,
+        apiKey: orDefaultKey ?? orKey,
         ...(orBaseUrl ? { baseUrl: orBaseUrl } : {}),
-        poolId: 'openrouter:OPENROUTER_API_KEY',
+        ...(orDefaultKey ? {} : { poolId: 'openrouter:OPENROUTER_API_KEY' }),
       };
     }
     throw new Error(`No API key for anthropic. Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY.`);
