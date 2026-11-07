@@ -13,6 +13,7 @@ import {
   renderPersonalityDirectives,
   renderPersonalitySection,
   type PersonalityDirective,
+  type PersonalityRenderOptions,
 } from '../personalityPrompt';
 
 const ALL = (value: number) => Object.fromEntries(HEXACO_TRAIT_KEYS.map((key) => [key, value]));
@@ -66,6 +67,20 @@ describe('renderPersonalityDirectives', () => {
 
   it('refuses a register that is neither conversation nor writing, as the section does', () => {
     expect(() => renderPersonalityDirectives({}, { register: 'Writing' as never })).toThrow(TypeError);
+  });
+
+  it('reads the register once in the section, so writing lines always come with their grounding rule', () => {
+    // A JavaScript caller's options may answer a getter differently on each read.
+    let reads = 0;
+    const options = {
+      get register() {
+        reads += 1;
+        return reads === 1 ? 'writing' : 'conversation';
+      },
+    } as PersonalityRenderOptions;
+
+    expect(renderPersonalitySection({ honesty: 0.9 }, options)).toBe(renderPersonalitySection({ honesty: 0.9 }, { register: 'writing' }));
+    expect(reads).toBe(1);
   });
 
   it('is exported from the package root and the substrate barrel', () => {
