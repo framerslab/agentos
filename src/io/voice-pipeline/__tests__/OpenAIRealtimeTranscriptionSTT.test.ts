@@ -1226,7 +1226,7 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
     session.close();
   });
 
-  it('keeps the connection when the rollover is refused, and closes the session at its hard stop', async () => {
+  it('keeps the connection when the rollover is refused, and ends the session with an error at its hard stop', async () => {
     fakeClock();
     const approve = vi.fn(async (_request: unknown) => false);
     const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: { ...ROLLOVER, approve } });
@@ -1239,7 +1239,7 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     await settle();
     expect(log.events).toContain('close');
-    expect(log.errors).toEqual([]);
+    expect(log.errors.map((error) => error.message)).toEqual([expect.stringContaining('hard stop')]);
   });
 
   it('reports usage per connection: at every interval while open, and once more when each closes', async () => {
@@ -1377,7 +1377,7 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
     await vi.advanceTimersByTimeAsync(10_000); // 30 s after the first connection opened: its hard stop
     await settle();
     expect(log.events).toContain('close');
-    expect(log.errors).toEqual([]);
+    expect(log.errors.map((error) => error.message)).toEqual([expect.stringContaining('hard stop')]);
     expect(Sockets.instances).toHaveLength(2);
   });
 
@@ -1531,7 +1531,7 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
     await vi.advanceTimersByTimeAsync(20_000); // 30 s: the first connection's hard stop, with no answer yet
     await settle();
     expect(log.events).toContain('close');
-    expect(log.errors).toEqual([]);
+    expect(log.errors.map((error) => error.message)).toEqual([expect.stringContaining('hard stop')]);
     expect(first.close).toHaveBeenCalledOnce();
     answers[0](true); // the answer comes after the hard stop
     await settle();

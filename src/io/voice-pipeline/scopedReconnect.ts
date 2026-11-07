@@ -42,7 +42,15 @@ export interface ScopedReconnectOptions {
  * past the bound, emits `error`, then `close`; a failed open is not retried. `transcript` is forwarded unchanged,
  * only from the current provider session, only outside a reset and only when the result carries the current
  * identity; `usage` is forwarded from every provider session. `flush()` waits for the admitted frames and any
- * reconnect, then flushes the current provider session; a close of that session during the flush opens no new one.
+ * reconnect, then flushes the current provider session; a close of that session during the flush opens no new one,
+ * and leaves the scoped session open unless the provider session reports `inputEnded`.
+ * The session's `inputEnded` reports what the provider's current session reports (see `StreamingSTTSession`), and
+ * stays true once the provider session's close ended the scoped session; before that close, an `error` that
+ * reconnects replaces the session, and the report is the new one's. While it is true, a frame of the current identity
+ * is dropped, after that close too: it resolves without reaching the provider or the replay. A close of a provider session whose `inputEnded` is true, during the
+ * flush or after it, ends the scoped session with `close` and no new one; for a session that reports nothing, a close after the flush completed
+ * still reconnects. An `error` after the flush still reconnects, a `close` that follows it while the reconnect runs
+ * included, and the replay holds no dropped frame.
  * `close()` drops the kept frames, closes the current provider session and emits `close` once.
  *
  * @param inner - The provider each session opens, again on every reconnect.
@@ -57,6 +65,8 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
   let closed = false;
   let resetting = false;
   let flushing = false;
+  // Latched once a provider session's close follows the flush that ended its stream.
+  let streamEnded = false;
   let current: ScopedStreamingSTTSession;
   let reopening: Promise<void> | undefined;
   let tail = Promise.resolve();
@@ -102,7 +112,20 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
       if (!closed && session === current) void reconnect().catch(fail);
     });
     session.on('close', () => {
-      if (!closed && !flushing && session === current) void reconnect().catch(fail);
+      // During a reconnect the replaced session's close is part of it: an error followed at once by a close still
+      // reconnects, whatever the failed session reported.
+      if (closed || reopening || session !== current) return;
+      if (session.inputEnded === true) {
+        // The provider sent its last result and ended its stream, as the caller's flush asked, during the flush too.
+        streamEnded = true;
+        closed = true;
+        history.length = 0;
+        historyMs = 0;
+        facade.emit('close');
+        return;
+      }
+      if (flushing) return;
+      void reconnect().catch(fail);
     });
     return session;
   };
@@ -135,12 +158,16 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
     return reopening;
   };
   current = await open();
-  return Object.assign(facade, {
+  const scoped = Object.assign(facade, {
     pushAudio(): void {
       throw new Error('scoped audio required');
     },
     pushAudioScoped(frame: ScopedAudioFrame): Promise<void> {
-      if (closed || resetting || !matches(frame)) return Promise.reject(new Error('stale recognition frame'));
+      if (resetting || !matches(frame)) return Promise.reject(new Error('stale recognition frame'));
+      // A frame sent to a stream a flush ended is no input, after the close that ended it too: it is dropped before
+      // its length is checked or it is kept for a replay.
+      if (streamEnded || current?.inputEnded === true) return Promise.resolve();
+      if (closed) return Promise.reject(new Error('stale recognition frame'));
       const duration = ms(frame);
       if (!Number.isFinite(duration) || duration <= 0 || pendingMs + duration > options.queueCapacityMs) return Promise.reject(new Error('recognition input bound'));
       pendingMs += duration;
@@ -148,7 +175,10 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
       const owned = { ...structuredClone(frame), samples: frame.samples.slice() };
       return run(async () => {
         if (reopening) await reopening;
-        if (closed || !matches(owned)) throw new Error('stale recognition frame');
+        if (!matches(owned)) throw new Error('stale recognition frame');
+        // Admitted before the flush that ended the stream completed: dropped the same way.
+        if (streamEnded || current?.inputEnded === true) return;
+        if (closed) throw new Error('stale recognition frame');
         await current.pushAudioScoped(owned);
         history.push(owned);
         historyMs += duration;
@@ -187,8 +217,11 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
       closed = true;
       history.length = 0;
       historyMs = 0;
+      streamEnded ||= current?.inputEnded === true;
       current?.close();
       facade.emit('close');
     },
   });
+  Object.defineProperty(scoped, 'inputEnded', { get: () => streamEnded || current?.inputEnded === true, enumerable: true });
+  return scoped;
 }

@@ -761,6 +761,46 @@ describe('VoicePipelineOrchestrator', () => {
     expect(failedCloses.map((event) => event.reason)).toEqual(['provider_failure']);
   });
 
+  it('takes the close of a host-made session that reports its flush ended the stream as the end of input, though a frame followed the flush', async () => {
+    let ended = false;
+    Object.defineProperty(sttSession, 'inputEnded', { get: () => ended });
+    const session = await startSession();
+    const sessionErrors: Array<VoiceSessionEventMap['session_error']> = [];
+    const closes: Array<VoiceSessionEventMap['close']> = [];
+    session.on('session_error', (event) => sessionErrors.push(event));
+    session.on('close', (event) => closes.push(event));
+    orchestrator.on('error', () => undefined);
+
+    await sttSession.flush();
+    ended = true;
+    transport.emit('audio', makeFrame()); // a frame the client had in flight when it stopped
+    await vi.advanceTimersByTimeAsync(0);
+    sttSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(orchestrator.state).toBe('listening');
+    expect(sessionErrors).toEqual([]);
+    expect(closes).toEqual([]);
+    expect(transport.sendControl).not.toHaveBeenCalledWith({ type: 'session_ended', reason: 'provider_failure' });
+  });
+
+  it('still ends the session on a close after a frame when the session reports that its flush left the stream open', async () => {
+    Object.defineProperty(sttSession, 'inputEnded', { value: false });
+    const session = await startSession();
+    const closes: Array<VoiceSessionEventMap['close']> = [];
+    session.on('close', (event) => closes.push(event));
+    orchestrator.on('error', () => undefined);
+
+    await sttSession.flush();
+    transport.emit('audio', makeFrame());
+    await vi.advanceTimersByTimeAsync(0);
+    sttSession.emit('close');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(orchestrator.state).toBe('closed');
+    expect(closes.map((event) => event.reason)).toEqual(['provider_failure']);
+  });
+
   it("takes the close of the user's STT provider in use after the host flushed the chain as the end of input: no next provider opens and the session goes on", async () => {
     const first = createMockSTTSession();
     const second = createMockSTTSession();

@@ -856,7 +856,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   /**
    * The input of the STT session has been ended on purpose: a `flush()` was called on the session (by the host that
    * holds it, through the method `_observeSttFlush` wraps) and no frame has gone to the session since. A `close` then is
-   * the session's own end, not a failure.
+   * the session's own end, not a failure, as it is whatever frames followed when the session reports `inputEnded`.
    */
   private sttEndRequested = false;
   /** The STT session ended after its input was ended on purpose: the transport's audio goes to it no more. */
@@ -1039,10 +1039,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * that ends input on purpose, as a push-to-talk stop does, calls it on the session it holds (the object its
    * `IStreamingSTT.startSession()` resolved with), whatever the provider or the chain behind it. The session's own
    * `flush()` is wrapped on that object and put back as the session stops. A flush counts until the next frame the
-   * orchestrator pushes; one that rejects or throws ended nothing, and a close that came while it was pending ends the
-   * session as the STT part's failure once it rejects (a close before it began, after an earlier flush, stays the end).
-   * Only the newest flush's rejection counts: an older flush that rejects after a newer one was called changes nothing. A session whose `flush` cannot be replaced (a frozen object)
-   * keeps every close a failure.
+   * orchestrator pushes, unless the session reports through `inputEnded` that the flush ended its stream: that report
+   * is read at the close, so a frame the client had in flight is no new input, in whichever order it and the flush came.
+   * A flush that rejects or throws ended nothing, and a close that came while it was pending ends the session as the STT
+   * part's failure once it rejects (a close before it began, after an earlier flush, stays the end). Only the newest
+   * flush's rejection counts: an older flush that rejects after a newer one was called changes nothing. A session whose
+   * `flush` cannot be replaced (a frozen object) and that gives no such report keeps every close a failure.
    *
    * @param stt - The STT session this orchestrator's session owns.
    */
@@ -1625,11 +1627,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * is no failure, and neither is a close after the host ended the input on purpose: a host that calls `flush()` on
    * the STT session it holds (the object its `streamingSTT.startSession()` resolved with), as a push-to-talk stop
    * does, has asked for the provider's last final, and a provider may end its stream with `close` after it, as the
-   * `StreamingSTTSession` contract has it. That close, with no frame pushed to the session since the flush, leaves the
-   * session running so the reply to that final still plays; the transport's audio goes to the closed STT session no
-   * more, and the session ends when the host closes it. An `'error'` after a flush is still a failure, and so is a
-   * close once a frame has gone to the session after the flush. The orchestrator wraps the session's `flush()` on that
-   * object to see the call, and puts it back as the session stops.
+   * `StreamingSTTSession` contract has it. That close, with no frame pushed to the session since the flush, or with
+   * the session reporting through `inputEnded` that the flush ended its stream, leaves the session running so the reply
+   * to that final still plays; the transport's audio goes to the closed STT session no more, and the session ends when
+   * the host closes it. An `'error'` after a flush is still a failure, and so is a close once a frame has gone after the
+   * flush to a session that gives no such report. The orchestrator wraps the session's `flush()` on that object to see
+   * the call, and puts it back as the session stops.
    *
    * @param transport - The bidirectional audio/text stream transport.
    * @param agent - The agent session adapter for turn-based conversation.
@@ -1703,10 +1706,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       // with none left, or from a session handed over without failover, reaches here. The close a stop makes finds the
       // session closed. A close after a flush() that ended the input on purpose, with no frame pushed since, is the
       // session's own end, as the session contract has it (a final, then 'close'): the session goes on, so the reply to
-      // that final still plays, and ends when the host closes it.
+      // that final still plays, and ends when the host closes it. So is a close of a session that reports its flush ended
+      // the stream, whatever frames arrived since: a frame sent to a stream that has ended is no new input.
       this.stt.on('close', () => {
         if (this.current === 'closed') return;
-        if (this.sttEndRequested) {
+        if (this.sttEndRequested || this.stt?.inputEnded === true) {
           this.sttEnded = true;
           return;
         }
@@ -1780,7 +1784,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     };
     transport.on('audio', (frame: AudioFrame) => {
       if (this.current === 'closed' || this.sttEnded || !this._takesSpeechFrom('audio')) return;
-      // New input: a close from here on is the session's failure again, though a flush() came before.
+      // New input: a close from here on is the session's failure again, though a flush() came before, unless the session
+      // reports that the flush ended its stream (read at the close). A session that does drops this frame.
       this.sttEndRequested = false;
       this.supervise(() => stt.pushAudio(frame), 'stt');
     });
@@ -2382,7 +2387,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Drains only the scoped closing generation; without a call profile it does nothing. Under a call profile it follows
-   * `cancelSynthesis()` and accepts only final transcripts of the closing generation until it resolves.
+   * `cancelSynthesis()` and accepts only final transcripts of the closing generation until it resolves. It flushes the
+   * STT session; the close of one whose `inputEnded` reports that this flush ended its stream, during the drain or
+   * after it, is that end and fails nothing.
    *
    * @param signal - Aborting it rejects the drain.
    */
@@ -2873,6 +2880,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       });
       stt.on('stt:gap', (event: { lostMs: number }) => this.fan?.gap('provider', event.lostMs));
       stt.on('close', () => {
+        // The recognition drain's flush asked the stream to end: the close of a session that reports so is that end.
+        if (this.stopping && stt.inputEnded === true) return;
         if (!this.changing && this.current !== 'closed') this.fail('provider_failure', 'stt');
       });
       this.profile.vadSession.on('vad', (event: VadFrameEvent) => {
