@@ -12,7 +12,7 @@
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { streamText, type StreamPart } from '../../streamText.js';
 import { setGlobalLlmObserver, type LlmUsageEvent } from '../../observers.js';
@@ -31,7 +31,6 @@ let mode: Mode = 'stall';
 let messagePosts = 0;
 let server: http.Server;
 let baseUrl: string;
-const savedKeys = { anthropic: process.env.ANTHROPIC_API_KEY, openrouter: process.env.OPENROUTER_API_KEY };
 
 function sse(event: unknown): string {
   return `data: ${JSON.stringify(event)}\n\n`;
@@ -46,10 +45,8 @@ const messageStart = {
   },
 };
 
-beforeAll(async () => {
-  // Without an Anthropic key in the environment the resolver can reroute to OpenRouter; keep it on Anthropic.
-  process.env.ANTHROPIC_API_KEY = 'sk-ant-abort-usage-test';
-  delete process.env.OPENROUTER_API_KEY;
+/** One server a test, on its own port: no connection a test left behind is reused by the next. */
+async function startServer(): Promise<void> {
   server = http.createServer((req, res) => {
     if (req.method !== 'POST' || !req.url?.startsWith('/v1/messages')) {
       res.writeHead(404, { 'content-type': 'application/json' });
@@ -58,8 +55,7 @@ beforeAll(async () => {
     }
     messagePosts += 1;
     req.resume();
-    // A fresh connection for every request: a kept-alive socket that afterEach closed is never reused.
-    res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' });
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write(sse(messageStart));
     res.write(sse({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }));
     for (const text of DELTAS) {
@@ -73,15 +69,16 @@ beforeAll(async () => {
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+beforeAll(() => {
+  // Without an Anthropic key in the environment the resolver can reroute to OpenRouter; keep it on Anthropic.
+  vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-abort-usage-test');
+  vi.stubEnv('OPENROUTER_API_KEY', undefined);
 });
 
-afterAll(async () => {
-  server.closeAllConnections();
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  if (savedKeys.anthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
-  else process.env.ANTHROPIC_API_KEY = savedKeys.anthropic;
-  if (savedKeys.openrouter === undefined) delete process.env.OPENROUTER_API_KEY;
-  else process.env.OPENROUTER_API_KEY = savedKeys.openrouter;
+afterAll(() => {
+  vi.unstubAllEnvs();
 });
 
 /** A usage event read with the abort and estimate marks this file checks. */
@@ -93,7 +90,7 @@ type MarkedEvent = LlmUsageEvent & {
 
 let events: MarkedEvent[];
 
-beforeEach(() => {
+beforeEach(async () => {
   mode = 'stall';
   messagePosts = 0;
   events = [];
@@ -101,11 +98,13 @@ beforeEach(() => {
   setGlobalLlmObserver((event) => {
     events.push(event as MarkedEvent);
   });
+  await startServer();
 });
 
-afterEach(() => {
+afterEach(async () => {
   setGlobalLlmObserver(null);
   server.closeAllConnections();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
 /** Reads `stream` until `abortAfter` text parts have arrived, aborts, then reads to the end; a throw becomes an error part. */
@@ -218,17 +217,13 @@ describe('an aborted Anthropic stream reports its usage', () => {
       prompt: 'Tell a story.',
       abortSignal: controller.signal,
       fallbackProviders: [],
+      __onUsageReport: () => controller.abort(),
     });
 
-    // Every delta has streamed and the final usage chunk follows them; abort once the server is holding the connection.
+    // The abort comes once streamText has counted the final chunk's usage, while the server holds the connection.
     const parts: StreamPart[] = [];
     try {
-      for await (const part of result.fullStream) {
-        parts.push(part);
-        if (part.type === 'text' && parts.filter((p) => p.type === 'text').length === DELTAS.length) {
-          setTimeout(() => controller.abort(), 200);
-        }
-      }
+      for await (const part of result.fullStream) parts.push(part);
     } catch (error) {
       parts.push({ type: 'error', error: error as Error });
     }
