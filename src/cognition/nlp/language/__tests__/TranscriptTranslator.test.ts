@@ -153,6 +153,16 @@ describe('TranscriptTranslator.translateLine', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('names the model the call sends on its result, a provider prefix removed', async () => {
+    answer(jsonResponse(chatCompletion('Good morning.')));
+    const translator = new TranscriptTranslator();
+    const options = { ...OPTIONS, model: 'openai:gpt-4o-mini' };
+    const translated = await translator.translateLine(line('Buenos días.'), 'en', options);
+    const skipped = await translator.translateLine(line('Buenos días.'), 'es', options);
+    expect([translated.model, skipped.model]).toEqual(['gpt-4o-mini', 'gpt-4o-mini']);
+    expect(posts().map((post) => post.body.model)).toEqual(['gpt-4o-mini']);
+  });
+
   it('translates a line of unknown provenance whatever its words, with source null', async () => {
     answer(jsonResponse(chatCompletion('Good morning.')), jsonResponse(chatCompletion('Buenos días.')));
     const got = await new TranscriptTranslator().translateLine(line('Buenos días.', { code: null, provenance: 'unknown' }), 'en', OPTIONS);
@@ -342,6 +352,23 @@ describe('TranscriptTranslator.translateLine', () => {
     } finally {
       random.mockRestore();
     }
+  });
+
+  it('keeps the success status of a last attempt whose body was lost, on the error and in the failure line', async () => {
+    const cut = async (): Promise<Response> =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(stream) {
+            stream.error(new TypeError('terminated'));
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    answer(cut);
+    const failed = await new TranscriptTranslator().translateLine(line('Hola.'), 'en', { ...OPTIONS, maxAttempts: 1 }).then(() => undefined, (error: unknown) => error);
+    expect(failed).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED', status: 200, unansweredAttempts: 1 });
+    expect(TranscriptTranslator.failedCallMicro(failed, 9_999, () => 0)).toBe(9_999);
+    expect(failures()).toEqual([expect.objectContaining({ provider: 'openai', reason: 'request_failed', status: 200 })]);
   });
 
   it('counts a lost success body though the HTTP error after it reports usage of its own', async () => {
