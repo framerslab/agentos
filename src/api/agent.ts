@@ -166,7 +166,8 @@ export interface AgentOptions extends BaseAgentConfig {
    * Callback invoked when a fallback provider is about to be tried.
    *
    * @param error - The error that triggered the fallback.
-   * @param fallbackProvider - The provider identifier being tried next.
+   * @param fallbackProvider - The provider the next leg is sent to, as
+   *   {@link GenerateTextOptions.onFallback} names it.
    */
   onFallback?: (error: Error, fallbackProvider: string) => void;
   /** Model router for intelligent provider selection per-call. */
