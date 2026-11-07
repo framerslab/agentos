@@ -129,6 +129,30 @@ describe('TranscriptTranslator.translateLine', () => {
     expect(posts()).toHaveLength(1);
   });
 
+  it("reads a Chinese code's script from its region when it names none: zh-CN is translated into zh-TW, and zh-TW is zh-Hant", async () => {
+    answer(jsonResponse(chatCompletion('早安。')));
+    const translator = new TranscriptTranslator();
+    const traditional = await translator.translateLine(line('早上好。', { code: 'zh-CN', provenance: 'configured' }), 'zh-TW', OPTIONS);
+    expect(traditional).toMatchObject({ status: 'translated', text: '早安。', source: 'zh-CN', target: 'zh-TW' });
+    expect(posts()).toHaveLength(1);
+    const same = await Promise.all([
+      translator.translateLine(line('早安。', { code: 'zh-TW', provenance: 'detected' }), 'zh-Hant', OPTIONS),
+      translator.translateLine(line('早安。', { code: 'zh_HK', provenance: 'detected' }), 'zh-TW', OPTIONS),
+      translator.translateLine(line('早上好。', { code: 'zh-CN', provenance: 'configured' }), 'zh-Hans', OPTIONS),
+    ]);
+    expect(same.map((each) => each.status)).toEqual(['skipped', 'skipped', 'skipped']);
+    expect(posts()).toHaveLength(1);
+  });
+
+  it("sends nothing for a model that names another provider, so the OpenAI key never goes to it", async () => {
+    answer(jsonResponse(chatCompletion('Good morning.')));
+    for (const model of ['anthropic:claude-opus-4-1', 'openrouter:openai/gpt-4o-mini']) {
+      const refused = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', { ...OPTIONS, model }).then(() => undefined, (error: unknown) => error);
+      expect(refused).toMatchObject({ name: 'TranslationProviderError', code: 'TRANSLATION_REQUEST_FAILED' });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('translates a line of unknown provenance whatever its words, with source null', async () => {
     answer(jsonResponse(chatCompletion('Good morning.')), jsonResponse(chatCompletion('Buenos días.')));
     const got = await new TranscriptTranslator().translateLine(line('Buenos días.', { code: null, provenance: 'unknown' }), 'en', OPTIONS);
