@@ -81,6 +81,7 @@ export type TranslatedLine =
        * 0 or `usage` is null, and the priced `usage` otherwise.
        */
       unansweredAttempts: number;
+      /** The model the call sent, as the provider received it (`openai:gpt-4o-mini` is `gpt-4o-mini`). */
       model: string;
       providerId: string;
       version: typeof TRANSLATOR_VERSION;
@@ -249,18 +250,21 @@ export class TranscriptTranslator {
    */
   async translateLine(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): Promise<TranslatedLine> {
     options.abortSignal?.throwIfAborted();
-    const base = { itemId: line.itemId, target, model: options.model, providerId: options.provider, version: TRANSLATOR_VERSION } as const;
+    // The model the call sends, so a result names what made it: `openai:gpt-4o-mini` is `gpt-4o-mini`.
+    const modelId = modelIdOf(options);
+    const base = { itemId: line.itemId, target, model: modelId, providerId: options.provider, version: TRANSLATOR_VERSION } as const;
     if (line.source.code !== null && line.source.provenance !== 'unknown' && languageOf(line.source.code) === languageOf(target)) {
       return { ...base, source: line.source.code, status: 'skipped', reason: 'same_language', usage: null };
     }
     const source = sourceOf(line);
-    const modelId = modelIdOf(options);
     const maxOutputTokens = capOf(line, options, modelId);
     // Attempts that got no usable answer may each have been billed for a whole answer: those that got no HTTP answer,
     // and those whose success status came and whose body never became the answer (a connection cut while it was read).
     let noAnswer = 0;
     let succeeded = 0;
     let lastSucceeded = false;
+    // The status the latest attempt answered with, kept for an error that loses it (a success body cut while it was read).
+    let lastStatus: number | null = null;
     // The tokens attempts answered with an error status reported for themselves. A later attempt replaces such an
     // attempt's error, so its bill is kept here: `earlier` for the attempts before the latest, `latest` for the latest,
     // whose own error, when the call ends on it, reports the same tokens.
@@ -311,6 +315,7 @@ export class TranscriptTranslator {
           earlier = sumUsage(earlier, latest);
           latest = !outcome.ok && outcome.status !== null ? billedUsageOfReport(outcome.usage) : null;
           lastSucceeded = outcome.ok;
+          lastStatus = outcome.status;
           if (outcome.ok) succeeded += 1;
           else if (outcome.status === null) noAnswer += 1;
         },
@@ -323,7 +328,8 @@ export class TranscriptTranslator {
         logTranslationFailed('openai', 'timeout', undefined, error);
         throw controller.signal.reason;
       }
-      const status = statusOf(error);
+      // A body lost after a success status ends as a network error with no status: the attempt's own status stands.
+      const status = statusOf(error) ?? (lastSucceeded && lastStatus !== null ? lastStatus : undefined);
       const billed = billedUsageOf(error) ?? latest;
       // Usage on an error accounts for a successful attempt's body only when that attempt was the last. A 500's usage
       // says nothing of the answer an earlier 200 may have been billed for, and the error of a response marked failed
