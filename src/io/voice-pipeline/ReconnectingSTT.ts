@@ -89,7 +89,9 @@ const frameMs = (f: AudioFrame): number => (f.samples.length / f.sampleRate) * 1
  * `pushAudioScoped()` frames that carry its current identity, replays them with that identity into a new
  * session of the same provider, and `reset()` drops the replay. The provider's sessions must implement
  * `pushAudioScoped()` and `reset()`. A reconnect whose session fails to open ends the scoped session instead of
- * being retried, and a reconnect never moves to another provider.
+ * being retried, and a reconnect never moves to another provider. The scoped session reports and honours
+ * `inputEnded` as this one does: a frame sent while it is true is dropped, and the close of a provider session that
+ * reports it ends the scoped session without a reconnect.
  *
  * @example
  * ```typescript
