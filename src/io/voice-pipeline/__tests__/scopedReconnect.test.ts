@@ -93,6 +93,21 @@ describe('scoped reconnection after a flush that ended the stream', () => {
     expect(session.inputEnded).toBe(true);
   });
 
+  it('drops a late frame of the current identity once the close that ended the stream ended the scoped session', async () => {
+    const { provider, opened } = host(true);
+    const session = await new ReconnectingSTT(provider, { minReplayMs: 0 }).startSession({ call: identity }) as ScopedStreamingSTTSession;
+    session.on('error', () => {});
+    await session.pushAudioScoped(frameAt(1));
+    await session.flush();
+    opened[0].emit('close');
+    await expect(session.pushAudioScoped(frameAt(2))).resolves.toBeUndefined();
+    await expect(session.pushAudioScoped({ ...frameAt(3), samples: new Float32Array(0) })).resolves.toBeUndefined();
+    expect(opened[0].pushAudioScoped).toHaveBeenCalledTimes(1);
+    expect(session.inputEnded).toBe(true);
+    // A frame of another identity is still refused.
+    await expect(session.pushAudioScoped({ ...frameAt(4), turnId: 'turn-b' })).rejects.toThrow('stale');
+  });
+
   it('drops a frame after the flush that ended the stream: it reaches neither the provider nor a replay', async () => {
     const { provider, opened } = host(true);
     const session = await new ReconnectingSTT(provider, { minReplayMs: 0 }).startSession({ call: identity }) as ScopedStreamingSTTSession;
