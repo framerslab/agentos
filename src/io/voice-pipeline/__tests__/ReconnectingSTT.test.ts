@@ -315,6 +315,39 @@ describe('ReconnectingSTT', () => {
     expect(closed).toHaveBeenCalledTimes(1);
     expect(sessions.length).toBe(1); // no reconnect after the caller's close
   });
+  it('opens no new session when the session reports its flush ended the stream, though audio and a final followed the flush', async () => {
+    const { stt, sessions } = scripted();
+    const session = await new ReconnectingSTT(stt, { clock: () => 0 }).startSession();
+    const closed = vi.fn();
+    session.on('close', closed);
+
+    await session.flush();
+    Object.defineProperty(sessions[0], 'inputEnded', { value: true });
+    session.pushAudio(frame(0));
+    sessions[0].emit('transcript', final('the last words', 0, 100));
+    sessions[0].emit('close');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(sessions.length).toBe(1);
+    expect(closed).toHaveBeenCalledTimes(1);
+    expect(session.inputEnded).toBe(true);
+  });
+
+  it('keeps a frame after the flush that ended the stream out of a later replay', async () => {
+    const { stt, sessions } = scripted();
+    const session = await new ReconnectingSTT(stt, { ringBufferCapacityMs: 3_000, minReplayMs: 0, clock: () => 0 }).startSession();
+    session.pushAudio(frame(0));
+    await session.flush();
+    Object.defineProperty(sessions[0], 'inputEnded', { value: true });
+    session.pushAudio(frame(20)); // in flight when the client stopped: no input for a stream that has ended
+
+    expect(sessions[0].frames.map((f) => f.timestamp)).toEqual([0]);
+    sessions[0].emit('error', new Error('socket error while draining'));
+    await vi.waitFor(() => expect(sessions.length).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sessions[1].frames.map((f) => f.timestamp)).toEqual([0]);
+  });
+
   it('ends without a reconnect when the provider closes its stream after a flush, and reconnects when audio followed the flush', async () => {
     const a = scripted();
     const ending = await new ReconnectingSTT(a.stt, { clock: () => 0 }).startSession();

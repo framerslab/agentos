@@ -7,6 +7,7 @@
  */
 import type { ZodError, ZodType } from 'zod';
 import { SchemaChecks, type SchemaCheck } from '../../core/utils/schemaChecks.js';
+import { findDuplicateJsonKey } from '../../core/utils/jsonDuplicateKeys.js';
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
 
 // ---------------------------------------------------------------------------
@@ -240,34 +241,68 @@ export function buildSchemaInstructionText(
  * This handles the common case where models wrap JSON in code blocks
  * despite being told not to.
  *
+ * An object that repeats a key is refused: `JSON.parse` would keep only the
+ * key's last value, and the reply would lose the others without a sign.
+ *
  * @param text - The raw text to parse.
  * @returns The parsed value.
- * @throws {SyntaxError} When no valid JSON can be extracted.
+ * @throws {SyntaxError} When no valid JSON can be extracted, or when the JSON
+ *   found holds an object that repeats a key.
  */
 export function extractJson(text: string): unknown {
   const trimmed = text.trim();
 
   // Fast path: direct JSON parse
+  let direct: { value: unknown } | undefined;
   try {
-    return JSON.parse(trimmed);
+    direct = { value: JSON.parse(trimmed) };
   } catch {
     // Fall through to code fence extraction
   }
+  if (direct) return withDistinctKeys(trimmed, direct.value);
 
   // Try extracting from markdown code fences (```json ... ``` or ``` ... ```)
   const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
   if (fenceMatch?.[1]) {
-    return JSON.parse(fenceMatch[1].trim());
+    const fenced = fenceMatch[1].trim();
+    return withDistinctKeys(fenced, JSON.parse(fenced));
   }
 
   // Last resort: find the first { and last } to extract a JSON object
   const firstBrace = trimmed.indexOf('{');
   const lastBrace = trimmed.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace > firstBrace) {
-    return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+    const braced = trimmed.slice(firstBrace, lastBrace + 1);
+    return withDistinctKeys(braced, JSON.parse(braced));
   }
 
   throw new SyntaxError(`No valid JSON found in LLM response: ${trimmed.slice(0, 200)}`);
+}
+
+/**
+ * Parses JSON text as {@link extractJson} does, refusing an object that
+ * repeats a key. For a reply whose text is the JSON itself (a forced schema
+ * tool's input, the JSON output format's answer).
+ *
+ * @throws {SyntaxError} When the text is not JSON, or holds an object that repeats a key.
+ */
+export function parseJsonWithDistinctKeys(text: string): unknown {
+  return withDistinctKeys(text, JSON.parse(text));
+}
+
+/**
+ * Returns `value`, the parse of `json`, unless an object of `json` repeats a key.
+ *
+ * @throws {SyntaxError} Naming the repeated key and the object that holds it.
+ */
+export function withDistinctKeys(json: string, value: unknown): unknown {
+  const duplicate = findDuplicateJsonKey(json);
+  if (duplicate) {
+    throw new SyntaxError(
+      `Duplicate key "${duplicate.key}" in the object at ${duplicate.path}: each key may appear once in an object, and JSON keeps only its last value.`,
+    );
+  }
+  return value;
 }
 
 /**
@@ -284,8 +319,9 @@ export function extractJson(text: string): unknown {
  * Driven strictly by the validation issues: for each `invalid_type` issue
  * expecting a container whose actual value is a string that syntactically
  * starts like that container, `JSON.parse` the string in place on a clone.
- * One pass, no recursion; anything that does not parse is left untouched so
- * the caller's normal retry/feedback path still applies.
+ * One pass, no recursion; anything that does not parse, or that holds an
+ * object repeating a key, is left untouched so the caller's normal
+ * retry/feedback path still applies.
  *
  * @param value - The extracted-but-invalid candidate value.
  * @param error - The Zod error from the failed validation.
@@ -337,6 +373,9 @@ export function repairStringEncodedContainers(
     } catch {
       continue;
     }
+    // An encoded container that repeats a key would keep only the key's last
+    // value: it stays a string, and the reply fails validation as it stands.
+    if (findDuplicateJsonKey(trimmed)) continue;
     if (path.length === 0) {
       // The root itself was string-encoded.
       root = inner;

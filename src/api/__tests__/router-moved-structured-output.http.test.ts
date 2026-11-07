@@ -14,7 +14,8 @@
  * OpenRouterProvider.
  *
  * An Anthropic call with no Anthropic key, which the resolver sends to
- * OpenRouter, goes to the OpenRouter base URL the environment sets, and a
+ * OpenRouter, goes to the OpenRouter base URL a call that names OpenRouter
+ * goes to (a global default's for OpenRouter, else the environment's), and a
  * structured send there is sent OpenRouter's payload.
  */
 import * as http from 'node:http';
@@ -26,6 +27,7 @@ import { z } from 'zod';
 import { agent } from '../agent.js';
 import { generateText } from '../generateText.js';
 import { shutdownProviderManagers } from '../model.js';
+import { clearDefaultProvider, setDefaultProvider } from '../runtime/global-default.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 
 /** The OpenRouter model the router sends every call to. */
@@ -239,6 +241,23 @@ describe('an Anthropic call with no Anthropic key, which the resolver sends to O
     const sent = completions();
     expect(sent).toHaveLength(1);
     expect(sent[0].model).toBe(REMAPPED_MODEL);
+  });
+
+  it('goes to the base URL a global default that names OpenRouter sets, as a call that names OpenRouter does', async () => {
+    answerText = 'remapped through the default';
+    vi.stubEnv('OPENROUTER_BASE_URL', '');
+    setDefaultProvider({ provider: 'openrouter', baseUrl: `${origin}/api/v1` });
+
+    try {
+      const result = await generateText({ provider: 'anthropic', model: 'claude-sonnet-4-5', prompt: 'x', fallbackProviders: [] });
+
+      expect(result.text).toBe('remapped through the default');
+      const sent = completions();
+      expect(sent).toHaveLength(1);
+      expect(sent[0].model).toBe(REMAPPED_MODEL);
+    } finally {
+      clearDefaultProvider();
+    }
   });
 
   it("is sent OpenRouter's json_schema payload when it is a structured send", async () => {

@@ -743,6 +743,44 @@ describe('session events under a call profile', () => {
     expect(f.transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_speaking' }));
   });
 
+  it.each([
+    ['during', true],
+    ['after', false],
+  ] as const)('takes a close %s the recognition drain from an STT session whose flush ended its stream as the end, not a failure', async (_when, during) => {
+    const f = await call();
+    let ended = false;
+    Object.defineProperty(f.stt, 'inputEnded', { get: () => ended, enumerable: true });
+    // The provider ends its stream at the drain's flush and then closes, before the flush resolves or after it.
+    f.stt.flush = async () => {
+      ended = true;
+      if (during) f.stt.emit('close');
+    };
+
+    await f.runtime.cancelSynthesis();
+    await f.runtime.drainRecognition(new AbortController().signal);
+    if (!during) f.stt.emit('close');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(f.runtime.state).not.toBe('closed');
+    expect(f.profile.onFailure).not.toHaveBeenCalled();
+    await f.runtime.stopSession('done');
+    expect(f.log.filter((line) => line.startsWith('session_error') || line.startsWith('close'))).toEqual(['close done']);
+  });
+
+  it('still fails the call on a close at the recognition drain from an STT session that reports no end of its stream', async () => {
+    const f = await call();
+    f.session.on('error', () => {});
+    f.stt.flush = async () => {
+      f.stt.emit('close');
+    };
+
+    await f.runtime.cancelSynthesis();
+    await f.runtime.drainRecognition(new AbortController().signal).catch(() => {});
+    await vi.waitFor(() => expect(f.runtime.state).toBe('closed'));
+
+    expect(f.log).toContain('session_error stt false');
+  });
+
   it('emits close once, and cleans up once, though a listener of the close stops the session again', async () => {
     const f = await call();
     const reasons: string[] = [];

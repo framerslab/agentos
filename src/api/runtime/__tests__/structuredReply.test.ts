@@ -72,6 +72,17 @@ describe('checkStructuredReply', () => {
     if (!prose.ok) expect(prose.issues[0]).toMatch(/the reply is not JSON/);
   });
 
+  it('leaves a string-encoded container that repeats a key unrepaired, so the reply fails rather than losing a value', () => {
+    // the outer JSON keeps its keys distinct; the encoded array's object holds "heavy" twice
+    const encoded = '{"items":"[{\\"date\\":\\"2026-10-13\\",\\"title\\":\\"Drill\\",\\"heavy\\":true,\\"heavy\\":false}]"}';
+    const check = checkStructuredReply(encoded, resolved);
+    expect(check.ok).toBe(false);
+    if (!check.ok) {
+      expect(check.issues.join('\n')).toContain('items');
+      expect(typeof (check.value as { items: unknown }).items).toBe('string');
+    }
+  });
+
   it('writes the repair message from the issues and the reply, and rechecks after a guardrail rewrote the text', () => {
     const message = structuredRepairMessage(['- items.0.heavy: Required'], resolved, 'x'.repeat(600));
     expect(message).toContain('did not match the required JSON schema for "week"');

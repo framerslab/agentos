@@ -371,6 +371,38 @@ describe('DeepgramStreamingSTT – KeepAlive while audio pauses', () => {
     }
   });
 
+  it('sends and counts no audio after flush() sent CloseStream, and reports the end of its stream', async () => {
+    const { session, ws } = await startSession();
+    try {
+      expect(session.inputEnded).toBe(false);
+      session.pushAudio(frame);
+      const sent = ws.send.mock.calls.length;
+      const seconds = (session as any).audioSeconds;
+      const flushing = session.flush();
+      expect(session.inputEnded).toBe(true);
+      session.pushAudio(frame); // a frame the client had in flight when the host flushed
+      await vi.advanceTimersByTimeAsync(200);
+      await flushing;
+      expect(ws.send.mock.calls.length).toBe(sent + 1);
+      expect((session as any).audioSeconds).toBe(seconds);
+    } finally {
+      session.close();
+    }
+  });
+
+  it('keeps its stream open when CloseStream cannot go out: the flush rejects and the session reports no end', async () => {
+    const { session, ws } = await startSession();
+    try {
+      ws.send.mockImplementationOnce(() => {
+        throw new Error('socket not open');
+      });
+      await expect(session.flush()).rejects.toThrow('socket not open');
+      expect(session.inputEnded).toBe(false);
+    } finally {
+      session.close();
+    }
+  });
+
   it('sends no KeepAlive after flush() sent CloseStream, even when audio arrives during the drain and the socket stays open', async () => {
     const { session, ws } = await startSession();
     try {

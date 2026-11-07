@@ -25,7 +25,7 @@ import {
   type ToolCallHookInfo,
 } from './generateText.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
-import { buildSchemaInstructionText, extractJson } from './runtime/structuredReply.js';
+import { buildSchemaInstructionText, extractJson, parseJsonWithDistinctKeys } from './runtime/structuredReply.js';
 import { createLogger } from '../core/logging/loggerFactory.js';
 import { resolveModelOption } from './model.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
@@ -856,7 +856,7 @@ async function generateWithValidation(
 
     let failure: ObjectGenerationError;
     try {
-      const parsed = extract ? extractJson(result.text) : JSON.parse(result.text);
+      const parsed = extract ? extractJson(result.text) : parseJsonWithDistinctKeys(result.text);
       const safe = schema.safeParse(parsed);
       if (safe.success) {
         observeValidatedExchange(memory.provider, memory.userText, result.text);

@@ -19,6 +19,7 @@ import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
+import { withDistinctKeys } from './runtime/structuredReply.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -563,26 +564,31 @@ function arrayFieldState(text: string, field: string): ArrayFieldState {
  *
  * @param text - The complete raw text to parse.
  * @returns The parsed value.
- * @throws {SyntaxError} When no valid JSON can be extracted.
+ * @throws {SyntaxError} When no valid JSON can be extracted, or when the JSON
+ *   found holds an object that repeats a key ({@link withDistinctKeys}).
  */
 function extractJson(text: string): unknown {
   const trimmed = text.trim();
 
+  let direct: { value: unknown } | undefined;
   try {
-    return JSON.parse(trimmed);
+    direct = { value: JSON.parse(trimmed) };
   } catch {
     // Fall through
   }
+  if (direct) return withDistinctKeys(trimmed, direct.value);
 
   const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
   if (fenceMatch?.[1]) {
-    return JSON.parse(fenceMatch[1].trim());
+    const fenced = fenceMatch[1].trim();
+    return withDistinctKeys(fenced, JSON.parse(fenced));
   }
 
   const firstBrace = trimmed.indexOf('{');
   const lastBrace = trimmed.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace > firstBrace) {
-    return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+    const braced = trimmed.slice(firstBrace, lastBrace + 1);
+    return withDistinctKeys(braced, JSON.parse(braced));
   }
 
   throw new SyntaxError(`No valid JSON found in streamed response: ${trimmed.slice(0, 200)}`);
