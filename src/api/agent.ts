@@ -426,7 +426,8 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * schema (a provider with none, a record schema on an Anthropic model
    * that refuses a forced tool choice, JSON-object mode) gets the schema
    * in its system prompt, in the words `generateObject` uses; each
-   * fallback provider is checked for its own payload.
+   * fallback provider, and the provider and model the agent's model router
+   * picks when it moves the send, is checked for its own payload.
    *
    * The agent's tools are left out of a schema request, and with them the
    * chain-of-thought instruction; `runtime: 'legacy'` (the default) warns
@@ -1220,10 +1221,11 @@ export function agent(opts: AgentOptions): Agent {
               schemaName,
             });
             // Per-leg rebuild (same contract as generateObject): a fallback
-            // hop onto a foreign provider gets a payload shaped for THAT
-            // provider instead of this primary-shaped one, which the leg
-            // provider's guard would silently drop — leaving the leg with
-            // zero provider-side enforcement.
+            // hop onto a foreign provider, and a call the agent's model router
+            // moves to another provider or model, gets a payload shaped for
+            // THAT provider and model instead of this primary-shaped one,
+            // which the other provider's guard would silently drop — leaving
+            // the call with zero provider-side enforcement.
             responseFormatBuilder = (legProviderId, legModelId) =>
               buildResponseFormatForProvider({
                 providerId: legProviderId,

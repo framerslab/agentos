@@ -156,6 +156,34 @@ describe('OpenAIProvider operation id', () => {
     expect(sent[1]).toBe(sent[0]);
   });
 
+  it('sends the operation id the call names on every attempt, in place of one of its own, streamed or not', async () => {
+    stub.queue(CHAT, UNAVAILABLE, chatCompletion('hi'), UNAVAILABLE, chatStream('hello'));
+    const openai = await provider({ operationIdHeader: HEADER });
+
+    await openai.generateCompletion('gpt-4o', messages, { operationId: 'op-whole' });
+    await drain(openai.generateCompletionStream('gpt-4o', messages, { operationId: 'op-stream' }));
+
+    expect(ids(CHAT)).toEqual(['op-whole', 'op-whole', 'op-stream', 'op-stream']);
+  });
+
+  it('replaces a customHeaders entry of the same name with the operation id the call names', async () => {
+    stub.queue(CHAT, chatCompletion('hi'));
+    const openai = await provider({ operationIdHeader: HEADER, customHeaders: { 'X-Operation-Id': 'from-the-host' } });
+
+    await openai.generateCompletion('gpt-4o', messages, { operationId: 'op-named' });
+
+    expect(ids(CHAT)).toEqual(['op-named']);
+  });
+
+  it('sends nothing for the operation id a call names when neither the config nor the environment names a header', async () => {
+    stub.queue(CHAT, chatCompletion('hi'));
+
+    await (await provider()).generateCompletion('gpt-4o', messages, { operationId: 'op-unsent' });
+
+    const [request] = stub.sent(CHAT);
+    expect(Object.values(request?.headers ?? {})).not.toContain('op-unsent');
+  });
+
   it('sends one operation id on both attempts of an embeddings call that a 503 retried', async () => {
     stub.queue(EMBEDDINGS, UNAVAILABLE, EMBEDDING);
     const openai = await provider({ operationIdHeader: HEADER });
@@ -167,6 +195,15 @@ describe('OpenAIProvider operation id', () => {
     expect(sent).toHaveLength(2);
     expect(sent[0]).toMatch(UUID);
     expect(sent[1]).toBe(sent[0]);
+  });
+
+  it('sends the operation id an embeddings call names on both attempts of a call that a 503 retried', async () => {
+    stub.queue(EMBEDDINGS, UNAVAILABLE, EMBEDDING);
+    const openai = await provider({ operationIdHeader: HEADER });
+
+    await openai.generateEmbeddings('text-embedding-3-small', ['hi'], { operationId: 'op-embed' });
+
+    expect(ids(EMBEDDINGS)).toEqual(['op-embed', 'op-embed']);
   });
 
   it('takes the header name from AGENTOS_OPERATION_ID_HEADER when the config names none, and the config name over it', async () => {

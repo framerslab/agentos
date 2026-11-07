@@ -31,9 +31,9 @@ function billedUsageOf(error: unknown): ModelUsage | undefined {
  * is charged once, when it ends or fails, with the last usage it carried (an error chunk's, for a billed failed
  * attempt), else the billed usage its thrown failure reports; an unstreamed call that throws is charged that usage.
  * On a budget with a spend meter each request is held in the meter before it is sent ({@link holdCall}): its largest
- * cost reserved under an operation id of its own, which spans the provider's retries of it, and settled by how it
- * ended (consumed at its usage, released when it was refused before any output, otherwise deferred until a reconcile
- * decides from evidence). A call whose stop had already aborted, or aborts while its reservation is made, sends
+ * cost reserved under an operation id of its own, which spans the provider's retries of it and which the provider
+ * sends in its operation id header, and settled by how it ended (consumed at its usage, released when it never left or
+ * the provider refused it with a 4xx before any output, otherwise deferred until a reconcile decides from evidence). A call whose stop had already aborted, or aborts while its reservation is made, sends
  * nothing and holds nothing: the stream ends with the terminal abort chunk the provider contract names (`IProvider`)
  * and the unstreamed call rejects, with an `AbortError` or the signal's reason, as the gmi() gateway refuses such an
  * attempt, since a provider that does not pass the signal to fetch would send it and be billed. Every other member
@@ -59,9 +59,14 @@ export function meteredProvider(provider: IProvider, budget: SpendBudget, what: 
     };
     return holdCall(budget, call);
   };
-  /** `options` with the hold's attempt report, which a hold in a meter reads on its way to the caller's own. */
-  const sentWith = (options: ModelCompletionOptions, held: CallHold): ModelCompletionOptions =>
-    held.onAttempt && held.onAttempt !== options.onAttempt ? { ...options, onAttempt: held.onAttempt } : options;
+  /**
+   * `options` with the hold's attempt report, which a hold in a meter reads on its way to the caller's own, and the
+   * operation id its reservation is under, which the provider sends in its operation id header.
+   */
+  const sentWith = (options: ModelCompletionOptions, held: CallHold): ModelCompletionOptions => {
+    const { onAttempt, operationId } = held.providerOptions;
+    return (onAttempt && onAttempt !== options.onAttempt) || operationId !== undefined ? { ...options, ...held.providerOptions } : options;
+  };
   const charge = (modelId: string, usage: ModelUsage | undefined): void => {
     if (!usage) return;
     budget.record(costOfUsageUSD(provider.providerId, modelId, usage), tokensOf(usage), what);

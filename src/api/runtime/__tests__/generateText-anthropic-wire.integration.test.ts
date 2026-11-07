@@ -450,6 +450,61 @@ describe('Anthropic catalog and pricing through the public API', () => {
     // $0.004 input + $0.02 cache reads + $0.01 output.
     expect(result.usage.costUSD).toBeCloseTo(0.034, 6);
   });
+
+  it('generateObject sums inclusiveInputTokens over its attempts: input_tokens plus the cache writes and reads of each Claude reply', async () => {
+    // Claude's input_tokens leaves the cached prompt out. A host pricing calls
+    // by inclusiveInputTokens, with promptTokens as its fallback, priced each
+    // cached structured call on its 4- or 8-token uncached tail.
+    route({
+      'claude-sonnet-5-5': [
+        textTurn('claude-sonnet-5-5', 'not json', {
+          input_tokens: 4,
+          cache_creation_input_tokens: 2000,
+          cache_read_input_tokens: 0,
+        }),
+        textTurn('claude-sonnet-5-5', '{"answer":"ok"}', {
+          input_tokens: 8,
+          cache_creation_input_tokens: 30,
+          cache_read_input_tokens: 2000,
+        }),
+      ],
+    });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-sonnet-5-5',
+      schema: z.object({ answer: z.string() }),
+      prompt: 'Answer with ok.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ answer: 'ok' });
+    expect(postedBodies()).toHaveLength(2);
+    expect(result.usage.promptTokens).toBe(12);
+    expect(result.usage.cacheCreationTokens).toBe(2030);
+    expect(result.usage.cacheReadTokens).toBe(2000);
+    expect(result.usage.inclusiveInputTokens).toBe(4 + 2000 + 0 + 8 + 30 + 2000);
+  });
+
+  it('generateObject reports inclusiveInputTokens equal to promptTokens over two attempts when the Claude replies carry no cache fields', async () => {
+    route({
+      'claude-sonnet-5-5': [
+        textTurn('claude-sonnet-5-5', 'not json', { input_tokens: 10 }),
+        textTurn('claude-sonnet-5-5', '{"answer":"ok"}', { input_tokens: 15 }),
+      ],
+    });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-sonnet-5-5',
+      schema: z.object({ answer: z.string() }),
+      prompt: 'Answer with ok.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ answer: 'ok' });
+    expect(postedBodies()).toHaveLength(2);
+    expect(result.usage.promptTokens).toBe(25);
+    expect(result.usage.inclusiveInputTokens).toBe(result.usage.promptTokens);
+  });
 });
 
 describe('the prompt-cache modes on the wire', () => {

@@ -4,7 +4,9 @@
  * via the caller-supplied `_responseFormatBuilder`; absent builder keeps the
  * legacy verbatim carry; a throwing builder overrides with an EXPLICIT
  * `undefined` (the stale primary payload must never leak into the leg
- * through the `...opts` spread).
+ * through the `...opts` spread). A call a model router moves is rebuilt the
+ * same way for the router's pick, and a call the router leaves on its own
+ * provider and model keeps the caller's payload.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
@@ -33,6 +35,7 @@ vi.mock('../../model.js', () => ({
 import { generateText } from '../generateText.js';
 import { resolveModelOption, resolveProvider } from '../../model.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import type { IModelRouter } from '../../../core/llm/routing/IModelRouter.js';
 
 const ANTHROPIC_MARKER = {
   _agentosUseToolForStructuredOutput: true,
@@ -160,5 +163,77 @@ describe('generateText fallback legs with _responseFormatBuilder', () => {
     });
 
     expect(builder).toHaveBeenCalledWith('openai', '');
+  });
+});
+
+describe('generateText calls a model router picks for, with _responseFormatBuilder', () => {
+  beforeEach(() => {
+    hoisted.generateCompletion.mockReset();
+    (resolveModelOption as unknown as Mock).mockImplementation(
+      (opts: { provider?: string; model?: string }) => ({
+        providerId: opts?.provider ?? 'openai',
+        modelId: opts?.model ?? 'gpt-4.1-mini',
+      }),
+    );
+    (resolveProvider as unknown as Mock).mockImplementation(
+      (providerId: string, modelId: string) => ({ providerId, modelId, apiKey: 'test-key' }),
+    );
+    globalLLMProviderHealth.reset();
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) => okResponse(modelId, '{"a":1}'));
+  });
+
+  /** A model router that sends every call to `modelId` on `providerId`. */
+  const routerTo = (providerId: string, modelId: string): IModelRouter =>
+    ({
+      routerId: `to-${providerId}`,
+      initialize: async () => undefined,
+      selectModel: async () => ({ modelId, modelInfo: { providerId } }),
+    }) as unknown as IModelRouter;
+
+  /** The system messages' text of the one provider call. */
+  const systemText = (): string =>
+    ((hoisted.generateCompletion.mock.calls[0]?.[1] ?? []) as Array<{ role: string; content: unknown }>)
+      .filter((m) => m.role === 'system')
+      .map((m) => String(m.content))
+      .join('\n');
+
+  it("a router that picks the call's own provider and model leaves the caller's payload as it is", async () => {
+    const builder = vi.fn(() => ({ type: 'json_object' }));
+
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-primary',
+      prompt: 'p',
+      router: routerTo('anthropic', 'claude-primary'),
+      fallbackProviders: [],
+      _responseFormat: ANTHROPIC_MARKER,
+      _responseFormatBuilder: builder,
+    });
+
+    expect(builder).not.toHaveBeenCalled();
+    const options = (hoisted.generateCompletion.mock.calls[0]?.[2] ?? {}) as { responseFormat?: unknown };
+    expect(options.responseFormat).toBe(ANTHROPIC_MARKER);
+  });
+
+  it('a routed call whose builder throws runs with no payload and the schema instructions in its system prompt', async () => {
+    await generateText({
+      provider: 'anthropic',
+      model: 'claude-primary',
+      prompt: 'p',
+      router: routerTo('openrouter', 'vendor/routed-model'),
+      fallbackProviders: [],
+      // The primary's marker carries the schema, so it alone would keep the
+      // instructions out of the prompt.
+      _responseFormat: ANTHROPIC_MARKER,
+      _responseFormatBuilder: () => {
+        throw new Error('builder bug');
+      },
+      _schemaInstruction: 'Answer in the routed schema.',
+    });
+
+    const [modelId, , options] = hoisted.generateCompletion.mock.calls[0] as [string, unknown, { responseFormat?: unknown }];
+    expect(modelId).toBe('vendor/routed-model');
+    expect(options.responseFormat).toBeUndefined();
+    expect(systemText()).toContain('Answer in the routed schema.');
   });
 });

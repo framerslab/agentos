@@ -28,10 +28,12 @@ import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from 
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { redactUrlSecrets } from '../core/llm/providers/url-secrets.js';
+import { operationIdHeaderNamed, resolveOperationIdHeader } from '../core/llm/providers/implementations/operation-id.js';
 import {
   asSpendBudget,
   costOfUsageUSD,
   holdCall,
+  holdsInMeter,
   type CallHold,
   type SpendBudget,
   type SpendBudgetOptions,
@@ -140,7 +142,8 @@ export interface EmbedTextOptions {
   /**
    * A spend budget for this call and, when the same {@link SpendBudget} instance is passed to several calls, for all of
    * them: the request is checked against what is left before it is sent, its input priced at the model's row, and
-   * its cost recorded after it.
+   * its cost recorded after it. On a budget with a spend meter, every request the call sends (each batch, and each
+   * retry Gemini makes) carries the id its reservation is under in the header `AGENTOS_OPERATION_ID_HEADER` names.
    */
   budget?: SpendBudget | SpendBudgetOptions;
 
@@ -275,6 +278,7 @@ interface OllamaEmbedResponse {
  *   answered, or null when no answer came (a network failure, or the caller's abort once the request had begun).
  * @param dimensionsField - The body field `dimensions` is sent in: `dimensions`, OpenAI's, unless the endpoint
  *   documents another ({@link DIMENSIONS_FIELDS}).
+ * @param operationHeaders - The call's operation id header ({@link reservationHeader}), or `{}` for none.
  * @returns Parsed {@link OpenAIEmbeddingResponse}.
  * @throws {Error} On non-2xx HTTP status or network failure, with base URL
  *   credentials and the API key masked out of the message; the signal's
@@ -289,6 +293,7 @@ async function callOpenAIEmbedding(
   abortSignal?: AbortSignal,
   onAttempt?: (outcome: AttemptOutcome) => void,
   dimensionsField = 'dimensions',
+  operationHeaders: Record<string, string> = {},
 ): Promise<OpenAIEmbeddingResponse> {
   // Construct the request body, omitting the output size when not specified
   // to avoid confusing models that don't support it.
@@ -304,6 +309,7 @@ async function callOpenAIEmbedding(
     response = await fetch(url, {
       method: 'POST',
       headers: {
+        ...operationHeaders,
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
@@ -385,6 +391,7 @@ function embeddingFetchError(
  * @param modelId - The Ollama model name (e.g. `nomic-embed-text`).
  * @param input - Array of strings to embed.
  * @param abortSignal - The caller's signal, which cancels the request in flight.
+ * @param operationHeaders - The call's operation id header ({@link reservationHeader}), or `{}` for none.
  * @returns Parsed {@link OllamaEmbedResponse}.
  * @throws {Error} On non-2xx HTTP status or network failure, with base URL
  *   credentials masked out of the message; the signal's reason once it has
@@ -395,6 +402,7 @@ async function callOllamaEmbed(
   modelId: string,
   input: string[],
   abortSignal?: AbortSignal,
+  operationHeaders: Record<string, string> = {},
 ): Promise<OllamaEmbedResponse> {
   const url = `${baseUrl.replace(/\/+$/, '')}/api/embed`;
 
@@ -402,7 +410,7 @@ async function callOllamaEmbed(
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...operationHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: modelId, input }),
       ...(abortSignal ? { signal: abortSignal } : {}),
     });
@@ -418,6 +426,22 @@ async function callOllamaEmbed(
   }
 
   return response.json() as Promise<OllamaEmbedResponse>;
+}
+
+/**
+ * The operation id header embedText's own requests carry: the id the call's reservation is under, in the header
+ * `name` names (`AGENTOS_OPERATION_ID_HEADER`), so a server in front of the provider records the call under the id
+ * the spend meter holds it by. None when no header is named or nothing is reserved (no budget, or a budget without a
+ * meter): with no reservation there is nothing for a `resolveExpired` to match. Every request of the call, each batch
+ * and each retry, carries the same id.
+ *
+ * @param name The header's name, as {@link resolveOperationIdHeader} gave it, or undefined for none.
+ * @param hold The call's hold in its budget.
+ * @returns The header, or `{}` for none.
+ */
+function reservationHeader(name: string | undefined, hold: CallHold): Record<string, string> {
+  const id = hold.providerOptions.operationId;
+  return id ? operationIdHeaderNamed(name, id) : {};
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +694,9 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         // Normalise input to an array for uniform handling downstream
         const inputArray = Array.isArray(opts.input) ? opts.input : [opts.input];
         span?.setAttribute('agentos.api.embed_input_count', inputArray.length);
+        // The header the reservation's id goes in, read before anything is reserved: a name the providers refuse
+        // (not an HTTP header name, or one a request sets itself) rejects with a RangeError, and nothing is held or sent.
+        const operationHeader = budget && holdsInMeter(budget) ? resolveOperationIdHeader(undefined) : undefined;
         // Checked once for the whole request, whichever branch below sends it:
         // its input's assumed tokens at the model's input rate. A budget with
         // a meter reserves the bound of its input and settles it at the end.
@@ -684,6 +711,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           abortSignal: opts.abortSignal,
         });
         hold = held;
+        const operationHeaders = reservationHeader(operationHeader, held);
 
         let embeddings: number[][];
         let reportedModel: string;
@@ -698,7 +726,9 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           // Ollama uses its own /api/embed endpoint format
           const baseUrl = resolved.baseUrl ?? 'http://localhost:11434';
           // The hold renews its reservation's lease while the request runs.
-          const result = await held.during(() => callOllamaEmbed(baseUrl, resolved.modelId, inputArray, opts.abortSignal));
+          const result = await held.during(() =>
+            callOllamaEmbed(baseUrl, resolved.modelId, inputArray, opts.abortSignal, operationHeaders),
+          );
 
           embeddings = result.embeddings;
           reportedModel = result.model;
@@ -718,6 +748,8 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           await gemini.initialize({
             apiKey: resolved.apiKey,
             ...(resolved.baseUrl ? { baseURL: resolved.baseUrl } : {}),
+            // The name read before the reservation, so a variable changed since moves no header.
+            ...(operationHeader ? { operationIdHeader: operationHeader } : {}),
           });
           // The hold renews its reservation's lease while the batches run.
           const result = await held
@@ -725,6 +757,9 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
               gemini.generateEmbeddings(resolved.modelId, inputArray, {
                 ...(opts.dimensions ? { dimensions: opts.dimensions } : {}),
                 ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+                // The reservation's id, which GeminiProvider sends in the header named above on every batch and retry;
+                // none without a reservation or a named header.
+                ...(operationHeader && held.providerOptions.operationId ? { operationId: held.providerOptions.operationId } : {}),
               }),
             )
             .catch((error: unknown) => {
@@ -737,10 +772,11 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                   totalTokens: partial.total_tokens,
                   ...(partial.costUSD !== undefined ? { costUSD: partial.costUSD } : {}),
                 };
-                budget?.record(partial.costUSD, partial.total_tokens, 'embed_text');
                 // A model that counts no tokens (gemini-embedding-001) was billed for what its report leaves out: a
-                // report of a total alone settles the whole reservation.
+                // report of a total alone settles the whole reservation. Told to the hold before the charge, which a
+                // guard's `onCapReached` function can throw from.
                 held.billedSoFar(partial.prompt_tokens > 0 ? metricUsage : { totalTokens: partial.total_tokens });
+                budget?.record(partial.costUSD, partial.total_tokens, 'embed_text');
               }
               throw error;
             });
@@ -826,6 +862,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                   opts.abortSignal,
                   held.onAttempt,
                   DIMENSIONS_FIELDS.get(resolved.providerId),
+                  operationHeaders,
                 ),
               );
 
@@ -869,10 +906,12 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         }
 
         metricUsage = usage;
-        budget?.record(usage.costUSD, usage.totalTokens, 'embed_text');
         // An answer that counts no tokens for its input says nothing of its bill: the call takes its whole reservation.
         const counted = inputArray.length === 0 || billedUsage().promptTokens > 0;
+        // Settled before the charge, which a guard's `onCapReached` function can throw from: the hold is consumed at
+        // the call's usage whatever the charge does, as SpendBudget.record's settle is.
         await held.settle({ kind: 'completed', usage: counted ? billedUsage() : undefined });
+        budget?.record(usage.costUSD, usage.totalTokens, 'embed_text');
         span?.setAttribute('agentos.api.embed_dimensions', embeddings[0]?.length ?? 0);
         attachUsageAttributes(span, {
           promptTokens: usage.promptTokens,

@@ -667,12 +667,14 @@ await anthropic.initialize({
 });
 ```
 
-- The provider makes the id, a UUID, once before a call's first attempt. Every retry of that call sends the same value: a retry after a 429, a 5xx or a network failure, an Anthropic stream that ended before its last event, and a hop to another key of the pool.
-- The next call gets a new id. So does a request sent again with a changed body: the request `generateObject` sends again with a raised token budget after a truncated answer, and OpenRouter's schema request sent again without its schema.
-- Streamed calls, embeddings (OpenAI, OpenRouter), the key probe's requests and OpenRouter's health check carry the header too; each probe request has an id of its own.
+- The provider makes the id, a UUID, once before a call's first attempt, unless the call names its own in the `operationId` option. Every retry of that call sends the same value: a retry after a 429, a 5xx or a network failure, an Anthropic stream that ended before its last event, and a hop to another key of the pool.
+- The next call gets a new id. So does a request sent again with a changed body: the request `generateObject` sends again with a raised token budget after a truncated answer, and OpenRouter's schema request sent again without its schema, which keeps a call's own `operationId` when it names one.
+- On a `SpendBudget` with a spend meter, the generation helpers and a launched team's seats pass each provider call the operation id its reservation is under, so the header carries the id the meter holds the call by ([Cost Optimization](../safety/COST_OPTIMIZATION.md#a-spend-budget-for-a-run-of-calls)). `embedText()` sends its requests itself and puts that id on each of them, in the header `AGENTOS_OPERATION_ID_HEADER` names.
+- Streamed calls, embeddings (OpenAI, OpenRouter), the key probe's requests and OpenRouter's health check carry the header too; each probe request has an id of its own. An embeddings call that names an `operationId` sends it in place of the id the provider makes.
+- `GeminiProvider` sends the header on embeddings only, and only when the call names an `operationId`, which it sends on every batch and retry, under its `operationIdHeader` or else the name `AGENTOS_OPERATION_ID_HEADER` gives. Its completions send none.
 - `operationIdHeader` in the provider's config names the header; when it is unset the provider reads `AGENTOS_OPERATION_ID_HEADER` at each call. A blank value counts as unset. With neither, no header is sent.
 - On OpenAI, the id replaces a `customHeaders` entry of the same name in any case (`X-Operation-Id` for `x-operation-id`), so each request carries one value. The other custom headers are sent as before.
-- A name that is not an HTTP header name, or one the provider sets itself (`Authorization`, `x-api-key`, `Content-Type`, `anthropic-version`, `anthropic-beta`, `OpenAI-Organization`, `HTTP-Referer`, `X-Title`, `User-Agent`), is refused with a `RangeError` before anything is sent: by the provider's `initialize()`, by each call, and by `probeApiKey()` and so `probeProviderKey()`. A key probe answers for the key; a refused name is the host's error, so the probe rejects rather than answering `unknown`.
+- A name that is not an HTTP header name, or one the provider sets itself (`Authorization`, `x-api-key`, `x-goog-api-key`, `Content-Type`, `anthropic-version`, `anthropic-beta`, `OpenAI-Organization`, `HTTP-Referer`, `X-Title`, `User-Agent`), is refused with a `RangeError` before anything is sent: by the provider's `initialize()`, by each call, and by `probeApiKey()` and so `probeProviderKey()`. A key probe answers for the key; a refused name is the host's error, so the probe rejects rather than answering `unknown`.
 
 ---
 
@@ -735,7 +737,21 @@ provider-side format carries no schema: on a provider whose entry is "None",
 on an Anthropic model whose schema neither the JSON output format nor a forced
 tool carries (a record schema on a model that refuses a forced tool choice), and
 in JSON-object mode. Each fallback provider is checked for its
-own format. `streamObject()` sends no provider-side format on any provider: its
+own format, and so is the provider a call is sent to: a session send that
+`agent({ router })` moves to another provider or model is sent the format of
+the provider and model it goes to, and the schema in its system prompt when
+that format carries none, so a send moved from Anthropic to an OpenRouter
+model goes out with OpenRouter's `json_schema` or JSON-object format rather
+than an Anthropic payload OpenRouter does not forward. A call on Anthropic
+with no Anthropic key or base URL goes to OpenRouter, whether the caller names
+Anthropic, a router picks it or a fallback leg names it, and is sent
+OpenRouter's format there, at the `OPENROUTER_BASE_URL` the environment sets,
+as a call that names OpenRouter is. A fallback entry whose model id carries
+another provider's prefix (`{ provider: 'anthropic', model:
+'openrouter:anthropic/claude-sonnet-4.5' }`) is sent the format of the provider
+the prefix names. A send that goes to the agent's own provider and
+model keeps the agent's format. `streamObject()`
+sends no provider-side format on any provider: its
 schema travels in the system prompt only. All three validate the reply against
 the caller's Zod schema, and `send()` throws an `ObjectGenerationError` when the
 reply is not matching JSON.

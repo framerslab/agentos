@@ -1,9 +1,10 @@
 /**
  * @file responseFormatForProvider.ts
  * @description The ONE place that maps (providerId, modelId, schema) to the
- * provider-native structured-output payload. generateObject's primary path
- * and generateText's fallback legs both route through here, so a fallback
- * hop onto a foreign provider rebuilds the payload for THAT provider
+ * provider-native structured-output payload. generateObject's primary path,
+ * generateText's fallback legs and a call a model router moves to another
+ * provider or model all route through here, so a fallback hop or a routed
+ * call onto a foreign provider rebuilds the payload for THAT provider
  * instead of inheriting the primary's shape verbatim — which the OpenAI /
  * OpenRouter provider guards then silently dropped, leaving the leg with
  * the schema in the system prompt only and zero provider-side enforcement.

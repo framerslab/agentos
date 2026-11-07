@@ -152,6 +152,32 @@ describe('OpenRouterProvider operation id', () => {
     expect(sent[1]).toBe(sent[0]);
   });
 
+  it('sends the operation id the call names on every attempt, in place of one of its own, streamed or not', async () => {
+    stub.queue(CHAT, UNAVAILABLE, chatCompletion('hi'), UNAVAILABLE, chatStream('hello'));
+    const openrouter = await provider({ operationIdHeader: HEADER });
+
+    await openrouter.generateCompletion(MODEL, messages, { operationId: 'op-whole' });
+    for await (const _chunk of openrouter.generateCompletionStream(MODEL, messages, { operationId: 'op-stream' })) {
+      // read and dropped
+    }
+
+    expect(ids(CHAT)).toEqual(['op-whole', 'op-whole', 'op-stream', 'op-stream']);
+  });
+
+  it('keeps the operation id the call names on the request sent again without its schema, streamed or not', async () => {
+    const noEndpoints: StubAnswer = { status: 404, json: { error: { message: 'No endpoints found that support the requested parameters.', code: 404 } } };
+    const responseFormat = { type: 'json_schema', json_schema: { name: 'verdict', strict: true, schema: { type: 'object', properties: { ok: { type: 'boolean' } } } } };
+    stub.queue(CHAT, noEndpoints, chatCompletion('{"ok":true}'), noEndpoints, chatStream('{"ok":true}'));
+    const openrouter = await provider({ operationIdHeader: HEADER });
+
+    await openrouter.generateCompletion(MODEL, messages, { operationId: 'op-whole', responseFormat } as never);
+    for await (const _chunk of openrouter.generateCompletionStream(MODEL, messages, { operationId: 'op-stream', responseFormat } as never)) {
+      // read and dropped
+    }
+
+    expect(ids(CHAT)).toEqual(['op-whole', 'op-whole', 'op-stream', 'op-stream']);
+  });
+
   it('sends one operation id on both attempts of an embeddings call that a 503 retried', async () => {
     stub.queue(EMBEDDINGS, UNAVAILABLE, EMBEDDING);
     const openrouter = await provider({ operationIdHeader: HEADER });
@@ -163,6 +189,15 @@ describe('OpenRouterProvider operation id', () => {
     expect(sent).toHaveLength(2);
     expect(sent[0]).toMatch(UUID);
     expect(sent[1]).toBe(sent[0]);
+  });
+
+  it('sends the operation id an embeddings call names on both attempts of a call that a 503 retried', async () => {
+    stub.queue(EMBEDDINGS, UNAVAILABLE, EMBEDDING);
+    const openrouter = await provider({ operationIdHeader: HEADER });
+
+    await openrouter.generateEmbeddings('openai/text-embedding-3-small', ['hi'], { operationId: 'op-embed' });
+
+    expect(ids(EMBEDDINGS)).toEqual(['op-embed', 'op-embed']);
   });
 
   it('takes the header name from AGENTOS_OPERATION_ID_HEADER when the config names none, and the config name over it', async () => {

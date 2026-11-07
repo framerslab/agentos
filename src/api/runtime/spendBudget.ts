@@ -14,7 +14,7 @@ import { CostCapExceededError, CostGuard } from '../../safety/runtime/CostGuard.
 import type { CostCapType } from '../../safety/runtime/CostGuard.js';
 import type { ISpendMeter, SpendDenyReason, SpendReserveResult } from '../../safety/runtime/SpendMeter.js';
 import { toMicro } from '../../safety/runtime/SpendReservations.js';
-import type { AttemptOutcome, ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
+import type { AttemptOutcome, ModelCompletionOptions, ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
 import { clampMaxOutputTokens } from '../../core/llm/providers/model-output-limits.js';
 import { generateUUID } from '../../core/utils/uuid.js';
 import { estimateMaxCallCostUSD, modelPricing, type MaxCostRequest, type ModelPriceTier } from './modelPricing.js';
@@ -834,6 +834,21 @@ const GENERATION_CONFIG_FIELDS = ['generationConfig', 'generation_config'];
  */
 const GENERATION_CONFIG_PROVIDERS = new Set(['gemini']);
 
+/**
+ * Whether a Gemini generation config asks for output other than text: a `responseModalities` naming anything but
+ * text (an image, audio), or a `speechConfig`. The bound prices output at the model's text rate, so such a call has
+ * none, as a call whose body sets OpenAI's `modalities` or `audio` has none.
+ */
+function asksForNonTextOutput(config: Record<string, unknown> | undefined): boolean {
+  if (!config) return false;
+  if (config.speechConfig !== undefined || config.speech_config !== undefined) return true;
+  return [config.responseModalities, config.response_modalities].some((modalities) => {
+    if (modalities === undefined || modalities === null) return false;
+    const listed: unknown[] = Array.isArray(modalities) ? modalities : [modalities];
+    return listed.some((modality) => typeof modality !== 'string' || modality.toLowerCase() !== 'text');
+  });
+}
+
 /** `value` as a plain object, or undefined. */
 function fieldsOf(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
@@ -870,7 +885,8 @@ function outputCapOf(providerId: string, maxTokens: number | undefined, body: Re
  * its other `customModelParams` fields, counted with the system prompt, since the provider sends them with the
  * request; and the flags its options set: prompt caching unless `cache` is `false` (never for an embedding), a
  * priority or fast tier, regional processing, more than one completion (`n`, `best_of`, a Gemini `candidateCount`),
- * and a body field that replaces what the call sends or draws in what it does not carry, which leaves it unbounded.
+ * and a body field that replaces what the call sends or draws in what it does not carry, or a Gemini generation config
+ * that asks for output other than text, either of which leaves it unbounded.
  *
  * @internal Exported for the generation helpers and their tests.
  */
@@ -898,7 +914,7 @@ export function maxCostRequestOf(call: Pick<HelperCall, 'route' | 'messages' | '
     cacheMarkers:
       call.embedding !== true &&
       (options.cache !== false || options.promptCacheRetention !== undefined || CACHE_BODY_FIELDS.some((field) => body[field] !== undefined)),
-    nonTextParts: UNBOUNDED_BODY_FIELDS.some((field) => body[field] !== undefined),
+    nonTextParts: UNBOUNDED_BODY_FIELDS.some((field) => body[field] !== undefined) || configs.some(asksForNonTextOutput),
     priorityTier: options.serviceTier === 'priority' || body.service_tier === 'priority' || body.speed === 'fast',
     regionalProcessing: body.inference_geo !== undefined && body.inference_geo !== 'global',
   };
@@ -915,10 +931,19 @@ export type CallEnd =
   /** Its reader stopped reading after its request was sent. */
   | { kind: 'left'; usage?: unknown };
 
+/**
+ * What a held call hands its provider beside its own options: the attempt report, and on a budget with a spend meter
+ * the operation id the call's reservation is under, which the provider sends in its operation id header. A key is
+ * left out when it has no value.
+ */
+export type HeldCallOptions = Pick<ModelCompletionOptions, 'onAttempt' | 'operationId'>;
+
 /** A provider call's hold in its budget, from its check to its settle ({@link holdCall}). */
 export interface CallHold {
   /** The attempt report to hand the provider: the caller's own, which a hold in a meter reads on the way. */
   readonly onAttempt: ((outcome: AttemptOutcome) => void) | undefined;
+  /** The options to hand the provider with the call's own: {@link CallHold.onAttempt}, and the reservation's id. */
+  readonly providerOptions: HeldCallOptions;
   /** Sends an unstreamed call and settles by its answer's usage (`usageOf`, its `usage` by default) or by its failure. */
   run<T>(send: () => Promise<T>, usageOf?: (result: T) => unknown): Promise<T>;
   /** Passes a provider stream on, and settles once it ends, fails or is left. */
@@ -942,6 +967,7 @@ export interface CallHold {
 function unheld(call: HelperCall): CallHold {
   return {
     onAttempt: call.onAttempt,
+    providerOptions: call.onAttempt ? { onAttempt: call.onAttempt } : {},
     run: (send) => send(),
     stream: (chunks) => chunks,
     during: (work) => work(),
@@ -952,12 +978,16 @@ function unheld(call: HelperCall): CallHold {
   };
 }
 
-/** Statuses a provider or a gateway answers when a request may have reached the model before it gave up: timeouts. */
-const TIMEOUT_STATUSES = new Set([408, 504, 524]);
+/** The 4xx a provider or a gateway answers when a request may have reached the model before it gave up: a timeout. */
+const TIMEOUT_STATUSES = new Set([408]);
 
-/** Whether `status` refused a request before any output: a 4xx or a 5xx, a timeout's status aside. */
+/**
+ * Whether `status` is the provider's own refusal of a request before any output: a 4xx (a bad request, a refused key
+ * or model, a rate limit), a timeout's status aside. A 5xx is never one: a gateway or the provider can answer it after
+ * the model ran, so it does not show that nothing was billed.
+ */
 function refusedBeforeOutput(status: unknown): boolean {
-  return typeof status === 'number' && status >= 400 && status <= 599 && !TIMEOUT_STATUSES.has(status);
+  return typeof status === 'number' && status >= 400 && status <= 499 && !TIMEOUT_STATUSES.has(status);
 }
 
 /** The HTTP status an error carries, in the fields provider errors and stream error chunks use. */
@@ -1060,6 +1090,10 @@ class MeteredHold implements CallHold {
     this.attempts.push(outcome);
     this.call.onAttempt?.(outcome);
   };
+
+  get providerOptions(): HeldCallOptions {
+    return { onAttempt: this.onAttempt, operationId: this.operationId };
+  }
 
   /**
    * @param lease - The shortest lease, in milliseconds, a meter gave the reservation; undefined when nothing was
@@ -1279,13 +1313,15 @@ export function holdsInMeter(budget: SpendBudget): boolean {
  * budget, nothing. On a budget without a meter, the synchronous check, as {@link assertCallWithinBudget} makes it, and
  * nothing held. On a budget with a meter (its own or one a budget it draws on names), the call's largest cost
  * ({@link maxCostRequestOf}) reserved under an operation id of its own, which spans the provider's retries of it, as
- * {@link SpendBudget.assertCanSpend} reserves it; a call whose signal fired meanwhile is freed and not sent. While the
- * call's request runs, the hold renews the reservation's lease. It settles the reservation by how the call ends:
- * consumed at its usage when usage came back (a finished call with none, or with a usage that names only a total,
- * takes its whole reservation), released when it never left or the provider refused it before any output, and
- * otherwise deferred, held and counted until a reconcile with `resolveExpired` decides from evidence: a timeout, a
- * dropped connection, a stream aborted or left after its request was sent, and an answer after an earlier attempt that
- * may have been billed. A settle the meter cannot answer is logged, and the reservation stays held until a reconcile
+ * {@link SpendBudget.assertCanSpend} reserves it; a call whose signal fired meanwhile is freed and not sent. The hold
+ * hands the provider that id ({@link CallHold.providerOptions}), which it sends in its operation id header
+ * (`AGENTOS_OPERATION_ID_HEADER`), so the evidence a server in front of the provider keeps names the call as the
+ * meter does. While the call's request runs, the hold renews the reservation's lease. It settles the reservation by
+ * how the call ends: consumed at its usage when usage came back (a finished call with none, or with a usage that names
+ * only a total, takes its whole reservation), released when it never left or the provider itself refused it with a
+ * 4xx before any output (a bad request, a refused key or model, a rate limit), and otherwise deferred, held and
+ * counted until a reconcile with `resolveExpired` decides from evidence: a timeout, a 5xx, a dropped connection, a
+ * stream aborted or left after its request was sent, and an answer after an earlier attempt that may have been billed. A settle the meter cannot answer is logged, and the reservation stays held until a reconcile
  * settles it; the call's answer or error goes on.
  *
  * @throws {CostCapExceededError} At a cap, or when a meter refuses the call.
@@ -1310,17 +1346,18 @@ export async function holdCall(budget: SpendBudget | undefined, call: HelperCall
 /**
  * Sends one unstreamed provider call of a generation helper inside its budget's hold ({@link holdCall}): checked, and on
  * a budget with a meter reserved, before `run` sends it, and settled by its answer's usage or by how it failed. `run`
- * is handed the attempt report to give the provider.
+ * is handed the options to give the provider with its own ({@link CallHold.providerOptions}): the attempt report, and
+ * the operation id the reservation is under.
  *
  * @internal Called by the generation helpers around each unstreamed provider call.
  */
 export async function withReservation<T>(
   budget: SpendBudget | undefined,
   call: HelperCall,
-  run: (onAttempt: ((outcome: AttemptOutcome) => void) | undefined) => Promise<T>,
+  run: (held: HeldCallOptions) => Promise<T>,
 ): Promise<T> {
   const hold = await holdCall(budget, call);
-  return hold.run(() => run(hold.onAttempt));
+  return hold.run(() => run(hold.providerOptions));
 }
 
 /**

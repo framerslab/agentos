@@ -811,6 +811,7 @@ export class OpenRouterProvider implements IProvider {
         options.abortSignal,
         options.maxAttempts,
         tally,
+        options.operationId,
       );
     } catch (error: unknown) {
       const remaining = attempts - tally.sent;
@@ -824,6 +825,8 @@ export class OpenRouterProvider implements IProvider {
         false,
         options.abortSignal,
         remaining,
+        undefined,
+        options.operationId,
       );
     }
     this.throwOnInBodyError(apiResponseData, modelId);
@@ -1013,6 +1016,7 @@ export class OpenRouterProvider implements IProvider {
           abortSignal,
           options.maxAttempts,
           tally,
+          options.operationId,
         );
       } catch (error: unknown) {
         const remaining = attempts - tally.sent;
@@ -1027,6 +1031,8 @@ export class OpenRouterProvider implements IProvider {
           true,
           abortSignal,
           remaining,
+          undefined,
+          options.operationId,
         );
       }
     } catch (error: unknown) {
@@ -1344,6 +1350,10 @@ export class OpenRouterProvider implements IProvider {
       payload,
       false,
       options?.abortSignal,
+      undefined,
+      undefined,
+      // The call's own operation id, when it names one, in place of the id this request makes.
+      options?.operationId,
     );
 
     return {
@@ -1651,7 +1661,9 @@ export class OpenRouterProvider implements IProvider {
    * refuses (`operationIdHeader`). Every attempt and key hop of the request
    * sends the same operation id. `tally` is filled with the attempts this
    * request sent, so a caller that sends it again without its schema spends
-   * only what is left of the call's count.
+   * only what is left of the call's count. `operationId`, the call's own id,
+   * goes in the operation id header in place of one this request makes; the
+   * request sent again without its schema keeps it.
    */
   private async makeApiRequest<T = unknown>(
     endpoint: string,
@@ -1662,11 +1674,13 @@ export class OpenRouterProvider implements IProvider {
     signal?: AbortSignal,
     maxAttempts?: number,
     tally?: AttemptTally,
+    operationId?: string,
   ): Promise<T> {
     let lastError: OpenRouterProviderError | null = null;
     const attempts = resolveAttemptCount(maxAttempts, OpenRouterProvider.MAX_REQUEST_ATTEMPTS);
-    // One operation id for the whole call: every attempt and key hop below sends this same value.
-    const operationHeaders = operationIdHeaders(this.config.operationIdHeader);
+    // One operation id for the whole call, the call's own when it names one: every attempt and key hop below sends
+    // this same value.
+    const operationHeaders = operationIdHeaders(this.config.operationIdHeader, operationId);
 
     // Key hops this request has made: a key-scoped failure moves to the next
     // usable key at once (at most one hop per key) without spending a

@@ -62,6 +62,8 @@ import { isCallerStop, markHookStop } from './runtime/callerStop.js';
  * after this module was imported still receives every failover event.
  */
 const fallbackLogger = moduleLogger('fallback', 'generate_text');
+/** The model router's component: a payload rebuilt for the router's pick reports its builder's failure here. */
+const routingLogger = moduleLogger('routing', 'generate_text');
 
 // A fallback skip's reason as one of the fixed words `llm.fallback_skipped` takes, never the reason's own text.
 function skipReason(reason: string): 'duplicate' | 'excluded' | 'capability' | 'refusal' | 'refill' | 'unknown' {
@@ -74,10 +76,11 @@ function skipReason(reason: string): 'duplicate' | 'excluded' | 'capability' | '
 }
 
 /**
- * Invoke a caller-supplied per-leg responseFormat builder without letting a
- * builder bug kill a fallback that would otherwise succeed. Failure -> one
- * WARN + `undefined` (the leg proceeds schema-in-prompt only, identical to
- * the guarded-drop outcome — but explicit).
+ * Invoke a caller-supplied responseFormat builder, for a fallback leg or for
+ * the provider and model a model router picked, without letting a builder bug
+ * kill a call that would otherwise succeed. Failure -> one WARN on `logger` +
+ * `undefined` (the leg or the routed call proceeds schema-in-prompt only,
+ * identical to the guarded-drop outcome — but explicit).
  *
  * @internal
  */
@@ -85,11 +88,12 @@ function safeBuildLegResponseFormat(
   builder: NonNullable<GenerateTextOptions['_responseFormatBuilder']>,
   providerId: string,
   modelId: string,
+  logger: typeof fallbackLogger = fallbackLogger,
 ): Record<string, unknown> | undefined {
   try {
     return builder(providerId, modelId);
   } catch (err) {
-    fallbackLogger.warn('llm.response_format_failed', { provider: providerName(providerId), ...errorFields(err) });
+    logger.warn('llm.response_format_failed', { provider: providerName(providerId), ...errorFields(err) });
     return undefined;
   }
 }
@@ -191,10 +195,14 @@ export interface TokenUsage {
   costUSD?: number;
   /**
    * Provider-independent total input tokens INCLUDING cached reads/writes,
-   * summed across steps (spec batch-1 C1). Anthropic reports input
-   * exclusive of cache (this field adds it back); OpenAI/OpenRouter report
-   * prompt tokens already inclusive (used as-is). Tri-state: undefined =
-   * no step reported enough to compute; a reported 0 is preserved.
+   * summed across steps, and across attempts in `generateObject` (spec
+   * batch-1 C1). Anthropic's `promptTokens` is `input_tokens` alone, which
+   * leaves the cache out, so this field is `input_tokens +
+   * cache_creation_input_tokens + cache_read_input_tokens`; OpenAI and
+   * OpenRouter report prompt tokens already inclusive (used as-is). Price
+   * input from this field: on a cached Anthropic call `promptTokens` counts
+   * only the uncached tail. Tri-state: undefined = no step reported enough
+   * to compute; a reported 0 is preserved.
    */
   inclusiveInputTokens?: number;
   /**
@@ -940,12 +948,17 @@ export interface GenerateTextOptions {
   _responseFormat?: { type: string } | Record<string, unknown>;
   /**
    * @internal Rebuilds the provider-native structured-output payload for a
-   * FALLBACK leg's provider. When absent, legs receive `_responseFormat`
-   * verbatim (legacy behavior — provider-side guards then drop foreign
-   * shapes, so the leg runs with zero provider enforcement). generateObject
-   * and AgentSession.send supply this; hand-rolled generateText callers are
-   * unaffected. `modelId` is `''` when the fallback entry omits `model`
-   * (the provider's default text model is resolved later).
+   * FALLBACK leg's provider, and for the provider and model a call resolves
+   * to when a `router` moved it off the call's own provider and model (the
+   * pair `_responseFormat` is built for) or the resolver sends it to another
+   * provider (an Anthropic call with no Anthropic key or base URL goes to
+   * OpenRouter). When absent, legs and a routed call
+   * receive `_responseFormat` verbatim (legacy behavior — provider-side
+   * guards then drop foreign shapes, so the leg runs with zero provider
+   * enforcement). generateObject and AgentSession.send supply this;
+   * hand-rolled generateText callers are unaffected. `modelId` is `''` when
+   * the fallback entry omits `model` (the provider's default text model is
+   * resolved later).
    */
   _responseFormatBuilder?: (
     providerId: string,
@@ -1306,14 +1319,14 @@ export async function createPlan(
     onAttempt: config?.onAttempt,
     abortSignal: config?.abortSignal,
   };
-  const response = await withReservation(spend?.budget, planCall, (onAttempt) => provider.generateCompletion(modelId, planMessages, {
+  const response = await withReservation(spend?.budget, planCall, (held) => provider.generateCompletion(modelId, planMessages, {
     temperature,
     maxTokens,
     ...(requestTimeout !== undefined ? { requestTimeout } : {}),
     ...(config?.abortSignal ? { abortSignal: config.abortSignal } : {}),
     // The call's attempt count and its report hold for the planning request too.
     ...(config?.maxAttempts !== undefined ? { maxAttempts: config.maxAttempts } : {}),
-    ...(onAttempt ? { onAttempt } : {}),
+    ...held,
     // Inherited (or planning-specific) cache control: a cache:false root
     // call's planning sub-call must not auto-cache behind the caller's back.
     ...(config?.cache !== undefined ? { cache: config.cache } : {}),
@@ -1524,8 +1537,12 @@ export function hasBillableUsage(usage: TokenUsage): boolean {
   );
 }
 
-/** The sum of two usage reports; an optional counter stays absent when neither has it. */
-function sumTokenUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+/**
+ * The sum of two usage reports; an optional counter stays absent when neither has it.
+ *
+ * @internal Shared with generateObject, which sums its attempts with it.
+ */
+export function sumTokenUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   const optional = (x: number | undefined, y: number | undefined): number | undefined =>
     x === undefined && y === undefined ? undefined : (x ?? 0) + (y ?? 0);
   const costUSD = optional(a.costUSD, b.costUSD);
@@ -2340,6 +2357,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // moves the call to another provider sends it there on that provider's
       // own credentials, as a fallback leg runs.
       const credentialProviderId = providerId;
+      // The call's own model: with that provider, the pair a caller's
+      // structured-output payload (`_responseFormat`) is built for.
+      const ownModelId = modelId;
 
       // --- Model routing (optional) ---
       if (opts.router) {
@@ -2411,6 +2431,26 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       );
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
+
+      // The structured-output payload this call sends. The caller built
+      // `_responseFormat` for the call's own provider and model. A call the
+      // router moved to another provider or model, and a call the resolver
+      // sends to another provider than the one it names (an Anthropic call
+      // with no Anthropic key or base URL goes to OpenRouter), is sent the
+      // payload of the provider and model it resolved to, rebuilt with the
+      // caller's builder as each fallback leg's is: that provider drops a
+      // payload shaped for another (OpenRouter forwards only json_object and
+      // json_schema), while such a payload would still count below as carrying
+      // the schema and keep the schema instructions out of the prompt. A call
+      // sent to its own provider and model, and a call with no builder, sends
+      // the caller's payload as it is.
+      const movedByRouter = providerId !== credentialProviderId || modelId !== ownModelId;
+      const sentToAnotherProvider = resolved.providerId !== providerId;
+      const responseFormat: GenerateTextOptions['_responseFormat'] =
+        (movedByRouter || sentToAnotherProvider) && typeof opts._responseFormatBuilder === 'function'
+          ? safeBuildLegResponseFormat(opts._responseFormatBuilder, resolved.providerId, resolved.modelId, routingLogger)
+          : opts._responseFormat;
+
       // A key or base URL of the call's own, when it differs from the
       // provider's, has a health record of its own. So do the credentials a
       // seat's strict resolution reaches when they differ from the provider's:
@@ -2496,7 +2536,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
       // A structured call whose payload carries no schema sends it after the
       // system prompt, so the model sees what it has to answer in.
-      if (opts._schemaInstruction && !responseFormatCarriesSchema(opts._responseFormat as Record<string, unknown> | undefined)) {
+      if (opts._schemaInstruction && !responseFormatCarriesSchema(responseFormat as Record<string, unknown> | undefined)) {
         messages.push({ role: 'system', content: opts._schemaInstruction });
       }
 
@@ -2688,7 +2728,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               assertFitsContextWindow({ messages: msgs });
             }
             const shimCall: HelperCall = { what: 'generate_text.shim', route: resolved, messages: msgs, maxTokens: opts.maxTokens, options: opts, onAttempt: opts.onAttempt, abortSignal: opts.abortSignal };
-            const r = await withReservation(budget, shimCall, (onAttempt) => provider.generateCompletion(resolved.modelId, msgs as any, {
+            const r = await withReservation(budget, shimCall, (held) => provider.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
@@ -2727,7 +2767,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
               // The call's attempt count and its report, as on the native step loop below.
               ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-              ...(onAttempt ? { onAttempt } : {}),
+              ...held,
             } as any));
             budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, r.usage), r.usage?.totalTokens ?? 0, 'generate_text.shim');
             // Aggregate the COMPLETE normalized usage from every shim
@@ -2871,7 +2911,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           messages: effectiveMessages,
           tools: toolSchemas,
           maxTokens: opts.maxTokens,
-          options: { ...opts, responseFormat: opts._responseFormat },
+          options: { ...opts, responseFormat },
           onAttempt: opts.onAttempt,
           abortSignal: opts.abortSignal,
         });
@@ -2937,8 +2977,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
                 // The most requests this step sends and the report of each, so a caller can settle the attempts it paid for.
                 ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
-                ...(stepHold.onAttempt ? { onAttempt: stepHold.onAttempt } : {}),
-                ...(opts._responseFormat ? { responseFormat: opts._responseFormat }: {}),
+                ...stepHold.providerOptions,
+                ...(responseFormat ? { responseFormat }: {}),
               } as any
             );
             attachUsageAttributes(stepSpan, {
@@ -3526,7 +3566,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // (providerHealthKey), which the call below reads before it sends;
         // a failure of another key skips none of them.
         // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
-        const legProvider = fallbackEntrySentAs(fb).provider;
+        const legSentAs = fallbackEntrySentAs(fb);
+        const legProvider = legSentAs.provider;
         const legOnSharedCredentials =
           fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;
         if (legOnSharedCredentials && globalLLMProviderHealth.isOpen(legProvider)) {
@@ -3540,10 +3581,20 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           const lastErr = lastError instanceof Error ? lastError: new Error(String(lastError));
           // Per-leg structured-output rebuild: when the caller supplied a
           // builder, recompute the provider-native payload for THIS leg's
-          // provider, once, for the recursion below.
+          // provider, once, for the recursion below. The payload is built for
+          // the provider and model the leg is sent to, not the provider the
+          // entry names: `{ provider: 'anthropic', model:
+          // 'openrouter:anthropic/...' }` goes to OpenRouter, which drops an
+          // Anthropic marker while the marker would still keep the schema out
+          // of the prompt. An entry with no model keeps `''`, so the builder
+          // decides on the schema alone.
           const hasResponseFormatBuilder = typeof opts._responseFormatBuilder === 'function';
           const rebuiltResponseFormat = hasResponseFormatBuilder
-            ? safeBuildLegResponseFormat(opts._responseFormatBuilder!, fb.provider, fb.model ?? '')
+            ? safeBuildLegResponseFormat(
+                opts._responseFormatBuilder!,
+                legSentAs.provider,
+                fb.model ? (legSentAs.model ?? '') : '',
+              )
             : undefined;
           fallbackLogger.warn('llm.fallback_fired', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(fb.provider), attempt, ...errorFields(lastErr) });
           // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
