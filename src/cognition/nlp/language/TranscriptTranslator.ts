@@ -58,7 +58,7 @@ export interface TranscriptTranslatorOptions {
    * and 1,024 tokens more for an OpenAI reasoning model (the o-series, GPT-5 and GPT-6), which runs at effort `low`.
    */
   maxOutputTokens?: number;
-  /** A first try and the retries `generateText` makes; default 2. */
+  /** A first try and the retries `generateText` makes, a whole number of 1 or more; default 2. */
   maxAttempts?: number;
   /** Ends the call: it rejects with the signal's reason, and no request is sent once the signal has aborted. */
   abortSignal?: AbortSignal;
@@ -180,6 +180,16 @@ function modelIdOf(options: TranscriptTranslatorOptions): string {
   }
 }
 
+/**
+ * The attempts the call may make, the option's or the default. A count that is not a whole number of 1 or more is
+ * refused with the `RangeError` the provider refuses it with, so no bound is ever priced on it and no call starts.
+ */
+function attemptsOf(options: TranscriptTranslatorOptions): number {
+  const attempts = options.maxAttempts ?? DEFAULTS.maxAttempts;
+  if (!Number.isInteger(attempts) || attempts < 1) throw new RangeError('maxAttempts is a whole number, 1 or more');
+  return attempts;
+}
+
 /** The output cap the call sends: the host's, or the default with room for a reasoning model's reasoning. */
 function capOf(line: TranscriptLineInput, options: TranscriptTranslatorOptions, modelId: string): number {
   if (options.maxOutputTokens !== undefined) return options.maxOutputTokens;
@@ -211,9 +221,11 @@ export class TranscriptTranslator {
    * sends, a reasoning model's room for its reasoning included. The model is read as the call reads it:
    * `openai:gpt-4o-mini` is priced as the `gpt-4o-mini` it sends.
    *
+   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more.
    * @throws {Error} For a model with no price row, a model of another provider, or a request it cannot bound.
    */
   boundMicro(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): number {
+    const attempts = attemptsOf(options);
     const maxContextLines = options.maxContextLines ?? DEFAULTS.maxContextLines;
     const { modelId } = resolveModelOption(options, 'text');
     const maxOutputTokens = capOf(line, options, modelId);
@@ -224,7 +236,7 @@ export class TranscriptTranslator {
     });
     if (usd === undefined) throw new Error(`TranscriptTranslator: no bound for ${options.provider} ${options.model}`);
     // Up to the micro-dollar from the dollars themselves: a bound never rounds an attempt's fraction away.
-    return Math.ceil(usd * 1_000_000) * (options.maxAttempts ?? DEFAULTS.maxAttempts);
+    return Math.ceil(usd * 1_000_000) * attempts;
   }
 
   /**
@@ -254,9 +266,11 @@ export class TranscriptTranslator {
    *   still starting included (with the `usage` earlier attempts answered with an error status reported),
    *   `TRANSLATION_EMPTY_OUTPUT`, `TRANSLATION_TRUNCATED` and `TRANSLATION_INCOMPLETE` (each with the billed `usage`);
    *   each carries `unansweredAttempts`. A call ended through `abortSignal` rejects with the signal's reason at once.
+   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more, before anything is sent.
    */
   async translateLine(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): Promise<TranslatedLine> {
     options.abortSignal?.throwIfAborted();
+    const attempts = attemptsOf(options);
     // The model the call sends, so a result names what made it: `openai:gpt-4o-mini` is `gpt-4o-mini`.
     const modelId = modelIdOf(options);
     const base = { itemId: line.itemId, target, model: modelId, providerId: options.provider, version: TRANSLATOR_VERSION } as const;
@@ -316,7 +330,7 @@ export class TranscriptTranslator {
         // A reasoning model reasons at the lowest effort the provider layer sends (`low`): a line's translation needs
         // little, and the reasoning comes out of the cap above.
         ...(isOpenAIReasoningModel(modelId) ? { effort: 'low' } : {}),
-        maxAttempts: options.maxAttempts ?? DEFAULTS.maxAttempts,
+        maxAttempts: attempts,
         // The provider reports each attempt once, when its status comes or when none came; a body lost after a
         // success status is not reported again, so it is counted here as a success the answer did not come from.
         onAttempt: (outcome) => {
