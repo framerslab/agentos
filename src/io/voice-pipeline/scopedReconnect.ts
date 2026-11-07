@@ -42,11 +42,12 @@ export interface ScopedReconnectOptions {
  * past the bound, emits `error`, then `close`; a failed open is not retried. `transcript` is forwarded unchanged,
  * only from the current provider session, only outside a reset and only when the result carries the current
  * identity; `usage` is forwarded from every provider session. `flush()` waits for the admitted frames and any
- * reconnect, then flushes the current provider session; a close of that session during the flush opens no new one.
+ * reconnect, then flushes the current provider session; a close of that session during the flush opens no new one,
+ * and leaves the scoped session open unless the provider session reports `inputEnded`.
  * The session's `inputEnded` reports what the provider's current session reports (see `StreamingSTTSession`), and
  * stays true once the stream ended. While it is true, a frame of the current identity is dropped: it resolves
- * without reaching the provider or the replay. A close of a provider session whose `inputEnded` is true ends the
- * scoped session with `close` and no new one; for a session that reports nothing, a close after the flush completed
+ * without reaching the provider or the replay. A close of a provider session whose `inputEnded` is true, during the
+ * flush or after it, ends the scoped session with `close` and no new one; for a session that reports nothing, a close after the flush completed
  * still reconnects. An `error` after the flush still reconnects, a `close` that follows it while the reconnect runs
  * included, and the replay holds no dropped frame.
  * `close()` drops the kept frames, closes the current provider session and emits `close` once.
@@ -112,9 +113,9 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
     session.on('close', () => {
       // During a reconnect the replaced session's close is part of it: an error followed at once by a close still
       // reconnects, whatever the failed session reported.
-      if (closed || flushing || reopening || session !== current) return;
+      if (closed || reopening || session !== current) return;
       if (session.inputEnded === true) {
-        // The provider sent its last result and ended its stream, as the caller's flush asked.
+        // The provider sent its last result and ended its stream, as the caller's flush asked, during the flush too.
         streamEnded = true;
         closed = true;
         history.length = 0;
@@ -122,6 +123,7 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
         facade.emit('close');
         return;
       }
+      if (flushing) return;
       void reconnect().catch(fail);
     });
     return session;
