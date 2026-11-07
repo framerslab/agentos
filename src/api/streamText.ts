@@ -1663,8 +1663,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       const chainEntries = opts.fallbackProviders === undefined
         ? buildPolicyAwareFallbackChain(walkTier, recordedProviderId)
         : opts.fallbackProviders;
-      const logLegSkip = (entry: FallbackProviderEntry, reason: FallbackSkipReason): void =>
-        fallbackLogger.warn('llm.fallback_skipped', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(entry.provider), reason: skipReason(reason) });
+      // A seat's legs resolve strictly: no Anthropic to OpenRouter reroute.
+      const strictLegs = opts.__strictCredentials === true;
+      // The skip line names the provider and model the entry would be sent
+      // as, as the circuit-open and fired lines do, so one entry is one
+      // provider.
+      const logLegSkip = (entry: FallbackProviderEntry, reason: FallbackSkipReason): void => {
+        const skippedAs = fallbackEntrySentAs(entry, { strict: strictLegs });
+        fallbackLogger.warn('llm.fallback_skipped', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(skippedAs.provider), ...(skippedAs.model !== undefined ? { fallbackModel: safePath(skippedAs.model) } : {}), reason: skipReason(reason) });
+      };
       // A stream that already handed text or tool activity to the consumer
       // is not restarted on another provider (a refusal after text
       // included): the consumer would receive the partial answer followed by
@@ -1685,6 +1692,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               requiredCapabilities: explicitRequiredCapabilities(opts),
               excludedModelIds: opts.routerParams?.excludedModelIds,
               onSkip: logLegSkip,
+              strictCredentials: strictLegs,
             });
       // This attempt's own failure updates the walk: a refusal is recorded,
       // and a standing leg that failed on availability is owed a refill.
@@ -1732,8 +1740,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
           // The provider and model the leg is sent as: the breaker read, the
           // fired line, the callback and the leg's hop name them, not the
-          // provider the entry says.
-          const legSentAs = fallbackEntrySentAs(fb);
+          // provider the entry says. An Anthropic entry with no Anthropic key
+          // or base URL is sent to OpenRouter by the credential layer, and is
+          // OpenRouter's here.
+          const legSentAs = fallbackEntrySentAs(fb, { strict: strictLegs });
           const legProvider = legSentAs.provider;
           const legOnSharedCredentials =
             fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;

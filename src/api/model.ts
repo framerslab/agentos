@@ -314,6 +314,37 @@ export function resolveProvider(
   modelId: string,
   overrides?: { apiKey?: string; baseUrl?: string; strict?: boolean; quiet?: boolean }
 ): ResolvedProvider {
+  return resolveProviderCredentials(providerId, modelId, overrides);
+}
+
+/**
+ * The provider and model {@link resolveProvider} sends a call to, without its
+ * credentials: an Anthropic call with no Anthropic key or base URL and
+ * `OPENROUTER_API_KEY` set is `openrouter` and `anthropic/<model>`, any other
+ * call its own provider and model. It resolves quietly (no notice that a
+ * request goes to OpenRouter), since it sends nothing. The fallback walkers
+ * name, breaker-read and capability-check a leg by it.
+ *
+ * @param providerId - Provider identifier, as `resolveModelOption` returns it.
+ * @param modelId - Model identifier within the provider.
+ * @param overrides - The call's own key and base URL, and `strict` for a seat.
+ * @returns The provider and model the call is sent to.
+ * @throws {Error} When no credentials can be resolved, as `resolveProvider` throws.
+ */
+export function resolveProviderRoute(
+  providerId: string,
+  modelId: string,
+  overrides?: { apiKey?: string; baseUrl?: string; strict?: boolean }
+): { providerId: string; modelId: string } {
+  const resolved = resolveProviderCredentials(providerId, modelId, { ...overrides, quiet: true });
+  return { providerId: resolved.providerId, modelId: resolved.modelId };
+}
+
+function resolveProviderCredentials(
+  providerId: string,
+  modelId: string,
+  overrides?: { apiKey?: string; baseUrl?: string; strict?: boolean; quiet?: boolean }
+): ResolvedProvider {
   // Global-default credentials apply when their `provider` matches the
   // provider being resolved (or when no provider was pinned in the
   // default — in which case the default's apiKey is treated as

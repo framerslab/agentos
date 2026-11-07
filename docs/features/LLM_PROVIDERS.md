@@ -753,7 +753,17 @@ another provider's prefix (`{ provider: 'anthropic', model:
 the prefix names, and `onFallback`, the `llm.fallback_fired` line (its
 `fallbackProvider` and `fallbackModel`) and the leg's hop in
 `result.fallback.hops` name that provider and the model id after the prefix
-(`openrouter`, `anthropic/claude-sonnet-4.5`). A send that goes to the agent's own provider and
+(`openrouter`, `anthropic/claude-sonnet-4.5`). An Anthropic entry the
+credential layer sends to OpenRouter (`{ provider: 'anthropic', model:
+'claude-sonnet-4-5' }` with no Anthropic key or base URL and
+`OPENROUTER_API_KEY` set) is named the same way, `openrouter` and
+`anthropic/claude-sonnet-4-5`, in both `generateText()` and `streamText()`:
+in `onFallback`, the `llm.fallback_fired`, `llm.fallback_succeeded` and
+`llm.fallback_failed_after_output` lines and the hops; its breaker read is
+OpenRouter's, its capability and exclusion checks judge
+`anthropic/claude-sonnet-4-5`, and an `llm.fallback_skipped` line names the
+provider and model (`fallbackProvider`, `fallbackModel`) the entry would have
+been sent as. A send that goes to the agent's own provider and
 model keeps the agent's format. `streamObject()`
 sends no provider-side format on any provider: its
 schema travels in the system prompt only. All three validate the reply against
