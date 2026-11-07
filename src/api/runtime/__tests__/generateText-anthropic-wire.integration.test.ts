@@ -1394,22 +1394,18 @@ describe('a key the model writes twice in a structured reply', () => {
     expect(postedBodies()[0].output_config.format.type).toBe('json_schema');
   });
 
-  it('a GMI session send asks again after a forced tool reply that repeats a key, and returns the next reply\'s object', async () => {
-    route({
-      'claude-sonnet-4-6': [
-        rawToolTurn('claude-sonnet-4-6', 'clip', TOP_LEVEL_DUPLICATE),
-        rawToolTurn('claude-sonnet-4-6', 'clip', ['{"items":[{"id":"a"},{"id":"b"},{"id":"c"}]}']),
-      ],
-    });
+  it('a GMI session send refuses a forced tool reply that repeats a key: the error carries the raw input, and the session keeps nothing of the turn', async () => {
+    route({ 'claude-sonnet-4-6': [rawToolTurn('claude-sonnet-4-6', 'clip', TOP_LEVEL_DUPLICATE)] });
     const session = agent({ runtime: 'gmi', provider: 'anthropic', model: 'claude-sonnet-4-6', memory: false, fallbackProviders: [] }).session(
       'forced-duplicate',
     );
 
-    const result = await session.send('List the items.', { responseSchema: clipSchema, schemaName: 'clip' });
+    const error = await rejectionOf(session.send('List the items.', { responseSchema: clipSchema, schemaName: 'clip' }));
 
-    expect((result.object as z.infer<typeof clipSchema>).items.map((item) => item.id)).toEqual(['a', 'b', 'c']);
-    const bodies = postedBodies();
-    expect(bodies).toHaveLength(2);
-    expect(JSON.stringify(bodies[1].messages)).toContain('Duplicate key');
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect((error as ObjectGenerationError).rawText).toBe(TOP_LEVEL_DUPLICATE.join(''));
+    expect((error as ObjectGenerationError).message).toContain('Duplicate key "items" in the object at <root>');
+    expect(postedBodies()).toHaveLength(1);
+    expect(session.messages()).toEqual([]);
   });
 });

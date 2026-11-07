@@ -25,6 +25,7 @@ import {
 import { addModelUsage, extractTextFromContent, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
 import { normalizeStreamFinishReason, type StreamTextResult } from '../streamText.js';
 import { ObjectGenerationError } from '../generateObject.js';
+import { parseJsonWithDistinctKeys } from './structuredReply.js';
 import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource, type LlmUsageEvent } from '../observers.js';
 import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
@@ -550,8 +551,8 @@ export async function* runGmiTurn(
  * turn whose last step stopped at the output limit (finish reason `length`) was cut off and rejects whatever its JSON,
  * with an error that says so and the raw text attached, since the session path does not escalate the budget as
  * generateObject does: JSON that does not parse, and JSON that parses, which a cut can leave too (an answer the limit
- * stops just after its closing brace parses whole). When the JSON parses and does not match the schema, the error
- * carries the issues.
+ * stops just after its closing brace parses whole). JSON in which an object repeats a key is refused as JSON that does
+ * not parse, its raw text attached. When the JSON parses and does not match the schema, the error carries the issues.
  *
  * @param maxTokens - The turn's `maxTokens`, named in the cut-off's message when the turn set one.
  */
@@ -565,7 +566,8 @@ function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: num
   if (structured === undefined || typeof structured === 'string') {
     const source = typeof structured === 'string' ? structured : folder.text();
     try {
-      raw = JSON.parse(source);
+      // A key the model wrote twice would keep only its last value in a plain parse: refused as JSON that does not parse.
+      raw = parseJsonWithDistinctKeys(source);
     } catch (err) {
       if (cutOff) {
         throw new ObjectGenerationError(
