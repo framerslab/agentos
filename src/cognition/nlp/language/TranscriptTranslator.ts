@@ -51,7 +51,7 @@ export interface TranscriptTranslatorOptions {
   baseUrl?: string;
   /** How many context lines are sent, a whole number of 0 or more; default 6. */
   maxContextLines?: number;
-  /** The call's own timeout; default 15,000 ms. */
+  /** The call's own timeout, from 1 to 2,147,483,647 ms; default 15,000 ms. */
   timeoutMs?: number;
   /**
    * The output cap, the reasoning of a reasoning model included; default `TranscriptTranslator.defaultMaxOutputTokens(text)`,
@@ -201,6 +201,22 @@ function contextLinesOf(options: TranscriptTranslatorOptions): number {
   return lines;
 }
 
+/** The longest delay `setTimeout` keeps; Node runs a longer one, as one below 1 ms or not a number, after 1 ms. */
+const TIMEOUT_CEILING_MS = 2_147_483_647;
+
+/**
+ * The call's own timeout, the option's or the default. A delay `setTimeout` cannot keep (below 1 ms, above
+ * 2,147,483,647 ms, `Infinity` or not a number) is refused with a `RangeError`: Node would run it after 1 ms, so every
+ * line would end as a timeout and be recorded at its bound.
+ */
+function timeoutOf(options: TranscriptTranslatorOptions): number {
+  const timeoutMs = options.timeoutMs ?? DEFAULTS.timeoutMs;
+  if (!(timeoutMs >= 1 && timeoutMs <= TIMEOUT_CEILING_MS)) {
+    throw new RangeError(`timeoutMs is a number of milliseconds from 1 to ${TIMEOUT_CEILING_MS}`);
+  }
+  return timeoutMs;
+}
+
 /** The output cap the call sends: the host's, or the default with room for a reasoning model's reasoning. */
 function capOf(line: TranscriptLineInput, options: TranscriptTranslatorOptions, modelId: string): number {
   if (options.maxOutputTokens !== undefined) return options.maxOutputTokens;
@@ -232,13 +248,15 @@ export class TranscriptTranslator {
    * sends, a reasoning model's room for its reasoning included. The model is read as the call reads it:
    * `openai:gpt-4o-mini` is priced as the `gpt-4o-mini` it sends.
    *
-   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more, or a `maxContextLines` that is not
-   *   a whole number of 0 or more.
+   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more, a `maxContextLines` that is not a
+   *   whole number of 0 or more, or a `timeoutMs` that is not a number from 1 to 2,147,483,647: a call with these
+   *   options cannot run, so no bound is reserved for it.
    * @throws {Error} For a model with no price row, a model of another provider, or a request it cannot bound.
    */
   boundMicro(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): number {
     const attempts = attemptsOf(options);
     const maxContextLines = contextLinesOf(options);
+    timeoutOf(options);
     const { modelId } = resolveModelOption(options, 'text');
     const maxOutputTokens = capOf(line, options, modelId);
     const usd = estimateMaxCallCostUSD(options.provider, modelId, {
@@ -278,13 +296,14 @@ export class TranscriptTranslator {
    *   still starting included (with the `usage` earlier attempts answered with an error status reported),
    *   `TRANSLATION_EMPTY_OUTPUT`, `TRANSLATION_TRUNCATED` and `TRANSLATION_INCOMPLETE` (each with the billed `usage`);
    *   each carries `unansweredAttempts`. A call ended through `abortSignal` rejects with the signal's reason at once.
-   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more, or a `maxContextLines` that is not
-   *   a whole number of 0 or more, before anything is sent.
+   * @throws {RangeError} For a `maxAttempts` that is not a whole number of 1 or more, a `maxContextLines` that is not a
+   *   whole number of 0 or more, or a `timeoutMs` that is not a number from 1 to 2,147,483,647, before anything is sent.
    */
   async translateLine(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): Promise<TranslatedLine> {
     options.abortSignal?.throwIfAborted();
     const attempts = attemptsOf(options);
     const maxContextLines = contextLinesOf(options);
+    const timeoutMs = timeoutOf(options);
     // The model the call sends, so a result names what made it: `openai:gpt-4o-mini` is `gpt-4o-mini`.
     const modelId = modelIdOf(options);
     const base = { itemId: line.itemId, target, model: modelId, providerId: options.provider, version: TRANSLATOR_VERSION } as const;
@@ -318,7 +337,7 @@ export class TranscriptTranslator {
         controller.abort(
           new TranslationProviderError('translation timed out', options.provider, 'TRANSLATION_TIMEOUT', undefined, undefined, sumUsage(earlier, latest), unanswered(0)),
         ),
-      options.timeoutMs ?? DEFAULTS.timeoutMs,
+      timeoutMs,
     );
     const onCallerAbort = () => controller.abort(options.abortSignal?.reason);
     options.abortSignal?.addEventListener('abort', onCallerAbort, { once: true });
