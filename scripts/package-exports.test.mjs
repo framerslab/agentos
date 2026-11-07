@@ -123,7 +123,8 @@ test('the speech module resolves at its public subpath, Deepgram pre-recorded tr
   const speech = await import('@framers/agentos/speech');
   assert.equal(typeof speech.createSpeechRuntimeFromEnv, 'function');
   assert.equal(typeof speech.DeepgramBatchSTTProvider, 'function');
-  const runtime = speech.createSpeechRuntimeFromEnv({ DEEPGRAM_API_KEY: 'dg-exports-check' });
+  // Both keys set: OpenAI registers first, so only the preferred order puts Deepgram ahead of it.
+  const runtime = speech.createSpeechRuntimeFromEnv({ OPENAI_API_KEY: 'sk-exports-check', DEEPGRAM_API_KEY: 'dg-exports-check' });
   assert.equal(runtime.getSTT({ preferredIds: ['deepgram-batch', 'openai-whisper'] })?.id, 'deepgram-batch');
 });
 
