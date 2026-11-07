@@ -276,6 +276,40 @@ describe('AgentSession.send responseSchema when the model router moves the send'
     expect(systemOf(call)).toContain('"title"');
   });
 
+  it('a send moved to an Anthropic model that resolves to OpenRouter (no Anthropic key) is sent OpenRouter\'s payload', async () => {
+    // The resolver sends an Anthropic call with no Anthropic key or base URL
+    // to OpenRouter's Anthropic slug, as resolveProvider does.
+    (resolveProvider as unknown as Mock).mockImplementation((providerId: string, modelId: string) =>
+      providerId === 'anthropic'
+        ? { providerId: 'openrouter', modelId: `anthropic/${modelId}`, apiKey: 'or-key' }
+        : { providerId, modelId, apiKey: 'test-key' },
+    );
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
+      okResponse(modelId, '{"title":"x"}'),
+    );
+
+    const a = agent({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      router: routerTo('anthropic', 'claude-sonnet-4-6'),
+      memory: false,
+      fallbackProviders: [],
+    });
+    const result = await a.session().send('hi', {
+      responseSchema: z.object({ title: z.string() }),
+      schemaName: 'titled',
+    });
+
+    expect((result as { object?: unknown }).object).toEqual({ title: 'x' });
+    const call = hoisted.generateCompletion.mock.calls[0] as unknown[];
+    expect(call[0]).toBe('anthropic/claude-sonnet-4-6');
+    // OpenRouter forwards a json_schema payload; an Anthropic marker would be
+    // dropped while still keeping the schema out of the prompt.
+    expect(payloadOf(call)).toMatchObject({ type: 'json_schema', json_schema: { name: 'titled', strict: true } });
+    expect((payloadOf(call) as Record<string, unknown>)._agentosUseToolForStructuredOutput).toBeUndefined();
+    expect(systemOf(call)).not.toContain(SCHEMA_LINE);
+  });
+
   it("a send the router leaves on the agent's own provider and model is sent as it is without a router", async () => {
     hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
       okResponse(modelId, '{"title":"x"}'),
