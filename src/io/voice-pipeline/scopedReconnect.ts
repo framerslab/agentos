@@ -47,7 +47,8 @@ export interface ScopedReconnectOptions {
  * stays true once the stream ended. While it is true, a frame of the current identity is dropped: it resolves
  * without reaching the provider or the replay. A close of a provider session whose `inputEnded` is true ends the
  * scoped session with `close` and no new one; for a session that reports nothing, a close after the flush completed
- * still reconnects. An `error` after the flush still reconnects, and the replay holds no dropped frame.
+ * still reconnects. An `error` after the flush still reconnects, a `close` that follows it while the reconnect runs
+ * included, and the replay holds no dropped frame.
  * `close()` drops the kept frames, closes the current provider session and emits `close` once.
  *
  * @param inner - The provider each session opens, again on every reconnect.
@@ -109,7 +110,9 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
       if (!closed && session === current) void reconnect().catch(fail);
     });
     session.on('close', () => {
-      if (closed || flushing || session !== current) return;
+      // During a reconnect the replaced session's close is part of it: an error followed at once by a close still
+      // reconnects, whatever the failed session reported.
+      if (closed || flushing || reopening || session !== current) return;
       if (session.inputEnded === true) {
         // The provider sent its last result and ended its stream, as the caller's flush asked.
         streamEnded = true;
