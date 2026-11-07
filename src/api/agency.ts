@@ -107,6 +107,7 @@ import {
   type ApprovalSlot,
 } from './runtime/approval-gate.js';
 import { createBufferedAsyncReplay } from './runtime/streamBuffer';
+import { parseJsonWithDistinctKeys } from './runtime/structuredReply.js';
 import {
   createAgencyProvenanceRecorder,
   type AgencyProvenanceRecorder,
@@ -1878,7 +1879,7 @@ function extractFirstJsonObject(text: string): unknown {
       depth--;
       if (depth === 0) {
         try {
-          return JSON.parse(text.slice(start, i + 1));
+          return parseJsonWithDistinctKeys(text.slice(start, i + 1));
         } catch {
           return undefined;
         }
@@ -1898,6 +1899,11 @@ function extractFirstJsonObject(text: string): unknown {
  * 2. JSON in a code fence — `\`\`\`json ... \`\`\`` wrapped blocks.
  * 3. JSON object embedded in prose — the first `{ ... }` block is extracted.
  *
+ * JSON in which an object repeats a key does not parse, whichever pattern
+ * found it: `JSON.parse` keeps only the key's last value, so the reply would
+ * lose the others without a sign, and `generate()` repeats the run as for any
+ * reply that does not match.
+ *
  * @param text - The raw result text from the strategy execution.
  * @param schema - The Zod schema (typed as `unknown` to avoid a hard zod dep).
  * @returns The parsed and validated object, or `undefined` when no pattern
@@ -1909,7 +1915,7 @@ function parseStructuredOutput(text: string, schema: unknown): unknown {
 
   /* Attempt 1: direct JSON parse of the entire text (happy path). */
   try {
-    const raw = JSON.parse(text);
+    const raw = parseJsonWithDistinctKeys(text);
     return zodSchema.parse(raw);
   } catch {
     /* Fall through to extraction heuristics. */
@@ -1919,7 +1925,7 @@ function parseStructuredOutput(text: string, schema: unknown): unknown {
   const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
   if (fenceMatch?.[1]) {
     try {
-      const raw = JSON.parse(fenceMatch[1].trim());
+      const raw = parseJsonWithDistinctKeys(fenceMatch[1].trim());
       return zodSchema.parse(raw);
     } catch {
       /* Fall through to brace matching. */
