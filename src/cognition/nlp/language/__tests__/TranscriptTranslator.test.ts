@@ -35,6 +35,8 @@ import { toMicro } from '../../../../safety/runtime/SpendReservations';
 
 /** A model OpenAI serves on /v1/responses alone, so a call to it takes the Responses route. */
 const RESPONSES_MODEL = 'gpt-5.3-codex';
+/** An OpenAI reasoning model served on Chat Completions, whose reasoning shares the output cap. */
+const REASONING_MODEL = 'gpt-6-luna';
 
 const OPTIONS = { provider: 'openai' as const, model: 'gpt-4o-mini', apiKey: 'test-key', baseUrl: 'https://openai.test/v1', timeoutMs: 1_000 };
 const line = (text: string, source: TranscriptLineInput['source'] = { code: 'es', provenance: 'detected' }): TranscriptLineInput =>
@@ -65,7 +67,7 @@ type PostAnswer = Response | ((init: { signal: AbortSignal }) => Promise<Respons
 function answer(...answers: PostAnswer[]): void {
   fetchMock.mockImplementation(async (_url: unknown, init?: { method?: string; signal: AbortSignal }) => {
     if ((init?.method ?? 'GET') === 'GET') {
-      return jsonResponse({ object: 'list', data: ['gpt-4o-mini', RESPONSES_MODEL].map((id) => ({ id, object: 'model', created: 1, owned_by: 'openai' })) });
+      return jsonResponse({ object: 'list', data: ['gpt-4o-mini', RESPONSES_MODEL, REASONING_MODEL].map((id) => ({ id, object: 'model', created: 1, owned_by: 'openai' })) });
     }
     const next = answers.shift();
     if (next === undefined) return jsonResponse({ error: { message: 'unexpected POST', type: 'invalid_request_error' } }, 404);
@@ -344,6 +346,52 @@ describe('TranscriptTranslator.translateLine', () => {
     }
   });
 
+  it('adds the tokens an earlier attempt answered with an error status reported to the translation after it and to the refusal after it', async () => {
+    // The shortest backoff before each retry.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const billed500 = (): Response =>
+        jsonResponse({ error: { message: 'server error', type: 'server_error' }, usage: { prompt_tokens: 40, completion_tokens: 7, total_tokens: 47 } }, 500);
+      const price = (usage: { promptTokens?: number; completionTokens?: number }) => (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
+      const translator = new TranscriptTranslator();
+      const options = { ...OPTIONS, maxAttempts: 2, timeoutMs: 10_000 };
+
+      // A 500 whose body reports tokens, then the translation: the call cost both.
+      answer(billed500(), jsonResponse(chatCompletion('Good morning.', 30, 5)));
+      const got = await translator.translateLine(line('Buenos días.'), 'en', options);
+      expect(got).toMatchObject({ status: 'translated', text: 'Good morning.', unansweredAttempts: 0, usage: { promptTokens: 70, completionTokens: 12, totalTokens: 82 } });
+
+      // The same 500, then a 503 that reports none: the refusal carries the first attempt's tokens and is recorded at them.
+      answer(billed500(), jsonResponse({ error: { message: 'unavailable', type: 'server_error' } }, 503));
+      const refused = await translator.translateLine(line('Buenos días.'), 'en', options).then(() => undefined, (error: unknown) => error);
+      expect(refused).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED', status: 503, unansweredAttempts: 0, usage: { promptTokens: 40, completionTokens: 7, totalTokens: 47 } });
+      expect(TranscriptTranslator.failedCallMicro(refused, 9_999, price)).toBe(47);
+
+      // Two such 500s: each attempt's tokens are counted once, the last one's with the error that reports it.
+      answer(billed500(), billed500());
+      const twice = await translator.translateLine(line('Buenos días.'), 'en', options).then(() => undefined, (error: unknown) => error);
+      expect(twice).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED', status: 500, usage: { promptTokens: 80, completionTokens: 14, totalTokens: 94 } });
+      expect(TranscriptTranslator.failedCallMicro(twice, 9_999, price)).toBe(94);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it('runs an OpenAI reasoning model at effort low with room for its reasoning over the answer, and a non-reasoning model as asked', async () => {
+    answer(jsonResponse(chatCompletion('Good morning.')), jsonResponse(chatCompletion('Good morning.')));
+    const translator = new TranscriptTranslator();
+    await translator.translateLine(line('Buenos días.'), 'en', { ...OPTIONS, model: REASONING_MODEL, maxAttempts: 1 });
+    await translator.translateLine(line('Buenos días.'), 'en', { ...OPTIONS, maxAttempts: 1 });
+    const [reasoning, plain] = posts();
+    expect(reasoning.url).toBe('https://openai.test/v1/chat/completions');
+    expect(reasoning.body.model).toBe(REASONING_MODEL);
+    expect(reasoning.body.reasoning_effort).toBe('low');
+    // The reasoning shares the output cap, so the default cap holds the answer's and 1,024 tokens for the reasoning.
+    expect(reasoning.body.max_completion_tokens).toBe(TranscriptTranslator.defaultMaxOutputTokens('Buenos días.') + 1_024);
+    expect(plain.body.reasoning_effort).toBeUndefined();
+    expect(plain.body.max_tokens ?? plain.body.max_completion_tokens).toBe(TranscriptTranslator.defaultMaxOutputTokens('Buenos días.'));
+  });
+
   it('carries the usage a failed call reported and records the call at it', async () => {
     // A Responses body with no output items: the provider refuses it, and its error holds the body's usage.
     answer(jsonResponse({ id: 'resp_2', object: 'response', status: 'completed', model: RESPONSES_MODEL, output: [], usage: { input_tokens: 40, output_tokens: 0, total_tokens: 40 } }));
@@ -462,5 +510,16 @@ describe('TranscriptTranslator.boundMicro', () => {
   it("defaults maxOutputTokens to the smaller of 2,048 and 64 plus three times the line's tokens", () => {
     expect(TranscriptTranslator.defaultMaxOutputTokens('Buenos días.')).toBe(64 + 3 * Math.ceil('Buenos días.'.length / 4));
     expect(TranscriptTranslator.defaultMaxOutputTokens('x'.repeat(40_000))).toBe(2_048);
+  });
+
+  it('bounds an OpenAI reasoning model at the cap its call sends: the default cap and 1,024 tokens of room for its reasoning', () => {
+    const translator = new TranscriptTranslator();
+    const text = 'Buenos días.';
+    const cap = TranscriptTranslator.defaultMaxOutputTokens(text) + 1_024;
+    for (const model of [REASONING_MODEL, `openai:${REASONING_MODEL}`]) {
+      expect(translator.boundMicro(line(text), 'en', { ...OPTIONS, model })).toBe(translator.boundMicro(line(text), 'en', { ...OPTIONS, model: REASONING_MODEL, maxOutputTokens: cap }));
+    }
+    // A cap the host sets is the whole cap, the reasoning included.
+    expect(translator.boundMicro(line(text), 'en', { ...OPTIONS, model: REASONING_MODEL, maxOutputTokens: 200 })).toBeLessThan(translator.boundMicro(line(text), 'en', { ...OPTIONS, model: REASONING_MODEL }));
   });
 });

@@ -55,6 +55,17 @@ describe('OpenAIProvider, a per-call attempt count', () => {
     expect(outcomes).toEqual([{ attempt: 1, status: 500, ok: false }]);
   });
 
+  it('reports the tokens an error status body reported with its attempt, and no usage when it reported none', async () => {
+    const billed = { ok: false, status: 500, statusText: 'Server Error', headers: new Headers(), json: () => Promise.resolve({ error: { message: 'boom', type: 'server_error' }, usage: { prompt_tokens: 40, completion_tokens: 7, total_tokens: 47 } }), body: null } as unknown as Response;
+    fetchMock.mockResolvedValueOnce(billed).mockResolvedValueOnce(serverError());
+    const outcomes: AttemptOutcome[] = [];
+    await thrown(request('/chat/completions', 'POST', 'key', {}, false, undefined, undefined, { max: 2, onAttempt: (o) => outcomes.push(o) }));
+    expect(outcomes).toEqual([
+      { attempt: 1, status: 500, ok: false, usage: { prompt_tokens: 40, completion_tokens: 7, total_tokens: 47 } },
+      { attempt: 2, status: 500, ok: false },
+    ]);
+  });
+
   it('with maxAttempts 1, a timeout makes one request and throws, reporting one attempt with no status', async () => {
     fetchMock.mockRejectedValue(abortError());
     const outcomes: AttemptOutcome[] = [];
