@@ -192,6 +192,8 @@ namespace OpenAIAPITypes {
   }
   export interface APIErrorResponse {
     error?: { message?: string; type?: string; code?: string };
+    /** The tokens an error body reports for the request it refused, when the server reports any. */
+    usage?: unknown;
   }
 
   // --- /v1/responses (Responses API) — narrow read surface --------------
@@ -2743,13 +2745,14 @@ export class OpenAIProvider implements IProvider {
     const allowed = attempts?.max ?? this.config.maxRetries!;
     if (!Number.isInteger(allowed) || allowed < 1) throw new RangeError('maxAttempts is a whole number, 1 or more');
     const budget = new CountingAttemptBudget({ maxAttempts: allowed, perAttempt: {} });
-    // Each attempt sent is reported once, with the status of its last send's answer, or with none when no answer came.
+    // Each attempt sent is reported once, with the status of its last send's answer, or with none when no answer came,
+    // and an error status with the tokens its body reported, which a later attempt's error would otherwise replace.
     let reported = -1;
-    const report = (attempt: number, status: number | null, ok: boolean): void => {
+    const report = (attempt: number, status: number | null, ok: boolean, usage?: unknown): void => {
       if (attempt === reported) return;
       reported = attempt;
       try {
-        attempts?.onAttempt?.({ attempt: attempt + 1, status, ok });
+        attempts?.onAttempt?.({ attempt: attempt + 1, status, ok, ...(usage !== undefined && usage !== null ? { usage } : {}) });
       } catch {
         // a caller's callback never ends the request
       }
@@ -2815,7 +2818,7 @@ export class OpenAIProvider implements IProvider {
             if (kind !== 'quota') {
               // Every send of this attempt answered: the attempt is reported with its last answer, not as one that
               // got none (the catch below reports only an attempt not reported yet).
-              report(attempt, response.status, false);
+              report(attempt, response.status, false, keyErrorData?.usage);
               throw this.allKeysFailedError(keyErrorData?.error?.message, response.status, keyErrorData?.error?.type, keyErrorData?.error?.code ?? undefined);
             }
             break;
@@ -2823,7 +2826,7 @@ export class OpenAIProvider implements IProvider {
           if (++keyHops >= this.keyPool.size) break;
           const nextKey = this.keyPool.next();
           if (nextKey === '') {
-            report(attempt, response.status, false);
+            report(attempt, response.status, false, keyErrorData?.usage);
             throw this.allKeysFailedError();
           }
           currentKey = nextKey;
@@ -2833,10 +2836,13 @@ export class OpenAIProvider implements IProvider {
           response = await fetch(url, { ...requestOptions, headers: { ...headers } });
         }
         clearTimeout(timeoutId);
-        report(attempt, response.status, response.ok);
+        if (response.ok) report(attempt, response.status, true);
 
         if (!response.ok) {
           const errorData: OpenAIAPITypes.APIErrorResponse = keyErrorData ?? (await response.json().catch(() => ({})));
+          // Reported once its body is read, so the attempt carries the tokens the body says it billed; a body that
+          // parsed to null is still reported with its status.
+          report(attempt, response.status, false, (errorData as OpenAIAPITypes.APIErrorResponse | null)?.usage);
           const errorMessage = errorData.error?.message || `HTTP error ${response.status}: ${response.statusText}`;
           const errorType = errorData.error?.type;
           const errorCode = errorData.error?.code;

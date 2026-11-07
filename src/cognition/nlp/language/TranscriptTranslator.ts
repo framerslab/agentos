@@ -4,6 +4,7 @@
  * its usage. A line whose source reliably equals the target is skipped with no call; a line whose language is unknown
  * is translated from its own language. A failed call throws {@link TranslationProviderError}, never returning the
  * input, and carries the usage of an answer the provider billed and the count of attempts that got no usable answer.
+ * An OpenAI reasoning model runs at effort `low` with 1,024 tokens of room for its reasoning over the default cap.
  * `boundMicro` answers the most one call can cost, for a caller's spend check; `failedCallMicro` what a failed call is
  * recorded as costing.
  *
@@ -21,10 +22,11 @@
  *
  * @module agentos/cognition/nlp/language/TranscriptTranslator
  */
-import { addModelUsage, generateText, hasBillableUsage, usageOfError, type TokenUsage } from '../../../api/generateText.js';
+import { addModelUsage, generateText, hasBillableUsage, sumTokenUsage, usageOfError, type TokenUsage } from '../../../api/generateText.js';
 import { resolveModelOption } from '../../../api/model.js';
 import { estimateMaxCallCostUSD } from '../../../api/runtime/modelPricing.js';
 import { tokensOfChars } from '../../../api/runtime/spendBudget.js';
+import { isOpenAIReasoningModel } from '../../../core/llm/providers/implementations/openaiModelFamilies.js';
 import { TranslationProviderError } from './interfaces.js';
 import { logTranslationFailed, statusOf } from './log.js';
 
@@ -51,7 +53,10 @@ export interface TranscriptTranslatorOptions {
   maxContextLines?: number;
   /** The call's own timeout; default 15,000 ms. */
   timeoutMs?: number;
-  /** The output cap; default `TranscriptTranslator.defaultMaxOutputTokens(text)`. */
+  /**
+   * The output cap, the reasoning of a reasoning model included; default `TranscriptTranslator.defaultMaxOutputTokens(text)`,
+   * and 1,024 tokens more for an OpenAI reasoning model (the o-series, GPT-5 and GPT-6), which runs at effort `low`.
+   */
   maxOutputTokens?: number;
   /** A first try and the retries `generateText` makes; default 2. */
   maxAttempts?: number;
@@ -84,6 +89,11 @@ export type TranslatedLine =
 
 const DEFAULTS = { maxContextLines: 6, timeoutMs: 15_000, maxAttempts: 2 } as const;
 const OUTPUT_CEILING = 2_048;
+/**
+ * The room an OpenAI reasoning model is given for its reasoning, which comes out of the same output cap as the answer:
+ * the 1,024 tokens the fallback chain grants its reasoning legs at effort `low` (`maxTokensHeadroom`, generateText.ts).
+ */
+const REASONING_HEADROOM = 1_024;
 
 /** The system message: the task, what to keep, and the answer's shape. Pinned by a test; a change moves TRANSLATOR_VERSION. */
 function systemFor(target: string, source: string | null): string {
@@ -107,12 +117,12 @@ function languageOf(code: string): string {
 }
 
 /**
- * The tokens a provider error reported for the request it ended (`details.usage`): in the provider layer's form, or as
- * the wire spells them on a body the provider could not use (the Responses API's `input_tokens` and `output_tokens`,
- * Chat Completions' `prompt_tokens` and `completion_tokens`). Null when it reported none.
+ * The tokens a provider reported for a request in a usage report (`details.usage` of an error, `usage` of an attempt):
+ * in the provider layer's form, or as the wire spells them on a body the provider could not use (the Responses API's
+ * `input_tokens` and `output_tokens`, Chat Completions' `prompt_tokens` and `completion_tokens`). Null when it
+ * reported none.
  */
-function billedUsageOf(error: unknown): TokenUsage | null {
-  const reported = usageOfError(error);
+function billedUsageOfReport(reported: unknown): TokenUsage | null {
   if (!reported || typeof reported !== 'object') return null;
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   addModelUsage(usage, reported);
@@ -129,6 +139,35 @@ function billedUsageOf(error: unknown): TokenUsage | null {
   return hasBillableUsage(usage) ? usage : null;
 }
 
+/** The tokens a provider error reported for the request it ended (`details.usage`), null when it reported none. */
+function billedUsageOf(error: unknown): TokenUsage | null {
+  return billedUsageOfReport(usageOfError(error));
+}
+
+/** The sum of the reports present, null when neither is; a provider's cost that covers one of the two is left out. */
+function sumUsage(a: TokenUsage | null, b: TokenUsage | null): TokenUsage | null {
+  if (a === null || b === null) return a ?? b;
+  const sum = sumTokenUsage(a, b);
+  if (a.costUSD === undefined || b.costUSD === undefined) delete sum.costUSD;
+  return sum;
+}
+
+/** The provider-side id the call sends, read as generateText reads it; the id as given where that read refuses it. */
+function modelIdOf(options: TranscriptTranslatorOptions): string {
+  try {
+    return resolveModelOption(options, 'text').modelId;
+  } catch {
+    return options.model;
+  }
+}
+
+/** The output cap the call sends: the host's, or the default with room for a reasoning model's reasoning. */
+function capOf(line: TranscriptLineInput, options: TranscriptTranslatorOptions, modelId: string): number {
+  if (options.maxOutputTokens !== undefined) return options.maxOutputTokens;
+  const answer = TranscriptTranslator.defaultMaxOutputTokens(line.text);
+  return isOpenAIReasoningModel(modelId) ? answer + REASONING_HEADROOM : answer;
+}
+
 /** The user message: the last `maxContextLines` lines, each after its speaker when it has one, then the line itself. */
 function promptFor(line: TranscriptLineInput, maxContextLines: number): string {
   const context = maxContextLines > 0 ? line.context.slice(-maxContextLines) : [];
@@ -138,7 +177,10 @@ function promptFor(line: TranscriptLineInput, maxContextLines: number): string {
 
 /** Translates a live transcript's final lines, one line and one target a call. */
 export class TranscriptTranslator {
-  /** The default output cap: 64 tokens plus three times the line's estimated tokens, at most 2,048. */
+  /**
+   * The default output cap for the answer: 64 tokens plus three times the line's estimated tokens, at most 2,048. A call
+   * to an OpenAI reasoning model sends 1,024 tokens more, for the reasoning that shares the cap.
+   */
   static defaultMaxOutputTokens(text: string): number {
     return Math.min(OUTPUT_CEILING, 64 + 3 * tokensOfChars(text.length));
   }
@@ -146,15 +188,16 @@ export class TranscriptTranslator {
   /**
    * The most one `translateLine` with these options can cost, in micro-dollars, times the attempts: the request as
    * `generateText` sends it, bounded by `estimateMaxCallCostUSD`, which counts a prompt at up to a token a byte, where
-   * `estimateCallCostUSD`'s four characters a token undercounts CJK text, emoji and base64. The model is read as the
-   * call reads it: `openai:gpt-4o-mini` is priced as the `gpt-4o-mini` it sends.
+   * `estimateCallCostUSD`'s four characters a token undercounts CJK text, emoji and base64, and the output cap the call
+   * sends, a reasoning model's room for its reasoning included. The model is read as the call reads it:
+   * `openai:gpt-4o-mini` is priced as the `gpt-4o-mini` it sends.
    *
    * @throws {Error} For a model with no price row, a model of another provider, or a request it cannot bound.
    */
   boundMicro(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): number {
     const maxContextLines = options.maxContextLines ?? DEFAULTS.maxContextLines;
-    const maxOutputTokens = options.maxOutputTokens ?? TranscriptTranslator.defaultMaxOutputTokens(line.text);
     const { modelId } = resolveModelOption(options, 'text');
+    const maxOutputTokens = capOf(line, options, modelId);
     const usd = estimateMaxCallCostUSD(options.provider, modelId, {
       system: systemFor(target, sourceOf(line)),
       messages: [{ role: 'user', content: promptFor(line, maxContextLines) }],
@@ -197,12 +240,18 @@ export class TranscriptTranslator {
       return { ...base, source: line.source.code, status: 'skipped', reason: 'same_language', usage: null };
     }
     const source = sourceOf(line);
-    const maxOutputTokens = options.maxOutputTokens ?? TranscriptTranslator.defaultMaxOutputTokens(line.text);
+    const modelId = modelIdOf(options);
+    const maxOutputTokens = capOf(line, options, modelId);
     // Attempts that got no usable answer may each have been billed for a whole answer: those that got no HTTP answer,
     // and those whose success status came and whose body never became the answer (a connection cut while it was read).
     let noAnswer = 0;
     let succeeded = 0;
     let lastSucceeded = false;
+    // The tokens attempts answered with an error status reported for themselves. A later attempt replaces such an
+    // attempt's error, so its bill is kept here: `earlier` for the attempts before the latest, `latest` for the latest,
+    // whose own error, when the call ends on it, reports the same tokens.
+    let earlier: TokenUsage | null = null;
+    let latest: TokenUsage | null = null;
     // `read` is how many successful attempts' bodies the call accounts for: the answer's, or the one whose usage an
     // error raised on a success carries.
     const unanswered = (read: number): number => noAnswer + Math.max(0, succeeded - read);
@@ -238,10 +287,15 @@ export class TranscriptTranslator {
         fallbackProviders: [],
         source: 'transcript_translation',
         maxTokens: maxOutputTokens,
+        // A reasoning model reasons at the lowest effort the provider layer sends (`low`): a line's translation needs
+        // little, and the reasoning comes out of the cap above.
+        ...(isOpenAIReasoningModel(modelId) ? { effort: 'low' } : {}),
         maxAttempts: options.maxAttempts ?? DEFAULTS.maxAttempts,
         // The provider reports each attempt once, when its status comes or when none came; a body lost after a
         // success status is not reported again, so it is counted here as a success the answer did not come from.
         onAttempt: (outcome) => {
+          earlier = sumUsage(earlier, latest);
+          latest = !outcome.ok && outcome.status !== null ? billedUsageOfReport(outcome.usage) : null;
           lastSucceeded = outcome.ok;
           if (outcome.ok) succeeded += 1;
           else if (outcome.status === null) noAnswer += 1;
@@ -256,7 +310,7 @@ export class TranscriptTranslator {
         throw controller.signal.reason;
       }
       const status = statusOf(error);
-      const billed = billedUsageOf(error);
+      const billed = billedUsageOf(error) ?? latest;
       // Usage on an error accounts for a successful attempt's body only when that attempt was the last. A 500's usage
       // says nothing of the answer an earlier 200 may have been billed for, and the error of a response marked failed
       // can read a status of 500 though the attempt that brought it answered 200.
@@ -268,7 +322,8 @@ export class TranscriptTranslator {
         'TRANSLATION_REQUEST_FAILED',
         status,
         error,
-        billed,
+        // The bill of the attempt the error reports, and of the attempts before it that answered with an error status.
+        sumUsage(earlier, billed),
         unanswered(fromSuccess ? 1 : 0),
       );
     } finally {
@@ -278,7 +333,8 @@ export class TranscriptTranslator {
     // A refused answer was still billed: its usage rides the error, so the caller records its cost (failedCallMicro).
     // generateText counts up from zeros, so an answer that reported no usage reads as zeros: that is no report, not a
     // bill of nothing, and it is null here so the call is recorded at its bound.
-    const usage = result.usage && hasBillableUsage(result.usage) ? result.usage : null;
+    // The attempts before it that answered with an error status and reported tokens were billed too.
+    const usage = result.usage && hasBillableUsage(result.usage) ? sumUsage(earlier, result.usage) : null;
     const unansweredAttempts = unanswered(1);
     if (result.finishReason === 'length') {
       logTranslationFailed('openai', 'truncated', 200);
