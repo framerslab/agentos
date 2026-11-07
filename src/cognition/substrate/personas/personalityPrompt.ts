@@ -132,12 +132,77 @@ export function bandOf(value: number, previous?: TraitBand): TraitBand {
   return 'moderate';
 }
 
+/** What {@link renderPersonalityDirectives} and {@link renderPersonalitySection} take beside the traits. */
+export interface PersonalityRenderOptions {
+  /**
+   * The band to render per trait, in place of the one its value gives (the band a learner's trait rendered last). A
+   * trait with no entry takes the band of its value, and so does a trait whose entry is not the map's own property or
+   * not one of `high`, `low` and `moderate`.
+   */
+  bands?: Partial<Record<HexacoTraitKey, TraitBand>>;
+  /** Conversation when left out. */
+  register?: PersonalityRegister;
+}
+
+/** One trait's directive, as {@link renderPersonalityDirectives} gives it. */
+export interface PersonalityDirective {
+  /** The trait, under its canonical key. */
+  trait: HexacoTraitKey;
+  /** The directive the trait renders in its band, or `null` when the trait is moderate. */
+  line: string | null;
+}
+
+/**
+ * The register a caller passed, checked. The type binds TypeScript callers only: a JavaScript host's misspelled
+ * register would otherwise render the conversation directives and drop the writing register's grounding rule without
+ * a word.
+ */
+function checkedRegister(register: unknown): PersonalityRegister {
+  if (register === undefined) return 'conversation';
+  if (register === 'conversation' || register === 'writing') return register;
+  const shown = typeof register === 'string' ? `'${register}'` : String(register);
+  throw new TypeError(
+    `Unknown personality register ${shown}: pass 'conversation' or 'writing', or leave it out for conversation.`,
+  );
+}
+
+/**
+ * The directive each HEXACO trait renders, one entry per trait in the order honesty, emotionality, extraversion,
+ * agreeableness, conscientiousness, openness: a trait in the high band (above 0.65) or the low band (below 0.35) gives
+ * its directive, a moderate trait gives `null`. These are the lines {@link renderPersonalitySection} puts under its
+ * heading, so a host that shows the line a trait value gives beside the trait's control shows what the agent is sent.
+ * Trait keys are normalized first, so the SOUL.md spelling `honestyHumility` reads as `honesty`, and a trait left out
+ * reads as 0.5. The writing register's grounding directive belongs to no trait and is not among the entries.
+ *
+ * @example
+ * ```ts
+ * import { renderPersonalityDirectives } from '@framers/agentos';
+ *
+ * const [honesty] = renderPersonalityDirectives({ honesty: 0.9, openness: 0.5 });
+ * honesty.line; // 'Be straightforward and transparent. Avoid flattery, spin, or evasion. Acknowledge limitations directly.'
+ * ```
+ *
+ * @param traits - A trait map under any accepted spelling; anything else gives six `null` lines.
+ * @param options - The bands to render in place of the values' and the register.
+ * @returns Six entries, one per trait.
+ * @throws {TypeError} When `options.register` is given and is neither `conversation` nor `writing`.
+ */
+export function renderPersonalityDirectives(traits: unknown, options: PersonalityRenderOptions = {}): PersonalityDirective[] {
+  const directives = checkedRegister(options.register) === 'writing' ? WRITING_DIRECTIVES : DIRECTIVES;
+  const values = normalizeHexacoTraits(traits);
+  return HEXACO_TRAIT_KEYS.map((trait) => {
+    const band = passedBand(options.bands, trait) ?? bandOf(values[trait] ?? 0.5);
+    return { trait, line: band === 'moderate' ? null : directives[trait][band] };
+  });
+}
+
 /**
  * Renders HEXACO trait values (0 to 1) as the personality section of a system prompt.
  *
  * Each trait in the high or the low band adds one directive, in the order honesty, emotionality, extraversion,
- * agreeableness, conscientiousness, openness; a moderate trait adds none. Trait keys are normalized first, so the
- * SOUL.md spelling `honestyHumility` reads as `honesty`, and a trait left out reads as 0.5.
+ * agreeableness, conscientiousness, openness; a moderate trait adds none. The directives are the non-null lines of
+ * {@link renderPersonalityDirectives}. Trait keys are normalized first, so the SOUL.md spelling `honestyHumility`
+ * reads as `honesty`, and a trait left out reads as 0.5.
  *
  * @param traits - A trait map under any accepted spelling; anything else renders nothing.
  * @param options.bands - The band to render per trait, in place of the one its value gives (the band a learner's
@@ -147,29 +212,10 @@ export function bandOf(value: number, previous?: TraitBand): TraitBand {
  * @returns The section, or `null` when every trait is moderate in either register.
  * @throws {TypeError} When `options.register` is given and is neither `conversation` nor `writing`.
  */
-export function renderPersonalitySection(
-  traits: unknown,
-  options: { bands?: Partial<Record<HexacoTraitKey, TraitBand>>; register?: PersonalityRegister } = {},
-): string | null {
-  // The type binds TypeScript callers only: a JavaScript host's misspelled register would otherwise render the
-  // conversation directives and drop the writing register's grounding rule without a word.
-  const register: unknown = options.register;
-  if (register !== undefined && register !== 'conversation' && register !== 'writing') {
-    const shown = typeof register === 'string' ? `'${register}'` : String(register);
-    throw new TypeError(
-      `Unknown personality register ${shown}: pass 'conversation' or 'writing', or leave it out for conversation.`,
-    );
-  }
-  const values = normalizeHexacoTraits(traits);
-  const writing = register === 'writing';
-  const directives = writing ? WRITING_DIRECTIVES : DIRECTIVES;
-  const lines: string[] = [];
-  for (const key of HEXACO_TRAIT_KEYS) {
-    const band = passedBand(options.bands, key) ?? bandOf(values[key] ?? 0.5);
-    if (band !== 'moderate') lines.push(directives[key][band]);
-  }
+export function renderPersonalitySection(traits: unknown, options: PersonalityRenderOptions = {}): string | null {
+  const lines = renderPersonalityDirectives(traits, options).flatMap(({ line }) => (line === null ? [] : [line]));
   if (lines.length === 0) return null;
-  if (writing) lines.unshift(WRITING_GROUNDING);
+  if (checkedRegister(options.register) === 'writing') lines.unshift(WRITING_GROUNDING);
   return `${PERSONALITY_SECTION_HEADING}\n\n${lines.join('\n')}`;
 }
 
