@@ -950,7 +950,9 @@ export interface GenerateTextOptions {
    * @internal Rebuilds the provider-native structured-output payload for a
    * FALLBACK leg's provider, and for the provider and model a call resolves
    * to when a `router` moved it off the call's own provider and model (the
-   * pair `_responseFormat` is built for). When absent, legs and a routed call
+   * pair `_responseFormat` is built for) or the resolver sends it to another
+   * provider (an Anthropic call with no Anthropic key or base URL goes to
+   * OpenRouter). When absent, legs and a routed call
    * receive `_responseFormat` verbatim (legacy behavior — provider-side
    * guards then drop foreign shapes, so the leg runs with zero provider
    * enforcement). generateObject and AgentSession.send supply this;
@@ -2432,18 +2434,20 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
       // The structured-output payload this call sends. The caller built
       // `_responseFormat` for the call's own provider and model. A call the
-      // router moved to another provider or model is sent the payload of the
-      // provider and model it resolved to (an Anthropic pick with no Anthropic
-      // key or base URL goes to OpenRouter), rebuilt with the caller's builder
-      // as each fallback leg's is: that provider drops a payload shaped for
-      // another (OpenRouter forwards only json_object and json_schema), while
-      // such a payload would still count below as carrying the schema and keep
-      // the schema instructions out of the prompt. A call the router left on
-      // its own provider and model, and a call with no builder, sends the
-      // caller's payload as it is.
+      // router moved to another provider or model, and a call the resolver
+      // sends to another provider than the one it names (an Anthropic call
+      // with no Anthropic key or base URL goes to OpenRouter), is sent the
+      // payload of the provider and model it resolved to, rebuilt with the
+      // caller's builder as each fallback leg's is: that provider drops a
+      // payload shaped for another (OpenRouter forwards only json_object and
+      // json_schema), while such a payload would still count below as carrying
+      // the schema and keep the schema instructions out of the prompt. A call
+      // sent to its own provider and model, and a call with no builder, sends
+      // the caller's payload as it is.
       const movedByRouter = providerId !== credentialProviderId || modelId !== ownModelId;
+      const sentToAnotherProvider = resolved.providerId !== providerId;
       const responseFormat: GenerateTextOptions['_responseFormat'] =
-        movedByRouter && typeof opts._responseFormatBuilder === 'function'
+        (movedByRouter || sentToAnotherProvider) && typeof opts._responseFormatBuilder === 'function'
           ? safeBuildLegResponseFormat(opts._responseFormatBuilder, resolved.providerId, resolved.modelId, routingLogger)
           : opts._responseFormat;
 
