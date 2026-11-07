@@ -15,8 +15,11 @@ export { CognitiveMemoryBridge } from './CognitiveMemoryBridge.js';
 export { NOTETAKER_PERSONA } from './personas/notetaker.js';
 export {
   bandOf,
+  renderPersonalityDirectives,
   renderPersonalitySection,
   OPERATOR_ONLY_TRAITS,
+  type PersonalityDirective,
+  type PersonalityRenderOptions,
   type TraitBand,
   type PersonalityRegister,
 } from './personas/personalityPrompt.js';

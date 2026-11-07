@@ -94,6 +94,16 @@ The propagation diagram at the top of this page shows the five surfaces. Each is
 
 The table is the default `conversation` register; a host may pass `register: 'writing'` to `renderPersonalitySection` for grounded writing, as [Notetaker traits and writing](../PERSONAS.md#notetaker-traits-and-writing) describes.
 
+`renderPersonalityDirectives(traits)`, exported from the package root and from `@framers/agentos/cognition/substrate`, gives the same lines one trait at a time: six entries in the order above, each `{ trait, line }`, with `line` set to the trait's directive in its band and `null` for a moderate trait. A host that shows a trait's control, such as a slider in an agent builder, shows the line beside it, and the agent is sent exactly that line. It takes the same `bands` and `register` options as `renderPersonalitySection`.
+
+```ts
+import { renderPersonalityDirectives } from '@framers/agentos';
+
+const lines = renderPersonalityDirectives({ honesty: 0.9, openness: 0.5 });
+lines[0]; // { trait: 'honesty', line: 'Be straightforward and transparent. ...' }
+lines[5]; // { trait: 'openness', line: null }
+```
+
 Source: [`src/cognition/substrate/personas/personalityPrompt.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/personalityPrompt.ts).
 
 ### 2. Memory encoding strength
