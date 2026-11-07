@@ -191,6 +191,7 @@ describe('streamText reports a prefixed fallback entry as the provider and model
       { provider: 'openai', model: PRIMARY_MODEL, ok: false },
       { provider: 'openrouter', model: SENT_MODEL, ok: true },
     ]);
+    expect(hoisted.lines.find((l) => l.message === 'llm.fallback_succeeded')?.meta).toMatchObject({ fallbackProvider: 'openrouter' });
   });
 
   it('reports an entry without a prefix as written', async () => {
