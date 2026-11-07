@@ -828,25 +828,32 @@ function responsesFailedError(
 }
 
 /**
- * Two usage reports in the same wire spelling summed field by field, a nested detail (`input_tokens_details`) as a
- * report of its own: a field holds a number where either report has a finite one. Either report may be absent.
+ * Two usage reports, each already priced as the request it reports, summed field by field: a count holds a number
+ * where either report has a finite one. The cost is the sum only when both reports carry one, since a cost known for
+ * one request alone is not the pair's. Either report may be absent.
  */
-function sumWireUsage(a: unknown, b: unknown): unknown {
-  if (a === undefined || a === null) return b;
-  if (b === undefined || b === null) return a;
+function sumModelUsage(a: ModelUsage | undefined, b: ModelUsage | undefined): ModelUsage | undefined {
+  if (!a || !b) return a ?? b;
+  const left = a as unknown as Record<string, unknown>;
+  const right = b as unknown as Record<string, unknown>;
   const finite = (value: unknown): number | undefined =>
     typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-  if (typeof a !== 'object' || typeof b !== 'object') {
-    const x = finite(a);
-    const y = finite(b);
-    return x === undefined && y === undefined ? a : (x ?? 0) + (y ?? 0);
+  const sum: Record<string, number> = {};
+  for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+    const x = finite(left[key]);
+    const y = finite(right[key]);
+    if (x !== undefined || y !== undefined) sum[key] = (x ?? 0) + (y ?? 0);
   }
-  const sum: Record<string, unknown> = {};
-  const left = a as Record<string, unknown>;
-  const right = b as Record<string, unknown>;
-  for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) sum[key] = sumWireUsage(left[key], right[key]);
-  return sum;
+  if (finite(a.costUSD) === undefined || finite(b.costUSD) === undefined) delete sum.costUSD;
+  return sum as unknown as ModelUsage;
 }
+
+/**
+ * The usage of the `/v1/responses` results marked failed that a call sent again, each priced as the request it was,
+ * keyed by the result the call returned. The mapper adds it to that result's own, so the requests are never priced as
+ * one: a pair that each fell below OpenAI's long-context threshold is not billed at the long-context rate.
+ */
+const retriedResponsesUsage = new WeakMap<object, ModelUsage>();
 
 /**
  * The chat-style finish reason of a `/v1/responses` result, shared by the
@@ -2296,8 +2303,12 @@ export class OpenAIProvider implements IProvider {
     apiResponse: OpenAIAPITypes.ResponsesResponse,
     modelId: string
   ): ModelCompletionResponse {
+    // Its own usage, priced as its request, and that of the failed results the call sent before it, priced as theirs.
+    const usage = sumModelUsage(
+      retriedResponsesUsage.get(apiResponse),
+      apiResponse.usage ? this.mapResponsesUsage(apiResponse.usage, apiResponse.model ?? modelId) : undefined,
+    );
     if (apiResponse.status === 'failed') {
-      const usage = apiResponse.usage ? this.mapResponsesUsage(apiResponse.usage, apiResponse.model ?? modelId) : undefined;
       throw responsesFailedError(apiResponse, usage);
     }
     const { text: assistantText, toolCalls, itemCount } = summarizeResponsesOutput(apiResponse.output);
@@ -2349,9 +2360,7 @@ export class OpenAIProvider implements IProvider {
         finishReason,
         logprobs: null,
       }],
-      usage: apiResponse.usage
-        ? this.mapResponsesUsage(apiResponse.usage, apiResponse.model ?? modelId)
-        : undefined,
+      usage,
     };
   }
 
@@ -2786,8 +2795,9 @@ export class OpenAIProvider implements IProvider {
     };
     // The tokens of the /v1/responses results marked failed that were sent again: billed, and reported by no later
     // answer, so they are added to the result the call returns or to the error it ends with.
-    let retriedUsage: unknown;
-    const ending = (error: Error): Error => this.withRetriedUsage(error, retriedUsage, body?.model);
+    const requestModel = typeof body?.model === 'string' ? body.model : '';
+    let retriedUsage: ModelUsage | undefined;
+    const ending = (error: Error): Error => this.withRetriedUsage(error, retriedUsage, requestModel);
     for (let attempt = 0; ; attempt++) {
       if (abortSignal?.aborted) {
         throw ending(new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED'));
@@ -2911,8 +2921,8 @@ export class OpenAIProvider implements IProvider {
           throw lastError; // If not explicitly handled for retry, throw
         }
 
-        if (fromPool && this.keyPool?.has(currentKey)) this.keyPool.markSuccess(currentKey, attemptStartedAt);
         if (expectStream) {
+          if (fromPool && this.keyPool?.has(currentKey)) this.keyPool.markSuccess(currentKey, attemptStartedAt);
           if (!response.body) {
             throw new OpenAIProviderError('Expected a stream response but body was null.', 'STREAM_BODY_NULL');
           }
@@ -2921,21 +2931,38 @@ export class OpenAIProvider implements IProvider {
         const answer = (await response.json()) as T;
         // A /v1/responses result marked `failed` with a retryable error code (`server_error`, `rate_limit_exceeded`,
         // `vector_store_timeout`) comes with a 200: it is sent again while the call has attempts left, as a 5xx is. The
-        // last one is returned, and the mapper throws its RESPONSES_FAILED.
-        // The tokens such a result reported are added to what the call returns or ends with (`retriedUsage`).
+        // last one is returned, and the mapper throws its RESPONSES_FAILED. Its usage, priced as the request it was, is
+        // added to what the call returns or ends with (`retriedUsage`).
         const failedStatus = endpoint === '/responses' ? retryableFailedResponseStatus(answer) : undefined;
+        const pooled = fromPool && this.keyPool?.has(currentKey) === true;
+        // A result throttled in its body is the key's 429: the key rests as a 429 rests it, and is never marked a
+        // success. Any other answer marks its key a success once its body has been read.
+        if (pooled && failedStatus === 429) {
+          if (this.keyPool!.size > 1) {
+            const kind = classifyKeyFailure(429, JSON.stringify(answer)) ?? 'quota';
+            this.keyPool!.markFailed(currentKey, kind, { status: 429, at: attemptStartedAt });
+          }
+        } else if (pooled) {
+          this.keyPool!.markSuccess(currentKey, attemptStartedAt);
+        }
         if (failedStatus !== undefined && !last) {
-          retriedUsage = sumWireUsage(retriedUsage, (answer as OpenAIAPITypes.ResponsesResponse).usage);
-          lastError = responsesFailedError(answer as OpenAIAPITypes.ResponsesResponse, undefined);
+          const failed = answer as OpenAIAPITypes.ResponsesResponse;
+          if (failed.usage) retriedUsage = sumModelUsage(retriedUsage, this.mapResponsesUsage(failed.usage, failed.model ?? requestModel));
+          lastError = responsesFailedError(failed, undefined);
+          // The retry of a throttled result goes out on the next usable key, when the pool has another.
+          if (pooled && failedStatus === 429 && this.keyPool!.size > 1 && this.keyPool!.usable() > 0) {
+            const nextKey = this.keyPool!.next();
+            if (nextKey !== '') {
+              currentKey = nextKey;
+              headers['Authorization'] = `Bearer ${currentKey}`;
+            }
+          }
           const waitMs = computeRetryBackoffMs(attempt);
           log.warn('llm.retry', { provider: 'openai', status: failedStatus, attempt: attempt + 1, waitMs });
           await waitForRetry(waitMs, abortSignal);
           continue;
         }
-        if (retriedUsage !== undefined && answer && typeof answer === 'object') {
-          const result = answer as { usage?: unknown };
-          result.usage = sumWireUsage(retriedUsage, result.usage);
-        }
+        if (retriedUsage && answer && typeof answer === 'object') retriedResponsesUsage.set(answer, retriedUsage);
         return answer;
 
       } catch (error: unknown) {
@@ -2988,19 +3015,19 @@ export class OpenAIProvider implements IProvider {
   }
 
   /**
-   * `error` with the tokens of the `/v1/responses` results marked failed that the call sent again (`retried`, in the
-   * Responses spelling) added to the usage it reports in `details.usage`, in the provider's form, so a caller meters
-   * them as it meters the error's own: an error body's usage, read in the same spelling, is summed with them. Its
-   * other details are kept (a cause that is not a plain object goes under `cause`). Without such tokens, or for an
-   * error that is not this provider's, `error` itself.
+   * `error` with the usage of the `/v1/responses` results marked failed that the call sent again (`retried`, each
+   * priced as the request it was) added to the usage it reports in `details.usage`, in the provider's form, so a
+   * caller meters them as it meters the error's own: an error body's own usage is priced alone and added. Its other
+   * details are kept (a cause that is not a plain object goes under `cause`). Without such usage, or for an error that
+   * is not this provider's, `error` itself.
    * @private
    */
-  private withRetriedUsage(error: Error, retried: unknown, model: unknown): Error {
-    if (retried === undefined || retried === null || !(error instanceof OpenAIProviderError)) return error;
+  private withRetriedUsage(error: Error, retried: ModelUsage | undefined, model: string): Error {
+    if (!retried || !(error instanceof OpenAIProviderError)) return error;
     const details = error.details;
     const plain = details !== null && typeof details === 'object' && !(details instanceof Error) && !Array.isArray(details);
-    const own = plain ? (details as { usage?: unknown }).usage : undefined;
-    const usage = this.mapResponsesUsage(sumWireUsage(retried, own) as OpenAIAPITypes.ResponsesUsage, typeof model === 'string' ? model : '');
+    const own = plain ? this.usageOfErrorBody((details as { usage?: unknown }).usage, model) : undefined;
+    const usage = sumModelUsage(retried, own);
     const withUsage = new OpenAIProviderError(
       error.message,
       error.code,
@@ -3011,6 +3038,22 @@ export class OpenAIProvider implements IProvider {
     );
     withUsage.stack = error.stack;
     return withUsage;
+  }
+
+  /**
+   * An error body's usage priced as its request: the Responses spelling (`input_tokens`), the Chat Completions one
+   * (`prompt_tokens`), or the provider's form as it is; undefined for anything else.
+   * @private
+   */
+  private usageOfErrorBody(usage: unknown, model: string): ModelUsage | undefined {
+    if (!usage || typeof usage !== 'object') return undefined;
+    const wire = usage as Record<string, unknown>;
+    const counted = (...keys: string[]): boolean => keys.some((key) => typeof wire[key] === 'number');
+    if (counted('input_tokens', 'output_tokens')) return this.mapResponsesUsage(usage as OpenAIAPITypes.ResponsesUsage, model);
+    if (counted('prompt_tokens', 'completion_tokens')) {
+      return this.calculateUsage(usage as { prompt_tokens: number; completion_tokens: number; total_tokens: number }, model);
+    }
+    return counted('promptTokens', 'completionTokens', 'totalTokens') ? (usage as ModelUsage) : undefined;
   }
 
   /**
