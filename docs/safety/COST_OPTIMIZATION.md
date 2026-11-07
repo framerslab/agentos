@@ -307,6 +307,8 @@ const assistant = agent({
 });
 ```
 
+An entry whose model id carries a provider prefix goes to that provider, and a structured call is sent that provider's format there: `{ provider: 'anthropic', model: 'openrouter:anthropic/claude-sonnet-4.5' }` is an OpenRouter call at OpenRouter's price ([Tool Calling Support](../features/LLM_PROVIDERS.md#tool-calling-support)).
+
 ## Send fewer tokens
 
 - **Prompt caching** is on by default: stable prompt prefixes are billed at the provider's cache-read rate on later calls. [Prompt Caching](../features/PROMPT_CACHING.md) covers the per-provider behavior and the `cache` option, and [Cache Diagnostics](../features/CACHE_DIAGNOSTICS.md) explains a cache miss.

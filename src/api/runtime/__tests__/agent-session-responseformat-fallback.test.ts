@@ -416,3 +416,121 @@ describe('AgentSession.send responseSchema when the model router moves the send'
     expect(systemOf(leg)).not.toContain(SCHEMA_LINE);
   });
 });
+
+describe('AgentSession.send responseSchema on a fallback entry whose model id names another provider', () => {
+  beforeEach(async () => {
+    resetHarness();
+    // The real model resolution, so an `openrouter:` prefix under another
+    // provider splits off as it does on a real call; the provider resolution
+    // stays an echo.
+    const actual = await vi.importActual<typeof import('../../model.js')>('../../model.js');
+    (resolveModelOption as unknown as Mock).mockImplementation(actual.resolveModelOption);
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
+      if (modelId === 'gpt-4o-mini') throw new Error('503 overloaded');
+      return okResponse(modelId, modelId.startsWith('google/') ? '{"palette":{"primary":"#aabbcc"}}' : '{"title":"x"}');
+    });
+  });
+
+  /** A send on an OpenAI agent whose primary answers 503 and whose one fallback entry is `entry`. */
+  async function sendWithLeg<T extends z.ZodType>(
+    entry: { provider: string; model: string },
+    schema: T,
+    schemaName: string,
+  ): Promise<unknown> {
+    const a = agent({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      memory: false,
+      fallbackProviders: [entry],
+    });
+    const result = await a.session().send('hi', { responseSchema: schema, schemaName });
+    return (result as { object?: unknown }).object;
+  }
+
+  it("an Anthropic entry with an `openrouter:` id is sent OpenRouter's json_schema payload, which carries the schema", async () => {
+    const object = await sendWithLeg(
+      { provider: 'anthropic', model: 'openrouter:anthropic/claude-sonnet-4.5' },
+      z.object({ title: z.string() }),
+      'titled',
+    );
+
+    expect(object).toEqual({ title: 'x' });
+    const leg = (hoisted.generateCompletion.mock.calls as unknown[][]).find((c) => c[0] === 'anthropic/claude-sonnet-4.5');
+    expect(leg).toBeDefined();
+    expect(payloadOf(leg)).toMatchObject({
+      type: 'json_schema',
+      json_schema: { name: 'titled', strict: true, schema: { type: 'object', properties: { title: { type: 'string' } } } },
+    });
+    expect((payloadOf(leg) as Record<string, unknown>)._agentosUseToolForStructuredOutput).toBeUndefined();
+    expect(systemOf(leg)).not.toContain(SCHEMA_LINE);
+  });
+
+  it('a Gemini entry with an `openrouter:` id and a record schema is sent JSON-object mode and the schema in its system prompt', async () => {
+    const object = await sendWithLeg(
+      { provider: 'gemini', model: 'openrouter:google/gemini-2.5-flash' },
+      z.object({ palette: z.record(z.string(), z.string()) }),
+      'palette',
+    );
+
+    expect(object).toEqual({ palette: { primary: '#aabbcc' } });
+    const leg = (hoisted.generateCompletion.mock.calls as unknown[][]).find((c) => c[0] === 'google/gemini-2.5-flash');
+    expect(leg).toBeDefined();
+    expect(payloadOf(leg)).toEqual({ type: 'json_object' });
+    expect(systemOf(leg)).toContain(SCHEMA_LINE);
+    expect(systemOf(leg)).toContain('"palette"');
+  });
+
+  it('an entry with no prefix is built for the provider it names, as before', async () => {
+    const object = await sendWithLeg(
+      { provider: 'anthropic', model: 'claude-sonnet-5-5' },
+      z.object({ title: z.string() }),
+      'titled',
+    );
+
+    expect(object).toEqual({ title: 'x' });
+    const leg = (hoisted.generateCompletion.mock.calls as unknown[][]).find((c) => c[0] === 'claude-sonnet-5-5');
+    expect(leg).toBeDefined();
+    expect(payloadOf(leg)).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
+    expect(systemOf(leg)).not.toContain(SCHEMA_LINE);
+  });
+});
+
+describe('AgentSession.send responseSchema when the model router moves the send to Anthropic with an Anthropic key', () => {
+  beforeEach(async () => {
+    resetHarness();
+    // The real resolver with an Anthropic key: the routed call goes to
+    // Anthropic's own API, not to OpenRouter.
+    const actual = await vi.importActual<typeof import('../../model.js')>('../../model.js');
+    (resolveProvider as unknown as Mock).mockImplementation(actual.resolveProvider);
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-test');
+    vi.stubEnv('ANTHROPIC_BASE_URL', '');
+    vi.stubEnv('OPENROUTER_API_KEY', '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('a record schema on Claude Sonnet 4.5 is sent the forced schema tool and no schema text', async () => {
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
+      okResponse(modelId, '{"palette":{"primary":"#aabbcc"}}'),
+    );
+
+    const a = agent({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      router: routerTo('anthropic', 'claude-sonnet-4-5'),
+      memory: false,
+      fallbackProviders: [],
+    });
+    const result = await a.session().send('hi', {
+      responseSchema: z.object({ palette: z.record(z.string(), z.string()) }),
+      schemaName: 'palette',
+    });
+
+    expect((result as { object?: unknown }).object).toEqual({ palette: { primary: '#aabbcc' } });
+    const call = hoisted.generateCompletion.mock.calls[0] as unknown[];
+    expect(call[0]).toBe('claude-sonnet-4-5');
+    expect(payloadOf(call)).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool' });
+    expect(systemOf(call)).not.toContain(SCHEMA_LINE);
+  });
+});
