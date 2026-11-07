@@ -414,6 +414,25 @@ room.registerTextStreamHandler(LIVEKIT_TRANSCRIPTION_TOPIC, async (reader) => {
 
 A line the provider could not transcribe arrives as an empty final with `agentos.transcription_failed` holding a short reason; an empty final without it takes back the text the line showed, and the ledger hides the line. `transcriptEventFromLiveKit()` reads a final's `agentos.start_ms` and `agentos.end_ms` into the event's `startMs` and `endMs`, so the ledger's line holds the times its final carried; a value that is not whole milliseconds in decimal digits is ignored, and its field stays undefined.
 
+#### Translations to the participants that read them
+
+`LiveKitTranslationOutput` (in `@framers/agentos/io/hearing/livekit`) writes a transcript's translations into the room as text streams on `'lk.translation'` (`LIVEKIT_TRANSLATION_TOPIC`, or the `topic` option), each to the identities the caller names and never to the whole room: a write or a `send` given an empty list sends nothing. Each line is numbered per target from 1 and kept in a ledger for that target, a line written to an empty list among them, so a reader that was away while nobody was named is sent it on its return; a line written again for the same item takes the next number. A stream's text is the line as JSON with its `seq` (the `encode` option writes another form), and it carries the attributes `translation.item_id`, `translation.target`, `translation.source` (empty when the source is unknown), `translation.status` (`translated`, `skipped` or `failed`) and `translation.seq` (`LIVEKIT_TRANSLATION_ATTRIBUTES`). `replayAfter(seq, target, identity)` sends that participant every line of the target numbered above `seq`, every line when `seq` is null, in order, and resolves how many, so a page that reconnects holding line 41 gets 42 onwards, a line it was sent and never read among them. `send(text, { destinationIdentities, topic })` carries a message that is not a line, such as a status, under the same rule.
+
+```typescript
+import { LiveKitTranslationOutput } from '@framers/agentos/io/hearing/livekit';
+import { TranscriptTranslator } from '@framers/agentos';
+
+const translator = new TranscriptTranslator();
+const output = new LiveKitTranslationOutput({ room }); // a connected @livekit/rtc-node Room
+const result = await translator.translateLine(line, 'fr', options);
+await output.write(
+  { itemId: result.itemId, target: 'fr', source: result.source, status: result.status, text: result.status === 'translated' ? result.text : null },
+  { destinationIdentities: readersOf('fr') }, // the identities that asked for French, never the room
+);
+```
+
+Sends go out one at a time in the order they were asked for; a send that fails rejects its own write and leaves the line in the ledger, so `replayAfter` sends it. An `encode` that throws rejects its write as well, the line neither numbered nor kept. A write made from inside `encode` waits for the line being encoded, so it goes out after that line with the next number, or takes that line's number when the encode throws; a `send` or a `replayAfter` asked for from inside `encode` waits for it as well. What `encode` asks for runs before the write that encodes returns, in the order it was asked for, so a write, a `send` or a `replayAfter` the caller asks for next, awaited or not, comes after it. A write copies the line and the identity list when it is called, so a caller that changes either while an earlier send is still going changes neither that write's send nor its replays; the `encode` option is given a copy of its own, so an encode that changes its argument changes neither, and `send` reads its topic and identities when it is called as well. The ledger lives as long as the output and is never trimmed, so a replay reaches back to the target's first line; a host makes one output per room session and drops it with the session. Like the transcription output, it takes the room through a structural type and imports no LiveKit package.
+
 ## Listening without speaking
 
 [`startListenSession(transport, sink, overrides)`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/ListenSession.ts) runs a session that only listens: the transport's audio goes to a streaming transcriber, and each final with words goes to a sink as a numbered turn. It takes no TTS, no barge-in handler and no agent session, and the endpoint detector is optional; `streamingSTT` and `runId` are the only fields `overrides` requires.

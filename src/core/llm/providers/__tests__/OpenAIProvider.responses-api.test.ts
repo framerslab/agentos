@@ -325,6 +325,37 @@ describe('OpenAIProvider.mapResponsesToCompletionResponse', () => {
     expect(cfRes.choices[0].finishReason).toBe('content_filter');
   });
 
+  it('maps an incomplete response with no reason it knows to length, never stop, even when it holds a tool call', () => {
+    const partial = [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial' }] }];
+    for (const incomplete_details of [undefined, null, {}, { reason: 'something_new' }]) {
+      const res = map({ id: 'r', model: 'gpt-5.5', status: 'incomplete', incomplete_details, output: partial }) as any;
+      expect(res.choices[0].finishReason).toBe('length');
+    }
+    const called = map({
+      id: 'r', model: 'gpt-5.5', status: 'incomplete',
+      output: [{ type: 'function_call', call_id: 'c1', name: 'ping', arguments: '{"x"' }],
+    }) as any;
+    expect(called.choices[0].finishReason).toBe('length');
+  });
+
+  it('throws RESPONSES_FAILED for a response marked failed, as its stream does, whatever text it holds', () => {
+    const failed = { id: 'r', model: 'gpt-5.5', status: 'failed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial' }] }] };
+    const thrownBy = (response: unknown): unknown => {
+      try {
+        return map(response);
+      } catch (error) {
+        return error;
+      }
+    };
+    expect(
+      thrownBy({ ...failed, error: { code: 'server_error', message: 'boom' }, usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 } }),
+    ).toMatchObject({ code: 'RESPONSES_FAILED', openaiErrorCode: 'server_error', httpStatus: 500, details: { usage: { promptTokens: 10, completionTokens: 3 } } });
+    const refused = thrownBy({ ...failed, error: { code: 'invalid_prompt', message: 'no' } }) as { code?: string; httpStatus?: number };
+    expect(refused.code).toBe('RESPONSES_FAILED');
+    expect(refused.httpStatus).toBeUndefined();
+    expect(thrownBy({ ...failed, output: [] })).toMatchObject({ code: 'RESPONSES_FAILED' });
+  });
+
   it('THROWS only on a GENUINELY empty output array (Codex-Medium-2 — must fall back, not empty-succeed)', () => {
     expect(() => map({ id: 'r', model: 'gpt-5.5', status: 'completed', output: [] })).toThrow();
     expect(() => map({ id: 'r', model: 'gpt-5.5', status: 'completed' })).toThrow(); // output absent

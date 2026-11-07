@@ -230,6 +230,11 @@
       "default": "./dist/cognition/nlp/ai_utilities/index.js",
       "types": "./dist/cognition/nlp/ai_utilities/index.d.ts"
     },
+    "./cognition/nlp/language": {
+      "import": "./dist/cognition/nlp/language/index.js",
+      "default": "./dist/cognition/nlp/language/index.js",
+      "types": "./dist/cognition/nlp/language/index.d.ts"
+    },
     "./cognition/rag": {
       "import": "./dist/cognition/rag/index.js",
       "default": "./dist/cognition/rag/index.js",

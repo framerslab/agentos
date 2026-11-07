@@ -125,6 +125,7 @@ export * from './cognition/skills';
 // Multilingual exports
 export * from './cognition/nlp/language/interfaces';
 export * from './cognition/nlp/language/LanguageService';
+export * from './cognition/nlp/language/TranscriptTranslator';
 // NLP AI Utilities (classification, sentiment, similarity, keyword extraction, etc.)
 export * from './cognition/nlp/ai_utilities/IUtilityAI';
 export * from './cognition/nlp/ai_utilities/LLMUtilityAI';

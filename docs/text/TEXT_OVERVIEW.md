@@ -27,6 +27,7 @@ flowchart LR
 |---|---|---|
 | Split text into words, drop stop words, stem | `TextProcessingPipeline`, `createProsePipeline()`, `createRagPipeline()`, `createCodePipeline()` | [Text Processing Pipeline](./TEXT_PROCESSING.md) |
 | Count, compare and classify text: sentences, n-grams, keywords, readability, similarity, language, summaries, sentiment | `StatisticalUtilityAI`, `LLMUtilityAI`, `HybridUtilityAI` | [Text Statistics and Classification](./TEXT_STATISTICS.md) |
+| Translate a live transcript's final lines for a reader, one line into one target a call, with a spend bound | `TranscriptTranslator` | [TranscriptTranslator](./TEXT_STATISTICS.md#transcripttranslator) |
 | Search by keywords, save the index as JSON, search in a browser | `LexicalIndex`, `BM25Index` | [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md) |
 | Search records as someone types, with typos, word beginnings and field weights, and mark the matches | `FuzzyIndex` | [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md#fuzzyindex) |
 | Fuse keyword and vector search | `HybridSearcher`, `reciprocalRankFusion()` | [Lexical and Hybrid Search](./LEXICAL_AND_HYBRID_SEARCH.md#hybridsearcher) |
@@ -44,6 +45,7 @@ flowchart LR
 | Text pipeline and presets | `@framers/agentos/cognition/nlp` | Node: it loads `natural` through `node:module` | No |
 | `StatisticalUtilityAI` | The package root, `@framers/agentos/cognition/nlp`, `@framers/agentos/cognition/nlp/ai_utilities` | Node | No |
 | `LLMUtilityAI` | The package root, `@framers/agentos/cognition/nlp`, `@framers/agentos/cognition/nlp/ai_utilities` | Node | Yes: a provider's key or a local model server |
+| `TranscriptTranslator`, `LanguageService` | The package root, `@framers/agentos/cognition/nlp/language` | Node | `TranscriptTranslator` calls OpenAI with the key the host passes; `LanguageService` calls its configured provider |
 | `BM25Index`, `HybridSearcher`, `SemanticChunker` | `@framers/agentos/cognition/rag` | Node | `HybridSearcher` calls the embedder you give it |
 | `reciprocalRankFusion` | `@framers/agentos/cognition/memory` | Node | No |
 | `fuseRanked` | `@framers/agentos/cognition/rag` | Node | No |

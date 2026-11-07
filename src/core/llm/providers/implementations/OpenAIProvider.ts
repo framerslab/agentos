@@ -192,6 +192,8 @@ namespace OpenAIAPITypes {
   }
   export interface APIErrorResponse {
     error?: { message?: string; type?: string; code?: string };
+    /** The tokens an error body reports for the request it refused, when the server reports any. */
+    usage?: unknown;
   }
 
   // --- /v1/responses (Responses API) — narrow read surface --------------
@@ -799,23 +801,68 @@ function responsesErrorStatus(code: string | null | undefined): number | undefin
   return typeof code === 'string' ? RESPONSES_RETRYABLE_ERROR_STATUS[code] : undefined;
 }
 
+/** The HTTP-equivalent status of a `/v1/responses` body marked `failed` with a retryable error code; else undefined. */
+function retryableFailedResponseStatus(body: unknown): number | undefined {
+  const response = body as Partial<OpenAIAPITypes.ResponsesResponse> | null | undefined;
+  return response?.status === 'failed' ? responsesErrorStatus(response.error?.code) : undefined;
+}
+
+/**
+ * The error a `/v1/responses` result marked `failed` throws, streamed or not,
+ * as a failed HTTP request does: the status of a retryable error code and the
+ * billed usage in `details.usage`, so callers can fail over and meter the
+ * attempt. Output the result holds is not an answer.
+ */
+function responsesFailedError(
+  response: OpenAIAPITypes.ResponsesResponse | undefined,
+  usage: ModelUsage | undefined,
+): OpenAIProviderError {
+  return new OpenAIProviderError(
+    response?.error?.message ?? 'OpenAI /responses reported the response as failed',
+    'RESPONSES_FAILED',
+    response?.error?.code ?? undefined,
+    'response_failed',
+    responsesErrorStatus(response?.error?.code),
+    { error: response?.error, ...(usage ? { usage } : {}) },
+  );
+}
+
+/**
+ * Two usage reports in the same wire spelling summed field by field, a nested detail (`input_tokens_details`) as a
+ * report of its own: a field holds a number where either report has a finite one. Either report may be absent.
+ */
+function sumWireUsage(a: unknown, b: unknown): unknown {
+  if (a === undefined || a === null) return b;
+  if (b === undefined || b === null) return a;
+  const finite = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  if (typeof a !== 'object' || typeof b !== 'object') {
+    const x = finite(a);
+    const y = finite(b);
+    return x === undefined && y === undefined ? a : (x ?? 0) + (y ?? 0);
+  }
+  const sum: Record<string, unknown> = {};
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) sum[key] = sumWireUsage(left[key], right[key]);
+  return sum;
+}
+
 /**
  * The chat-style finish reason of a `/v1/responses` result, shared by the
  * streamed and non-streamed mappings. An incomplete response reports why it
  * stopped, as Chat Completions does, even when it holds a function call (the
- * call may be cut off): `length` when the output budget ran out and
- * `content_filter` when a filter stopped it. Otherwise `tool_calls` when the
- * turn called tools, else `stop`.
+ * call may be cut off): `content_filter` when a filter stopped it, and `length`
+ * otherwise, the output budget's or any reason this does not know or none,
+ * since `stop` would present the part as the whole. Otherwise `tool_calls` when
+ * the turn called tools, else `stop`.
  */
 function responsesFinishReason(
   status: string | undefined,
   incompleteReason: string | undefined,
   hasToolCalls: boolean,
 ): string {
-  if (status === 'incomplete') {
-    if (incompleteReason === 'max_output_tokens' || incompleteReason === 'max_tokens') return 'length';
-    if (incompleteReason === 'content_filter') return 'content_filter';
-  }
+  if (status === 'incomplete') return incompleteReason === 'content_filter' ? 'content_filter' : 'length';
   return hasToolCalls ? 'tool_calls' : 'stop';
 }
 
@@ -1642,16 +1689,7 @@ export class OpenAIProvider implements IProvider {
           noteResponse(response);
           const message = response?.error?.message ?? 'OpenAI /responses reported the response as failed';
           const usage = response?.usage ? this.mapResponsesUsage(response.usage, response.model ?? modelId) : undefined;
-          if (!deliveredOutput()) {
-            throw new OpenAIProviderError(
-              message,
-              'RESPONSES_FAILED',
-              response?.error?.code ?? undefined,
-              'response_failed',
-              responsesErrorStatus(response?.error?.code),
-              { error: response?.error, ...(usage ? { usage } : {}) },
-            );
-          }
+          if (!deliveredOutput()) throw responsesFailedError(response, usage);
           yield chunk({
             choices: [],
             error: {
@@ -2258,6 +2296,10 @@ export class OpenAIProvider implements IProvider {
     apiResponse: OpenAIAPITypes.ResponsesResponse,
     modelId: string
   ): ModelCompletionResponse {
+    if (apiResponse.status === 'failed') {
+      const usage = apiResponse.usage ? this.mapResponsesUsage(apiResponse.usage, apiResponse.model ?? modelId) : undefined;
+      throw responsesFailedError(apiResponse, usage);
+    }
     const { text: assistantText, toolCalls, itemCount } = summarizeResponsesOutput(apiResponse.output);
     const finishReason = responsesFinishReason(
       apiResponse.status,
@@ -2730,20 +2772,25 @@ export class OpenAIProvider implements IProvider {
     const allowed = attempts?.max ?? this.config.maxRetries!;
     if (!Number.isInteger(allowed) || allowed < 1) throw new RangeError('maxAttempts is a whole number, 1 or more');
     const budget = new CountingAttemptBudget({ maxAttempts: allowed, perAttempt: {} });
-    // Each attempt sent is reported once, with the status of its last send's answer, or with none when no answer came.
+    // Each attempt sent is reported once, with the status of its last send's answer, or with none when no answer came,
+    // and an error status with the tokens its body reported, which a later attempt's error would otherwise replace.
     let reported = -1;
-    const report = (attempt: number, status: number | null, ok: boolean): void => {
+    const report = (attempt: number, status: number | null, ok: boolean, usage?: unknown): void => {
       if (attempt === reported) return;
       reported = attempt;
       try {
-        attempts?.onAttempt?.({ attempt: attempt + 1, status, ok });
+        attempts?.onAttempt?.({ attempt: attempt + 1, status, ok, ...(usage !== undefined && usage !== null ? { usage } : {}) });
       } catch {
         // a caller's callback never ends the request
       }
     };
+    // The tokens of the /v1/responses results marked failed that were sent again: billed, and reported by no later
+    // answer, so they are added to the result the call returns or to the error it ends with.
+    let retriedUsage: unknown;
+    const ending = (error: Error): Error => this.withRetriedUsage(error, retriedUsage, body?.model);
     for (let attempt = 0; ; attempt++) {
       if (abortSignal?.aborted) {
-        throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+        throw ending(new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED'));
       }
       try {
         await budget.authorize({ purpose: attempt === 0 ? 'initial' : 'retry' });
@@ -2802,7 +2849,7 @@ export class OpenAIProvider implements IProvider {
             if (kind !== 'quota') {
               // Every send of this attempt answered: the attempt is reported with its last answer, not as one that
               // got none (the catch below reports only an attempt not reported yet).
-              report(attempt, response.status, false);
+              report(attempt, response.status, false, keyErrorData?.usage);
               throw this.allKeysFailedError(keyErrorData?.error?.message, response.status, keyErrorData?.error?.type, keyErrorData?.error?.code ?? undefined);
             }
             break;
@@ -2810,7 +2857,7 @@ export class OpenAIProvider implements IProvider {
           if (++keyHops >= this.keyPool.size) break;
           const nextKey = this.keyPool.next();
           if (nextKey === '') {
-            report(attempt, response.status, false);
+            report(attempt, response.status, false, keyErrorData?.usage);
             throw this.allKeysFailedError();
           }
           currentKey = nextKey;
@@ -2820,10 +2867,13 @@ export class OpenAIProvider implements IProvider {
           response = await fetch(url, { ...requestOptions, headers: { ...headers } });
         }
         clearTimeout(timeoutId);
-        report(attempt, response.status, response.ok);
+        if (response.ok) report(attempt, response.status, true);
 
         if (!response.ok) {
           const errorData: OpenAIAPITypes.APIErrorResponse = keyErrorData ?? (await response.json().catch(() => ({})));
+          // Reported once its body is read, so the attempt carries the tokens the body says it billed; a body that
+          // parsed to null is still reported with its status.
+          report(attempt, response.status, false, (errorData as OpenAIAPITypes.APIErrorResponse | null)?.usage);
           const errorMessage = errorData.error?.message || `HTTP error ${response.status}: ${response.statusText}`;
           const errorType = errorData.error?.type;
           const errorCode = errorData.error?.code;
@@ -2868,7 +2918,25 @@ export class OpenAIProvider implements IProvider {
           }
           return response.body;
         }
-        return (await response.json()) as T;
+        const answer = (await response.json()) as T;
+        // A /v1/responses result marked `failed` with a retryable error code (`server_error`, `rate_limit_exceeded`,
+        // `vector_store_timeout`) comes with a 200: it is sent again while the call has attempts left, as a 5xx is. The
+        // last one is returned, and the mapper throws its RESPONSES_FAILED.
+        // The tokens such a result reported are added to what the call returns or ends with (`retriedUsage`).
+        const failedStatus = endpoint === '/responses' ? retryableFailedResponseStatus(answer) : undefined;
+        if (failedStatus !== undefined && !last) {
+          retriedUsage = sumWireUsage(retriedUsage, (answer as OpenAIAPITypes.ResponsesResponse).usage);
+          lastError = responsesFailedError(answer as OpenAIAPITypes.ResponsesResponse, undefined);
+          const waitMs = computeRetryBackoffMs(attempt);
+          log.warn('llm.retry', { provider: 'openai', status: failedStatus, attempt: attempt + 1, waitMs });
+          await waitForRetry(waitMs, abortSignal);
+          continue;
+        }
+        if (retriedUsage !== undefined && answer && typeof answer === 'object') {
+          const result = answer as { usage?: unknown };
+          result.usage = sumWireUsage(retriedUsage, result.usage);
+        }
+        return answer;
 
       } catch (error: unknown) {
         clearTimeout(timeoutId);
@@ -2877,10 +2945,10 @@ export class OpenAIProvider implements IProvider {
         if (sent) report(attempt, null, false);
         // A caller abort ends the request here; it is not a timeout to retry.
         if (abortSignal?.aborted) {
-          throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+          throw ending(new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED'));
         }
         if (error instanceof OpenAIProviderError) { // If already our custom error, re-throw if not retryable
-             if (error.code === 'API_CLIENT_ERROR' || error.code === 'ALL_KEYS_FAILED') throw error;
+             if (error.code === 'API_CLIENT_ERROR' || error.code === 'ALL_KEYS_FAILED') throw ending(error);
              lastError = error;
         } else if (error instanceof Error && error.name === 'AbortError') {
           lastError = new OpenAIProviderError(`Request timed out after ${effectiveTimeout}ms.`, 'REQUEST_TIMEOUT', undefined, undefined, undefined, error);
@@ -2907,16 +2975,42 @@ export class OpenAIProvider implements IProvider {
     }
     // For network errors, replace the cryptic cause chain with a clean message
     if (lastError instanceof OpenAIProviderError && lastError.code === 'NETWORK_ERROR') {
-      throw new OpenAIProviderError(
+      throw ending(new OpenAIProviderError(
         redactUrlSecrets(
           `Network error: unable to reach ${this.config.baseURL}. Check your internet connection.`,
           this.config.baseURL,
           [apiKey],
         ),
         'NETWORK_ERROR',
-      );
+      ));
     }
-    throw lastError; // Throw the last encountered error after all retries
+    throw ending(lastError); // Throw the last encountered error after all retries
+  }
+
+  /**
+   * `error` with the tokens of the `/v1/responses` results marked failed that the call sent again (`retried`, in the
+   * Responses spelling) added to the usage it reports in `details.usage`, in the provider's form, so a caller meters
+   * them as it meters the error's own: an error body's usage, read in the same spelling, is summed with them. Its
+   * other details are kept (a cause that is not a plain object goes under `cause`). Without such tokens, or for an
+   * error that is not this provider's, `error` itself.
+   * @private
+   */
+  private withRetriedUsage(error: Error, retried: unknown, model: unknown): Error {
+    if (retried === undefined || retried === null || !(error instanceof OpenAIProviderError)) return error;
+    const details = error.details;
+    const plain = details !== null && typeof details === 'object' && !(details instanceof Error) && !Array.isArray(details);
+    const own = plain ? (details as { usage?: unknown }).usage : undefined;
+    const usage = this.mapResponsesUsage(sumWireUsage(retried, own) as OpenAIAPITypes.ResponsesUsage, typeof model === 'string' ? model : '');
+    const withUsage = new OpenAIProviderError(
+      error.message,
+      error.code,
+      error.openaiErrorCode,
+      error.openaiErrorType,
+      error.httpStatus,
+      plain ? { ...(details as Record<string, unknown>), usage } : details === undefined ? { usage } : { cause: details, usage },
+    );
+    withUsage.stack = error.stack;
+    return withUsage;
   }
 
   /**
