@@ -335,6 +335,26 @@ describe('TranscriptTranslator.translateLine', () => {
     expect(posts()).toHaveLength(0);
   });
 
+  it('refuses a maxContextLines that is not a whole number of 0 or more, in boundMicro and before any request; 0 sends no earlier line', async () => {
+    answer(jsonResponse(chatCompletion('Hello.')));
+    const translator = new TranscriptTranslator();
+    // 0.5 read as slice(-0.5) is slice(0): every earlier line would be sent, and priced.
+    for (const maxContextLines of [-1, 0.5, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => translator.boundMicro(line('Hola.'), 'en', { ...OPTIONS, maxContextLines })).toThrow(RangeError);
+      const refused = await translator.translateLine(line('Hola.'), 'en', { ...OPTIONS, maxContextLines }).then(() => undefined, (error: unknown) => error);
+      expect(refused).toBeInstanceOf(RangeError);
+      expect(refused).toMatchObject({ message: 'maxContextLines is a whole number, 0 or more' });
+    }
+    expect(posts()).toHaveLength(0);
+
+    expect(translator.boundMicro(line('Hola.'), 'en', { ...OPTIONS, maxContextLines: 0 })).toBeGreaterThan(0);
+    await translator.translateLine(line('Hola.'), 'en', { ...OPTIONS, maxContextLines: 0 });
+    const messages = posts()[0].body.messages;
+    const user = JSON.stringify(messages[messages.length - 1]);
+    expect(user).not.toContain('Hola a todos.');
+    expect(user).not.toContain('Earlier lines:');
+  });
+
   it("carries the tokens an earlier attempt's error status reported on a timeout's error, and records the timeout at its bound", async () => {
     // The shortest backoff before the retry (500 ms), so the second attempt is sent and hangs until the timeout.
     const random = vi.spyOn(Math, 'random').mockReturnValue(0);
