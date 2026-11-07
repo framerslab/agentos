@@ -3566,7 +3566,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // (providerHealthKey), which the call below reads before it sends;
         // a failure of another key skips none of them.
         // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
-        const legProvider = fallbackEntrySentAs(fb).provider;
+        const legSentAs = fallbackEntrySentAs(fb);
+        const legProvider = legSentAs.provider;
         const legOnSharedCredentials =
           fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;
         if (legOnSharedCredentials && globalLLMProviderHealth.isOpen(legProvider)) {
@@ -3580,10 +3581,20 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           const lastErr = lastError instanceof Error ? lastError: new Error(String(lastError));
           // Per-leg structured-output rebuild: when the caller supplied a
           // builder, recompute the provider-native payload for THIS leg's
-          // provider, once, for the recursion below.
+          // provider, once, for the recursion below. The payload is built for
+          // the provider and model the leg is sent to, not the provider the
+          // entry names: `{ provider: 'anthropic', model:
+          // 'openrouter:anthropic/...' }` goes to OpenRouter, which drops an
+          // Anthropic marker while the marker would still keep the schema out
+          // of the prompt. An entry with no model keeps `''`, so the builder
+          // decides on the schema alone.
           const hasResponseFormatBuilder = typeof opts._responseFormatBuilder === 'function';
           const rebuiltResponseFormat = hasResponseFormatBuilder
-            ? safeBuildLegResponseFormat(opts._responseFormatBuilder!, fb.provider, fb.model ?? '')
+            ? safeBuildLegResponseFormat(
+                opts._responseFormatBuilder!,
+                legSentAs.provider,
+                fb.model ? (legSentAs.model ?? '') : '',
+              )
             : undefined;
           fallbackLogger.warn('llm.fallback_fired', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(fb.provider), attempt, ...errorFields(lastErr) });
           // A seat's callback is handed the error through the seat's mask, as it would leave the seat.

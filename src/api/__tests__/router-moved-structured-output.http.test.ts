@@ -12,6 +12,10 @@
  * `POST /chat/completions`. Every request outside it fails the case. Drives
  * agent().session().send() through the real resolver, provider manager and
  * OpenRouterProvider.
+ *
+ * An Anthropic call with no Anthropic key, which the resolver sends to
+ * OpenRouter, goes to the OpenRouter base URL the environment sets, and a
+ * structured send there is sent OpenRouter's payload.
  */
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -20,11 +24,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { z } from 'zod';
 
 import { agent } from '../agent.js';
+import { generateText } from '../generateText.js';
 import { shutdownProviderManagers } from '../model.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 
 /** The OpenRouter model the router sends every call to. */
 const ROUTED_MODEL = 'meta-llama/llama-3.3-70b-instruct';
+/** The OpenRouter slug an Anthropic call with no Anthropic key is sent as. */
+const REMAPPED_MODEL = 'anthropic/claude-sonnet-4-5';
 /** The line the schema instructions carry when the schema rides the system prompt. */
 const SCHEMA_LINE = 'The JSON MUST conform to this JSON Schema:';
 
@@ -71,6 +78,13 @@ beforeAll(async () => {
                 pricing: { prompt: '0.0000001', completion: '0.0000003' },
                 architecture: { modality: 'text->text' },
               },
+              {
+                id: REMAPPED_MODEL,
+                name: 'Claude Sonnet 4.5',
+                context_length: 200000,
+                pricing: { prompt: '0.000003', completion: '0.000015' },
+                architecture: { modality: 'text->text' },
+              },
             ],
           }),
         );
@@ -83,7 +97,7 @@ beforeAll(async () => {
             id: 'gen-routed',
             object: 'chat.completion',
             created: 1,
-            model: ROUTED_MODEL,
+            model: typeof received[received.length - 1].body.model === 'string' ? received[received.length - 1].body.model : ROUTED_MODEL,
             choices: [{ index: 0, message: { role: 'assistant', content: answerText }, finish_reason: 'stop' }],
             usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
           }),
@@ -212,5 +226,48 @@ describe('a structured send the model router moves from Anthropic to an OpenRout
     // JSON-object mode carries no schema, so the system prompt does.
     expect(systemText(sent[0])).toContain(SCHEMA_LINE);
     expect(systemText(sent[0])).toContain('"palette"');
+  });
+});
+
+describe('an Anthropic call with no Anthropic key, which the resolver sends to OpenRouter', () => {
+  it('goes to the OpenRouter base URL the environment sets', async () => {
+    answerText = 'remapped';
+
+    const result = await generateText({ provider: 'anthropic', model: 'claude-sonnet-4-5', prompt: 'x', fallbackProviders: [] });
+
+    expect(result.text).toBe('remapped');
+    const sent = completions();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].model).toBe(REMAPPED_MODEL);
+  });
+
+  it("is sent OpenRouter's json_schema payload when it is a structured send", async () => {
+    answerText = '{"title":"Remapped"}';
+
+    const a = agent({ provider: 'anthropic', model: 'claude-sonnet-4-5', memory: false, fallbackProviders: [] });
+    let object: unknown;
+    try {
+      const result = await a.session().send('Answer in the schema.', {
+        responseSchema: z.object({ title: z.string() }),
+        schemaName: 'chapter',
+      });
+      object = (result as { object?: unknown }).object;
+    } finally {
+      await a.close();
+    }
+
+    expect(object).toEqual({ title: 'Remapped' });
+    const sent = completions();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].model).toBe(REMAPPED_MODEL);
+    expect(sent[0].response_format).toMatchObject({
+      type: 'json_schema',
+      json_schema: {
+        name: 'chapter',
+        strict: true,
+        schema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] },
+      },
+    });
+    expect(systemText(sent[0])).not.toContain(SCHEMA_LINE);
   });
 });

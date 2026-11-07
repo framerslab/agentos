@@ -287,7 +287,8 @@ function refuseMisdirectedCredentials(opts: ModelOption, task: TaskType): void {
  * Reads API keys and base URLs from well-known environment variables
  * (e.g. `OPENAI_API_KEY`, `OLLAMA_BASE_URL`) and merges caller-supplied
  * `overrides`.  Applies the Anthropic → OpenRouter fallback when
- * `ANTHROPIC_API_KEY` is absent but `OPENROUTER_API_KEY` is set.
+ * `ANTHROPIC_API_KEY` is absent but `OPENROUTER_API_KEY` is set; that
+ * resolution carries `OPENROUTER_BASE_URL` as its base URL when it is set.
  *
  * @param providerId - Provider identifier (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
  * @param modelId - Model identifier within the provider.
@@ -359,7 +360,17 @@ export function resolveProvider(
           `(routed as "anthropic/${orModelId}"). Set ANTHROPIC_API_KEY for direct access.`
         );
       }
-      return { providerId: 'openrouter', modelId: `anthropic/${orModelId}`, apiKey: orKey, poolId: 'openrouter:OPENROUTER_API_KEY' };
+      // The key comes from OPENROUTER_API_KEY, so the URL comes from
+      // OPENROUTER_BASE_URL, read as a direct OpenRouter call reads it; with
+      // none set the call goes to OpenRouter's own endpoint.
+      const orBaseUrl = resolveBaseUrl('openrouter', undefined, undefined);
+      return {
+        providerId: 'openrouter',
+        modelId: `anthropic/${orModelId}`,
+        apiKey: orKey,
+        ...(orBaseUrl ? { baseUrl: orBaseUrl } : {}),
+        poolId: 'openrouter:OPENROUTER_API_KEY',
+      };
     }
     throw new Error(`No API key for anthropic. Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY.`);
   }
