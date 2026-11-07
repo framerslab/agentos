@@ -296,3 +296,48 @@ describe('resolveModelOption', () => {
     });
   });
 });
+
+describe('resolveProvider: an Anthropic call with no Anthropic key, sent to OpenRouter', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  function withOnlyOpenRouterKey(): void {
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('ANTHROPIC_BASE_URL', '');
+    vi.stubEnv('OPENROUTER_API_KEY', 'sk-or-test');
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  }
+
+  it('carries the OpenRouter base URL the environment sets, as a direct OpenRouter call does', () => {
+    withOnlyOpenRouterKey();
+    vi.stubEnv('OPENROUTER_BASE_URL', ' http://127.0.0.1:9/api/v1 ');
+
+    const remapped = resolveProvider('anthropic', 'claude-sonnet-4-5');
+    const direct = resolveProvider('openrouter', 'anthropic/claude-sonnet-4-5');
+
+    expect(remapped).toEqual({
+      providerId: 'openrouter',
+      modelId: 'anthropic/claude-sonnet-4-5',
+      apiKey: 'sk-or-test',
+      baseUrl: 'http://127.0.0.1:9/api/v1',
+      poolId: 'openrouter:OPENROUTER_API_KEY',
+    });
+    expect(remapped.baseUrl).toBe(direct.baseUrl);
+  });
+
+  it('carries no base URL when the variable is unset or blank, so the call goes to OpenRouter itself', () => {
+    withOnlyOpenRouterKey();
+    for (const value of ['', '   ']) {
+      vi.stubEnv('OPENROUTER_BASE_URL', value);
+      const remapped = resolveProvider('anthropic', 'claude-haiku-4-5-20251001');
+      expect(remapped).toEqual({
+        providerId: 'openrouter',
+        modelId: 'anthropic/claude-haiku-4-5',
+        apiKey: 'sk-or-test',
+        poolId: 'openrouter:OPENROUTER_API_KEY',
+      });
+    }
+  });
+});
