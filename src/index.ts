@@ -385,6 +385,16 @@ export type {
 // The trait map a learner context carries (`LearnerContext.authoredTraits`) and a learner session answers
 // (`currentTraits()`).
 export type { HexacoTraitValues } from './cognition/substrate/personas/hexaco.js';
+// The directive line each trait renders, for a host that shows it beside the trait's control (an agent builder's
+// slider): the lines `agent()` sends in its personality section.
+export { renderPersonalityDirectives } from './cognition/substrate/personas/personalityPrompt.js';
+export type {
+  PersonalityDirective,
+  PersonalityRegister,
+  PersonalityRenderOptions,
+  TraitBand,
+} from './cognition/substrate/personas/personalityPrompt.js';
+export type { HexacoTraitKey } from './cognition/substrate/personas/hexaco.js';
 export { createAgentCognitiveMemory } from './api/runtime/agentCognitiveMemory.js';
 export type { AgentCognitiveMemory, AgentCognitiveMemoryOptions } from './api/runtime/agentCognitiveMemory.js';
 export type { MemoryProviderHookOptions } from './api/runtime/memoryProviderHooks.js';

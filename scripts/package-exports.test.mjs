@@ -114,6 +114,20 @@ test('the segmentation module resolves at its own subpath, background removal in
   assert.equal(segmentation.FAL_BIREFNET_MODEL, 'fal-ai/birefnet/v2');
 });
 
+test('the speech module resolves at its public subpath, Deepgram pre-recorded transcription included', async () => {
+  assert.deepEqual(pkg.exports['./speech'], {
+    import: './dist/io/speech/index.js',
+    default: './dist/io/speech/index.js',
+    types: './dist/io/speech/index.d.ts',
+  });
+  const speech = await import('@framers/agentos/speech');
+  assert.equal(typeof speech.createSpeechRuntimeFromEnv, 'function');
+  assert.equal(typeof speech.DeepgramBatchSTTProvider, 'function');
+  // Both keys set: OpenAI registers first, so only the preferred order puts Deepgram ahead of it.
+  const runtime = speech.createSpeechRuntimeFromEnv({ OPENAI_API_KEY: 'sk-exports-check', DEEPGRAM_API_KEY: 'dg-exports-check' });
+  assert.equal(runtime.getSTT({ preferredIds: ['deepgram-batch', 'openai-whisper'] })?.id, 'deepgram-batch');
+});
+
 test('the learning module resolves at its own subpath, as the emergent module does', async () => {
   assert.deepEqual(pkg.exports['./cognition/learning'], {
     import: './dist/cognition/learning/index.js',
@@ -136,4 +150,13 @@ test('the key probe resolves at its own subpath, as the other api modules do', a
   const probe = await import('@framers/agentos/api/probeProviderKey');
   assert.equal(typeof probe.probeProviderKey, 'function');
   assert.deepEqual([...probe.PROBEABLE_KEY_PROVIDERS], ['anthropic', 'openai', 'gemini', 'openrouter', 'requesty']);
+});
+
+test('the per-trait personality directives resolve at the package root', async () => {
+  const root = await import('@framers/agentos');
+  assert.equal(typeof root.renderPersonalityDirectives, 'function');
+  assert.deepEqual(
+    root.renderPersonalityDirectives({ honesty: 0.95 }).map((d) => [d.trait, d.line !== null]),
+    [['honesty', true], ['emotionality', false], ['extraversion', false], ['agreeableness', false], ['conscientiousness', false], ['openness', false]],
+  );
 });
