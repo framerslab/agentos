@@ -718,6 +718,23 @@ export interface StreamingSTTSession extends EventEmitterLike {
   flush(): Promise<void>;
 
   /**
+   * Whether a `flush()` ended this session's stream: `true` from the moment
+   * the provider was told the input is over, and for the rest of the session,
+   * its `'close'` included. A session that reports it takes no more audio from
+   * then on, so {@link pushAudio} drops a frame that arrives after that before
+   * checking it (an empty or malformed one fails nothing either), and
+   * its `'close'` is the end the flush asked for, whatever frames arrived
+   * since. A frame the client had in flight when it stopped is no new input.
+   * A flush that rejects ends nothing and leaves this `false`.
+   *
+   * A session whose flush commits a turn and leaves the stream open never sets
+   * it, and may omit it; the frame after such a flush is new input. A wrapper
+   * reports what the session under it reports. Without this report a `'close'`
+   * counts as the end of input only with no frame pushed since the flush.
+   */
+  readonly inputEnded?: boolean;
+
+  /**
    * Immediately terminate the session without waiting for a final result.
    * Useful during barge-in where the in-flight hypothesis is discarded.
    */
