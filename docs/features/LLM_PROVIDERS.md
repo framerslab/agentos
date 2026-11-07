@@ -779,9 +779,12 @@ Sonnet 5, Haiku 4.5 and Haiku 5.5 among them. It carries every schema on Claude
 Opus 4 and Claude Sonnet 4 (the May 2025 ids, retired on 2026-06-15), which have
 no JSON output format. The call's input is the answer: it becomes the message's
 JSON text and leaves `tool_calls`, so `generateText()`'s tool loop never runs it
-as a tool. The text is the input as the model wrote it (the streamed input
-deltas joined), never the parsed input written out again, so a key the model
-repeated reaches `generateObject()`'s parse, which refuses it and asks again.
+as a tool. On a streamed call the text is the input as the model wrote it
+(the streamed input deltas joined), so a key the model repeated reaches
+`generateObject()`'s parse, which refuses it and asks again. A single-shot call
+(`streamCompletions: false`) receives the input already parsed by the API, which
+has kept only a repeated key's last value, and its text is that input written
+out with `JSON.stringify`.
 A passthrough `customModelParams.tools` array replaces the schema
 tool, so it must hold a tool of the schema's name for the forced choice to go
 out; without one the schema rides the prompt. A passthrough `tool_choice` keeps
