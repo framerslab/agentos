@@ -801,6 +801,12 @@ function responsesErrorStatus(code: string | null | undefined): number | undefin
   return typeof code === 'string' ? RESPONSES_RETRYABLE_ERROR_STATUS[code] : undefined;
 }
 
+/** The HTTP-equivalent status of a `/v1/responses` body marked `failed` with a retryable error code; else undefined. */
+function retryableFailedResponseStatus(body: unknown): number | undefined {
+  const response = body as Partial<OpenAIAPITypes.ResponsesResponse> | null | undefined;
+  return response?.status === 'failed' ? responsesErrorStatus(response.error?.code) : undefined;
+}
+
 /**
  * The error a `/v1/responses` result marked `failed` throws, streamed or not,
  * as a failed HTTP request does: the status of a retryable error code and the
@@ -2887,7 +2893,19 @@ export class OpenAIProvider implements IProvider {
           }
           return response.body;
         }
-        return (await response.json()) as T;
+        const answer = (await response.json()) as T;
+        // A /v1/responses result marked `failed` with a retryable error code (`server_error`, `rate_limit_exceeded`,
+        // `vector_store_timeout`) comes with a 200: it is sent again while the call has attempts left, as a 5xx is. The
+        // last one is returned, and the mapper throws its RESPONSES_FAILED.
+        const failedStatus = endpoint === '/responses' ? retryableFailedResponseStatus(answer) : undefined;
+        if (failedStatus !== undefined && !last) {
+          lastError = responsesFailedError(answer as OpenAIAPITypes.ResponsesResponse, undefined);
+          const waitMs = computeRetryBackoffMs(attempt);
+          log.warn('llm.retry', { provider: 'openai', status: failedStatus, attempt: attempt + 1, waitMs });
+          await waitForRetry(waitMs, abortSignal);
+          continue;
+        }
+        return answer;
 
       } catch (error: unknown) {
         clearTimeout(timeoutId);
