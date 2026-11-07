@@ -188,10 +188,12 @@ function checkedRegister(register: unknown): PersonalityRegister {
  * @throws {TypeError} When `options.register` is given and is neither `conversation` nor `writing`.
  */
 export function renderPersonalityDirectives(traits: unknown, options: PersonalityRenderOptions = {}): PersonalityDirective[] {
-  const directives = checkedRegister(options.register) === 'writing' ? WRITING_DIRECTIVES : DIRECTIVES;
+  // Each option is read once: a JavaScript caller's options may answer a getter differently on each read.
+  const { bands, register } = options;
+  const directives = checkedRegister(register) === 'writing' ? WRITING_DIRECTIVES : DIRECTIVES;
   const values = normalizeHexacoTraits(traits);
   return HEXACO_TRAIT_KEYS.map((trait) => {
-    const band = passedBand(options.bands, trait) ?? bandOf(values[trait] ?? 0.5);
+    const band = passedBand(bands, trait) ?? bandOf(values[trait] ?? 0.5);
     return { trait, line: band === 'moderate' ? null : directives[trait][band] };
   });
 }
@@ -213,9 +215,13 @@ export function renderPersonalityDirectives(traits: unknown, options: Personalit
  * @throws {TypeError} When `options.register` is given and is neither `conversation` nor `writing`.
  */
 export function renderPersonalitySection(traits: unknown, options: PersonalityRenderOptions = {}): string | null {
-  const lines = renderPersonalityDirectives(traits, options).flatMap(({ line }) => (line === null ? [] : [line]));
+  // The register is read once, so the directive table and the grounding rule follow the same answer.
+  const register = checkedRegister(options.register);
+  const lines = renderPersonalityDirectives(traits, { bands: options.bands, register }).flatMap(({ line }) =>
+    line === null ? [] : [line],
+  );
   if (lines.length === 0) return null;
-  if (checkedRegister(options.register) === 'writing') lines.unshift(WRITING_GROUNDING);
+  if (register === 'writing') lines.unshift(WRITING_GROUNDING);
   return `${PERSONALITY_SECTION_HEADING}\n\n${lines.join('\n')}`;
 }
 
