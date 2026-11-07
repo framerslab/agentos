@@ -355,6 +355,24 @@ describe('TranscriptTranslator.translateLine', () => {
     expect(user).not.toContain('Earlier lines:');
   });
 
+  it('refuses a timeoutMs setTimeout cannot keep, in boundMicro and before any request, never as a timeout', async () => {
+    answer(jsonResponse(chatCompletion('Hello.')));
+    const translator = new TranscriptTranslator();
+    // Node runs a delay of each of these after about 1 ms, so every line would end as a timeout recorded at its bound.
+    for (const timeoutMs of [0, -1, 0.5, 2_147_483_648, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => translator.boundMicro(line('Hola.'), 'en', { ...OPTIONS, timeoutMs })).toThrow(RangeError);
+      const refused = await translator.translateLine(line('Hola.'), 'en', { ...OPTIONS, timeoutMs }).then(() => undefined, (error: unknown) => error);
+      expect(refused).toBeInstanceOf(RangeError);
+      expect(refused).toMatchObject({ message: 'timeoutMs is a number of milliseconds from 1 to 2147483647' });
+    }
+    expect(posts()).toHaveLength(0);
+    expect(failures()).toHaveLength(0);
+
+    // The longest delay setTimeout keeps is a timeout like any other.
+    expect(translator.boundMicro(line('Hola.'), 'en', { ...OPTIONS, timeoutMs: 2_147_483_647 })).toBeGreaterThan(0);
+    await expect(translator.translateLine(line('Hola.'), 'en', { ...OPTIONS, timeoutMs: 2_147_483_647 })).resolves.toMatchObject({ status: 'translated', text: 'Hello.' });
+  });
+
   it("carries the tokens an earlier attempt's error status reported on a timeout's error, and records the timeout at its bound", async () => {
     // The shortest backoff before the retry (500 ms), so the second attempt is sent and hangs until the timeout.
     const random = vi.spyOn(Math, 'random').mockReturnValue(0);
