@@ -9,7 +9,7 @@
 - **Function calls**: the tool calls a model returns in one response, with their arguments validated and their handlers run.
 - **Entity extraction**: one or all entities of a schema from a text.
 - **Retries**: another attempt after a reply that does not parse or validate.
-- **Parsing**: markdown fences, surrounding text, trailing commas, single quotes and unquoted keys are repaired before giving up.
+- **Parsing**: markdown fences, surrounding text, trailing commas, single quotes and unquoted keys are repaired before giving up. A reply in which one object repeats a key is refused (`parseJSON()` returns `null`) whichever step finds it, since `JSON.parse` keeps only the key's last value: `generate()` reports the key in the issue and asks again.
 
 ## Quick Start
 
@@ -94,7 +94,7 @@ result.calls.forEach((call) => {
 });
 ```
 
-The manager makes one model call with the functions as tools (`toolChoice` defaults to `'auto'`) and takes every tool call in the reply. It validates each call's arguments against the function's `parameters` and runs the handler of each call whose arguments are valid, one call after another. A handler that throws leaves `argumentsValid` `true` and sets `executionError` to its message. `result.success` is `true` when every call has valid arguments and no handler threw. `maxParallelCalls` is not read. The provider must be `openai`, `anthropic` or `openrouter`; any other provider id throws `Provider <id> does not support function calling`.
+The manager makes one model call with the functions as tools (`toolChoice` defaults to `'auto'`) and takes every tool call in the reply. It validates each call's arguments against the function's `parameters` and runs the handler of each call whose arguments are valid, one call after another. Arguments that do not parse, or whose object repeats a key, are invalid (`keyword: 'parse'`) and run no handler. A handler that throws leaves `argumentsValid` `true` and sets `executionError` to its message. `result.success` is `true` when every call has valid arguments and no handler threw. `maxParallelCalls` is not read. The provider must be `openai`, `anthropic` or `openrouter`; any other provider id throws `Provider <id> does not support function calling`.
 
 ### Entity Extraction
 
@@ -134,7 +134,7 @@ console.log(result.entities);
 | Strategy | Request | Schema in the prompt |
 |---|---|---|
 | `json_mode` | `responseFormat: { type: 'json_object' }` | Yes, in the system prompt |
-| `function_calling` | One tool named `schemaName` with the schema as its parameters, and `toolChoice` forcing it; the result is the tool call's arguments | No |
+| `function_calling` | One tool named `schemaName` with the schema as its parameters, and `toolChoice` forcing it; the result is the tool call's arguments (on Anthropic, the input as the stream delivered it, so a repeated key reaches the parse) | No |
 | `prompt_engineering` | No format option | Yes, in the system prompt |
 | `grammar` | No format option | No |
 | `auto` (default) | `recommendStrategy()` picks one of the first three | |

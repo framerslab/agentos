@@ -266,7 +266,9 @@ interface AnthropicContentBlock {
   /**
    * The tool_use input as the stream delivered it, its `input_json_delta`
    * chunks joined: set by {@link AnthropicProvider.accumulateMessagesStream}
-   * on the forced schema tool's call, never sent or received on the wire.
+   * on every call whose input arrived, never sent or received on the wire.
+   * The forced schema tool's call answers with it, and so does a call the
+   * request forced by name ({@link AnthropicProvider.mapResponseToCompletion}).
    */
   rawInput?: string;
   /** Present when type === 'tool_result'. */
@@ -531,6 +533,18 @@ function forcedSchemaToolName(payload: object, options: ModelCompletionOptions):
   if (schemaRouteOfPayload.get(payload) !== 'forced_tool') return undefined;
   const name = (options.responseFormat as { tool?: { name?: unknown } } | undefined)?.tool?.name;
   return typeof name === 'string' && name ? name : undefined;
+}
+
+/**
+ * The tool a built payload forces by name (`tool_choice: { type: 'tool', name }`,
+ * a caller's `toolChoice: { type: 'function', function: { name } }`), read after
+ * the forced-choice clamp, so a choice the clamp sent as `auto` names none. Such a
+ * call's input is the caller's answer, so its arguments are the input as the model
+ * wrote it ({@link AnthropicProvider.mapResponseToCompletion}).
+ */
+function forcedToolChoiceName(payload: Record<string, unknown>): string | undefined {
+  const choice = payload.tool_choice as { type?: unknown; name?: unknown } | undefined;
+  return choice?.type === 'tool' && typeof choice.name === 'string' && choice.name ? choice.name : undefined;
 }
 
 /** True when the payload turns thinking on (`adaptive` or `enabled`); the off shapes (`disabled`, `between_tools`) do not. */
@@ -816,7 +830,7 @@ export class AnthropicProvider implements IProvider {
         options.operationId,
       );
       this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-      return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
+      return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId, forcedToolChoiceName(payload)), payload);
     }
 
     // Default: ride the SSE path so parseSseStream's idle watchdog bounds
@@ -837,7 +851,7 @@ export class AnthropicProvider implements IProvider {
       options.operationId,
     );
     this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
-    return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId), payload);
+    return withSchemaRoute(this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId, forcedToolChoiceName(payload)), payload);
   }
 
   /**
@@ -1209,11 +1223,11 @@ export class AnthropicProvider implements IProvider {
               'STREAM_INCOMPLETE',
             );
           }
-          // The forced schema tool's input is the answer, and its text is what
-          // the model wrote: a re-serialisation of the parsed input would drop
-          // every value but the last of a key the model repeated.
-          const rawInput = schemaToolName !== undefined && block.name === schemaToolName ? block.argsJson : undefined;
-          return { type: 'tool_use', id: block.id, name: block.name, input, ...(rawInput ? { rawInput } : {}) };
+          // The input as the model wrote it rides beside the parse: the forced
+          // schema tool's text and a call forced by name take it, since a
+          // re-serialisation of the parsed input would drop every value but
+          // the last of a key the model repeated.
+          return { type: 'tool_use', id: block.id, name: block.name, input, ...(block.argsJson ? { rawInput: block.argsJson } : {}) };
         }
         if (block.type === 'thinking') {
           return { type: 'thinking', thinking: block.thinking ?? '', signature: block.signature ?? '' };
@@ -2933,6 +2947,10 @@ export class AnthropicProvider implements IProvider {
    *   whose input becomes the message content.
    * @param requestedModelId - The model the request named. Prices the call
    *   when the response carries no model echo.
+   * @param forcedToolName - The tool the request forced by name
+   *   ({@link forcedToolChoiceName}): its call's arguments are the input as the
+   *   stream delivered it, so a key the model repeated reaches the caller's
+   *   parse. Every other call's arguments are its parsed input written out.
    * @returns {ModelCompletionResponse} Normalized completion response.
    * @throws {AnthropicProviderError} With code `content_filter` when the model
    *   refused (`stop_reason: 'refusal'`), whether or not it wrote any output
@@ -2943,6 +2961,7 @@ export class AnthropicProvider implements IProvider {
     apiResponse: AnthropicMessagesResponse,
     structuredOutputName?: string,
     requestedModelId?: string,
+    forcedToolName?: string,
   ): ModelCompletionResponse {
     const pricedModelId = apiResponse.model || requestedModelId || '';
 
@@ -3014,7 +3033,12 @@ export class AnthropicProvider implements IProvider {
       fullText = stoppedAtLimit && noInput ? '' : schemaToolBlock.rawInput ?? JSON.stringify(input);
     }
 
-    // Collect the other tool_use blocks and convert to OpenAI-style tool_calls
+    // Collect the other tool_use blocks and convert to OpenAI-style tool_calls.
+    // A call the request forced by name is the caller's answer (a schema sent
+    // as a tool and forced, as StructuredOutputManager's function_calling does):
+    // its arguments are the input as the model wrote it, so a key it repeated
+    // reaches the caller's parse, which JSON.stringify of the parsed input
+    // would hide. A single-shot response carries the input already parsed.
     const toolCalls = apiResponse.content
       .filter(block => block.type === 'tool_use' && block !== schemaToolBlock)
       .map(block => ({
@@ -3022,7 +3046,10 @@ export class AnthropicProvider implements IProvider {
         type: 'function' as const,
         function: {
           name: block.name!,
-          arguments: JSON.stringify(block.input ?? {}),
+          arguments:
+            forcedToolName !== undefined && block.name === forcedToolName && block.rawInput
+              ? block.rawInput
+              : JSON.stringify(block.input ?? {}),
         },
       }));
 

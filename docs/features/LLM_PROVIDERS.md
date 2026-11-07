@@ -785,7 +785,11 @@ as a tool. On a streamed call the text is the input as the model wrote it
 `generateObject()`'s parse, which refuses it and asks again. A single-shot call
 (`streamCompletions: false`) receives the input already parsed by the API, which
 has kept only a repeated key's last value, and its text is that input written
-out with `JSON.stringify`.
+out with `JSON.stringify`. A call to the tool a request forces by name (a
+caller's `toolChoice: { type: 'function', function: { name } }`, as
+`StructuredOutputManager`'s `function_calling` strategy sends) keeps its
+arguments as the stream delivered them, for the same reason; every other call's
+arguments are its parsed input written out.
 A passthrough `customModelParams.tools` array replaces the schema
 tool, so it must hold a tool of the schema's name for the forced choice to go
 out; without one the schema rides the prompt. A passthrough `tool_choice` keeps
