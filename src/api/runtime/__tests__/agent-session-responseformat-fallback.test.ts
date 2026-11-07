@@ -8,7 +8,7 @@
  * the router's pick, and the schema in its system prompt when that payload
  * carries none.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import { z } from 'zod';
 
@@ -249,6 +249,28 @@ describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () =>
 describe('AgentSession.send responseSchema when the model router moves the send', () => {
   beforeEach(resetHarness);
 
+  let warnSpy: { mockRestore(): void } | undefined;
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    warnSpy?.mockRestore();
+    warnSpy = undefined;
+  });
+
+  /**
+   * The real resolver, with no Anthropic key or base URL and an OpenRouter
+   * key in the environment: it sends an Anthropic call to OpenRouter's
+   * Anthropic slug.
+   */
+  async function resolveWithoutAnthropicKey(): Promise<void> {
+    const actual = await vi.importActual<typeof import('../../model.js')>('../../model.js');
+    (resolveProvider as unknown as Mock).mockImplementation(actual.resolveProvider);
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    vi.stubEnv('ANTHROPIC_BASE_URL', '');
+    vi.stubEnv('OPENROUTER_API_KEY', 'sk-or-test');
+    // The resolver's notice that the call goes to OpenRouter.
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  }
+
   it('a send moved to a provider whose route is the prompt is sent no payload and the schema in its system prompt', async () => {
     hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
       okResponse(modelId, '{"title":"x"}'),
@@ -277,13 +299,7 @@ describe('AgentSession.send responseSchema when the model router moves the send'
   });
 
   it('a send moved to an Anthropic model that resolves to OpenRouter (no Anthropic key) is sent OpenRouter\'s payload', async () => {
-    // The resolver sends an Anthropic call with no Anthropic key or base URL
-    // to OpenRouter's Anthropic slug, as resolveProvider does.
-    (resolveProvider as unknown as Mock).mockImplementation((providerId: string, modelId: string) =>
-      providerId === 'anthropic'
-        ? { providerId: 'openrouter', modelId: `anthropic/${modelId}`, apiKey: 'or-key' }
-        : { providerId, modelId, apiKey: 'test-key' },
-    );
+    await resolveWithoutAnthropicKey();
     hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
       okResponse(modelId, '{"title":"x"}'),
     );
@@ -308,6 +324,37 @@ describe('AgentSession.send responseSchema when the model router moves the send'
     expect(payloadOf(call)).toMatchObject({ type: 'json_schema', json_schema: { name: 'titled', strict: true } });
     expect((payloadOf(call) as Record<string, unknown>)._agentosUseToolForStructuredOutput).toBeUndefined();
     expect(systemOf(call)).not.toContain(SCHEMA_LINE);
+  });
+
+  it("an Anthropic agent's send with no Anthropic key goes to OpenRouter with OpenRouter's payload, with or without a router that keeps it", async () => {
+    await resolveWithoutAnthropicKey();
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
+      okResponse(modelId, '{"title":"x"}'),
+    );
+
+    for (const router of [undefined, routerTo('anthropic', 'claude-opus-4-8')]) {
+      const a = agent({
+        provider: 'anthropic',
+        model: 'claude-opus-4-8',
+        ...(router ? { router } : {}),
+        memory: false,
+        fallbackProviders: [],
+      });
+      const result = await a.session().send('hi', {
+        responseSchema: z.object({ title: z.string() }),
+        schemaName: 'titled',
+      });
+      expect((result as { object?: unknown }).object).toEqual({ title: 'x' });
+    }
+
+    const calls = hoisted.generateCompletion.mock.calls as unknown[][];
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call[0]).toBe('anthropic/claude-opus-4-8');
+      expect(payloadOf(call)).toMatchObject({ type: 'json_schema', json_schema: { name: 'titled', strict: true } });
+      expect((payloadOf(call) as Record<string, unknown>)._agentosUseToolForStructuredOutput).toBeUndefined();
+      expect(systemOf(call)).not.toContain(SCHEMA_LINE);
+    }
   });
 
   it("a send the router leaves on the agent's own provider and model is sent as it is without a router", async () => {
