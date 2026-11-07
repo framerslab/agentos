@@ -1885,12 +1885,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // The leg answered, a leg that served with no part included.
             answeredBy = legAnswer ?? answeredBy;
 
+            // Named by the provider that served, as generateText names it: a
+            // leg whose own walk served on a later entry names that entry's.
+            const servedBy = legAnswer?.provider || legProvider;
             if (fallbackFinishReason === 'error') {
               outcome = 'failed-after-output';
-              fallbackLogger.error('llm.fallback_failed_after_output', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), attempt });
+              fallbackLogger.error('llm.fallback_failed_after_output', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(servedBy), attempt });
             } else {
               outcome = 'served';
-              fallbackLogger.info('llm.fallback_succeeded', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), attempt });
+              fallbackLogger.info('llm.fallback_succeeded', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(servedBy), attempt });
             }
             break;
           } catch (fbErr: any) {

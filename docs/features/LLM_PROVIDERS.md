@@ -760,10 +760,20 @@ credential layer sends to OpenRouter (`{ provider: 'anthropic', model:
 `anthropic/claude-sonnet-4-5`, in both `generateText()` and `streamText()`:
 in `onFallback`, the `llm.fallback_fired`, `llm.fallback_succeeded` and
 `llm.fallback_failed_after_output` lines and the hops; its breaker read is
-OpenRouter's, its capability and exclusion checks judge
-`anthropic/claude-sonnet-4-5`, and an `llm.fallback_skipped` line names the
-provider and model (`fallbackProvider`, `fallbackModel`) the entry would have
-been sent as. A send that goes to the agent's own provider and
+OpenRouter's, its capability check judges `anthropic/claude-sonnet-4-5`, and
+an `llm.fallback_skipped` line names the provider and model
+(`fallbackProvider`, `fallbackModel`) the entry would have been sent as. An
+excluded model (`routerParams.excludedModelIds`, a bare id or a
+`provider:model` id) skips every entry that names it as written, as the model
+resolves (the provider's default for an entry with no model, the id after an
+`anthropic:` or `anthropic/` prefix) or as it is sent (`anthropic/<model>` on
+OpenRouter), in `generateText()`, `streamText()` and the completion gateway.
+When a leg's own walk serves on a later entry, the outer
+`llm.fallback_succeeded` and `llm.fallback_failed_after_output` lines name the
+provider that served, in both walkers. The completion gateway's
+`onHopSkipped` report names the entry as written (`provider`, `model`) and the
+provider and model it would have been sent to (`sentAsProvider`,
+`sentAsModel`), the names its `onFallback` and `onHopFailure` reports use. A send that goes to the agent's own provider and
 model keeps the agent's format. `streamObject()`
 sends no provider-side format on any provider: its
 schema travels in the system prompt only. All three validate the reply against
