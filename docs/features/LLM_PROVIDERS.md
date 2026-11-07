@@ -737,7 +737,14 @@ provider-side format carries no schema: on a provider whose entry is "None",
 on an Anthropic model whose schema neither the JSON output format nor a forced
 tool carries (a record schema on a model that refuses a forced tool choice), and
 in JSON-object mode. Each fallback provider is checked for its
-own format. `streamObject()` sends no provider-side format on any provider: its
+own format, and so is the pick of a model router: a session send that
+`agent({ router })` moves to another provider or model is sent the format of
+the provider and model the router picked, and the schema in its system prompt
+when that format carries none, so a send moved from Anthropic to an OpenRouter
+model goes out with OpenRouter's `json_schema` or JSON-object format rather
+than an Anthropic payload OpenRouter does not forward. A send the router leaves
+on the agent's own provider and model keeps the agent's format. `streamObject()`
+sends no provider-side format on any provider: its
 schema travels in the system prompt only. All three validate the reply against
 the caller's Zod schema, and `send()` throws an `ObjectGenerationError` when the
 reply is not matching JSON.

@@ -62,6 +62,8 @@ import { isCallerStop, markHookStop } from './runtime/callerStop.js';
  * after this module was imported still receives every failover event.
  */
 const fallbackLogger = moduleLogger('fallback', 'generate_text');
+/** The model router's component: a payload rebuilt for the router's pick reports its builder's failure here. */
+const routingLogger = moduleLogger('routing', 'generate_text');
 
 // A fallback skip's reason as one of the fixed words `llm.fallback_skipped` takes, never the reason's own text.
 function skipReason(reason: string): 'duplicate' | 'excluded' | 'capability' | 'refusal' | 'refill' | 'unknown' {
@@ -74,10 +76,11 @@ function skipReason(reason: string): 'duplicate' | 'excluded' | 'capability' | '
 }
 
 /**
- * Invoke a caller-supplied per-leg responseFormat builder without letting a
- * builder bug kill a fallback that would otherwise succeed. Failure -> one
- * WARN + `undefined` (the leg proceeds schema-in-prompt only, identical to
- * the guarded-drop outcome — but explicit).
+ * Invoke a caller-supplied responseFormat builder, for a fallback leg or for
+ * the provider and model a model router picked, without letting a builder bug
+ * kill a call that would otherwise succeed. Failure -> one WARN on `logger` +
+ * `undefined` (the leg or the routed call proceeds schema-in-prompt only,
+ * identical to the guarded-drop outcome — but explicit).
  *
  * @internal
  */
@@ -85,11 +88,12 @@ function safeBuildLegResponseFormat(
   builder: NonNullable<GenerateTextOptions['_responseFormatBuilder']>,
   providerId: string,
   modelId: string,
+  logger: typeof fallbackLogger = fallbackLogger,
 ): Record<string, unknown> | undefined {
   try {
     return builder(providerId, modelId);
   } catch (err) {
-    fallbackLogger.warn('llm.response_format_failed', { provider: providerName(providerId), ...errorFields(err) });
+    logger.warn('llm.response_format_failed', { provider: providerName(providerId), ...errorFields(err) });
     return undefined;
   }
 }
@@ -944,12 +948,15 @@ export interface GenerateTextOptions {
   _responseFormat?: { type: string } | Record<string, unknown>;
   /**
    * @internal Rebuilds the provider-native structured-output payload for a
-   * FALLBACK leg's provider. When absent, legs receive `_responseFormat`
-   * verbatim (legacy behavior — provider-side guards then drop foreign
-   * shapes, so the leg runs with zero provider enforcement). generateObject
-   * and AgentSession.send supply this; hand-rolled generateText callers are
-   * unaffected. `modelId` is `''` when the fallback entry omits `model`
-   * (the provider's default text model is resolved later).
+   * FALLBACK leg's provider, and for the provider and model a `router` picks
+   * when that pick is not the call's own provider and model (the pair
+   * `_responseFormat` is built for). When absent, legs and a routed call
+   * receive `_responseFormat` verbatim (legacy behavior — provider-side
+   * guards then drop foreign shapes, so the leg runs with zero provider
+   * enforcement). generateObject and AgentSession.send supply this;
+   * hand-rolled generateText callers are unaffected. `modelId` is `''` when
+   * the fallback entry omits `model` (the provider's default text model is
+   * resolved later).
    */
   _responseFormatBuilder?: (
     providerId: string,
@@ -2348,6 +2355,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // moves the call to another provider sends it there on that provider's
       // own credentials, as a fallback leg runs.
       const credentialProviderId = providerId;
+      // The call's own model: with that provider, the pair a caller's
+      // structured-output payload (`_responseFormat`) is built for.
+      const ownModelId = modelId;
 
       // --- Model routing (optional) ---
       if (opts.router) {
@@ -2400,6 +2410,22 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           );
         }
       }
+
+      // The structured-output payload this call sends. The caller built
+      // `_responseFormat` for the call's own provider and model. A call the
+      // router moved to another provider or model is sent the payload of the
+      // router's pick, rebuilt with the caller's builder as each fallback leg's
+      // is: the pick's provider drops a payload shaped for another (OpenRouter
+      // forwards only json_object and json_schema), while that payload would
+      // still count below as carrying the schema and keep the schema
+      // instructions out of the prompt. A call the router left on its own
+      // provider and model, and a call with no builder, sends the caller's
+      // payload as it is.
+      const movedByRouter = providerId !== credentialProviderId || modelId !== ownModelId;
+      const responseFormat: GenerateTextOptions['_responseFormat'] =
+        movedByRouter && typeof opts._responseFormatBuilder === 'function'
+          ? safeBuildLegResponseFormat(opts._responseFormatBuilder, providerId, modelId, routingLogger)
+          : opts._responseFormat;
 
       // A blank baseUrl counts here and changes nothing: resolveProvider drops it, so the record is the provider's own.
       const ownCredentials =
@@ -2504,7 +2530,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
       // A structured call whose payload carries no schema sends it after the
       // system prompt, so the model sees what it has to answer in.
-      if (opts._schemaInstruction && !responseFormatCarriesSchema(opts._responseFormat as Record<string, unknown> | undefined)) {
+      if (opts._schemaInstruction && !responseFormatCarriesSchema(responseFormat as Record<string, unknown> | undefined)) {
         messages.push({ role: 'system', content: opts._schemaInstruction });
       }
 
@@ -2879,7 +2905,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           messages: effectiveMessages,
           tools: toolSchemas,
           maxTokens: opts.maxTokens,
-          options: { ...opts, responseFormat: opts._responseFormat },
+          options: { ...opts, responseFormat },
           onAttempt: opts.onAttempt,
           abortSignal: opts.abortSignal,
         });
@@ -2946,7 +2972,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // The most requests this step sends and the report of each, so a caller can settle the attempts it paid for.
                 ...(opts.maxAttempts !== undefined ? { maxAttempts: opts.maxAttempts } : {}),
                 ...stepHold.providerOptions,
-                ...(opts._responseFormat ? { responseFormat: opts._responseFormat }: {}),
+                ...(responseFormat ? { responseFormat }: {}),
               } as any
             );
             attachUsageAttributes(stepSpan, {
