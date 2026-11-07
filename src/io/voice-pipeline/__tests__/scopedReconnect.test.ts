@@ -110,6 +110,26 @@ describe('scoped reconnection after a flush that ended the stream', () => {
     session.close();
   });
 
+  it('reconnects on an error followed at once by a close, though the session reports the end of its stream', async () => {
+    const { provider, opened } = host(true);
+    const session = await new ReconnectingSTT(provider, { minReplayMs: 0 }).startSession({ call: identity }) as ScopedStreamingSTTSession;
+    const errors: Error[] = [];
+    const closes = vi.fn();
+    session.on('error', (error: Error) => errors.push(error));
+    session.on('close', closes);
+    await session.pushAudioScoped(frameAt(1));
+    await session.flush();
+    // A provider that fails sends its error and its close in one go, after the flush that ended its stream.
+    opened[0].emit('error', new Error('connection lost'));
+    opened[0].emit('close');
+    await vi.waitFor(() => expect(opened).toHaveLength(2));
+    await session.flush();
+    expect(vi.mocked(opened[1].pushAudioScoped).mock.calls.map(([frame]) => frame.sequence)).toEqual([1]);
+    expect(closes).not.toHaveBeenCalled();
+    expect(errors).toEqual([]);
+    session.close();
+  });
+
   it('still reconnects on a close after a completed flush when the session reports no end', async () => {
     const { provider, opened } = host(false);
     const session = await new ReconnectingSTT(provider, { minReplayMs: 0 }).startSession({ call: identity }) as ScopedStreamingSTTSession;
