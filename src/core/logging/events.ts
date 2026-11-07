@@ -76,7 +76,8 @@ export const AGENTOS_EVENTS = {
   'llm.output_empty': { provider, count: 'int' },
   'llm.format_fallback': { provider, reason: { enum: ['json_schema'] } },
   'llm.response_format_failed': { provider, type: 'word', code: 'word' },
-  'llm.fallback_skipped': { ...fallback, reason: { enum: ['duplicate', 'excluded', 'capability', 'refusal', 'refill', 'unknown'] } },
+  // `fallbackProvider` and `fallbackModel` name the provider and model the passed-over entry would be sent as.
+  'llm.fallback_skipped': { ...fallback, fallbackModel: 'path', reason: { enum: ['duplicate', 'excluded', 'capability', 'refusal', 'refill', 'unknown'] } },
   'llm.fallback_circuit_open': fallback,
   // `fallbackModel` is the model id the leg is sent as, `unknown` when it is not a valid path.
   'llm.fallback_fired': { ...fallback, fallbackModel: 'path', type: 'word', code: 'word' },

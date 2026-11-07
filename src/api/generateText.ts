@@ -12,7 +12,7 @@
  * the system prompt so the tool loop executes with awareness of the strategy.
  */
 import { randomUUID } from 'node:crypto';
-import { resolveModelOption, resolveProvider, createProviderManager, knownProviderPrefixOf } from './model.js';
+import { resolveModelOption, resolveProvider, resolveProviderRoute, createProviderManager, knownProviderPrefixOf } from './model.js';
 import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource } from './observers.js';
@@ -757,7 +757,10 @@ export interface GenerateTextOptions {
    * @param fallbackProvider - The provider the next leg is sent to. An entry
    *   whose model id carries another provider's prefix (`{ provider:
    *   'anthropic', model: 'openrouter:anthropic/claude-sonnet-4.5' }`) is sent
-   *   to the provider the prefix names, so this is `'openrouter'`.
+   *   to the provider the prefix names, so this is `'openrouter'`. So is an
+   *   Anthropic entry with no Anthropic key or base URL (its own, the global
+   *   default's or `ANTHROPIC_BASE_URL`) while `OPENROUTER_API_KEY` is set:
+   *   the credential layer sends it to OpenRouter.
    */
   onFallback?: (error: Error, fallbackProvider: string) => void;
   /**
@@ -1118,7 +1121,11 @@ export interface FallbackSignal {
    * the provider and model it was sent as: a fallback entry whose model id
    * carries another provider's prefix (`{ provider: 'anthropic', model:
    * 'openrouter:anthropic/claude-sonnet-4.5' }`) is recorded as `{ provider:
-   * 'openrouter', model: 'anthropic/claude-sonnet-4.5' }`.
+   * 'openrouter', model: 'anthropic/claude-sonnet-4.5' }`, and an entry
+   * `{ provider: 'anthropic', model: 'claude-sonnet-4-5' }` that the
+   * credential layer sends to OpenRouter (no Anthropic key or base URL,
+   * `OPENROUTER_API_KEY` set) as `{ provider: 'openrouter', model:
+   * 'anthropic/claude-sonnet-4-5' }`.
    */
   hops: Array<{ provider: string; model?: string; ok: boolean }>;
 }
@@ -2035,18 +2042,42 @@ export function explicitRequiredCapabilities(
 /**
  * The provider and model a fallback entry is sent as: resolved the way the
  * leg's own call resolves it (a provider's default model when the entry
- * names none, a `provider:model` id split), or the entry as written when it
- * does not resolve.
+ * names none, a `provider:model` id split), then through the credential
+ * layer with the entry's own key and base URL, so an Anthropic entry with no
+ * Anthropic key or base URL that `resolveProvider()` sends to OpenRouter is
+ * `openrouter` and `anthropic/<model>`. When the credentials do not resolve
+ * (the leg will fail on them), it is the model resolution's answer; when the
+ * model does not resolve, the entry as written.
  *
+ * @param entry - The fallback entry.
+ * @param opts - `strict` for a seat's walk, whose legs resolve strictly (no
+ *   Anthropic to OpenRouter reroute).
  * @internal Shared with streamText.
  */
-export function fallbackEntrySentAs(entry: FallbackProviderEntry): { provider: string; model?: string } {
+export function fallbackEntrySentAs(
+  entry: FallbackProviderEntry,
+  opts: { strict?: boolean } = {},
+): { provider: string; model?: string } {
+  let parsed: { providerId: string; modelId: string };
   try {
-    const { providerId, modelId } = resolveModelOption({ provider: entry.provider, model: entry.model }, 'text');
-    return { provider: providerId, model: modelId };
+    parsed = resolveModelOption({ provider: entry.provider, model: entry.model }, 'text');
   } catch {
     return { provider: entry.provider, model: entry.model };
   }
+  try {
+    // The route resolveProvider sends the leg on, read quietly: this lookup sends nothing.
+    const sent = resolveProviderRoute(parsed.providerId, parsed.modelId, {
+      apiKey: entry.apiKey,
+      baseUrl: entry.baseUrl,
+      strict: opts.strict === true,
+    });
+    if (sent && typeof sent.providerId === 'string' && typeof sent.modelId === 'string') {
+      return { provider: sent.providerId, model: sent.modelId };
+    }
+  } catch {
+    // No credentials: the leg fails on them, and is reported as the model resolution names it.
+  }
+  return { provider: parsed.providerId, model: parsed.modelId };
 }
 
 /**
@@ -2067,6 +2098,8 @@ export function resolveFallbackChain(
     requiredCapabilities?: readonly string[];
     excludedModelIds?: readonly string[];
     onSkip?: (entry: FallbackProviderEntry, reason: FallbackSkipReason) => void;
+    /** A seat's walk: its legs resolve strictly, as {@link fallbackEntrySentAs} reads them. */
+    strictCredentials?: boolean;
   },
 ): ResolvedFallbackEntry[] {
   const required = ctx.requiredCapabilities ?? [];
@@ -2090,7 +2123,7 @@ export function resolveFallbackChain(
       ctx.onSkip?.(entry, 'failed_primary');
       continue;
     }
-    const sentAs = fallbackEntrySentAs(entry);
+    const sentAs = fallbackEntrySentAs(entry, { strict: ctx.strictCredentials });
     if (isExcluded(entry.model) || isExcluded(sentAs.model)) {
       ctx.onSkip?.(entry, 'excluded_model');
       continue;
@@ -3523,8 +3556,14 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     const chainEntries = opts.fallbackProviders === undefined
       ? buildPolicyAwareFallbackChain(walkTier, metricProviderId)
       : opts.fallbackProviders;
-    const logLegSkip = (entry: FallbackProviderEntry, reason: FallbackSkipReason): void =>
-      fallbackLogger.warn('llm.fallback_skipped', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(entry.provider), reason: skipReason(reason) });
+    // A seat's legs resolve strictly: no Anthropic to OpenRouter reroute.
+    const strictLegs = opts.__strictCredentials === true;
+    // The skip line names the provider and model the entry would be sent as,
+    // as the circuit-open and fired lines do, so one entry is one provider.
+    const logLegSkip = (entry: FallbackProviderEntry, reason: FallbackSkipReason): void => {
+      const skippedAs = fallbackEntrySentAs(entry, { strict: strictLegs });
+      fallbackLogger.warn('llm.fallback_skipped', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(skippedAs.provider), ...(skippedAs.model !== undefined ? { fallbackModel: safePath(skippedAs.model) } : {}), reason: skipReason(reason) });
+    };
     // Resolved only when the walk runs, so its skip lines describe a walk.
     // A call whose prompt-shim tools already ran cannot be continued, and a
     // restart would run them again; it surfaces the error instead.
@@ -3538,6 +3577,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             requiredCapabilities: explicitRequiredCapabilities(opts),
             excludedModelIds: opts.routerParams?.excludedModelIds,
             onSkip: logLegSkip,
+            strictCredentials: strictLegs,
           });
     // This attempt's own failure updates the walk: a refusal is recorded,
     // and a standing leg that failed on availability is owed a refill.
@@ -3575,7 +3615,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // (providerHealthKey), which the call below reads before it sends;
         // a failure of another key skips none of them.
         // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
-        const legSentAs = fallbackEntrySentAs(fb);
+        // An Anthropic entry with no Anthropic key or base URL is sent to
+        // OpenRouter by the credential layer: its breaker read, its lines and
+        // its hop are OpenRouter's.
+        const legSentAs = fallbackEntrySentAs(fb, { strict: strictLegs });
         const legProvider = legSentAs.provider;
         const legOnSharedCredentials =
           fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;
