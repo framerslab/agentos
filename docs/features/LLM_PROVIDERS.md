@@ -745,8 +745,9 @@ model goes out with OpenRouter's `json_schema` or JSON-object format rather
 than an Anthropic payload OpenRouter does not forward. A call on Anthropic
 with no Anthropic key or base URL goes to OpenRouter, whether the caller names
 Anthropic, a router picks it or a fallback leg names it, and is sent
-OpenRouter's format there, at the `OPENROUTER_BASE_URL` the environment sets,
-as a call that names OpenRouter is. A fallback entry whose model id carries
+OpenRouter's format there, with the key and base URL a call that names
+OpenRouter is sent with (a `setDefaultProvider()` default that names
+OpenRouter, else `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`). A fallback entry whose model id carries
 another provider's prefix (`{ provider: 'anthropic', model:
 'openrouter:anthropic/claude-sonnet-4.5' }`) is sent the format of the provider
 the prefix names. A send that goes to the agent's own provider and
