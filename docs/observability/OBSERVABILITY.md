@@ -245,6 +245,30 @@ await generateText({
 
 `accountIdOf` is an option of `generateText()`, `streamText()`, `generateObject()`, `streamObject()`, `agent()` and `gmi()`, and an agent's `generate()` and `stream()` calls take their own in its place. It suits a host that holds the account in its own request context and puts no budget on the call. It runs on the call path and returns a string at once; an answer that is not a non-empty string leaves the field absent. One that throws does too, logs one warning naming the error's built-in type (`TypeError`, `RangeError` and the rest, otherwise `Error`; never the error's message or a `name` the host set), and the model call goes on. A promise is not an account: the field is absent, and a promise that rejects logs the same warning and is never left unhandled. It is asked only for an event an observer will hear, and never when the budget already names the account.
 
+### An aborted call
+
+A `streamText()` call ended through its `abortSignal` fires an event when it used anything, with `aborted: true` and `finishReason: 'error'`. A stream aborted after the provider read the request reports what it billed:
+
+| Provider reported before the abort | `event.usage` |
+|---|---|
+| Its final counts (Anthropic's `message_delta`, OpenRouter's usage line) | Those counts, once. `usageEstimated` is absent |
+| Input only (Anthropic's `message_start`, then the abort) | The input and cache counts exactly, and `completionTokens` estimated from the characters streamed so far (text, tool input and thinking) at four characters a token. `event.usageEstimated` and `event.usage.completionTokensEstimated` are `true`, and `costUSD` prices the estimate |
+| Nothing (an abort before the first event) | No event |
+
+Anthropic sends no per-delta usage: its output count arrives only on the final `message_delta`, so an Anthropic stream aborted between `message_start` and `message_delta` always reports an estimated output count. A host that writes its own estimate for an aborted call can drop it and read the event.
+
+```ts
+setGlobalLlmObserver((event) =>
+  usageRows.insert({
+    provider: event.provider,
+    model: event.model,
+    costUSD: event.usage.costUSD ?? 0,
+    aborted: event.aborted === true,
+    estimated: event.usageEstimated === true,
+  }),
+);
+```
+
 The observer is not called while content-safe telemetry is on; read usage from the call's result instead.
 
 ---

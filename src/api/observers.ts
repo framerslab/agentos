@@ -79,6 +79,20 @@ export interface LlmUsageEvent {
    */
   finishReason?: string;
   /**
+   * True when the caller's `abortSignal` ended a `streamText` call (`finishReason` is then `'error'`). An aborted call fires an
+   * event when it used anything: a stream aborted after the provider read the request reports the input it billed and
+   * the output streamed before the abort. Absent on a call that was not aborted.
+   */
+  aborted?: true;
+  /**
+   * True when `usage.completionTokens` holds an estimate rather than the provider's count
+   * (`usage.completionTokensEstimated`): a stream aborted before the provider sent its output count reports the
+   * characters it had streamed at four characters a token. Anthropic sends the output count only on its final
+   * `message_delta`, so an Anthropic stream aborted after `message_start` reports its input and cache counts exactly
+   * and its output this way. Absent when every count in `usage` is the provider's own.
+   */
+  usageEstimated?: true;
+  /**
    * Which agentos surface fired the event. Lets a single observer
    * route generateText, generateObject, generateImage, embedText, etc.
    * into different meters when needed.

@@ -428,6 +428,12 @@ export interface ModelUsage {
    * report enough to compute; a reported 0 is meaningful and preserved.
    */
   inclusiveInputTokens?: number;
+  /**
+   * True when {@link ModelUsage.completionTokens} is an estimate rather than the provider's count: the stream ended
+   * (the caller's abort) before the event that carries the output count arrived, so the provider counted the
+   * characters it had streamed instead, at four characters a token. Absent when the count is the provider's own.
+   */
+  completionTokensEstimated?: true;
 }
 
 /**

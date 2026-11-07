@@ -74,6 +74,13 @@ import { createContentSafeConsole } from '../../../logging/contentSafeConsole.js
 /** This module's fixed diagnostic origin; no runtime name enters telemetry. */
 const console = createContentSafeConsole('anthropic_provider');
 
+/**
+ * Characters a token is taken to hold when a stream's output count has to be estimated: an abort before
+ * `message_delta`, the only event that carries Anthropic's output count, leaves the characters streamed so far.
+ * The library's ratio wherever it counts tokens from characters (`tokensOfChars` in the spend budget).
+ */
+const ESTIMATED_CHARS_PER_TOKEN = 4;
+
 // Re-export so callers that already reach for Anthropic model-capability
 // predicates (modelSupportsTemperature lives here too) find this one next to
 // it, even though its source of truth is the pure model-forced-tool-choice
@@ -1398,6 +1405,30 @@ export class AnthropicProvider implements IProvider {
      * final chunk so the agent loop can replay them verbatim.
      */
     const thinkingAccum: Map<number, ThinkingBlock> = new Map();
+    /** Whether message_start arrived: from then on the request has been read and its input counted. */
+    let messageStarted = false;
+    /** The output tokens message_start reported (Anthropic's running count at the start, usually 1). */
+    let startOutputTokens = 0;
+    /** The characters of text, tool input and thinking streamed so far: what an abort before message_delta reports. */
+    let streamedOutputChars = 0;
+    /** Whether the final chunk, which carries the provider's own counts, has been yielded. */
+    let finalUsageReported = false;
+    // An abort after message_start ends the stream with what the call used: the input and cache counts message_start
+    // gave, and an estimate of the output streamed so far, since Anthropic reports the output count only on
+    // message_delta. Once the final chunk has reported the counts, the abort chunk reports nothing, so none counts twice.
+    const abortChunk = (): ModelCompletionResponse =>
+      this.buildAbortChunk(
+        modelId,
+        messageStarted && !finalUsageReported
+          ? this.partialStreamUsage(modelId, {
+              inputTokens,
+              outputTokens: Math.max(startOutputTokens, Math.ceil(streamedOutputChars / ESTIMATED_CHARS_PER_TOKEN)),
+              cacheCreationTokens,
+              cacheReadTokens,
+              cacheCreationSplit,
+            })
+          : undefined,
+      );
 
     const abortHandler = () => { /* consumer checks abortSignal each iteration */ };
     abortSignal?.addEventListener('abort', abortHandler, { once: true });
@@ -1405,7 +1436,7 @@ export class AnthropicProvider implements IProvider {
     try {
       for await (const rawEvent of this.parseSseStream(stream)) {
         if (abortSignal?.aborted) {
-          yield this.buildAbortChunk(modelId);
+          yield abortChunk();
           break;
         }
 
@@ -1424,6 +1455,8 @@ export class AnthropicProvider implements IProvider {
         switch (event.type) {
           case 'message_start': {
             responseId = event.message.id;
+            messageStarted = true;
+            startOutputTokens = event.message.usage?.output_tokens ?? 0;
             inputTokens = event.message.usage?.input_tokens ?? 0;
             // input_tokens excludes cached tokens — capture the cache
             // counts so the final chunk's usage prices them (the
@@ -1468,6 +1501,7 @@ export class AnthropicProvider implements IProvider {
               // Incremental text content
               const textDelta = event.delta.text;
               accumulatedContent += textDelta;
+              streamedOutputChars += textDelta.length;
 
               yield {
                 id: responseId,
@@ -1483,6 +1517,7 @@ export class AnthropicProvider implements IProvider {
               };
             } else if (event.delta.type === 'input_json_delta' && event.delta.partial_json) {
               // Incremental tool argument JSON fragment
+              streamedOutputChars += event.delta.partial_json.length;
               const accum = toolCallAccum.get(event.index);
               if (accum) {
                 accum.argsJson += event.delta.partial_json;
@@ -1512,7 +1547,8 @@ export class AnthropicProvider implements IProvider {
               event.delta.type === 'thinking_delta' &&
               typeof event.delta.thinking === 'string'
             ) {
-              // Internal reasoning — accumulated, not surfaced as a text delta.
+              // Internal reasoning — accumulated, not surfaced as a text delta. It is billed as output.
+              streamedOutputChars += event.delta.thinking.length;
               const accum = thinkingAccum.get(event.index);
               if (accum && accum.type === 'thinking') {
                 accum.thinking += event.delta.thinking;
@@ -1614,6 +1650,7 @@ export class AnthropicProvider implements IProvider {
               throw this.refusalError(modelId, event.delta.stop_details, accumulatedContent, usage);
             }
 
+            finalUsageReported = true;
             yield {
               id: responseId,
               object: 'chat.completion.chunk',
@@ -1679,7 +1716,7 @@ export class AnthropicProvider implements IProvider {
       // The caller's signal rides on the fetch, so an abort mid-stream ends the body's read at once: the stream
       // ends with the abort chunk, not an error chunk.
       if (abortSignal?.aborted) {
-        yield this.buildAbortChunk(modelId);
+        yield abortChunk();
         return;
       }
       const message = streamError instanceof Error ? streamError.message : 'Anthropic stream processing error';
@@ -3199,10 +3236,11 @@ export class AnthropicProvider implements IProvider {
    * Builds an abort chunk for early stream termination.
    *
    * @param {string} modelId - The model ID for the response.
+   * @param {ModelUsage} [usage] - What the aborted request used, when it had started: see {@link partialStreamUsage}.
    * @returns {ModelCompletionResponse} A terminal chunk with abort error.
    * @private
    */
-  private buildAbortChunk(modelId: string): ModelCompletionResponse {
+  private buildAbortChunk(modelId: string, usage?: ModelUsage): ModelCompletionResponse {
     return {
       id: `anthropic-abort-${Date.now()}`,
       object: 'chat.completion.chunk',
@@ -3210,7 +3248,45 @@ export class AnthropicProvider implements IProvider {
       modelId,
       choices: [],
       error: { message: 'Stream aborted by caller', type: 'abort' },
+      ...(usage !== undefined && { usage }),
       isFinal: true,
+    };
+  }
+
+  /**
+   * The usage of a stream the caller aborted after message_start and before message_delta: the input and cache counts
+   * message_start reported, and an output count estimated from the characters streamed, marked
+   * {@link ModelUsage.completionTokensEstimated}. Priced like the final chunk's usage.
+   *
+   * @private
+   */
+  private partialStreamUsage(
+    modelId: string,
+    counts: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheCreationTokens: number | undefined;
+      cacheReadTokens: number | undefined;
+      cacheCreationSplit: AnthropicCacheCreationBreakdown | null | undefined;
+    },
+  ): ModelUsage {
+    const { inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, cacheCreationSplit } = counts;
+    return {
+      promptTokens: inputTokens,
+      completionTokens: outputTokens,
+      totalTokens: inputTokens + outputTokens,
+      costUSD: estimateAnthropicCostUSD(modelId, {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cache_read_input_tokens: cacheReadTokens,
+        cache_creation_input_tokens: cacheCreationTokens,
+        cache_creation: cacheCreationSplit,
+      }),
+      ...(cacheCreationTokens !== undefined && { cacheCreationInputTokens: cacheCreationTokens }),
+      ...oneHourCacheWrites(cacheCreationSplit),
+      ...(cacheReadTokens !== undefined && { cacheReadInputTokens: cacheReadTokens }),
+      inclusiveInputTokens: inputTokens + (cacheReadTokens ?? 0) + (cacheCreationTokens ?? 0),
+      completionTokensEstimated: true,
     };
   }
 
