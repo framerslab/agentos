@@ -3,7 +3,10 @@
  * AgentSession.send({responseSchema}) must rebuild the structured-output
  * payload per fallback leg (the second first-party structured-output caller
  * after generateObject) — a foreign leg must not inherit the primary's
- * provider-shaped payload verbatim.
+ * provider-shaped payload verbatim. The same holds for a send the agent's
+ * model router moves to another provider or model: it is sent the payload of
+ * the router's pick, and the schema in its system prompt when that payload
+ * carries none.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
@@ -33,6 +36,7 @@ vi.mock('../../model.js', () => ({
 import { agent } from '../../agent.js';
 import { resolveModelOption, resolveProvider } from '../../model.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import type { IModelRouter } from '../../../core/llm/routing/IModelRouter.js';
 
 /** The system prompt a provider call sent: the text of its system messages. */
 function systemOf(call: unknown[] | undefined): string {
@@ -54,24 +58,41 @@ function okResponse(modelId: string, text: string) {
   };
 }
 
+/** Resolution echoes the provider and model it is given, so each call is sent as itself. */
+function resetHarness(): void {
+  hoisted.generateCompletion.mockReset();
+  (resolveModelOption as unknown as Mock).mockImplementation(
+    (opts: { provider?: string; model?: string }) => ({
+      providerId: opts?.provider ?? 'openai',
+      modelId: opts?.model ?? 'gpt-4.1-mini',
+    }),
+  );
+  (resolveProvider as unknown as Mock).mockImplementation(
+    (providerId: string, modelId: string) => ({
+      providerId,
+      modelId: modelId || 'default-model',
+      apiKey: 'test-key',
+    }),
+  );
+  globalLLMProviderHealth.reset();
+}
+
+/** A model router that sends every call to `modelId` on `providerId`. */
+function routerTo(providerId: string, modelId: string): IModelRouter {
+  return {
+    routerId: `to-${providerId}`,
+    initialize: async () => undefined,
+    selectModel: async () => ({ modelId, modelInfo: { providerId } }),
+  } as unknown as IModelRouter;
+}
+
+/** The structured-output payload a provider call carried. */
+function payloadOf(call: unknown[] | undefined): unknown {
+  return (call?.[2] as { responseFormat?: unknown } | undefined)?.responseFormat;
+}
+
 describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () => {
-  beforeEach(() => {
-    hoisted.generateCompletion.mockReset();
-    (resolveModelOption as unknown as Mock).mockImplementation(
-      (opts: { provider?: string; model?: string }) => ({
-        providerId: opts?.provider ?? 'openai',
-        modelId: opts?.model ?? 'gpt-4.1-mini',
-      }),
-    );
-    (resolveProvider as unknown as Mock).mockImplementation(
-      (providerId: string, modelId: string) => ({
-        providerId,
-        modelId: modelId || 'default-model',
-        apiKey: 'test-key',
-      }),
-    );
-    globalLLMProviderHealth.reset();
-  });
+  beforeEach(resetHarness);
 
   it('anthropic primary down -> openai leg receives an OpenAI-shaped responseFormat', async () => {
     hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
@@ -221,6 +242,96 @@ describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () =>
       _agentosUseToolForStructuredOutput: true,
       route: 'json_schema',
     });
+    expect(systemOf(leg)).not.toContain(SCHEMA_LINE);
+  });
+});
+
+describe('AgentSession.send responseSchema when the model router moves the send', () => {
+  beforeEach(resetHarness);
+
+  it('a send moved to a provider whose route is the prompt is sent no payload and the schema in its system prompt', async () => {
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
+      okResponse(modelId, '{"title":"x"}'),
+    );
+
+    // The agent's own provider takes a strict json_schema payload, which
+    // carries the schema; the router's pick has no structured-output payload.
+    const a = agent({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      router: routerTo('groq', 'llama-3.3-70b-versatile'),
+      memory: false,
+      fallbackProviders: [],
+    });
+    const result = await a.session().send('hi', {
+      responseSchema: z.object({ title: z.string() }),
+      schemaName: 'titled',
+    });
+
+    expect((result as { object?: unknown }).object).toEqual({ title: 'x' });
+    const call = hoisted.generateCompletion.mock.calls[0] as unknown[];
+    expect(call[0]).toBe('llama-3.3-70b-versatile');
+    expect(payloadOf(call)).toBeUndefined();
+    expect(systemOf(call)).toContain(SCHEMA_LINE);
+    expect(systemOf(call)).toContain('"title"');
+  });
+
+  it("a send the router leaves on the agent's own provider and model is sent as it is without a router", async () => {
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
+      okResponse(modelId, '{"title":"x"}'),
+    );
+    const send = async (router?: IModelRouter): Promise<void> => {
+      const a = agent({
+        provider: 'anthropic',
+        model: 'claude-opus-4-8',
+        ...(router ? { router } : {}),
+        memory: false,
+        fallbackProviders: [],
+      });
+      await a.session().send('hi', {
+        responseSchema: z.object({ title: z.string() }),
+        schemaName: 'titled',
+      });
+    };
+
+    await send();
+    await send(routerTo('anthropic', 'claude-opus-4-8'));
+
+    const [unrouted, routed] = hoisted.generateCompletion.mock.calls as unknown[][];
+    expect(routed[0]).toBe('claude-opus-4-8');
+    expect(payloadOf(routed)).toMatchObject({ _agentosUseToolForStructuredOutput: true });
+    expect(payloadOf(routed)).toEqual(payloadOf(unrouted));
+    expect(systemOf(routed)).toBe(systemOf(unrouted));
+  });
+
+  it("a routed send whose pick fails falls back with the leg's own payload", async () => {
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
+      if (modelId === 'claude-sonnet-5-5') return okResponse(modelId, '{"title":"x"}');
+      throw new Error('503 overloaded');
+    });
+
+    const a = agent({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      router: routerTo('groq', 'llama-3.3-70b-versatile'),
+      memory: false,
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-sonnet-5-5' }],
+    });
+    const result = await a.session().send('hi', {
+      responseSchema: z.object({ title: z.string() }),
+      schemaName: 'titled',
+    });
+
+    expect((result as { object?: unknown }).object).toEqual({ title: 'x' });
+    const calls = hoisted.generateCompletion.mock.calls as unknown[][];
+    const routed = calls.find((c) => c[0] === 'llama-3.3-70b-versatile');
+    const leg = calls.find((c) => c[0] === 'claude-sonnet-5-5');
+    expect(routed).toBeDefined();
+    expect(payloadOf(routed)).toBeUndefined();
+    expect(systemOf(routed)).toContain(SCHEMA_LINE);
+    // The leg is built for its own provider and model, as it is without a router.
+    expect(leg).toBeDefined();
+    expect(payloadOf(leg)).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
     expect(systemOf(leg)).not.toContain(SCHEMA_LINE);
   });
 });
