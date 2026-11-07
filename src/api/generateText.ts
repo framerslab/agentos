@@ -242,6 +242,13 @@ export interface TokenUsage {
    * writes by lifetime.
    */
   cacheCreationExtendedTokens?: number;
+  /**
+   * True when some step's {@link TokenUsage.completionTokens} is an estimate rather than the provider's count: a
+   * stream the caller aborted before the provider sent its output count (Anthropic sends it only on the final
+   * `message_delta`) reports the characters it had streamed, at four characters a token. Absent when every count is
+   * the provider's own.
+   */
+  completionTokensEstimated?: true;
 }
 
 /**
@@ -1527,6 +1534,7 @@ export function addModelUsage(target: TokenUsage, usage: unknown): void {
   }
   const inclusive = num(u.inclusiveInputTokens);
   if (inclusive !== undefined) target.inclusiveInputTokens = (target.inclusiveInputTokens ?? 0) + inclusive;
+  if (u.completionTokensEstimated === true) target.completionTokensEstimated = true;
 }
 
 /**
@@ -1575,6 +1583,7 @@ export function sumTokenUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
     ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
     ...(cacheCreationExtendedTokens !== undefined ? { cacheCreationExtendedTokens } : {}),
+    ...(a.completionTokensEstimated || b.completionTokensEstimated ? { completionTokensEstimated: true as const } : {}),
   };
 }
 
