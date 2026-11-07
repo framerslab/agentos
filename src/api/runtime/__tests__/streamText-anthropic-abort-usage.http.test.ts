@@ -28,6 +28,7 @@ const STREAMED_CHARS = DELTAS.join('').length;
 type Mode = 'stall' | 'finalThenStall';
 
 let mode: Mode = 'stall';
+let messagePosts = 0;
 let server: http.Server;
 let baseUrl: string;
 const savedKeys = { anthropic: process.env.ANTHROPIC_API_KEY, openrouter: process.env.OPENROUTER_API_KEY };
@@ -55,8 +56,10 @@ beforeAll(async () => {
       res.end('{}');
       return;
     }
+    messagePosts += 1;
     req.resume();
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    // A fresh connection for every request: a kept-alive socket that afterEach closed is never reused.
+    res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' });
     res.write(sse(messageStart));
     res.write(sse({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }));
     for (const text of DELTAS) {
@@ -92,6 +95,7 @@ let events: MarkedEvent[];
 
 beforeEach(() => {
   mode = 'stall';
+  messagePosts = 0;
   events = [];
   globalLLMProviderHealth.reset();
   setGlobalLlmObserver((event) => {
@@ -230,6 +234,10 @@ describe('an aborted Anthropic stream reports its usage', () => {
     }
     await settled();
 
+    expect({ posts: messagePosts, trail: partTrail(parts) }).toEqual({
+      posts: 1,
+      trail: ['text', 'text', 'text', expect.stringMatching(/abort/i)],
+    });
     const usage = await result.usage;
     expect({ trail: partTrail(parts), usage }).toMatchObject({ usage: { promptTokens: 120, completionTokens: 15 } });
     expect(usage.completionTokensEstimated).toBeUndefined();
