@@ -123,6 +123,13 @@ async function readThenAbort(
   return parts;
 }
 
+/** The parts as words, an error part with its message, so a failed assertion shows how the stream ended. */
+function partTrail(parts: StreamPart[]): string[] {
+  return parts.map((part) =>
+    part.type === 'error' ? `error: ${(part.error as Error | undefined)?.message ?? String(part.error)}` : part.type,
+  );
+}
+
 /** Lets the stream's finally (where the usage event fires) and any promise it starts settle. */
 async function settled(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 50));
@@ -177,6 +184,10 @@ describe('an aborted Anthropic stream reports its usage', () => {
 
     expect(parts.filter((part) => part.type === 'text')).toHaveLength(DELTAS.length);
     expect(parts[parts.length - 1]?.type).toBe('error');
+    // The call's own usage reports the same counts the event carries.
+    expect({ trail: partTrail(parts), usage: await result.usage }).toMatchObject({
+      usage: { promptTokens: 120, completionTokens: Math.ceil(STREAMED_CHARS / 4), completionTokensEstimated: true },
+    });
     expect(events).toHaveLength(1);
     const event = events[0] as MarkedEvent;
     expect(event.provider).toBe('anthropic');
@@ -219,6 +230,9 @@ describe('an aborted Anthropic stream reports its usage', () => {
     }
     await settled();
 
+    const usage = await result.usage;
+    expect({ trail: partTrail(parts), usage }).toMatchObject({ usage: { promptTokens: 120, completionTokens: 15 } });
+    expect(usage.completionTokensEstimated).toBeUndefined();
     expect(events).toHaveLength(1);
     const event = events[0] as MarkedEvent;
     expect(event.usage.promptTokens).toBe(120);

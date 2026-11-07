@@ -121,6 +121,7 @@ function addTokenUsage(target: TokenUsage, add: TokenUsage): void {
   if (add.inclusiveInputTokens !== undefined) {
     target.inclusiveInputTokens = (target.inclusiveInputTokens ?? 0) + add.inclusiveInputTokens;
   }
+  if (add.completionTokensEstimated) target.completionTokensEstimated = true;
 }
 
 /**
@@ -1187,6 +1188,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               if (typeof chunkInclusiveIn === 'number') {
                 usage.inclusiveInputTokens = (usage.inclusiveInputTokens ?? 0) + chunkInclusiveIn;
               }
+              // A stream the caller aborted before the provider's output count reports an estimate, marked so.
+              if (chunk.usage.completionTokensEstimated === true) usage.completionTokensEstimated = true;
               attachUsageAttributes(stepSpan, {
                 promptTokens: chunk.usage.promptTokens,
                 completionTokens: chunk.usage.completionTokens,
@@ -2063,6 +2066,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       //   usage (tokens metered before a later failure) — suppressing those
       //   left real spend unmetered; zero-usage failures stay silent.
       const accruedBillableUsage = hasBillableUsage(usage);
+      // The caller's signal ended the call: its event says so, and says when an output count in it is an estimate.
+      const endedByAbort = metricStatus === 'error' && opts.abortSignal?.aborted === true;
       if (fallbackLegRan && attemptUsage && hasBillableUsage(attemptUsage)) {
         fireLlmUsageObserver({
           provider: recordedProviderId ?? '',
@@ -2071,6 +2076,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           source: opts.source,
           ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
           finishReason: 'error',
+          ...(attemptUsage.completionTokensEstimated ? { usageEstimated: true } : {}),
           surface: 'streamText',
           durationMs: Date.now() - startedAt,
         }, usageAccount);
@@ -2089,6 +2095,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               : allToolCalls.length > 0 && !finalText
                 ? 'tool-calls'
                 : normalizeStreamFinishReason(lastStepFinishReason),
+          ...(endedByAbort ? { aborted: true } : {}),
+          ...(usage.completionTokensEstimated ? { usageEstimated: true } : {}),
           surface: 'streamText',
           durationMs: Date.now() - startedAt,
           ...(firstPartAt !== undefined ? { ttfbMs: firstPartAt - startedAt } : {}),
