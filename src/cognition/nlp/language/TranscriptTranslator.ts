@@ -108,12 +108,25 @@ function sourceOf(line: TranscriptLineInput): string | null {
 
 /**
  * A language code as the same-language skip compares it: without case and without a region, so `EN`, `en-US` and
- * `en_us` are `en`; a script subtag is kept, so `zh-Hans` and `zh-Hant` stay two languages to translate between.
+ * `en_us` are `en`; a script subtag is kept, so `zh-Hans` and `zh-Hant` stay two languages to translate between. A
+ * Chinese code with a region and no script takes the script the region is written in, as Unicode's likely subtags
+ * give it (`zh-TW` and `zh-HK` are `zh-hant`, `zh-CN` is `zh-hans`); a bare `zh` names no script.
  */
 function languageOf(code: string): string {
   const [primary = '', ...rest] = code.trim().toLowerCase().split(/[-_]/);
-  const script = rest.find((part) => /^[a-z]{4}$/.test(part));
+  const script = rest.find((part) => /^[a-z]{4}$/.test(part)) ?? (primary === 'zh' ? chineseScriptOf(rest) : undefined);
   return script ? `${primary}-${script}` : primary;
+}
+
+/** The script a Chinese code's region is written in (`Intl.Locale#maximize`), lower-cased; undefined without a region. */
+function chineseScriptOf(subtags: readonly string[]): string | undefined {
+  const region = subtags.find((part) => /^([a-z]{2}|\d{3})$/.test(part));
+  if (region === undefined) return undefined;
+  try {
+    return new Intl.Locale(`zh-${region}`).maximize().script?.toLowerCase();
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -225,7 +238,8 @@ export class TranscriptTranslator {
 
   /**
    * Translates `line` into `target`, or skips it when its configured or detected source is the target's language,
-   * compared without case or region (`en-US` is `en`, `zh-Hant` is not `zh-Hans`).
+   * compared without case or region (`en-US` is `en`, `zh-Hant` is not `zh-Hans`), a Chinese region naming its script
+   * (`zh-TW` is `zh-Hant`, not `zh-CN`).
    *
    * @throws {TranslationProviderError} `TRANSLATION_REQUEST_FAILED` (with the HTTP `status` when the provider answered,
    *   and the `usage` the provider's error reported), `TRANSLATION_TIMEOUT` past `timeoutMs`, while the provider is
