@@ -1505,6 +1505,55 @@ describe('AnthropicProvider', () => {
       expect(result.choices[0].finishReason).toBe('tool_calls');
     });
 
+    it('answers a forced schema call with its input as the stream delivered it, a repeated key and its spacing kept, never a re-serialisation of the parsed input', async () => {
+      // JSON.parse keeps only the last value of a repeated key: a text made
+      // from the parsed input would hand the caller a halved object that
+      // parses. The raw text reaches the caller's parse, which refuses it.
+      const events = (chunks: string[]) => [
+        d({ type: 'message_start', message: { ...makeAnthropicResponse(), content: [], stop_reason: null } }),
+        d({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_s', name: 'emit', input: {} } }),
+        ...chunks.map((chunk) => d({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: chunk } })),
+        d({ type: 'content_block_stop', index: 0 }),
+        d({ type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 9 } }),
+        d({ type: 'message_stop' }),
+      ];
+      const sseOf = (list: string[]) =>
+        ({
+          ok: true, status: 200, statusText: 'OK', headers: new Headers(),
+          json: () => Promise.reject(new Error('SSE body, not JSON')),
+          body: createSseStream(list),
+        }) as unknown as Response;
+      const recordSchema = {
+        type: 'object',
+        properties: { scores: { type: 'object', additionalProperties: { type: 'number' } } },
+      };
+      const marker = { _agentosUseToolForStructuredOutput: true, tool: { name: 'emit', input_schema: recordSchema } } as never;
+
+      const repeated = ['{"scores":{"a":1},', '"scores":{"b":2}}'];
+      fetchMock.mockResolvedValueOnce(sseOf(events(repeated)));
+      const result = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+        responseFormat: marker,
+      });
+      expect(result.schemaRoute).toBe('forced_tool');
+      expect(result.choices[0].message.content).toBe('{"scores":{"a":1},"scores":{"b":2}}');
+      expect(result.choices[0].message.tool_calls).toBeUndefined();
+      expect(result.choices[0].finishReason).toBe('stop');
+
+      const spaced = ['{ "scores": ', '{ "a": 1 } }'];
+      fetchMock.mockResolvedValueOnce(sseOf(events(spaced)));
+      const clean = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Score a.' }], {
+        responseFormat: marker,
+      });
+      expect(clean.choices[0].message.content).toBe('{ "scores": { "a": 1 } }');
+      expect(clean.choices[0].finishReason).toBe('stop');
+
+      // A caller's own tool call keeps its arguments as before.
+      fetchMock.mockResolvedValueOnce(sseOf(events(spaced).map((e) => e.replace('"name":"emit"', '"name":"lookup"'))));
+      const own = await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Look up a.' }], {});
+      expect(own.choices[0].message.content).toBeNull();
+      expect(own.choices[0].message.tool_calls?.[0].function.arguments).toBe('{"scores":{"a":1}}');
+    });
+
     it('answers a forced schema call the output limit cut mid-JSON with its raw input and the length stop, in one request; a caller tool cut the same way still fails as an incomplete stream', async () => {
       // A length stop is what generateObject raises its budget for; an
       // incomplete-stream error was retried at the same budget, then thrown past it.

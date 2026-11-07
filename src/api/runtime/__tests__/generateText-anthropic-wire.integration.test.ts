@@ -71,6 +71,22 @@ function toolTurn(model: string, name: string, input: Json): Reply {
     ]);
 }
 
+/**
+ * A forced tool call to `name` whose input arrives as the `partialJson` chunks, as written: the joined chunks need not
+ * be what JSON.stringify of the parsed input gives (spacing, a key written twice).
+ */
+function rawToolTurn(model: string, name: string, partialJson: string[]): Reply {
+  return () =>
+    sse([
+      messageStart(model, { input_tokens: 10 }),
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name, input: {} } },
+      ...partialJson.map((chunk) => ({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: chunk } })),
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 5 } },
+      { type: 'message_stop' },
+    ]);
+}
+
 /** A forced tool call to `name` cut off by `max_tokens` while its input was still being written. */
 function cutToolTurn(model: string, name: string, partialJson: string): Reply {
   return () =>
@@ -1269,5 +1285,131 @@ describe('the Anthropic rescue leg of buildFallbackChain on the wire', () => {
       if (saved.gemini === undefined) delete process.env.GEMINI_API_KEY;
       else process.env.GEMINI_API_KEY = saved.gemini;
     }
+  });
+});
+
+describe('a key the model writes twice in a structured reply', () => {
+  // A schema with a record field goes to Claude Sonnet 4.6 as the non-strict forced tool (the JSON output format does
+  // not carry a record), so the reply is the tool call's streamed input.
+  const clipSchema = z.object({
+    items: z.array(z.object({ id: z.string(), frames: z.array(z.number()).optional() })),
+    scores: z.record(z.string(), z.number()).optional(),
+  });
+  const TOP_LEVEL_DUPLICATE = ['{"items":[{"id":"a"},', '{"id":"b"}],"items":[{"id":"c"}]}'];
+  const NESTED_DUPLICATE = ['{"items":[{"id":"a","frames":[1],', '"frames":[2]}]}'];
+
+  it('generateObject refuses a forced tool reply that repeats a top-level key: the error carries the raw input and no object is returned', async () => {
+    route({ 'claude-sonnet-4-6': [rawToolTurn('claude-sonnet-4-6', 'clip', TOP_LEVEL_DUPLICATE)] });
+
+    const error = await rejectionOf(
+      generateObject({
+        model: 'anthropic:claude-sonnet-4-6',
+        schema: clipSchema,
+        schemaName: 'clip',
+        prompt: 'List the items.',
+        maxRetries: 0,
+        fallbackProviders: [],
+      }),
+    );
+
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect((error as ObjectGenerationError).rawText).toBe(TOP_LEVEL_DUPLICATE.join(''));
+    expect((error as ObjectGenerationError).message).toContain('Duplicate key "items" in the object at <root>');
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].tool_choice).toEqual({ type: 'tool', name: 'clip' });
+  });
+
+  it('generateObject refuses a forced tool reply that repeats a key inside a nested object, naming where', async () => {
+    route({ 'claude-sonnet-4-6': [rawToolTurn('claude-sonnet-4-6', 'clip', NESTED_DUPLICATE)] });
+
+    const error = await rejectionOf(
+      generateObject({
+        model: 'anthropic:claude-sonnet-4-6',
+        schema: clipSchema,
+        schemaName: 'clip',
+        prompt: 'List the items.',
+        maxRetries: 0,
+        fallbackProviders: [],
+      }),
+    );
+
+    expect(error).toBeInstanceOf(ObjectGenerationError);
+    expect((error as ObjectGenerationError).rawText).toBe(NESTED_DUPLICATE.join(''));
+    expect((error as ObjectGenerationError).message).toContain('Duplicate key "frames" in the object at items[0]');
+  });
+
+  it('generateObject asks again after a repeated key, naming it, and returns the next reply\'s object', async () => {
+    route({
+      'claude-sonnet-4-6': [
+        rawToolTurn('claude-sonnet-4-6', 'clip', TOP_LEVEL_DUPLICATE),
+        rawToolTurn('claude-sonnet-4-6', 'clip', ['{"items":[{"id":"a"},{"id":"b"},{"id":"c"}]}']),
+      ],
+    });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-sonnet-4-6',
+      schema: clipSchema,
+      schemaName: 'clip',
+      prompt: 'List the items.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object.items.map((item) => item.id)).toEqual(['a', 'b', 'c']);
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(2);
+    expect(JSON.stringify(bodies[1].messages)).toContain('Duplicate key');
+  });
+
+  it('generateObject returns a clean forced tool reply\'s object, and its text is the joined input byte for byte', async () => {
+    const written = ['{ "items": [ {"id": "a"},', '\n  {"id": "b", "frames": [1, 2]} ],', ' "scores": {"a": 1} }'];
+    route({ 'claude-sonnet-4-6': [rawToolTurn('claude-sonnet-4-6', 'clip', written)] });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-sonnet-4-6',
+      schema: clipSchema,
+      schemaName: 'clip',
+      prompt: 'List the items.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ items: [{ id: 'a' }, { id: 'b', frames: [1, 2] }], scores: { a: 1 } });
+    expect(result.text).toBe(written.join(''));
+    expect(result.finishReason).toBe('stop');
+  });
+
+  it('generateObject on the JSON output format keeps the text answer as written', async () => {
+    const written = '{ "answer": "ok" }';
+    route({ 'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', written)] });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-sonnet-5-5',
+      schema: z.object({ answer: z.string() }),
+      prompt: 'Answer with ok.',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ answer: 'ok' });
+    expect(result.text).toBe(written);
+    expect(postedBodies()[0].output_config.format.type).toBe('json_schema');
+  });
+
+  it('a GMI session send asks again after a forced tool reply that repeats a key, and returns the next reply\'s object', async () => {
+    route({
+      'claude-sonnet-4-6': [
+        rawToolTurn('claude-sonnet-4-6', 'clip', TOP_LEVEL_DUPLICATE),
+        rawToolTurn('claude-sonnet-4-6', 'clip', ['{"items":[{"id":"a"},{"id":"b"},{"id":"c"}]}']),
+      ],
+    });
+    const session = agent({ runtime: 'gmi', provider: 'anthropic', model: 'claude-sonnet-4-6', memory: false, fallbackProviders: [] }).session(
+      'forced-duplicate',
+    );
+
+    const result = await session.send('List the items.', { responseSchema: clipSchema, schemaName: 'clip' });
+
+    expect((result.object as z.infer<typeof clipSchema>).items.map((item) => item.id)).toEqual(['a', 'b', 'c']);
+    const bodies = postedBodies();
+    expect(bodies).toHaveLength(2);
+    expect(JSON.stringify(bodies[1].messages)).toContain('Duplicate key');
   });
 });
