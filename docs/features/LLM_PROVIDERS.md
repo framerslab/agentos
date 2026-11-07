@@ -750,7 +750,10 @@ OpenRouter is sent with (a `setDefaultProvider()` default that names
 OpenRouter, else `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`). A fallback entry whose model id carries
 another provider's prefix (`{ provider: 'anthropic', model:
 'openrouter:anthropic/claude-sonnet-4.5' }`) is sent the format of the provider
-the prefix names. A send that goes to the agent's own provider and
+the prefix names, and `onFallback`, the `llm.fallback_fired` line (its
+`fallbackProvider` and `fallbackModel`) and the leg's hop in
+`result.fallback.hops` name that provider and the model id after the prefix
+(`openrouter`, `anthropic/claude-sonnet-4.5`). A send that goes to the agent's own provider and
 model keeps the agent's format. `streamObject()`
 sends no provider-side format on any provider: its
 schema travels in the system prompt only. All three validate the reply against
