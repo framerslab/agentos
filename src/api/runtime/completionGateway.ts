@@ -24,6 +24,7 @@ import {
   advanceFallbackWalk,
   buildPolicyAwareFallbackChain,
   explicitRequiredCapabilities,
+  fallbackEntrySentAs,
   fallbackHopOverrides,
   gateFallbackEntry,
   INITIAL_FALLBACK_WALK,
@@ -81,11 +82,39 @@ export interface CompletionRoute {
   onHopSkipped?: (info: CompletionHopSkip) => void;
 }
 
-/** A chain entry the walk passed over without an attempt, and why. */
+/**
+ * A chain entry the walk passed over without an attempt, and why.
+ * `provider` and `model` name the entry as written; `sentAsProvider` and
+ * `sentAsModel` name the provider and model the gateway would have sent it
+ * to, the names `onFallback` (`to`) and `onHopFailure` (`providerId`) use for
+ * a hop: an Anthropic entry with no Anthropic key or base URL and
+ * `OPENROUTER_API_KEY` set is `openrouter` and `anthropic/<model>` there, a
+ * `provider:model` id its prefix's provider and the id after it, an entry
+ * with no model its provider's default.
+ */
 export interface CompletionHopSkip {
+  /** The entry's provider, as written. */
   provider: string;
+  /** The entry's model, as written (undefined for a provider's default). */
   model?: string;
   reason: FallbackSkipReason;
+  /** The provider the entry would have been sent to. */
+  sentAsProvider?: string;
+  /** The model id the entry would have been sent as. */
+  sentAsModel?: string;
+}
+
+/** The skip report for a passed-over entry: the entry as written, and as the gateway sends a hop. */
+function hopSkip(entry: { provider: string; model?: string }, reason: FallbackSkipReason): CompletionHopSkip {
+  // A fallback hop is sent on the environment's credentials (see resolve's hop loop).
+  const sentAs = fallbackEntrySentAs({ provider: entry.provider, model: entry.model });
+  return {
+    provider: entry.provider,
+    model: entry.model,
+    reason,
+    sentAsProvider: sentAs.provider,
+    ...(sentAs.model !== undefined ? { sentAsModel: sentAs.model } : {}),
+  };
 }
 
 /** One entry of the hop list a route resolves to. */
@@ -754,7 +783,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         primary,
         requiredCapabilities: explicitRequiredCapabilities({ hostPolicy: route.hostPolicy, routerParams: route.routerParams }),
         excludedModelIds: route.routerParams?.excludedModelIds,
-        onSkip: (entry, reason) => pendingSkips.push({ provider: entry.provider, model: entry.model, reason }),
+        onSkip: (entry, reason) => pendingSkips.push(hopSkip(entry, reason)),
       });
       chain = [
         { provider: primary.provider, model: primary.model, ownCredentials: primary.ownCredentials },
@@ -770,7 +799,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       if (h.entry) {
         const gate = gateFallbackEntry(walk, h.entry);
         if (!gate.run) {
-          route.onHopSkipped?.({ provider: h.provider, model: h.model, reason: gate.reason });
+          route.onHopSkipped?.(hopSkip(h, gate.reason));
           continue;
         }
         walk = gate.state;

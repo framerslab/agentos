@@ -251,6 +251,83 @@ describe('CompletionGateway.resolve: the walk', () => {
     expect(created.map((c) => `${c.providerId}/${c.modelId}`)).toEqual(['anthropic/claude-x', 'openrouter/x/allowed']);
   });
 
+  describe('an exclusion matches a rerouted Anthropic entry in every spelling of its model', () => {
+    beforeEach(() => {
+      // No Anthropic key or base URL: the credential layer sends Anthropic entries to OpenRouter.
+      vi.stubEnv('OPENROUTER_API_KEY', 'or-key');
+      vi.stubEnv('ANTHROPIC_BASE_URL', '');
+    });
+
+    async function walkExcluding(excludedModelIds: string[], fallbackProviders: Array<{ provider: string; model?: string }>) {
+      failInit.add('openai');
+      const skipped: unknown[] = [];
+      const gateway = createCompletionGateway({ routerParams: { excludedModelIds } });
+      const r = await gateway.resolve({
+        providerId: 'openai',
+        modelId: 'gpt-4o',
+        messages: [],
+        fallbackProviders,
+        onHopSkipped: (skip) => skipped.push(skip),
+      });
+      return { r, skipped };
+    }
+
+    it('skips an entry with no model, whose default the bare id or the prefixed id names', async () => {
+      for (const exclusion of [PROVIDER_DEFAULTS.anthropic!.text!, `anthropic:${PROVIDER_DEFAULTS.anthropic!.text!}`]) {
+        created.length = 0;
+        failInit.clear();
+        globalLLMProviderHealth.reset();
+        const { r, skipped } = await walkExcluding([exclusion], [{ provider: 'anthropic' }, { provider: 'openrouter', model: 'x/allowed' }]);
+        expect(r).toMatchObject({ providerId: 'openrouter', modelId: 'x/allowed', hop: 1 });
+        // The entry as written, and the provider and model it would have been sent to.
+        expect(skipped).toEqual([
+          {
+            provider: 'anthropic',
+            model: undefined,
+            reason: 'excluded_model',
+            sentAsProvider: 'openrouter',
+            sentAsModel: `anthropic/${PROVIDER_DEFAULTS.anthropic!.text!}`,
+          },
+        ]);
+        expect(created.map((c) => `${c.providerId}/${c.modelId}`)).toEqual(['openai/gpt-4o', 'openrouter/x/allowed']);
+      }
+    });
+
+    it("skips an entry whose model carries the provider's prefix, with a colon or a slash", async () => {
+      const { r, skipped } = await walkExcluding(
+        ['claude-sonnet-4-5'],
+        [
+          { provider: 'anthropic', model: 'anthropic:claude-sonnet-4-5' },
+          { provider: 'anthropic', model: 'anthropic/claude-sonnet-4-5' },
+          { provider: 'openrouter', model: 'x/allowed' },
+        ],
+      );
+      expect(r).toMatchObject({ providerId: 'openrouter', modelId: 'x/allowed', hop: 1 });
+      expect(skipped).toEqual([
+        { provider: 'anthropic', model: 'anthropic:claude-sonnet-4-5', reason: 'excluded_model', sentAsProvider: 'openrouter', sentAsModel: 'anthropic/claude-sonnet-4-5' },
+        { provider: 'anthropic', model: 'anthropic/claude-sonnet-4-5', reason: 'excluded_model', sentAsProvider: 'openrouter', sentAsModel: 'anthropic/claude-sonnet-4-5' },
+      ]);
+    });
+
+    it('runs an entry the exclusion does not name, and judges an unrerouted entry as before', async () => {
+      const kept = await walkExcluding(['claude-sonnet-4-6'], [{ provider: 'anthropic', model: 'claude-sonnet-4-5' }]);
+      expect(kept.skipped).toEqual([]);
+      expect(kept.r).toMatchObject({ hop: 1 });
+      expect(kept.r?.chain.map((h) => h.model)).toEqual(['gpt-4o', 'claude-sonnet-4-5']);
+
+      // With an Anthropic key the entry is sent to Anthropic as written, and named so.
+      vi.stubEnv('ANTHROPIC_API_KEY', 'ant-key');
+      failInit.clear();
+      globalLLMProviderHealth.reset();
+      const anthropicDefault = PROVIDER_DEFAULTS.anthropic!.text!;
+      const direct = await walkExcluding([anthropicDefault], [{ provider: 'anthropic' }, { provider: 'openrouter', model: 'x/allowed' }]);
+      expect(direct.r).toMatchObject({ providerId: 'openrouter', modelId: 'x/allowed', hop: 1 });
+      expect(direct.skipped).toEqual([
+        { provider: 'anthropic', model: undefined, reason: 'excluded_model', sentAsProvider: 'anthropic', sentAsModel: anthropicDefault },
+      ]);
+    });
+  });
+
   it("drops the policy chain's entry for the first model, and reports it only when a walk starts", async () => {
     vi.stubEnv('OPENROUTER_API_KEY', 'or-key');
     expect(LADDER.length).toBeGreaterThanOrEqual(3);
