@@ -131,6 +131,28 @@ describe('OpenAIProvider, a per-call attempt count', () => {
     expect(alone).toMatchObject({ code: 'API_SERVER_ERROR', details: { error: { message: 'boom' }, usage: { promptTokens: 150_000, completionTokens: 10, totalTokens: 150_010 } } });
   });
 
+  it('adds the usage of a Responses result marked failed and sent again to the error an answer with no output items ends with', async () => {
+    const answered = (body: unknown): Response =>
+      ({ ok: true, status: 200, statusText: 'OK', headers: new Headers(), json: () => Promise.resolve(body), body: null }) as unknown as Response;
+    const usage = { input_tokens: 150_000, output_tokens: 10, total_tokens: 150_010 };
+    const single = estimateOpenAICostUSD('gpt-5.4', { promptTokens: 150_000, completionTokens: 10 })!;
+    fetchMock
+      .mockResolvedValueOnce(answered({ id: 'resp_1', object: 'response', model: 'gpt-5.4', status: 'failed', error: { code: 'server_error', message: 'The model failed.' }, output: [], usage }))
+      .mockResolvedValueOnce(answered({ id: 'resp_2', object: 'response', model: 'gpt-5.4', status: 'completed', output: [], usage }));
+    const call = request('/responses', 'POST', 'key', { model: 'gpt-5.4' }, false, undefined, undefined, { max: 2 });
+    await vi.runAllTimersAsync();
+    const answer = await call;
+    let error: unknown;
+    try {
+      map(answer, 'gpt-5.4');
+    } catch (thrownByMap) {
+      error = thrownByMap;
+    }
+    // Both requests were billed, each at its own rate, in the provider's form a caller meters.
+    expect(error).toMatchObject({ code: 'INVALID_RESPONSE', details: { id: 'resp_2', usage: { promptTokens: 300_000, completionTokens: 20, totalTokens: 300_020 } } });
+    expect((error as { details?: { usage?: { costUSD?: number } } }).details?.usage?.costUSD).toBeCloseTo(2 * single, 10);
+  });
+
   it('a success is reported once, as ok', async () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200, statusText: 'OK', headers: new Headers(), json: () => Promise.resolve({ choices: [] }), body: null } as unknown as Response);
     const outcomes: AttemptOutcome[] = [];

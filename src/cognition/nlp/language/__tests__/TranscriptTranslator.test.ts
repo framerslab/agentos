@@ -550,6 +550,16 @@ describe('TranscriptTranslator.translateLine', () => {
       const refused = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', options).then(() => undefined, (error: unknown) => error);
       expect(refused).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED' });
       expect(posts()).toHaveLength(3);
+
+      // Sent again, an answer with no output items is refused: the refusal carries both requests' tokens.
+      globalLLMProviderHealth.reset();
+      answer(
+        failed('server_error'),
+        jsonResponse({ id: 'resp_2', object: 'response', model: RESPONSES_MODEL, status: 'completed', output: [], usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 } }),
+      );
+      const empty = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', options).then(() => undefined, (error: unknown) => error);
+      expect(empty).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED', unansweredAttempts: 1, usage: { promptTokens: 50, completionTokens: 0, totalTokens: 50 } });
+      expect(posts()).toHaveLength(5);
     } finally {
       random.mockRestore();
     }

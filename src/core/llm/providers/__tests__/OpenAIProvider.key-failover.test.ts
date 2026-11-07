@@ -204,6 +204,32 @@ describe('OpenAIProvider key failover', () => {
     }
   });
 
+  it('sends the retry of a result throttled in its body with the key whose rest ends soonest when every key is resting', async () => {
+    // The shortest backoff before the retry (500 ms), shorter than beta's rest.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const p = await provider('sk_alpha_0001,sk_beta_0002');
+      const pool = (p as unknown as { keyPool: { markFailed(key: string, kind: 'quota', detail?: { retryAfterMs?: number }): void } }).keyPool;
+      // Beta rests for a second; alpha, the only usable key, takes the request.
+      pool.markFailed('sk_beta_0002', 'quota', { retryAfterMs: 1_000 });
+      const throttled = {
+        id: 'resp_1', object: 'response', model: 'gpt-5.3-codex', status: 'failed',
+        error: { code: 'rate_limit_exceeded', message: 'Rate limit reached for gpt-5.3-codex. Please try again in 2s.' }, output: [],
+      };
+      const completed = {
+        id: 'resp_2', object: 'response', model: 'gpt-5.3-codex', status: 'completed',
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hello' }] }],
+        usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+      };
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, throttled)).mockResolvedValueOnce(jsonResponse(200, completed));
+      await p.generateCompletion('gpt-5.3-codex', [{ role: 'user', content: 'hi' }], { maxAttempts: 2 });
+      // Alpha now rests for the pool's cooldown (15 minutes), so beta, back within the second, takes the retry.
+      expect(callsOf().map(keyOf)).toEqual(['sk_alpha_0001', 'sk_beta_0002']);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
   it("reads OpenAI's insufficient_quota 429 as a billing failure, not a throttle", async () => {
     const p = await provider('sk_alpha_0001,sk_beta_0002');
     fetchMock.mockResolvedValueOnce(jsonResponse(429, insufficientQuota)).mockResolvedValueOnce(jsonResponse(200, okChat));
