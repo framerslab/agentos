@@ -137,3 +137,12 @@ test('the key probe resolves at its own subpath, as the other api modules do', a
   assert.equal(typeof probe.probeProviderKey, 'function');
   assert.deepEqual([...probe.PROBEABLE_KEY_PROVIDERS], ['anthropic', 'openai', 'gemini', 'openrouter', 'requesty']);
 });
+
+test('the per-trait personality directives resolve at the package root', async () => {
+  const root = await import('@framers/agentos');
+  assert.equal(typeof root.renderPersonalityDirectives, 'function');
+  assert.deepEqual(
+    root.renderPersonalityDirectives({ honesty: 0.95 }).map((d) => [d.trait, d.line !== null]),
+    [['honesty', true], ['emotionality', false], ['extraversion', false], ['agreeableness', false], ['conscientiousness', false], ['openness', false]],
+  );
+});
