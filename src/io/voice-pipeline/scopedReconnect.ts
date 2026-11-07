@@ -45,8 +45,9 @@ export interface ScopedReconnectOptions {
  * reconnect, then flushes the current provider session; a close of that session during the flush opens no new one,
  * and leaves the scoped session open unless the provider session reports `inputEnded`.
  * The session's `inputEnded` reports what the provider's current session reports (see `StreamingSTTSession`), and
- * stays true once the stream ended. While it is true, a frame of the current identity is dropped: it resolves
- * without reaching the provider or the replay. A close of a provider session whose `inputEnded` is true, during the
+ * stays true once the provider session's close ended the scoped session; before that close, an `error` that
+ * reconnects replaces the session, and the report is the new one's. While it is true, a frame of the current identity
+ * is dropped, after that close too: it resolves without reaching the provider or the replay. A close of a provider session whose `inputEnded` is true, during the
  * flush or after it, ends the scoped session with `close` and no new one; for a session that reports nothing, a close after the flush completed
  * still reconnects. An `error` after the flush still reconnects, a `close` that follows it while the reconnect runs
  * included, and the replay holds no dropped frame.
@@ -162,9 +163,11 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
       throw new Error('scoped audio required');
     },
     pushAudioScoped(frame: ScopedAudioFrame): Promise<void> {
-      if (closed || resetting || !matches(frame)) return Promise.reject(new Error('stale recognition frame'));
-      // A frame sent to a stream a flush ended is no input: it is dropped before its length is checked or it is kept for a replay.
-      if (current?.inputEnded === true) return Promise.resolve();
+      if (resetting || !matches(frame)) return Promise.reject(new Error('stale recognition frame'));
+      // A frame sent to a stream a flush ended is no input, after the close that ended it too: it is dropped before
+      // its length is checked or it is kept for a replay.
+      if (streamEnded || current?.inputEnded === true) return Promise.resolve();
+      if (closed) return Promise.reject(new Error('stale recognition frame'));
       const duration = ms(frame);
       if (!Number.isFinite(duration) || duration <= 0 || pendingMs + duration > options.queueCapacityMs) return Promise.reject(new Error('recognition input bound'));
       pendingMs += duration;
@@ -172,9 +175,10 @@ export async function openScopedReconnect(inner: IStreamingSTT, config: Streamin
       const owned = { ...structuredClone(frame), samples: frame.samples.slice() };
       return run(async () => {
         if (reopening) await reopening;
-        if (closed || !matches(owned)) throw new Error('stale recognition frame');
+        if (!matches(owned)) throw new Error('stale recognition frame');
         // Admitted before the flush that ended the stream completed: dropped the same way.
-        if (current.inputEnded === true) return;
+        if (streamEnded || current?.inputEnded === true) return;
+        if (closed) throw new Error('stale recognition frame');
         await current.pushAudioScoped(owned);
         history.push(owned);
         historyMs += duration;

@@ -2387,7 +2387,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
 
   /**
    * Drains only the scoped closing generation; without a call profile it does nothing. Under a call profile it follows
-   * `cancelSynthesis()` and accepts only final transcripts of the closing generation until it resolves.
+   * `cancelSynthesis()` and accepts only final transcripts of the closing generation until it resolves. It flushes the
+   * STT session; the close of one whose `inputEnded` reports that this flush ended its stream, during the drain or
+   * after it, is that end and fails nothing.
    *
    * @param signal - Aborting it rejects the drain.
    */
@@ -2878,6 +2880,8 @@ class CallPipelineRuntime extends EventEmitter implements VoicePipelineSession {
       });
       stt.on('stt:gap', (event: { lostMs: number }) => this.fan?.gap('provider', event.lostMs));
       stt.on('close', () => {
+        // The recognition drain's flush asked the stream to end: the close of a session that reports so is that end.
+        if (this.stopping && stt.inputEnded === true) return;
         if (!this.changing && this.current !== 'closed') this.fail('provider_failure', 'stt');
       });
       this.profile.vadSession.on('vad', (event: VadFrameEvent) => {
