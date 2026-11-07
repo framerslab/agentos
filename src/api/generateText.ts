@@ -2058,11 +2058,25 @@ export function fallbackEntrySentAs(
   entry: FallbackProviderEntry,
   opts: { strict?: boolean } = {},
 ): { provider: string; model?: string } {
+  return fallbackEntryRoute(entry, opts).sentAs;
+}
+
+/**
+ * {@link fallbackEntrySentAs} with the model resolution's own answer beside
+ * it: `resolvedModel` is the model id before the credential layer moves the
+ * entry (the provider's default model when the entry names none, the id with
+ * a `provider:` or `provider/` prefix split off), undefined when the model
+ * does not resolve.
+ */
+function fallbackEntryRoute(
+  entry: FallbackProviderEntry,
+  opts: { strict?: boolean },
+): { resolvedModel?: string; sentAs: { provider: string; model?: string } } {
   let parsed: { providerId: string; modelId: string };
   try {
     parsed = resolveModelOption({ provider: entry.provider, model: entry.model }, 'text');
   } catch {
-    return { provider: entry.provider, model: entry.model };
+    return { sentAs: { provider: entry.provider, model: entry.model } };
   }
   try {
     // The route resolveProvider sends the leg on, read quietly: this lookup sends nothing.
@@ -2072,20 +2086,23 @@ export function fallbackEntrySentAs(
       strict: opts.strict === true,
     });
     if (sent && typeof sent.providerId === 'string' && typeof sent.modelId === 'string') {
-      return { provider: sent.providerId, model: sent.modelId };
+      return { resolvedModel: parsed.modelId, sentAs: { provider: sent.providerId, model: sent.modelId } };
     }
   } catch {
     // No credentials: the leg fails on them, and is reported as the model resolution names it.
   }
-  return { provider: parsed.providerId, model: parsed.modelId };
+  return { resolvedModel: parsed.modelId, sentAs: { provider: parsed.providerId, model: parsed.modelId } };
 }
 
 /**
  * Resolve a call's fallback chain once, at the start of the top-level walk.
  * Policy-chain entries (`origin: 'policy-default'`) naming the failed first
  * model are dropped; every entry is checked, as the provider and model it
- * will be sent as, against the call's explicitly required capabilities and
- * excluded models (a model outside the catalog counts as capable); the
+ * will be sent as, against the call's explicitly required capabilities (a
+ * model outside the catalog counts as capable), and against the excluded
+ * models by its model as written, as the model resolution names it (the
+ * provider's default when the entry names none, a prefix split off) and as
+ * it is sent (an OpenRouter reroute's `anthropic/<model>`); the
  * uncensored group's first two remaining entries become standing legs and
  * the rest refills. Caller-written entries keep their order.
  *
@@ -2104,7 +2121,9 @@ export function resolveFallbackChain(
 ): ResolvedFallbackEntry[] {
   const required = ctx.requiredCapabilities ?? [];
   // An exclusion names a model as written or as a `provider:model` id; a leg
-  // matches by its model as written and as it is sent.
+  // matches by its model as written, as the model resolution names it and as
+  // it is sent, so a rerouted entry with no model or a prefixed one is still
+  // matched by the bare id.
   const excluded = new Set<string>();
   for (const id of ctx.excludedModelIds ?? []) {
     excluded.add(id);
@@ -2123,8 +2142,8 @@ export function resolveFallbackChain(
       ctx.onSkip?.(entry, 'failed_primary');
       continue;
     }
-    const sentAs = fallbackEntrySentAs(entry, { strict: ctx.strictCredentials });
-    if (isExcluded(entry.model) || isExcluded(sentAs.model)) {
+    const { resolvedModel, sentAs } = fallbackEntryRoute(entry, { strict: ctx.strictCredentials });
+    if (isExcluded(entry.model) || isExcluded(resolvedModel) || isExcluded(sentAs.model)) {
       ctx.onSkip?.(entry, 'excluded_model');
       continue;
     }
