@@ -489,11 +489,38 @@ describe('TranscriptTranslator.translateLine', () => {
         usage: { input_tokens: 40, output_tokens: 3, total_tokens: 43 },
       }),
     );
-    const failure = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', { ...OPTIONS, model: RESPONSES_MODEL }).catch((error: unknown) => error);
+    // One attempt: a retryable failure on the last attempt is the call's answer.
+    const failure = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', { ...OPTIONS, model: RESPONSES_MODEL, maxAttempts: 1 }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(TranslationProviderError);
     expect(failure).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED', unansweredAttempts: 0, usage: { promptTokens: 40, completionTokens: 3 } });
     const price = (usage: { promptTokens?: number; completionTokens?: number }) => (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
     expect(TranscriptTranslator.failedCallMicro(failure, 9_999, price)).toBe(43);
+  });
+
+  it('sends a Responses answer marked failed with a retryable code again while attempts remain, and one with another code never', async () => {
+    // The shortest backoff before the retry.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const failed = (code: string): Response =>
+        jsonResponse({ id: 'resp_1', object: 'response', model: RESPONSES_MODEL, status: 'failed', error: { code, message: 'The model failed.' }, output: [], usage: { input_tokens: 40, output_tokens: 0, total_tokens: 40 } });
+      const options = { ...OPTIONS, model: RESPONSES_MODEL, maxAttempts: 2, timeoutMs: 10_000 };
+      answer(
+        failed('server_error'),
+        jsonResponse({ id: 'resp_2', object: 'response', model: RESPONSES_MODEL, status: 'completed', output_text: 'Good morning.', output: [{ type: 'message', content: [{ type: 'output_text', text: 'Good morning.' }] }], usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 } }),
+      );
+      const got = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', options);
+      // The failed answer's 200 brought a body that never became the answer, so it counts as unanswered and the call
+      // is recorded at its bound.
+      expect(got).toMatchObject({ status: 'translated', text: 'Good morning.', unansweredAttempts: 1 });
+      expect(posts()).toHaveLength(2);
+
+      answer(failed('invalid_prompt'), jsonResponse(chatCompletion('unused')));
+      const refused = await new TranscriptTranslator().translateLine(line('Buenos días.'), 'en', options).then(() => undefined, (error: unknown) => error);
+      expect(refused).toMatchObject({ code: 'TRANSLATION_REQUEST_FAILED' });
+      expect(posts()).toHaveLength(3);
+    } finally {
+      random.mockRestore();
+    }
   });
 
   it('refuses a Responses answer cut off with no reason, though it holds text', async () => {
