@@ -37,6 +37,7 @@ import { generateText } from '../../generateText.js';
 import { streamText } from '../../streamText.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import { clearDefaultProvider } from '../global-default.js';
+import { PROVIDER_DEFAULTS } from '../provider-defaults.js';
 
 const PRIMARY_MODEL = 'gpt-4o-mini';
 const REROUTED = { provider: 'anthropic', model: 'claude-sonnet-4-5' };
@@ -382,5 +383,164 @@ describe('streamText reports an Anthropic entry the credential layer sends to Op
     expect(linesOf('llm.fallback_fired')).toEqual([
       expect.objectContaining({ fallbackProvider: 'anthropic', fallbackModel: REROUTED.model }),
     ]);
+  });
+});
+
+/**
+ * An exclusion names a model by its bare id or a `provider:model` id. A
+ * rerouted Anthropic entry is matched by its model as written, as the model
+ * resolution names it (the provider's default when the entry names none, the
+ * id after an `anthropic:` or `anthropic/` prefix) and as it is sent
+ * (`anthropic/<model>` on OpenRouter), so an excluded model is never sent
+ * through OpenRouter.
+ */
+describe('both walkers skip a rerouted Anthropic entry whose model an exclusion names in any spelling', () => {
+  // An entry with no model is sent as the provider's default.
+  const DEFAULT_MODEL = PROVIDER_DEFAULTS.anthropic!.text!;
+  const cases: Array<{ name: string; entry: { provider: string; model?: string }; exclusion: string; sentModel: string }> = [
+    { name: 'no model, bare exclusion', entry: { provider: 'anthropic' }, exclusion: DEFAULT_MODEL, sentModel: `anthropic/${DEFAULT_MODEL}` },
+    { name: 'no model, prefixed exclusion', entry: { provider: 'anthropic' }, exclusion: `anthropic:${DEFAULT_MODEL}`, sentModel: `anthropic/${DEFAULT_MODEL}` },
+    { name: 'colon-prefixed model', entry: { provider: 'anthropic', model: 'anthropic:claude-sonnet-4-5' }, exclusion: 'claude-sonnet-4-5', sentModel: SENT_MODEL },
+    { name: 'slash-prefixed model', entry: { provider: 'anthropic', model: 'anthropic/claude-sonnet-4-5' }, exclusion: 'claude-sonnet-4-5', sentModel: SENT_MODEL },
+  ];
+
+  for (const c of cases) {
+    it(`generateText: ${c.name}`, async () => {
+      completions({ [c.sentModel]: 'served', [RESCUE.model]: 'rescued' });
+      const result = await generateText({
+        provider: 'openai',
+        model: PRIMARY_MODEL,
+        prompt: 'hi',
+        fallbackProviders: [c.entry, RESCUE],
+        routerParams: { excludedModelIds: [c.exclusion] },
+      });
+
+      expect(result.text).toBe('rescued');
+      expect(hoisted.generateCompletion.mock.calls.map((call) => call[0])).toEqual([PRIMARY_MODEL, RESCUE.model]);
+      expect(linesOf('llm.fallback_skipped')).toEqual([
+        expect.objectContaining({ fallbackProvider: 'openrouter', fallbackModel: c.sentModel, reason: 'excluded' }),
+      ]);
+    });
+
+    it(`streamText: ${c.name}`, async () => {
+      streams({ [c.sentModel]: 'served', [RESCUE.model]: 'rescued' });
+      const r = streamText({
+        provider: 'openai',
+        model: PRIMARY_MODEL,
+        prompt: 'hi',
+        fallbackProviders: [c.entry, RESCUE],
+        routerParams: { excludedModelIds: [c.exclusion] },
+      });
+      for await (const _part of r.fullStream) { /* drain */ }
+
+      expect(await r.text).toBe('rescued');
+      expect(hoisted.generateCompletionStream.mock.calls.map((call) => call[0])).toEqual([PRIMARY_MODEL, RESCUE.model]);
+      expect(linesOf('llm.fallback_skipped')).toEqual([
+        expect.objectContaining({ fallbackProvider: 'openrouter', fallbackModel: c.sentModel, reason: 'excluded' }),
+      ]);
+    });
+  }
+
+  it('both walkers run a rerouted entry the exclusion does not name, and judge an unrerouted entry as before', async () => {
+    completions({ [SENT_MODEL]: 'served' });
+    const kept = await generateText({
+      provider: 'openai',
+      model: PRIMARY_MODEL,
+      prompt: 'hi',
+      fallbackProviders: [REROUTED],
+      routerParams: { excludedModelIds: [DEFAULT_MODEL] },
+    });
+    expect(kept.text).toBe('served');
+    expect(linesOf('llm.fallback_skipped')).toEqual([]);
+
+    globalLLMProviderHealth.reset();
+    streams({ [SENT_MODEL]: 'served' });
+    const keptStream = streamText({
+      provider: 'openai',
+      model: PRIMARY_MODEL,
+      prompt: 'hi',
+      fallbackProviders: [REROUTED],
+      routerParams: { excludedModelIds: [DEFAULT_MODEL] },
+    });
+    for await (const _part of keptStream.fullStream) { /* drain */ }
+    expect(await keptStream.text).toBe('served');
+    expect(linesOf('llm.fallback_skipped')).toEqual([]);
+
+    // With an Anthropic key the entry goes to Anthropic as written; the exclusion still skips it.
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-reroute-test');
+    hoisted.lines.length = 0;
+    globalLLMProviderHealth.reset();
+    hoisted.generateCompletion.mockClear();
+    completions({ [DEFAULT_MODEL]: 'served', [RESCUE.model]: 'rescued' });
+    const direct = await generateText({
+      provider: 'openai',
+      model: PRIMARY_MODEL,
+      prompt: 'hi',
+      fallbackProviders: [{ provider: 'anthropic' }, RESCUE],
+      routerParams: { excludedModelIds: [DEFAULT_MODEL] },
+    });
+    expect(direct.text).toBe('rescued');
+    expect(hoisted.generateCompletion.mock.calls.map((call) => call[0])).toEqual([PRIMARY_MODEL, RESCUE.model]);
+    expect(linesOf('llm.fallback_skipped')).toEqual([
+      expect.objectContaining({ fallbackProvider: 'anthropic', fallbackModel: DEFAULT_MODEL, reason: 'excluded' }),
+    ]);
+  });
+});
+
+/**
+ * A leg whose own walk serves on a later entry: the outer walk's succeeded
+ * and failed-after-output lines name the provider that served, in both
+ * walkers, as the hops and `finalProvider` do.
+ */
+describe("both walkers' outer lines name the provider a leg's own walk served on", () => {
+  const unavailable = () => status(503, 'overloaded');
+  /** The fields of the outer walk's lines: the leg's own lines name the leg's provider as their primary. */
+  const outerLines = (event: string) => linesOf(event).filter((l) => l.primaryProvider === 'openai');
+
+  it('generateText names the provider that served in the outer succeeded line', async () => {
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
+      if (modelId === PRIMARY_MODEL || modelId === SENT_MODEL) throw unavailable();
+      if (modelId === RESCUE.model) return reply(modelId, 'rescued');
+      throw new Error(`unexpected model ${modelId}`);
+    });
+    const result = await generateText({ provider: 'openai', model: PRIMARY_MODEL, prompt: 'hi', fallbackProviders: [REROUTED, RESCUE] });
+
+    expect(result.text).toBe('rescued');
+    expect(result.fallback?.finalProvider).toBe('gemini');
+    expect(outerLines('llm.fallback_succeeded')).toEqual([expect.objectContaining({ fallbackProvider: 'gemini' })]);
+  });
+
+  it('streamText names the provider that served in the outer succeeded line', async () => {
+    hoisted.generateCompletionStream.mockImplementation(async function* (modelId: string) {
+      if (modelId === PRIMARY_MODEL || modelId === SENT_MODEL) throw unavailable();
+      if (modelId === RESCUE.model) {
+        yield textChunk(modelId, 'rescued');
+        return;
+      }
+      throw new Error(`unexpected model ${modelId}`);
+    });
+    const r = streamText({ provider: 'openai', model: PRIMARY_MODEL, prompt: 'hi', fallbackProviders: [REROUTED, RESCUE] });
+    for await (const _part of r.fullStream) { /* drain */ }
+
+    expect(await r.text).toBe('rescued');
+    expect((await r.fallback)?.finalProvider).toBe('gemini');
+    expect(outerLines('llm.fallback_succeeded')).toEqual([expect.objectContaining({ fallbackProvider: 'gemini' })]);
+  });
+
+  it('streamText names the provider that failed after output in the outer failed-after-output line', async () => {
+    hoisted.generateCompletionStream.mockImplementation(async function* (modelId: string) {
+      if (modelId === PRIMARY_MODEL || modelId === SENT_MODEL) throw unavailable();
+      if (modelId === RESCUE.model) {
+        yield textChunk(modelId, 'partial ', false);
+        throw Object.assign(new Error('read ECONNRESET'), { code: 'STREAM_PARSING_ERROR' });
+      }
+      throw new Error(`unexpected model ${modelId}`);
+    });
+    const r = streamText({ provider: 'openai', model: PRIMARY_MODEL, prompt: 'hi', fallbackProviders: [REROUTED, RESCUE] });
+    for await (const _part of r.fullStream) { /* drain */ }
+
+    expect(await r.text).toBe('partial ');
+    expect(outerLines('llm.fallback_failed_after_output')).toEqual([expect.objectContaining({ fallbackProvider: 'gemini' })]);
+    expect(outerLines('llm.fallback_succeeded')).toEqual([]);
   });
 });
