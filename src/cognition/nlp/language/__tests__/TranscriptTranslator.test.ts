@@ -323,6 +323,18 @@ describe('TranscriptTranslator.translateLine', () => {
     }
   });
 
+  it('refuses a maxAttempts that is not a whole number of 1 or more, in boundMicro and before any request, never as a bound', async () => {
+    answer(jsonResponse(chatCompletion('unused')));
+    const translator = new TranscriptTranslator();
+    for (const maxAttempts of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => translator.boundMicro(line('Hola.'), 'en', { ...OPTIONS, maxAttempts })).toThrow(RangeError);
+      const refused = await translator.translateLine(line('Hola.'), 'en', { ...OPTIONS, maxAttempts }).then(() => undefined, (error: unknown) => error);
+      expect(refused).toBeInstanceOf(RangeError);
+      expect(refused).toMatchObject({ message: 'maxAttempts is a whole number, 1 or more' });
+    }
+    expect(posts()).toHaveLength(0);
+  });
+
   it("carries the tokens an earlier attempt's error status reported on a timeout's error, and records the timeout at its bound", async () => {
     // The shortest backoff before the retry (500 ms), so the second attempt is sent and hangs until the timeout.
     const random = vi.spyOn(Math, 'random').mockReturnValue(0);
