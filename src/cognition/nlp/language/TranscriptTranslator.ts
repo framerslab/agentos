@@ -72,11 +72,16 @@ export type TranslatedLine =
       source: string | null;
       text: string;
       status: 'translated';
-      /** The answer's tokens, as the provider reported them; null when it reported none, so a caller records the bound. */
+      /**
+       * The call's tokens, as the provider reported them: the answer's, and those of earlier attempts answered with an
+       * error status or with a Responses result marked failed; null when the answer reported none, so a caller records
+       * the bound.
+       */
       usage: TokenUsage | null;
       /**
        * The attempts before the answer that got no usable one: no HTTP answer (a network failure, the provider layer's
-       * own timeout), or a success status whose body was lost while it was read. Each may have been billed for a whole
+       * own timeout), or a success status whose body did not become the answer (lost while it was read, or a Responses
+       * result marked failed that was sent again, whose tokens `usage` holds). Each may have been billed for a whole
        * answer nobody saw, so a caller that records the call's cost records its bound (`boundMicro`) when this is above
        * 0 or `usage` is null, and the priced `usage` otherwise.
        */
@@ -225,14 +230,16 @@ export class TranscriptTranslator {
   /**
    * What a failed call is recorded as costing, in micro-dollars: the tokens the provider reported for an answer it billed
    * and the translator refused (`error.usage`, priced by the caller's `price`); the bound where the bill is unknown (a
-   * timeout, a network error, a caller's abort, an attempt of the call that got no usable answer, anything not a
-   * `TranslationProviderError`); nothing where the provider refused every attempt with an HTTP status and reported no
-   * tokens, since it wrote nothing. The bound covers an unanswered attempt and the answer after it together: it is a
-   * whole answer's bound for every attempt the call may make.
+   * timeout, though its error carries the tokens earlier attempts reported, a network error, a caller's abort, an
+   * attempt of the call that got no usable answer, anything not a `TranslationProviderError`); nothing where the
+   * provider refused every attempt with an HTTP status and reported no tokens, since it wrote nothing. The bound covers
+   * an unanswered attempt and the answer after it together: it is a whole answer's bound for every attempt the call may
+   * make.
    */
   static failedCallMicro(error: unknown, boundMicro: number, price: (usage: TokenUsage) => number): number {
     if (!(error instanceof TranslationProviderError)) return boundMicro;
-    if (error.unansweredAttempts > 0) return boundMicro;
+    // The attempt a timeout ended may have been billed for a whole answer nobody saw.
+    if (error.unansweredAttempts > 0 || error.code === 'TRANSLATION_TIMEOUT') return boundMicro;
     if (error.usage) return price(error.usage);
     return error.code === 'TRANSLATION_REQUEST_FAILED' && error.status !== undefined ? 0 : boundMicro;
   }
@@ -244,9 +251,9 @@ export class TranscriptTranslator {
    *
    * @throws {TranslationProviderError} `TRANSLATION_REQUEST_FAILED` (with the HTTP `status` when the provider answered,
    *   and the `usage` the provider's error reported), `TRANSLATION_TIMEOUT` past `timeoutMs`, while the provider is
-   *   still starting included, `TRANSLATION_EMPTY_OUTPUT`, `TRANSLATION_TRUNCATED` and `TRANSLATION_INCOMPLETE` (each
-   *   with the billed `usage`); each carries `unansweredAttempts`. A call ended through `abortSignal` rejects with the
-   *   signal's reason at once.
+   *   still starting included (with the `usage` earlier attempts answered with an error status reported),
+   *   `TRANSLATION_EMPTY_OUTPUT`, `TRANSLATION_TRUNCATED` and `TRANSLATION_INCOMPLETE` (each with the billed `usage`);
+   *   each carries `unansweredAttempts`. A call ended through `abortSignal` rejects with the signal's reason at once.
    */
   async translateLine(line: TranscriptLineInput, target: string, options: TranscriptTranslatorOptions): Promise<TranslatedLine> {
     options.abortSignal?.throwIfAborted();
@@ -274,13 +281,14 @@ export class TranscriptTranslator {
     // error raised on a success carries.
     const unanswered = (read: number): number => noAnswer + Math.max(0, succeeded - read);
     const controller = new AbortController();
-    // The timeout's error is made when it fires, so it carries the attempts that got no usable answer by then. The
-    // attempt it ends counts when its success status had come, since its body is lost with it; one still waiting for
-    // its status reports itself only after the abort, and is the attempt the error reports.
+    // The timeout's error is made when it fires, so it carries the attempts that got no usable answer by then and the
+    // tokens the attempts answered with an error status reported. The attempt it ends counts when its success status
+    // had come, since its body is lost with it; one still waiting for its status reports itself only after the abort,
+    // and is the attempt the error reports.
     const timer = setTimeout(
       () =>
         controller.abort(
-          new TranslationProviderError('translation timed out', options.provider, 'TRANSLATION_TIMEOUT', undefined, undefined, null, unanswered(0)),
+          new TranslationProviderError('translation timed out', options.provider, 'TRANSLATION_TIMEOUT', undefined, undefined, sumUsage(earlier, latest), unanswered(0)),
         ),
       options.timeoutMs ?? DEFAULTS.timeoutMs,
     );

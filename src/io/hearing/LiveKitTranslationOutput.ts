@@ -71,6 +71,12 @@ export class LiveKitTranslationOutput {
   private chain: Promise<unknown> = Promise.resolve();
   /** Whether `encode` is running, so a write, a send or a replay asked for from inside it waits for the line being encoded. */
   private encoding = false;
+  /**
+   * The writes, sends and replays asked for from inside `encode`, in the order they were asked for. They run as soon
+   * as the line being encoded is numbered, kept and queued, or refused, before the write of that line returns, so an
+   * operation the caller asks for after that write comes after them.
+   */
+  private readonly waiting: Array<() => void> = [];
 
   constructor(private readonly options: LiveKitTranslationOutputOptions) {
     this.topic = options.topic ?? LIVEKIT_TRANSLATION_TOPIC;
@@ -86,22 +92,38 @@ export class LiveKitTranslationOutput {
    * rejects this write too, never throwing at the caller, and the line is neither numbered nor kept. A write made from
    * inside `encode` waits for the line being encoded, so it goes out after that line with the next number, or takes
    * that line's number when the encode throws; the ledger holds finished lines alone, so a replay never sees one being
-   * encoded.
+   * encoded. What `encode` asks for is numbered and queued before the write that encodes returns, in the order it was
+   * asked for, so a write, a send or a replay the caller asks for next comes after it.
    */
   async write(line: TranslationOutputLine, to: { destinationIdentities: readonly string[] }): Promise<void> {
     const kept: TranslationOutputLine = { ...line };
     const destinationIdentities = [...to.destinationIdentities];
-    // `encode` is synchronous, so by the next microtask the line it was given is numbered, kept and queued, or refused.
-    if (this.encoding) await Promise.resolve();
+    if (this.encoding) return this.afterEncoding(() => this.writeNow(kept, destinationIdentities));
+    return this.writeNow(kept, destinationIdentities);
+  }
+
+  /**
+   * Numbers, keeps and queues the line at once, then runs what its `encode` asked for; an `encode` that throws rejects
+   * the returned promise, the line neither numbered nor kept, and what it asked for still runs.
+   */
+  private writeNow(kept: TranslationOutputLine, destinationIdentities: string[]): Promise<void> {
     const ledger = this.ledgers.get(kept.target) ?? [];
     this.ledgers.set(kept.target, ledger);
     const last = ledger[ledger.length - 1];
     const seq = (last?.seq ?? 0) + 1;
-    const written: Written = { seq, line: kept, text: this.encoded(kept, seq) };
+    let text: string;
+    try {
+      text = this.encoded(kept, seq);
+    } catch (error) {
+      this.runWaiting();
+      return Promise.reject(error);
+    }
+    const written: Written = { seq, line: kept, text };
     ledger.push(written);
     // Never to the room: LiveKit sends a stream with no destination identities to every participant.
-    if (destinationIdentities.length === 0) return;
-    return this.enqueue(() => this.sendLine(written, destinationIdentities));
+    const sent = destinationIdentities.length === 0 ? Promise.resolve() : this.enqueue(() => this.sendLine(written, destinationIdentities));
+    this.runWaiting();
+    return sent;
   }
 
   /**
@@ -109,12 +131,14 @@ export class LiveKitTranslationOutput {
    * resolves how many. Asked for from inside `encode`, it waits for the line being encoded, as a write does.
    */
   async replayAfter(afterSeq: number | null, target: string, participantIdentity: string): Promise<number> {
-    if (this.encoding) await Promise.resolve();
-    const lines = (this.ledgers.get(target) ?? []).filter((each) => afterSeq === null || each.seq > afterSeq);
-    return this.enqueue(async () => {
-      for (const each of lines) await this.sendLine(each, [participantIdentity]);
-      return lines.length;
-    });
+    const replay = (): Promise<number> => {
+      const lines = (this.ledgers.get(target) ?? []).filter((each) => afterSeq === null || each.seq > afterSeq);
+      return this.enqueue(async () => {
+        for (const each of lines) await this.sendLine(each, [participantIdentity]);
+        return lines.length;
+      });
+    };
+    return this.encoding ? this.afterEncoding(replay) : replay();
   }
 
   /**
@@ -127,12 +151,34 @@ export class LiveKitTranslationOutput {
     // Read when it is called, as the identities are, so a caller that reuses its options changes no queued send.
     const topic = to.topic ?? this.topic;
     const destinationIdentities = [...to.destinationIdentities];
-    if (this.encoding) await Promise.resolve();
-    return this.enqueue(() =>
-      this.local()
-        .sendText(text, { topic, destinationIdentities })
-        .then(() => undefined)
-    );
+    const send = (): Promise<void> =>
+      this.enqueue(() =>
+        this.local()
+          .sendText(text, { topic, destinationIdentities })
+          .then(() => undefined)
+      );
+    return this.encoding ? this.afterEncoding(send) : send();
+  }
+
+  /** Runs `operation` once the line being encoded is numbered, kept and queued, or refused; resolves as it does. */
+  private afterEncoding<T>(operation: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.waiting.push(() => {
+        try {
+          operation().then(resolve, reject);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  }
+
+  /**
+   * Runs the operations asked for from inside `encode`, oldest first. One that encodes a line runs what its own `encode`
+   * asked for through this same list, so every operation runs in the order it was asked for.
+   */
+  private runWaiting(): void {
+    for (let next = this.waiting.shift(); next; next = this.waiting.shift()) next();
   }
 
   /** The line's stream text, with `encoding` set while the option runs. */
