@@ -1395,7 +1395,9 @@ console.log(data?.title, data?.keyPoints);
 
 `agency()` appends a short JSON instruction to the prompt; for an object
 schema it names the top-level keys. It reads the reply as JSON, then from a fenced code block, then
-from the first `{ ... }` object in the text. When that fails, `generate()` and
+from the first `{ ... }` object in the text. JSON in which one object repeats a
+key does not parse, whichever of the three finds it: `JSON.parse` keeps only the
+key's last value, so the reply would lose the others. When that fails, `generate()` and
 a session's `send()` repeat the run up to `controls.maxValidationRetries`
 times (default `1`) with the previous reply quoted in the prompt; when every
 attempt fails, `parsed` is `undefined` and no error is thrown. `stream()` and

@@ -29,7 +29,7 @@ import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { moduleLogger } from '../core/logging/loggerFactory.js';
-import { errorFields, providerName } from '../core/logging/events.js';
+import { errorFields, providerName, safePath } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
@@ -754,7 +754,10 @@ export interface GenerateTextOptions {
    * primary (or a previous fallback) failed.  Useful for logging or metrics.
    *
    * @param error - The error that triggered the fallback.
-   * @param fallbackProvider - The provider identifier being tried next.
+   * @param fallbackProvider - The provider the next leg is sent to. An entry
+   *   whose model id carries another provider's prefix (`{ provider:
+   *   'anthropic', model: 'openrouter:anthropic/claude-sonnet-4.5' }`) is sent
+   *   to the provider the prefix names, so this is `'openrouter'`.
    */
   onFallback?: (error: Error, fallbackProvider: string) => void;
   /**
@@ -1110,7 +1113,13 @@ export interface FallbackSignal {
   finalProvider: string;
   /** Model that produced the returned result. */
   finalModel: string;
-  /** Ordered trail of every provider hop attempted, in order. */
+  /**
+   * Ordered trail of every provider hop attempted, in order. Each hop names
+   * the provider and model it was sent as: a fallback entry whose model id
+   * carries another provider's prefix (`{ provider: 'anthropic', model:
+   * 'openrouter:anthropic/claude-sonnet-4.5' }`) is recorded as `{ provider:
+   * 'openrouter', model: 'anthropic/claude-sonnet-4.5' }`.
+   */
   hops: Array<{ provider: string; model?: string; ok: boolean }>;
 }
 
@@ -3596,9 +3605,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 fb.model ? (legSentAs.model ?? '') : '',
               )
             : undefined;
-          fallbackLogger.warn('llm.fallback_fired', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(fb.provider), attempt, ...errorFields(lastErr) });
+          // The line, the callback and the leg's hop name the provider and
+          // model the leg is sent as, not the provider the entry says.
+          fallbackLogger.warn('llm.fallback_fired', { api: 'generateText', primaryProvider: providerName(metricProviderId), fallbackProvider: providerName(legSentAs.provider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...errorFields(lastErr) });
           // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
-          opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastErr) as Error) : lastErr, fb.provider);
+          opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastErr) as Error) : lastErr, legSentAs.provider);
           // Build a new options object targeting the fallback provider.
           const fallbackResult = await generateText({
             ...opts,
@@ -3713,7 +3724,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             throw opts.abortSignal.reason;
           }
           lastError = fbError;
-          fallbackHops.push({ provider: fb.provider, model: fb.model, ok: false });
+          fallbackHops.push({ provider: legSentAs.provider, model: legSentAs.model, ok: false });
           // The leg ran tools before it failed. A later leg would start
           // from a conversation that does not show them and run them again.
           if (toolsRanBefore(fbError)) break;

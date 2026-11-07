@@ -78,7 +78,8 @@ export const AGENTOS_EVENTS = {
   'llm.response_format_failed': { provider, type: 'word', code: 'word' },
   'llm.fallback_skipped': { ...fallback, reason: { enum: ['duplicate', 'excluded', 'capability', 'refusal', 'refill', 'unknown'] } },
   'llm.fallback_circuit_open': fallback,
-  'llm.fallback_fired': { ...fallback, type: 'word', code: 'word' },
+  // `fallbackModel` is the model id the leg is sent as, `unknown` when it is not a valid path.
+  'llm.fallback_fired': { ...fallback, fallbackModel: 'path', type: 'word', code: 'word' },
   'llm.fallback_succeeded': fallback,
   'llm.fallback_failed_after_output': fallback,
   'llm.fallback_exhausted': { api, primaryProvider: provider, attempts: 'int', type: 'word', code: 'word' },
@@ -153,6 +154,14 @@ export function valid(kind: FieldKind, value: unknown, key = ''): boolean {
  * @returns The value when it is a valid word, otherwise `'unknown'`.
  */
 export function safeWord(value: unknown): string { return valid('word', value) ? value as string : 'unknown'; }
+
+/**
+ * A value as a path, or `unknown` when it is not a valid path.
+ *
+ * @param value - The value to write, such as a model id (`anthropic/claude-sonnet-4.5`).
+ * @returns The value when it is a valid path, otherwise `'unknown'`.
+ */
+export function safePath(value: unknown): string { return valid('path', value) ? value as string : 'unknown'; }
 
 // A value read from a caught error, or undefined when reading it throws.
 function read(get: () => unknown): unknown {

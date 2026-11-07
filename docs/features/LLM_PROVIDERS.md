@@ -750,7 +750,10 @@ OpenRouter is sent with (a `setDefaultProvider()` default that names
 OpenRouter, else `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`). A fallback entry whose model id carries
 another provider's prefix (`{ provider: 'anthropic', model:
 'openrouter:anthropic/claude-sonnet-4.5' }`) is sent the format of the provider
-the prefix names. A send that goes to the agent's own provider and
+the prefix names, and `onFallback`, the `llm.fallback_fired` line (its
+`fallbackProvider` and `fallbackModel`) and the leg's hop in
+`result.fallback.hops` name that provider and the model id after the prefix
+(`openrouter`, `anthropic/claude-sonnet-4.5`). A send that goes to the agent's own provider and
 model keeps the agent's format. `streamObject()`
 sends no provider-side format on any provider: its
 schema travels in the system prompt only. All three validate the reply against
@@ -785,7 +788,11 @@ as a tool. On a streamed call the text is the input as the model wrote it
 `generateObject()`'s parse, which refuses it and asks again. A single-shot call
 (`streamCompletions: false`) receives the input already parsed by the API, which
 has kept only a repeated key's last value, and its text is that input written
-out with `JSON.stringify`.
+out with `JSON.stringify`. A call to the tool a request forces by name (a
+caller's `toolChoice: { type: 'function', function: { name } }`, as
+`StructuredOutputManager`'s `function_calling` strategy sends) keeps its
+arguments as the stream delivered them, for the same reason; every other call's
+arguments are its parsed input written out.
 A passthrough `customModelParams.tools` array replaces the schema
 tool, so it must hold a tool of the schema's name for the forced choice to go
 out; without one the schema rides the prompt. A passthrough `tool_choice` keeps

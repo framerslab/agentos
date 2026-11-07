@@ -13,6 +13,7 @@
 import type { ILogger } from '../../../core/logging/ILogger';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager';
 import type { ChatMessage } from '../../../core/llm/providers/IProvider';
+import { findDuplicateJsonKey } from '../../../core/utils/jsonDuplicateKeys.js';
 import {
   IStructuredOutputManager,
   JSONSchema,
@@ -34,6 +35,22 @@ type JSONSchemaType = 'string' | 'number' | 'integer' | 'boolean' | 'object' | '
 
 /** Token usage type for structured output results */
 type TokenUsage = { promptTokens: number; completionTokens: number; totalTokens: number };
+
+/**
+ * `JSON.parse(text)`, refusing an object that repeats a key: the parse would
+ * keep only the key's last value, and the reply would lose the others without
+ * a sign.
+ *
+ * @throws {SyntaxError} When the text is not JSON, or holds an object that repeats a key.
+ */
+function parseDistinctJson(text: string): unknown {
+  const value: unknown = JSON.parse(text);
+  const duplicate = findDuplicateJsonKey(text);
+  if (duplicate) {
+    throw new SyntaxError(`Duplicate key "${duplicate.key}" in the object at ${duplicate.path}`);
+  }
+  return value;
+}
 
 /** Convert ModelUsage to TokenUsage */
 function convertUsage(usage?: { promptTokens?: number; completionTokens?: number; totalTokens: number }): TokenUsage | undefined {
@@ -357,13 +374,17 @@ export class StructuredOutputManager implements IStructuredOutputManager {
     const parsed = this.parseJSON(rawOutput);
 
     if (parsed === null) {
+      // A reply whose object repeats a key is refused by parseJSON; the issue names the key.
+      const duplicate = findDuplicateJsonKey(rawOutput);
       return {
         success: false,
         rawOutput,
         validationErrors: [
           {
             path: '',
-            message: 'Failed to parse JSON from output',
+            message: duplicate
+              ? `Failed to parse JSON from output: the object at ${duplicate.path} repeats the key "${duplicate.key}", and JSON keeps only its last value`
+              : 'Failed to parse JSON from output',
             keyword: 'parse',
             severity: 'error',
           },
@@ -518,11 +539,24 @@ export class StructuredOutputManager implements IStructuredOutputManager {
     if (toolCalls) {
       for (const toolCall of toolCalls) {
         const fn = options.functions.find(f => f.name === toolCall.function.name);
-        const args = this.parseJSON(toolCall.function.arguments) as Record<string, unknown> || {};
+        const parsedArgs = this.parseJSON(toolCall.function.arguments);
+        const args = (parsedArgs ?? {}) as Record<string, unknown>;
 
-        // Validate arguments
+        // Validate arguments. Arguments that do not parse, or whose object
+        // repeats a key, are invalid: the handler never runs on `{}` or on
+        // the object a plain parse would keep.
         let validationErrors: ValidationIssue[] = [];
-        if (fn) {
+        const rawArgs: unknown = toolCall.function.arguments;
+        if (parsedArgs === null && typeof rawArgs === 'string' && rawArgs.trim() !== '') {
+          validationErrors = [
+            {
+              path: '',
+              message: 'Failed to parse the arguments as JSON',
+              keyword: 'parse',
+              severity: 'error',
+            },
+          ];
+        } else if (fn) {
           // Use non-strict validation for function arguments by default
           // to allow providers to add extra metadata
           validationErrors = this.validate(args, fn.parameters, false);
@@ -1069,14 +1103,16 @@ export class StructuredOutputManager implements IStructuredOutputManager {
   }
 
   /**
-   * Parses JSON string with error recovery.
+   * Parses JSON string with error recovery. Returns `null` for text in which an
+   * object repeats a key, whichever step finds the JSON: `JSON.parse` keeps only
+   * the key's last value, so the reply would lose the others without a sign.
    */
   public parseJSON(jsonString: string): unknown | null {
     if (!jsonString) return null;
 
     // Try direct parse first
     try {
-      return JSON.parse(jsonString);
+      return parseDistinctJson(jsonString);
     } catch {
       // Continue to recovery methods
     }
@@ -1089,7 +1125,7 @@ export class StructuredOutputManager implements IStructuredOutputManager {
 
     // Try parsing cleaned version
     try {
-      return JSON.parse(cleaned);
+      return parseDistinctJson(cleaned);
     } catch {
       // Continue
     }
@@ -1110,7 +1146,7 @@ export class StructuredOutputManager implements IStructuredOutputManager {
       .replace(/(\{|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
 
     try {
-      return JSON.parse(cleaned);
+      return parseDistinctJson(cleaned);
     } catch {
       this.logger?.warn?.('Failed to parse JSON after recovery attempts', {
         textLength: jsonString.length,

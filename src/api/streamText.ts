@@ -62,7 +62,7 @@ import { StreamingReconstructor } from '../core/llm/streaming/StreamingReconstru
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { recordAgentOSTurnMetrics, startAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { moduleLogger } from '../core/logging/loggerFactory.js';
-import { errorFields, providerName } from '../core/logging/events.js';
+import { errorFields, providerName, safePath } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
 
@@ -1730,7 +1730,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // (providerHealthKey), which the call below reads before it sends;
           // a failure of another key skips none of them.
           // A blank fb.baseUrl skips only this read: the call below drops it and reads its breaker before it sends.
-          const legProvider = fallbackEntrySentAs(fb).provider;
+          // The provider and model the leg is sent as: the breaker read, the
+          // fired line, the callback and the leg's hop name them, not the
+          // provider the entry says.
+          const legSentAs = fallbackEntrySentAs(fb);
+          const legProvider = legSentAs.provider;
           const legOnSharedCredentials =
             fb.apiKey === undefined && fb.baseUrl === undefined && opts.__strictCredentials !== true;
           if (legOnSharedCredentials && globalLLMProviderHealth.isOpen(legProvider)) {
@@ -1747,9 +1751,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // The run this leg reports as the one that answered, once it ended.
           let legAnswer: { provider: string; model: string } | undefined;
           try {
-            fallbackLogger.warn('llm.fallback_fired', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(fb.provider), attempt, ...errorFields(lastFallbackError) });
+            fallbackLogger.warn('llm.fallback_fired', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), ...(legSentAs.model !== undefined ? { fallbackModel: safePath(legSentAs.model) } : {}), attempt, ...errorFields(lastFallbackError) });
             // A seat's callback is handed the error through the seat's mask, as it would leave the seat.
-            opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastFallbackError) as Error) : lastFallbackError, fb.provider);
+            opts.onFallback?.(opts.__maskError ? (opts.__maskError(lastFallbackError) as Error) : lastFallbackError, legProvider);
             const fallbackResult = streamText({
               ...opts,
               provider: fb.provider,
@@ -1820,10 +1824,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // joins this stream's; a leg whose output reached the consumer
               // is the run that answered, served or not.
               const legSignal = await fallbackResult.fallback;
-              hopsTried.push(...(legSignal?.hops ?? [{ provider: fb.provider, model: fb.model, ok: false }]));
+              hopsTried.push(...(legSignal?.hops ?? [{ provider: legProvider, model: legSentAs.model, ok: false }]));
               legAnswer = {
-                provider: legSignal?.finalProvider || fb.provider,
-                model: legSignal?.finalModel || (await fallbackResult.model) || (fb.model ?? ''),
+                provider: legSignal?.finalProvider || legProvider,
+                model: legSignal?.finalModel || (await fallbackResult.model) || (legSentAs.model ?? ''),
               };
               if (legDelivered) answeredBy = legAnswer;
             }
@@ -1873,16 +1877,16 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
             if (fallbackFinishReason === 'error') {
               outcome = 'failed-after-output';
-              fallbackLogger.error('llm.fallback_failed_after_output', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(fb.provider), attempt });
+              fallbackLogger.error('llm.fallback_failed_after_output', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), attempt });
             } else {
               outcome = 'served';
-              fallbackLogger.info('llm.fallback_succeeded', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(fb.provider), attempt });
+              fallbackLogger.info('llm.fallback_succeeded', { api: 'streamText', primaryProvider: providerName(recordedProviderId), fallbackProvider: providerName(legProvider), attempt });
             }
             break;
           } catch (fbErr: any) {
             lastFallbackError = fbErr instanceof Error ? fbErr : new Error(String(fbErr));
             // A leg that failed before its stream was read has no trail of its own.
-            if (!legAnswer) hopsTried.push({ provider: fb.provider, model: fb.model, ok: false });
+            if (!legAnswer) hopsTried.push({ provider: legProvider, model: legSentAs.model, ok: false });
             if (legDelivered) {
               // Output already reached the consumer: this error ends the
               // stream and nothing is replayed.
