@@ -16,6 +16,7 @@ import type { ITool } from '../../core/tools/ITool.js';
 import type { IModelRouter, ModelRouteParams } from '../../core/llm/routing/IModelRouter.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
+import { findDuplicateJsonKey } from '../../core/utils/jsonDuplicateKeys.js';
 import { resolveModelOption, resolveProvider, createProviderManager, type ModelOption } from '../model.js';
 import { providerHealthKey } from './providerHealthKey.js';
 import { credentialsGoWith, modelNamesAnotherProvider } from './credentialOwner.js';
@@ -643,7 +644,8 @@ function stoppedAtOutputLimit(chunk: ModelCompletionResponse): boolean {
  * removed, its raw arguments become the chunk's text and nothing goes into
  * `structuredOutput`, so the step keeps its finish reason and the session
  * names the failure, and the GMI never parses or runs the cut call: arguments
- * that do not parse, and any call on a chunk that stopped at the output limit
+ * that do not parse or that repeat a key (the parse would keep only the
+ * key's last value), and any call on a chunk that stopped at the output limit
  * (`length`), whose arguments can parse though the call was cut (the limit
  * can fall just after the closing brace; Anthropic's provider gives a call
  * none of whose input arrived empty arguments, never a `{}`).
@@ -670,6 +672,9 @@ function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): M
     } catch {
       return asText();
     }
+    // A key the model repeated would keep only its last value in the parse:
+    // the call stays text, which the session's parse refuses and repairs.
+    if (findDuplicateJsonKey(args)) return asText();
   }
   return {
     ...chunk,
@@ -696,6 +701,8 @@ function liftSchemaText(chunk: ModelCompletionResponse, text: string): ModelComp
   } catch {
     return chunk;
   }
+  // As in liftSchemaToolCall: a repeated key leaves the answer as text.
+  if (findDuplicateJsonKey(text)) return chunk;
   return { ...chunk, structuredOutput } as ModelCompletionResponse & { structuredOutput: unknown };
 }
 

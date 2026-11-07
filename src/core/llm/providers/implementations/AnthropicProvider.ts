@@ -263,6 +263,12 @@ interface AnthropicContentBlock {
   id?: string;
   name?: string;
   input?: Record<string, unknown>;
+  /**
+   * The tool_use input as the stream delivered it, its `input_json_delta`
+   * chunks joined: set by {@link AnthropicProvider.accumulateMessagesStream}
+   * on the forced schema tool's call, never sent or received on the wire.
+   */
+  rawInput?: string;
   /** Present when type === 'tool_result'. */
   tool_use_id?: string;
   content?: string | Array<{ type: string; text?: string }>;
@@ -1203,7 +1209,11 @@ export class AnthropicProvider implements IProvider {
               'STREAM_INCOMPLETE',
             );
           }
-          return { type: 'tool_use', id: block.id, name: block.name, input };
+          // The forced schema tool's input is the answer, and its text is what
+          // the model wrote: a re-serialisation of the parsed input would drop
+          // every value but the last of a key the model repeated.
+          const rawInput = schemaToolName !== undefined && block.name === schemaToolName ? block.argsJson : undefined;
+          return { type: 'tool_use', id: block.id, name: block.name, input, ...(rawInput ? { rawInput } : {}) };
         }
         if (block.type === 'thinking') {
           return { type: 'thinking', thinking: block.thinking ?? '', signature: block.signature ?? '' };
@@ -2970,8 +2980,8 @@ export class AnthropicProvider implements IProvider {
     }
 
     // Schema-driven structured output: when the request forced the schema
-    // tool, the matching tool_use block is the answer. Its input becomes the
-    // message's JSON text, which keeps result.text uniform with OpenAI's
+    // tool, the matching tool_use block is the answer. Its input, as the model
+    // wrote it, becomes the message's JSON text, which keeps result.text uniform with OpenAI's
     // json_schema response for callers that read result.text directly, and
     // the block leaves the tool calls: a tool loop (generateText's) would
     // otherwise run it as a tool it does not have and ask the model again.
@@ -2996,7 +3006,12 @@ export class AnthropicProvider implements IProvider {
       const input = schemaToolBlock.input;
       const noInput =
         input !== null && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length === 0;
-      fullText = stoppedAtLimit && noInput ? '' : JSON.stringify(input);
+      // The text is the input as the model wrote it when the stream delivered
+      // it (rawInput), so a key the model repeated reaches the caller's parse,
+      // which refuses it; JSON.stringify of the parsed input would keep only
+      // the key's last value and pass. A single-shot response carries the
+      // input already parsed.
+      fullText = stoppedAtLimit && noInput ? '' : schemaToolBlock.rawInput ?? JSON.stringify(input);
     }
 
     // Collect the other tool_use blocks and convert to OpenAI-style tool_calls
