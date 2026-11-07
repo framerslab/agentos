@@ -21,10 +21,14 @@ export function statusOf(error: unknown): number | undefined {
   return undefined;
 }
 
-/** Writes one `language.translation_failed` line for a failed or empty translation. */
+/**
+ * Writes one `language.translation_failed` line for a failed translation: the request failed, the answer was empty,
+ * the call ran past the translator's own timeout (`timeout`), the answer stopped at the output cap (`truncated`), or
+ * it stopped for another reason before its end, a content filter among them (`incomplete`).
+ */
 export function logTranslationFailed(
   provider: 'openai' | 'deepl',
-  reason: 'request_failed' | 'empty_output',
+  reason: 'request_failed' | 'empty_output' | 'timeout' | 'truncated' | 'incomplete',
   status: number | undefined,
   error?: unknown,
 ): void {

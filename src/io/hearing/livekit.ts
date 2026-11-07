@@ -2,7 +2,8 @@
  * @module hearing/livekit
  *
  * LiveKit for the hearing layer and the voice pipeline: transcripts written
- * into a LiveKit room as LiveKit's own transcription text streams, a room
+ * into a LiveKit room as LiveKit's own transcription text streams, their
+ * translations written to the participants that read them, a room
  * participant's audio as `AudioFrame`s, and an `IStreamTransport` over a
  * room, which with a publisher also speaks into it. The transcription output
  * takes the host's connected `@livekit/rtc-node` `Room`, described by a
@@ -12,7 +13,7 @@
  *
  * @example
  * ```typescript
- * import { LiveKitRoomAudioSource, LiveKitTranscriptionOutput } from '@framers/agentos/io/hearing/livekit';
+ * import { LiveKitRoomAudioSource, LiveKitTranscriptionOutput, LiveKitTranslationOutput } from '@framers/agentos/io/hearing/livekit';
  * ```
  */
 
@@ -21,6 +22,13 @@ export {
   type LiveKitTranscriptionOutputOptions,
   type LiveKitTranscriptionRoomLike,
 } from './LiveKitTranscriptionOutput.js';
+export {
+  LiveKitTranslationOutput,
+  LIVEKIT_TRANSLATION_TOPIC,
+  LIVEKIT_TRANSLATION_ATTRIBUTES,
+  type LiveKitTranslationOutputOptions,
+  type TranslationOutputLine,
+} from './LiveKitTranslationOutput.js';
 export {
   LiveKitRoomAudioSource,
   loadLiveKitRtc,

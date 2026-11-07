@@ -127,6 +127,12 @@ export interface AttemptOutcome {
   status: number | null;
   /** True when it answered with a success. */
   ok: boolean;
+  /**
+   * The tokens an attempt answered with an error status reported for itself (its error body's `usage`, as the wire
+   * spells it), present only when the body reported some. A later attempt replaces that error, so a caller that settles
+   * the whole call reads them here; a success reports its usage with its result.
+   */
+  usage?: unknown;
 }
 
 /**
