@@ -319,8 +319,9 @@ export function withDistinctKeys(json: string, value: unknown): unknown {
  * Driven strictly by the validation issues: for each `invalid_type` issue
  * expecting a container whose actual value is a string that syntactically
  * starts like that container, `JSON.parse` the string in place on a clone.
- * One pass, no recursion; anything that does not parse is left untouched so
- * the caller's normal retry/feedback path still applies.
+ * One pass, no recursion; anything that does not parse, or that holds an
+ * object repeating a key, is left untouched so the caller's normal
+ * retry/feedback path still applies.
  *
  * @param value - The extracted-but-invalid candidate value.
  * @param error - The Zod error from the failed validation.
@@ -372,6 +373,9 @@ export function repairStringEncodedContainers(
     } catch {
       continue;
     }
+    // An encoded container that repeats a key would keep only the key's last
+    // value: it stays a string, and the reply fails validation as it stands.
+    if (findDuplicateJsonKey(trimmed)) continue;
     if (path.length === 0) {
       // The root itself was string-encoded.
       root = inner;
