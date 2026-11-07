@@ -2330,13 +2330,17 @@ export class OpenAIProvider implements IProvider {
       // ABOVE the finishReason computation — so it threw before the code that
       // already knew how to express it could run, hard-erroring entire builds
       // over one budget-capped turn.
+      //
+      // The body goes in `details` with `usage` in the provider's form, its own
+      // and that of the failed results sent before it, so a caller meters the
+      // billed requests as it meters any other error's `details.usage`.
       throw new OpenAIProviderError(
         `OpenAI /responses returned no usable output (status: ${apiResponse.status ?? 'unknown'})`,
         'INVALID_RESPONSE',
         undefined,
         undefined,
         undefined,
-        apiResponse as unknown as Record<string, unknown>
+        { ...(apiResponse as unknown as Record<string, unknown>), ...(usage ? { usage } : {}) }
       );
     }
 
@@ -2949,8 +2953,9 @@ export class OpenAIProvider implements IProvider {
           const failed = answer as OpenAIAPITypes.ResponsesResponse;
           if (failed.usage) retriedUsage = sumModelUsage(retriedUsage, this.mapResponsesUsage(failed.usage, failed.model ?? requestModel));
           lastError = responsesFailedError(failed, undefined);
-          // The retry of a throttled result goes out on the next usable key, when the pool has another.
-          if (pooled && failedStatus === 429 && this.keyPool!.size > 1 && this.keyPool!.usable() > 0) {
+          // The retry of a throttled result goes out with the key the pool draws next: a usable one, or, when every
+          // key is resting, the one whose rest ends soonest, the key just rested among them.
+          if (pooled && failedStatus === 429 && this.keyPool!.size > 1) {
             const nextKey = this.keyPool!.next();
             if (nextKey !== '') {
               currentKey = nextKey;
