@@ -137,3 +137,16 @@ test('the key probe resolves at its own subpath, as the other api modules do', a
   assert.equal(typeof probe.probeProviderKey, 'function');
   assert.deepEqual([...probe.PROBEABLE_KEY_PROVIDERS], ['anthropic', 'openai', 'gemini', 'openrouter', 'requesty']);
 });
+
+test('the speech module resolves at its public subpath, Deepgram pre-recorded transcription included', async () => {
+  assert.deepEqual(pkg.exports['./speech'], {
+    import: './dist/io/speech/index.js',
+    default: './dist/io/speech/index.js',
+    types: './dist/io/speech/index.d.ts',
+  });
+  const speech = await import('@framers/agentos/speech');
+  assert.equal(typeof speech.createSpeechRuntimeFromEnv, 'function');
+  assert.equal(typeof speech.DeepgramBatchSTTProvider, 'function');
+  const runtime = speech.createSpeechRuntimeFromEnv({ DEEPGRAM_API_KEY: 'dg-exports-check' });
+  assert.equal(runtime.getSTT({ preferredIds: ['deepgram-batch', 'openai-whisper'] })?.id, 'deepgram-batch');
+});
