@@ -75,6 +75,21 @@ test('a breaking marker releases whatever the type: ! in the header or a note in
   assert.deepEqual(note.decision().releasing.map((c) => c.why), ['breaking-change note']);
 });
 
+test('a revert releases, as git writes it or as a revert: header', (t) => {
+  const repo = repository(t);
+  const reverted = repo.commit('feat(memory): add the reader', { 'src/reader.ts': 'export {};\n' });
+  repo.git('tag', 'v0.1.1');
+  repo.git('revert', '--no-edit', reverted);
+  assert.match(repo.git('log', '-1', '--format=%s'), /^Revert "feat\(memory\): add the reader"$/);
+  assert.deepEqual(repo.decision().releasing.map((c) => c.why), ['revert']);
+});
+
+test('a fix to the badge script releases, since the release writes the badge the package ships', (t) => {
+  const repo = repository(t);
+  repo.commit('fix: count skipped tests in the badge', { 'scripts/update-test-badge.mjs': 'x\n' });
+  assert.equal(repo.decision().releasable, true);
+});
+
 test('a dependency fix releases through package.json or the lockfile', (t) => {
   const repo = repository(t);
   repo.commit('fix(deps): take the patched parser', { 'pnpm-lock.yaml': 'lockfileVersion: 9\n' });

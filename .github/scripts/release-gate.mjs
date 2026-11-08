@@ -15,20 +15,23 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // The files the build reads to make what ships, besides the package's own files: `build` compiles
 // src/ with tsconfig.build.json (which extends tsconfig.json) and rewrites the imports with
-// fix-esm-imports.mjs; `prepublishOnly` writes knowledge/ with build-knowledge-corpus.mjs. A
-// dependency change counts through package.json or the lockfile, so a `fix(deps)` commit releases.
+// fix-esm-imports.mjs; `prepublishOnly` writes knowledge/ with build-knowledge-corpus.mjs; the
+// release job writes .github/badges/tests.json with update-test-badge.mjs. A dependency change
+// counts through package.json or the lockfile, so a `fix(deps)` commit releases.
 export const BUILD_INPUTS = [
   'src',
   'tsconfig.json',
   'tsconfig.build.json',
   'scripts/fix-esm-imports.mjs',
   'scripts/build-knowledge-corpus.mjs',
+  'scripts/update-test-badge.mjs',
   'pnpm-lock.yaml',
 ];
 
-// The conventionalcommits preset's header pattern, and the line a breaking-change note starts
-// with (conventional-commits-parser 6: `^(?:\*\s+)?(<keywords>):\s*(.*)`, case-insensitive).
+// The conventionalcommits preset's header and revert patterns, and the line a breaking-change note
+// starts with (conventional-commits-parser 6: `^(?:\*\s+)?(<keywords>):\s*(.*)`, case-insensitive).
 const HEADER = /^(\w*)(?:\((.*)\))?(!?): (.*)$/;
+const REVERT = /^(?:Revert|revert:)\s"?([\s\S]+?)"?\s*This reverts commit (\w*)\./i;
 const DEFAULT_NOTE_KEYWORDS = ['BREAKING CHANGE', 'BREAKING-CHANGE'];
 
 const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -67,6 +70,8 @@ export function releaseReason(message, { types, noteKeywords }) {
   const [header = '', ...rest] = message.split('\n');
   const notes = new RegExp(`^(?:\\*\\s+)?(${noteKeywords.map(escape).join('|')}):\\s*`, 'i');
   if (rest.some((line) => notes.test(line))) return 'breaking-change note';
+  // git's `Revert "<header>"` message; commit-analyzer's own rules release a revert as a patch.
+  if (REVERT.test(message)) return 'revert';
   const match = HEADER.exec(header);
   if (!match) return null;
   if (match[3] === '!') return `${match[1]}!`;

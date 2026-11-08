@@ -41,7 +41,7 @@ permissions:
 jobs:
   test:
     name: Test & Lint
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' || github.ref != 'refs/heads/master'
     runs-on: ubuntu-latest
 
     # Postgres service container for the Brain.openPostgres integration tests
@@ -401,14 +401,33 @@ jobs:
 
   # A push to master: lint, the type check and the tests the push affects, against a
   # build, since some tests read dist/. vitest's --changed runs the test files that
-  # import a file the push changed, and every test when a file vitest's
-  # forceRerunTriggers names (package.json, the vitest config) changed. Tests that
-  # need Postgres or the Moonshine model skip here, as they do without their
-  # variables; the daily release's run of the whole suite runs them before it publishes.
+  # import a file the push changed, and every test when a file vitest.config.ts's
+  # forceRerunTriggers names (package.json, the vitest config, the global setup and the
+  # knowledge corpus script) changed. The Moonshine model test skips here, as it does
+  # without its folder; the daily release's run of the whole suite runs it before it
+  # publishes. A push to another branch runs the whole suite, as before.
   quick:
     name: Quick checks
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+
+    # The Postgres suites fail in CI without their database rather than skip, so an affected
+    # one runs against the same service Test & Lint starts.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: ci_test_password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      AGENTOS_TEST_POSTGRES_URL: postgresql://postgres:ci_test_password@localhost:5432/postgres
+
     steps:
       - uses: actions/checkout@v5
         with:
@@ -454,7 +473,7 @@ jobs:
 
   browser:
     name: Browser tests
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' || github.ref != 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -483,7 +502,7 @@ jobs:
   # failure-gating too (44-red burn-down completed 2026-07-20).
   batch1-tests:
     name: Batch-1 gated tests
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' || github.ref != 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -525,7 +544,7 @@ jobs:
   # the last release tag, fed the way the Release workflow feeds them.
   release-dry-run:
     name: Release dry run
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' || github.ref != 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: read
