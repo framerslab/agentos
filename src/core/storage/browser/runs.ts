@@ -9,7 +9,8 @@
  * and the page's `pagehide`, `visibilitychange`, `online` and `offline` events, listened to where the page has them.
  *
  * The record is fourteen fields (`RunRecord`) and `isRunRecord` refuses any other, so what a run keeps on the device
- * is its counts, its state and the caller's checked description of what was chosen, never a file, a text or a title.
+ * is its counts, its state and the caller's checked description of what was chosen, never a file's contents; its
+ * strings (`kind`, `way`, a failed item's name, what `isChosen` lets `chosen` hold) are the caller's to keep plain.
  * It is written before the job's first content write and then at most once every `writeEvery` while the counts change,
  * at once when the page is hidden away and at the run's end; every write after the first changes a record that exists
  * and never makes one, so a write in flight after a removal cannot bring the record back.
@@ -205,15 +206,18 @@ function holdsOnly(value: Record<string, unknown>, allowed: readonly string[], r
   return Object.keys(value).every((key) => allowed.includes(key)) && required.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 }
 
+/** True for a finite count of zero or more. */
 function isCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+/** True for the five counts and no other field. */
 function isCounts(value: unknown): value is RunCounts {
   if (!isPlain(value) || !holdsOnly(value, COUNT_FIELDS, COUNT_FIELDS)) return false;
   return (value.total === null || isCount(value.total)) && isCount(value.pending) && isCount(value.applied) && isCount(value.skipped) && isCount(value.failed);
 }
 
+/** True for an item of an index and a state, with a name on a failed item alone. */
 function isItem(value: unknown): boolean {
   if (!isPlain(value) || !holdsOnly(value, ITEM_FIELDS, ['index', 'state'])) return false;
   if (!isCount(value.index) || !Number.isInteger(value.index) || !ITEM_STATES.includes(value.state as RunItemState)) return false;
@@ -255,6 +259,7 @@ function isRunMessage(value: unknown): value is RunMessage {
   );
 }
 
+/** A copy of a record, its counts and items copied too. */
 function copyRecord(record: RunRecord): RunRecord {
   return { ...record, counts: { ...record.counts }, items: record.items.map((item) => ({ ...item })) };
 }
@@ -266,6 +271,7 @@ function later(work: () => void, ms: number): Timer {
   return timer;
 }
 
+/** An interval that never keeps a Node process alive. */
 function every(work: () => void, ms: number): Interval {
   const timer = setInterval(work, ms);
   (timer as unknown as { unref?: () => void }).unref?.();
@@ -303,6 +309,7 @@ interface LockManagerLike {
 /** The page's own names, for a page with no Web Locks: one set for every owner of the page. */
 let namesOfThisPage: RunLocks | null = null;
 
+/** The page's own run names, made once and shared by every owner of the page. */
 function pageNames(): RunLocks {
   if (namesOfThisPage) return namesOfThisPage;
   const held = new Set<string>();
@@ -438,6 +445,7 @@ interface PageScope {
   };
 }
 
+/** The page's globals, read structurally. */
 function page(): PageScope {
   return globalThis as unknown as PageScope;
 }
@@ -537,6 +545,7 @@ class BrowserRunOwner implements RunOwner {
     if (page().document?.visibilityState === 'hidden') this.flush();
   };
 
+  /** Opens the channel and the page's listeners; with no channel, the records are read once a second from now on. */
   constructor(options: RunOwnerOptions) {
     this.store = options.store;
     this.keyPrefix = options.keyPrefix;
@@ -558,10 +567,12 @@ class BrowserRunOwner implements RunOwner {
     this.ensureTimers();
   }
 
+  /** Takes the job's lock, writes its record and runs it; refused at once while the job's lock is held anywhere. */
   start(job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }> {
     return this.begin(job, {});
   }
 
+  /** Marks the run stopping, writes and tells it at once, and aborts its signal: the job ends after the item in hand. */
   stop(id: string): void {
     const held = this.held.get(id);
     if (!held || held.ended !== null || held.controller.signal.aborted) return;
@@ -573,6 +584,7 @@ class BrowserRunOwner implements RunOwner {
     held.controller.abort();
   }
 
+  /** The next attempt of a stopped or failed run, its lock handed over when the job is the same; the earlier attempt's record goes. */
   async continueRun(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }> {
     const old = this.held.get(id);
     if (old && old.ended === null) await old.done;
@@ -588,12 +600,14 @@ class BrowserRunOwner implements RunOwner {
     return started;
   }
 
+  /** A cut run's rest under its own id, from the record as read (a run this owner holds goes to `continueRun`). */
   async finish(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }> {
     if (this.held.has(id)) return this.continueRun(id, job);
     const resume = this.seen.get(id)?.read.record ?? (await this.readOne(id));
     return this.begin(job, resume ? { resume } : {});
   }
 
+  /** Deletes the record and drops the run; another tab's record only while its lock can be held here. */
   async dismiss(id: string): Promise<{ ok: true } | { refused: 'another-tab' }> {
     const held = this.held.get(id);
     if (held) {
@@ -629,11 +643,13 @@ class BrowserRunOwner implements RunOwner {
     return { ok: true };
   }
 
+  /** Stops drawing a run in this page alone. */
   hide(id: string): void {
     this.hidden.add(id);
     this.touch();
   }
 
+  /** The end was drawn: the record goes and the lock is let go, unless the run is an unsaved export. */
   async shown(id: string): Promise<void> {
     const held = this.held.get(id);
     if (held) {
@@ -651,6 +667,7 @@ class BrowserRunOwner implements RunOwner {
     this.touch();
   }
 
+  /** An unsaved export was saved: its record goes and its lock is let go. */
   async saved(id: string): Promise<void> {
     const held = this.held.get(id);
     if (!held || held.ended !== 'unsaved' || held.release === null) return;
@@ -661,6 +678,7 @@ class BrowserRunOwner implements RunOwner {
     this.touch();
   }
 
+  /** Logs the stop for the starts still waiting for their locks, then stops everything of the account. */
   async stopAccount(cut: AccountStop): Promise<void> {
     this.stopCuts.push(cut);
     this.runningStops.push(cut);
@@ -671,6 +689,7 @@ class BrowserRunOwner implements RunOwner {
     }
   }
 
+  /** The records fenced under their locks, this owner's runs stopped, the other tabs told, and their locks awaited. */
   private async stopEverything(cut: AccountStop): Promise<void> {
     const names = new Set<string>();
     let keys: string[] = [];
@@ -711,6 +730,7 @@ class BrowserRunOwner implements RunOwner {
     this.touch();
   }
 
+  /** Reads every record of the account under the prefix, with the runs this owner holds. */
   async records(): Promise<RunRead[]> {
     const before = this.seenSignature();
     const reads: RunRead[] = [];
@@ -766,6 +786,7 @@ class BrowserRunOwner implements RunOwner {
     return parts.join('|');
   }
 
+  /** The runs as drawn, newest first; the same object until something changes. */
   snapshot(): RunsSnapshot {
     if (this.cached) return this.cached;
     const runs: RunsSnapshot['runs'] = [];
@@ -778,6 +799,7 @@ class BrowserRunOwner implements RunOwner {
     return this.cached;
   }
 
+  /** Called when the snapshot changes, at most four times a second. */
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -785,6 +807,7 @@ class BrowserRunOwner implements RunOwner {
     };
   }
 
+  /** Called once at each end of a run this owner holds or watches, and at no count. */
   subscribeEnds(listener: (read: RunRead, ended: Ended) => void): () => void {
     this.endListeners.add(listener);
     return () => {
@@ -792,15 +815,18 @@ class BrowserRunOwner implements RunOwner {
     };
   }
 
+  /** Each run's end, once every run this owner started has returned. */
   async whenIdle(): Promise<Map<string, RunEnd>> {
     for (let pending = [...this.running]; pending.length > 0; pending = [...this.running]) await Promise.all(pending);
     return new Map<string, RunEnd>([...this.ends].map(([id, end]): [string, RunEnd] => [id, { ended: end.ended, counts: { ...end.counts } }]));
   }
 
+  /** Sends every live run's message now. */
   beat(): void {
     for (const held of this.held.values()) if (this.beats(held)) this.post(held);
   }
 
+  /** Stops the timers, the listeners and the channel; a held run goes on to its end. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -897,15 +923,18 @@ class BrowserRunOwner implements RunOwner {
     return { id };
   }
 
+  /** Holds the run lock of a job's key, or answers null at once when it is held. */
   private async hold(key: string): Promise<(() => void) | null> {
     const grant = await this.runLocks.hold(this.runName(key));
     return grant ? () => grant.release() : null;
   }
 
+  /** The run lock's name for a job's key in this account. */
   private runName(key: string): string {
     return runLockName(this.lockPrefix, this.account, key);
   }
 
+  /** Whether no tab holds the run lock of a job's key; a lock that cannot be read counts as free. */
   private async lockFree(key: string): Promise<boolean> {
     try {
       return await this.runLocks.free(this.runName(key));
@@ -935,6 +964,7 @@ class BrowserRunOwner implements RunOwner {
     return done;
   }
 
+  /** What the job is handed. */
   private contextFor(held: Held): RunContext {
     return {
       id: held.record.id,
@@ -1027,12 +1057,14 @@ class BrowserRunOwner implements RunOwner {
     this.markUnavailable();
   }
 
+  /** Notes that the store refused something, once. */
   private markUnavailable(): void {
     if (this.unavailable) return;
     this.unavailable = true;
     this.touch();
   }
 
+  /** Whether the account's stop, a dismissal or the run's own cut fences its writes. */
   private isFenced(held: Held): boolean {
     return held.stopCut !== null || held.dropped || held.cutSelf !== null;
   }
@@ -1083,6 +1115,7 @@ class BrowserRunOwner implements RunOwner {
     return { fenced: true as const };
   }
 
+  /** Pauses a run while the page is offline, written and told at once, until it is back online or the run is aborted. */
   private async waitOnline(held: Held): Promise<void> {
     const online = this.online;
     const signal = held.controller.signal;
@@ -1115,6 +1148,7 @@ class BrowserRunOwner implements RunOwner {
     }
   }
 
+  /** Marks the run's record cut by the session's end with its counts, then aborts the run. */
   private async cutRun(held: Held, reason: 'session'): Promise<void> {
     if (held.ended !== null || held.cutSelf !== null) return;
     held.cutSelf = reason;
@@ -1148,6 +1182,7 @@ class BrowserRunOwner implements RunOwner {
     });
   }
 
+  /** Deletes a record under its lock. */
   private deleteRecord(id: string): Promise<void> {
     const key = this.keyPrefix + id;
     return this.locks.request(this.lockName(key), () => this.store.delete(key)).catch(() => undefined);
@@ -1200,6 +1235,7 @@ class BrowserRunOwner implements RunOwner {
     if (this.held.get(held.record.id) === held) this.held.delete(held.record.id);
   }
 
+  /** Stops a run's paced write and its pending message. */
   private clearTimers(held: Held): void {
     if (held.paceTimer !== null) clearTimeout(held.paceTimer);
     if (held.postTimer !== null) clearTimeout(held.postTimer);
@@ -1229,10 +1265,12 @@ class BrowserRunOwner implements RunOwner {
     this.touch();
   }
 
+  /** A run this owner holds, as read. */
   private heldRead(held: Held): RunRead {
     return { record: copyRecord(held.record), status: 'held', cut: held.record.cut };
   }
 
+  /** The account's record of an id, or null when there is none or it fails its check. */
   private async readOne(id: string): Promise<RunRecord | null> {
     try {
       const value = await this.store.get<unknown>(this.keyPrefix + id);
@@ -1250,6 +1288,7 @@ class BrowserRunOwner implements RunOwner {
     return { record: copy, status: 'failed', cut: record.cut };
   }
 
+  /** Keeps a run this owner does not hold, as read. */
   private see(read: RunRead): Seen {
     const id = read.record.id;
     const before = this.seen.get(id);
@@ -1266,6 +1305,7 @@ class BrowserRunOwner implements RunOwner {
     return seen;
   }
 
+  /** A message from another tab of the account. */
   private hear(message: RunMessage): void {
     if (this.closed || !isRunMessage(message) || message.account !== this.account) return;
     if ('stop' in message) {
@@ -1303,6 +1343,7 @@ class BrowserRunOwner implements RunOwner {
     this.touch();
   }
 
+  /** A watched run's counts and state from its holder's message. */
   private apply(seen: Seen, message: Progress): void {
     const record = seen.read.record;
     seen.read = { record: { ...record, counts: { ...message.counts }, state: message.state, phase: message.phase, progressed: message.at }, status: 'watched', cut: record.cut };
@@ -1347,10 +1388,12 @@ class BrowserRunOwner implements RunOwner {
     }
   }
 
+  /** Whether a held run is live and sends a beat. */
   private beats(held: Held): boolean {
     return held.release !== null && (held.ended === null || held.ended === 'unsaved') && LIVE.includes(held.record.state);
   }
 
+  /** Starts or stops the beat and the reads of other tabs' runs as the runs need them. */
   private ensureTimers(): void {
     const beating = !this.closed && [...this.held.values()].some((held) => this.beats(held));
     if (beating && this.beatTimer === null) this.beatTimer = every(() => this.beat(), this.beatEvery);
@@ -1367,6 +1410,7 @@ class BrowserRunOwner implements RunOwner {
     }
   }
 
+  /** Sends a held run's message now. */
   private post(held: Held): void {
     held.lastPost = Date.now();
     if (held.postTimer !== null) clearTimeout(held.postTimer);
@@ -1384,6 +1428,7 @@ class BrowserRunOwner implements RunOwner {
     }
   }
 
+  /** Sends a held run's message now, or once the quarter second since the last one has passed. */
   private schedulePost(held: Held): void {
     if (this.channel === null || held.postTimer !== null) return;
     const since = Date.now() - held.lastPost;
@@ -1397,6 +1442,7 @@ class BrowserRunOwner implements RunOwner {
     }, NOTICE_EVERY - since);
   }
 
+  /** Counts an end and calls `subscribeEnds`' listeners. */
   private fire(read: RunRead, ended: Ended): void {
     if (ended === 'fenced') return;
     if (ended === 'unsaved' || (ended === 'finished' && read.record.counts.failed === 0)) this.endedCounts.finished += 1;
@@ -1411,11 +1457,13 @@ class BrowserRunOwner implements RunOwner {
     }
   }
 
+  /** Something changed: the snapshot is built again and the listeners hear of it. */
   private touch(): void {
     this.cached = null;
     this.notice();
   }
 
+  /** Calls the listeners now, or once the quarter second since the last notice has passed. */
   private notice(): void {
     if (this.listeners.size === 0) return;
     if (this.noticeTimer !== null) {
