@@ -780,7 +780,11 @@ Anthropic or rerouted to OpenRouter, and `claude-haiku-4-5` skips
 does not skip an entry sent to Anthropic's own API. This holds in
 `generateText()`, `streamText()` and the completion gateway, which all send a
 fallback entry with its own `apiKey` and `baseUrl` when it has them (else the
-environment's) and judge it on the route those give.
+environment's) and judge it on the route those give. An entry with its own key
+or base URL whose model prefix names another provider (`provider: 'anthropic'`,
+`model: 'openrouter:anthropic/claude-sonnet-4-5'`) is refused in all three, so
+its credentials never go to the provider the prefix names, and the walk moves
+to the next entry.
 When a leg's own walk serves on a later entry, the outer
 `llm.fallback_succeeded` and `llm.fallback_failed_after_output` lines name the
 provider that served, in both walkers. The completion gateway's

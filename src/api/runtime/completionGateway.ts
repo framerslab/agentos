@@ -814,18 +814,23 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       let servingProviderId: string | undefined;
       let healthId: string | undefined;
       try {
-        const parsed = hop === 0 && h.model ? { providerId: h.provider, modelId: h.model } : resolveModelOption({ provider: h.provider, model: h.model }, 'text');
         // The route's own credentials go to the primary only when they are for
         // its provider (a router may have picked another). A fallback hop goes
         // with its entry's own key and base URL, as generateText and streamText
         // send a leg and as resolveFallbackChain judged it, else on the
         // environment's.
         const routeCredentials = hop === 0 && h.ownCredentials !== false;
-        const credentials = routeCredentials
-          ? { apiKey: route.apiKey, baseUrl: route.baseUrl }
-          : h.entry
-            ? { apiKey: h.entry.apiKey, baseUrl: h.entry.baseUrl }
-            : undefined;
+        const entryCredentials = !routeCredentials && h.entry ? { apiKey: h.entry.apiKey, baseUrl: h.entry.baseUrl } : undefined;
+        const credentials = routeCredentials ? { apiKey: route.apiKey, baseUrl: route.baseUrl } : entryCredentials;
+        // The model resolution sees the entry's credentials, so an entry whose
+        // model prefix names another provider (`provider: 'anthropic'`,
+        // `model: 'openrouter:...'`, an Anthropic key) is refused, as the
+        // walkers refuse that leg, instead of sending its key to the provider
+        // the prefix names; the hop cannot start and the walk goes on.
+        const parsed =
+          hop === 0 && h.model
+            ? { providerId: h.provider, modelId: h.model }
+            : resolveModelOption({ provider: h.provider, model: h.model, ...entryCredentials }, 'text');
         const resolved = credentials
           ? resolveProvider(parsed.providerId, parsed.modelId, credentials)
           : resolveProvider(parsed.providerId, parsed.modelId);
