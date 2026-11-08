@@ -763,11 +763,24 @@ in `onFallback`, the `llm.fallback_fired`, `llm.fallback_succeeded` and
 OpenRouter's, its capability check judges `anthropic/claude-sonnet-4-5`, and
 an `llm.fallback_skipped` line names the provider and model
 (`fallbackProvider`, `fallbackModel`) the entry would have been sent as. An
-excluded model (`routerParams.excludedModelIds`, a bare id or a
-`provider:model` id) skips every entry that names it as written, as the model
-resolves (the provider's default for an entry with no model, the id after an
-`anthropic:` or `anthropic/` prefix) or as it is sent (`anthropic/<model>` on
-OpenRouter), in `generateText()`, `streamText()` and the completion gateway.
+excluded model (`routerParams.excludedModelIds`: a bare id, a
+`provider:model` id, or a `provider/model` id whose prefix is a provider
+agentos knows, read as that provider's model) skips every entry that names it
+as written, as the model resolves (the provider's default for an entry with no
+model, the id after a `provider:` or `provider/` prefix) or as it is sent; on
+a gateway that names models `vendor/model` (OpenRouter, Requesty) the sent id
+is also read after the vendor, and every id also without a `-YYYYMMDD` release
+date. So `claude-sonnet-4-6` and `anthropic:claude-sonnet-4-6` skip
+`{ provider: 'openrouter', model: 'anthropic/claude-sonnet-4-6' }`, `gpt-4o`
+skips `{ provider: 'openrouter' }` (sent as `openai/gpt-4o`),
+`anthropic/claude-sonnet-4-6` skips an Anthropic entry whether it is sent to
+Anthropic or rerouted to OpenRouter, and `claude-haiku-4-5` skips
+`claude-haiku-4-5-20251001` either way, while
+`openrouter:anthropic/claude-sonnet-4-5` names OpenRouter's slug only and
+does not skip an entry sent to Anthropic's own API. This holds in
+`generateText()`, `streamText()` and the completion gateway, which all send a
+fallback entry with its own `apiKey` and `baseUrl` when it has them (else the
+environment's) and judge it on the route those give.
 When a leg's own walk serves on a later entry, the outer
 `llm.fallback_succeeded` and `llm.fallback_failed_after_output` lines name the
 provider that served, in both walkers. The completion gateway's

@@ -134,8 +134,8 @@ describe('resolveFallbackChain', () => {
         { provider: 'openrouter', model: `openrouter:${MAGNUM}` },
         { provider: 'openrouter', model: MAGNUM },
         { provider: 'openrouter', model: `openrouter:${HERMES}` },
-        // Sent as `gpt-5.6-sol` (the prefix repeats the provider): only the
-        // written form matches this exclusion.
+        // Sent as `gpt-5.6-sol` (the prefix repeats the provider): the
+        // exclusion matches it as written and after its known `openai/` prefix.
         { provider: 'openai', model: 'openai/gpt-5.6-sol' },
         { provider: 'openrouter', model: LLAMA },
       ],

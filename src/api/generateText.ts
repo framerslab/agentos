@@ -13,6 +13,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { resolveModelOption, resolveProvider, resolveProviderRoute, createProviderManager, knownProviderPrefixOf } from './model.js';
+import { PROVIDER_DEFAULTS } from './runtime/provider-defaults.js';
 import { providerHealthKey } from './runtime/providerHealthKey.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource } from './observers.js';
@@ -2103,16 +2104,76 @@ function fallbackEntryRoute(
   return { resolvedModel: parsed.modelId, sentAs: { provider: parsed.providerId, model: parsed.modelId } };
 }
 
+/** Gateways that name a vendor's model `vendor/model`, as OpenRouter names Claude `anthropic/claude-sonnet-4-6`. */
+const VENDOR_SLUG_GATEWAYS: ReadonlySet<string> = new Set(['openrouter', 'requesty']);
+
+/** A snapshot's release-date suffix (Anthropic's `-20251001`), which OpenRouter's slugs drop. */
+const RELEASE_DATE_SUFFIX = /-\d{8}$/;
+
+/**
+ * The spellings an exclusion names a model by: the id as written, the id
+ * after a known `provider:` prefix, and the id after a known `provider/`
+ * prefix, the way {@link resolveModelOption} reads `anthropic/claude-sonnet-4-6`
+ * with no provider as Anthropic's `claude-sonnet-4-6`. A colon id keeps its
+ * slash, as the model resolution keeps it, so `openrouter:anthropic/<model>`
+ * names OpenRouter's slug and not Anthropic's own API.
+ */
+function exclusionSpellings(id: string): string[] {
+  const spellings = [id];
+  const colonPrefix = knownProviderPrefixOf(id);
+  if (colonPrefix) {
+    spellings.push(id.slice(colonPrefix.length + 1));
+    return spellings;
+  }
+  const slash = id.includes(':') ? -1 : id.indexOf('/');
+  if (slash > 0 && Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, id.slice(0, slash))) {
+    spellings.push(id.slice(slash + 1));
+  }
+  return spellings;
+}
+
+/**
+ * The ids a fallback leg is matched against an exclusion by: its model as
+ * written, as the model resolution names it, and as it is sent; on a gateway
+ * that names models `vendor/model`, the sent id after the vendor; and each of
+ * those without a `-YYYYMMDD` release date. So a leg sent to OpenRouter as
+ * `anthropic/claude-haiku-4-5` is matched by `claude-haiku-4-5` however its
+ * entry is written, and an entry's verdict does not change with the key that
+ * decides where it is sent.
+ */
+function legMatchIds(
+  entry: FallbackProviderEntry,
+  resolvedModel: string | undefined,
+  sentAs: { provider: string; model?: string },
+): Set<string> {
+  const ids = new Set<string>();
+  const add = (id: string | undefined): void => {
+    if (!id) return;
+    ids.add(id);
+    const dateless = id.replace(RELEASE_DATE_SUFFIX, '');
+    if (dateless !== id) ids.add(dateless);
+  };
+  add(entry.model);
+  add(resolvedModel);
+  add(sentAs.model);
+  const slash = sentAs.model?.indexOf('/') ?? -1;
+  if (VENDOR_SLUG_GATEWAYS.has(sentAs.provider) && slash > 0) add(sentAs.model!.slice(slash + 1));
+  return ids;
+}
+
 /**
  * Resolve a call's fallback chain once, at the start of the top-level walk.
  * Policy-chain entries (`origin: 'policy-default'`) naming the failed first
  * model are dropped; every entry is checked, as the provider and model it
  * will be sent as, against the call's explicitly required capabilities (a
  * model outside the catalog counts as capable), and against the excluded
- * models by its model as written, as the model resolution names it (the
- * provider's default when the entry names none, a prefix split off) and as
- * it is sent (an OpenRouter reroute's `anthropic/<model>`); the
- * uncensored group's first two remaining entries become standing legs and
+ * models: an exclusion (a bare id, a `provider:model` id or a
+ * `provider/model` id with a known provider) skips an entry whose model as
+ * written, as the model resolution names it (the provider's default when the
+ * entry names none, a prefix split off) or as it is sent names it, a
+ * gateway's `vendor/model` id read also as the model after the vendor, and
+ * every id also without a `-YYYYMMDD` release date (see {@link legMatchIds});
+ * the uncensored group's first two remaining entries become standing legs and
  * the rest refills. Caller-written entries keep their order.
  *
  * @internal
@@ -2129,17 +2190,11 @@ export function resolveFallbackChain(
   },
 ): ResolvedFallbackEntry[] {
   const required = ctx.requiredCapabilities ?? [];
-  // An exclusion names a model as written or as a `provider:model` id; a leg
-  // matches by its model as written, as the model resolution names it and as
-  // it is sent, so a rerouted entry with no model or a prefixed one is still
-  // matched by the bare id.
   const excluded = new Set<string>();
   for (const id of ctx.excludedModelIds ?? []) {
-    excluded.add(id);
-    const prefix = knownProviderPrefixOf(id);
-    if (prefix) excluded.add(id.slice(prefix.length + 1));
+    for (const spelling of exclusionSpellings(id)) excluded.add(spelling);
   }
-  const isExcluded = (model: string | undefined): boolean => model !== undefined && excluded.has(model);
+  const isExcluded = (ids: Set<string>): boolean => [...ids].some((id) => excluded.has(id));
   const resolved: ResolvedFallbackEntry[] = [];
   let uncensoredLegs = 0;
   for (const entry of chain) {
@@ -2152,7 +2207,7 @@ export function resolveFallbackChain(
       continue;
     }
     const { resolvedModel, sentAs } = fallbackEntryRoute(entry, { strict: ctx.strictCredentials });
-    if (isExcluded(entry.model) || isExcluded(resolvedModel) || isExcluded(sentAs.model)) {
+    if (excluded.size > 0 && isExcluded(legMatchIds(entry, resolvedModel, sentAs))) {
       ctx.onSkip?.(entry, 'excluded_model');
       continue;
     }
