@@ -615,13 +615,20 @@ describe('the run owner', () => {
     const store = new MemoryKeyValueStore();
     await store.set('lib/j/r4', { id: 'r4', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
     const locks = memoryLocks();
+    const asked = deferred();
     const late = deferred();
-    const lagging: RunLocks = { ...locks, free: async (name) => { const answer = await locks.free(name); await late.promise; return answer; } };
+    // The dismissing owner reads (or takes) the run's lock, then waits while the other owner tries to finish the run.
+    const lagging: RunLocks = {
+      ...locks,
+      free: async (name) => { const answer = await locks.free(name); asked.resolve(); await late.promise; return answer; },
+      hold: async (name) => { const grant = await locks.hold(name); asked.resolve(); await late.promise; return grant; },
+    };
     const a = owner(store, lagging, bus());
     const b = owner(store, locks, bus());
     await b.records();
     const blocked = deferred();
     const dismissing = a.dismiss('r4');
+    await asked.promise;
     const finished = await b.finish('r4', countingJob(1, [() => blocked.promise]));
     late.resolve();
     const dismissed = await dismissing;
