@@ -25,7 +25,7 @@ import {
 import { addModelUsage, extractTextFromContent, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
 import { normalizeStreamFinishReason, type StreamTextResult } from '../streamText.js';
 import { ObjectGenerationError } from '../generateObject.js';
-import { parseJsonWithDistinctKeys } from './structuredReply.js';
+import { dropNullsForOptionalFields, parseJsonWithDistinctKeys } from './structuredReply.js';
 import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource, type LlmUsageEvent } from '../observers.js';
 import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
@@ -581,7 +581,8 @@ function parseStructured(folder: GmiTurnFolder, schema: ZodType, maxTokens?: num
       );
     }
   }
-  const safe = schema.safeParse(raw);
+  // A strict json_schema payload makes every optional property nullable: a `null` there means absent.
+  const safe = schema.safeParse(dropNullsForOptionalFields(raw, schema));
   if (cutOff) {
     throw new ObjectGenerationError(
       safe.success
