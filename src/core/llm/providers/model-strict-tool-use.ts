@@ -191,7 +191,7 @@ export function jsonOutputSchemaSupported(objectSchema: unknown, otherStrictSche
  * together: at most {@link STRICT_MAX_UNION_TYPED_PARAMETERS} union-typed and
  * {@link STRICT_MAX_OPTIONAL_PARAMETERS} optional parameters, summed.
  */
-function strictSchemasWithinLimits(schemas: readonly unknown[]): boolean {
+export function strictSchemasWithinLimits(schemas: readonly unknown[]): boolean {
   const counts = { unionTyped: 0, optional: 0 };
   for (const schema of schemas) countStrictParameters(schema, 0, counts);
   return counts.unionTyped <= STRICT_MAX_UNION_TYPED_PARAMETERS && counts.optional <= STRICT_MAX_OPTIONAL_PARAMETERS;
