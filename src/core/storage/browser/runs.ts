@@ -21,9 +21,10 @@
  *
  * Every content write of a job goes through `context.write(work)`, which takes the record's own lock, reads the
  * record and runs `work` inside that lock only when the record exists and carries no cut mark: the write gate. The
- * account's stop (`stopAccount`) deletes or marks every record under the same lock first, so a removal or a sign-out
- * lands before a write, which is then refused, or after it, never between the check and the write; then it stops the
- * account's runs here and, through the channel, in every other tab, and waits for their locks.
+ * account's stop (`stopAccount`) deletes or marks every record of the account under the same lock first, so a removal
+ * or a sign-out lands before a write, which is then refused, or after it, never between the check and the write; then
+ * it stops the account's runs here and, through the channel, in every other tab, and waits for their locks. A start
+ * still waiting for its lock when the account stops, or made while the stop runs, is fenced from its start.
  * @module agentos/core/storage/browser/runs
  */
 import type { KeyValueStore } from '@framers/sql-storage-adapter/kv';
@@ -527,6 +528,11 @@ class BrowserRunOwner implements RunOwner {
   private watchTimer: Interval | null = null;
   private watching = false;
   private closed = false;
+  /** Raised at every account stop, so a start that was waiting for its lock meanwhile fences itself. */
+  private stopGeneration = 0;
+  /** Account stops running now: a start that gets its lock while one runs fences itself too. */
+  private stopsRunning = 0;
+  private lastStop: AccountStop = 'removal';
   private readonly onPageHide = (): void => this.flush();
   private readonly onVisibility = (): void => {
     if (page().document?.visibilityState === 'hidden') this.flush();
@@ -550,6 +556,7 @@ class BrowserRunOwner implements RunOwner {
     const scope = page();
     scope.addEventListener?.('pagehide', this.onPageHide);
     scope.document?.addEventListener?.('visibilitychange', this.onVisibility);
+    this.ensureTimers();
   }
 
   start(job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }> {
@@ -605,8 +612,16 @@ class BrowserRunOwner implements RunOwner {
     } else {
       const seen = this.seen.get(id);
       const record = seen?.read.record ?? (await this.readOne(id));
-      if (record && !seen?.local && !(await this.lockFree(record.key))) return { refused: 'another-tab' };
-      if (record) await this.deleteRecord(id);
+      if (record) {
+        // Held while the record is deleted, so no tab can finish the run between the check and the deletion.
+        const release = await this.hold(record.key);
+        if (!release) return { refused: 'another-tab' };
+        try {
+          await this.deleteRecord(id);
+        } finally {
+          release();
+        }
+      }
       this.seen.delete(id);
     }
     this.hidden.delete(id);
@@ -648,6 +663,17 @@ class BrowserRunOwner implements RunOwner {
   }
 
   async stopAccount(cut: AccountStop): Promise<void> {
+    this.stopGeneration += 1;
+    this.stopsRunning += 1;
+    this.lastStop = cut;
+    try {
+      await this.stopEverything(cut);
+    } finally {
+      this.stopsRunning -= 1;
+    }
+  }
+
+  private async stopEverything(cut: AccountStop): Promise<void> {
     const names = new Set<string>();
     let keys: string[] = [];
     try {
@@ -659,6 +685,8 @@ class BrowserRunOwner implements RunOwner {
       try {
         await this.locks.request(this.lockName(key), async () => {
           const current = await this.store.get<unknown>(key);
+          // Another account's record under the same prefix is that account's to stop.
+          if (isPlain(current) && typeof current.account === 'string' && current.account !== this.account) return;
           if (isPlain(current) && typeof current.key === 'string') names.add(this.runName(current.key));
           if (cut === 'removal') await this.store.delete(key);
           else if (isPlain(current) && LIVE.includes(current.state as RunState) && current.cut === null) await this.store.set(key, { ...current, cut });
@@ -686,6 +714,7 @@ class BrowserRunOwner implements RunOwner {
   }
 
   async records(): Promise<RunRead[]> {
+    const before = this.seenSignature();
     const reads: RunRead[] = [];
     const present = new Set<string>();
     let unreadable = 0;
@@ -723,8 +752,20 @@ class BrowserRunOwner implements RunOwner {
       }
     }
     this.ensureTimers();
-    this.touch();
+    // A read that changed nothing notifies no one, so the once-a-second read with no channel draws nothing new.
+    if (this.seenSignature() !== before) this.touch();
     return reads.map((read) => ({ ...read, record: copyRecord(read.record) }));
+  }
+
+  /** What the runs this owner does not hold look like, to tell a read that changed something from one that did not. */
+  private seenSignature(): string {
+    const parts = [String(this.unreadable), String(this.unavailable)];
+    for (const [id, seen] of this.seen) {
+      const { record, status, cut } = seen.read;
+      const counts = record.counts;
+      parts.push([id, status, cut, record.state, record.phase, counts.total, counts.pending, counts.applied, counts.skipped, counts.failed, record.items.length, seen.ended, seen.local, this.hidden.has(id)].join(':'));
+    }
+    return parts.join('|');
   }
 
   snapshot(): RunsSnapshot {
@@ -792,8 +833,24 @@ class BrowserRunOwner implements RunOwner {
       from.lock?.();
       throw new TypeError('openRunOwner: the run record fails its check (a key of 64 lowercase hexadecimal characters, a chosen the given check allows, the known kinds of every field); nothing was started');
     }
-    const release = from.lock ?? (await this.hold(job.key));
-    if (!release) return { refused: 'another-tab' };
+    const generation = this.stopGeneration;
+    let release = from.lock;
+    if (!release) {
+      // A finish holds the cut run's own lock too, so one tab alone finishes it whatever key its new pick makes.
+      const names = from.resume && from.resume.key !== job.key ? [from.resume.key, job.key] : [job.key];
+      const releases: Array<() => void> = [];
+      for (const name of names) {
+        const one = await this.hold(name);
+        if (!one) {
+          for (const letGo of releases) letGo();
+          return { refused: 'another-tab' };
+        }
+        releases.push(one);
+      }
+      release = () => {
+        for (const letGo of releases) letGo();
+      };
+    }
     const id = record.id;
     const held: Held = {
       record, job, controller: new AbortController(), release, memoryOnly: false, ended: null, stopCut: null, dropped: false, cutSelf: null,
@@ -803,18 +860,37 @@ class BrowserRunOwner implements RunOwner {
     this.seen.delete(id);
     this.hidden.delete(id);
     this.ends.delete(id);
+    // The account stopped while this start waited for its lock, or is stopping now: the run is fenced from its start.
+    if (this.stopGeneration !== generation || this.stopsRunning > 0) {
+      held.stopCut = this.lastStop;
+      held.controller.abort();
+    }
     const key = this.keyPrefix + id;
+    let gone = false as boolean;
     try {
       await this.locks.request(this.lockName(key), async () => {
+        if (from.resume) {
+          // A finish never brings back a record another tab removed or dismissed meanwhile.
+          const current = await this.store.get<unknown>(key);
+          if (!isPlain(current) || current.id !== id) {
+            gone = true;
+            return;
+          }
+        }
         await this.store.set(key, copyRecord(record));
       });
       held.lastWrite = this.now();
     } catch {
       this.toMemory(held);
     }
+    if (gone) {
+      this.drop(held);
+      this.touch();
+      return { refused: 'another-tab' };
+    }
     // The account's stop came while the record was written: the record it could not see is fenced now.
     if (held.stopCut !== null && !held.memoryOnly) await this.fenceRecord(key, held.stopCut).catch(() => undefined);
-    this.post(held);
+    if (held.stopCut === null) this.post(held);
     held.done = this.runJob(held);
     this.ensureTimers();
     this.touch();
@@ -932,7 +1008,7 @@ class BrowserRunOwner implements RunOwner {
         await this.store.set(key, { ...current, counts: { ...record.counts }, items: record.items.map((item) => ({ ...item })), state: record.state, phase: record.phase, progressed: record.progressed });
       })
       .catch(() => {
-        this.toMemory(held);
+        this.markUnavailable();
       });
   }
 
@@ -943,10 +1019,16 @@ class BrowserRunOwner implements RunOwner {
     }
   }
 
+  /** The store refused the run's first record: the run goes on in memory, fenced by the account's stop, a dismissal and its own cut. */
   private toMemory(held: Held): void {
     held.memoryOnly = true;
     if (held.paceTimer !== null) clearTimeout(held.paceTimer);
     held.paceTimer = null;
+    this.markUnavailable();
+  }
+
+  private markUnavailable(): void {
+    if (this.unavailable) return;
     this.unavailable = true;
     this.touch();
   }
@@ -955,13 +1037,25 @@ class BrowserRunOwner implements RunOwner {
     return held.stopCut !== null || held.dropped || held.cutSelf !== null;
   }
 
-  /** The write gate. */
+  /**
+   * The write gate. When the store cannot answer the record's read, this one write is fenced by the run's state in
+   * memory (the account's stop, a dismissal, its own cut) and the next write reads the record again.
+   */
   private async gate<T>(held: Held, work: () => Promise<T>): Promise<T | { fenced: true }> {
     if (held.memoryOnly) return this.isFenced(held) ? { fenced: true as const } : work();
     const key = this.keyPrefix + held.record.id;
-    let outcome = 'refused' as 'refused' | 'ran' | 'threw' | 'unreadable';
+    let outcome = 'refused' as 'refused' | 'ran' | 'threw' | 'lockless';
     let value: T | undefined;
     let thrown: unknown;
+    const run = async (): Promise<void> => {
+      try {
+        value = await work();
+        outcome = 'ran';
+      } catch (error) {
+        thrown = error;
+        outcome = 'threw';
+      }
+    };
     try {
       await this.locks.request(this.lockName(key), async () => {
         if (this.isFenced(held)) return;
@@ -969,27 +1063,22 @@ class BrowserRunOwner implements RunOwner {
         try {
           current = await this.store.get<unknown>(key);
         } catch {
-          outcome = 'unreadable';
+          this.markUnavailable();
+          await run();
           return;
         }
         if (!isPlain(current) || current.id !== held.record.id || current.cut !== null) return;
-        try {
-          value = await work();
-          outcome = 'ran';
-        } catch (error) {
-          thrown = error;
-          outcome = 'threw';
-        }
+        await run();
       });
     } catch {
-      // The record lock itself failed.
-      if (outcome === 'refused') outcome = 'unreadable';
+      // The record lock itself failed before the work ran.
+      if (outcome === 'refused') outcome = 'lockless';
     }
     if (outcome === 'threw') throw thrown;
     if (outcome === 'ran') return value as T;
-    if (outcome === 'unreadable') {
-      this.toMemory(held);
-      return this.gate(held, work);
+    if (outcome === 'lockless' && !this.isFenced(held)) {
+      this.markUnavailable();
+      return work();
     }
     return { fenced: true as const };
   }
@@ -1039,7 +1128,7 @@ class BrowserRunOwner implements RunOwner {
           await this.store.set(key, { ...current, counts: { ...record.counts }, items: record.items.map((item) => ({ ...item })), state: record.state, phase: record.phase, progressed: record.progressed, cut: reason });
         })
         .catch(() => {
-          this.toMemory(held);
+          this.markUnavailable();
         });
     }
     held.record.cut = reason;
@@ -1268,7 +1357,8 @@ class BrowserRunOwner implements RunOwner {
       clearInterval(this.beatTimer);
       this.beatTimer = null;
     }
-    const watched = !this.closed && [...this.seen.values()].some((seen) => this.channel === null || seen.read.status === 'watched');
+    // With no channel, the records are read once a second at all times, so a run another tab starts is found.
+    const watched = !this.closed && (this.channel === null || [...this.seen.values()].some((seen) => seen.read.status === 'watched'));
     if (watched && this.watchTimer === null) this.watchTimer = every(() => void this.watch(), WATCH_EVERY);
     if (!watched && this.watchTimer !== null) {
       clearInterval(this.watchTimer);
