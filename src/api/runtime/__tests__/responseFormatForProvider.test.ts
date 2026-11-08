@@ -111,6 +111,46 @@ describe('buildResponseFormatForProvider', () => {
     ).toEqual({ type: 'json_object' });
   });
 
+  // OpenRouter sends a Claude model's strict json_schema on to Anthropic's JSON
+  // output format, which refuses a request whose schemas hold more than 16
+  // parameters that use a type array or `anyOf` (HTTP 400, "Schemas contains
+  // too many parameters with union types (17 parameters with type arrays or
+  // anyOf) ... limit: 16 parameters with unions", OpenRouter's Claude
+  // endpoints, 2026-11-08). The strict schema makes every optional property
+  // a type array or an `anyOf`, so seventeen optional fields are one over.
+  const optionalFields = (count: number): z.ZodTypeAny => {
+    const shape: Record<string, z.ZodTypeAny> = { id: z.string() };
+    for (let i = 0; i < count; i++) shape[`f${i}`] = z.string().min(1).optional();
+    return z.object(shape);
+  };
+
+  it('openrouter + a Claude model + more union-typed parameters than Anthropic takes -> json_object', () => {
+    expect(
+      buildResponseFormatForProvider(inputs('openrouter', 'anthropic/claude-haiku-4-5', optionalFields(17))),
+    ).toEqual({ type: 'json_object' });
+    // Nullable fields count the same way, required or not.
+    const nullable: Record<string, z.ZodTypeAny> = { id: z.string() };
+    for (let i = 0; i < 17; i++) nullable[`n${i}`] = z.string().nullable();
+    expect(
+      buildResponseFormatForProvider(inputs('openrouter', 'anthropic/claude-sonnet-4-5', z.object(nullable))),
+    ).toEqual({ type: 'json_object' });
+  });
+
+  it('openrouter + a Claude model within the limit -> strict json_schema with the optional fields nullable', () => {
+    const rf = buildResponseFormatForProvider(inputs('openrouter', 'anthropic/claude-haiku-4-5', optionalFields(16))) as any;
+    expect(rf.type).toBe('json_schema');
+    expect(rf.json_schema.strict).toBe(true);
+    expect(rf.json_schema.schema.properties.f15).toEqual({ type: ['string', 'null'] });
+  });
+
+  it('openrouter + a model of another vendor, or no model (the default is openai/gpt-4o) -> strict json_schema at any count', () => {
+    for (const model of ['openai/gpt-4o-mini', '']) {
+      const rf = buildResponseFormatForProvider(inputs('openrouter', model, optionalFields(17))) as any;
+      expect(rf.type).toBe('json_schema');
+      expect(rf.json_schema.schema.properties.f16).toEqual({ type: ['string', 'null'] });
+    }
+  });
+
   it('unknown provider -> undefined (schema rides the system prompt)', () => {
     expect(
       buildResponseFormatForProvider(inputs('ollama', 'llama3', plainSchema)),
