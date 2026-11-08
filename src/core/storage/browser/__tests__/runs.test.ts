@@ -639,7 +639,7 @@ describe('the run owner', () => {
     own.close();
   });
 
-  it('never deletes the record of a run another owner finished between the check and the deletion', async () => {
+  it("never deletes the record of a run another owner finished between the check and the deletion: the dismissal that reads the lock first holds it", async () => {
     const store = new MemoryKeyValueStore();
     await store.set('lib/j/r4', { id: 'r4', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
     const locks = memoryLocks();
@@ -654,19 +654,29 @@ describe('the run owner', () => {
     const a = owner(store, lagging, bus());
     const b = owner(store, locks, bus());
     await b.records();
-    const blocked = deferred();
     const dismissing = a.dismiss('r4');
     await asked.promise;
-    const finished = await b.finish('r4', countingJob(1, [() => blocked.promise]));
+    const finished = await b.finish('r4', countingJob(1, [async () => undefined]));
     late.resolve();
-    const dismissed = await dismissing;
-    if ('id' in finished) {
-      expect(dismissed).toEqual({ refused: 'another-tab' });
-      expect(await store.keys('lib/j/')).toEqual(['lib/j/r4']);
-    } else {
-      expect(dismissed).toEqual({ ok: true });
-      expect(await store.keys('lib/j/')).toEqual([]);
-    }
+    expect(finished).toEqual({ refused: 'another-tab' });
+    expect(await dismissing).toEqual({ ok: true });
+    expect(await store.keys('lib/j/')).toEqual([]);
+    a.close();
+    b.close();
+  });
+
+  it('refuses a dismissal while another owner finishes the run, and keeps its record', async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r3', { id: 'r3', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+    const locks = memoryLocks();
+    const a = owner(store, locks, bus());
+    const b = owner(store, locks, bus());
+    await a.records();
+    await b.records();
+    const blocked = deferred();
+    expect(await b.finish('r3', countingJob(1, [() => blocked.promise]))).toEqual({ id: 'r3' });
+    expect(await a.dismiss('r3')).toEqual({ refused: 'another-tab' });
+    expect(await store.keys('lib/j/')).toEqual(['lib/j/r3']);
     blocked.resolve();
     await b.whenIdle();
     a.close();
