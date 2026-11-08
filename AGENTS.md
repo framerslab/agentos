@@ -65,7 +65,7 @@ Available scripts that CI does not run: `pnpm run build:knowledge`, `pnpm run do
 
 ## Releases
 
-semantic-release evaluates every push to `master` after CI passes. `feat`, `fix`, `perf`, `refactor` and `revert` release a patch; a breaking change releases a minor while AgentOS is 0.x; `docs`, `chore`, `test`, `ci`, `build` and `style` release nothing. Never edit `CHANGELOG.md` or the `version` field, and never run `npm publish`. Details: the [release guide](https://github.com/framerslab/agentos/blob/master/docs/getting-started/RELEASING.md).
+The release workflow runs daily at 10:17 UTC: when `master` holds a releasing change since the last tag, the whole suite runs and semantic-release publishes; otherwise the run ends after its check. A push to `master` runs CI's quick checks only. `feat`, `fix`, `perf`, `refactor` and `revert` release a patch; a breaking change releases a minor while AgentOS is 0.x; `docs`, `chore`, `test`, `ci`, `build` and `style` release nothing. Never edit `CHANGELOG.md` or the `version` field, and never run `npm publish`. Details: the [release guide](https://github.com/framerslab/agentos/blob/master/docs/getting-started/RELEASING.md).
 
 ## Automated review threads
 

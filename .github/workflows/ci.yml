@@ -1,20 +1,35 @@
 name: CI
 
+# A pull request, a dispatched run and the daily release run the whole suite. A push to master
+# runs the quick checks alone (lint, the type check and the tests the push affects), since the
+# release workflow (release.yml) runs this whole file on master's commit, through workflow_call
+# with release: true, before it publishes, and only on a day with a change to release.
 on:
   push:
     branches: [master, main]
   pull_request:
     branches: [master, main]
   # A dispatched run can read any secret a step references, and the ref it runs on can carry
-  # changes nobody has read yet, so no step that runs on workflow_dispatch may reference a
-  # repository secret.
+  # changes nobody has read yet, so no step that runs on a dispatch of this workflow may reference
+  # a repository secret. The release's call passes the Codecov token, and release.yml runs on
+  # master only.
   workflow_dispatch: {}
+  workflow_call:
+    inputs:
+      release:
+        description: The daily release's run on master, which sends the coverage the badge reads
+        type: boolean
+        default: false
+    secrets:
+      CODECOV_TOKEN:
+        required: false
 
 # A newer push to a pull request cancels the run of the commit it replaces. Every
 # other run keys a group of its own, its run id, so it never waits behind another run
-# and nothing cancels it: each push to master, whose run the release workflow follows,
-# and a dispatched run. A re-run keys its own group too, so re-running an older
-# commit's run never cancels the newest one.
+# and nothing cancels it: each push to master, a dispatched run and the release's call
+# (whose run id is the release run's; release.yml's own group is named release). A
+# re-run keys its own group too, so re-running an older commit's run never cancels
+# the newest one.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
@@ -26,6 +41,7 @@ permissions:
 jobs:
   test:
     name: Test & Lint
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
 
     # Postgres service container for the Brain.openPostgres integration tests
@@ -74,6 +90,11 @@ jobs:
       # repository of their own, with stand-ins for gh and npm.
       - name: The release's tag cleanup after a transparency-log conflict
         run: node --test .github/scripts/drop-unpublished-release-tag.test.mjs
+
+      # The daily release's gate decides from git alone whether master holds a change to release;
+      # its tests run it on repositories of their own.
+      - name: The daily release's gate
+        run: node --test .github/scripts/release-gate.test.mjs
 
       - name: Install PNPM
         uses: pnpm/action-setup@v6
@@ -362,23 +383,78 @@ jobs:
 
       # Codecov keeps master's figure, which the coverage badge in the README reads,
       # and compares a pull request opened from a branch of this repository with its
-      # base. A pull request from a fork gets no token and uploads nothing, and a
-      # dispatched run reads no secret (see the note on workflow_dispatch above). It runs
-      # after a test step that failed too, so a push whose coverage fell under the
-      # thresholds still sends its lower figure and the badge shows it. On a push to
-      # master a failed upload fails the job, so the badge never goes stale unnoticed; on
-      # any other push and on a pull request it is reported in the step's log.
+      # base. master's figure comes from the daily release's run of this suite, the one
+      # run of the whole suite on master. A pull request from a fork gets no token and
+      # uploads nothing, and a dispatch of this workflow reads no secret (see the note on
+      # workflow_dispatch above). It runs after a test step that failed too, so a commit
+      # whose coverage fell under the thresholds still sends its lower figure and the
+      # badge shows it. In the release's run a failed upload fails the job, so the badge
+      # never goes stale unnoticed; on a pull request it is reported in the step's log.
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() && hashFiles('coverage/lcov.info') != '' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
+        if: ${{ !cancelled() && hashFiles('coverage/lcov.info') != '' && ((inputs.release && github.ref == 'refs/heads/master') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
           disable_search: true
-          fail_ci_if_error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          fail_ci_if_error: ${{ inputs.release == true && github.ref == 'refs/heads/master' }}
+
+  # A push to master: lint, the type check and the tests the push affects, against a
+  # build, since some tests read dist/. vitest's --changed runs the test files that
+  # import a file the push changed, and every test when a file vitest's
+  # forceRerunTriggers names (package.json, the vitest config) changed. Tests that
+  # need Postgres or the Moonshine model skip here, as they do without their
+  # variables; the daily release's run of the whole suite runs them before it publishes.
+  quick:
+    name: Quick checks
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Type check
+        run: pnpm run typecheck
+
+      # The push's first commit is the one after `before`; a push that created the branch
+      # or rewrote it has no usable `before`, so it compares with the previous commit.
+      - name: The tests the push affects
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BEFORE"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD~1)"
+          fi
+          echo "Tests affected by the changes since $base"
+          pnpm exec vitest run --changed "$base" --passWithNoTests
 
   browser:
     name: Browser tests
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -407,6 +483,7 @@ jobs:
   # failure-gating too (44-red burn-down completed 2026-07-20).
   batch1-tests:
     name: Batch-1 gated tests
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -448,6 +525,7 @@ jobs:
   # the last release tag, fed the way the Release workflow feeds them.
   release-dry-run:
     name: Release dry run
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read

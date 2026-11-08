@@ -1,52 +1,102 @@
 name: Release
 
+# A release runs once a day, at 10:17 UTC, when master holds a change to release. The gate job
+# reads the commits since the last release tag with git alone (.github/scripts/release-gate.mjs)
+# and ends the run there, green, when none of them both carries a releasing type and changes what
+# the package ships. Otherwise the whole CI suite runs on master's commit (ci.yml, called with
+# release: true, which also sends the coverage the README badge reads) and the release job
+# publishes that commit. Pushes to master run CI's quick checks only and never publish.
+#
+# To release now, dispatch this workflow on master:
+#   gh workflow run release.yml --ref master
+# force: true skips the gate's check; dry_run: true runs the gate, the suite and the release job up
+# to the publish and stops there, so nothing is tagged, published or released.
+# GitHub may start a scheduled run late when Actions is busy.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [master]
+  schedule:
+    - cron: '17 10 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Release without checking for releasing changes since the last tag
+        type: boolean
+        default: false
+      dry_run:
+        description: Stop before the publish; tag, publish and release nothing
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  id-token: write
+  contents: read
 
-# Serialize release runs (workflow_run events from back-to-back CI
-# completions must not race semantic-release's tag/version writes);
-# never cancel an in-progress publish.
+# One release run at a time, so two runs never race semantic-release's tag and version writes;
+# a release run is never cancelled. The suite ci.yml runs for it keys a group of its own.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
+  gate:
+    name: Releasable changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      releasable: ${{ steps.check.outputs.releasable }}
+    steps:
+      # A dispatched run can start on any branch, and the suite it calls reads the Codecov token;
+      # a release comes from master alone.
+      - name: Release from master only
+        if: github.ref != 'refs/heads/master'
+        run: |
+          echo "::error::a release runs on master; this run is on $GITHUB_REF"
+          exit 1
+
+      # Every commit and tag, without file contents: the check reads commit messages and the paths
+      # each commit changes.
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Check for releasing changes since the last tag
+        id: check
+        env:
+          FORCE: ${{ inputs.force && 'true' || 'false' }}
+        run: node .github/scripts/release-gate.mjs
+
+  suite:
+    name: Suite
+    needs: gate
+    if: needs.gate.outputs.releasable == 'true'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    with:
+      release: true
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
   release:
     name: Release
+    needs: [gate, suite]
+    if: needs.gate.outputs.releasable == 'true'
     runs-on: ubuntu-latest
-    # Runs only after the CI workflow completes successfully on master.
-    if: github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
     steps:
+      # The commit the suite tested: a scheduled or dispatched run's commit is master's when the run
+      # started. When master has moved on since, semantic-release finds the local branch behind the
+      # remote and publishes nothing; the next day's run releases the newer commit.
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      # semantic-release requires a branch checkout, so we stay on master and
-      # instead guard that master still points at the CI-tested commit. When a
-      # newer push has moved master, this run skips — that push's own CI run
-      # releases it. Guarantees the published SHA is always a CI-passed SHA.
-      - name: Verify master still points at the tested commit
-        id: guard
-        run: |
-          TESTED="${{ github.event.workflow_run.head_sha }}"
-          HEAD_SHA="$(git rev-parse HEAD)"
-          if [ "$HEAD_SHA" = "$TESTED" ]; then
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "master ($HEAD_SHA) moved past tested commit ($TESTED); skipping — the newer push's CI will release"
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -60,15 +110,12 @@ jobs:
           version: 10
 
       - name: Install dependencies
-        if: steps.guard.outputs.should_release == 'true'
         run: pnpm install
 
       - name: Build
-        if: steps.guard.outputs.should_release == 'true'
         run: pnpm run build
 
       - name: Verify build
-        if: steps.guard.outputs.should_release == 'true'
         run: |
           if [ ! -d "dist" ]; then
             echo "Build failed: dist directory not found"
@@ -76,7 +123,6 @@ jobs:
           fi
 
       - name: Refresh test-count badge
-        if: steps.guard.outputs.should_release == 'true'
         run: node scripts/update-test-badge.mjs
 
       # Trusted publishing: @semantic-release/npm 13 exchanges the job's OIDC token with npm and then
@@ -85,7 +131,6 @@ jobs:
       # publisher for @framers/agentos was set); agentos-extensions' release.yml has the same step.
       # ci.yml's Test & Lint job installs the same npm for the package checks; change both together.
       - name: Use npm 11 for trusted publishing
-        if: steps.guard.outputs.should_release == 'true'
         run: |
           npm install -g npm@11.20.0
           test "$(npm --version)" = 11.20.0
@@ -99,8 +144,12 @@ jobs:
       # and semantic-release runs once more after a 30-second pause, signing anew. A second conflict deletes that
       # attempt's tag too and fails the job, so the next run releases; any other failure fails the job as before.
       # shell: bash adds pipefail, so the if reads semantic-release's status rather than tee's.
+      - name: Dry run, nothing published
+        if: inputs.dry_run
+        run: echo "dry_run is set; the release stops before semantic-release, so nothing is tagged, published or released"
+
       - name: Semantic Release
-        if: steps.guard.outputs.should_release == 'true'
+        if: ${{ !inputs.dry_run }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
