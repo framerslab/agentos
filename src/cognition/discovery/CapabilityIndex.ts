@@ -111,7 +111,7 @@ export class CapabilityIndex {
    * {@link upsertCapability} leaves it.
    *
    * @param caps - The capabilities to add or update.
-   * @returns The number of capabilities written to the vector store.
+   * @returns The number of capabilities the vector store reports it wrote.
    */
   async upsertCapabilities(caps: readonly CapabilityDescriptor[]): Promise<number> {
     for (const cap of caps) {
@@ -123,8 +123,10 @@ export class CapabilityIndex {
       return 0;
     }
 
-    await this.vectorStore.upsert(this.collectionName, documents);
-    return documents.length;
+    const result = await this.vectorStore.upsert(this.collectionName, documents);
+    // A store reports the documents it refused in its result rather than by throwing; a store
+    // that returns no result is taken to have written every document it was given.
+    return result?.upsertedCount ?? documents.length;
   }
 
   /**

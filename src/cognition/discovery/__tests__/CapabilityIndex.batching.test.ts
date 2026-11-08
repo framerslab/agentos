@@ -21,6 +21,7 @@ vi.mock('@framers/agentos-extensions-registry', () => ({ CAPABILITY_CATALOG: cat
 
 import { CapabilityDiscoveryEngine } from '../CapabilityDiscoveryEngine.js';
 import { CapabilityEmbeddingStrategy } from '../CapabilityEmbeddingStrategy.js';
+import { CapabilityIndex } from '../CapabilityIndex.js';
 import { EmbeddingManager } from '../../rag/EmbeddingManager.js';
 import { InMemoryVectorStore } from '../../rag/vector_stores/InMemoryVectorStore.js';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager.js';
@@ -92,7 +93,7 @@ async function setup(options: { defaultBatchSize?: number; failRequest?: number 
   const vectorStore = new InMemoryVectorStore();
   await vectorStore.initialize({ id: COLLECTION, type: 'in_memory', similarityMetric: 'cosine' } as any);
   const engine = new CapabilityDiscoveryEngine(embeddingManager, vectorStore, { collectionName: COLLECTION });
-  return { engine, vectorStore, requests };
+  return { engine, embeddingManager, vectorStore, requests };
 }
 
 function tools(prefix: string, count: number): NonNullable<CapabilityIndexSources['tools']> {
@@ -231,5 +232,20 @@ describe('capability discovery embeds its index in batches', () => {
     expect(stored.has('extension:first')).toBe(true);
     expect(stored.has('extension:last')).toBe(true);
     expect(stored.has('extension:blank')).toBe(false);
+  });
+
+  it('counts only the capabilities the vector store accepted', async () => {
+    const { embeddingManager, vectorStore, requests } = await setup();
+    // A collection of another dimension: the store refuses every document in its result
+    // rather than by throwing, as the Qdrant and HNSW stores report a refused document.
+    await vectorStore.createCollection(COLLECTION, DIMENSION + 1, { similarityMetric: 'cosine' });
+    const index = new CapabilityIndex(embeddingManager, vectorStore, COLLECTION);
+    const caps = index.normalizeSources({ tools: tools('refused', 3) });
+
+    const written = await index.upsertCapabilities(caps);
+
+    expect(requests).toHaveLength(1);
+    expect(written).toBe(0);
+    expect(index.listIds()).toHaveLength(3);
   });
 });
