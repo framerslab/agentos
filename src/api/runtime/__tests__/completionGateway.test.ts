@@ -544,6 +544,22 @@ describe('CompletionGateway.stream', () => {
     expect(globalLLMProviderHealth.isOpen('openai')).toBe(true);
   });
 
+  it("sends an OpenAI hop a strict schema whose optional fields are required and nullable, as generateObject's legs are sent", async () => {
+    let seen: Record<string, unknown> = {};
+    const res = resolutionWith(async function* (options) {
+      seen = options;
+      yield stop('{"text":"Hello","imageUrl":null}');
+    });
+    const schema = z.object({ text: z.string().min(1), imageUrl: z.string().min(1).optional() });
+    await drain(createCompletionGateway().stream(res, [], {}, schema, 'frame'));
+    const strict = (seen.responseFormat as { type: string; json_schema: { strict: boolean; schema: any } });
+    expect(strict.type).toBe('json_schema');
+    expect(strict.json_schema.strict).toBe(true);
+    expect(strict.json_schema.schema.required).toEqual(['text', 'imageUrl']);
+    expect(strict.json_schema.schema.properties.text).toEqual({ type: 'string' });
+    expect(strict.json_schema.schema.properties.imageUrl).toEqual({ type: ['string', 'null'] });
+  });
+
   // claude-x stands for a Claude model that accepts a forced tool_choice; Sonnet 5.5 and Opus 5.5 do not (next case).
   it('lowers a schema for the hop, suppresses tools, and lifts the forced schema tool call into structuredOutput', async () => {
     let seen: Record<string, unknown> = {};
