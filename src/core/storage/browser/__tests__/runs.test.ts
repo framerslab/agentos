@@ -506,6 +506,34 @@ describe('the run owner', () => {
     own.close();
   });
 
+  it("fences a start still waiting for its lock when another tab's stop arrives, the removal winning over a later sign-out", async () => {
+    const store = new MemoryKeyValueStore();
+    const locks = memoryLocks();
+    const made = bus();
+    const opened = deferred();
+    const slow: RunLocks = { ...locks, hold: async (name) => { await opened.promise; return locks.hold(name); } };
+    const own = owner(store, slow, made);
+    const other = owner(store, locks, made);
+    let wrote = false;
+    const starting = own.start({
+      ...countingJob(1, []),
+      async run(context) {
+        const done = await context.write(async () => { wrote = true; return true; });
+        return { ended: typeof done === 'object' ? 'fenced' : 'finished', counts: context.record().counts };
+      },
+    });
+    await other.stopAccount('removal');
+    await other.stopAccount('signout');
+    opened.resolve();
+    const started = await starting;
+    const ends = await own.whenIdle();
+    expect(wrote).toBe(false);
+    expect(await store.keys('lib/j/')).toEqual([]);
+    expect(ends.get('id' in started ? started.id : '')?.ended).toBe('fenced');
+    own.close();
+    other.close();
+  });
+
   it("stops the account's own records alone when two accounts share one store and prefix", async () => {
     const store = new MemoryKeyValueStore();
     await store.set('lib/j/other', { id: 'other', key: KEY, account: 'b'.repeat(32), kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 2, pending: 1, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
