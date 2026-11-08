@@ -560,6 +560,30 @@ describe('CompletionGateway.stream', () => {
     expect(strict.json_schema.schema.properties.imageUrl).toEqual({ type: ['string', 'null'] });
   });
 
+  it("sends an OpenRouter hop on a Claude slug in JSON mode, with the schema in its prompt, when the strict schema's nullable fields exceed Anthropic's limit of 16 union-typed parameters", async () => {
+    let seen: Record<string, unknown> = {};
+    let seenMessages: unknown = [];
+    const provider = {
+      providerId: 'openrouter',
+      generateCompletionStream: (_m: string, msgs: unknown, options: Record<string, unknown>) => {
+        seenMessages = msgs;
+        seen = options;
+        return (async function* () { yield stop('{"text":"Hello"}'); })();
+      },
+    };
+    const res = resolutionWith(async function* () { /* unused: the provider below answers */ }, {
+      providerId: 'openrouter',
+      modelId: 'anthropic/claude-haiku-4-5',
+      chain: [{ provider: 'openrouter', model: 'anthropic/claude-haiku-4-5' }],
+      providerManager: { getProvider: () => provider } as unknown as AIModelProviderManager,
+    });
+    const shape: Record<string, z.ZodTypeAny> = { text: z.string().min(1) };
+    for (let i = 0; i < 17; i++) shape[`f${i}`] = z.string().min(1).optional();
+    await drain(createCompletionGateway().stream(res, [], {}, z.object(shape), 'frame'));
+    expect(seen.responseFormat).toEqual({ type: 'json_object' });
+    expect(JSON.stringify(seenMessages)).toContain('f16');
+  });
+
   // claude-x stands for a Claude model that accepts a forced tool_choice; Sonnet 5.5 and Opus 5.5 do not (next case).
   it('lowers a schema for the hop, suppresses tools, and lifts the forced schema tool call into structuredOutput', async () => {
     let seen: Record<string, unknown> = {};

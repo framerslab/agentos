@@ -31,6 +31,26 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 const LEG_MODEL = 'openai/gpt-4o-mini';
 /** The OpenRouter slug an Anthropic call with no Anthropic key is sent as; the server answers it 503. */
 const OVERLOADED_MODEL = 'anthropic/claude-sonnet-4-5';
+/** A Claude model on OpenRouter that serves: its strict schema is held to Anthropic's limits. */
+const CLAUDE_MODEL = 'anthropic/claude-haiku-4-5';
+/** Anthropic's limit on parameters that use a type array or `anyOf`, summed over a request's strict schemas. */
+const ANTHROPIC_UNION_LIMIT = 16;
+
+/**
+ * The parameters of a JSON Schema that use a type array or `anyOf`, below the
+ * root, counted as Anthropic counts them: once per position in the schema.
+ */
+function unionTypedParameters(node: unknown, depth = 0): number {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return 0;
+  const schema = node as Record<string, unknown>;
+  let count = depth > 0 && (Array.isArray(schema.type) || Array.isArray(schema.anyOf)) ? 1 : 0;
+  const below: unknown[] = [];
+  if (schema.properties && typeof schema.properties === 'object') below.push(...Object.values(schema.properties));
+  if (schema.items && typeof schema.items === 'object') below.push(schema.items);
+  if (Array.isArray(schema.anyOf)) below.push(...schema.anyOf);
+  for (const child of below) count += unionTypedParameters(child, depth + 1);
+  return count;
+}
 
 interface Received {
   method: string;
@@ -61,7 +81,7 @@ beforeAll(async () => {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
           JSON.stringify({
-            data: [LEG_MODEL, OVERLOADED_MODEL].map((id) => ({
+            data: [LEG_MODEL, OVERLOADED_MODEL, CLAUDE_MODEL].map((id) => ({
               id,
               name: id,
               context_length: 128000,
@@ -76,6 +96,23 @@ beforeAll(async () => {
         if (body.model === OVERLOADED_MODEL) {
           res.writeHead(503, { 'content-type': 'application/json' });
           res.end('{"error":{"code":503,"message":"overloaded"}}');
+          return;
+        }
+        // OpenRouter's Claude endpoints send a strict json_schema on to
+        // Anthropic's JSON output format, which refuses a request over its
+        // union-typed parameter limit; the body is the one they return.
+        const format = body.response_format as { type?: string; json_schema?: { schema?: unknown } } | undefined;
+        const unions = format?.type === 'json_schema' ? unionTypedParameters(format.json_schema?.schema) : 0;
+        if (typeof body.model === 'string' && body.model.startsWith('anthropic/') && unions > ANTHROPIC_UNION_LIMIT) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: {
+                code: 400,
+                message: `Schemas contains too many parameters with union types (${unions} parameters with type arrays or anyOf). This causes exponential compilation cost. Reduce the number of nullable or union-typed parameters (limit: 16 parameters with unions).`,
+              },
+            }),
+          );
           return;
         }
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -254,5 +291,107 @@ describe('a structured call whose payload is strict json_schema', () => {
     const sent = completions();
     expect(sent).toHaveLength(1);
     expectOptionalFieldsNullable(strictSchemaOf(sent[0]));
+  });
+
+  // Seventeen optional fields are seventeen nullable properties on the strict
+  // schema, one over Anthropic's limit, which OpenRouter's Claude endpoints
+  // apply: the strict payload is refused with a 400 no fallback walks.
+  const wideShape: Record<string, z.ZodTypeAny> = { id: z.string() };
+  for (let i = 0; i < ANTHROPIC_UNION_LIMIT + 1; i++) wideShape[`f${i}`] = z.string().min(1).optional();
+  const Wide = z.object(wideShape);
+  const WIDE_REPLY = '{"id":"w1","f3":"kept"}';
+
+  it('an Anthropic call with no Anthropic key, sent to OpenRouter as a Claude slug, goes out in JSON mode when its strict schema would exceed Anthropic\'s union limit', async () => {
+    answerText = WIDE_REPLY;
+
+    const result = await generateObject({
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+      fallbackProviders: [],
+      schema: Wide,
+      schemaName: 'wide',
+      prompt: 'Fill it in.',
+      maxRetries: 0,
+    });
+
+    expect(result.object).toEqual({ id: 'w1', f3: 'kept' });
+    const sent = completions();
+    expect(sent.map((b) => b.model)).toEqual([CLAUDE_MODEL]);
+    expect(sent[0].response_format).toEqual({ type: 'json_object' });
+  });
+
+  it('a fallback leg on a Claude slug after a primary that answers 503 goes out in JSON mode over the limit', async () => {
+    answerText = WIDE_REPLY;
+
+    const result = await generateObject({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5',
+      fallbackProviders: [{ provider: 'openrouter', model: CLAUDE_MODEL }],
+      schema: Wide,
+      schemaName: 'wide',
+      prompt: 'Fill it in.',
+      maxAttempts: 1,
+      maxRetries: 0,
+    });
+
+    expect(result.object).toEqual({ id: 'w1', f3: 'kept' });
+    expect(result.fallback?.fired).toBe(true);
+    const sent = completions();
+    expect(sent.map((b) => b.model)).toEqual([OVERLOADED_MODEL, CLAUDE_MODEL]);
+    expect(sent[1].response_format).toEqual({ type: 'json_object' });
+  });
+
+  it('a model of another vendor on OpenRouter keeps the strict schema over the limit', async () => {
+    answerText = WIDE_REPLY;
+
+    const result = await generateObject({
+      provider: 'openrouter',
+      model: LEG_MODEL,
+      fallbackProviders: [],
+      schema: Wide,
+      schemaName: 'wide',
+      prompt: 'Fill it in.',
+      maxRetries: 0,
+    });
+
+    expect(result.object).toEqual({ id: 'w1', f3: 'kept' });
+    expect(strictSchemaOf(completions()[0]).properties.f16).toEqual({ type: ['string', 'null'] });
+  });
+
+  it('session.send on a Claude slug over the limit goes out in JSON mode with the schema in its system prompt', async () => {
+    answerText = WIDE_REPLY;
+
+    const a = agent({ provider: 'openrouter', model: CLAUDE_MODEL, memory: false, fallbackProviders: [] });
+    let object: unknown;
+    try {
+      const result = await a.session().send('Fill it in.', { responseSchema: Wide, schemaName: 'wide' });
+      object = (result as { object?: unknown }).object;
+    } finally {
+      await a.close();
+    }
+
+    expect(object).toEqual({ id: 'w1', f3: 'kept' });
+    const sent = completions();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].response_format).toEqual({ type: 'json_object' });
+    const system = (sent[0].messages as Array<{ role: string; content: unknown }>).filter((m) => m.role === 'system');
+    expect(JSON.stringify(system)).toContain('f16');
+  });
+
+  it('a Claude slug within the limit keeps the strict schema, its optional fields nullable', async () => {
+    answerText = STRICT_REPLY;
+
+    const result = await generateObject({
+      provider: 'openrouter',
+      model: CLAUDE_MODEL,
+      fallbackProviders: [],
+      schema: Scene,
+      schemaName: 'scene',
+      prompt: 'Write the scene.',
+      maxRetries: 0,
+    });
+
+    expect(result.object).toEqual(EXPECTED_OBJECT);
+    expectOptionalFieldsNullable(strictSchemaOf(completions()[0]));
   });
 });
