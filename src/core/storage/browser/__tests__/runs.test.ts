@@ -469,6 +469,175 @@ describe('the run owner', () => {
     watcher.close();
   });
 
+  it('fences a start still waiting for its lock when the account stops, and a start made while the stop waits', async () => {
+    const store = new MemoryKeyValueStore();
+    const locks = memoryLocks();
+    const opened = deferred();
+    const slow: RunLocks = { ...locks, hold: async (name) => { await opened.promise; return locks.hold(name); } };
+    const own = owner(store, slow, bus());
+    let wrote = false;
+    const writing: RunJob = {
+      ...countingJob(1, []),
+      async run(context) {
+        const done = await context.write(async () => { wrote = true; return true; });
+        return { ended: typeof done === 'object' ? 'fenced' : 'finished', counts: context.record().counts };
+      },
+    };
+    const starting = own.start(writing);
+    await own.stopAccount('removal');
+    opened.resolve();
+    const started = await starting;
+    const ends = await own.whenIdle();
+    expect(wrote).toBe(false);
+    expect(await store.keys('lib/j/')).toEqual([]);
+    expect(ends.get('id' in started ? started.id : '')?.ended).toBe('fenced');
+
+    const inHand = deferred();
+    await own.start({ ...countingJob(1, [() => inHand.promise]), key: 'c'.repeat(64) });
+    const stopping = own.stopAccount('signout'); // waits for the first run's item in hand
+    await Promise.resolve();
+    wrote = false;
+    const during = await own.start(writing);
+    inHand.resolve();
+    await stopping;
+    const after = await own.whenIdle();
+    expect(wrote).toBe(false);
+    expect(after.get('id' in during ? during.id : '')?.ended).toBe('fenced');
+    own.close();
+  });
+
+  it("stops the account's own records alone when two accounts share one store and prefix", async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/other', { id: 'other', key: KEY, account: 'b'.repeat(32), kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 2, pending: 1, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+    const own = owner(store, memoryLocks(), bus());
+    await own.stopAccount('signout');
+    expect((await store.get<RunRecord>('lib/j/other'))?.cut).toBeNull();
+    await own.stopAccount('removal');
+    expect(await store.keys('lib/j/')).toEqual(['lib/j/other']);
+    own.close();
+  });
+
+  it('finds a run another owner starts later when no channel reaches it', async () => {
+    const locks = memoryLocks();
+    const store = new MemoryKeyValueStore();
+    const watcher = owner(store, locks, () => null);
+    expect(await watcher.records()).toEqual([]);
+    const holder = owner(store, locks, () => null);
+    const between = deferred();
+    await holder.start({
+      ...countingJob(1, []),
+      async run(context) {
+        await between.promise;
+        return { ended: 'finished', counts: context.record().counts };
+      },
+    });
+    await vi.waitFor(() => expect(watcher.snapshot().runs).toEqual([expect.objectContaining({ status: 'watched' })]), { timeout: 5_000, interval: 100 });
+    between.resolve();
+    await holder.whenIdle();
+    holder.close();
+    watcher.close();
+  });
+
+  it('reads the record again for the next write after one read the store refused, so a record deleted meanwhile still fences it', async () => {
+    const store = new MemoryKeyValueStore();
+    const realGet = store.get.bind(store);
+    let refuse = false;
+    store.get = async <T,>(key: string): Promise<T | undefined> => {
+      if (refuse) {
+        refuse = false;
+        throw new Error('refused');
+      }
+      return realGet<T>(key);
+    };
+    const own = owner(store, memoryLocks(), bus());
+    const second = deferred();
+    let wroteFirst = false;
+    let wroteSecond = false;
+    const started = await own.start({
+      ...countingJob(2, []),
+      async run(context) {
+        refuse = true;
+        await context.write(async () => { wroteFirst = true; return true; }); // the store cannot answer: the fence in memory stands
+        await second.promise;
+        const done = await context.write(async () => { wroteSecond = true; return true; });
+        return { ended: typeof done === 'object' ? 'fenced' : 'finished', counts: context.record().counts };
+      },
+    });
+    const id = 'id' in started ? started.id : '';
+    await vi.waitFor(() => expect(wroteFirst).toBe(true));
+    expect(own.snapshot().unavailable).toBe(true);
+    await store.delete(`lib/j/${id}`); // another tab's removal, with no channel to say so
+    second.resolve();
+    expect((await own.whenIdle()).get(id)?.ended).toBe('fenced');
+    expect(wroteSecond).toBe(false);
+    own.close();
+  });
+
+  it('lets one owner alone finish a cut run, whatever key its new pick makes', async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r5', { id: 'r5', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+    const locks = memoryLocks();
+    const a = owner(store, locks, bus());
+    const b = owner(store, locks, bus());
+    await a.records();
+    await b.records();
+    const hold = deferred();
+    expect(await a.finish('r5', { ...countingJob(1, [() => hold.promise]), key: 'c'.repeat(64) })).toEqual({ id: 'r5' });
+    expect(await b.finish('r5', { ...countingJob(1, [async () => undefined]), key: 'd'.repeat(64) })).toEqual({ refused: 'another-tab' });
+    hold.resolve();
+    await a.whenIdle();
+    a.close();
+    b.close();
+  });
+
+  it('refuses to finish a cut run whose record was removed meanwhile, and writes nothing', async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r6', { id: 'r6', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+    const own = owner(store, memoryLocks(), bus());
+    expect(await own.records()).toEqual([expect.objectContaining({ status: 'cut' })]);
+    await store.delete('lib/j/r6'); // another tab's removal
+    let wrote = false;
+    const finished = await own.finish('r6', {
+      ...countingJob(1, []),
+      async run(context) {
+        await context.write(async () => { wrote = true; return true; });
+        return { ended: 'finished', counts: context.record().counts };
+      },
+    });
+    await own.whenIdle();
+    expect(finished).toEqual({ refused: 'another-tab' });
+    expect(await store.keys('lib/j/')).toEqual([]);
+    expect(wrote).toBe(false);
+    own.close();
+  });
+
+  it('never deletes the record of a run another owner finished between the check and the deletion', async () => {
+    const store = new MemoryKeyValueStore();
+    await store.set('lib/j/r4', { id: 'r4', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 3, pending: 2, applied: 1, skipped: 0, failed: 0 }, items: [], state: 'running', cut: null, phase: null, began: 1, progressed: 2 });
+    const locks = memoryLocks();
+    const late = deferred();
+    const lagging: RunLocks = { ...locks, free: async (name) => { const answer = await locks.free(name); await late.promise; return answer; } };
+    const a = owner(store, lagging, bus());
+    const b = owner(store, locks, bus());
+    await b.records();
+    const blocked = deferred();
+    const dismissing = a.dismiss('r4');
+    const finished = await b.finish('r4', countingJob(1, [() => blocked.promise]));
+    late.resolve();
+    const dismissed = await dismissing;
+    if ('id' in finished) {
+      expect(dismissed).toEqual({ refused: 'another-tab' });
+      expect(await store.keys('lib/j/')).toEqual(['lib/j/r4']);
+    } else {
+      expect(dismissed).toEqual({ ok: true });
+      expect(await store.keys('lib/j/')).toEqual([]);
+    }
+    blocked.resolve();
+    await b.whenIdle();
+    a.close();
+    b.close();
+  });
+
   it("marks its own record cut for the session, refuses the writes after it, lets its lock go and reads as cut with the session's mark", async () => {
     const store = new MemoryKeyValueStore();
     const own = owner(store, memoryLocks(), bus());
