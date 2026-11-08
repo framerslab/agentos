@@ -369,6 +369,47 @@ describe("a fallback leg is sent with its entry's own key and base URL, in every
     expect(next?.healthId).toMatch(/^openai@[0-9a-f]{12}$/);
   });
 
+  // An entry whose model prefix names another provider than its own: its key
+  // is Anthropic's, and the prefix would send the leg to OpenRouter.
+  const MISDIRECTED_ENTRY: Entry = { provider: 'anthropic', model: 'openrouter:anthropic/claude-sonnet-4-5', apiKey: 'sk-ant-own' };
+  const keySentElsewhere = () => hoisted.sentWith.filter((s) => s.apiKey === 'sk-ant-own' && s.providerId !== 'anthropic');
+
+  it("generateText refuses an entry whose model prefix would send its key to another provider, and walks on", async () => {
+    const walk = await walkGenerate([MISDIRECTED_ENTRY, RESCUE], []);
+    expect(walk.sent).toEqual([RESCUE.model]);
+    expect(walk.text).toBe(`served by ${RESCUE.model}`);
+    expect(keySentElsewhere()).toEqual([]);
+  });
+
+  it("streamText refuses an entry whose model prefix would send its key to another provider, and walks on", async () => {
+    const walk = await walkStream([MISDIRECTED_ENTRY, RESCUE], []);
+    expect(walk.sent).toEqual([RESCUE.model]);
+    expect(walk.text).toBe(`served by ${RESCUE.model}`);
+    expect(keySentElsewhere()).toEqual([]);
+  });
+
+  it("the completion gateway refuses an entry whose model prefix would send its key to another provider, and walks on", async () => {
+    const failures: Array<{ providerId: string; hop: number; message: string }> = [];
+    const gateway = createCompletionGateway();
+    const route = {
+      providerId: PRIMARY.provider,
+      modelId: PRIMARY.model,
+      messages: [],
+      fallbackProviders: [MISDIRECTED_ENTRY, RESCUE],
+      onHopFailure: ({ providerId, hop, error }: { providerId: string; hop: number; error: Error }) =>
+        failures.push({ providerId, hop, message: error.message }),
+    };
+    const first = await gateway.resolve(route);
+    hoisted.sentWith.length = 0;
+    const next = await gateway.resolve(route, first!, status(503));
+    expect(next).toMatchObject({ providerId: RESCUE.provider, modelId: RESCUE.model, hop: 2 });
+    expect(keySentElsewhere()).toEqual([]);
+    expect(hoisted.sentWith.map((s) => s.providerId)).toEqual([RESCUE.provider]);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ providerId: 'anthropic', hop: 1 });
+    expect(failures[0].message).toMatch(/names provider 'openrouter', not 'anthropic'/);
+  });
+
   it("the completion gateway's skip report names the route the entry's own key sends it on", async () => {
     const { next, skipped } = await walkGateway([OWN_KEY_ENTRY, RESCUE], ['claude-sonnet-4-5']);
     expect(next).toMatchObject({ providerId: RESCUE.provider, hop: 1 });
