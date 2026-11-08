@@ -1,0 +1,1356 @@
+/**
+ * @fileoverview A page's long runs (an import, an export, an upload) above its views: one owner a page per account
+ * that holds each run's AbortSignal, its content-free record in the given key-value store, a Web Lock named for the
+ * run's job for its whole life, and a BroadcastChannel whose messages carry the account's id with the job's counts,
+ * so a second tab draws the run and never starts it again. The owner knows no product: the store, the key prefix,
+ * the record locks, the lock prefix, the check of what a job may record as chosen and the channel's name are the
+ * caller's; it writes no log line, opens no database and never names a file's contents. Node-free and DOM-free but
+ * for `navigator.locks` and `BroadcastChannel`, reached only when a caller gives `webRunLocks()` and a channel name,
+ * and the page's `pagehide`, `visibilitychange`, `online` and `offline` events, listened to where the page has them.
+ *
+ * The record is fourteen fields (`RunRecord`) and `isRunRecord` refuses any other, so what a run keeps on the device
+ * is its counts, its state and the caller's checked description of what was chosen, never a file, a text or a title.
+ * It is written before the job's first content write and then at most once every `writeEvery` while the counts change,
+ * at once when the page is hidden away and at the run's end; every write after the first changes a record that exists
+ * and never makes one, so a write in flight after a removal cannot bring the record back.
+ *
+ * The run's lock (`RunLocks`, `webRunLocks()`) is held from `start` until the end has been shown (an export's until it
+ * is saved or dismissed); a second `start` of the same job while it is held is refused at once, never queued. A record
+ * in a live state whose lock is free was cut by a load (or marked by a sign-out or a session's end); one whose lock is
+ * held is another tab's, watched. Silence on the channel never makes a run cut: only a free lock does.
+ *
+ * Every content write of a job goes through `context.write(work)`, which takes the record's own lock, reads the
+ * record and runs `work` inside that lock only when the record exists and carries no cut mark: the write gate. The
+ * account's stop (`stopAccount`) deletes or marks every record under the same lock first, so a removal or a sign-out
+ * lands before a write, which is then refused, or after it, never between the check and the write; then it stops the
+ * account's runs here and, through the channel, in every other tab, and waits for their locks.
+ * @module agentos/core/storage/browser/runs
+ */
+import type { KeyValueStore } from '@framers/sql-storage-adapter/kv';
+
+/** What a run counts. */
+export type RunUnit = 'sessions' | 'files' | 'notes' | 'bytes';
+/** Where one chosen item stands. */
+export type RunItemState = 'waiting' | 'reading' | 'added' | 'skipped' | 'failed';
+/** The states a record keeps. A finished or stopped run keeps its last live state until its end is shown. */
+export type RunState = 'running' | 'paused' | 'stopping' | 'failed' | 'unsaved';
+/** Why a run stopped short: a load (read, never written), a sign-out or the session's end on the server. */
+export type RunCut = null | 'load' | 'signout' | 'session';
+/** Which indeterminate line a run shows while it has no count to show. */
+export type RunPhase = 'counting' | 'reading' | 'writing' | 'sending' | 'being-read' | null;
+/** A run's counts: `total` is null until it is known; `failed` counts the items to try again. */
+export interface RunCounts { total: number | null; pending: number; applied: number; skipped: number; failed: number }
+/** One chosen item: its index and its state, with its name kept for a failed item alone. */
+export interface RunItem { index: number; state: RunItemState; name?: string }
+/** The record of one run attempt: these fourteen fields and no other. */
+export interface RunRecord { id: string; key: string; account: string; kind: string; way: string | null; unit: RunUnit; chosen: unknown; counts: RunCounts; items: RunItem[]; state: RunState; cut: RunCut; phase: RunPhase; began: number; progressed: number }
+/** How a job ended; `fenced` is a job the write gate refused or the account's stop reached, which draws no row. */
+export type RunEnd = { ended: 'finished' | 'stopped' | 'failed' | 'unsaved' | 'cut' | 'fenced'; counts: RunCounts };
+/** What a job is handed while it runs. */
+export interface RunContext {
+  /** This attempt's id, new at every `start` and `continueRun`; a finish keeps the cut record's. */
+  id: string;
+  /** Aborted by `stop`, by the account's stop and by `dismiss`: the job reads it between items. */
+  signal: AbortSignal;
+  /** Changes the counts; the record follows at most once every `writeEvery`. */
+  counts(next: Partial<RunCounts>): void;
+  /** Sets one item's state; a name is kept for a failed item alone. */
+  item(index: number, state: RunItemState, name?: string): void;
+  /** Sets the indeterminate line. */
+  phase(next: RunPhase): void;
+  /** Resolves at once while online; offline, marks the run paused and resolves when the page is back online. */
+  waitOnline(): Promise<void>;
+  /** The write gate: runs `work` under the record's lock while the record stands unmarked, else answers `{ fenced: true }`. */
+  write<T>(work: () => Promise<T>): Promise<T | { fenced: true }>;
+  /** Marks the record cut by the session's end and awaits the mark; the run ends as `cut`. */
+  cut(reason: 'session'): Promise<void>;
+  /** A copy of the run's record as it stands in memory. */
+  record(): RunRecord;
+}
+/** One run a caller starts: its stable key (64 lowercase hexadecimal characters, the caller's), what it is, and its work. */
+export interface RunJob { key: string; kind: string; way: string | null; unit: RunUnit; chosen: unknown; network: boolean; total: number | null; run(context: RunContext): Promise<RunEnd> }
+/** The locks of runs' lives: a hold that is refused at once when the name is held, never queued. */
+export interface RunLocks { hold(name: string): Promise<{ release(): void } | null>; free(name: string): Promise<boolean>; waitFree(name: string, ms: number): Promise<boolean> }
+/**
+ * What the owners of one account tell each other: a run's counts and state (`ended` once it has ended), or the
+ * account's stop. A message carries no name, no file and no word.
+ */
+export type RunMessage =
+  | { account: string; id: string; key: string; counts: RunCounts; state: RunState; phase: RunPhase; at: number; ended?: RunEnd['ended'] }
+  | { account: string; stop: 'removal' | 'signout' | 'session' };
+/** A channel between the tabs of one origin, as `BroadcastChannel` is: a post never reaches its own sender. */
+export interface RunChannel { post(message: RunMessage): void; listen(hear: (message: RunMessage) => void): void; close(): void }
+/** A run held by this owner, watched in another tab, cut, or failed with its lock free. */
+export type RunStatus = 'held' | 'watched' | 'cut' | 'failed';
+/** One run as read: its record, whose it is, and why it stopped short when it did (`'load'` when nothing marked it). */
+export interface RunRead { record: RunRecord; status: RunStatus; cut: RunCut }
+/**
+ * The runs as drawn, newest first: each with `hidden` (this page stopped drawing it) and `ended` (how it ended, null
+ * while it runs); the records the last read could not parse; whether the store refused a record, so a run is held in
+ * memory alone; and how many runs this owner held or watched have finished and failed since it opened.
+ */
+export interface RunsSnapshot {
+  runs: Array<RunRead & { hidden: boolean; ended: RunEnd['ended'] | null }>;
+  unreadable: number;
+  unavailable: boolean;
+  ended: { finished: number; failed: number };
+}
+/** What an owner is opened with. */
+export interface RunOwnerOptions {
+  /** The account's store, where the records live under `keyPrefix`. */
+  store: KeyValueStore;
+  keyPrefix: string;
+  /** The account's id: the records, the locks and the messages of another account are never read. */
+  account: string;
+  /** The record locks: the same lock the caller takes to change or delete a record, named by `lockName(storeKey)`. */
+  locks: { request(name: string, work: () => Promise<void>): Promise<void> };
+  lockName: (key: string) => string;
+  /** The runs' locks: `webRunLocks()` in a page. */
+  runLocks: RunLocks;
+  /**
+   * What every run lock's name begins with.
+   * @default 'run-'
+   */
+  lockPrefix?: string;
+  /** The caller's check of what a job may record as chosen: it names every key each shape may hold. */
+  isChosen: (value: unknown) => boolean;
+  /** The channel's name. */
+  channel: string;
+  /** Makes the channel; null for none. Without it, a `BroadcastChannel` of the name, where the page has one. */
+  makeChannel?: (name: string) => RunChannel | null;
+  /** Whether the page is online, and its changes. Without it, `navigator.onLine` and the page's events, where it has them. */
+  online?: { now(): boolean; subscribe(listener: () => void): () => void };
+  /** @default Date.now */
+  now?: () => number;
+  /** @default 1000 */
+  writeEvery?: number;
+  /** @default 2000 */
+  beatEvery?: number;
+}
+/** A page's run owner for one account. */
+export interface RunOwner {
+  /** Takes the job's lock, writes its record and runs it; refused at once while the job's lock is held anywhere. */
+  start(job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }>;
+  /** Stops a run after the item in hand. */
+  stop(id: string): void;
+  /** A stopped or failed run's rest as a new attempt under the same lock, from the page's memory. */
+  continueRun(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }>;
+  /** A cut run's rest after a load, under the cut record's id, with the job the caller builds from the new pick. */
+  finish(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }>;
+  /** Deletes the record and drops the run, for a run this owner holds or a record whose lock is free. */
+  dismiss(id: string): Promise<{ ok: true } | { refused: 'another-tab' }>;
+  /** Stops drawing a run in this page alone; the record and the run are untouched. */
+  hide(id: string): void;
+  /** The end was drawn: the record goes and the lock is let go, unless the run is an unsaved export. */
+  shown(id: string): Promise<void>;
+  /** An unsaved export was saved: its record goes and its lock is let go. */
+  saved(id: string): Promise<void>;
+  /** Deletes (a removal) or marks (a sign-out, a session's end) every record, stops the account's runs in every tab and waits for their locks, ten seconds at most. */
+  stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<void>;
+  /** Reads every record under the prefix, with the runs this owner holds. */
+  records(): Promise<RunRead[]>;
+  /** The runs as drawn; the same object until something changes. */
+  snapshot(): RunsSnapshot;
+  /** Called when the snapshot changes, at most four times a second. */
+  subscribe(listener: () => void): () => void;
+  /** Called once when a run this owner holds or watches ends, fails or turns unsaved, and at no count. */
+  subscribeEnds(listener: (read: RunRead, ended: RunEnd['ended']) => void): () => void;
+  /** Each run's end, once every run this owner started has returned. */
+  whenIdle(): Promise<Map<string, RunEnd>>;
+  /** Sends every live run's message now. */
+  beat(): void;
+  /** Stops the owner's timers, listeners and channel; a run it holds goes on to its end. */
+  close(): void;
+}
+
+type Ended = RunEnd['ended'];
+type AccountStop = 'removal' | 'signout' | 'session';
+type Timer = ReturnType<typeof setTimeout>;
+type Interval = ReturnType<typeof setInterval>;
+
+const UNITS: readonly RunUnit[] = ['sessions', 'files', 'notes', 'bytes'];
+const ITEM_STATES: readonly RunItemState[] = ['waiting', 'reading', 'added', 'skipped', 'failed'];
+const STATES: readonly RunState[] = ['running', 'paused', 'stopping', 'failed', 'unsaved'];
+const LIVE: readonly RunState[] = ['running', 'paused', 'stopping', 'unsaved'];
+const CUTS: readonly RunCut[] = [null, 'load', 'signout', 'session'];
+const PHASES: readonly RunPhase[] = ['counting', 'reading', 'writing', 'sending', 'being-read', null];
+const ENDS: readonly Ended[] = ['finished', 'stopped', 'failed', 'unsaved', 'cut', 'fenced'];
+const STOPS: readonly AccountStop[] = ['removal', 'signout', 'session'];
+const FIELDS = ['id', 'key', 'account', 'kind', 'way', 'unit', 'chosen', 'counts', 'items', 'state', 'cut', 'phase', 'began', 'progressed'] as const;
+const COUNT_FIELDS = ['total', 'pending', 'applied', 'skipped', 'failed'] as const;
+const ITEM_FIELDS = ['index', 'state', 'name'] as const;
+const KEY_PATTERN = /^[0-9a-f]{64}$/;
+/** How long the account's stop waits for the runs' locks in all. */
+const STOP_WAIT = 10_000;
+/** How often a page that draws another tab's run reads its lock, or the records with no channel. */
+const WATCH_EVERY = 1_000;
+/** The least time between two notices to `subscribe`'s listeners, and between two messages of one run. */
+const NOTICE_EVERY = 250;
+
+/** The run's lock name: the caller's prefix, the account and the job's key, so one job is one lock across tabs. */
+export function runLockName(prefix: string, account: string, key: string): string {
+  return `${prefix}${account}/${key}`;
+}
+
+/** True for an object of the object literal's own kind (no `File`, `Blob`, `Map` or array). */
+function isPlain(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** True when `value` holds no key outside `allowed` and every key of `required`. */
+function holdsOnly(value: Record<string, unknown>, allowed: readonly string[], required: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key)) && required.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isCounts(value: unknown): value is RunCounts {
+  if (!isPlain(value) || !holdsOnly(value, COUNT_FIELDS, COUNT_FIELDS)) return false;
+  return (value.total === null || isCount(value.total)) && isCount(value.pending) && isCount(value.applied) && isCount(value.skipped) && isCount(value.failed);
+}
+
+function isItem(value: unknown): boolean {
+  if (!isPlain(value) || !holdsOnly(value, ITEM_FIELDS, ['index', 'state'])) return false;
+  if (!isCount(value.index) || !Number.isInteger(value.index) || !ITEM_STATES.includes(value.state as RunItemState)) return false;
+  return !Object.prototype.hasOwnProperty.call(value, 'name') || (value.state === 'failed' && typeof value.name === 'string');
+}
+
+/**
+ * True for a record of the fourteen fields and no other, its `key` 64 lowercase hexadecimal characters, its items of
+ * an index, a state and a name at most (a name on a failed item alone), and a `chosen` the given check allows.
+ */
+export function isRunRecord(value: unknown, isChosen: (value: unknown) => boolean): value is RunRecord {
+  if (!isPlain(value) || !holdsOnly(value, FIELDS, FIELDS)) return false;
+  if (typeof value.id !== 'string' || value.id === '' || typeof value.account !== 'string' || value.account === '') return false;
+  if (typeof value.key !== 'string' || !KEY_PATTERN.test(value.key)) return false;
+  if (typeof value.kind !== 'string' || (value.way !== null && typeof value.way !== 'string')) return false;
+  if (!UNITS.includes(value.unit as RunUnit) || !STATES.includes(value.state as RunState)) return false;
+  if (!CUTS.includes(value.cut as RunCut) || !PHASES.includes(value.phase as RunPhase)) return false;
+  if (!isCounts(value.counts) || !Array.isArray(value.items) || !value.items.every(isItem)) return false;
+  if (typeof value.began !== 'number' || !Number.isFinite(value.began) || typeof value.progressed !== 'number' || !Number.isFinite(value.progressed)) return false;
+  try {
+    return isChosen(value.chosen) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** True for a message of either form, its counts and state checked. */
+function isRunMessage(value: unknown): value is RunMessage {
+  if (!isPlain(value) || typeof value.account !== 'string') return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'stop')) return STOPS.includes(value.stop as AccountStop);
+  return (
+    typeof value.id === 'string' &&
+    typeof value.key === 'string' &&
+    isCounts(value.counts) &&
+    STATES.includes(value.state as RunState) &&
+    PHASES.includes(value.phase as RunPhase) &&
+    typeof value.at === 'number' &&
+    (value.ended === undefined || ENDS.includes(value.ended as Ended))
+  );
+}
+
+function copyRecord(record: RunRecord): RunRecord {
+  return { ...record, counts: { ...record.counts }, items: record.items.map((item) => ({ ...item })) };
+}
+
+/** A timer that never keeps a Node process alive. */
+function later(work: () => void, ms: number): Timer {
+  const timer = setTimeout(work, Math.max(0, ms));
+  (timer as unknown as { unref?: () => void }).unref?.();
+  return timer;
+}
+
+function every(work: () => void, ms: number): Interval {
+  const timer = setInterval(work, ms);
+  (timer as unknown as { unref?: () => void }).unref?.();
+  return timer;
+}
+
+/** A signal that aborts after `ms`. */
+function timeoutSignal(ms: number): AbortSignal {
+  const make = AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal };
+  if (typeof make.timeout === 'function') return make.timeout(Math.max(0, ms));
+  const controller = new AbortController();
+  later(() => controller.abort(), ms);
+  return controller.signal;
+}
+
+/** A run attempt's id: the browser's random UUID, or random characters where it has none. */
+function newId(): string {
+  const webCrypto = (globalThis as unknown as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (webCrypto && typeof webCrypto.randomUUID === 'function') {
+    try {
+      return webCrypto.randomUUID();
+    } catch {
+      // An insecure context refuses it: the characters below serve.
+    }
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+/** The part of the page's Web Locks the run locks use. */
+interface LockManagerLike {
+  request(name: string, options: { mode?: 'exclusive' | 'shared'; ifAvailable?: boolean; signal?: AbortSignal }, callback: (lock: unknown) => unknown): Promise<unknown>;
+  query(): Promise<{ held?: Array<{ name?: string }> }>;
+}
+
+/** The page's own names, for a page with no Web Locks: one set for every owner of the page. */
+let namesOfThisPage: RunLocks | null = null;
+
+function pageNames(): RunLocks {
+  if (namesOfThisPage) return namesOfThisPage;
+  const held = new Set<string>();
+  const waiting = new Map<string, Array<() => void>>();
+  const wake = (name: string): void => {
+    const wakers = waiting.get(name) ?? [];
+    waiting.delete(name);
+    for (const waker of wakers) waker();
+  };
+  namesOfThisPage = {
+    async hold(name) {
+      if (held.has(name)) return null;
+      held.add(name);
+      let released = false;
+      return {
+        release: () => {
+          if (released) return;
+          released = true;
+          held.delete(name);
+          wake(name);
+        },
+      };
+    },
+    async free(name) {
+      return !held.has(name);
+    },
+    waitFree(name, ms) {
+      if (!held.has(name)) return Promise.resolve(true);
+      return new Promise<boolean>((resolve) => {
+        const timer = later(() => resolve(false), ms);
+        waiting.set(name, [...(waiting.get(name) ?? []), () => { clearTimeout(timer); resolve(true); }]);
+      });
+    },
+  };
+  return namesOfThisPage;
+}
+
+/**
+ * Run locks on the browser's Web Locks: `hold` with `ifAvailable`, kept until `release()`; `free` from `query()`'s
+ * held names; `waitFree` requests the name without `ifAvailable` under a timeout and lets it go at once. A page with
+ * no Web Locks keeps the names in a set of its own, so the one-job rule holds inside that tab alone.
+ */
+export function webRunLocks(): RunLocks {
+  const manager = (globalThis as unknown as { navigator?: { locks?: Partial<LockManagerLike> } }).navigator?.locks;
+  if (!manager || typeof manager.request !== 'function' || typeof manager.query !== 'function') return pageNames();
+  const locks = manager as LockManagerLike;
+  return {
+    hold(name) {
+      return new Promise((resolve) => {
+        let release: () => void = () => undefined;
+        const kept = new Promise<void>((done) => { release = done; });
+        let answered = false;
+        locks
+          .request(name, { mode: 'exclusive', ifAvailable: true }, (lock) => {
+            answered = true;
+            if (lock === null || lock === undefined) {
+              resolve(null);
+              return undefined;
+            }
+            resolve({ release: () => release() });
+            return kept;
+          })
+          .catch(() => {
+            // The browser refused the request itself: the page's own names keep the rule in this tab.
+            if (!answered) void pageNames().hold(name).then(resolve);
+          });
+      });
+    },
+    async free(name) {
+      try {
+        const state = await locks.query();
+        return !(state.held ?? []).some((lock) => lock.name === name);
+      } catch {
+        return pageNames().free(name);
+      }
+    },
+    async waitFree(name, ms) {
+      try {
+        await locks.request(name, { mode: 'exclusive', signal: timeoutSignal(ms) }, () => undefined);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+/** The page's `BroadcastChannel` of the name, or null where the page has none or refuses one. */
+function browserChannel(name: string): RunChannel | null {
+  interface ChannelLike {
+    postMessage(message: unknown): void;
+    addEventListener(type: 'message', listener: (event: { data: unknown }) => void): void;
+    close(): void;
+    unref?: () => void;
+  }
+  const Channel = (globalThis as unknown as { BroadcastChannel?: new (name: string) => ChannelLike }).BroadcastChannel;
+  if (typeof Channel !== 'function') return null;
+  let channel: ChannelLike;
+  try {
+    channel = new Channel(name);
+  } catch {
+    return null;
+  }
+  channel.unref?.();
+  return {
+    post(message) {
+      try {
+        channel.postMessage(message);
+      } catch {
+        // A closed channel: the records and the locks still carry the run.
+      }
+    },
+    listen(hear) {
+      channel.addEventListener('message', (event) => {
+        if (isRunMessage(event.data)) hear(event.data);
+      });
+    },
+    close() {
+      channel.close();
+    },
+  };
+}
+
+/** The page's own events and document, read structurally. */
+interface PageScope {
+  addEventListener?: (type: string, listener: () => void) => void;
+  removeEventListener?: (type: string, listener: () => void) => void;
+  navigator?: { onLine?: unknown };
+  document?: {
+    visibilityState?: string;
+    addEventListener?: (type: string, listener: () => void) => void;
+    removeEventListener?: (type: string, listener: () => void) => void;
+  };
+}
+
+function page(): PageScope {
+  return globalThis as unknown as PageScope;
+}
+
+/** `navigator.onLine` and the page's `online` and `offline` events, or null where the page has neither. */
+function browserOnline(): NonNullable<RunOwnerOptions['online']> | null {
+  const scope = page();
+  if (typeof scope.navigator?.onLine !== 'boolean' || typeof scope.addEventListener !== 'function' || typeof scope.removeEventListener !== 'function') return null;
+  return {
+    now: () => page().navigator?.onLine !== false,
+    subscribe(listener) {
+      scope.addEventListener?.('online', listener);
+      scope.addEventListener?.('offline', listener);
+      return () => {
+        scope.removeEventListener?.('online', listener);
+        scope.removeEventListener?.('offline', listener);
+      };
+    },
+  };
+}
+
+/** A run this owner holds. */
+interface Held {
+  record: RunRecord;
+  job: RunJob;
+  controller: AbortController;
+  /** Lets the run's lock go; null once it went (the end shown, the export saved, the run dropped). */
+  release: (() => void) | null;
+  /** The store refused the record: the run goes on in memory, fenced by the flags below alone. */
+  memoryOnly: boolean;
+  ended: Ended | null;
+  /** The account's stop reached the run, here or from another tab. */
+  stopCut: AccountStop | null;
+  /** `dismiss` dropped the run while it ran. */
+  dropped: boolean;
+  /** `context.cut`'s mark. */
+  cutSelf: RunCut;
+  lastWrite: number;
+  dirty: boolean;
+  paceTimer: Timer | null;
+  lastPost: number;
+  postTimer: Timer | null;
+  done: Promise<void> | null;
+}
+
+/** A run this owner does not hold: watched in another tab, cut, or failed with its lock free. */
+interface Seen {
+  read: RunRead;
+  /** When its last message came, by the owner's clock. */
+  heard: number;
+  ended: Ended | null;
+  /** Kept in the page's memory after its record went (a failed row whose end was shown), until it is dismissed. */
+  local: boolean;
+}
+
+type Progress = Extract<RunMessage, { id: string }>;
+
+class BrowserRunOwner implements RunOwner {
+  private readonly store: KeyValueStore;
+  private readonly keyPrefix: string;
+  private readonly account: string;
+  private readonly locks: RunOwnerOptions['locks'];
+  private readonly lockName: (key: string) => string;
+  private readonly runLocks: RunLocks;
+  private readonly lockPrefix: string;
+  private readonly isChosen: (value: unknown) => boolean;
+  private readonly now: () => number;
+  private readonly writeEvery: number;
+  private readonly beatEvery: number;
+  private readonly online: NonNullable<RunOwnerOptions['online']> | null;
+  private readonly channel: RunChannel | null;
+  private readonly held = new Map<string, Held>();
+  private readonly seen = new Map<string, Seen>();
+  /** A message for a run whose record is being read, applied once it is. */
+  private readonly early = new Map<string, Progress>();
+  private readonly hidden = new Set<string>();
+  private readonly ends = new Map<string, RunEnd>();
+  private readonly running = new Set<Promise<void>>();
+  private readonly listeners = new Set<() => void>();
+  private readonly endListeners = new Set<(read: RunRead, ended: Ended) => void>();
+  private readonly endedCounts = { finished: 0, failed: 0 };
+  private unreadable = 0;
+  private unavailable = false;
+  private cached: RunsSnapshot | null = null;
+  private noticeTimer: Timer | null = null;
+  private noticePending = false;
+  private beatTimer: Interval | null = null;
+  private watchTimer: Interval | null = null;
+  private watching = false;
+  private closed = false;
+  private readonly onPageHide = (): void => this.flush();
+  private readonly onVisibility = (): void => {
+    if (page().document?.visibilityState === 'hidden') this.flush();
+  };
+
+  constructor(options: RunOwnerOptions) {
+    this.store = options.store;
+    this.keyPrefix = options.keyPrefix;
+    this.account = options.account;
+    this.locks = options.locks;
+    this.lockName = options.lockName;
+    this.runLocks = options.runLocks;
+    this.lockPrefix = options.lockPrefix ?? 'run-';
+    this.isChosen = options.isChosen;
+    this.now = options.now ?? (() => Date.now());
+    this.writeEvery = options.writeEvery ?? 1_000;
+    this.beatEvery = options.beatEvery ?? 2_000;
+    this.online = options.online ?? browserOnline();
+    this.channel = options.makeChannel ? options.makeChannel(options.channel) : browserChannel(options.channel);
+    this.channel?.listen((message) => this.hear(message));
+    const scope = page();
+    scope.addEventListener?.('pagehide', this.onPageHide);
+    scope.document?.addEventListener?.('visibilitychange', this.onVisibility);
+  }
+
+  start(job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }> {
+    return this.begin(job, {});
+  }
+
+  stop(id: string): void {
+    const held = this.held.get(id);
+    if (!held || held.ended !== null || held.controller.signal.aborted) return;
+    held.record.state = 'stopping';
+    held.record.progressed = this.now();
+    void this.persist(held);
+    this.post(held);
+    this.touch();
+    held.controller.abort();
+  }
+
+  async continueRun(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }> {
+    const old = this.held.get(id);
+    if (old && old.ended === null) await old.done;
+    // The run's own lock passes to the next attempt of the same job, so the two take one lock.
+    const lock = old && old.release !== null && old.job.key === job.key ? old.release : undefined;
+    if (old && lock) old.release = null;
+    const started = await this.begin(job, { carry: old?.record, lock });
+    if ('id' in started && old && this.held.get(old.record.id) === old) {
+      this.drop(old);
+      await this.deleteRecord(old.record.id);
+      this.touch();
+    }
+    return started;
+  }
+
+  async finish(id: string, job: RunJob): Promise<{ id: string } | { refused: 'another-tab' }> {
+    if (this.held.has(id)) return this.continueRun(id, job);
+    const resume = this.seen.get(id)?.read.record ?? (await this.readOne(id));
+    return this.begin(job, resume ? { resume } : {});
+  }
+
+  async dismiss(id: string): Promise<{ ok: true } | { refused: 'another-tab' }> {
+    const held = this.held.get(id);
+    if (held) {
+      if (held.ended === null) {
+        // Its end lets its lock go once the job has returned.
+        held.dropped = true;
+        held.controller.abort();
+      } else {
+        held.release?.();
+        held.release = null;
+      }
+      this.held.delete(id);
+      this.clearTimers(held);
+      await this.deleteRecord(id);
+    } else {
+      const seen = this.seen.get(id);
+      const record = seen?.read.record ?? (await this.readOne(id));
+      if (record && !seen?.local && !(await this.lockFree(record.key))) return { refused: 'another-tab' };
+      if (record) await this.deleteRecord(id);
+      this.seen.delete(id);
+    }
+    this.hidden.delete(id);
+    this.ensureTimers();
+    this.touch();
+    return { ok: true };
+  }
+
+  hide(id: string): void {
+    this.hidden.add(id);
+    this.touch();
+  }
+
+  async shown(id: string): Promise<void> {
+    const held = this.held.get(id);
+    if (held) {
+      if (held.ended === null || held.ended === 'unsaved' || held.release === null) return;
+      await this.deleteRecord(id);
+      held.release?.();
+      held.release = null;
+    } else {
+      const seen = this.seen.get(id);
+      if (!seen || seen.read.status !== 'failed' || seen.local || !(await this.lockFree(seen.read.record.key))) return;
+      await this.deleteRecord(id);
+      seen.local = true;
+    }
+    this.ensureTimers();
+    this.touch();
+  }
+
+  async saved(id: string): Promise<void> {
+    const held = this.held.get(id);
+    if (!held || held.ended !== 'unsaved' || held.release === null) return;
+    await this.deleteRecord(id);
+    held.release?.();
+    held.release = null;
+    this.ensureTimers();
+    this.touch();
+  }
+
+  async stopAccount(cut: AccountStop): Promise<void> {
+    const names = new Set<string>();
+    let keys: string[] = [];
+    try {
+      keys = await this.store.keys(this.keyPrefix);
+    } catch {
+      // The store refused the list: the stops below still end every run in memory.
+    }
+    for (const key of keys) {
+      try {
+        await this.locks.request(this.lockName(key), async () => {
+          const current = await this.store.get<unknown>(key);
+          if (isPlain(current) && typeof current.key === 'string') names.add(this.runName(current.key));
+          if (cut === 'removal') await this.store.delete(key);
+          else if (isPlain(current) && LIVE.includes(current.state as RunState) && current.cut === null) await this.store.set(key, { ...current, cut });
+        });
+      } catch {
+        // This record could not be reached: the stops below still end its run.
+      }
+    }
+    for (const held of this.held.values()) if (held.release !== null) names.add(this.runName(held.job.key));
+    // A BroadcastChannel never delivers to its sender, so this owner's own runs are stopped here, directly.
+    this.stopHeld(cut);
+    this.channel?.post({ account: this.account, stop: cut });
+    const deadline = Date.now() + STOP_WAIT;
+    for (const name of names) {
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      try {
+        await this.runLocks.waitFree(name, left);
+      } catch {
+        // Past the wait the gate still refuses every later write.
+      }
+    }
+    if (cut !== 'removal') await this.records().catch(() => []);
+    this.touch();
+  }
+
+  async records(): Promise<RunRead[]> {
+    const reads: RunRead[] = [];
+    const present = new Set<string>();
+    let unreadable = 0;
+    let keys: string[] | null = null;
+    try {
+      keys = await this.store.keys(this.keyPrefix);
+    } catch {
+      this.unavailable = true;
+    }
+    for (const key of keys ?? []) {
+      let value: unknown;
+      try {
+        value = await this.store.get<unknown>(key);
+      } catch {
+        this.unavailable = true;
+        continue;
+      }
+      if (!isRunRecord(value, this.isChosen)) {
+        unreadable += 1;
+        continue;
+      }
+      if (value.account !== this.account) continue;
+      present.add(value.id);
+      if (this.held.has(value.id)) continue;
+      const read = await this.classify(value);
+      if (!this.held.has(value.id)) reads.push(this.see(read).read);
+    }
+    for (const held of this.held.values()) reads.push(this.heldRead(held));
+    if (keys !== null) {
+      this.unreadable = unreadable;
+      for (const [id, seen] of this.seen) {
+        if (present.has(id) || seen.local) continue;
+        this.seen.delete(id);
+        this.hidden.delete(id);
+      }
+    }
+    this.ensureTimers();
+    this.touch();
+    return reads.map((read) => ({ ...read, record: copyRecord(read.record) }));
+  }
+
+  snapshot(): RunsSnapshot {
+    if (this.cached) return this.cached;
+    const runs: RunsSnapshot['runs'] = [];
+    for (const held of this.held.values()) runs.push({ ...this.heldRead(held), hidden: this.hidden.has(held.record.id), ended: held.ended });
+    for (const seen of this.seen.values()) {
+      runs.push({ record: copyRecord(seen.read.record), status: seen.read.status, cut: seen.read.cut, hidden: this.hidden.has(seen.read.record.id), ended: seen.ended });
+    }
+    runs.sort((a, b) => b.record.began - a.record.began);
+    this.cached = { runs, unreadable: this.unreadable, unavailable: this.unavailable, ended: { ...this.endedCounts } };
+    return this.cached;
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  subscribeEnds(listener: (read: RunRead, ended: Ended) => void): () => void {
+    this.endListeners.add(listener);
+    return () => {
+      this.endListeners.delete(listener);
+    };
+  }
+
+  async whenIdle(): Promise<Map<string, RunEnd>> {
+    for (let pending = [...this.running]; pending.length > 0; pending = [...this.running]) await Promise.all(pending);
+    return new Map<string, RunEnd>([...this.ends].map(([id, end]): [string, RunEnd] => [id, { ended: end.ended, counts: { ...end.counts } }]));
+  }
+
+  beat(): void {
+    for (const held of this.held.values()) if (this.beats(held)) this.post(held);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const held of this.held.values()) this.clearTimers(held);
+    if (this.noticeTimer !== null) clearTimeout(this.noticeTimer);
+    this.noticeTimer = null;
+    this.ensureTimers();
+    const scope = page();
+    scope.removeEventListener?.('pagehide', this.onPageHide);
+    scope.document?.removeEventListener?.('visibilitychange', this.onVisibility);
+    this.channel?.close();
+    this.listeners.clear();
+    this.endListeners.clear();
+  }
+
+  /** Takes the job's lock (or the one handed over), writes the record before the job's first write, and runs the job. */
+  private async begin(job: RunJob, from: { resume?: RunRecord; carry?: RunRecord; lock?: () => void }): Promise<{ id: string } | { refused: 'another-tab' }> {
+    const now = this.now();
+    const fresh = { total: job.total, pending: job.total ?? 0, applied: 0, skipped: 0, failed: 0 };
+    const record: RunRecord = from.resume
+      ? { ...copyRecord(from.resume), key: job.key, kind: job.kind, way: job.way, unit: job.unit, chosen: job.chosen, state: 'running', cut: null, progressed: now }
+      : {
+          id: newId(), key: job.key, account: this.account, kind: job.kind, way: job.way, unit: job.unit, chosen: job.chosen,
+          counts: from.carry ? { ...from.carry.counts } : fresh, items: from.carry ? from.carry.items.map((item) => ({ ...item })) : [],
+          state: 'running', cut: null, phase: null, began: now, progressed: now,
+        };
+    if (!isRunRecord(record, this.isChosen) || record.account !== this.account) {
+      from.lock?.();
+      throw new TypeError('openRunOwner: the run record fails its check (a key of 64 lowercase hexadecimal characters, a chosen the given check allows, the known kinds of every field); nothing was started');
+    }
+    const release = from.lock ?? (await this.hold(job.key));
+    if (!release) return { refused: 'another-tab' };
+    const id = record.id;
+    const held: Held = {
+      record, job, controller: new AbortController(), release, memoryOnly: false, ended: null, stopCut: null, dropped: false, cutSelf: null,
+      lastWrite: now, dirty: false, paceTimer: null, lastPost: 0, postTimer: null, done: null,
+    };
+    this.held.set(id, held);
+    this.seen.delete(id);
+    this.hidden.delete(id);
+    this.ends.delete(id);
+    const key = this.keyPrefix + id;
+    try {
+      await this.locks.request(this.lockName(key), async () => {
+        await this.store.set(key, copyRecord(record));
+      });
+      held.lastWrite = this.now();
+    } catch {
+      this.toMemory(held);
+    }
+    // The account's stop came while the record was written: the record it could not see is fenced now.
+    if (held.stopCut !== null && !held.memoryOnly) await this.fenceRecord(key, held.stopCut).catch(() => undefined);
+    this.post(held);
+    held.done = this.runJob(held);
+    this.ensureTimers();
+    this.touch();
+    return { id };
+  }
+
+  private async hold(key: string): Promise<(() => void) | null> {
+    const grant = await this.runLocks.hold(this.runName(key));
+    return grant ? () => grant.release() : null;
+  }
+
+  private runName(key: string): string {
+    return runLockName(this.lockPrefix, this.account, key);
+  }
+
+  private async lockFree(key: string): Promise<boolean> {
+    try {
+      return await this.runLocks.free(this.runName(key));
+    } catch {
+      return true;
+    }
+  }
+
+  /** Runs the job, called before this returns so its first write is asked for at once. */
+  private runJob(held: Held): Promise<void> {
+    const context = this.contextFor(held);
+    let result: Promise<RunEnd>;
+    try {
+      result = Promise.resolve(held.job.run(context));
+    } catch (error) {
+      result = Promise.reject(error);
+    }
+    const failed = (): RunEnd => ({ ended: 'failed', counts: { ...held.record.counts } });
+    const done: Promise<void> = result
+      .then((end) => (isPlain(end) && ENDS.includes(end.ended as Ended) ? end : failed()), failed)
+      .then((end) => this.ended(held, end))
+      .catch(() => undefined)
+      .finally(() => {
+        this.running.delete(done);
+      });
+    this.running.add(done);
+    return done;
+  }
+
+  private contextFor(held: Held): RunContext {
+    return {
+      id: held.record.id,
+      signal: held.controller.signal,
+      counts: (next) => {
+        if (held.ended !== null) return;
+        const counts = held.record.counts;
+        if (next.total === null || isCount(next.total)) counts.total = next.total;
+        if (isCount(next.pending)) counts.pending = next.pending;
+        if (isCount(next.applied)) counts.applied = next.applied;
+        if (isCount(next.skipped)) counts.skipped = next.skipped;
+        if (isCount(next.failed)) counts.failed = next.failed;
+        this.changed(held);
+      },
+      item: (index, state, name) => {
+        if (held.ended !== null || !isCount(index) || !Number.isInteger(index) || !ITEM_STATES.includes(state)) return;
+        const entry: RunItem = state === 'failed' && typeof name === 'string' ? { index, state, name } : { index, state };
+        const items = held.record.items;
+        const last = items[items.length - 1];
+        const at = last === undefined || last.index < index ? -1 : items.findIndex((item) => item.index === index);
+        if (at === -1) items.push(entry);
+        else items[at] = entry;
+        if (at === -1 && last !== undefined && last.index > index) items.sort((a, b) => a.index - b.index);
+        this.changed(held);
+      },
+      phase: (next) => {
+        if (held.ended !== null || !PHASES.includes(next)) return;
+        held.record.phase = next;
+        this.changed(held);
+      },
+      waitOnline: () => this.waitOnline(held),
+      write: <T>(work: () => Promise<T>) => this.gate<T>(held, work),
+      cut: (reason) => this.cutRun(held, reason),
+      record: () => copyRecord(held.record),
+    };
+  }
+
+  /** A change in memory: the record follows at most once every `writeEvery`, the message at most four times a second. */
+  private changed(held: Held): void {
+    // A fenced run's record stays as the stop left it, and its counts go to no other tab.
+    if (this.isFenced(held)) return;
+    held.record.progressed = this.now();
+    held.dirty = true;
+    if (!held.memoryOnly) {
+      const since = this.now() - held.lastWrite;
+      if (since >= this.writeEvery) void this.persist(held);
+      else if (held.paceTimer === null) {
+        held.paceTimer = later(() => {
+          held.paceTimer = null;
+          if (held.dirty && held.ended === null) void this.persist(held);
+        }, this.writeEvery - since);
+      }
+    }
+    this.schedulePost(held);
+    this.touch();
+  }
+
+  /** Writes the run's counts, items, state and phase into its record, which must exist and carry no cut mark. */
+  private persist(held: Held): Promise<void> {
+    if (held.memoryOnly) return Promise.resolve();
+    held.dirty = false;
+    held.lastWrite = this.now();
+    if (held.paceTimer !== null) clearTimeout(held.paceTimer);
+    held.paceTimer = null;
+    const key = this.keyPrefix + held.record.id;
+    return this.locks
+      .request(this.lockName(key), async () => {
+        const current = await this.store.get<unknown>(key);
+        if (!isPlain(current) || current.id !== held.record.id || current.cut !== null) return;
+        const record = held.record;
+        await this.store.set(key, { ...current, counts: { ...record.counts }, items: record.items.map((item) => ({ ...item })), state: record.state, phase: record.phase, progressed: record.progressed });
+      })
+      .catch(() => {
+        this.toMemory(held);
+      });
+  }
+
+  /** The page is hidden away or leaving: every held run's record now. */
+  private flush(): void {
+    for (const held of this.held.values()) {
+      if (held.release !== null && (held.dirty || held.ended === null)) void this.persist(held);
+    }
+  }
+
+  private toMemory(held: Held): void {
+    held.memoryOnly = true;
+    if (held.paceTimer !== null) clearTimeout(held.paceTimer);
+    held.paceTimer = null;
+    this.unavailable = true;
+    this.touch();
+  }
+
+  private isFenced(held: Held): boolean {
+    return held.stopCut !== null || held.dropped || held.cutSelf !== null;
+  }
+
+  /** The write gate. */
+  private async gate<T>(held: Held, work: () => Promise<T>): Promise<T | { fenced: true }> {
+    if (held.memoryOnly) return this.isFenced(held) ? { fenced: true as const } : work();
+    const key = this.keyPrefix + held.record.id;
+    let outcome = 'refused' as 'refused' | 'ran' | 'threw' | 'unreadable';
+    let value: T | undefined;
+    let thrown: unknown;
+    try {
+      await this.locks.request(this.lockName(key), async () => {
+        if (this.isFenced(held)) return;
+        let current: unknown;
+        try {
+          current = await this.store.get<unknown>(key);
+        } catch {
+          outcome = 'unreadable';
+          return;
+        }
+        if (!isPlain(current) || current.id !== held.record.id || current.cut !== null) return;
+        try {
+          value = await work();
+          outcome = 'ran';
+        } catch (error) {
+          thrown = error;
+          outcome = 'threw';
+        }
+      });
+    } catch {
+      // The record lock itself failed.
+      if (outcome === 'refused') outcome = 'unreadable';
+    }
+    if (outcome === 'threw') throw thrown;
+    if (outcome === 'ran') return value as T;
+    if (outcome === 'unreadable') {
+      this.toMemory(held);
+      return this.gate(held, work);
+    }
+    return { fenced: true as const };
+  }
+
+  private async waitOnline(held: Held): Promise<void> {
+    const online = this.online;
+    const signal = held.controller.signal;
+    if (online === null || online.now() || signal.aborted || held.ended !== null) return;
+    if (held.record.state === 'running') held.record.state = 'paused';
+    held.record.progressed = this.now();
+    void this.persist(held);
+    this.post(held);
+    this.touch();
+    await new Promise<void>((resolve) => {
+      let off: (() => void) | null = null;
+      let settled = false as boolean;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        off?.();
+        signal.removeEventListener('abort', done);
+        resolve();
+      };
+      off = online.subscribe(() => {
+        if (online.now()) done();
+      });
+      if (settled) off();
+      signal.addEventListener('abort', done);
+      if (online.now()) done();
+    });
+    if (held.record.state === 'paused' && held.ended === null) {
+      held.record.state = 'running';
+      this.changed(held);
+    }
+  }
+
+  private async cutRun(held: Held, reason: 'session'): Promise<void> {
+    if (held.ended !== null || held.cutSelf !== null) return;
+    held.cutSelf = reason;
+    if (!held.memoryOnly) {
+      const key = this.keyPrefix + held.record.id;
+      await this.locks
+        .request(this.lockName(key), async () => {
+          const current = await this.store.get<unknown>(key);
+          if (!isPlain(current) || current.id !== held.record.id || current.cut !== null) return;
+          const record = held.record;
+          await this.store.set(key, { ...current, counts: { ...record.counts }, items: record.items.map((item) => ({ ...item })), state: record.state, phase: record.phase, progressed: record.progressed, cut: reason });
+        })
+        .catch(() => {
+          this.toMemory(held);
+        });
+    }
+    held.record.cut = reason;
+    held.controller.abort();
+    this.touch();
+  }
+
+  /** Under the record's lock: a removal deletes it, a sign-out or a session's end marks a live one. */
+  private fenceRecord(key: string, cut: AccountStop): Promise<void> {
+    return this.locks.request(this.lockName(key), async () => {
+      if (cut === 'removal') {
+        await this.store.delete(key);
+        return;
+      }
+      const current = await this.store.get<unknown>(key);
+      if (isPlain(current) && LIVE.includes(current.state as RunState) && current.cut === null) await this.store.set(key, { ...current, cut });
+    });
+  }
+
+  private deleteRecord(id: string): Promise<void> {
+    const key = this.keyPrefix + id;
+    return this.locks.request(this.lockName(key), () => this.store.delete(key)).catch(() => undefined);
+  }
+
+  /** The job returned: its end, its record's last write, its message and its listeners. */
+  private async ended(held: Held, end: RunEnd): Promise<void> {
+    const counts = isCounts(end.counts) ? { ...end.counts } : { ...held.record.counts };
+    held.record.counts = counts;
+    held.record.phase = null;
+    let ended: Ended = end.ended;
+    if (held.stopCut !== null || held.dropped) ended = 'fenced';
+    else if (held.cutSelf !== null) ended = 'cut';
+    held.ended = ended;
+    this.ends.set(held.record.id, { ended, counts: { ...counts } });
+    if (ended === 'fenced') {
+      // No row of its own; a removal's record is gone, a sign-out's stays marked, and the job deletes neither.
+      this.drop(held);
+      if (held.stopCut === 'signout' || held.stopCut === 'session') void this.records().catch(() => []);
+      this.ensureTimers();
+      this.touch();
+      return;
+    }
+    if (ended === 'cut') {
+      this.post(held);
+      this.drop(held);
+      const read: RunRead = { record: copyRecord(held.record), status: 'cut', cut: held.cutSelf };
+      this.see(read);
+      this.fire(read, 'cut');
+      this.ensureTimers();
+      this.touch();
+      return;
+    }
+    if (ended === 'failed' || (ended === 'finished' && counts.failed > 0)) held.record.state = 'failed';
+    else if (ended === 'unsaved') held.record.state = 'unsaved';
+    else if (ended === 'stopped') held.record.state = 'stopping';
+    held.record.progressed = this.now();
+    await this.persist(held);
+    this.post(held);
+    this.fire(this.heldRead(held), ended);
+    this.ensureTimers();
+    this.touch();
+  }
+
+  /** Lets the run's lock go and forgets it. */
+  private drop(held: Held): void {
+    this.clearTimers(held);
+    held.release?.();
+    held.release = null;
+    if (this.held.get(held.record.id) === held) this.held.delete(held.record.id);
+  }
+
+  private clearTimers(held: Held): void {
+    if (held.paceTimer !== null) clearTimeout(held.paceTimer);
+    if (held.postTimer !== null) clearTimeout(held.postTimer);
+    held.paceTimer = null;
+    held.postTimer = null;
+  }
+
+  /** The account's stop, here: every held run is aborted and fenced, and lets its lock go once its job has returned. */
+  private stopHeld(cut: AccountStop): void {
+    let returned = false;
+    for (const held of [...this.held.values()]) {
+      held.stopCut = cut;
+      held.controller.abort();
+      if (held.ended !== null) {
+        this.drop(held);
+        returned = true;
+      }
+    }
+    if (cut === 'removal') {
+      this.seen.clear();
+      this.hidden.clear();
+      this.early.clear();
+    } else if (returned) {
+      void this.records().catch(() => []);
+    }
+    this.ensureTimers();
+    this.touch();
+  }
+
+  private heldRead(held: Held): RunRead {
+    return { record: copyRecord(held.record), status: 'held', cut: held.record.cut };
+  }
+
+  private async readOne(id: string): Promise<RunRecord | null> {
+    try {
+      const value = await this.store.get<unknown>(this.keyPrefix + id);
+      return isRunRecord(value, this.isChosen) && value.account === this.account && value.id === id ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** A record this owner does not hold: watched while its lock is held, cut when live with its lock free, else failed. */
+  private async classify(record: RunRecord): Promise<RunRead> {
+    const copy = copyRecord(record);
+    if (!(await this.lockFree(record.key))) return { record: copy, status: 'watched', cut: record.cut };
+    if (LIVE.includes(record.state)) return { record: copy, status: 'cut', cut: record.cut ?? 'load' };
+    return { record: copy, status: 'failed', cut: record.cut };
+  }
+
+  private see(read: RunRead): Seen {
+    const id = read.record.id;
+    const before = this.seen.get(id);
+    // A hidden watched run is drawn again once it reads as cut or failed with its lock free.
+    if (before?.read.status === 'watched' && read.status !== 'watched') this.hidden.delete(id);
+    const seen: Seen = { read, heard: before?.heard ?? this.now(), ended: before?.ended ?? null, local: false };
+    this.seen.set(id, seen);
+    // With no channel, a watched run's end shows in its record alone.
+    const turned = before !== undefined && before.read.record.state !== read.record.state;
+    if (turned && read.status === 'watched' && seen.ended === null && (read.record.state === 'failed' || read.record.state === 'unsaved')) {
+      seen.ended = read.record.state === 'failed' ? 'failed' : 'unsaved';
+      this.fire(read, seen.ended);
+    }
+    return seen;
+  }
+
+  private hear(message: RunMessage): void {
+    if (this.closed || !isRunMessage(message) || message.account !== this.account) return;
+    if ('stop' in message) {
+      this.stopHeld(message.stop);
+      return;
+    }
+    if (this.held.has(message.id)) return;
+    // A new attempt of a job replaces the one it continues.
+    for (const [id, seen] of this.seen) {
+      if (id !== message.id && seen.read.record.key === message.key && seen.read.status === 'watched') {
+        this.seen.delete(id);
+        this.hidden.delete(id);
+      }
+    }
+    const seen = this.seen.get(message.id);
+    if (!seen) {
+      const first = !this.early.has(message.id);
+      this.early.set(message.id, message);
+      if (first) void this.learn(message.id);
+      return;
+    }
+    this.apply(seen, message);
+  }
+
+  /** Reads the record of a run first heard on the channel, then applies the newest message heard meanwhile. */
+  private async learn(id: string): Promise<void> {
+    const record = await this.readOne(id);
+    const message = this.early.get(id);
+    this.early.delete(id);
+    if (!record || this.held.has(id) || this.closed) return;
+    const seen = this.see(await this.classify(record));
+    if (message) this.apply(seen, message);
+    this.ensureTimers();
+    this.touch();
+  }
+
+  private apply(seen: Seen, message: Progress): void {
+    const record = seen.read.record;
+    seen.read = { record: { ...record, counts: { ...message.counts }, state: message.state, phase: message.phase, progressed: message.at }, status: 'watched', cut: record.cut };
+    seen.heard = this.now();
+    seen.local = false;
+    if (message.ended !== undefined && seen.ended === null) {
+      seen.ended = message.ended;
+      this.fire(seen.read, message.ended);
+    }
+    this.ensureTimers();
+    this.touch();
+  }
+
+  /** Each second while this page draws a run it does not hold: the records with no channel, else a silent run's lock. */
+  private async watch(): Promise<void> {
+    if (this.watching || this.closed) return;
+    this.watching = true;
+    try {
+      if (this.channel === null) {
+        await this.records();
+        return;
+      }
+      for (const seen of [...this.seen.values()]) {
+        if (seen.read.status !== 'watched' || this.now() - seen.heard < this.beatEvery) continue;
+        const id = seen.read.record.id;
+        if (!(await this.lockFree(seen.read.record.key))) continue;
+        const record = await this.readOne(id);
+        if (this.held.has(id) || this.seen.get(id) !== seen) continue;
+        if (record === null) {
+          this.seen.delete(id);
+          this.hidden.delete(id);
+        } else {
+          this.see(await this.classify(record));
+        }
+        this.touch();
+      }
+    } catch {
+      // The next second reads again.
+    } finally {
+      this.watching = false;
+      this.ensureTimers();
+    }
+  }
+
+  private beats(held: Held): boolean {
+    return held.release !== null && (held.ended === null || held.ended === 'unsaved') && LIVE.includes(held.record.state);
+  }
+
+  private ensureTimers(): void {
+    const beating = !this.closed && [...this.held.values()].some((held) => this.beats(held));
+    if (beating && this.beatTimer === null) this.beatTimer = every(() => this.beat(), this.beatEvery);
+    if (!beating && this.beatTimer !== null) {
+      clearInterval(this.beatTimer);
+      this.beatTimer = null;
+    }
+    const watched = !this.closed && [...this.seen.values()].some((seen) => this.channel === null || seen.read.status === 'watched');
+    if (watched && this.watchTimer === null) this.watchTimer = every(() => void this.watch(), WATCH_EVERY);
+    if (!watched && this.watchTimer !== null) {
+      clearInterval(this.watchTimer);
+      this.watchTimer = null;
+    }
+  }
+
+  private post(held: Held): void {
+    held.lastPost = Date.now();
+    if (held.postTimer !== null) clearTimeout(held.postTimer);
+    held.postTimer = null;
+    if (this.channel === null || this.closed) return;
+    const record = held.record;
+    const message: RunMessage = {
+      account: this.account, id: record.id, key: record.key, counts: { ...record.counts }, state: record.state, phase: record.phase, at: this.now(),
+      ...(held.ended !== null && held.ended !== 'fenced' ? { ended: held.ended } : {}),
+    };
+    try {
+      this.channel.post(message);
+    } catch {
+      // The beat and the records carry the run.
+    }
+  }
+
+  private schedulePost(held: Held): void {
+    if (this.channel === null || held.postTimer !== null) return;
+    const since = Date.now() - held.lastPost;
+    if (since >= NOTICE_EVERY) {
+      this.post(held);
+      return;
+    }
+    held.postTimer = later(() => {
+      held.postTimer = null;
+      if (this.held.get(held.record.id) === held) this.post(held);
+    }, NOTICE_EVERY - since);
+  }
+
+  private fire(read: RunRead, ended: Ended): void {
+    if (ended === 'fenced') return;
+    if (ended === 'unsaved' || (ended === 'finished' && read.record.counts.failed === 0)) this.endedCounts.finished += 1;
+    else if (ended === 'failed' || ended === 'finished') this.endedCounts.failed += 1;
+    const copy: RunRead = { ...read, record: copyRecord(read.record) };
+    for (const listener of [...this.endListeners]) {
+      try {
+        listener(copy, ended);
+      } catch {
+        // A listener's error is its own.
+      }
+    }
+  }
+
+  private touch(): void {
+    this.cached = null;
+    this.notice();
+  }
+
+  private notice(): void {
+    if (this.listeners.size === 0) return;
+    if (this.noticeTimer !== null) {
+      this.noticePending = true;
+      return;
+    }
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch {
+        // A listener's error is its own.
+      }
+    }
+    this.noticeTimer = later(() => {
+      this.noticeTimer = null;
+      if (!this.noticePending) return;
+      this.noticePending = false;
+      this.notice();
+    }, NOTICE_EVERY);
+  }
+}
+
+/**
+ * Opens a page's run owner for one account. Open one a page per account and close it when the page lets the account
+ * go; the runs, the records and the locks outlive no account: `stopAccount` ends them all.
+ */
+export function openRunOwner(options: RunOwnerOptions): RunOwner {
+  return new BrowserRunOwner(options);
+}

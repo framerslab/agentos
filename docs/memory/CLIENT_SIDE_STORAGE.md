@@ -168,6 +168,41 @@ const next = reconcileList(
   ```
 
 - `reconcileList(local, server)` compares the server's list with the device's copies. `fetch` holds the ids the server names that the device lacks or holds at a lower version; `remove` holds the ids the device holds that the server does not name, when the server lists them as deleted or its list is `complete`. An entry whose `pending` is true is never removed.
+- `openRunOwner(options)`, also at its own subpath, `@framers/agentos/core/storage/browser/runs`, keeps a page's long runs (an import, an export, an upload) above its views: one owner a page per account. A run is a job the page writes: a `key` of 64 lowercase hexadecimal characters that names the job across tabs and attempts (a hash of what was chosen, made by the page), what it counts (`unit`), what was chosen in a form the page's `isChosen` check allows, and `run(context)`. `start(job)` takes a Web Lock named for the job (`webRunLocks()`) and answers `{ refused: 'another-tab' }` at once while another tab holds it; otherwise it writes the run's record under `keyPrefix` before the job's first write and runs the job. The record holds fourteen fields, and `isRunRecord` refuses any other: the counts (`total`, `pending`, `applied`, `skipped`, `failed`), each item's index and state (with a name for a failed item alone), the state, the cut mark, the phase and two times, so no file, text or title reaches it. `context.counts`, `item` and `phase` change the run in memory; the record follows at most once a second, at once when the page is hidden away, and at the end, and every write after the first changes a record that exists and never makes one. Every content write goes through `context.write(work)`, which runs `work` under the record's lock (the page's `locks` and `lockName`, the lock it takes to change or delete the record itself) only while the record exists with no cut mark, and answers `{ fenced: true }` otherwise. A `BroadcastChannel` named by the page carries each run's counts with the account's id, and a beat every two seconds while the run lives: another tab draws the run as `watched`, and reads a live record as `cut` only once its lock is free, never on silence. A reload or a closed tab lets the lock go, so the next load reads the run as cut and the page offers to finish it (`finish(id, job)`, under the cut record's id). With no channel, the other tab reads the records once a second. `stop(id)` stops the run after the item in hand; `continueRun(id, job)` starts the next attempt under the same lock; `shown(id)` deletes a finished, stopped or failed record once its end is drawn, while an unsaved export's waits for `saved(id)` or `dismiss(id)`; `hide(id)` stops drawing another tab's run in this page alone. `stopAccount(cut)` is for a removal, which deletes every record, and for a sign-out or a session's end, which marks every live record: it does that under each record's lock first, so a write in flight lands before it and every later write is refused, then stops the account's runs in this tab and, through the channel, in every other, and waits for their locks, ten seconds at most. `snapshot()` and `subscribe` give the runs as drawn, at most four changes a second; `subscribeEnds` is called once at each run's end and never at a count. When the store refuses a record, the run goes on in memory (`snapshot().unavailable`) and the account's stop still reaches it. The owner opens no database, writes no log line and holds no word a person reads.
+
+  ```typescript
+  import { namespaced, openIndexedDbStore } from '@framers/agentos/core/storage/browser';
+  import { openRunOwner, webRunLocks } from '@framers/agentos/core/storage/browser/runs';
+
+  const store = namespaced(await openIndexedDbStore({ dbName: 'notes-app', storeName: 'kv' }), 'account-1/');
+  const owner = openRunOwner({
+    store,
+    keyPrefix: 'runs/',
+    account: 'account-1',
+    locks: { request: (name, work) => navigator.locks.request(name, work) },
+    lockName: (key) => `notes-app-record-${key}`,
+    runLocks: webRunLocks(),
+    lockPrefix: 'notes-app-run-',
+    isChosen: (chosen) => chosen === null || (typeof chosen === 'object' && Object.keys(chosen).every((key) => key === 'file')),
+    channel: 'notes-app-runs',
+  });
+
+  const started = await owner.start({
+    key: jobKey, // the page's hash of what was chosen
+    kind: 'import', way: 'file', unit: 'notes', network: false, total: notes.length,
+    chosen: { file: { name: file.name, size: file.size, lastModified: file.lastModified } },
+    async run(context) {
+      for (const [index, note] of notes.entries()) {
+        if (context.signal.aborted) return { ended: 'stopped', counts: context.record().counts };
+        const wrote = await context.write(async () => { await saveNote(note); return true; });
+        if (wrote !== true) return { ended: 'fenced', counts: context.record().counts };
+        context.counts({ applied: index + 1, pending: notes.length - index - 1 });
+      }
+      return { ended: 'finished', counts: context.record().counts };
+    },
+  });
+  // started is { id } or { refused: 'another-tab' }
+  ```
 
 The library's browser entry, `@framers/agentos/cognition/library/browser`, exports the same names beside the lexical index a page searches with ([Library Index](../features/LIBRARY_INDEX.md#on-a-device)).
 
