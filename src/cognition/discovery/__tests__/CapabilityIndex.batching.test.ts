@@ -248,4 +248,20 @@ describe('capability discovery embeds its index in batches', () => {
     expect(written).toBe(0);
     expect(index.listIds()).toHaveLength(3);
   });
+
+  it('keeps the vector an earlier copy of an id got when a later copy has no embedding text, as single upserts in order would', async () => {
+    const { embeddingManager, vectorStore } = await setup();
+    await vectorStore.createCollection(COLLECTION, DIMENSION, { similarityMetric: 'cosine' });
+    const index = new CapabilityIndex(embeddingManager, vectorStore, COLLECTION);
+    const [first] = index.normalizeSources({ tools: tools('dup', 1) });
+    const blank: CapabilityDescriptor = { ...first, name: '', displayName: '', description: '', category: '', fullSchema: undefined };
+    expect(strategy.buildEmbeddingText(blank)).toBe('');
+
+    const written = await index.upsertCapabilities([first, blank]);
+
+    expect(written).toBe(1);
+    expect(index.getCapability(first.id)).toBe(blank);
+    const stored = await storedDocuments(vectorStore);
+    expect(stored.get(first.id)?.embedding).toEqual(vectorFor(strategy.buildEmbeddingText(first)));
+  });
 });

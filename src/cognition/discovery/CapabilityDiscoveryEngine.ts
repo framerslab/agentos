@@ -431,7 +431,9 @@ export class CapabilityDiscoveryEngine implements ICapabilityDiscoveryEngine {
    * entries costs 4 requests, not 119. This runs inside {@link initialize}, so an
    * agent's boot stays inside a provider or proxy limit on calls per minute.
    *
-   * @returns The number of catalog entries injected into the index.
+   * @returns The number of catalog entries added to the index. Each one is listed and
+   *   readable by id; an entry whose embedding or store write failed has no vector, so
+   *   semantic search does not return it.
    */
   async hydrateFromCapabilityCatalog(): Promise<number> {
     let catalog: Array<{

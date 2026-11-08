@@ -106,9 +106,9 @@ export class CapabilityIndex {
    *
    * The embedding manager splits the call into provider requests of its batch size (32 unless the
    * model or the manager sets another), so N capabilities cost ceil(N / batch) requests rather
-   * than N. When an id appears more than once, the last copy wins, as single upserts in order would
-   * leave it. A capability that gets no vector stays in the index without one, as
-   * {@link upsertCapability} leaves it.
+   * than N. When an id appears more than once, the index keeps the last copy and the store gets the
+   * vector of the last copy that got one, as single upserts in order would leave them. A capability
+   * that gets no vector stays in the index without one, as {@link upsertCapability} leaves it.
    *
    * @param caps - The capabilities to add or update.
    * @returns The number of capabilities the vector store reports it wrote.
@@ -139,12 +139,7 @@ export class CapabilityIndex {
    * capability before it.
    */
   private async embedDocuments(caps: readonly CapabilityDescriptor[]): Promise<VectorDocument[]> {
-    const latest = new Map<string, CapabilityDescriptor>();
-    for (const cap of caps) {
-      latest.set(cap.id, cap);
-    }
-
-    const pending = Array.from(latest.values())
+    const pending = caps
       .map((cap) => ({ cap, text: this.embeddingStrategy.buildEmbeddingText(cap) }))
       .filter(({ text }) => text.trim() !== '');
     if (pending.length === 0) {
@@ -156,13 +151,15 @@ export class CapabilityIndex {
       modelId: this.embeddingModelId,
     });
 
-    const documents: VectorDocument[] = [];
+    // Per id, the last copy that got a vector is written, as single upserts in order would leave
+    // the store: a later copy with no vector does not drop an earlier copy's.
+    const documents = new Map<string, VectorDocument>();
     pending.forEach(({ cap, text }, i) => {
       const embedding = response.embeddings[i];
       if (!Array.isArray(embedding) || embedding.length === 0) {
         return;
       }
-      documents.push({
+      documents.set(cap.id, {
         id: cap.id,
         embedding,
         metadata: {
@@ -174,7 +171,7 @@ export class CapabilityIndex {
         textContent: text,
       });
     });
-    return documents;
+    return Array.from(documents.values());
   }
 
   /**
