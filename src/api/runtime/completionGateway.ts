@@ -105,9 +105,13 @@ export interface CompletionHopSkip {
 }
 
 /** The skip report for a passed-over entry: the entry as written, and as the gateway sends a hop. */
-function hopSkip(entry: { provider: string; model?: string }, reason: FallbackSkipReason): CompletionHopSkip {
-  // A fallback hop is sent on the environment's credentials (see resolve's hop loop).
-  const sentAs = fallbackEntrySentAs({ provider: entry.provider, model: entry.model });
+function hopSkip(
+  entry: { provider: string; model?: string; apiKey?: string; baseUrl?: string },
+  reason: FallbackSkipReason,
+): CompletionHopSkip {
+  // A fallback hop is sent on its entry's own key and base URL, else the
+  // environment's (see resolve's hop loop), as the walkers send a leg.
+  const sentAs = fallbackEntrySentAs({ provider: entry.provider, model: entry.model, apiKey: entry.apiKey, baseUrl: entry.baseUrl });
   return {
     provider: entry.provider,
     model: entry.model,
@@ -799,7 +803,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       if (h.entry) {
         const gate = gateFallbackEntry(walk, h.entry);
         if (!gate.run) {
-          route.onHopSkipped?.(hopSkip(h, gate.reason));
+          route.onHopSkipped?.(hopSkip(h.entry, gate.reason));
           continue;
         }
         walk = gate.state;
@@ -810,16 +814,29 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       let servingProviderId: string | undefined;
       let healthId: string | undefined;
       try {
-        const parsed = hop === 0 && h.model ? { providerId: h.provider, modelId: h.model } : resolveModelOption({ provider: h.provider, model: h.model }, 'text');
         // The route's own credentials go to the primary only when they are for
-        // its provider (a router may have picked another).
+        // its provider (a router may have picked another). A fallback hop goes
+        // with its entry's own key and base URL, as generateText and streamText
+        // send a leg and as resolveFallbackChain judged it, else on the
+        // environment's.
         const routeCredentials = hop === 0 && h.ownCredentials !== false;
-        const resolved = routeCredentials
-          ? resolveProvider(parsed.providerId, parsed.modelId, { apiKey: route.apiKey, baseUrl: route.baseUrl })
+        const entryCredentials = !routeCredentials && h.entry ? { apiKey: h.entry.apiKey, baseUrl: h.entry.baseUrl } : undefined;
+        const credentials = routeCredentials ? { apiKey: route.apiKey, baseUrl: route.baseUrl } : entryCredentials;
+        // The model resolution sees the entry's credentials, so an entry whose
+        // model prefix names another provider (`provider: 'anthropic'`,
+        // `model: 'openrouter:...'`, an Anthropic key) is refused, as the
+        // walkers refuse that leg, instead of sending its key to the provider
+        // the prefix names; the hop cannot start and the walk goes on.
+        const parsed =
+          hop === 0 && h.model
+            ? { providerId: h.provider, modelId: h.model }
+            : resolveModelOption({ provider: h.provider, model: h.model, ...entryCredentials }, 'text');
+        const resolved = credentials
+          ? resolveProvider(parsed.providerId, parsed.modelId, credentials)
           : resolveProvider(parsed.providerId, parsed.modelId);
         servingProviderId = resolved.providerId;
         // A blank baseUrl counts here and changes nothing: resolveProvider dropped it, so the record is the provider's own.
-        const ownCredentials = routeCredentials && (route.apiKey !== undefined || route.baseUrl !== undefined);
+        const ownCredentials = credentials !== undefined && (credentials.apiKey !== undefined || credentials.baseUrl !== undefined);
         // The provider's shared credentials are read quietly: that lookup sends nothing.
         const hopHealthId = providerHealthKey(
           resolved,
