@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -58,6 +58,14 @@ export default defineConfig({
     // Generate the (gitignored) knowledge corpus before tests so corpus-dependent
     // tests can read it in standalone CI.
     globalSetup: ['./scripts/vitest-global-setup.mjs'],
+    // `vitest --changed` (CI's quick checks on a push to master) and watch mode run every test
+    // when one of these changes: the global setup and the corpus it builds reach tests through
+    // the file system, not through imports.
+    forceRerunTriggers: [
+      ...configDefaults.forceRerunTriggers,
+      '**/scripts/vitest-global-setup.mjs',
+      '**/scripts/build-knowledge-corpus.mjs',
+    ],
     include: ['tests/**/*.{test,spec}.ts', 'src/**/*.{test,spec}.ts'],
     exclude: [
       'dist', 'coverage', 'node_modules',
