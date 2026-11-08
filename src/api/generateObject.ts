@@ -23,6 +23,7 @@ import { buildResponseFormatForProvider } from './runtime/responseFormatForProvi
 import { buildResponseFormat } from '../core/llm/providers/structuredOutputFormat.js';
 import {
   buildSchemaInstructionText,
+  dropNullsForOptionalFields,
   extractJson,
   repairEnumCasing,
   repairStringEncodedContainers,
@@ -768,6 +769,11 @@ export async function generateObject<T extends ZodType>(
     }
 
     // Step 2: Validate against the Zod schema
+    // A strict json_schema payload (OpenAI, OpenRouter: the primary or any
+    // fallback leg) makes every optional property nullable, since strict mode
+    // takes no optional property; the model writes `null` for one it leaves
+    // out, and that `null` means absent. Drop it before the schema reads it.
+    parsed = dropNullsForOptionalFields(parsed, effectiveSchema);
     // Use safeParse to capture structured validation errors for retry feedback
     let validation = effectiveSchema.safeParse(parsed) as
       | { success: true; data: { items: z.infer<T> } | z.infer<T> }
@@ -784,7 +790,9 @@ export async function generateObject<T extends ZodType>(
       // issues point at and re-validate once before spending a retry.
       const repair = repairStringEncodedContainers(parsed, validation.error);
       if (repair.repaired) {
-        const revalidation = effectiveSchema.safeParse(repair.value) as typeof validation;
+        const revalidation = effectiveSchema.safeParse(
+          dropNullsForOptionalFields(repair.value, effectiveSchema),
+        ) as typeof validation;
         // Adopt the repaired candidate even when it STILL fails validation:
         // the unwrap succeeded, so the real defect lives inside the container
         // (a bad enum, a missing field, out-of-range value). Keeping the
@@ -792,7 +800,7 @@ export async function generateObject<T extends ZodType>(
         // ObjectGenerationError — the misleading "expected array, received
         // string" issue instead of the true one, so retries fixed the wrong
         // thing and the failure log masked the actual cause.
-        parsed = repair.value;
+        parsed = dropNullsForOptionalFields(repair.value, effectiveSchema);
         validation = revalidation;
       }
     }
