@@ -24,7 +24,7 @@ import { CapabilityEmbeddingStrategy } from '../CapabilityEmbeddingStrategy.js';
 import { EmbeddingManager } from '../../rag/EmbeddingManager.js';
 import { InMemoryVectorStore } from '../../rag/vector_stores/InMemoryVectorStore.js';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager.js';
-import type { CapabilityDescriptor } from '../types.js';
+import type { CapabilityDescriptor, CapabilityIndexSources } from '../types.js';
 
 const DIMENSION = 8;
 const COLLECTION = 'capability-batching-test';
@@ -95,7 +95,7 @@ async function setup(options: { defaultBatchSize?: number; failRequest?: number 
   return { engine, vectorStore, requests };
 }
 
-function tools(prefix: string, count: number) {
+function tools(prefix: string, count: number): NonNullable<CapabilityIndexSources['tools']> {
   return Array.from({ length: count }, (_, i) => ({
     id: `tool:${prefix}-${i}`,
     name: `${prefix}-${i}`,

@@ -192,7 +192,9 @@ export interface EmbeddingManagerConfig {
   /**
    * Optional: The default batch size to use when sending multiple texts to an LLM provider
    * for embedding. Providers often have limits on batch size or perform better with
-   * optimal batching.
+   * optimal batching. The default of 32 stays under OpenAI's per-request limits of 2,048
+   * inputs and 300,000 tokens summed across inputs, even at 8,192 tokens an input
+   * (https://developers.openai.com/api/reference/resources/embeddings/methods/create).
    * @type {number}
    * @optional
    * @default 32

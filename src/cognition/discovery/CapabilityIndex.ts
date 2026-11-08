@@ -66,25 +66,16 @@ export class CapabilityIndex {
       return;
     }
 
-    // 3. Generate embedding texts
-    const embeddingTexts = descriptors.map((d) =>
-      this.embeddingStrategy.buildEmbeddingText(d),
-    );
-
-    // 4. Batch embed all capabilities
-    const embeddingResponse = await this.embeddingManager.generateEmbeddings({
-      texts: embeddingTexts,
-      modelId: this.embeddingModelId,
-    });
-    const usableEmbeddings = embeddingResponse.embeddings.filter((embedding) => Array.isArray(embedding) && embedding.length > 0);
-    if (usableEmbeddings.length === 0) {
+    // 3. Embed all capabilities in batches
+    const documents = await this.embedDocuments(descriptors);
+    if (documents.length === 0) {
       this.built = true;
       return;
     }
 
-    // 5. Create collection if the store supports it
+    // 4. Create collection if the store supports it
     if (this.vectorStore.createCollection) {
-      const dimension = usableEmbeddings[0]?.length;
+      const dimension = documents[0]?.embedding.length;
       if (dimension) {
         const exists = this.vectorStore.collectionExists
           ? await this.vectorStore.collectionExists(this.collectionName)
@@ -97,21 +88,7 @@ export class CapabilityIndex {
       }
     }
 
-    // 6. Upsert into vector store
-    const documents: VectorDocument[] = descriptors
-      .map((desc, i) => ({
-        id: desc.id,
-        embedding: embeddingResponse.embeddings[i],
-        metadata: {
-          kind: desc.kind,
-          name: desc.name,
-          category: desc.category,
-          available: desc.available,
-        },
-        textContent: embeddingTexts[i],
-      }))
-      .filter((doc) => Array.isArray(doc.embedding) && doc.embedding.length > 0);
-
+    // 5. Upsert into vector store
     await this.vectorStore.upsert(this.collectionName, documents);
 
     this.built = true;
@@ -121,31 +98,81 @@ export class CapabilityIndex {
    * Incrementally add or update a single capability.
    */
   async upsertCapability(cap: CapabilityDescriptor): Promise<void> {
-    this.descriptors.set(cap.id, cap);
+    await this.upsertCapabilities([cap]);
+  }
 
-    const text = this.embeddingStrategy.buildEmbeddingText(cap);
-    const response = await this.embeddingManager.generateEmbeddings({
-      texts: text,
-      modelId: this.embeddingModelId,
-    });
-    const embedding = response.embeddings[0];
-    if (!Array.isArray(embedding) || embedding.length === 0) {
-      return;
+  /**
+   * Add or update several capabilities with one embeddings call.
+   *
+   * The embedding manager splits the call into provider requests of its batch size (32 unless the
+   * model or the manager sets another), so N capabilities cost ceil(N / batch) requests rather
+   * than N. When an id appears more than once, the last copy wins, as single upserts in order would
+   * leave it. A capability that gets no vector stays in the index without one, as
+   * {@link upsertCapability} leaves it.
+   *
+   * @param caps - The capabilities to add or update.
+   * @returns The number of capabilities written to the vector store.
+   */
+  async upsertCapabilities(caps: readonly CapabilityDescriptor[]): Promise<number> {
+    for (const cap of caps) {
+      this.descriptors.set(cap.id, cap);
     }
 
-    const doc: VectorDocument = {
-      id: cap.id,
-      embedding,
-      metadata: {
-        kind: cap.kind,
-        name: cap.name,
-        category: cap.category,
-        available: cap.available,
-      },
-      textContent: text,
-    };
+    const documents = await this.embedDocuments(caps);
+    if (documents.length === 0) {
+      return 0;
+    }
 
-    await this.vectorStore.upsert(this.collectionName, [doc]);
+    await this.vectorStore.upsert(this.collectionName, documents);
+    return documents.length;
+  }
+
+  /**
+   * Embed capabilities with one embeddings call and return a vector document for each one that got
+   * a vector.
+   *
+   * The embedding manager returns one vector per text it was sent, in the order sent, so the i-th
+   * vector belongs to the i-th text. A capability whose embedding text is empty is not sent: the
+   * manager drops empty texts before it embeds, which would shift every later vector onto the
+   * capability before it.
+   */
+  private async embedDocuments(caps: readonly CapabilityDescriptor[]): Promise<VectorDocument[]> {
+    const latest = new Map<string, CapabilityDescriptor>();
+    for (const cap of caps) {
+      latest.set(cap.id, cap);
+    }
+
+    const pending = Array.from(latest.values())
+      .map((cap) => ({ cap, text: this.embeddingStrategy.buildEmbeddingText(cap) }))
+      .filter(({ text }) => text.trim() !== '');
+    if (pending.length === 0) {
+      return [];
+    }
+
+    const response = await this.embeddingManager.generateEmbeddings({
+      texts: pending.map(({ text }) => text),
+      modelId: this.embeddingModelId,
+    });
+
+    const documents: VectorDocument[] = [];
+    pending.forEach(({ cap, text }, i) => {
+      const embedding = response.embeddings[i];
+      if (!Array.isArray(embedding) || embedding.length === 0) {
+        return;
+      }
+      documents.push({
+        id: cap.id,
+        embedding,
+        metadata: {
+          kind: cap.kind,
+          name: cap.name,
+          category: cap.category,
+          available: cap.available,
+        },
+        textContent: text,
+      });
+    });
+    return documents;
   }
 
   /**
