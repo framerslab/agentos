@@ -528,11 +528,10 @@ class BrowserRunOwner implements RunOwner {
   private watchTimer: Interval | null = null;
   private watching = false;
   private closed = false;
-  /** Raised at every account stop, so a start that was waiting for its lock meanwhile fences itself. */
-  private stopGeneration = 0;
-  /** Account stops running now: a start that gets its lock while one runs fences itself too. */
-  private stopsRunning = 0;
-  private lastStop: AccountStop = 'removal';
+  /** Every account stop this owner made or heard, in order, so a start that was waiting for its lock meanwhile fences itself. */
+  private readonly stopCuts: AccountStop[] = [];
+  /** This owner's account stops running now: a start that gets its lock while one runs fences itself too. */
+  private readonly runningStops: AccountStop[] = [];
   private readonly onPageHide = (): void => this.flush();
   private readonly onVisibility = (): void => {
     if (page().document?.visibilityState === 'hidden') this.flush();
@@ -663,13 +662,12 @@ class BrowserRunOwner implements RunOwner {
   }
 
   async stopAccount(cut: AccountStop): Promise<void> {
-    this.stopGeneration += 1;
-    this.stopsRunning += 1;
-    this.lastStop = cut;
+    this.stopCuts.push(cut);
+    this.runningStops.push(cut);
     try {
       await this.stopEverything(cut);
     } finally {
-      this.stopsRunning -= 1;
+      this.runningStops.splice(this.runningStops.indexOf(cut), 1);
     }
   }
 
@@ -833,7 +831,7 @@ class BrowserRunOwner implements RunOwner {
       from.lock?.();
       throw new TypeError('openRunOwner: the run record fails its check (a key of 64 lowercase hexadecimal characters, a chosen the given check allows, the known kinds of every field); nothing was started');
     }
-    const generation = this.stopGeneration;
+    const stopsBefore = this.stopCuts.length;
     let release = from.lock;
     if (!release) {
       // A finish holds the cut run's own lock too, so one tab alone finishes it whatever key its new pick makes.
@@ -860,9 +858,11 @@ class BrowserRunOwner implements RunOwner {
     this.seen.delete(id);
     this.hidden.delete(id);
     this.ends.delete(id);
-    // The account stopped while this start waited for its lock, or is stopping now: the run is fenced from its start.
-    if (this.stopGeneration !== generation || this.stopsRunning > 0) {
-      held.stopCut = this.lastStop;
+    // The account stopped while this start waited for its lock (here or in another tab), or is stopping now: the run is
+    // fenced from its start, a removal among those stops winning over a sign-out or a session's end.
+    const cuts = [...this.stopCuts.slice(stopsBefore), ...this.runningStops];
+    if (cuts.length > 0) {
+      held.stopCut = cuts.includes('removal') ? 'removal' : cuts[cuts.length - 1];
       held.controller.abort();
     }
     const key = this.keyPrefix + id;
@@ -1269,6 +1269,7 @@ class BrowserRunOwner implements RunOwner {
   private hear(message: RunMessage): void {
     if (this.closed || !isRunMessage(message) || message.account !== this.account) return;
     if ('stop' in message) {
+      this.stopCuts.push(message.stop);
       this.stopHeld(message.stop);
       return;
     }
