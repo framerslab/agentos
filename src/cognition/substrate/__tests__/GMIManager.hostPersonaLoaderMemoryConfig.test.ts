@@ -84,8 +84,11 @@ describe('a host IPersonaLoader with null memory settings', () => {
     const malformed = JSON.parse(
       '{"id":"bad","name":"bad","version":"1.0.0","baseSystemPrompt":"x","sentimentTracking":{"enabled":true,"presets":"frustration_recovery"}}',
     ) as IPersonaDefinition;
+    const nullPresets = JSON.parse(
+      '{"id":"nul","name":"nul","version":"1.0.0","baseSystemPrompt":"x","sentimentTracking":{"enabled":true,"presets":null}}',
+    ) as IPersonaDefinition;
     const good = { id: 'good', name: 'good', version: '1.0.0', baseSystemPrompt: 'x' } as IPersonaDefinition;
-    const manager = createManager(hostLoader([malformed, good]), vi.fn() as never);
+    const manager = createManager(hostLoader([malformed, nullPresets, good]), vi.fn() as never);
     await manager.initialize();
 
     expect(manager.getPersonaDefinition('good')).toBe(good);
@@ -96,10 +99,14 @@ describe('a host IPersonaLoader with null memory settings', () => {
       .allPersonaRecords;
     const codes = records.get('bad')?.validation?.issues.map((issue) => issue.code) ?? [];
     expect(codes).toContain('invalid_sentiment_presets');
+    const nullCodes = records.get('nul')?.validation?.issues.map((issue) => issue.code) ?? [];
+    expect(nullCodes).toContain('invalid_sentiment_presets');
+    const goodCodes = records.get('good')?.validation?.issues.map((issue) => issue.code) ?? [];
+    expect(goodCodes).not.toContain('invalid_sentiment_presets');
     await manager.shutdown();
   });
 
-  it('stores a definition the normalizer throws on as returned, beside the rest', async () => {
+  it('skips a definition the normalizer throws on, and loads and validates the rest', async () => {
     const other = { id: 'r', name: 'r', version: '1.0.0', baseSystemPrompt: 'x' } as IPersonaDefinition;
     // A getter that throws stands for any host object the normalizer cannot read.
     const broken = { id: 'broken', name: 'broken', version: '1.0.0', baseSystemPrompt: 'x' } as IPersonaDefinition;
@@ -111,8 +118,10 @@ describe('a host IPersonaLoader with null memory settings', () => {
     });
     const manager = createManager(hostLoader([broken, other]), vi.fn() as never);
     await expect(manager.initialize()).resolves.toBeUndefined();
-    expect(manager.getPersonaDefinition('broken')).toBe(broken);
+    expect(manager.getPersonaDefinition('broken')).toBeUndefined();
     expect(manager.getPersonaDefinition('r')).toBe(other);
+    const records = (manager as unknown as { allPersonaRecords: Map<string, unknown> }).allPersonaRecords;
+    expect([...records.keys()]).toEqual(['r']);
     await manager.shutdown();
   });
 
