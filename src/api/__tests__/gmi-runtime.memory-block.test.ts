@@ -191,6 +191,46 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
     }
   });
 
+  it('a recalled statement longer than the block has room for is left out whole: the request carries no cut line, and the statements that fit are whole', async () => {
+    // Forty sentences of about 170 characters: more than the 1600-token block holds (6,400 characters, preamble included).
+    const LONG_START = 'Inventory line 1 of the camping trip:';
+    const LONG_STATEMENT = Array.from(
+      { length: 40 },
+      (_, i) =>
+        `Inventory line ${i + 1} of the camping trip: the stove parcel waits in a locker at the downtown parcel station, ` +
+        'with the receipt, the trip checklist and a spare fuel canister.',
+    ).join(' ');
+    const SHORT_STATEMENTS = ['The parcel locker for the camping stove is number 14.', 'The code of the camping stove parcel locker is 5832.'];
+    expect(LONG_STATEMENT.startsWith(LONG_START)).toBe(true);
+    expect(LONG_STATEMENT.length).toBeGreaterThan(1600 * 4);
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Okay.'), reply.text('Sure.'), reply.text('Locker 14.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withMemory(k);
+    try {
+      const session = a.session('s');
+      await session.send(LONG_STATEMENT);
+      for (const statement of SHORT_STATEMENTS) await session.send(statement);
+      session.clear();
+      await session.send('Which parcel locker holds the camping stove, and what is its code?');
+
+      const block = memoryBlockOf(s, 3);
+      // No line of the block is a memory cut to fit.
+      expect(block, `the block:\n${block}`).not.toContain(MEMORY_CUT_MARKER);
+      // The long statement is nowhere in the request the model receives, in the block or outside it.
+      expect(requestTextOf(s, 3)).not.toContain(LONG_START);
+      // The statements that fit are in Recent Experiences, each once and whole.
+      const experiences = sectionLines(block, EPISODIC_HEADER);
+      for (const statement of SHORT_STATEMENTS) {
+        expect(experiences.filter((line) => line.includes(statement)), `${statement}\nin the block:\n${block}`).toHaveLength(1);
+      }
+      expect(tokensOf(block)).toBeLessThanOrEqual(1600);
+    } finally {
+      await a.close();
+    }
+  });
+
   it('ages of a week or more reach the model in days with the stored date; under a week they keep the short form', async () => {
     vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
     const turnAt = Date.UTC(2026, 10, 8, 12, 0, 0); // 2026-11-08 12:00 UTC
