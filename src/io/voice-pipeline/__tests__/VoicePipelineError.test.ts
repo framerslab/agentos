@@ -95,6 +95,26 @@ describe('VoicePipelineError', () => {
       expect(classified.retryable).toBe(false);
     });
 
+    it.each<[number, string, string]>([
+      [402, 'Payment Required', 'quota'],
+      [456, 'Quota Exceeded', 'quota'],
+      [429, 'Request failed', 'quota'],
+      [401, 'Request failed: quota_exceeded', 'auth'],
+      [403, 'Request failed', 'auth'],
+      [500, 'Request failed', 'service'],
+      [503, 'Request failed', 'service'],
+    ])('classes an error whose numeric status is %d, with the message %s, as %s', (status, message, expected) => {
+      const failure = Object.assign(new Error(message), { status });
+      const classified = VoicePipelineError.classifyError(failure, meta);
+      expect(classified.errorClass).toBe(expected);
+      expect(classified.retryable).toBe(expected !== 'auth');
+    });
+
+    it('reads no class from a status that is not a number', () => {
+      const failure = Object.assign(new Error('Request failed'), { status: '402' });
+      expect(VoicePipelineError.classifyError(failure, meta).errorClass).toBe('unknown');
+    });
+
     it('classes a TimeoutError, as AbortSignal.timeout() rejects a fetch with, as network, retryable', () => {
       const timeout = new Error('The operation was aborted due to timeout');
       timeout.name = 'TimeoutError';
