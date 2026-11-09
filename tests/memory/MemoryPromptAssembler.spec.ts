@@ -554,6 +554,27 @@ describe('MemoryPromptAssembler', () => {
       expect(whole.contextText).toContain(item.slice(0, 700));
     });
 
+    it('keeps working memory to its leading slots when a longer slot does not fit, and skips a graph association too short to cut', () => {
+      // Slots arrive sorted by activation, highest first; a shorter slot after one that does not fit stays out.
+      const slots = [
+        '- [ACTIVE] mt_first (activation: 0.95)',
+        `- [ACTIVE] mt_${'long'.repeat(60)} (activation: 0.90)`,
+        '- [weak] mt_last (activation: 0.30)',
+      ];
+      const wm = assembleMemoryContext({ totalTokenBudget: 40, traits: {}, workingMemoryText: slots.join('\n') });
+      expect(sectionLines(wm.contextText, '## Active Context')).toEqual([slots[0]]);
+
+      const graph = assembleMemoryContext({
+        totalTokenBudget: 30,
+        allocation: { graphAssociations: 1 },
+        traits: {},
+        graphContext: [`[associated, activation=0.80] ${'x'.repeat(200)}`, '[associated, activation=0.40] go'],
+      });
+      expect(graph.contextText).not.toContain('[associated, activation=0.80]');
+      expect(graph.contextText).toContain('- [associated, activation=0.40] go');
+      expect(graph.tokensUsed).toBeLessThanOrEqual(30);
+    });
+
     it('never ends a cut inside a surrogate pair', () => {
       const emoji = '\u{1F600}'.repeat(2000);
       const now = Date.UTC(2026, 10, 8, 12, 0, 0);
