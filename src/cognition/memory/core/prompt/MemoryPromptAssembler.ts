@@ -390,8 +390,9 @@ function renderInvoluntary(
  * already holds (rendered in Relevant Memories or Recent Experiences, or the
  * involuntary memory) is left out of Related Context, and the room goes to the
  * associations after it; should a trace section take such a trace in the
- * second pass, Related Context is rendered again without it, and an
- * involuntary memory Related Context shows is not added. `tokensUsed` counts
+ * second pass, Related Context is rendered again without it and the second
+ * pass runs again, so the room the association held reaches the sections with
+ * content left out. An involuntary memory Related Context shows is not added. `tokensUsed` counts
  * the headers and separators too and never exceeds `totalTokenBudget`. The
  * returned `allocation` holds the shares the sections were granted from, after
  * the defaults, the zeroing and the scaling.
@@ -542,19 +543,21 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
   }
 
   // --- Pass 2, same order: what is still unspent goes to sections with content left out ---
-  for (const key of MEMORY_BUDGET_SPILL_ORDER) {
-    if (spare <= 0) break;
-    if (rendered[key].tokens >= demand[key]) continue;
-    const sectionBudget = rendered[key].tokens + spare;
-    const again = renderSection(key, sectionBudget);
-    if (again.tokens <= rendered[key].tokens) continue;
-    rendered[key] = again;
-    spare = sectionBudget - again.tokens;
-  }
-
-  // --- A trace section that grew in pass 2 may now hold a trace Related Context shows: the association goes ---
-  const heldOutside = idsOutsideGraph();
-  if (rendered.graphAssociations.includedIds.some((id) => heldOutside.has(id))) {
+  // A trace section that grows here may take a trace Related Context shows; the association then goes, and the
+  // pass runs again so the room it held reaches the sections with content left out. A round ends with Related
+  // Context holding no trace another section holds, and the rounds stop at one more than the associations.
+  for (let round = 0; round <= graphItems.length; round++) {
+    for (const key of MEMORY_BUDGET_SPILL_ORDER) {
+      if (spare <= 0) break;
+      if (rendered[key].tokens >= demand[key]) continue;
+      const sectionBudget = rendered[key].tokens + spare;
+      const again = renderSection(key, sectionBudget);
+      if (again.tokens <= rendered[key].tokens) continue;
+      rendered[key] = again;
+      spare = sectionBudget - again.tokens;
+    }
+    const heldOutside = idsOutsideGraph();
+    if (!rendered.graphAssociations.includedIds.some((id) => heldOutside.has(id))) break;
     const sectionBudget = rendered.graphAssociations.tokens + spare;
     rendered.graphAssociations = renderGraph(sectionBudget);
     spare = sectionBudget - rendered.graphAssociations.tokens;
