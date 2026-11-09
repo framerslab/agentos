@@ -22,7 +22,8 @@
  * association that leads to a trace the block already holds (in Relevant
  * Memories, Recent Experiences or the involuntary memory) is left out of
  * Related Context, so the trace appears once and its room goes to the next
- * association.
+ * association; a trace section that would give up such a trace keeps it unless
+ * Related Context can show it instead.
  *
  * @module agentos/memory/prompt/MemoryPromptAssembler
  */
@@ -156,6 +157,10 @@ export interface MemoryAssemblerInput {
    * block already holds (a retrieved trace rendered in Relevant Memories or
    * Recent Experiences, or the involuntary memory) is left out of Related
    * Context; a plain line is never left out for that.
+   *
+   * Through 0.15.121 the field was `string[]`. Code that reads its elements as
+   * strings no longer type-checks; narrow each element first
+   * (`typeof item === 'string' ? item : item.text`).
    */
   graphContext?: (string | MemoryGraphAssociation)[];
   /** Observation notes (Batch 2). */
@@ -389,10 +394,17 @@ function renderInvoluntary(
  * still unspent. A graph association that carries the id of a trace the block
  * already holds (rendered in Relevant Memories or Recent Experiences, or the
  * involuntary memory) is left out of Related Context, and the room goes to the
- * associations after it; should a trace section take such a trace in the
- * second pass, Related Context is rendered again without it and the second
- * pass runs again, so the room the association held reaches the sections with
- * content left out. An involuntary memory Related Context shows is not added. `tokensUsed` counts
+ * associations after it. At the end of each round of the second pass, Related
+ * Context is rendered again whenever the trace ids the trace sections hold
+ * changed among those an association leads to: should a trace section take such
+ * a trace, Related Context gives up its association and the second pass runs
+ * again, so the room the association held reaches the sections with content
+ * left out. A trace section rendered on a larger budget can give up a later
+ * trace for a cut of an earlier one; when the trace it gives up is one whose
+ * association Related Context left out, Related Context is rendered again at
+ * once on what the section leaves unspent, and the section keeps the trace
+ * unless Related Context then shows it. An involuntary memory Related Context
+ * shows is not added. `tokensUsed` counts
  * the headers and separators too and never exceeds `totalTokenBudget`. The
  * returned `allocation` holds the shares the sections were granted from, after
  * the defaults, the zeroing and the scaling.
@@ -500,6 +512,8 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
       ...(rendered.recentEpisodic?.includedIds ?? []),
       ...(involuntary ? [involuntary.id] : []),
     ]);
+  /** The ids of {@link idsOutsideGraph} Related Context was last rendered against. */
+  let graphRenderedAgainst = new Set<string>();
   /** Related Context, leaving out the associations that lead to a trace the block already holds. */
   const renderGraph = (sectionBudget: number): RenderedSection => {
     const held = idsOutsideGraph();
@@ -510,6 +524,19 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
       sectionBudget,
       { cut: cutAssociationLine, ids: items.map((item) => item.traceId) },
     );
+  };
+  /** Keeps `section` as Related Context, rendered against the trace ids the block holds now. */
+  const setGraph = (section: RenderedSection): void => {
+    rendered.graphAssociations = section;
+    graphRenderedAgainst = idsOutsideGraph();
+  };
+  /** The trace ids some graph association leads to. */
+  const associatedIds = new Set(graphItems.flatMap((item) => (item.traceId === undefined ? [] : [item.traceId])));
+  /** Whether `a` and `b` hold the same associated trace ids, so Related Context leaves out the same associations. */
+  const sameAssociatedIds = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean => {
+    const inA = [...a].filter((id) => associatedIds.has(id));
+    const inB = [...b].filter((id) => associatedIds.has(id));
+    return inA.length === inB.length && inA.every((id) => b.has(id));
   };
 
   const renderSection = (key: SectionKey, sectionBudget: number): RenderedSection => {
@@ -538,14 +565,50 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
   let spare = Math.max(0, available - granted);
   for (const key of MEMORY_BUDGET_SPILL_ORDER) {
     const sectionBudget = grant[key] + spare;
-    rendered[key] = renderSection(key, sectionBudget);
-    spare = sectionBudget - rendered[key].tokens;
+    const section = renderSection(key, sectionBudget);
+    if (key === 'graphAssociations') setGraph(section);
+    else rendered[key] = section;
+    spare = sectionBudget - section.tokens;
   }
 
+  /**
+   * Gives a trace section `again`, its render on `sectionBudget`, in pass 2. Rendered from scratch on a larger budget,
+   * a trace section can fill its room with a cut of an earlier trace and lose a later one. A lost trace whose
+   * association Related Context left out as a duplicate would then appear nowhere, so Related Context is rendered again
+   * at once, on its own tokens and what the new render leaves unspent, and the new render is kept only when Related
+   * Context then shows every such trace and still shows every association it showed (or that association's trace in a
+   * section). Otherwise the section keeps what it held and nothing changes.
+   */
+  const growTraceSection = (key: 'semanticRecall' | 'recentEpisodic', again: RenderedSection, sectionBudget: number): void => {
+    const lost = off('graphAssociations')
+      ? []
+      : rendered[key].includedIds.filter((id) => associatedIds.has(id) && !again.includedIds.includes(id));
+    if (lost.length === 0) {
+      rendered[key] = again;
+      spare = sectionBudget - again.tokens;
+      return;
+    }
+    const before = rendered[key];
+    const beforeGraph = rendered.graphAssociations;
+    rendered[key] = again;
+    const graphBudget = beforeGraph.tokens + sectionBudget - again.tokens;
+    const graphAgain = renderSection('graphAssociations', graphBudget);
+    const held = idsOutsideGraph();
+    const shown = new Set([...held, ...graphAgain.includedIds]);
+    if (lost.every((id) => shown.has(id)) && beforeGraph.includedIds.every((id) => shown.has(id))) {
+      setGraph(graphAgain);
+      spare = graphBudget - graphAgain.tokens;
+      return;
+    }
+    rendered[key] = before;
+  };
+
   // --- Pass 2, same order: what is still unspent goes to sections with content left out ---
-  // A trace section that grows here may take a trace Related Context shows; the association then goes, and the
-  // pass runs again so the room it held reaches the sections with content left out. A round ends with Related
-  // Context holding no trace another section holds, and the rounds stop at one more than the associations.
+  // A trace section that grows here may take a trace Related Context shows, or give up one whose association Related
+  // Context left out as a duplicate (see growTraceSection). At the end of each round Related Context is rendered again
+  // whenever the trace ids the trace sections hold changed among those an association leads to, and the pass runs
+  // again so the room an association gave up reaches the sections with content left out; the rounds stop at one more
+  // than the associations.
   for (let round = 0; round <= graphItems.length; round++) {
     for (const key of MEMORY_BUDGET_SPILL_ORDER) {
       if (spare <= 0) break;
@@ -553,14 +616,19 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
       const sectionBudget = rendered[key].tokens + spare;
       const again = renderSection(key, sectionBudget);
       if (again.tokens <= rendered[key].tokens) continue;
-      rendered[key] = again;
+      if (key === 'semanticRecall' || key === 'recentEpisodic') {
+        growTraceSection(key, again, sectionBudget);
+        continue;
+      }
+      if (key === 'graphAssociations') setGraph(again);
+      else rendered[key] = again;
       spare = sectionBudget - again.tokens;
     }
-    const heldOutside = idsOutsideGraph();
-    if (!rendered.graphAssociations.includedIds.some((id) => heldOutside.has(id))) break;
+    if (sameAssociatedIds(idsOutsideGraph(), graphRenderedAgainst)) break;
     const sectionBudget = rendered.graphAssociations.tokens + spare;
-    rendered.graphAssociations = renderGraph(sectionBudget);
-    spare = sectionBudget - rendered.graphAssociations.tokens;
+    const graph = renderSection('graphAssociations', sectionBudget);
+    setGraph(graph);
+    spare = sectionBudget - graph.tokens;
   }
 
   // --- An involuntary memory left out of its tenth, or cut to it, takes what is still unspent ---
