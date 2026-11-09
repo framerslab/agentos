@@ -3,7 +3,8 @@
  * Cognitive memory for GMIs built from agent options (`agent({ runtime: 'gmi' })`):
  * a {@link CognitiveMemoryManager} over an in-memory vector store, the
  * in-memory knowledge graph, an embedding manager for `memory.embedding`, a
- * working memory of its own and the persona's HEXACO traits.
+ * working memory of its own, the persona's HEXACO traits and the persona's
+ * section shares of the memory block (`cognitiveMemoryConfig.tokenBudget`).
  *
  * One manager serves every session of an agent, and each session's GMI is given
  * `manager.forSession()`: the shared store with a working memory of its own, so
@@ -298,7 +299,10 @@ export async function openAgentMemoryBrain(store: NonNullable<MemoryConfig['stor
 }
 
 export interface AgentCognitiveMemoryOptions {
-  /** The agent's persona: its id is the memory's owner (`agentId`), its traits shape encoding. */
+  /**
+   * The agent's persona: its id is the memory's owner (`agentId`), its traits shape encoding, and its
+   * `cognitiveMemoryConfig.tokenBudget` sets the memory block's section shares (a 0 share turns its section off).
+   */
   persona: IPersonaDefinition;
   memory: MemoryConfig;
   /** The memory mechanisms to run; none when undefined. */
@@ -449,6 +453,9 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     );
   }
 
+  // The persona's section shares (cognitiveMemoryConfig.tokenBudget): a 0 share turns its section off.
+  const personaBudget = opts.persona.cognitiveMemoryConfig?.tokenBudget;
+
   const config: CognitiveMemoryConfig = {
     workingMemory,
     knowledgeGraph,
@@ -459,6 +466,7 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     moodProvider: () => ({ ...NEUTRAL_PAD }),
     featureDetectionStrategy: 'keyword',
     graph: { backend: 'knowledge-graph' },
+    ...(personaBudget ? { tokenBudget: { ...personaBudget } } : {}),
     ...(opts.mechanisms ? { cognitiveMechanisms: opts.mechanisms } : {}),
     consolidation: { enabled: consolidationEnabled },
     ...(opts.brain ? { brain: opts.brain, archive } : {}),
