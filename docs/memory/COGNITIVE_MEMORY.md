@@ -592,7 +592,12 @@ Assembles memory context into a single formatted string within a token budget, s
 
 ### Default Budget Allocation
 
-A share is the least a section with content gets, not a cap (see [Overflow Redistribution](#overflow-redistribution)). Shares set through `tokenBudget` that add up to more than 1 are scaled down, and a share that is not a finite positive number counts as 0.
+A share is the least a section with content gets, not a cap (see [Overflow Redistribution](#overflow-redistribution)). Shares set through `tokenBudget` that add up to more than 1 are scaled down, and a share that is not a finite positive number counts as 0. A share set to exactly 0 turns its section off: it gets no grant, takes none of the budget other sections leave unused, and is left out of the block. A key left out of `tokenBudget`, or set to `undefined`, keeps its default share. The `allocation` the assembly returns holds the shares it used: the defaults with the configured shares over them, 0 for the ones that count as 0, scaled down when they add up to more than 1.
+
+```typescript
+// Never show recent episodic memories; every other section keeps its default share.
+await memory.initialize({ ...deps, tokenBudget: { recentEpisodic: 0 } });
+```
 
 | Section | Budget % | Content |
 |---------|---------|---------|
@@ -610,9 +615,9 @@ Budget a section leaves unused (it is empty, or its content is shorter than its 
 
 ### Trace Lines
 
-A trace's content is rendered whole. When the next trace does not fit what is left of its section, it is cut to fit that space, at a word boundary, and its content ends with `…[cut]`; the section ends there. A trace whose cut would keep fewer than 40 characters of content is left out. Working memory keeps its leading slots when the whole list does not fit.
+A trace's content is rendered whole. A trace that does not fit what is left of its section is cut to fit that space, at a word boundary, and its content ends with `…[cut]`. A trace whose cut would keep fewer than 40 characters of content is skipped, and the traces after it are still tried, in order, while the section has room. Graph associations follow the same rule, their `[associated, activation=…]` tag kept whole. Lines of the other sections are whole or skipped. A cut never splits a surrogate pair, so an emoji is kept or dropped whole; the same holds for persistent memory cut to fit. Working memory keeps its leading slots when the whole list does not fit.
 
-Every line carries the trace's age and the UTC date it was stored (`createdAt`): `just now`, `Nm ago`, `Nh ago` and `Nd ago` under a week, `N days ago` from a week on, then `, YYYY-MM-DD`. A trace stored 26 days before the turn reads:
+Every line carries the trace's age and the UTC date it was stored (`createdAt`): `just now`, `Nm ago` and `Nh ago` under a day; from a day on, the number of UTC calendar days between the stored date and the turn's date, as `Nd ago` under a week and `N days ago` from a week on; then `, YYYY-MM-DD`. Counted in calendar days, the age always agrees with the date: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, though fewer than 27 whole 24-hour periods have passed. A trace stored 26 days before the turn reads:
 
 ```
 - [episodic] user: which locker did we pick? ... (26 days ago, 2026-10-13 | moderate confidence | relevance: 0.62)
@@ -662,6 +667,17 @@ The assembler selects a formatting style by comparing conscientiousness, opennes
 The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to the sections with content), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
 
 Token estimation uses ~4 chars per token heuristic.
+
+### Upgrading from 0.15.120 or earlier
+
+What callers see differently in the memory block and its formatters:
+
+- `formatMemoryTrace` and `formatMemoryTraces` (exported from `@framers/agentos/cognition/memory`) return the whole content of a trace when called without `maxChars`. Through 0.15.120 they cut it to about 300 characters (350 in the narrative style). A caller that needs a bound passes `formatMemoryTrace(trace, style, { maxChars })`.
+- `assembleForPrompt()` puts a graph association's whole content in Related Context, cut to fit only when it does not fit what is left of the section. Through 0.15.120 every association was cut to 150 characters.
+- The involuntary memory is chosen from the traces the turn did not retrieve: every retrieved trace is left out of its pool, including one that did not fit the block. Through 0.15.120 only the traces that made it into the block were left out.
+- A `tokenBudget` share of exactly 0 turns its section off. With the budget other sections leave unused flowing to the sections with content, a 0 share would otherwise still render its section. The default allocation has no zero share, so a host that sets none sees no change.
+- Ages of a day or more count UTC calendar days between the stored date and the turn's date, so the age and the date beside it agree. An age counted in whole 24-hour periods could read one day less than the dates (`26 days ago, 2026-10-12` on 2026-11-08).
+- The returned `allocation` holds the shares the assembly used, not the configured ones.
 
 ---
 

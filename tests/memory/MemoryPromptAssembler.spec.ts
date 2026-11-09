@@ -488,7 +488,7 @@ describe('MemoryPromptAssembler', () => {
       // Semantic Recall holds its scaled default share, not the rounding left over.
       const many = (type: 'semantic' | 'episodic') =>
         Array.from({ length: 30 }, (_, i) => makeScoredTrace({ id: `${type}-${i}`, type, content: wordsText(500, i) }));
-      const full = (allocation: Record<string, number | undefined>) =>
+      const full = (allocation: MemoryAssemblerInput['allocation']) =>
         assembleMemoryContext({
           totalTokenBudget: 4000,
           allocation,

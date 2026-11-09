@@ -571,6 +571,11 @@ export interface AssembledMemoryContext {
   contextText: string;
   /** Estimated tokens of `contextText` (about 4 characters a token), headers included; never above the budget. */
   tokensUsed: number;
+  /**
+   * The shares the sections were granted from: the configured shares over the
+   * defaults, 0 for a share that is 0 or not a finite positive number, scaled
+   * down when they add up to more than 1.
+   */
   allocation: MemoryBudgetAllocation;
   includedMemoryIds: string[];
 }

@@ -226,7 +226,9 @@ export interface CognitiveMemoryPersonaConfig {
    * Token budget share overrides (fractions of the block's budget; shares
    * adding up to more than 1 are scaled down, and a share that is not a
    * finite positive number counts as 0). Unused budget flows to the sections
-   * that still have content.
+   * that still have content. A share of exactly 0 turns its section off: it
+   * gets no grant and no unused budget. A key left out or set to `undefined`
+   * keeps its default share.
    */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
   /** Encoding config overrides. */
@@ -271,6 +273,11 @@ export interface CognitiveMemoryConfig {
   decay?: Partial<DecayConfig>;
   /** @default 7 (Miller's number) */
   workingMemoryCapacity?: number;
+  /**
+   * Section shares of the memory block's budget, over
+   * {@link DEFAULT_BUDGET_ALLOCATION}. A share of exactly 0 turns its section
+   * off; a key left out or set to `undefined` keeps its default.
+   */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
 
   // --- Batch 2 (optional, no-op when absent) ---
