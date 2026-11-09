@@ -272,6 +272,16 @@ describe('MemoryPromptAssembler', () => {
       expect(formatMemoryTrace(makeScoredTrace({ createdAt: now - 26 * DAY_MS }), 'emotional', { now }))
         .toMatch(/^\(~\) 26 days ago, 2026-10-13: /);
     });
+
+    it('leaves the date out, and still renders the block, for a stored time past the last instant a Date can hold', () => {
+      const now = Date.UTC(2026, 10, 8, 12, 0, 0);
+      // A nanosecond epoch: finite and positive, but above 8.64e15 ms, where toISOString throws.
+      const trace = makeScoredTrace({ type: 'episodic', createdAt: now * 1_000_000 });
+      expect(() => formatMemoryTrace(trace, 'structured', { now })).not.toThrow();
+      expect(formatMemoryTrace(trace, 'structured', { now })).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+      const result = assembleMemoryContext({ totalTokenBudget: 1000, traits: {}, retrievedTraces: [trace] });
+      expect(result.includedMemoryIds).toContain(trace.id);
+    });
   });
 
   describe('budget spill', () => {

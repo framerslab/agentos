@@ -68,10 +68,15 @@ function timeAgo(timestampMs: number, now: number): string {
   return `${days} days ago`;
 }
 
-/** The UTC calendar date (YYYY-MM-DD) of a timestamp, or undefined when it has none. */
+/**
+ * The UTC calendar date (YYYY-MM-DD) of a timestamp, or undefined when it has
+ * none or lies outside the range a Date can hold (toISOString would throw).
+ */
 function calendarDate(timestampMs: number): string | undefined {
   if (!Number.isFinite(timestampMs) || timestampMs <= 0) return undefined;
-  return new Date(timestampMs).toISOString().slice(0, 10);
+  const date = new Date(timestampMs);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString().slice(0, 10);
 }
 
 /** The age of a trace with the date it was stored beside it: `26 days ago, 2026-10-13`. */
