@@ -147,7 +147,7 @@ describe('a host IPersonaLoader with null memory settings', () => {
     await manager.shutdown();
   });
 
-  it('merges the presets when a host persona sets metaPrompts to a value that is not an array, and reports it', async () => {
+  it('reports invalid_metaprompts when presets replace a host metaPrompts that is not an array', async () => {
     const parsed = JSON.parse(
       '{"id":"m","name":"m","version":"1.0.0","baseSystemPrompt":"x","metaPrompts":"","sentimentTracking":{"enabled":true,"presets":["frustration_recovery"]}}',
     ) as IPersonaDefinition;
@@ -157,7 +157,7 @@ describe('a host IPersonaLoader with null memory settings', () => {
     expect(manager.getPersonaDefinition('m')!.metaPrompts!.map((metaPrompt) => metaPrompt.id)).toEqual(['gmi_frustration_recovery']);
     const records = (manager as unknown as { allPersonaRecords: Map<string, { validation?: { issues: { code: string }[] } }> })
       .allPersonaRecords;
-    expect(records.get('m')?.validation?.issues.map((issue) => issue.code)).not.toContain('invalid_metaprompts');
+    expect(records.get('m')?.validation?.issues.map((issue) => issue.code)).toContain('invalid_metaprompts');
     await manager.shutdown();
   });
 
