@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CartesiaBatchTTS, CARTESIA_VERSION } from '../providers/CartesiaBatchTTS.js';
+import { VoicePipelineError } from '../VoicePipelineError.js';
 
 const okAudio = () => new Response(new Uint8Array([1, 2, 3, 4]).buffer, { status: 200 });
 
@@ -67,6 +68,41 @@ describe('CartesiaBatchTTS', () => {
     const body = JSON.parse(((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(body.voice).toEqual({ mode: 'id', id: 'v2' });
     expect(body.model_id).toBe('sonic-3');
+  });
+
+  it('throws an error a spent-credit 402 answer classifies as quota', async () => {
+    const body = JSON.stringify({
+      error_code: 'quota_exceeded',
+      message:
+        'Please upgrade your subscription at https://play.cartesia.ai/subscription to increase your credit limit or enable overages for your account.',
+      title: 'Model credits exhausted',
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 402 })));
+    const tts = new CartesiaBatchTTS({ apiKey: 'k', voiceId: 'v1' });
+    const thrown = await tts.synthesize('hi').then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain('402 {"error_code":"quota_exceeded"');
+    const classified = VoicePipelineError.classifyError(thrown, { kind: 'tts', provider: tts.providerId });
+    expect(classified.errorClass).toBe('quota');
+    expect(classified.retryable).toBe(true);
+  });
+
+  it('throws an error a request timeout classifies as network', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      }),
+    );
+    const tts = new CartesiaBatchTTS({ apiKey: 'k', voiceId: 'v1' });
+    const thrown = await tts.synthesize('hi').then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(VoicePipelineError.classifyError(thrown, { kind: 'tts', provider: tts.providerId }).errorClass).toBe('network');
   });
 
   it('throws with status + body excerpt on failure', async () => {
