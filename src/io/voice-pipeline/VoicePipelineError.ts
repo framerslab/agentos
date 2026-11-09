@@ -6,8 +6,29 @@
  * matching error.message.
  */
 
+import { hasQuotaBodySignal, QUOTA_STATUS_CODES } from '../../core/providers/quotaErrors.js';
 import { describeReason, isError } from './describeReason.js';
 
+/** A quota status (429, 402 or 456) standing as its own number in a message, as `HTTP 402` or `failed: 456 {...}`. */
+const QUOTA_STATUS_PATTERN = new RegExp(`\\b(?:${[...QUOTA_STATUS_CODES].join('|')})\\b`);
+
+/**
+ * The class of a provider failure, as {@link VoicePipelineError.classifyError}
+ * reads it:
+ *
+ * - `auth`: a 401 or 403, "unauthorized", "invalid api key" or "forbidden".
+ *   Not retryable.
+ * - `quota`: a throttle or a spent quota or credit. A 429, 402 or 456, "rate
+ *   limit", "too many", or one of the quota body signals the key pools rotate
+ *   on (`quota_exceeded`, `rate_limit_exceeded`, `insufficient_quota`,
+ *   `overloaded_error`, `resource_exhausted`, `rate_limit`). Retryable.
+ * - `service`: a 5xx, "internal server", "bad gateway", "gateway timeout" or
+ *   "service unavailable". Retryable.
+ * - `network`: an error named `TimeoutError`, which `AbortSignal.timeout()`
+ *   rejects a request with, the codes `ECONNRESET`, `ETIMEDOUT` and
+ *   `ENOTFOUND`, "socket hang up" or "network". Retryable.
+ * - `unknown`: anything else, a caller's own abort (`AbortError`) included.
+ */
 export type HealthErrorClass =
   | 'auth'
   | 'quota'
@@ -43,7 +64,9 @@ export class VoicePipelineError extends Error {
 
   /**
    * Best-effort classification of an arbitrary error into a voice-pipeline
-   * error with a well-known errorClass. Preserves the original error as
+   * error with a well-known errorClass ({@link HealthErrorClass} lists what
+   * each class covers). The tests run in that list's order, so a 401 or 403 is
+   * `auth` whatever else its message says. Preserves the original error as
    * `cause` so upstream inspection can still recover provider-specific
    * detail. A value that is no `Error` gets its message from
    * `describeReason()`, so one `String()` cannot print (an object without a
@@ -64,13 +87,14 @@ export class VoicePipelineError extends Error {
     if (/\b401\b|unauthori[sz]ed|invalid api key|forbidden|\b403\b/i.test(msg)) {
       errorClass = 'auth';
       retryable = false;
-    } else if (/\b429\b|rate.?limit|too many/i.test(msg)) {
+    } else if (QUOTA_STATUS_PATTERN.test(msg) || /rate.?limit|too many/i.test(msg) || hasQuotaBodySignal(msg)) {
       errorClass = 'quota';
       retryable = true;
     } else if (/\b5\d\d\b|internal server|bad gateway|gateway timeout|service unavailable/i.test(msg)) {
       errorClass = 'service';
       retryable = true;
     } else if (
+      errorName(err) === 'TimeoutError' ||
       code === 'ECONNRESET' ||
       code === 'ETIMEDOUT' ||
       code === 'ENOTFOUND' ||
@@ -88,6 +112,22 @@ export class VoicePipelineError extends Error {
       cause: err,
       retryable,
     });
+  }
+}
+
+/**
+ * A failure value's `name`, such as `'TimeoutError'` for the rejection of a
+ * request whose `AbortSignal.timeout()` fired, or `''` when it has none or
+ * refuses the read.
+ *
+ * @param err - What a provider threw or rejected with.
+ * @returns The value's `name`, or `''`.
+ */
+function errorName(err: unknown): unknown {
+  try {
+    return (err as { name?: unknown } | null | undefined)?.name ?? '';
+  } catch {
+    return '';
   }
 }
 

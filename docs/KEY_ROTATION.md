@@ -157,7 +157,7 @@ The key pool is implemented in [`src/core/providers/`](https://github.com/framer
 
 - `ApiKeyPool.ts`: the strategies, `markFailed()` / `markSuccess()`, the probes and rechecks, the persisted state and the log lines; `keyPoolStrategyFromEnv()` reads `AGENTOS_KEY_POOL_STRATEGY`
 - `KeyPoolStateStore.ts`: `KeyState`, `KeyPoolStateStore`, `InMemoryKeyPoolStateStore`, `SqlKeyPoolStateStore` and the table's DDL
-- `quotaErrors.ts`: `classifyKeyFailure()` (the kinds above), `retryAfterMs()` (a Retry-After header as bounded milliseconds) and `isQuotaError()` (the broad rotation test)
+- `quotaErrors.ts`: `classifyKeyFailure()` (the kinds above), `retryAfterMs()` (a Retry-After header as bounded milliseconds), `isQuotaError()` (the broad rotation test), and `QUOTA_STATUS_CODES`, `QUOTA_BODY_SIGNALS` and `hasQuotaBodySignal()`, the statuses and body signals that test reads, which the voice pipeline's `VoicePipelineError.classifyError()` reads too, to class a failure as `quota`
 - `keyProbe.ts`: what one probe found (`KeyProbeAnswer`), read from its answer; `probeProviderKey()` in [`src/api/probeProviderKey.ts`](https://github.com/framerslab/agentos/blob/master/src/api/probeProviderKey.ts) turns it into a key's state
 - `ApiKeyPoolRegistry.ts`: one shared pool per environment variable (`getKeyPool()`), built from the first call's config (a later call's config is ignored and logged), not used by the built-in providers
 
