@@ -24,6 +24,7 @@
 import type {
   MemoryBudgetAllocation,
   AssembledMemoryContext,
+  MemoryTrace,
   ScoredMemoryTrace,
 } from '../types.js';
 import type { HexacoTraits } from '../config.js';
@@ -262,14 +263,35 @@ function renderTraces(
 // ---------------------------------------------------------------------------
 
 /**
- * The most of the budget (after the preamble) an involuntary memory may take.
- * It is set aside before the sections are granted theirs, so a block full of
- * recalled traces still has room for one.
+ * The share of the budget (after the preamble) set aside for an involuntary
+ * memory before the sections are granted theirs, so a block full of recalled
+ * traces still has room for one. A memory that does not fit it whole also
+ * takes what the sections leave unspent.
  */
 const INVOLUNTARY_MAX_SHARE = 0.1;
 
 /** Characters the involuntary section takes besides its trace line: separator, header, newline and prefix. */
 const INVOLUNTARY_OVERHEAD_CHARS = SECTION_SEPARATOR_CHARS + INVOLUNTARY_HEADER.length + 1 + INVOLUNTARY_PREFIX.length;
+
+interface InvoluntarySection {
+  text: string;
+  tokens: number;
+  id: string;
+}
+
+/** The involuntary-recall section for `trace` within `budgetTokens`, or null when no useful line fits. */
+function renderInvoluntary(
+  trace: MemoryTrace,
+  style: FormattingStyle,
+  now: number,
+  budgetTokens: number,
+): InvoluntarySection | null {
+  const roomChars = budgetTokens * 4 - INVOLUNTARY_OVERHEAD_CHARS;
+  const line = roomChars > 0 ? formatMemoryTrace(trace, style, { now, maxChars: roomChars }) : '';
+  if (!line) return null;
+  const text = `${INVOLUNTARY_HEADER}\n${INVOLUNTARY_PREFIX}${line}`;
+  return { text, tokens: Math.ceil((SECTION_SEPARATOR_CHARS + text.length) / 4), id: trace.id };
+}
 
 /**
  * Assemble memory context into a single formatted string within the given
@@ -287,8 +309,9 @@ const INVOLUNTARY_OVERHEAD_CHARS = SECTION_SEPARATOR_CHARS + INVOLUNTARY_HEADER.
  * pass in the same order gives what is still unspent (a section that could
  * not use its grant, such as working memory too long for it) to the sections
  * that still have content left out, so the block can fill the whole budget.
- * `tokensUsed` counts the headers and separators too and never exceeds
- * `totalTokenBudget`.
+ * An involuntary memory that did not fit its tenth whole then takes what is
+ * still unspent. `tokensUsed` counts the headers and separators too and never
+ * exceeds `totalTokenBudget`.
  */
 export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMemoryContext {
   const alloc: MemoryBudgetAllocation = {
@@ -325,19 +348,13 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
 
   // --- Involuntary Recall (Cognitive Mechanisms) ---
   // Chosen from the traces this turn did not retrieve, and set aside first.
-  let involuntary: { text: string; tokens: number; id: string } | null = null;
+  let involuntaryTrace: MemoryTrace | null = null;
+  let involuntary: InvoluntarySection | null = null;
   if (input.mechanismsEngine && input.allTraces) {
     const retrievedSet = new Set((input.retrievedTraces ?? []).map((trace) => trace.id));
-    const { involuntaryMemory } = input.mechanismsEngine.onPromptAssembly(input.allTraces, retrievedSet);
-    if (involuntaryMemory) {
-      const roomChars = Math.floor(afterPreamble * INVOLUNTARY_MAX_SHARE) * 4 - INVOLUNTARY_OVERHEAD_CHARS;
-      const line = roomChars > 0
-        ? formatMemoryTrace(involuntaryMemory, style, { now, maxChars: roomChars })
-        : '';
-      if (line) {
-        const text = `${INVOLUNTARY_HEADER}\n${INVOLUNTARY_PREFIX}${line}`;
-        involuntary = { text, tokens: Math.ceil((SECTION_SEPARATOR_CHARS + text.length) / 4), id: involuntaryMemory.id };
-      }
+    involuntaryTrace = input.mechanismsEngine.onPromptAssembly(input.allTraces, retrievedSet).involuntaryMemory;
+    if (involuntaryTrace) {
+      involuntary = renderInvoluntary(involuntaryTrace, style, now, Math.floor(afterPreamble * INVOLUNTARY_MAX_SHARE));
     }
   }
   const available = afterPreamble - (involuntary?.tokens ?? 0);
@@ -420,6 +437,14 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
     if (again.tokens <= rendered[key].tokens) continue;
     rendered[key] = again;
     spare = sectionBudget - again.tokens;
+  }
+
+  // --- An involuntary memory left out of its tenth, or cut to it, takes what is still unspent ---
+  // The sections hold `available - spare` tokens, so the memory may grow to its own tokens plus `spare`.
+  if (involuntaryTrace && spare > 0) {
+    const held = involuntary?.tokens ?? 0;
+    const wider = renderInvoluntary(involuntaryTrace, style, now, held + spare);
+    if (wider && wider.tokens > held) involuntary = wider;
   }
 
   const sections: string[] = includePreamble ? [preamble] : [];
