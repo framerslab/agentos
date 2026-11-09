@@ -80,6 +80,42 @@ describe('a host IPersonaLoader with null memory settings', () => {
     await manager.shutdown();
   });
 
+  it('loads the other personas when one has non-array sentiment presets, and reports that one', async () => {
+    const malformed = JSON.parse(
+      '{"id":"bad","name":"bad","version":"1.0.0","baseSystemPrompt":"x","sentimentTracking":{"enabled":true,"presets":"frustration_recovery"}}',
+    ) as IPersonaDefinition;
+    const good = { id: 'good', name: 'good', version: '1.0.0', baseSystemPrompt: 'x' } as IPersonaDefinition;
+    const manager = createManager(hostLoader([malformed, good]), vi.fn() as never);
+    await manager.initialize();
+
+    expect(manager.getPersonaDefinition('good')).toBe(good);
+    const stored = manager.getPersonaDefinition('bad');
+    expect(stored).toBeDefined();
+    expect(stored!.metaPrompts).toBeUndefined();
+    const records = (manager as unknown as { allPersonaRecords: Map<string, { validation?: { issues: { code: string }[] } }> })
+      .allPersonaRecords;
+    const codes = records.get('bad')?.validation?.issues.map((issue) => issue.code) ?? [];
+    expect(codes).toContain('invalid_sentiment_presets');
+    await manager.shutdown();
+  });
+
+  it('stores a definition the normalizer throws on as returned, beside the rest', async () => {
+    const other = { id: 'r', name: 'r', version: '1.0.0', baseSystemPrompt: 'x' } as IPersonaDefinition;
+    // A getter that throws stands for any host object the normalizer cannot read.
+    const broken = { id: 'broken', name: 'broken', version: '1.0.0', baseSystemPrompt: 'x' } as IPersonaDefinition;
+    Object.defineProperty(broken, 'sentimentTracking', {
+      enumerable: true,
+      get: () => {
+        throw new Error('unreadable');
+      },
+    });
+    const manager = createManager(hostLoader([broken, other]), vi.fn() as never);
+    await expect(manager.initialize()).resolves.toBeUndefined();
+    expect(manager.getPersonaDefinition('broken')).toBe(broken);
+    expect(manager.getPersonaDefinition('r')).toBe(other);
+    await manager.shutdown();
+  });
+
   it('stores a clean persona as the same object', async () => {
     const clean = { id: 'q', name: 'q', version: '1', baseSystemPrompt: 'x' } as IPersonaDefinition;
     const manager = createManager(hostLoader([clean]), vi.fn() as never);
