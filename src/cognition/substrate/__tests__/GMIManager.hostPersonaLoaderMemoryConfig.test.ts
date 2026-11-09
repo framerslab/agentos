@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GMIManager, type GMICognitiveMemoryFactoryInput } from '../GMIManager';
 import type { IPersonaLoader } from '../personas/IPersonaLoader';
+import { InMemoryPersonaLoader } from '../personas/InMemoryPersonaLoader';
 import type { IPersonaDefinition } from '../personas/IPersonaDefinition';
 import type { ICognitiveMemoryManager } from '../../memory/CognitiveMemoryManager.js';
 import type { IUtilityAI } from '../../nlp/ai_utilities/IUtilityAI';
@@ -122,6 +123,51 @@ describe('a host IPersonaLoader with null memory settings', () => {
     expect(manager.getPersonaDefinition('r')).toBe(other);
     const records = (manager as unknown as { allPersonaRecords: Map<string, unknown> }).allPersonaRecords;
     expect([...records.keys()]).toEqual(['r']);
+    await manager.shutdown();
+  });
+
+  it('stores a shipped loader persona with the preset metaprompts merged once, overrides kept', async () => {
+    const override = { id: 'gmi_frustration_recovery', description: 'host override', promptTemplate: 'mine', trigger: { type: 'manual' } };
+    const custom = { id: 'custom', description: 'custom', promptTemplate: 'custom', trigger: { type: 'manual' } };
+    const definition = {
+      id: 's',
+      name: 's',
+      version: '1.0.0',
+      baseSystemPrompt: 'x',
+      sentimentTracking: { enabled: true, presets: ['frustration_recovery', 'confusion_clarification'] },
+      metaPrompts: [override, custom],
+    } as unknown as IPersonaDefinition;
+    const manager = createManager(new InMemoryPersonaLoader([definition]), vi.fn() as never);
+    await manager.initialize();
+
+    const stored = manager.getPersonaDefinition('s')!.metaPrompts!;
+    expect(stored.map((metaPrompt) => metaPrompt.id)).toEqual(['gmi_frustration_recovery', 'gmi_confusion_clarification', 'custom']);
+    expect(stored[0]).toEqual(override);
+    expect(stored[2]).toEqual(custom);
+    await manager.shutdown();
+  });
+
+  it('merges the presets when a host persona sets metaPrompts to a value that is not an array, and reports it', async () => {
+    const parsed = JSON.parse(
+      '{"id":"m","name":"m","version":"1.0.0","baseSystemPrompt":"x","metaPrompts":"","sentimentTracking":{"enabled":true,"presets":["frustration_recovery"]}}',
+    ) as IPersonaDefinition;
+    const manager = createManager(hostLoader([parsed]), vi.fn() as never);
+    await manager.initialize();
+
+    expect(manager.getPersonaDefinition('m')!.metaPrompts!.map((metaPrompt) => metaPrompt.id)).toEqual(['gmi_frustration_recovery']);
+    const records = (manager as unknown as { allPersonaRecords: Map<string, { validation?: { issues: { code: string }[] } }> })
+      .allPersonaRecords;
+    expect(records.get('m')?.validation?.issues.map((issue) => issue.code)).not.toContain('invalid_metaprompts');
+    await manager.shutdown();
+  });
+
+  it('reports a host persona whose metaPrompts is not an array', async () => {
+    const parsed = JSON.parse('{"id":"n","name":"n","version":"1.0.0","baseSystemPrompt":"x","metaPrompts":"oops"}') as IPersonaDefinition;
+    const manager = createManager(hostLoader([parsed]), vi.fn() as never);
+    await manager.initialize();
+    const records = (manager as unknown as { allPersonaRecords: Map<string, { validation?: { issues: { code: string }[] } }> })
+      .allPersonaRecords;
+    expect(records.get('n')?.validation?.issues.map((issue) => issue.code)).toContain('invalid_metaprompts');
     await manager.shutdown();
   });
 
