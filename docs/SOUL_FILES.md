@@ -65,7 +65,13 @@ Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
 The LLM folds new conversation into pages when memory consolidates: a
 [`souledAgent`](getting-started/HIGH_LEVEL_API.md) runs this on the agent's `close()`,
 and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new facts
-rather than clobbering human edits. The runtime does not version the pages.
+rather than clobbering human edits, and each page written is dated with the time
+of the compile. The runtime does not version the pages.
+
+The traces a `souledAgent`'s own observer stores carry no entities, so the default
+clusterer merges them into the page `concepts/notes`. Entity pages come from traces
+stored with entities through `agent.memory.remember()`, or from a clusterer passed
+to `attachMemoryWiki()`.
 
 A page's id is its path under `memory/` without `.md`, with `/` between folders:
 `entities/johnny` is `memory/entities/johnny.md`. An id is one or more names joined
@@ -103,7 +109,30 @@ into the system prompt and starts the folder, follows no link: see
 [Loading a Soul](#loading-a-soul).
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
-and is left untouched on disk.
+and is left untouched on disk. The copied text sits between the markers
+`<!-- migrated from MEMORY.md -->` and `<!-- end of MEMORY.md -->`, right under
+the index's `# Memory Index` heading. An end marker that `MEMORY.md` itself
+holds is copied as `<!-- end of MEMORY.md (quoted) -->`, so it closes no block.
+When the wiki writes its catalog into `index.md`, it keeps that block and writes the catalog after it, so the text
+stays in the system prompt. An `index.md` with the start marker and no end marker
+(as earlier versions wrote it) is read as a block that runs to the end of the
+file, and gets its end marker on the first catalog write. A start marker anywhere
+else, such as in a page summary taken from a conversation, opens no block, and an
+`index.md` with no block is replaced by the catalog. The end marker itself stays
+out of the system prompt, and out of the `wikiIndex` that `loadSoul()` and
+`loadSoulSync()` return.
+
+When the wiki refreshes its catalog, it reads `index.md` never through a symbolic
+link and writes it whole, through a new file beside it and a rename, so a catalog
+written by another agent on the same workspace at the same moment never finds it
+half written. (`WikiMemoryStore.getCatalog()` is a plain read of `index.md` and
+follows a link.) Where the platform refuses the new file or the rename (`EACCES`,
+`EPERM`, `EBUSY`), the catalog is written into `index.md` in place instead, and a
+refresh running at that moment can then read it half written. A symbolic link at
+`index.md` is not read: the refresh replaces the link with the catalog file and
+leaves the link's target as it is. An `index.md` the wiki cannot read for any
+other reason is left as it is: the page write that would refresh it fails, and so
+does the compile, which takes the same traces up again the next time.
 
 ## SOUL.md Format
 
@@ -212,7 +241,7 @@ The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, ME
 
 The `hexaco:` block in SOUL.md frontmatter maps directly to AgentOS's existing
 [HEXACO personality model](./memory/HEXACO_PERSONALITY.md). The scores land in
-`personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits:
+`personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits; their trait paragraph reaches the prompt only with a learning layer ([GMI.md](./GMI.md#learning)):
 
 - [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): with `emergentConfig.selfImprovement.enabled`, changes a trait for the session's GMI within a per-session budget
 - [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts): records those changes when a storage adapter is configured

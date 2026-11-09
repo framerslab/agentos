@@ -60,6 +60,7 @@ import { LAUNCH_AGENCY_TOOL_NAME, MIN_LAUNCH_TOKENS, resolveLaunchLimits, type A
 import { createGmiLaunchTool } from './runtime/agencyLaunch/gmiLaunchTool.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions, stablePersonaIdOf } from './runtime/gmiPersona.js';
+import { withOneSoulWarning } from './runtime/soulLoadWarning.js';
 import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import {
   assertEmbeddingConfig,
@@ -634,8 +635,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
   const shared = retryingOnce<Shared>(async () => {
     // Throws, as generateText throws, when no provider or model resolves.
-    const persona = personaFromAgentOptions(opts, cognition, tools);
-    const lightPersona = personaFromAgentOptions(opts, lightCognition, tools);
+    // Both personas load the soul: a soul that fails to load warns once for the pair.
+    const [persona, lightPersona] = withOneSoulWarning(() => [
+      personaFromAgentOptions(opts, cognition, tools),
+      personaFromAgentOptions(opts, lightCognition, tools),
+    ] as const);
     const promptEngine = new PromptEngine();
     await promptEngine.initialize(GMI_PROMPT_ENGINE_CONFIG);
     const utilityAI = new StatisticalUtilityAI(`gmi-utility-${persona.id}`);
