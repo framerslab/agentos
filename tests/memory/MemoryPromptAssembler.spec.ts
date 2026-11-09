@@ -580,6 +580,20 @@ describe('MemoryPromptAssembler', () => {
       expect(tokensOf(semantic(withUndefined.contextText))).toBeGreaterThan(400);
     });
 
+    it('a share set to null keeps its default, as undefined does', () => {
+      const semanticTrace = makeScoredTrace({ id: 'sem', type: 'semantic', content: 'The team meets on Thursdays.' });
+      const withNull = assembleMemoryContext({
+        totalTokenBudget: 1600,
+        traits: {},
+        allocation: { semanticRecall: null } as never,
+        retrievedTraces: [semanticTrace],
+      });
+      const withDefault = assembleMemoryContext({ totalTokenBudget: 1600, traits: {}, retrievedTraces: [semanticTrace] });
+      expect(withNull.allocation.semanticRecall).toBeCloseTo(DEFAULT_BUDGET_ALLOCATION.semanticRecall, 9);
+      expect(withNull.allocation).toEqual(withDefault.allocation);
+      expect(withNull.contextText).toBe(withDefault.contextText);
+    });
+
     it('reports the shares the assembly used: scaled, and 0 for a share that is not a finite positive number', () => {
       const scaled = assembleMemoryContext({
         totalTokenBudget: 1000,
