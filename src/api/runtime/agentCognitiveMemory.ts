@@ -4,7 +4,9 @@
  * a {@link CognitiveMemoryManager} over an in-memory vector store, the
  * in-memory knowledge graph, an embedding manager for `memory.embedding`, a
  * working memory of its own, the persona's HEXACO traits and the persona's
- * section shares of the memory block (`cognitiveMemoryConfig.tokenBudget`).
+ * memory settings (`cognitiveMemoryConfig`: the memory block's section shares,
+ * encoding, decay, working-memory capacity, observer, reflector, graph and
+ * infinite context).
  *
  * One manager serves every session of an agent, and each session's GMI is given
  * `manager.forSession()`: the shared store with a working memory of its own, so
@@ -23,7 +25,7 @@
  * opens the Brain ({@link openAgentMemoryBrain}) and closes it once the manager has closed.
  */
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
-import type { CognitiveMemoryConfig, HexacoTraits, PADState } from '../../cognition/memory/core/config.js';
+import type { CognitiveMemoryConfig, CognitiveMemoryPersonaConfig, HexacoTraits, PADState } from '../../cognition/memory/core/config.js';
 import type { CognitiveMechanismsConfig } from '../../cognition/memory/mechanisms/types.js';
 import { SqlStorageMemoryArchive } from '../../cognition/memory/archive/SqlStorageMemoryArchive.js';
 import { KnowledgeGraph } from '../../cognition/memory/retrieval/graph/knowledge/KnowledgeGraph.js';
@@ -301,7 +303,9 @@ export async function openAgentMemoryBrain(store: NonNullable<MemoryConfig['stor
 export interface AgentCognitiveMemoryOptions {
   /**
    * The agent's persona: its id is the memory's owner (`agentId`), its traits shape encoding, and its
-   * `cognitiveMemoryConfig.tokenBudget` sets the memory block's section shares (a 0 share turns its section off).
+   * `cognitiveMemoryConfig` tunes the manager: `tokenBudget` sets the memory block's section shares (a 0 share turns
+   * its section off), and `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` and
+   * `infiniteContext` reach the manager's config under the same names.
    */
   persona: IPersonaDefinition;
   memory: MemoryConfig;
@@ -327,6 +331,11 @@ export interface AgentCognitiveMemory {
    * manager this builder created. Later calls return the first call's promise.
    */
   close(): Promise<void>;
+}
+
+/** A copy of `value` without the keys set to `undefined`, so a default under such a key is kept. */
+function definedEntries<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as Partial<T>;
 }
 
 /** The text the build embeds once to check the embedding model. */
@@ -453,8 +462,16 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     );
   }
 
-  // The persona's section shares (cognitiveMemoryConfig.tokenBudget): a 0 share turns its section off.
-  const personaBudget = opts.persona.cognitiveMemoryConfig?.tokenBudget;
+  // The persona's memory settings. A field or key the persona leaves undefined keeps the default. The section shares
+  // (tokenBudget): a 0 share turns its section off.
+  const personaMemory: CognitiveMemoryPersonaConfig = opts.persona.cognitiveMemoryConfig ?? {};
+  const personaBudget = personaMemory.tokenBudget;
+  const personaTuning: Partial<CognitiveMemoryConfig> = {};
+  for (const key of ['encoding', 'decay', 'observer', 'reflector', 'infiniteContext'] as const) {
+    const value = personaMemory[key];
+    if (value !== undefined) (personaTuning as Record<string, unknown>)[key] = definedEntries(value);
+  }
+  if (personaMemory.workingMemoryCapacity !== undefined) personaTuning.workingMemoryCapacity = personaMemory.workingMemoryCapacity;
 
   const config: CognitiveMemoryConfig = {
     workingMemory,
@@ -465,7 +482,8 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     traits,
     moodProvider: () => ({ ...NEUTRAL_PAD }),
     featureDetectionStrategy: 'keyword',
-    graph: { backend: 'knowledge-graph' },
+    ...personaTuning,
+    graph: { backend: 'knowledge-graph', ...definedEntries(personaMemory.graph ?? {}) },
     ...(personaBudget ? { tokenBudget: { ...personaBudget } } : {}),
     ...(opts.mechanisms ? { cognitiveMechanisms: opts.mechanisms } : {}),
     consolidation: { enabled: consolidationEnabled },

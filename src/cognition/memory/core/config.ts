@@ -217,10 +217,25 @@ export interface ConsolidationConfig {
 // Per-persona cognitive memory overrides
 // ---------------------------------------------------------------------------
 
+/**
+ * A persona's cognitive memory settings. `createAgentCognitiveMemory` passes
+ * each field but `featureDetectionStrategy` to the manager it builds, under
+ * the same name in {@link CognitiveMemoryConfig}; a field or key left out or
+ * set to `undefined` keeps the default. A host that builds its manager from a
+ * persona itself (`gmiManagerConfig.cognitiveMemoryFactory`) passes them the
+ * same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from
+ * their options, which set no `cognitiveMemoryConfig`.
+ */
 export interface CognitiveMemoryPersonaConfig {
-  /** Feature detection strategy. @default 'keyword' */
+  /**
+   * Feature detection strategy. Nothing in agentos reads it yet:
+   * `createAgentCognitiveMemory` runs `'keyword'`, as it has no LLM invoker for
+   * `'llm'` or `'hybrid'`.
+   *
+   * @default 'keyword'
+   */
   featureDetectionStrategy?: 'keyword' | 'llm' | 'hybrid';
-  /** Working memory slot capacity override. */
+  /** Working memory slot capacity override ({@link CognitiveMemoryConfig.workingMemoryCapacity}). */
   workingMemoryCapacity?: number;
   /**
    * Token budget share overrides (fractions of the block's budget; shares
@@ -237,17 +252,32 @@ export interface CognitiveMemoryPersonaConfig {
    * default shares.
    */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
-  /** Encoding config overrides. */
+  /** Encoding config overrides ({@link CognitiveMemoryConfig.encoding}). */
   encoding?: Partial<EncodingConfig>;
-  /** Decay config overrides. */
+  /** Decay config overrides ({@link CognitiveMemoryConfig.decay}). */
   decay?: Partial<DecayConfig>;
-  /** Observer config (Batch 2). */
+  /**
+   * Observer config (Batch 2; {@link CognitiveMemoryConfig.observer}). The
+   * manager runs an observer only when the config carries an `llmInvoker`.
+   */
   observer?: Partial<ObserverConfig>;
-  /** Reflector config (Batch 2). */
+  /**
+   * Reflector config (Batch 2; {@link CognitiveMemoryConfig.reflector}). The
+   * manager runs a reflector only when the config carries an `llmInvoker`.
+   */
   reflector?: Partial<ReflectorConfig>;
-  /** Memory graph config (Batch 2). */
+  /**
+   * Memory graph config (Batch 2; {@link CognitiveMemoryConfig.graph}).
+   * `createAgentCognitiveMemory` lays it over its `{ backend: 'knowledge-graph' }`;
+   * the `'graphology'` backend needs graphology, an optional peer dependency.
+   */
   graph?: Partial<MemoryGraphConfig>;
-  /** Infinite context config (Batch 3). */
+  /**
+   * Infinite context config (Batch 3; {@link CognitiveMemoryConfig.infiniteContext}).
+   * The manager runs infinite context only with
+   * {@link CognitiveMemoryConfig.maxContextTokens}, which
+   * `createAgentCognitiveMemory` does not set, so on that path it has no effect yet.
+   */
   infiniteContext?: Partial<InfiniteContextConfig>;
 }
 
