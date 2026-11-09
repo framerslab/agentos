@@ -228,7 +228,13 @@ export interface CognitiveMemoryPersonaConfig {
    * finite positive number counts as 0). Unused budget flows to the sections
    * that still have content. A share of exactly 0 turns its section off: it
    * gets no grant and no unused budget. A key left out or set to `undefined`
-   * keeps its default share.
+   * keeps its default share. `createAgentCognitiveMemory` passes it to the
+   * manager it builds as {@link CognitiveMemoryConfig.tokenBudget}; a host that
+   * builds its manager from a persona itself
+   * (`gmiManagerConfig.cognitiveMemoryFactory`) passes it the same way.
+   * `agent({ runtime: 'gmi' })` and `gmi()` build their persona from their
+   * options, which set no `cognitiveMemoryConfig`, so their memory runs on the
+   * default shares.
    */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
   /** Encoding config overrides. */

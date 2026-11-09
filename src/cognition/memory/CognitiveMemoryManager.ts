@@ -42,6 +42,7 @@ import { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js
 import {
   assembleMemoryContext,
   type MemoryAssemblerInput,
+  type MemoryGraphAssociation,
 } from './core/prompt/MemoryPromptAssembler.js';
 
 // Batch 2 imports
@@ -1175,7 +1176,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     const wmText = workingMemory.formatForPrompt();
 
     // --- Batch 2: Graph associations ---
-    const graphContext: string[] = [];
+    const graphContext: MemoryGraphAssociation[] = [];
     if (this.graph && result.retrieved.length > 0) {
       const seedIds = result.retrieved.slice(0, 3).map((t) => t.id);
       try {
@@ -1194,8 +1195,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
             recallableIds.has(node.memoryId) &&
             !this.store.isDeleted(node.memoryId)
           ) {
-            // Whole: the assembler cuts an association to fit what is left of its section.
-            graphContext.push(`[associated, activation=${node.activation.toFixed(2)}] ${trace.content}`);
+            // Whole: the assembler cuts an association to fit what is left of its section, and leaves it out when
+            // the block already holds its trace (a retrieved trace past the three seeds may be associated).
+            graphContext.push({
+              traceId: node.memoryId,
+              text: `[associated, activation=${node.activation.toFixed(2)}] ${trace.content}`,
+            });
           }
         }
       } catch {

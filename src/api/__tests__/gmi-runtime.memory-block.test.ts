@@ -10,15 +10,30 @@
  *
  * Each case clears the session's history before the turn it reads, so what it
  * finds in the block reached the prompt through recall, not through history.
+ *
+ * agent() builds the persona from its options, which set no
+ * `cognitiveMemoryConfig`; a case that needs one sets `personaMemory.config`,
+ * and the persona agent() builds carries it, so the case reads what
+ * createAgentCognitiveMemory makes of a persona's section shares on this path.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CognitiveMemoryPersonaConfig } from '../../cognition/memory/core/config';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+const personaMemory = vi.hoisted(() => ({ config: undefined as CognitiveMemoryPersonaConfig | undefined }));
+vi.mock('../runtime/gmiPersona', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../runtime/gmiPersona')>();
+  return {
+    ...actual,
+    personaFromAgentOptions: (...args: Parameters<typeof actual.personaFromAgentOptions>) => {
+      const persona = actual.personaFromAgentOptions(...args);
+      return personaMemory.config ? { ...persona, cognitiveMemoryConfig: personaMemory.config } : persona;
+    },
+  };
+});
 import { agent, type AgentOptions } from '../agent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import type { ChatMessage } from '../../core/llm/providers/IProvider';
-import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
-import type { CognitiveMemoryConfig } from '../../cognition/memory/core/config';
 
 let n = 0;
 const key = () => `k-memory-block-${++n}`;
@@ -70,6 +85,13 @@ function memoryBlockOf(s: ProviderScript, call: number): string {
   return text.slice(start, end === -1 ? undefined : end);
 }
 
+/** Every message of the provider request `call`, as one text: what the model receives on that turn. */
+function requestTextOf(s: ProviderScript, call: number): string {
+  const request = s.seen[call];
+  expect(request, `model call ${call}`).toBeDefined();
+  return request.messages.map(textOf).join('\n\n');
+}
+
 /** The lines of one section of a block, from its header to the next section. */
 function sectionLines(block: string, header: string): string[] {
   const start = block.indexOf(header);
@@ -85,24 +107,9 @@ const DAY_MS = 86_400_000;
 /** Tokens of a text by the assembler's estimate (about four characters a token). */
 const tokensOf = (text: string) => Math.ceil(text.length / 4);
 
-/** The manager's own initialize, for a case that hands it a config with section shares. */
-const initializeManager = CognitiveMemoryManager.prototype.initialize;
-
-/**
- * Has the next cognitive memory manager start with `tokenBudget` as its
- * section shares: agent() builds the manager's config and sets none, so a case
- * that needs shares adds them where the manager receives its config.
- */
-function withSectionShares(tokenBudget: CognitiveMemoryConfig['tokenBudget']) {
-  return vi
-    .spyOn(CognitiveMemoryManager.prototype, 'initialize')
-    .mockImplementation(function (this: CognitiveMemoryManager, config: CognitiveMemoryConfig) {
-      return initializeManager.call(this, { ...config, tokenBudget });
-    });
-}
-
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
+  personaMemory.config = undefined;
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -198,9 +205,9 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
       await a.close();
     }
   });
-  it('a section whose share is set to 0 stays out of the request, where the default share renders it', async () => {
+  it("a persona's tokenBudget share of 0 keeps its section out of the request, where the default share renders it", async () => {
     for (const zeroed of [false, true]) {
-      const shares = zeroed ? withSectionShares({ recentEpisodic: 0 }) : undefined;
+      personaMemory.config = zeroed ? { tokenBudget: { recentEpisodic: 0 } } : undefined;
       const k = key(); const emb = key();
       const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Locker 14.')] });
       script('openai', emb, { replies: [] });
@@ -213,25 +220,27 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         await session.send('Which parcel locker code did we set for the camping stove?');
         const block = memoryBlockOf(s, 1);
         if (zeroed) {
-          expect(shares, 'the manager received the shares').toBeDefined();
-          expect(shares!.mock.calls.length).toBeGreaterThan(0);
           expect(block, 'share 0').not.toContain(EPISODIC_HEADER);
+          // Nowhere in the request: not in another message, not outside the block.
+          expect(requestTextOf(s, 1), 'share 0, the whole request').not.toContain(EPISODIC_HEADER);
         } else {
           expect(block, 'default share').toContain(EPISODIC_HEADER);
           expect(sectionLines(block, EPISODIC_HEADER).join('\n')).toContain(FACT);
         }
       } finally {
         await a.close();
-        shares?.mockRestore();
       }
     }
   });
 
-  it('a graph association reaches the model whole, its fact past the 150th character', async () => {
+  it('a graph association reaches the model whole, its fact past the 150th character, and a recalled trace it leads to appears once', async () => {
     // STATEMENT and the kayak notes are recalled together on the early and the mixed turns, so the memory graph links
-    // them. The last question shares words with the kayak notes alone: three of them rank above STATEMENT and seed the
-    // graph walk, and STATEMENT arrives as their association.
+    // them. The last question shares words with the kayak notes: three of them rank above STATEMENT and seed the graph
+    // walk, and STATEMENT arrives as their association. Recall also returns STATEMENT itself, past the three seeds:
+    // with Recent Experiences on it renders there and stays out of Related Context; with the persona's share of 0 for
+    // Recent Experiences it renders in Related Context, whole.
     expect(STATEMENT.indexOf('5832')).toBeGreaterThan(150);
+    const STATEMENT_START = 'At the downtown parcel station';
     const turns = [
       STATEMENT,
       'Kayak paddles hang on the garage rack beside the red canoe.',
@@ -241,25 +250,36 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
       'Remember the parcel station locker near the entrance and the red canoe on the garage rack.',
     ];
     const acks = ['Noted.', 'Okay.', 'Sure.', 'Fine.', 'Right.', 'Yes.'];
-    const k = key(); const emb = key();
-    const s = script('openai', k, { replies: [...acks.map((ack) => reply.text(ack)), reply.text('On the rack.')] });
-    script('openai', emb, { replies: [] });
-    vi.stubEnv('OPENAI_API_KEY', emb);
-    const a = withMemory(k);
-    try {
-      const session = a.session('s');
-      for (const turn of turns) await session.send(turn);
-      session.clear();
-      await session.send('Kayak paddles, red canoe, garage rack: where again?');
+    for (const episodicOff of [false, true]) {
+      personaMemory.config = episodicOff ? { tokenBudget: { recentEpisodic: 0 } } : undefined;
+      const k = key(); const emb = key();
+      const s = script('openai', k, { replies: [...acks.map((ack) => reply.text(ack)), reply.text('On the rack.')] });
+      script('openai', emb, { replies: [] });
+      vi.stubEnv('OPENAI_API_KEY', emb);
+      const a = withMemory(k);
+      try {
+        const session = a.session('s');
+        for (const turn of turns) await session.send(turn);
+        session.clear();
+        await session.send('Kayak paddles, red canoe, garage rack: where again?');
 
-      const block = memoryBlockOf(s, turns.length);
-      const graphLines = sectionLines(block, GRAPH_HEADER);
-      const association = graphLines.find((line) => line.includes('At the downtown parcel station'));
-      expect(association, `the statement among the associations of:\n${block}`).toBeDefined();
-      expect(association).toContain(FACT);
-      expect(association).not.toContain('…[cut]');
-    } finally {
-      await a.close();
+        const block = memoryBlockOf(s, turns.length);
+        expect(block.split(STATEMENT_START), `the statement once in:\n${block}`).toHaveLength(2);
+        // Once in the whole request the model receives, not only in the block.
+        const request = requestTextOf(s, turns.length);
+        expect(request.split(STATEMENT_START), `the statement once in the request:\n${request}`).toHaveLength(2);
+        const association = sectionLines(block, GRAPH_HEADER).find((line) => line.includes(STATEMENT_START));
+        if (episodicOff) {
+          expect(association, `the statement among the associations of:\n${block}`).toBeDefined();
+          expect(association).toContain(FACT);
+          expect(association).not.toContain('…[cut]');
+        } else {
+          expect(sectionLines(block, EPISODIC_HEADER).join('\n')).toContain(STATEMENT_START);
+          expect(association, `the statement left out of the associations of:\n${block}`).toBeUndefined();
+        }
+      } finally {
+        await a.close();
+      }
     }
   });
 
