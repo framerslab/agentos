@@ -38,15 +38,17 @@ const CHARS_PER_TOKEN = 4;
 /**
  * Join recalled traces, in rank order, into a recall block that fits `tokenBudget` (estimated with
  * `estimateTokens`). Whole traces are added while they fit; when the first alone is larger, it is cut at the last
- * word boundary that fits (mid-word only when it has none), so a matched trace never yields an empty block. A
- * budget that is not a positive number is the hooks' default.
+ * word boundary that fits (mid-word only when it has none, and never inside a character a surrogate pair encodes),
+ * so a matched trace never yields an empty block under a positive budget. A budget of 0 or less asks for no recall,
+ * and one that is not a number is the hooks' default.
  *
  * @param contents - The traces' text, best first.
  * @param tokenBudget - The block's token ceiling.
- * @returns The block, or '' when nothing was recalled.
+ * @returns The block, or '' when nothing was recalled or the budget is 0 or less.
  */
 function recallWithinBudget(contents: readonly string[], tokenBudget: number): string {
-  const budget = Number.isFinite(tokenBudget) && tokenBudget > 0 ? Math.floor(tokenBudget) : DEFAULT_MEMORY_TOKEN_BUDGET;
+  if (tokenBudget <= 0) return '';
+  const budget = Number.isNaN(tokenBudget) ? DEFAULT_MEMORY_TOKEN_BUDGET : Math.floor(tokenBudget);
   const texts = contents.filter((c) => c.length > 0);
   if (texts.length === 0) return '';
   let block = '';
@@ -57,10 +59,20 @@ function recallWithinBudget(contents: readonly string[], tokenBudget: number): s
   }
   if (block) return block;
   const maxChars = Math.max(1, budget * CHARS_PER_TOKEN);
-  const head = texts[0].slice(0, maxChars);
+  const head = codePointPrefix(texts[0], maxChars);
   // Cut back to the last whitespace when the cut falls inside a word.
   const cut = /\s/.test(texts[0].charAt(maxChars)) ? head : head.replace(/\s+\S*$/, '');
   return cut.trimEnd() || head;
+}
+
+/**
+ * The first `maxUnits` UTF-16 units of `text`, one fewer when the last would be the first half of a surrogate pair,
+ * so no character is cut in two; the whole first character when it alone is longer than `maxUnits`.
+ */
+function codePointPrefix(text: string, maxUnits: number): string {
+  const splitsPair = /[\uD800-\uDBFF]/.test(text.charAt(maxUnits - 1)) && /[\uDC00-\uDFFF]/.test(text.charAt(maxUnits));
+  const end = splitsPair ? maxUnits - 1 : maxUnits;
+  return end > 0 ? text.slice(0, end) : String.fromCodePoint(text.codePointAt(0) ?? 0);
 }
 
 /** Options for {@link souledAgent}. Identical to {@link AgentOptions}, but `soul` is required. */
@@ -168,10 +180,10 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       await memory.compileWiki({ reason: 'session-end' });
     } catch (err) {
       // The watermark moves only past compiled traces, so the next compile takes these up again.
+      // The reason goes in as text alone: the console's inspection of an error can throw, and close must go on.
       console.warn(
         `[agentos] souledAgent: the memory wiki compile on close failed (${messageOf(err)}); ` +
           'the conversation traces stay in the store for the next compile.',
-        err,
       );
     }
     try {

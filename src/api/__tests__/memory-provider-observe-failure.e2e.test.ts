@@ -83,7 +83,7 @@ describe('a memoryProvider whose observe() fails', () => {
     });
     try {
       const k = key();
-      script('openai', k, { replies: [reply.text('Answered.')] });
+      script('openai', k, { whole: true, replies: [reply.text('Answered.')] });
       const error = new Error('store down');
       Object.defineProperty(error, inspect.custom, { value: () => { throw new Error('cannot inspect'); } });
       const memoryProvider: AgentMemoryProvider = { observe: async () => { throw error; } };

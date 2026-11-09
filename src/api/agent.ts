@@ -39,7 +39,6 @@ import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
 import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
-import { withoutMigratedEndMarker } from '../cognition/substrate/memory/wiki/migrateMemoryMd.js';
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
 import type { ForgetReport, ImportReport, LearnedStateDocument, LearningConfig, LedgerEntry, LoopManifest } from '../cognition/learning/types.js';
 import type { HexacoTraitValues } from '../cognition/substrate/personas/hexaco.js';
@@ -283,8 +282,10 @@ export interface AgentOptions extends BaseAgentConfig {
   skills?: SkillEntry[];
   /**
    * Structured system prompt blocks with cache breakpoints.
-   * When provided, takes precedence over the assembled string from
-   * `instructions`, `name`, `personality`, and `skills`.
+   * When provided, they replace the assembled prompt whole: the `soul` is not
+   * read (no SOUL.md prose, STYLE.md or memory index, and no warning when it
+   * would fail to load), and `instructions`, `name`, `personality` and
+   * `skills` are not added.
    * Use this for prompt caching support with Anthropic.
    */
   systemBlocks?: import('./generateText.js').SystemContentBlock[];
@@ -334,8 +335,9 @@ export interface AgentOptions extends BaseAgentConfig {
    *   agent({ provider: 'anthropic', soul: { content: SOUL_MARKDOWN_STRING } });
    *   ```
    *
-   * Loading semantics: when the agent is built, `agent()` reads the soul and
-   * joins its prose into one system prompt, first the SOUL.md body, then a
+   * Loading semantics: when the agent is built without `systemBlocks` (which
+   * replace the assembled prompt, the soul's prose with it), `agent()` reads
+   * the soul and joins its prose into one system prompt, first the SOUL.md body, then a
    * `## Style` section from STYLE.md, then the `memory/index.md` catalog, before
    * `instructions`, `name`, `personality` and `skills`. The front matter's
    * structured fields (HEXACO traits, voice, mood, hard limits) are not applied
@@ -694,8 +696,8 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
     // remembers, then pulls full pages via the read_memory_page tool. Skip the
     // empty catalog (a bare "# Memory Index") so agents with no memory yet keep
     // a clean prompt.
-    // The end marker of text migrated from a legacy MEMORY.md is the wiki's bookkeeping and stays out.
-    const wikiIndex = loaded?.wikiIndex ? withoutMigratedEndMarker(loaded.wikiIndex) : '';
+    // The loader leaves out the end marker of text migrated from a legacy MEMORY.md, the wiki's own bookkeeping.
+    const wikiIndex = loaded?.wikiIndex ?? '';
     if (wikiIndex && wikiIndex !== '# Memory Index') {
       sections.push(
         '## Long-Term Memory (index)\n\n' +

@@ -50,10 +50,9 @@ export function reportObserveFailure(provider: AgentMemoryProvider, error: unkno
   failureCounts.set(provider, count);
   if (!isLoggedFailure(count)) return;
   const which = count === 1 ? '' : ` (failure ${count} of this provider; logged at the 1st, 10th, 100th and so on)`;
-  console.warn(
-    `[agentos] The turn was answered, but the memory provider failed to record it${which}: ${messageOf(error)}`,
-    error,
-  );
+  // The reason goes in as text alone: the console's inspection of an error can throw, and this runs in the handler
+  // of a promise no one waits for.
+  console.warn(`[agentos] The turn was answered, but the memory provider failed to record it${which}: ${messageOf(error)}`);
 }
 
 /**

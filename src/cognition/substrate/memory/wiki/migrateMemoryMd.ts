@@ -19,6 +19,12 @@ export const MIGRATED_START_MARKER = '<!-- migrated from MEMORY.md -->';
 export const MIGRATED_END_MARKER = '<!-- end of MEMORY.md -->';
 
 /**
+ * What {@link MIGRATED_END_MARKER} becomes where `MEMORY.md` itself holds it, so the copied text cannot close its own
+ * block: a comment still, and so as unseen in rendered markdown as the one it replaces.
+ */
+const QUOTED_END_MARKER = '<!-- end of MEMORY.md (quoted) -->';
+
+/**
  * The opening of an `index.md` that holds text migrated from `MEMORY.md`: the catalog's heading and the blank lines
  * under it. `ensureMemoryDir` and the wiki store put {@link MIGRATED_START_MARKER} right after them, and nowhere else.
  */
@@ -87,7 +93,8 @@ const PLACE_REFUSED: Record<OpenRefusal, string> = {
  * - `memory/` and `memory/.meta/` are made when missing.
  * - A missing `memory/index.md` is seeded from `MEMORY.md` when the workspace holds one, and is otherwise a stub.
  *   The copied text sits between {@link MIGRATED_START_MARKER} and {@link MIGRATED_END_MARKER}, which the wiki store
- *   keeps when it rewrites the catalog. `MEMORY.md` is left on disk as a fallback.
+ *   keeps when it rewrites the catalog. An end marker the text itself holds is copied as
+ *   `<!-- end of MEMORY.md (quoted) -->`, so it closes no block. `MEMORY.md` is left on disk as a fallback.
  * - A missing `memory/.meta/index.json` starts an empty page index.
  *
  * Never modifies or deletes `MEMORY.md`.
@@ -128,7 +135,8 @@ export function ensureMemoryDir(workspaceDir: string): string {
       );
       return null;
     }
-    return `# Memory Index\n\n${MIGRATED_START_MARKER}\n\n${legacy.text.trimEnd()}\n\n${MIGRATED_END_MARKER}\n`;
+    const text = legacy.text.trimEnd().split(MIGRATED_END_MARKER).join(QUOTED_END_MARKER);
+    return `# Memory Index\n\n${MIGRATED_START_MARKER}\n\n${text}\n\n${MIGRATED_END_MARKER}\n`;
   });
   makeMissingFile(path.join(soulDir, 'memory', '.meta', 'index.json'), () => META_INDEX);
 
