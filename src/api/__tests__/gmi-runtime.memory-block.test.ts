@@ -228,17 +228,19 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
   });
 
   it('a graph association reaches the model whole, its fact past the 150th character', async () => {
-    // STATEMENT and the kayak notes are recalled together on the mixed turns, so the memory graph links them; the last
-    // question recalls the kayak notes first, and STATEMENT arrives as their association.
+    // STATEMENT and the kayak notes are recalled together on the early and the mixed turns, so the memory graph links
+    // them. The last question shares words with the kayak notes alone: three of them rank above STATEMENT and seed the
+    // graph walk, and STATEMENT arrives as their association.
     expect(STATEMENT.indexOf('5832')).toBeGreaterThan(150);
     const turns = [
       STATEMENT,
       'Kayak paddles hang on the garage rack beside the red canoe.',
       'The red canoe and the kayak paddles share the garage rack.',
+      'Kayak paddles, red canoe, garage rack: all in place.',
       'Check the downtown parcel station locker code and the kayak paddles on the garage rack.',
       'Remember the parcel station locker near the entrance and the red canoe on the garage rack.',
     ];
-    const acks = ['Noted.', 'Okay.', 'Sure.', 'Right.', 'Yes.'];
+    const acks = ['Noted.', 'Okay.', 'Sure.', 'Fine.', 'Right.', 'Yes.'];
     const k = key(); const emb = key();
     const s = script('openai', k, { replies: [...acks.map((ack) => reply.text(ack)), reply.text('On the rack.')] });
     script('openai', emb, { replies: [] });
@@ -248,7 +250,7 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
       const session = a.session('s');
       for (const turn of turns) await session.send(turn);
       session.clear();
-      await session.send('Where do the kayak paddles and the red canoe hang in the garage rack?');
+      await session.send('Kayak paddles, red canoe, garage rack: where again?');
 
       const block = memoryBlockOf(s, turns.length);
       const graphLines = sectionLines(block, GRAPH_HEADER);
