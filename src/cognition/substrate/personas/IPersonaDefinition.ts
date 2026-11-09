@@ -462,8 +462,8 @@ export interface IPersonaDefinition {
   memoryConfig?: PersonaMemoryConfig;
   /**
    * Cognitive memory system per-persona overrides (encoding, decay, working memory capacity, etc.).
-   * `createAgentCognitiveMemory` applies `tokenBudget`, the memory block's section shares; a host that builds its
-   * manager from the persona reads the others.
+   * `createAgentCognitiveMemory` passes every field but `featureDetectionStrategy` to the manager it builds; a host
+   * that builds its manager from the persona passes them the same way.
    */
   cognitiveMemoryConfig?: import('../../memory/core/config.js').CognitiveMemoryPersonaConfig;
   /** Conversation context override strategy (message importance heuristics, summarization triggers). */

@@ -14,7 +14,7 @@
  * agent() builds the persona from its options, which set no
  * `cognitiveMemoryConfig`; a case that needs one sets `personaMemory.config`,
  * and the persona agent() builds carries it, so the case reads what
- * createAgentCognitiveMemory makes of a persona's section shares on this path.
+ * createAgentCognitiveMemory makes of a persona's memory settings on this path.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CognitiveMemoryPersonaConfig } from '../../cognition/memory/core/config';
@@ -231,6 +231,47 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         await a.close();
       }
     }
+  });
+
+  it("a persona's workingMemoryCapacity bounds the Active Context the request carries", async () => {
+    // Every send files the user's message and the reply, each focused in the session's working memory, and every
+    // turn's recall focuses its top traces there too. With encoding's baseStrength at 1 a focused trace outlasts a few
+    // turns of decay, so the slots fill: a capacity of 9 holds more than 5 of them, a capacity of 5 holds 5 at most.
+    // The emotional traits leave the capacity as the persona sets it (openness and conscientiousness move it by one).
+    const ACTIVE_HEADER = '## Active Context (in focus — reference directly)';
+    const notes = [
+      'We packed the camping stove and the blue tent for the lake trip.',
+      'The lake trip needs the camping stove fuel and two sleeping bags.',
+      'We bought fuel for the camping stove before the lake trip.',
+      'The blue tent and the sleeping bags went in the car for the lake trip.',
+      'We tested the camping stove in the yard before the lake trip.',
+      'The lake trip map and the tent poles are in the blue bag.',
+      'We checked the camping stove fuel again for the lake trip.',
+      'The sleeping bags and the camping stove are ready for the lake trip.',
+    ];
+    const counts: Record<number, number> = {};
+    for (const capacity of [9, 5]) {
+      personaMemory.config = { workingMemoryCapacity: capacity, encoding: { baseStrength: 1 } };
+      const k = key(); const emb = key();
+      const s = script('openai', k, { replies: [...notes.map(() => reply.text('Noted.')), reply.text('By the lake.')] });
+      script('openai', emb, { replies: [] });
+      vi.stubEnv('OPENAI_API_KEY', emb);
+      const a = withMemory(k, STYLE_TRAITS.emotional);
+      try {
+        const session = a.session('s');
+        for (const note of notes) await session.send(note);
+        session.clear();
+        await session.send('What did we pack for the camping stove on the lake trip?');
+        const block = memoryBlockOf(s, notes.length);
+        counts[capacity] = sectionLines(block, ACTIVE_HEADER).filter((line) => line.startsWith('- [')).length;
+        if (capacity === 5) expect(counts[capacity], `capacity 5:\n${block}`).toBeLessThanOrEqual(5);
+        else expect(counts[capacity], `capacity ${capacity}:\n${block}`).toBeGreaterThan(5);
+      } finally {
+        await a.close();
+      }
+    }
+    expect(counts[5]).toBeGreaterThan(0);
+    expect(counts[5]).toBeLessThan(counts[9]);
   });
 
   it('a graph association reaches the model whole, its fact past the 150th character, and a recalled trace it leads to appears once', async () => {
