@@ -4,7 +4,8 @@
  *
  * - A page the wiki compiler creates takes its summary from its page id, never from conversation text, so what a
  *   user says never becomes a standing line of the memory index and of the system prompt.
- * - close() lets the agent's own close finish and waits for the turn's memory writes before it compiles.
+ * - close() lets the agent's own close finish, then waits, within one deadline, for the turns still running and for the
+ *   turns' memory writes before it compiles.
  * - The compile's model calls are held to the agent's spend budget and written to its usage ledger.
  * - Recalled traces carry their speaker and their date.
  * - A soul with no workspace folder, and a soul beside systemBlocks, are named in one warning line.
@@ -149,6 +150,49 @@ describe("souledAgent()'s close()", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0]).toMatch(/\b2\b/);
   });
+
+  it('waits for a turn still running when close() is called, and compiles it', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    let answer!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const s = script('openai', k, { whole: true, replies: [reply.hold([], gate, reply.text('Lovely.')), reply.text('Jasmine tea.')] });
+    const a = await souledAgent({ ...stubbed(k), soul: dir } as never);
+    const turn = a.session('s').send('My favourite tea is jasmine.');
+    const closing = a.close();
+    // The reply arrives while close() is running: the turn, then its memory writes, are waited for before the compile.
+    setTimeout(answer, 100);
+    await Promise.all([turn, closing]);
+
+    const merges = mergeCalls(s);
+    expect(merges).toHaveLength(1);
+    expect(JSON.stringify(merges[0].messages)).toContain('My favourite tea is jasmine.');
+    expect(fs.existsSync(path.join(dir, 'memory', 'concepts', 'notes.md'))).toBe(true);
+  });
+
+  it('gives a turn that outlasts the wait up, within the same deadline as the writes, and says so', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    let answer!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    const s = script('openai', k, { whole: true, replies: [reply.hold([], gate, reply.text('Lovely.'))] });
+    const a = await souledAgent({ ...stubbed(k), soul: dir, pendingWritesTimeoutMs: 50 } as never);
+    const turn = a.session('s').send('My favourite tea is jasmine.');
+    const started = Date.now();
+    await a.close();
+    expect(Date.now() - started).toBeLessThan(900);
+    answer();
+    await turn;
+
+    expect(mergeCalls(s)).toHaveLength(0);
+    const pending = linesOf(warn).filter((line) => /pending/.test(line) && /souledAgent/.test(line));
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatch(/\b1\b/);
+  });
 });
 
 describe("the compile's model calls", () => {
@@ -184,6 +228,22 @@ describe("the compile's model calls", () => {
     expect(budget.tokensUsed()).toBe(15);
     const rows = fs.readFileSync(ledgerPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { source?: string; totalTokens?: number });
     expect(rows).toMatchObject([{ source: 'souledAgent.compileWiki', totalTokens: 15 }]);
+  });
+
+  it("are estimated and sent with the agent's completion cap, so a tight budget allows a compile that fits under it", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    const s = script('openai', k, { whole: true, replies: [reply.text('Tea notes.')] });
+    // Estimated with the default 4,096 output tokens the compile would not fit; with the agent's cap of 64 it does.
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 4_000, unpriced: 'allow' });
+    const a = await souledAgent({ ...stubbed(k, { budget, maxTokens: 64 }), soul: dir } as never);
+    await a.memory!.remember('Johnny likes green tea', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+    await a.close();
+
+    const merges = mergeCalls(s);
+    expect(merges).toHaveLength(1);
+    expect(merges[0].options.maxTokens).toBe(64);
+    expect(fs.existsSync(path.join(dir, 'memory', 'concepts', 'notes.md'))).toBe(true);
   });
 });
 
@@ -321,6 +381,8 @@ describe('a soul the agent cannot use in full', () => {
     agent({ provider: 'openai', model: 'gpt-4o', soul: dir, systemBlocks: blocks } as never);
     expect(replaced()).toHaveLength(1);
     expect(replaced()[0]).toMatch(/soul/);
+    // A build that copied the soul's text into its blocks still gets the line, so it says what is not done for it.
+    expect(replaced()[0]).toMatch(/not automatically added/);
 
     warn.mockClear();
     agent({ provider: 'openai', model: 'gpt-4o', runtime: 'gmi', soul: dir, systemBlocks: blocks } as never);
