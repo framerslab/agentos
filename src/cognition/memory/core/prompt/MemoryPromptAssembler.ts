@@ -249,8 +249,10 @@ function renderLines(
   for (const line of lines) {
     const room = maxChars - chars - 1;
     if (room <= 0) break;
-    const fitted = line.length <= room ? line : options.cut ? options.cut(line, room) : '';
-    if (!fitted) {
+    // A blank line fits whole like any other; only a line too long for the room is cut or passed over.
+    const fits = line.length <= room;
+    const fitted = fits ? line : options.cut ? options.cut(line, room) : '';
+    if (!fits && !fitted) {
       if (options.leadingOnly) break;
       continue;
     }
