@@ -222,11 +222,12 @@ export interface ConsolidationConfig {
  * each field but `featureDetectionStrategy` to the manager it builds, under
  * the same name in {@link CognitiveMemoryConfig}; a field or key left out, or
  * set to `undefined`, keeps the default. The type lists no `null`, and a
- * loaded persona holds none: the persona loaders (the file-system
- * `PersonaLoader`, `InMemoryPersonaLoader` and `normalizePersonaDefinition`,
- * which both run) drop a field set to `null`, a key set to `null` inside a
- * field, and a `cognitiveMemoryConfig` set to `null`, as a persona read from
- * JSON writes an unset key. A host that builds its manager from a persona
+ * loaded persona holds none: `normalizePersonaDefinition`, which the
+ * file-system `PersonaLoader` and `InMemoryPersonaLoader` run and `GMIManager`
+ * runs again on every definition any loader returns (a host's own
+ * `IPersonaLoader` included), drops a field set to `null`, a key set to `null`
+ * inside a field, and a `cognitiveMemoryConfig` set to `null`, as a persona
+ * read from JSON writes an unset key. A host that builds its manager from a persona
  * itself (`gmiManagerConfig.cognitiveMemoryFactory`) gets the persona so
  * normalized, and passes the fields the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from
  * their options, which set no `cognitiveMemoryConfig`.

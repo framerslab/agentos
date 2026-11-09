@@ -424,7 +424,9 @@ export class GMIManager {
       this.allPersonaDefinitions.clear();
       loadedDefs.forEach(persona => {
         if (persona && persona.id) {
-          this.allPersonaDefinitions.set(persona.id, persona);
+          // Every loader's definitions are normalized here, a host's own IPersonaLoader included, so a stored
+          // persona matches the shipped loaders' output. A clean persona comes back as the same object.
+          this.allPersonaDefinitions.set(persona.id, normalizePersonaDefinition(persona));
         } else {
           console.warn(`GMIManager (ID: ${this.managerId}): Encountered an invalid persona definition (missing ID or null) during load. Skipping.`);
         }

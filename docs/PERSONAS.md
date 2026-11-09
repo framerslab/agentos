@@ -87,7 +87,7 @@ class DatabasePersonaLoader implements IPersonaLoader {
 const agentos = await AgentOS.create({ personaLoader: new DatabasePersonaLoader() });
 ```
 
-`InMemoryPersonaLoader` and the file-system `PersonaLoader` are exported for composition. Apply `normalizePersonaDefinition()` to definitions your loader returns so sentiment presets expand the way the built-in loaders expand them.
+`InMemoryPersonaLoader` and the file-system `PersonaLoader` are exported for composition. `GMIManager` runs `normalizePersonaDefinition()` on every definition a loader returns, yours included, so sentiment presets expand and `null` memory settings drop the way the built-in loaders do; a definition that needs neither is stored as the same object.
 
 ## Validation and strict mode
 
