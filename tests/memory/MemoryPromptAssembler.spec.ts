@@ -587,6 +587,28 @@ describe('MemoryPromptAssembler', () => {
       expect(sectionLines(plain.contextText, '## Related Context').join('\n')).toContain(fact);
     });
 
+    it('gives the room of an association dropped after the second pass back to the sections with content left out', () => {
+      // The second episodic trace first fits in the second pass, after Related Context took its association; once the
+      // association goes, its room must reach the trace sections, not stay unspent.
+      const budget = 820;
+      const fact = makeScoredTrace({ id: 'sem', type: 'semantic', content: `Harbor notes: ${wordsText(950)}` });
+      const first = makeScoredTrace({ id: 'epi-1', type: 'episodic', content: `Lantern walk: ${wordsText(950, 1)}` });
+      const second = makeScoredTrace({ id: 'epi-2', type: 'episodic', content: `Ferry log: ${wordsText(950, 2)}` });
+      const result = assembleMemoryContext({
+        totalTokenBudget: budget,
+        traits: {},
+        retrievedTraces: [fact, first, second],
+        graphContext: [{ traceId: 'epi-2', text: `[associated, activation=0.70] ${second.content}` }],
+        observationNotes: [wordsText(4000, 5)],
+      });
+      expect(result.contextText.split('Ferry log:').length).toBeLessThanOrEqual(2);
+      expect(sectionLines(result.contextText, '## Related Context').join('\n')).not.toContain('Ferry log:');
+      // Something is left out (the second episodic trace is cut, the note does not fit), so the block fills the budget
+      // but for the few characters a cut at a word boundary leaves.
+      expect(result.tokensUsed).toBeLessThanOrEqual(budget);
+      expect(result.tokensUsed).toBeGreaterThanOrEqual(budget - 5);
+    });
+
     it('keeps working memory to its leading slots when a longer slot does not fit, and skips a graph association too short to cut', () => {
       // Slots arrive sorted by activation, highest first; a shorter slot after one that does not fit stays out.
       const slots = [
