@@ -18,12 +18,17 @@
  * section off. Traces and graph associations are rendered whole; one that
  * does not fit what is left of its section is cut to fit, at a word boundary,
  * with a visible marker, and an item that does not fit at all is skipped for
- * the later ones. Working memory keeps a run of its leading slots. A graph
- * association that leads to a trace the block already holds (in Relevant
- * Memories, Recent Experiences or the involuntary memory) is left out of
- * Related Context, so the trace appears once and its room goes to the next
- * association; a trace section that would give up such a trace keeps it unless
- * Related Context can show it instead without dropping a line it showed.
+ * the later ones. Working memory keeps a run of its leading slots.
+ *
+ * A first pass fills each section on its share and what the sections before
+ * it left unspent. A second pass spends what is still unspent and only adds to
+ * the block: it lengthens a line the first pass cut and adds items the first
+ * pass skipped, so every line the first pass rendered stays, in its section and
+ * its order. A trace appears once: a graph association that leads to a trace
+ * the block already holds (in Relevant Memories, Recent Experiences or the
+ * involuntary memory) is left out of Related Context and its room goes to the
+ * next association, and a trace section does not take a trace Related Context
+ * already shows through its association.
  *
  * @module agentos/memory/prompt/MemoryPromptAssembler
  */
@@ -234,65 +239,113 @@ function sectionChars(header: string, lines: readonly string[]): number {
   return SECTION_SEPARATOR_CHARS + header.length + lines.reduce((n, line) => n + 1 + line.length, 0);
 }
 
-interface RenderedSection {
-  text: string;
-  tokens: number;
-  includedIds: string[];
-  /** The indexes, in the lines given, of the lines kept (sections rendered by {@link renderLines}). */
-  keptLines?: number[];
+/** A line a section can show. */
+interface Candidate {
+  /** The id of the trace the line shows: a retrieved trace, or the trace a graph association leads to. */
+  id?: string;
+  /** The length of the whole line. */
+  length: number;
+  /** The whole line. */
+  whole(): string;
+  /** The line shortened to fit `maxChars`, or `''` when no useful cut fits; absent for a line shown whole or not at all. */
+  cut?(maxChars: number): string;
 }
 
-const EMPTY_SECTION: RenderedSection = { text: '', tokens: 0, includedIds: [] };
+/** A line a section shows. */
+interface ShownLine {
+  text: string;
+  /** Whether `text` is the whole line. A cut line can be lengthened in the second pass. */
+  whole: boolean;
+}
 
-/** How {@link renderLines} treats a line that does not fit whole. */
-interface RenderLinesOptions {
-  /** The trace id of each line, by index; the ids of the kept lines become the section's `includedIds`. */
-  ids?: readonly (string | undefined)[];
-  /** Shortens a line to fit `maxChars`, or returns `''` when it cannot. */
-  cut?: (line: string, maxChars: number) => string;
+/** A section of the block: its candidate lines, in rank order, and the lines it shows. */
+interface Section {
+  header: string;
+  candidates: readonly Candidate[];
+  /** The line shown for each candidate, by index; `undefined` for a candidate the section does not show. */
+  shown: (ShownLine | undefined)[];
   /**
-   * End the section at the first line that does not fit, so it holds a run of
-   * leading lines (working memory's slots, sorted by activation, highest
-   * first). Otherwise such a line is skipped for the later ones.
+   * End the section at the first line that does not fit, so it holds a run of leading lines (working memory's slots,
+   * sorted by activation, highest first). Otherwise such a line is skipped for the later ones.
    */
-  leadingOnly?: boolean;
+  leadingOnly: boolean;
+}
+
+/** A section that shows none of `candidates` yet. */
+function createSection(header: string, candidates: readonly Candidate[], leadingOnly = false): Section {
+  return { header, candidates, shown: candidates.map(() => undefined), leadingOnly };
+}
+
+/** Characters `section` takes as shown, its separator and header included; 0 when it shows no line. */
+function shownChars(section: Section): number {
+  let chars = 0;
+  let lines = 0;
+  for (const line of section.shown) {
+    if (!line) continue;
+    lines++;
+    chars += 1 + line.text.length;
+  }
+  return lines === 0 ? 0 : SECTION_SEPARATOR_CHARS + section.header.length + chars;
+}
+
+/** Tokens `section` takes as shown. */
+function shownTokens(section: Section): number {
+  return Math.ceil(shownChars(section) / 4);
+}
+
+/** The trace ids of the lines `section` shows, in order. */
+function shownIds(section: Section): string[] {
+  return section.candidates.flatMap((candidate, index) =>
+    section.shown[index] && candidate.id !== undefined ? [candidate.id] : [],
+  );
+}
+
+/** The section's text: its header, then the lines it shows in rank order; `''` when it shows none. */
+function sectionText(section: Section): string {
+  const lines = section.shown.flatMap((line) => (line ? [line.text] : []));
+  return lines.length === 0 ? '' : `${section.header}\n${lines.join('\n')}`;
 }
 
 /**
- * A section of lines, in order: each whole when it fits what is left of
- * `budgetTokens`; otherwise `cut` (when given) shortens it to fit, and a line
- * that still does not fit is skipped for the later ones, or ends the section
- * with `leadingOnly`.
+ * Spends up to `budgetTokens` on `section`, counting what it already shows, in rank order, and keeps every line it
+ * shows. A candidate it does not show is added whole when it fits what is left, otherwise cut to fit (when it can be
+ * cut); one that still does not fit is skipped for the later ones, or ends the section with `leadingOnly`. A candidate
+ * `skip` names is passed over. A line shown cut is lengthened, whole when it fits. The first pass fills each section
+ * from nothing; the second pass fills it again on more room, so it only adds to what the first pass rendered.
  */
-function renderLines(
-  header: string,
-  lines: readonly string[],
-  budgetTokens: number,
-  options: RenderLinesOptions = {},
-): RenderedSection {
+function fillSection(section: Section, budgetTokens: number, skip?: (candidate: Candidate) => boolean): void {
   const maxChars = budgetTokens * 4;
-  let chars = SECTION_SEPARATOR_CHARS + header.length;
-  const kept: string[] = [];
-  const ids: string[] = [];
-  const keptLines: number[] = [];
-  for (const [index, line] of lines.entries()) {
-    const room = maxChars - chars - 1;
-    if (room <= 0) break;
-    // A blank line fits whole like any other; only a line too long for the room is cut or passed over.
-    const fits = line.length <= room;
-    const fitted = fits ? line : options.cut ? options.cut(line, room) : '';
-    if (!fits && !fitted) {
-      if (options.leadingOnly) break;
+  let chars = SECTION_SEPARATOR_CHARS + section.header.length;
+  for (const line of section.shown) if (line) chars += 1 + line.text.length;
+  for (const [index, candidate] of section.candidates.entries()) {
+    const free = maxChars - chars;
+    if (free <= 0) break;
+    const shown = section.shown[index];
+    if (shown?.whole) continue;
+    if (!shown && skip?.(candidate)) continue;
+    // A line shown cut can grow by what is free; a new line also takes its newline.
+    const room = shown ? shown.text.length + free : free - 1;
+    if (room <= 0) {
+      if (section.leadingOnly) break;
       continue;
     }
-    kept.push(fitted);
-    keptLines.push(index);
-    const id = options.ids?.[index];
-    if (id !== undefined) ids.push(id);
-    chars += 1 + fitted.length;
+    // A blank line fits whole like any other; only a line too long for the room is cut or passed over.
+    const fits = candidate.length <= room;
+    const text = fits ? candidate.whole() : candidate.cut ? candidate.cut(room) : '';
+    if (shown) {
+      if (fits || text.length > shown.text.length) {
+        chars += text.length - shown.text.length;
+        section.shown[index] = { text, whole: fits };
+      }
+      continue;
+    }
+    if (!fits && !text) {
+      if (section.leadingOnly) break;
+      continue;
+    }
+    section.shown[index] = { text, whole: fits };
+    chars += 1 + text.length;
   }
-  if (kept.length === 0) return EMPTY_SECTION;
-  return { text: `${header}\n${kept.join('\n')}`, tokens: Math.ceil(chars / 4), includedIds: ids, keptLines };
 }
 
 /** A leading `[tag] ` on a graph association, kept whole when the association is cut. */
@@ -309,36 +362,32 @@ function cutAssociationLine(line: string, maxChars: number): string {
   return text ? `${prefix}${text}` : '';
 }
 
-/**
- * A section of traces, in order: each rendered whole when it fits what is left
- * of `budgetTokens`, otherwise cut to fit at a word boundary; a trace whose
- * cut would keep too little is skipped for the later ones.
- */
-function renderTraces(
-  header: string,
-  traces: readonly ScoredMemoryTrace[],
-  style: FormattingStyle,
-  now: number,
-  budgetTokens: number,
-): RenderedSection {
-  const maxChars = budgetTokens * 4;
-  let chars = SECTION_SEPARATOR_CHARS + header.length;
-  const kept: string[] = [];
-  const ids: string[] = [];
-  for (const trace of traces) {
-    const room = maxChars - chars - 1;
-    if (room <= 0) break;
-    const line =
-      memoryTraceLineLength(trace, style, { now }) <= room
-        ? formatMemoryTrace(trace, style, { now })
-        : formatMemoryTrace(trace, style, { now, maxChars: room });
-    if (!line) continue;
-    kept.push(line);
-    ids.push(trace.id);
-    chars += 1 + line.length;
-  }
-  if (kept.length === 0) return EMPTY_SECTION;
-  return { text: `${header}\n${kept.join('\n')}`, tokens: Math.ceil(chars / 4), includedIds: ids };
+/** A line shown whole or not at all. */
+function wholeLine(line: string): Candidate {
+  return { length: line.length, whole: () => line };
+}
+
+/** A graph association's line: whole, or cut at a word boundary with its bullet and tag whole. */
+function associationLine(item: { traceId?: string; text: string }): Candidate {
+  const line = `- ${item.text}`;
+  return {
+    id: item.traceId,
+    length: line.length,
+    whole: () => line,
+    cut: (maxChars) => cutAssociationLine(line, maxChars),
+  };
+}
+
+/** Persistent memory's text: whole, or cut to fit and ended with `<!-- truncated -->`. */
+function persistentLine(text: string): Candidate {
+  return {
+    length: text.length,
+    whole: () => text,
+    cut: (maxChars) => {
+      const room = maxChars - PERSISTENT_TRUNCATED_MARKER.length;
+      return room > 0 ? `${sliceWholeCodePoints(text, room)}${PERSISTENT_TRUNCATED_MARKER}` : '';
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -387,34 +436,53 @@ function renderInvoluntary(
  * key set to `undefined` keeps its default; shares that are not finite
  * positive numbers count as 0, and shares adding up to more than 1 are scaled
  * down), capped at what its content needs. A section whose share is set to
- * exactly 0 is off: it gets no grant, takes no spill and is left out. What the grants leave (the shares of empty or
- * under-filled sections, the rounding, and any share left unallocated) flows
- * to the sections in {@link MEMORY_BUDGET_SPILL_ORDER}: each in turn renders
- * with its grant plus whatever the sections before it left unspent. A second
- * pass in the same order gives what is still unspent (a section that could
- * not use its grant, such as working memory too long for it) to the sections
- * that still have content left out, so the block can fill the whole budget.
- * An involuntary memory that did not fit its tenth whole then takes what is
- * still unspent. A graph association that carries the id of a trace the block
- * already holds (rendered in Relevant Memories or Recent Experiences, or the
- * involuntary memory) is left out of Related Context, and the room goes to the
- * associations after it. At the end of each round of the second pass, Related
- * Context is rendered again whenever the trace ids the trace sections hold
- * changed among those an association leads to: should a trace section take such
- * a trace, Related Context gives up its association and the second pass runs
- * again, so the room the association held reaches the sections with content
- * left out. A trace section rendered on a larger budget can give up a later
- * trace for a cut of an earlier one; when the trace it gives up is one whose
- * association Related Context left out, Related Context is rendered again at
- * once on what the section leaves unspent, and the section keeps the trace
- * unless Related Context then shows it and every line it showed before (an
- * association's trace now in a trace section counts as shown). An involuntary
- * memory Related Context shows is not added. `tokensUsed` counts
- * the headers and separators too and never exceeds `totalTokenBudget`. The
- * returned `allocation` holds the shares the sections were granted from, after
- * the defaults, the zeroing and the scaling.
+ * exactly 0 is off: it gets no grant, takes no spill and is left out.
+ *
+ * The first pass goes through the sections in {@link MEMORY_BUDGET_SPILL_ORDER}:
+ * each renders on its grant plus whatever the sections before it left unspent
+ * (the shares of empty or under-filled sections, the rounding, and any share
+ * left unallocated). The second pass, in the same order, gives what is still
+ * unspent (a section that could not use its grant, such as working memory too
+ * long for it) to the sections with content left out, so the block can fill
+ * the whole budget. The second pass only adds to the block: it lengthens a
+ * line the first pass cut, adds items the first pass skipped at their rank,
+ * whole or cut to fit, and adds lines to a section that rendered none. Every
+ * line the first pass rendered stays, in its section and its order, whole if
+ * it was whole. An involuntary memory that did not fit its tenth whole then
+ * takes what is still unspent.
+ *
+ * A trace appears once. A graph association that carries the id of a trace
+ * the block already holds (rendered in Relevant Memories or Recent
+ * Experiences, or the involuntary memory) is left out of Related Context, and
+ * the room goes to the associations after it. In the second pass a trace
+ * section leaves out a trace Related Context already shows through its
+ * association, and an involuntary memory Related Context shows is not added.
+ * As no line leaves the block, a trace an association was left out for stays
+ * in the block. `tokensUsed` counts the headers and separators too and never
+ * exceeds `totalTokenBudget`. The returned `allocation` holds the shares the
+ * sections were granted from, after the defaults, the zeroing and the scaling.
  */
 export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMemoryContext {
+  return assemble(input, true);
+}
+
+/**
+ * The block {@link assembleMemoryContext} renders for `input` before its
+ * second pass: each section on its grant and what the sections before it left
+ * unspent, and an involuntary memory on its tenth. Every line in it is in the
+ * block `assembleMemoryContext` returns for the same input, in its section and
+ * its order, whole if it is whole here. The mechanisms engine picks the
+ * involuntary memory at random among its candidates, so a comparison of the
+ * two blocks gives it one candidate.
+ *
+ * @internal For tests of that guarantee; not part of the package's API.
+ */
+export function assembleMemoryContextFirstPass(input: MemoryAssemblerInput): AssembledMemoryContext {
+  return assemble(input, false);
+}
+
+/** The block for `input`: the first pass, then, with `secondPass`, the second pass and a late involuntary memory. */
+function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMemoryContext {
   const alloc: MemoryBudgetAllocation = { ...DEFAULT_BUDGET_ALLOCATION };
   for (const key of BLOCK_ORDER) {
     const share = input.allocation?.[key];
@@ -509,194 +577,97 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
     granted += grant[key];
   }
 
-  const rendered = {} as Record<SectionKey, RenderedSection>;
-  /** Ids of the traces the block holds outside Related Context, as rendered so far. */
-  const idsOutsideGraph = (): Set<string> =>
-    new Set([
-      ...(rendered.semanticRecall?.includedIds ?? []),
-      ...(rendered.recentEpisodic?.includedIds ?? []),
-      ...(involuntary ? [involuntary.id] : []),
-    ]);
-  /** The ids of {@link idsOutsideGraph} Related Context was last rendered against. */
-  let graphRenderedAgainst = new Set<string>();
+  /** A retrieved trace's line in `style`: whole, or cut at a word boundary with the cut marker. */
+  const traceLine = (trace: ScoredMemoryTrace): Candidate => ({
+    id: trace.id,
+    length: memoryTraceLineLength(trace, style, { now }),
+    whole: () => formatMemoryTrace(trace, style, { now }),
+    cut: (maxChars) => formatMemoryTrace(trace, style, { now, maxChars }),
+  });
+  const sections: Record<SectionKey, Section> = {
+    persistentMemory: createSection(HEADERS.persistentMemory, pmText ? [persistentLine(pmText)] : []),
+    workingMemory: createSection(HEADERS.workingMemory, wmLines.map(wholeLine), true),
+    semanticRecall: createSection(HEADERS.semanticRecall, semanticTraces.map(traceLine)),
+    recentEpisodic: createSection(HEADERS.recentEpisodic, episodicTraces.map(traceLine)),
+    prospectiveAlerts: createSection(HEADERS.prospectiveAlerts, prospectiveLines.map(wholeLine)),
+    graphAssociations: createSection(HEADERS.graphAssociations, graphItems.map(associationLine)),
+    observationNotes: createSection(HEADERS.observationNotes, observationLines.map(wholeLine)),
+  };
+
   /**
-   * Related Context, leaving out the associations that lead to a trace the block already holds. Its `keptLines` are
-   * indexes into `graphItems`.
+   * What section `key` passes over so a trace appears once: Related Context an association to a trace the block holds
+   * elsewhere (in a trace section, or the involuntary memory), and a trace section a trace Related Context shows
+   * through its association.
    */
-  const renderGraph = (sectionBudget: number): RenderedSection => {
-    const held = idsOutsideGraph();
-    const items = graphItems
-      .map((item, index) => ({ ...item, index }))
-      .filter((item) => item.traceId === undefined || !held.has(item.traceId));
-    const section = renderLines(
-      HEADERS.graphAssociations,
-      items.map((item) => `- ${item.text}`),
-      sectionBudget,
-      { cut: cutAssociationLine, ids: items.map((item) => item.traceId) },
-    );
-    return section.keptLines ? { ...section, keptLines: section.keptLines.map((kept) => items[kept].index) } : section;
-  };
-  /** Keeps `section` as Related Context, rendered against the trace ids the block holds now. */
-  const setGraph = (section: RenderedSection): void => {
-    rendered.graphAssociations = section;
-    graphRenderedAgainst = idsOutsideGraph();
-  };
-  /** The trace ids some graph association leads to. */
-  const associatedIds = new Set(graphItems.flatMap((item) => (item.traceId === undefined ? [] : [item.traceId])));
-  /** Whether `a` and `b` hold the same associated trace ids, so Related Context leaves out the same associations. */
-  const sameAssociatedIds = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean => {
-    const inA = [...a].filter((id) => associatedIds.has(id));
-    const inB = [...b].filter((id) => associatedIds.has(id));
-    return inA.length === inB.length && inA.every((id) => b.has(id));
-  };
-
-  const renderSection = (key: SectionKey, sectionBudget: number): RenderedSection => {
-    if (off(key)) return EMPTY_SECTION;
-    switch (key) {
-      case 'persistentMemory':
-        return renderPersistent(pmText, sectionBudget);
-      case 'workingMemory':
-        return renderLines(HEADERS.workingMemory, wmLines, sectionBudget, { leadingOnly: true });
-      case 'semanticRecall':
-        return renderTraces(HEADERS.semanticRecall, semanticTraces, style, now, sectionBudget);
-      case 'recentEpisodic':
-        return renderTraces(HEADERS.recentEpisodic, episodicTraces, style, now, sectionBudget);
-      case 'prospectiveAlerts':
-        return renderLines(HEADERS.prospectiveAlerts, prospectiveLines, sectionBudget);
-      case 'graphAssociations':
-        return renderGraph(sectionBudget);
-      case 'observationNotes':
-        return renderLines(HEADERS.observationNotes, observationLines, sectionBudget);
-      default:
-        return EMPTY_SECTION;
+  const skipFor = (key: SectionKey): ((candidate: Candidate) => boolean) | undefined => {
+    if (key === 'graphAssociations') {
+      const held = new Set([
+        ...shownIds(sections.semanticRecall),
+        ...shownIds(sections.recentEpisodic),
+        ...(involuntary ? [involuntary.id] : []),
+      ]);
+      return (candidate) => candidate.id !== undefined && held.has(candidate.id);
     }
+    if (key === 'semanticRecall' || key === 'recentEpisodic') {
+      const inGraph = new Set(shownIds(sections.graphAssociations));
+      return (candidate) => candidate.id !== undefined && inGraph.has(candidate.id);
+    }
+    return undefined;
+  };
+  /** Gives section `key` up to `extra` tokens beyond what it shows, and returns the tokens it took of them. */
+  const grow = (key: SectionKey, extra: number): number => {
+    if (off(key)) return 0;
+    const section = sections[key];
+    const before = shownTokens(section);
+    fillSection(section, before + extra, skipFor(key));
+    return shownTokens(section) - before;
   };
 
-  // --- Pass 1, in spill order: grant + whatever is unspent so far ---
+  // --- Pass 1, in spill order: each section on its grant and whatever the sections before it left unspent ---
   let spare = Math.max(0, available - granted);
   for (const key of MEMORY_BUDGET_SPILL_ORDER) {
-    const sectionBudget = grant[key] + spare;
-    const section = renderSection(key, sectionBudget);
-    if (key === 'graphAssociations') setGraph(section);
-    else rendered[key] = section;
-    spare = sectionBudget - section.tokens;
+    spare += grant[key];
+    spare -= grow(key, spare);
   }
 
-  /**
-   * Gives a trace section `again`, its render on `sectionBudget`, in pass 2. Rendered from scratch on a larger budget,
-   * a trace section can fill its room with a cut of an earlier trace and lose a later one. A lost trace whose
-   * association Related Context left out as a duplicate would then appear nowhere, so Related Context is rendered again
-   * at once, on its own tokens and what the new render leaves unspent, and the new render is kept only when Related
-   * Context then shows every such trace and still shows every line it showed (or, for an association, its trace in a
-   * section). Otherwise the section keeps what it held and nothing changes.
-   */
-  const growTraceSection = (key: 'semanticRecall' | 'recentEpisodic', again: RenderedSection, sectionBudget: number): void => {
-    const lost = off('graphAssociations')
-      ? []
-      : rendered[key].includedIds.filter((id) => associatedIds.has(id) && !again.includedIds.includes(id));
-    if (lost.length === 0) {
-      rendered[key] = again;
-      spare = sectionBudget - again.tokens;
-      return;
-    }
-    const before = rendered[key];
-    const beforeGraph = rendered.graphAssociations;
-    rendered[key] = again;
-    const graphBudget = beforeGraph.tokens + sectionBudget - again.tokens;
-    const graphAgain = renderSection('graphAssociations', graphBudget);
-    const held = idsOutsideGraph();
-    const shown = new Set([...held, ...graphAgain.includedIds]);
-    const linesAgain = new Set(graphAgain.keptLines ?? []);
-    const keepsLines = (beforeGraph.keptLines ?? []).every((index) => {
-      const traceId = graphItems[index].traceId;
-      return linesAgain.has(index) || (traceId !== undefined && held.has(traceId));
-    });
-    if (lost.every((id) => shown.has(id)) && keepsLines) {
-      setGraph(graphAgain);
-      spare = graphBudget - graphAgain.tokens;
-      return;
-    }
-    rendered[key] = before;
-  };
-
-  // --- Pass 2, same order: what is still unspent goes to sections with content left out ---
-  // A trace section that grows here may take a trace Related Context shows, or give up one whose association Related
-  // Context left out as a duplicate (see growTraceSection). At the end of each round Related Context is rendered again
-  // whenever the trace ids the trace sections hold changed among those an association leads to, and the pass runs
-  // again so the room an association gave up reaches the sections with content left out; the rounds stop at one more
-  // than the associations.
-  for (let round = 0; round <= graphItems.length; round++) {
+  if (secondPass) {
+    // --- Pass 2, same order: what is still unspent goes to the sections with content left out ---
+    // Each section keeps every line it shows and may only lengthen a cut line or add lines, so no room comes back and
+    // one pass through the order spends all a section can take.
     for (const key of MEMORY_BUDGET_SPILL_ORDER) {
       if (spare <= 0) break;
-      if (rendered[key].tokens >= demand[key]) continue;
-      const sectionBudget = rendered[key].tokens + spare;
-      const again = renderSection(key, sectionBudget);
-      if (again.tokens <= rendered[key].tokens) continue;
-      if (key === 'semanticRecall' || key === 'recentEpisodic') {
-        growTraceSection(key, again, sectionBudget);
-        continue;
-      }
-      if (key === 'graphAssociations') setGraph(again);
-      else rendered[key] = again;
-      spare = sectionBudget - again.tokens;
+      spare -= grow(key, spare);
     }
-    if (sameAssociatedIds(idsOutsideGraph(), graphRenderedAgainst)) break;
-    const sectionBudget = rendered.graphAssociations.tokens + spare;
-    const graph = renderSection('graphAssociations', sectionBudget);
-    setGraph(graph);
-    spare = sectionBudget - graph.tokens;
+
+    // --- An involuntary memory left out of its tenth, or cut to it, takes what is still unspent ---
+    // The sections hold `available - spare` tokens, so the memory may grow to its own tokens plus `spare`.
+    // One that Related Context already shows stays out, so the trace appears once.
+    if (involuntaryTrace && spare > 0 && !shownIds(sections.graphAssociations).includes(involuntaryTrace.id)) {
+      const held = involuntary?.tokens ?? 0;
+      const wider = renderInvoluntary(involuntaryTrace, style, now, held + spare);
+      if (wider && wider.tokens > held) involuntary = wider;
+    }
   }
 
-  // --- An involuntary memory left out of its tenth, or cut to it, takes what is still unspent ---
-  // The sections hold `available - spare` tokens, so the memory may grow to its own tokens plus `spare`.
-  // One that Related Context already shows stays out, so the trace appears once.
-  if (involuntaryTrace && spare > 0 && !rendered.graphAssociations.includedIds.includes(involuntaryTrace.id)) {
-    const held = involuntary?.tokens ?? 0;
-    const wider = renderInvoluntary(involuntaryTrace, style, now, held + spare);
-    if (wider && wider.tokens > held) involuntary = wider;
-  }
-
-  const sections: string[] = includePreamble ? [preamble] : [];
+  const blocks: string[] = includePreamble ? [preamble] : [];
   for (const key of BLOCK_ORDER) {
-    const section = rendered[key];
-    if (!section.text) continue;
-    sections.push(section.text);
-    totalTokens += section.tokens;
+    const text = sectionText(sections[key]);
+    if (!text) continue;
+    blocks.push(text);
+    totalTokens += shownTokens(sections[key]);
   }
   // Ids in the order the sections that hold them appear.
-  const includedIds = [...rendered.semanticRecall.includedIds, ...rendered.recentEpisodic.includedIds];
+  const includedIds = [...shownIds(sections.semanticRecall), ...shownIds(sections.recentEpisodic)];
   if (involuntary) {
-    sections.push(involuntary.text);
+    blocks.push(involuntary.text);
     totalTokens += involuntary.tokens;
     includedIds.push(involuntary.id);
   }
 
   return {
-    contextText: sections.join('\n\n'),
+    contextText: blocks.join('\n\n'),
     tokensUsed: totalTokens,
     allocation: effective,
     includedMemoryIds: includedIds,
-  };
-}
-
-/**
- * The persistent-memory section: the text whole when it fits `budgetTokens`,
- * otherwise cut to fit and ended with `<!-- truncated -->`.
- */
-function renderPersistent(text: string, budgetTokens: number): RenderedSection {
-  if (!text) return EMPTY_SECTION;
-  const header = HEADERS.persistentMemory;
-  const maxChars = budgetTokens * 4;
-  const wholeChars = sectionChars(header, [text]);
-  if (wholeChars <= maxChars) {
-    return { text: `${header}\n${text}`, tokens: Math.ceil(wholeChars / 4), includedIds: [] };
-  }
-  const room = maxChars - SECTION_SEPARATOR_CHARS - header.length - 1 - PERSISTENT_TRUNCATED_MARKER.length;
-  if (room <= 0) return EMPTY_SECTION;
-  const cut = `${sliceWholeCodePoints(text, room)}${PERSISTENT_TRUNCATED_MARKER}`;
-  return {
-    text: `${header}\n${cut}`,
-    tokens: Math.ceil(sectionChars(header, [cut]) / 4),
-    includedIds: [],
   };
 }
