@@ -54,8 +54,9 @@ function withoutMemoryNulls(
  * - `cognitiveMemoryConfig` loses the `null` values a persona read from JSON writes for an unset key (a field set to
  *   `null`, a key set to `null` inside a field, or the whole config set to `null`), so a loaded persona matches
  *   `CognitiveMemoryPersonaConfig`, which lists no `null`.
- * - When `sentimentTracking.enabled` is true and `presets` names at least one preset, the preset metaprompts are
- *   merged into `metaPrompts`.
+ * - When `sentimentTracking.enabled` is true and `presets` is an array naming at least one preset, the preset
+ *   metaprompts are merged into `metaPrompts`. A `presets` that is not an array, or a `metaPrompts` that is set and
+ *   not an array, merges nothing (`validatePersona` reports the first as `invalid_sentiment_presets`).
  *
  * Returns the input object untouched when nothing applies, and a new object (the input is never mutated) when
  * either step does.
@@ -73,7 +74,10 @@ export function normalizePersonaDefinition(definition: IPersonaDefinition): IPer
   }
 
   const sentiment = result.sentimentTracking;
-  if (!sentiment?.enabled || !sentiment.presets || sentiment.presets.length === 0) {
+  if (!sentiment?.enabled || !Array.isArray(sentiment.presets) || sentiment.presets.length === 0) {
+    return result;
+  }
+  if (result.metaPrompts !== undefined && !Array.isArray(result.metaPrompts)) {
     return result;
   }
   const requestedIds = sentiment.presets.includes('all')

@@ -425,8 +425,15 @@ export class GMIManager {
       loadedDefs.forEach(persona => {
         if (persona && persona.id) {
           // Every loader's definitions are normalized here, a host's own IPersonaLoader included, so a stored
-          // persona matches the shipped loaders' output. A clean persona comes back as the same object.
-          this.allPersonaDefinitions.set(persona.id, normalizePersonaDefinition(persona));
+          // persona matches the shipped loaders' output. A clean persona comes back as the same object. A
+          // definition the normalizer cannot read is stored as returned, so it never takes the others down.
+          let stored = persona;
+          try {
+            stored = normalizePersonaDefinition(persona);
+          } catch (normalizeError: any) {
+            console.warn(`GMIManager (ID: ${this.managerId}): Could not normalize persona '${persona.id}'; storing it as loaded: ${normalizeError?.message ?? normalizeError}`);
+          }
+          this.allPersonaDefinitions.set(persona.id, stored);
         } else {
           console.warn(`GMIManager (ID: ${this.managerId}): Encountered an invalid persona definition (missing ID or null) during load. Skipping.`);
         }

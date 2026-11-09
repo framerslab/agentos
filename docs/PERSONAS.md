@@ -87,7 +87,7 @@ class DatabasePersonaLoader implements IPersonaLoader {
 const agentos = await AgentOS.create({ personaLoader: new DatabasePersonaLoader() });
 ```
 
-`InMemoryPersonaLoader` and the file-system `PersonaLoader` are exported for composition. `GMIManager` runs `normalizePersonaDefinition()` on every definition a loader returns, yours included, so sentiment presets expand and `null` memory settings drop the way the built-in loaders do; a definition that needs neither is stored as the same object.
+`InMemoryPersonaLoader` and the file-system `PersonaLoader` are exported for composition. `GMIManager` runs `normalizePersonaDefinition()` on every definition a loader returns, yours included, so sentiment presets expand and `null` memory settings drop the way the built-in loaders do; a definition that needs neither is stored as the same object. A `sentimentTracking.presets` that is not an array merges no presets and is reported as `invalid_sentiment_presets`, and a definition the normalizer cannot read is stored as returned with a warning, so one bad definition never stops the others from loading.
 
 ## Validation and strict mode
 
