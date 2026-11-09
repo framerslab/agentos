@@ -554,6 +554,39 @@ describe('MemoryPromptAssembler', () => {
       expect(whole.contextText).toContain(item.slice(0, 700));
     });
 
+    it('leaves out of Related Context an association to a trace the block already holds, and the next association takes its room', () => {
+      // Spreading activation leaves out only the top three retrieved seeds, so a fourth retrieved trace can come back as
+      // an association of the first.
+      const fact = 'The ferry to the island leaves at 7:40 from pier 3.';
+      const recalled = makeScoredTrace({ id: 'd', type: 'episodic', content: `${wordsText(300)} ${fact}` });
+      const next = { traceId: 'e', text: `[associated, activation=0.40] ${wordsText(300, 2)} We bought the picnic basket.` };
+      const alone = assembleMemoryContext({ totalTokenBudget: 1600, traits: {}, retrievedTraces: [recalled], graphContext: [next] });
+      expect(sectionLines(alone.contextText, '## Related Context')).toEqual([`- ${next.text}`]);
+
+      // At the budget the recalled trace and the next association fill exactly, the duplicate takes none of it.
+      const budget = alone.tokensUsed;
+      const result = assembleMemoryContext({
+        totalTokenBudget: budget,
+        traits: {},
+        retrievedTraces: [recalled],
+        graphContext: [{ traceId: 'd', text: `[associated, activation=0.80] ${recalled.content}` }, next],
+      });
+      expect(result.contextText.split(fact)).toHaveLength(2);
+      expect(sectionLines(result.contextText, '## Recent Experiences').join('\n')).toContain(fact);
+      expect(sectionLines(result.contextText, '## Related Context')).toEqual([`- ${next.text}`]);
+      expect(result.contextText).toBe(alone.contextText);
+      expect(result.tokensUsed).toBeLessThanOrEqual(budget);
+
+      // A plain line carries no id and is never left out for that.
+      const plain = assembleMemoryContext({
+        totalTokenBudget: 1600,
+        traits: {},
+        retrievedTraces: [recalled],
+        graphContext: [`[associated, activation=0.80] ${recalled.content}`],
+      });
+      expect(sectionLines(plain.contextText, '## Related Context').join('\n')).toContain(fact);
+    });
+
     it('keeps working memory to its leading slots when a longer slot does not fit, and skips a graph association too short to cut', () => {
       // Slots arrive sorted by activation, highest first; a shorter slot after one that does not fit stays out.
       const slots = [

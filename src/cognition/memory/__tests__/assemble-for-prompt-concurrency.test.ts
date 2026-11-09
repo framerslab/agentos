@@ -555,4 +555,35 @@ describe('assembleForPrompt memory block', () => {
       await manager.shutdown();
     }
   });
+
+  it('a retrieved trace the graph walk also reaches appears once, and the next association takes its place', async () => {
+    // The walk seeds from the top three retrieved traces only, so the fourth can come back as an association of the first.
+    const manager = new CognitiveMemoryManager();
+    await manager.initialize(makeManagerConfig(makeMocks(), 'graph-dedupe'));
+    try {
+      const fact = 'The ferry to the island leaves at 7:40 from pier 3.';
+      const fourth = traceOf('retrieved-4', 'episodic', `We checked the harbor timetable together. ${fact}`);
+      const other = traceOf('associated-2', 'episodic', 'We bought the picnic basket at the harbor market.');
+      await manager.getStore().store(fourth as never);
+      await manager.getStore().store(other as never);
+      retrievalOf(manager, [
+        traceOf('retrieved-1', 'semantic', 'We plan a day trip to the island.'),
+        traceOf('retrieved-2', 'semantic', 'The island has a lighthouse.'),
+        traceOf('retrieved-3', 'semantic', 'Bring sunscreen for the island.'),
+        fourth,
+      ]);
+      vi.spyOn(manager.getGraph()!, 'spreadingActivation').mockResolvedValue([
+        { memoryId: fourth.id, activation: 0.8, depth: 1, activatedBy: ['retrieved-1'] },
+        { memoryId: other.id, activation: 0.6, depth: 1, activatedBy: ['retrieved-1'] },
+      ]);
+
+      const out = await manager.assembleForPrompt('when does the ferry to the island leave', 1600, MOOD);
+      expect(out.contextText.split(fact)).toHaveLength(2);
+      expect(out.contextText).toContain('## Recent Experiences');
+      expect(out.contextText).not.toContain('[associated, activation=0.80]');
+      expect(out.contextText).toContain(`[associated, activation=0.60] ${other.content}`);
+    } finally {
+      await manager.shutdown();
+    }
+  });
 });
