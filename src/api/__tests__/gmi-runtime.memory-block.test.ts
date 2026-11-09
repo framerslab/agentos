@@ -223,11 +223,14 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
     }
   });
 
-  it('a graph association reaches the model whole, its fact past the 150th character', async () => {
+  it('a graph association reaches the model whole, its fact past the 150th character, and a recalled trace it leads to appears once', async () => {
     // STATEMENT and the kayak notes are recalled together on the early and the mixed turns, so the memory graph links
-    // them. The last question shares words with the kayak notes alone: three of them rank above STATEMENT and seed the
-    // graph walk, and STATEMENT arrives as their association.
+    // them. The last question shares words with the kayak notes: three of them rank above STATEMENT and seed the graph
+    // walk, and STATEMENT arrives as their association. Recall also returns STATEMENT itself, past the three seeds:
+    // with Recent Experiences on it renders there and stays out of Related Context; with the persona's share of 0 for
+    // Recent Experiences it renders in Related Context, whole.
     expect(STATEMENT.indexOf('5832')).toBeGreaterThan(150);
+    const STATEMENT_START = 'At the downtown parcel station';
     const turns = [
       STATEMENT,
       'Kayak paddles hang on the garage rack beside the red canoe.',
@@ -237,25 +240,33 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
       'Remember the parcel station locker near the entrance and the red canoe on the garage rack.',
     ];
     const acks = ['Noted.', 'Okay.', 'Sure.', 'Fine.', 'Right.', 'Yes.'];
-    const k = key(); const emb = key();
-    const s = script('openai', k, { replies: [...acks.map((ack) => reply.text(ack)), reply.text('On the rack.')] });
-    script('openai', emb, { replies: [] });
-    vi.stubEnv('OPENAI_API_KEY', emb);
-    const a = withMemory(k);
-    try {
-      const session = a.session('s');
-      for (const turn of turns) await session.send(turn);
-      session.clear();
-      await session.send('Kayak paddles, red canoe, garage rack: where again?');
+    for (const episodicOff of [false, true]) {
+      personaMemory.config = episodicOff ? { tokenBudget: { recentEpisodic: 0 } } : undefined;
+      const k = key(); const emb = key();
+      const s = script('openai', k, { replies: [...acks.map((ack) => reply.text(ack)), reply.text('On the rack.')] });
+      script('openai', emb, { replies: [] });
+      vi.stubEnv('OPENAI_API_KEY', emb);
+      const a = withMemory(k);
+      try {
+        const session = a.session('s');
+        for (const turn of turns) await session.send(turn);
+        session.clear();
+        await session.send('Kayak paddles, red canoe, garage rack: where again?');
 
-      const block = memoryBlockOf(s, turns.length);
-      const graphLines = sectionLines(block, GRAPH_HEADER);
-      const association = graphLines.find((line) => line.includes('At the downtown parcel station'));
-      expect(association, `the statement among the associations of:\n${block}`).toBeDefined();
-      expect(association).toContain(FACT);
-      expect(association).not.toContain('…[cut]');
-    } finally {
-      await a.close();
+        const block = memoryBlockOf(s, turns.length);
+        expect(block.split(STATEMENT_START), `the statement once in:\n${block}`).toHaveLength(2);
+        const association = sectionLines(block, GRAPH_HEADER).find((line) => line.includes(STATEMENT_START));
+        if (episodicOff) {
+          expect(association, `the statement among the associations of:\n${block}`).toBeDefined();
+          expect(association).toContain(FACT);
+          expect(association).not.toContain('…[cut]');
+        } else {
+          expect(sectionLines(block, EPISODIC_HEADER).join('\n')).toContain(STATEMENT_START);
+          expect(association, `the statement left out of the associations of:\n${block}`).toBeUndefined();
+        }
+      } finally {
+        await a.close();
+      }
     }
   });
 
