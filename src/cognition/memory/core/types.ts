@@ -552,6 +552,11 @@ export interface CognitiveRetrievalResult {
 // Prompt assembly types
 // ---------------------------------------------------------------------------
 
+/**
+ * Each memory-block section's share of the budget, as a fraction. A share is
+ * a floor for a section with content, not a ceiling: budget other sections
+ * leave unused flows to it (see `assembleMemoryContext`).
+ */
 export interface MemoryBudgetAllocation {
   workingMemory: number;
   semanticRecall: number;
@@ -564,6 +569,7 @@ export interface MemoryBudgetAllocation {
 
 export interface AssembledMemoryContext {
   contextText: string;
+  /** Estimated tokens of `contextText` (about 4 characters a token), headers included; never above the budget. */
   tokensUsed: number;
   allocation: MemoryBudgetAllocation;
   includedMemoryIds: string[];
