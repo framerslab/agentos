@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { format, inspect } from 'node:util';
 
 // Spy on the real `agent` factory so we can inspect what souledAgent passes it,
 // while keeping loadSoulFromOption (and the rest of agent.js) real.
@@ -109,6 +110,34 @@ describe('souledAgent', () => {
       const lines = warn.mock.calls.filter((call) => typeof call[0] === 'string' && call[0].includes('compile on close failed'));
       expect(lines).toHaveLength(1);
       expect(lines[0][0]).toMatch(/traces stay in the store/);
+      expect(agentClose).toHaveBeenCalledTimes(1);
+      expect(storeClose).toHaveBeenCalled();
+    } finally {
+      compile.mockRestore();
+      storeClose.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('warns and still closes when the compile on close fails with an error that cannot be inspected', async () => {
+    const agentClose = vi.fn(async () => {});
+    agentSpy.mockImplementationOnce((o: unknown) => ({ __agentOpts: o, generate: async () => ({ text: '' }), close: agentClose }));
+    const error = new Error('disk full');
+    Object.defineProperty(error, inspect.custom, { value: () => { throw new Error('cannot inspect'); } });
+    const compile = vi.spyOn(Memory.prototype, 'compileWiki').mockRejectedValue(error);
+    const storeClose = vi.spyOn(Memory.prototype, 'close');
+    // Formats its arguments as the console does, so an argument that cannot be inspected throws here as it would there.
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      format(...args);
+    });
+    try {
+      const a = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
+      warn.mockClear();
+      await expect(a.close()).resolves.toBeUndefined();
+
+      const lines = warn.mock.calls.filter((call) => typeof call[0] === 'string' && call[0].includes('compile on close failed'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0][0]).toContain('disk full');
       expect(agentClose).toHaveBeenCalledTimes(1);
       expect(storeClose).toHaveBeenCalled();
     } finally {

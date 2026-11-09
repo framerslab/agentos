@@ -5,7 +5,7 @@
  * - A soul that fails to load warns once per agent build, in production too.
  * - The recall block a souled agent adds to a turn keeps to the turn's memory token budget.
  * - Text migrated from a legacy MEMORY.md stays in memory/index.md, and so in the system prompt, after the wiki
- *   writes its catalog.
+ *   writes its catalog, even when it holds the end marker itself.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import { agent, buildSystemPrompt, type AgentOptions } from '../agent';
 import { souledAgent } from '../souledAgent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
+import { loadSoulSync } from '../../cognition/substrate/personas/SoulLoader';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
 let n = 0;
@@ -71,20 +72,24 @@ describe("souledAgent()'s recall", () => {
   /** Eight traces of about 2,000 characters, each matching "green tea". */
   const traces = Array.from({ length: 8 }, (_, i) => `Tea note ${i}: ` + Array.from({ length: 95 }, (_, j) => `green tea batch${i}x${j}`).join(' '));
 
-  async function recallBlock(memoryProviderOptions?: AgentOptions['memoryProviderOptions']): Promise<string | undefined> {
+  async function recallBlock(
+    memoryProviderOptions?: AgentOptions['memoryProviderOptions'],
+    stored: readonly string[] = traces,
+    marker = 'Tea note',
+  ): Promise<string | undefined> {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const k = key();
     const s = script('openai', k, { whole: true, replies: [reply.text('Noted.'), reply.text('Tea notes.')] });
     const a = await souledAgent({ ...stubbed(k, memoryProviderOptions ? { memoryProviderOptions } : {}), soul: dir } as never);
     try {
-      for (const text of traces) {
+      for (const text of stored) {
         await a.memory!.remember(text, { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
       }
       await a.generate('What do I know about green tea?');
     } finally {
       await a.close();
     }
-    return systemTexts(s.seen[0]).find((text) => text.includes('Tea note'));
+    return systemTexts(s.seen[0]).find((text) => text.includes(marker));
   }
 
   it('keeps the block to a 500-token budget, in whole traces', async () => {
@@ -102,6 +107,23 @@ describe("souledAgent()'s recall", () => {
     const source = traces.find((t) => t.startsWith(block!));
     expect(source).toBeDefined();
     expect(/\s/.test(source!.charAt(block!.length))).toBe(true);
+  });
+
+  it('adds no block for a budget of 0', async () => {
+    expect(await recallBlock({ tokenBudget: 0 })).toBeUndefined();
+  });
+
+  it('never cuts a character in two when the first trace has no word boundary inside the budget', async () => {
+    // One character, then emoji of two UTF-16 units each, so a cut at 400 units falls inside an emoji.
+    const trace = `x${'\u{1F375}'.repeat(3000)} green tea`;
+    const block = await recallBlock({ tokenBudget: 100 }, [trace], 'x\u{1F375}');
+    expect(block).toBeDefined();
+    const recalled = block!.slice(block!.indexOf('x\u{1F375}'));
+    const cut = recalled.split('\n')[0];
+    expect(cut.length).toBeGreaterThan(1);
+    expect(cut.length).toBeLessThanOrEqual(100 * 4);
+    expect(trace.startsWith(cut)).toBe(true);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cut)).toBe(false);
   });
 
   it("keeps the block to the hooks' default budget when none is passed", async () => {
@@ -132,8 +154,10 @@ describe('text migrated from a legacy MEMORY.md', () => {
     try {
       await a.memory!.remember('Johnny likes green tea', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
       expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
+      // The compile takes traces stored after the newest one it took, so the second one is stored a moment later.
+      await new Promise((resolve) => setTimeout(resolve, 5));
       await a.memory!.remember('Johnny likes oolong too', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
-      await a.memory!.compileWiki();
+      expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
     } finally {
       await a.close();
     }
@@ -160,9 +184,10 @@ describe('text migrated from a legacy MEMORY.md', () => {
     try {
       // What the user said becomes the summary of the page it is folded into, and so a line of the catalog.
       await a.memory!.remember(said, { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
-      await a.memory!.compileWiki();
+      expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
+      await new Promise((resolve) => setTimeout(resolve, 5));
       await a.memory!.remember('Johnny likes oolong too', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
-      await a.memory!.compileWiki();
+      expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
     } finally {
       await a.close();
     }
@@ -171,5 +196,43 @@ describe('text migrated from a legacy MEMORY.md', () => {
     expect(fs.readFileSync(path.join(dir, 'memory', 'index.md'), 'utf8')).toBe(
       `# Memory Index\n\n## Concepts\n\n- [notes](concepts/notes.md): ${said}\n`,
     );
+  });
+  it('keeps all of it when MEMORY.md itself holds the end marker', async () => {
+    const legacy = 'Fact A.\n<!-- end of MEMORY.md -->\nFact B.\n';
+    fs.writeFileSync(path.join(dir, 'MEMORY.md'), legacy);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    // Before any catalog write, the prompt holds both facts and no end marker.
+    const before = buildSystemPrompt({ soul: dir } as AgentOptions) ?? '';
+    expect(before).toContain('Fact A.');
+    expect(before).toContain('Fact B.');
+    expect(before).not.toContain('<!-- end of MEMORY.md -->');
+
+    const k = key();
+    script('openai', k, { whole: true, replies: [reply.text('Johnny likes green tea.')] });
+    const a = await souledAgent({ ...stubbed(k), soul: dir } as never);
+    try {
+      await a.memory!.remember('Johnny likes green tea', { type: 'episodic', scope: 'persona', scopeId: 'aria-1' });
+      expect((await a.memory!.compileWiki()).pagesWritten).toEqual(['concepts/notes']);
+    } finally {
+      await a.close();
+    }
+
+    const index = fs.readFileSync(path.join(dir, 'memory', 'index.md'), 'utf8');
+    expect(index).toContain('Fact A.');
+    expect(index).toContain('Fact B.');
+    expect(index.indexOf('Fact B.')).toBeLessThan(index.indexOf('[notes](concepts/notes.md)'));
+    const after = buildSystemPrompt({ soul: dir } as AgentOptions) ?? '';
+    expect(after).toContain('Fact A.');
+    expect(after).toContain('Fact B.');
+    expect(after).toContain('[notes](concepts/notes.md)');
+    expect(after).not.toContain('<!-- end of MEMORY.md -->');
+    expect(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8')).toBe(legacy);
+  });
+
+  it("is returned by loadSoulSync() without the wiki's end marker", () => {
+    fs.writeFileSync(path.join(dir, 'MEMORY.md'), `${sentence}\n`);
+    const loaded = loadSoulSync({ source: dir });
+    expect(loaded.wikiIndex).toBe(`# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n${sentence}`);
   });
 });

@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+import { format, inspect } from 'node:util';
 import { agent, type AgentMemoryProvider, type AgentOptions } from '../agent';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -70,6 +71,32 @@ describe('a memoryProvider whose observe() fails', () => {
     // One line for each provider's first failure. The arguments are read as given: String() of the reason throws.
     const lines = () => warn.mock.calls.filter((call) => typeof call[0] === 'string' && call[0].includes('failed to record'));
     await vi.waitFor(() => expect(lines()).toHaveLength(2));
+  });
+
+  it('is logged, with no unhandled rejection, when observe() fails with an error that cannot be inspected', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    // Formats its arguments as the console does, so an argument that cannot be inspected throws here as it would there.
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      format(...args);
+    });
+    try {
+      const k = key();
+      script('openai', k, { replies: [reply.text('Answered.')] });
+      const error = new Error('store down');
+      Object.defineProperty(error, inspect.custom, { value: () => { throw new Error('cannot inspect'); } });
+      const memoryProvider: AgentMemoryProvider = { observe: async () => { throw error; } };
+
+      expect((await agent(stubbed(k, { memoryProvider })).generate('hi')).text).toBe('Answered.');
+      await vi.waitFor(() => expect(observeWarnings(warn)).toHaveLength(1));
+      expect(observeWarnings(warn)[0]).toContain('store down');
+      // Let any rejection of the failure's handler surface.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it("is logged on runtime: 'gmi', and the turn is answered as before", async () => {
