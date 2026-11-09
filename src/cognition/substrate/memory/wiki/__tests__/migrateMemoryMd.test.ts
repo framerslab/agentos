@@ -23,6 +23,15 @@ describe('ensureMemoryDir', () => {
     expect(fs.existsSync(path.join(memoryDir, '.meta', 'index.json'))).toBe(true);
   });
 
+  it('marks where the migrated MEMORY.md text starts and ends', () => {
+    fs.writeFileSync(path.join(dir, 'MEMORY.md'), '# Facts\n\nUser likes terse commits.\n');
+    const memoryDir = ensureMemoryDir(dir);
+    expect(fs.readFileSync(path.join(memoryDir, 'index.md'), 'utf8')).toBe(
+      '# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n# Facts\n\nUser likes terse commits.\n\n<!-- end of MEMORY.md -->\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'MEMORY.md'), 'utf8')).toBe('# Facts\n\nUser likes terse commits.\n');
+  });
+
   it('is idempotent: existing memory/ is never overwritten', () => {
     const memoryDir = path.join(dir, 'memory');
     fs.mkdirSync(memoryDir);

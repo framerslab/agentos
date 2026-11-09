@@ -21,6 +21,26 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+describe('WikiMemoryStore index.md and the text migrated from MEMORY.md', () => {
+  const page = (id: string, summary: string) => ({ id, type: 'concept' as const, summary, updated: '', sources: [], body: 'b', links: [] });
+
+  it('keeps an index written before the end marker existed, and gives it its end marker on the first refresh', async () => {
+    // What ensureMemoryDir wrote before the migrated text had an end marker, the catalog not yet written.
+    fs.writeFileSync(
+      path.join(memoryDir, 'index.md'),
+      '# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n# Facts\n\nThe user prefers concise answers.\n',
+    );
+    const store = new WikiMemoryStore({ memoryDir, port: noopPort, agentId: 'a1' });
+    await store.writePage(page('concepts/billing', 'How billing works.'));
+    await store.writePage(page('concepts/tone', 'How to talk.'));
+
+    expect(fs.readFileSync(path.join(memoryDir, 'index.md'), 'utf8')).toBe(
+      '# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n# Facts\n\nThe user prefers concise answers.\n\n<!-- end of MEMORY.md -->\n\n' +
+        '## Concepts\n\n- [billing](concepts/billing.md): How billing works.\n- [tone](concepts/tone.md): How to talk.\n',
+    );
+  });
+});
+
 describe('WikiMemoryStore filesystem', () => {
   it('writePage then readPage round-trips and updates index.md', async () => {
     const store = new WikiMemoryStore({ memoryDir, port: noopPort, agentId: 'a1' });

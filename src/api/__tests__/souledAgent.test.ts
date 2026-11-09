@@ -68,6 +68,31 @@ describe('souledAgent', () => {
     compileSpy.mockRestore();
   });
 
+  it('warns when the compile on close fails, and still closes the agent and the store', async () => {
+    const agentClose = vi.fn(async () => {});
+    agentSpy.mockImplementationOnce((o: unknown) => ({ __agentOpts: o, generate: async () => ({ text: '' }), close: agentClose }));
+    const compile = vi.spyOn(Memory.prototype, 'compileWiki').mockRejectedValue(new Error('disk full'));
+    const storeClose = vi.spyOn(Memory.prototype, 'close');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const a = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
+      warn.mockClear();
+      await expect(a.close()).resolves.toBeUndefined();
+
+      expect(compile).toHaveBeenCalled();
+      const lines = warn.mock.calls.map((call) => call.map(String).join(' '));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('disk full');
+      expect(lines[0]).toMatch(/traces stay in the store/);
+      expect(agentClose).toHaveBeenCalledTimes(1);
+      expect(storeClose).toHaveBeenCalled();
+    } finally {
+      compile.mockRestore();
+      storeClose.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
   it('starts with pages named after members every object has, and finds their index entries on the next start', async () => {
     const memoryDir = path.join(dir, 'memory');
     fs.mkdirSync(memoryDir);
