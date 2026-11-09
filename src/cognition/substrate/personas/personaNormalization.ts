@@ -55,7 +55,7 @@ function withoutMemoryNulls(
  *   `null`, a key set to `null` inside a field, or the whole config set to `null`), so a loaded persona matches
  *   `CognitiveMemoryPersonaConfig`, which lists no `null`.
  * - When `sentimentTracking.enabled` is true and `presets` is an array naming at least one preset, the preset
- *   metaprompts are merged into `metaPrompts`. A `presets` that is not an array, or a `metaPrompts` that is set and
+ *   metaprompts are merged into `metaPrompts`. A `presets` that is not an array (`null` included), or a `metaPrompts` that is set and
  *   not an array, merges nothing (`validatePersona` reports the first as `invalid_sentiment_presets`).
  *
  * Returns the input object untouched when nothing applies, and a new object (the input is never mutated) when
