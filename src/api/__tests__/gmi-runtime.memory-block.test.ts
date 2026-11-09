@@ -85,6 +85,13 @@ function memoryBlockOf(s: ProviderScript, call: number): string {
   return text.slice(start, end === -1 ? undefined : end);
 }
 
+/** Every message of the provider request `call`, as one text: what the model receives on that turn. */
+function requestTextOf(s: ProviderScript, call: number): string {
+  const request = s.seen[call];
+  expect(request, `model call ${call}`).toBeDefined();
+  return request.messages.map(textOf).join('\n\n');
+}
+
 /** The lines of one section of a block, from its header to the next section. */
 function sectionLines(block: string, header: string): string[] {
   const start = block.indexOf(header);
@@ -214,6 +221,8 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         const block = memoryBlockOf(s, 1);
         if (zeroed) {
           expect(block, 'share 0').not.toContain(EPISODIC_HEADER);
+          // Nowhere in the request: not in another message, not outside the block.
+          expect(requestTextOf(s, 1), 'share 0, the whole request').not.toContain(EPISODIC_HEADER);
         } else {
           expect(block, 'default share').toContain(EPISODIC_HEADER);
           expect(sectionLines(block, EPISODIC_HEADER).join('\n')).toContain(FACT);
@@ -256,6 +265,9 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
 
         const block = memoryBlockOf(s, turns.length);
         expect(block.split(STATEMENT_START), `the statement once in:\n${block}`).toHaveLength(2);
+        // Once in the whole request the model receives, not only in the block.
+        const request = requestTextOf(s, turns.length);
+        expect(request.split(STATEMENT_START), `the statement once in the request:\n${request}`).toHaveLength(2);
         const association = sectionLines(block, GRAPH_HEADER).find((line) => line.includes(STATEMENT_START));
         if (episodicOff) {
           expect(association, `the statement among the associations of:\n${block}`).toBeDefined();
