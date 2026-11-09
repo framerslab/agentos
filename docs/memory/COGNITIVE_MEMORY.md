@@ -599,6 +599,16 @@ A share is the least a section with content gets, not a cap (see [Overflow Redis
 await memory.initialize({ ...deps, tokenBudget: { recentEpisodic: 0 } });
 ```
 
+A persona sets the same shares in `cognitiveMemoryConfig.tokenBudget`. [`createAgentCognitiveMemory`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/agentCognitiveMemory.ts), which builds the manager of `agent({ runtime: 'gmi' })` and `gmi()`, passes them to the manager as `tokenBudget`. A host that builds its manager from a persona itself, in `gmiManagerConfig.cognitiveMemoryFactory`, passes `persona.cognitiveMemoryConfig?.tokenBudget` the same way.
+
+```typescript
+const persona: IPersonaDefinition = {
+  ...basePersona,
+  cognitiveMemoryConfig: { tokenBudget: { recentEpisodic: 0 } },
+};
+const { manager } = await createAgentCognitiveMemory({ persona, memory: { embedding: { provider: 'openai' } } });
+```
+
 | Section | Budget % | Content |
 |---------|---------|---------|
 | Persistent Memory | 5% | The persistent markdown working memory, truncated to fit |
@@ -615,7 +625,7 @@ Budget a section leaves unused (it is empty, or its content is shorter than its 
 
 ### Trace Lines
 
-A trace's content is rendered whole. A trace that does not fit what is left of its section is cut to fit that space, at a word boundary, and its content ends with `…[cut]`. A trace whose cut would keep fewer than 40 characters of content is skipped, and the traces after it are still tried, in order, while the section has room. Graph associations follow the same rule, their `[associated, activation=…]` tag kept whole. Lines of the other sections are whole or skipped. A cut never splits a surrogate pair, so an emoji is kept or dropped whole; the same holds for persistent memory cut to fit. Working memory keeps its leading slots when the whole list does not fit: its slots are sorted by activation, so the first slot that does not fit ends the section and no lower slot takes its place.
+A trace's content is rendered whole. A trace that does not fit what is left of its section is cut to fit that space, at a word boundary, and its content ends with `…[cut]`. A trace whose cut would keep fewer than 40 characters of content is skipped, and the traces after it are still tried, in order, while the section has room. Graph associations follow the same rule, their `[associated, activation=…]` tag kept whole. Lines of the other sections are whole or skipped. An association that leads to a trace the block already holds, in Relevant Memories, Recent Experiences or the involuntary memory, is left out of Related Context, and the associations after it take its room: spreading activation leaves out only the top three retrieved traces, so a fourth can come back as an association of the first, and it then appears once, in its own section. Should a trace section take such a trace in the second pass, Related Context is rendered again without it. `assembleMemoryContext()` takes a graph association as `{ traceId, text }` (`MemoryGraphAssociation`) for this; a plain string line carries no id and is never left out for it. A cut never splits a surrogate pair, so an emoji is kept or dropped whole; the same holds for persistent memory cut to fit. Working memory keeps its leading slots when the whole list does not fit: its slots are sorted by activation, so the first slot that does not fit ends the section and no lower slot takes its place.
 
 Every line carries the trace's age and the UTC date it was stored (`createdAt`): `just now`, `Nm ago` and `Nh ago` under a day; from a day on, the number of UTC calendar days between the stored date and the turn's date, as `Nd ago` under a week and `N days ago` from a week on; then `, YYYY-MM-DD`. Counted in calendar days, the age always agrees with the date: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, though fewer than 27 whole 24-hour periods have passed. A trace stored 26 days before the turn reads:
 
@@ -675,6 +685,8 @@ What callers see differently in the memory block and its formatters:
 - `assembleForPrompt()` renders each recalled trace whole. A trace that does not fit what is left of its section is cut at a word boundary and ends with `…[cut]`, and budget a section leaves unused flows to the sections with content (see [Overflow Redistribution](#overflow-redistribution)), so a section can hold more than its share. Through 0.15.120 each trace was cut to about 300 characters (350 in the narrative style), and only Semantic Recall took budget other sections left unused.
 - `formatMemoryTrace` and `formatMemoryTraces` (exported from `@framers/agentos/cognition/memory`) return the whole content of a trace when called without `maxChars`. Through 0.15.120 they cut it to about 300 characters (350 in the narrative style). A caller that needs a bound passes `formatMemoryTrace(trace, style, { maxChars })`.
 - `assembleForPrompt()` puts a graph association's whole content in Related Context, cut to fit only when it does not fit what is left of the section. Through 0.15.120 every association was cut to 150 characters.
+- A graph association that leads to a trace the block already holds (a retrieved trace past the three that seed the graph walk, or the involuntary memory) is left out of Related Context, so the trace appears once and the next association takes its room. Through 0.15.120 such a trace appeared in its own section and again, cut, in Related Context. `assembleMemoryContext()` takes `graphContext` entries as `{ traceId, text }` as well as plain strings.
+- A persona's `cognitiveMemoryConfig.tokenBudget` reaches the manager `createAgentCognitiveMemory` builds (the manager of `agent({ runtime: 'gmi' })` and `gmi()`). Through 0.15.120 the field was declared and nothing read it, so the manager ran on the default shares.
 - The involuntary memory is chosen from the traces the turn did not retrieve: every retrieved trace is left out of its pool, including one that did not fit the block. Through 0.15.120 only the traces that made it into the block were left out.
 - A `tokenBudget` share of exactly 0 turns its section off. With the budget other sections leave unused flowing to the sections with content, a 0 share would otherwise still render its section. The default allocation has no zero share, so a host that sets none sees no change.
 - Each line carries the UTC date the trace was stored after its age, and an age from a week on reads `N days ago`. Through 0.15.120 a line carried no date and an age from a week on read `Nw ago`. Ages of a day or more count UTC calendar days between the stored date and the turn's date, so the age and the date agree: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, one more than the whole 24-hour periods between them.
