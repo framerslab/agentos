@@ -455,3 +455,104 @@ describe('assembleForPrompt concurrency', () => {
     );
   });
 });
+
+describe('assembleForPrompt memory block', () => {
+  function traceOf(id: string, type: 'episodic' | 'semantic', content: string) {
+    return {
+      id,
+      type,
+      scope: 'user',
+      scopeId: 'u1',
+      content,
+      entities: [],
+      tags: [],
+      provenance: { sourceType: 'user_statement', sourceTimestamp: Date.now(), confidence: 1, verificationCount: 0 },
+      emotionalContext: { valence: 0, arousal: 0, dominance: 0, intensity: 0, gmiMood: '' },
+      encodingStrength: 0.8,
+      stability: 0.5,
+      retrievalCount: 0,
+      lastAccessedAt: Date.now(),
+      accessCount: 0,
+      reinforcementInterval: 0,
+      associatedTraceIds: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      isActive: true,
+    };
+  }
+
+  function scored(trace: ReturnType<typeof traceOf>) {
+    return {
+      ...trace,
+      retrievalScore: 0.9,
+      vectorSimilarity: 0.9,
+      scoreBreakdown: {
+        strengthScore: 0.9,
+        similarityScore: 0.9,
+        recencyScore: 0.9,
+        emotionalCongruenceScore: 0.5,
+        graphActivationScore: 0,
+        importanceScore: 0.8,
+      },
+    };
+  }
+
+  function retrievalOf(manager: CognitiveMemoryManager, traces: ReturnType<typeof traceOf>[]) {
+    vi.spyOn(manager, 'retrieve').mockResolvedValue({
+      retrieved: traces.map(scored),
+      partiallyRetrieved: [],
+      diagnostics: { candidatesScanned: traces.length, vectorSearchTimeMs: 0, scoringTimeMs: 0, totalTimeMs: 0 },
+    } as never);
+  }
+
+  it('a tokenBudget share of 0 leaves its section out of the block, though the rest of the budget is unspent', async () => {
+    const traces = [
+      traceOf('sem-1', 'semantic', 'The team meets on Thursdays in the library.'),
+      traceOf('epi-1', 'episodic', 'We walked to the harbor after the Thursday meeting.'),
+    ];
+    const off = new CognitiveMemoryManager();
+    const on = new CognitiveMemoryManager();
+    await off.initialize(makeManagerConfig(makeMocks(), 'share-zero-off', { tokenBudget: { recentEpisodic: 0 } }));
+    await on.initialize(makeManagerConfig(makeMocks(), 'share-zero-on'));
+    try {
+      retrievalOf(off, traces);
+      retrievalOf(on, traces);
+      const withoutEpisodic = await off.assembleForPrompt('what do we do on thursdays', 1600, MOOD);
+      expect(withoutEpisodic.contextText).toContain('The team meets on Thursdays in the library.');
+      expect(withoutEpisodic.contextText).not.toContain('## Recent Experiences');
+      expect(withoutEpisodic.contextText).not.toContain('We walked to the harbor');
+      expect(withoutEpisodic.includedMemoryIds).not.toContain('epi-1');
+
+      const withEpisodic = await on.assembleForPrompt('what do we do on thursdays', 1600, MOOD);
+      expect(withEpisodic.contextText).toContain('We walked to the harbor after the Thursday meeting.');
+    } finally {
+      await off.shutdown();
+      await on.shutdown();
+    }
+  });
+
+  it('a graph-associated trace reaches the block whole, its fact past the 150th character', async () => {
+    const manager = new CognitiveMemoryManager();
+    await manager.initialize(makeManagerConfig(makeMocks(), 'graph-whole'));
+    try {
+      const fact = 'The spare key is under the blue flowerpot by the back door.';
+      const content =
+        'We spent the afternoon repainting the back fence, moved the potted herbs to the porch, swept the patio, ' +
+        'fixed the squeaky gate hinge and then stacked the firewood by the shed. ' +
+        fact;
+      expect(content.indexOf(fact)).toBeGreaterThan(150);
+      const associated = traceOf('associated-1', 'episodic', content);
+      await manager.getStore().store(associated as never);
+      retrievalOf(manager, [traceOf('seed-1', 'semantic', 'The back fence is white.')]);
+      vi.spyOn(manager.getGraph()!, 'spreadingActivation').mockResolvedValue([
+        { memoryId: associated.id, activation: 0.8, depth: 1, activatedBy: ['seed-1'] },
+      ]);
+
+      const out = await manager.assembleForPrompt('where is the spare key', 1600, MOOD);
+      expect(out.contextText).toContain('## Related Context');
+      expect(out.contextText).toContain(`[associated, activation=0.80] ${content}`);
+    } finally {
+      await manager.shutdown();
+    }
+  });
+});

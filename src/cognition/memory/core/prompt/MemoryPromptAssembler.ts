@@ -14,9 +14,11 @@
  * Each section's share of the budget is a floor, not a ceiling: budget a
  * section leaves unused (it is empty, or its content is shorter than its
  * share) flows to the sections that still have content, in
- * {@link MEMORY_BUDGET_SPILL_ORDER}. Traces are rendered whole; the one trace
- * that does not fit what is left of its section is cut to fit, at a word
- * boundary, with a visible marker.
+ * {@link MEMORY_BUDGET_SPILL_ORDER}. A share set to exactly 0 turns its
+ * section off. Traces and graph associations are rendered whole; one that
+ * does not fit what is left of its section is cut to fit, at a word boundary,
+ * with a visible marker, and an item that does not fit at all is skipped for
+ * the later ones. Working memory keeps a run of its leading slots.
  *
  * @module agentos/memory/prompt/MemoryPromptAssembler
  */
@@ -29,7 +31,13 @@ import type {
 } from '../types.js';
 import type { HexacoTraits } from '../config.js';
 import { DEFAULT_BUDGET_ALLOCATION } from '../config.js';
-import { formatMemoryTrace, memoryTraceLineLength, type FormattingStyle } from './MemoryFormatters.js';
+import {
+  cutMemoryContent,
+  formatMemoryTrace,
+  memoryTraceLineLength,
+  sliceWholeCodePoints,
+  type FormattingStyle,
+} from './MemoryFormatters.js';
 
 // ---------------------------------------------------------------------------
 // Token estimation
@@ -115,7 +123,9 @@ export interface MemoryAssemblerInput {
   /**
    * Section shares of the budget (fractions; scaled down when they add up to
    * more than 1). A share is a floor for a section with content: budget left
-   * unused flows on in {@link MEMORY_BUDGET_SPILL_ORDER}.
+   * unused flows on in {@link MEMORY_BUDGET_SPILL_ORDER}. A share set to
+   * exactly 0 turns its section off (no grant and no spill); a key left out,
+   * or set to `undefined`, keeps its default share.
    */
   allocation?: Partial<MemoryBudgetAllocation>;
   /** HEXACO traits for formatting style selection. */
@@ -209,23 +219,68 @@ interface RenderedSection {
 
 const EMPTY_SECTION: RenderedSection = { text: '', tokens: 0, includedIds: [] };
 
-/** A section of whole lines, as many from the front as fit `budgetTokens`. */
-function renderLines(header: string, lines: readonly string[], budgetTokens: number): RenderedSection {
+/** How {@link renderLines} treats a line that does not fit whole. */
+interface RenderLinesOptions {
+  /** Shortens a line to fit `maxChars`, or returns `''` when it cannot. */
+  cut?: (line: string, maxChars: number) => string;
+  /**
+   * End the section at the first line that does not fit, so it holds a run of
+   * leading lines (working memory's slots, sorted by activation, highest
+   * first). Otherwise such a line is skipped for the later ones.
+   */
+  leadingOnly?: boolean;
+}
+
+/**
+ * A section of lines, in order: each whole when it fits what is left of
+ * `budgetTokens`; otherwise `cut` (when given) shortens it to fit, and a line
+ * that still does not fit is skipped for the later ones, or ends the section
+ * with `leadingOnly`.
+ */
+function renderLines(
+  header: string,
+  lines: readonly string[],
+  budgetTokens: number,
+  options: RenderLinesOptions = {},
+): RenderedSection {
   const maxChars = budgetTokens * 4;
   let chars = SECTION_SEPARATOR_CHARS + header.length;
   const kept: string[] = [];
   for (const line of lines) {
-    if (chars + 1 + line.length > maxChars) break;
-    kept.push(line);
-    chars += 1 + line.length;
+    const room = maxChars - chars - 1;
+    if (room <= 0) break;
+    // A blank line fits whole like any other; only a line too long for the room is cut or passed over.
+    const fits = line.length <= room;
+    const fitted = fits ? line : options.cut ? options.cut(line, room) : '';
+    if (!fits && !fitted) {
+      if (options.leadingOnly) break;
+      continue;
+    }
+    kept.push(fitted);
+    chars += 1 + fitted.length;
   }
   if (kept.length === 0) return EMPTY_SECTION;
   return { text: `${header}\n${kept.join('\n')}`, tokens: Math.ceil(chars / 4), includedIds: [] };
 }
 
+/** A leading `[tag] ` on a graph association, kept whole when the association is cut. */
+const LEADING_TAG = /^- \[[^\]\n]*\]\s/;
+
 /**
- * A section of traces: each rendered whole while it fits `budgetTokens`; the
- * first that does not is cut to fit what is left, and the section ends there.
+ * A graph-association line cut at a word boundary to fit `maxChars`, its
+ * bullet and leading `[tag]` whole and its text ending with the cut marker;
+ * `''` when too little of the text would remain.
+ */
+function cutAssociationLine(line: string, maxChars: number): string {
+  const prefix = LEADING_TAG.exec(line)?.[0] ?? '- ';
+  const text = cutMemoryContent(line.slice(prefix.length), maxChars - prefix.length);
+  return text ? `${prefix}${text}` : '';
+}
+
+/**
+ * A section of traces, in order: each rendered whole when it fits what is left
+ * of `budgetTokens`, otherwise cut to fit at a word boundary; a trace whose
+ * cut would keep too little is skipped for the later ones.
  */
 function renderTraces(
   header: string,
@@ -239,20 +294,16 @@ function renderTraces(
   const kept: string[] = [];
   const ids: string[] = [];
   for (const trace of traces) {
-    const wholeLength = memoryTraceLineLength(trace, style, { now });
-    if (chars + 1 + wholeLength <= maxChars) {
-      kept.push(formatMemoryTrace(trace, style, { now }));
-      ids.push(trace.id);
-      chars += 1 + wholeLength;
-      continue;
-    }
-    const cut = formatMemoryTrace(trace, style, { now, maxChars: maxChars - chars - 1 });
-    if (cut) {
-      kept.push(cut);
-      ids.push(trace.id);
-      chars += 1 + cut.length;
-    }
-    break;
+    const room = maxChars - chars - 1;
+    if (room <= 0) break;
+    const line =
+      memoryTraceLineLength(trace, style, { now }) <= room
+        ? formatMemoryTrace(trace, style, { now })
+        : formatMemoryTrace(trace, style, { now, maxChars: room });
+    if (!line) continue;
+    kept.push(line);
+    ids.push(trace.id);
+    chars += 1 + line.length;
   }
   if (kept.length === 0) return EMPTY_SECTION;
   return { text: `${header}\n${kept.join('\n')}`, tokens: Math.ceil(chars / 4), includedIds: ids };
@@ -300,9 +351,11 @@ function renderInvoluntary(
  * The preamble's tokens come off the budget first, then an involuntary
  * memory's (at most {@link INVOLUNTARY_MAX_SHARE} of the rest) when a host
  * passes the mechanisms engine. Each section is then granted its share of
- * what remains (`allocation`; shares that are not finite positive numbers
- * count as 0, and shares adding up to more than 1 are scaled down), capped at
- * what its content needs. What the grants leave (the shares of empty or
+ * what remains (`allocation` over {@link DEFAULT_BUDGET_ALLOCATION}, where a
+ * key set to `undefined` keeps its default; shares that are not finite
+ * positive numbers count as 0, and shares adding up to more than 1 are scaled
+ * down), capped at what its content needs. A section whose share is set to
+ * exactly 0 is off: it gets no grant, takes no spill and is left out. What the grants leave (the shares of empty or
  * under-filled sections, the rounding, and any share left unallocated) flows
  * to the sections in {@link MEMORY_BUDGET_SPILL_ORDER}: each in turn renders
  * with its grant plus whatever the sections before it left unspent. A second
@@ -311,13 +364,17 @@ function renderInvoluntary(
  * that still have content left out, so the block can fill the whole budget.
  * An involuntary memory that did not fit its tenth whole then takes what is
  * still unspent. `tokensUsed` counts the headers and separators too and never
- * exceeds `totalTokenBudget`.
+ * exceeds `totalTokenBudget`. The returned `allocation` holds the shares the
+ * sections were granted from, after the defaults, the zeroing and the scaling.
  */
 export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMemoryContext {
-  const alloc: MemoryBudgetAllocation = {
-    ...DEFAULT_BUDGET_ALLOCATION,
-    ...input.allocation,
-  };
+  const alloc: MemoryBudgetAllocation = { ...DEFAULT_BUDGET_ALLOCATION };
+  for (const key of BLOCK_ORDER) {
+    const share = input.allocation?.[key];
+    if (share !== undefined) alloc[key] = share;
+  }
+  /** A section the caller turned off by setting its share to exactly 0. */
+  const off = (key: SectionKey): boolean => alloc[key] === 0;
 
   const budget = Number.isFinite(input.totalTokenBudget) ? Math.max(0, Math.floor(input.totalTokenBudget)) : 0;
   const style = selectFormattingStyle(input.traits);
@@ -373,7 +430,7 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
           SECTION_SEPARATOR_CHARS + header.length,
         );
 
-  /** Tokens each section takes with all of its content whole. */
+  /** Tokens each section takes with all of its content whole; 0 for a section that is off. */
   const demand: Record<SectionKey, number> = {
     persistentMemory: pmText ? Math.ceil(sectionChars(HEADERS.persistentMemory, [pmText]) / 4) : 0,
     workingMemory: Math.ceil(sectionChars(HEADERS.workingMemory, wmLines) / 4),
@@ -383,6 +440,7 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
     graphAssociations: Math.ceil(sectionChars(HEADERS.graphAssociations, graphLines) / 4),
     observationNotes: Math.ceil(sectionChars(HEADERS.observationNotes, observationLines) / 4),
   };
+  for (const key of BLOCK_ORDER) if (off(key)) demand[key] = 0;
 
   // --- Grants: each section's share, capped at its demand ---
   const shareOf = (key: SectionKey): number => {
@@ -392,18 +450,21 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
   const shareSum = BLOCK_ORDER.reduce((sum, key) => sum + shareOf(key), 0);
   const scale = shareSum > 1 ? 1 / shareSum : 1;
   const grant = {} as Record<SectionKey, number>;
+  const effective = {} as MemoryBudgetAllocation;
   let granted = 0;
   for (const key of BLOCK_ORDER) {
-    grant[key] = Math.min(demand[key], Math.floor(available * shareOf(key) * scale));
+    effective[key] = shareOf(key) * scale;
+    grant[key] = Math.min(demand[key], Math.floor(available * effective[key]));
     granted += grant[key];
   }
 
   const renderSection = (key: SectionKey, sectionBudget: number): RenderedSection => {
+    if (off(key)) return EMPTY_SECTION;
     switch (key) {
       case 'persistentMemory':
         return renderPersistent(pmText, sectionBudget);
       case 'workingMemory':
-        return renderLines(HEADERS.workingMemory, wmLines, sectionBudget);
+        return renderLines(HEADERS.workingMemory, wmLines, sectionBudget, { leadingOnly: true });
       case 'semanticRecall':
         return renderTraces(HEADERS.semanticRecall, semanticTraces, style, now, sectionBudget);
       case 'recentEpisodic':
@@ -411,7 +472,7 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
       case 'prospectiveAlerts':
         return renderLines(HEADERS.prospectiveAlerts, prospectiveLines, sectionBudget);
       case 'graphAssociations':
-        return renderLines(HEADERS.graphAssociations, graphLines, sectionBudget);
+        return renderLines(HEADERS.graphAssociations, graphLines, sectionBudget, { cut: cutAssociationLine });
       case 'observationNotes':
         return renderLines(HEADERS.observationNotes, observationLines, sectionBudget);
       default:
@@ -465,7 +526,7 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
   return {
     contextText: sections.join('\n\n'),
     tokensUsed: totalTokens,
-    allocation: alloc,
+    allocation: effective,
     includedMemoryIds: includedIds,
   };
 }
@@ -484,7 +545,7 @@ function renderPersistent(text: string, budgetTokens: number): RenderedSection {
   }
   const room = maxChars - SECTION_SEPARATOR_CHARS - header.length - 1 - PERSISTENT_TRUNCATED_MARKER.length;
   if (room <= 0) return EMPTY_SECTION;
-  const cut = `${text.slice(0, room)}${PERSISTENT_TRUNCATED_MARKER}`;
+  const cut = `${sliceWholeCodePoints(text, room)}${PERSISTENT_TRUNCATED_MARKER}`;
   return {
     text: `${header}\n${cut}`,
     tokens: Math.ceil(sectionChars(header, [cut]) / 4),

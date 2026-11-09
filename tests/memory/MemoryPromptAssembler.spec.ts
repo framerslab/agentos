@@ -3,7 +3,7 @@
  * Tests budget allocation, overflow redistribution, and personality formatting.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { assembleMemoryContext, type MemoryAssemblerInput } from '../../src/cognition/memory/core/prompt/MemoryPromptAssembler.js';
 import {
   formatMemoryTrace,
@@ -13,6 +13,7 @@ import {
 } from '../../src/cognition/memory/core/prompt/MemoryFormatters.js';
 import { CognitiveMechanismsEngine } from '../../src/cognition/memory/mechanisms/CognitiveMechanismsEngine.js';
 import type { ScoredMemoryTrace } from '../../src/cognition/memory/core/types.js';
+import { DEFAULT_BUDGET_ALLOCATION } from '../../src/cognition/memory/core/config.js';
 
 const DAY_MS = 86_400_000;
 const tokensOf = (text: string) => Math.ceil(text.length / 4);
@@ -443,6 +444,219 @@ describe('MemoryPromptAssembler', () => {
           expect(tokensOf(result.contextText), `budget ${budget}`).toBeLessThanOrEqual(budget);
         }
       }
+    });
+  });
+  describe('review follow-ups', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** A UTF-16 string that holds a lone surrogate. */
+    const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+    it('a share set to exactly 0 turns its section off: no grant and no spill', () => {
+      const traces = [
+        makeScoredTrace({ id: 'sem', type: 'semantic', content: 'The team meets on Thursdays.' }),
+        makeScoredTrace({ id: 'epi', type: 'episodic', content: 'We walked to the harbor after the meeting.' }),
+      ];
+      const off = assembleMemoryContext({
+        totalTokenBudget: 1600,
+        allocation: { recentEpisodic: 0 },
+        traits: {},
+        retrievedTraces: traces,
+      });
+      expect(off.contextText).not.toContain('## Recent Experiences');
+      expect(off.contextText).not.toContain('We walked to the harbor');
+      expect(off.includedMemoryIds).toEqual(['sem']);
+      expect(off.allocation.recentEpisodic).toBe(0);
+      // The default allocation has no zero share: the same traces render both sections.
+      const on = assembleMemoryContext({ totalTokenBudget: 1600, traits: {}, retrievedTraces: traces });
+      expect(on.contextText).toContain('## Recent Experiences');
+      expect(on.includedMemoryIds).toEqual(['sem', 'epi']);
+    });
+
+    it('a share set to undefined keeps its default', () => {
+      const result = assembleMemoryContext({
+        totalTokenBudget: 1000,
+        allocation: { semanticRecall: undefined },
+        traits: {},
+        retrievedTraces: [makeScoredTrace({ id: 'sem' })],
+      });
+      expect(result.allocation.semanticRecall).toBeCloseTo(DEFAULT_BUDGET_ALLOCATION.semanticRecall, 9);
+
+      // With every section full and the other shares adding up to more than 1,
+      // Semantic Recall holds its scaled default share, not the rounding left over.
+      const many = (type: 'semantic' | 'episodic') =>
+        Array.from({ length: 30 }, (_, i) => makeScoredTrace({ id: `${type}-${i}`, type, content: wordsText(500, i) }));
+      const full = (allocation: MemoryAssemblerInput['allocation']) =>
+        assembleMemoryContext({
+          totalTokenBudget: 4000,
+          allocation,
+          traits: { conscientiousness: 0.9 },
+          workingMemoryText: Array.from({ length: 40 }, (_, i) => `- [ACTIVE] mt_${i} ${wordsText(60, i)}`).join('\n'),
+          retrievedTraces: [...many('semantic'), ...many('episodic')],
+          prospectiveAlerts: Array.from({ length: 40 }, (_, i) => wordsText(120, i)),
+          graphContext: Array.from({ length: 40 }, (_, i) => wordsText(120, i)),
+          observationNotes: Array.from({ length: 40 }, (_, i) => wordsText(120, i)),
+          persistentMemoryText: wordsText(6000),
+        });
+      const withUndefined = full({ semanticRecall: undefined, recentEpisodic: 0.85 });
+      const withDefault = full({ semanticRecall: DEFAULT_BUDGET_ALLOCATION.semanticRecall, recentEpisodic: 0.85 });
+      const semantic = (text: string) => sectionLines(text, '## Relevant Memories').join('\n');
+      expect(semantic(withUndefined.contextText)).toBe(semantic(withDefault.contextText));
+      expect(withUndefined.allocation).toEqual(withDefault.allocation);
+      expect(tokensOf(semantic(withUndefined.contextText))).toBeGreaterThan(400);
+    });
+
+    it('reports the shares the assembly used: scaled, and 0 for a share that is not a finite positive number', () => {
+      const scaled = assembleMemoryContext({
+        totalTokenBudget: 1000,
+        allocation: { semanticRecall: 1, recentEpisodic: 1 },
+        traits: {},
+      });
+      const sum = Object.values(scaled.allocation).reduce((n, share) => n + share, 0);
+      expect(sum).toBeCloseTo(1, 9);
+      const configuredSum = 1 + 1 + 0.15 + 0.05 * 4;
+      expect(scaled.allocation.semanticRecall).toBeCloseTo(1 / configuredSum, 9);
+      expect(scaled.allocation.recentEpisodic).toBeCloseTo(1 / configuredSum, 9);
+      expect(scaled.allocation.workingMemory).toBeCloseTo(0.15 / configuredSum, 9);
+
+      for (const bad of [Number.NaN, -1, Infinity, -Infinity, 0]) {
+        const result = assembleMemoryContext({ totalTokenBudget: 1000, allocation: { prospectiveAlerts: bad }, traits: {} });
+        expect(result.allocation.prospectiveAlerts, String(bad)).toBe(0);
+        for (const share of Object.values(result.allocation)) {
+          expect(Number.isFinite(share), String(bad)).toBe(true);
+        }
+      }
+
+      const defaults = assembleMemoryContext({ totalTokenBudget: 1000, traits: {} });
+      for (const [key, share] of Object.entries(DEFAULT_BUDGET_ALLOCATION)) {
+        expect(defaults.allocation[key as keyof typeof DEFAULT_BUDGET_ALLOCATION], key).toBeCloseTo(share, 9);
+      }
+    });
+
+    it('a graph association too long for what is left of its section is cut to fit at a word boundary, its tag whole', () => {
+      const content = `${wordsText(400)} The spare key is under the blue flowerpot. ${wordsText(2000, 3)}`;
+      const item = `[associated, activation=0.80] ${content}`;
+      const result = assembleMemoryContext({ totalTokenBudget: 200, traits: {}, graphContext: [item] });
+      const [line] = sectionLines(result.contextText, '## Related Context');
+      expect(line).toBeDefined();
+      expect(line.startsWith('- [associated, activation=0.80] ')).toBe(true);
+      expect(line.endsWith(MEMORY_CUT_MARKER)).toBe(true);
+      const kept = line.slice('- [associated, activation=0.80] '.length, -MEMORY_CUT_MARKER.length);
+      expect(content.startsWith(kept)).toBe(true);
+      expect(content[kept.length]).toBe(' ');
+      expect(kept).toContain('The spare key is under the blue flowerpot.');
+      expect(result.tokensUsed).toBeLessThanOrEqual(200);
+      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(200);
+      // Whole when it fits.
+      const whole = assembleMemoryContext({ totalTokenBudget: 1600, traits: {}, graphContext: [item.slice(0, 700)] });
+      expect(whole.contextText).toContain(item.slice(0, 700));
+    });
+
+    it('keeps working memory to its leading slots when a longer slot does not fit, and skips a graph association too short to cut', () => {
+      // Slots arrive sorted by activation, highest first; a shorter slot after one that does not fit stays out.
+      const slots = [
+        '- [ACTIVE] mt_first (activation: 0.95)',
+        `- [ACTIVE] mt_${'long'.repeat(60)} (activation: 0.90)`,
+        '- [weak] mt_last (activation: 0.30)',
+      ];
+      const wm = assembleMemoryContext({ totalTokenBudget: 40, traits: {}, workingMemoryText: slots.join('\n') });
+      expect(sectionLines(wm.contextText, '## Active Context')).toEqual([slots[0]]);
+
+      const graph = assembleMemoryContext({
+        totalTokenBudget: 30,
+        allocation: { graphAssociations: 1 },
+        traits: {},
+        graphContext: [`[associated, activation=0.80] ${'x'.repeat(200)}`, '[associated, activation=0.40] go'],
+      });
+      expect(graph.contextText).not.toContain('[associated, activation=0.80]');
+      expect(graph.contextText).toContain('- [associated, activation=0.40] go');
+      expect(graph.tokensUsed).toBeLessThanOrEqual(30);
+    });
+
+    it('keeps a blank line in working memory text and the slots after it when they fit', () => {
+      // A host that calls assembleMemoryContext itself may separate its working memory with blank lines.
+      const text = '- [ACTIVE] mt_first (activation: 0.95)\n\n- [ACTIVE] mt_second (activation: 0.90)';
+      const result = assembleMemoryContext({ totalTokenBudget: 200, traits: {}, workingMemoryText: text });
+      expect(result.contextText).toContain(`## Active Context (in focus — reference directly)\n${text}`);
+      expect(result.tokensUsed).toBeLessThanOrEqual(200);
+      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(200);
+    });
+
+    it('never ends a cut inside a surrogate pair', () => {
+      const emoji = '\u{1F600}'.repeat(2000);
+      const now = Date.UTC(2026, 10, 8, 12, 0, 0);
+      const trace = makeScoredTrace({ content: emoji, createdAt: now });
+      const bare = memoryTraceLineLength(makeScoredTrace({ ...trace, content: '' }), 'structured', { now });
+      for (let extra = 0; extra < 6; extra++) {
+        const maxChars = bare + MEMORY_CUT_MARKER.length + MIN_CUT_CONTENT_CHARS + 1 + extra;
+        const line = formatMemoryTrace(trace, 'structured', { now, maxChars });
+        expect(line, `maxChars ${maxChars}`).toContain(MEMORY_CUT_MARKER);
+        expect(line.length).toBeLessThanOrEqual(maxChars);
+        expect(LONE_SURROGATE.test(line), `maxChars ${maxChars}`).toBe(false);
+      }
+      for (const budget of [60, 61, 62, 63, 64, 65]) {
+        for (const extra of [0, 1]) {
+          const result = assembleMemoryContext({
+            totalTokenBudget: budget,
+            traits: {},
+            persistentMemoryText: `${'a'.repeat(extra)}${emoji}`,
+          });
+          expect(result.contextText, `budget ${budget}`).toContain('<!-- truncated -->');
+          expect(LONE_SURROGATE.test(result.contextText), `budget ${budget}, offset ${extra}`).toBe(false);
+        }
+      }
+    });
+
+    it('skips an item that does not fit and tries the later ones while room is left', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const now = Date.UTC(2026, 10, 8, 12, 0, 0);
+      vi.setSystemTime(now);
+      const header = (() => {
+        const probe = assembleMemoryContext({ totalTokenBudget: 200, traits: {}, retrievedTraces: [makeScoredTrace({ createdAt: now })] });
+        return probe.contextText.split('\n')[0];
+      })();
+      expect(header.startsWith('## Relevant Memories')).toBe(true);
+
+      const short = makeScoredTrace({ id: 'short', content: 'The gate code is 4417 at night.', createdAt: now });
+      const long = makeScoredTrace({ id: 'long', content: wordsText(2000), createdAt: now });
+      const lineShort = memoryTraceLineLength(short, 'structured', { now });
+      const bareLong = memoryTraceLineLength(long, 'structured', { now }) - long.content.length;
+      // The room left after the first trace holds the short line whole but not the least cut of the long one.
+      expect(lineShort).toBeLessThan(bareLong + MEMORY_CUT_MARKER.length + MIN_CUT_CONTENT_CHARS);
+
+      const budget = 200; // under the preamble's threshold, so the section has the whole budget
+      const firstLine = 4 * budget - header.length - 4 - lineShort;
+      const firstBare = memoryTraceLineLength(makeScoredTrace({ content: '', createdAt: now }), 'structured', { now });
+      const first = makeScoredTrace({ id: 'first', content: 'b'.repeat(firstLine - firstBare), createdAt: now });
+      expect(memoryTraceLineLength(first, 'structured', { now })).toBe(firstLine);
+
+      const result = assembleMemoryContext({ totalTokenBudget: budget, traits: {}, retrievedTraces: [first, long, short] });
+      expect(result.includedMemoryIds).toEqual(['first', 'short']);
+      expect(result.contextText).toContain('The gate code is 4417 at night.');
+      expect(result.tokensUsed).toBeLessThanOrEqual(budget);
+      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(budget);
+
+      // Lines too: a reminder too long for the room left is skipped, the short one after it kept.
+      const reminders = assembleMemoryContext({
+        totalTokenBudget: 60,
+        traits: {},
+        prospectiveAlerts: ['x'.repeat(400), 'Call the plumber on Monday.'],
+      });
+      expect(reminders.contextText).toContain('- Call the plumber on Monday.');
+    });
+
+    it('counts an age of a day or more in UTC calendar days, so the age and the date agree', () => {
+      const now = Date.UTC(2026, 10, 8, 0, 30, 0); // 2026-11-08 00:30 UTC
+      const line = (createdAt: number) => formatMemoryTrace(makeScoredTrace({ createdAt }), 'structured', { now });
+      expect(line(Date.UTC(2026, 9, 12, 23, 0, 0))).toContain('(27 days ago, 2026-10-12 |');
+      expect(line(Date.UTC(2026, 10, 6, 23, 0, 0))).toContain('(2d ago, 2026-11-06 |');
+      expect(line(Date.UTC(2026, 10, 1, 23, 0, 0))).toContain('(7 days ago, 2026-11-01 |');
+      // Under a day the age stays in hours and minutes.
+      expect(line(Date.UTC(2026, 10, 7, 23, 0, 0))).toContain('(1h ago, 2026-11-07 |');
+      expect(line(Date.UTC(2026, 10, 8, 0, 10, 0))).toContain('(20m ago, 2026-11-08 |');
+      expect(line(Date.UTC(2026, 10, 7, 0, 31, 0))).toContain('(23h ago, 2026-11-07 |');
     });
   });
 });

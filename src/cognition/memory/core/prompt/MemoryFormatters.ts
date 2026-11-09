@@ -11,12 +11,14 @@
  * `maxChars` (the prompt assembler, when a trace does not fit what is left
  * of its section's budget) gets a shortened line: the content is cut at a
  * word boundary so the whole line fits `maxChars`, and ends with
- * {@link MEMORY_CUT_MARKER}.
+ * {@link MEMORY_CUT_MARKER}. A cut never splits a surrogate pair.
  *
  * Each line carries the trace's age and the UTC calendar date it was stored:
- * `just now`, `Nm ago`, `Nh ago` and `Nd ago` under a week, `N days ago`
- * from a week on, followed by `, YYYY-MM-DD` (for example
- * `26 days ago, 2026-10-13`).
+ * `just now`, `Nm ago` and `Nh ago` under a day; from a day on, the number of
+ * UTC calendar days between the stored date and the date of `now`, as `Nd ago`
+ * under a week and `N days ago` from a week on; then `, YYYY-MM-DD` (for
+ * example `26 days ago, 2026-10-13`). Counted in calendar days, the age
+ * always agrees with the printed date.
  *
  * @module agentos/memory/prompt/MemoryFormatters
  */
@@ -51,10 +53,13 @@ export const MIN_CUT_CONTENT_CHARS = 40;
 // ---------------------------------------------------------------------------
 
 const MINUTE_MS = 60_000;
+const DAY_MS = 86_400_000;
 
 /**
- * The age of a timestamp: `just now`, `Nm ago`, `Nh ago`, `Nd ago` under a
- * week, and `N days ago` from a week on, so a model can count days.
+ * The age of a timestamp: `just now`, `Nm ago` and `Nh ago` under a day; from
+ * a day on, the UTC calendar days between the timestamp's date and `now`'s
+ * date, as `Nd ago` under a week and `N days ago` from a week on, so a model
+ * can count days and the age agrees with the date printed beside it.
  */
 function timeAgo(timestampMs: number, now: number): string {
   const elapsed = now - timestampMs;
@@ -63,7 +68,7 @@ function timeAgo(timestampMs: number, now: number): string {
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
+  const days = Math.floor(now / DAY_MS) - Math.floor(timestampMs / DAY_MS);
   if (days < 7) return `${days}d ago`;
   return `${days} days ago`;
 }
@@ -99,15 +104,41 @@ function valenceEmoji(valence: number): string {
 }
 
 /**
+ * The first `maxChars` UTF-16 code units of `text`, one fewer when the last
+ * would be the first half of a surrogate pair, so a cut never leaves a lone
+ * surrogate.
+ */
+export function sliceWholeCodePoints(text: string, maxChars: number): string {
+  const end = Math.max(0, Math.floor(maxChars));
+  if (end >= text.length) return text;
+  const last = text.charCodeAt(end - 1);
+  return last >= 0xd800 && last <= 0xdbff ? text.slice(0, end - 1) : text.slice(0, end);
+}
+
+/**
  * The first `maxChars` characters of `content` or fewer, ending at a word
- * boundary when one falls in the second half of that span.
+ * boundary when one falls in the second half of that span, and never inside
+ * a surrogate pair.
  */
 function cutAtWordBoundary(content: string, maxChars: number): string {
   if (content.length <= maxChars) return content;
   const span = content.slice(0, maxChars + 1);
   const lastSpace = span.search(/\s\S*$/);
-  const cut = lastSpace > maxChars / 2 ? span.slice(0, lastSpace) : content.slice(0, maxChars);
+  const cut = lastSpace > maxChars / 2 ? span.slice(0, lastSpace) : sliceWholeCodePoints(content, maxChars);
   return cut.trimEnd();
+}
+
+/**
+ * `content` cut at a word boundary so that it and {@link MEMORY_CUT_MARKER}
+ * fit `maxChars`, ending with the marker; `''` when the cut would keep fewer
+ * than {@link MIN_CUT_CONTENT_CHARS} characters.
+ */
+export function cutMemoryContent(content: string, maxChars: number): string {
+  const room = Math.floor(maxChars) - MEMORY_CUT_MARKER.length;
+  if (room < MIN_CUT_CONTENT_CHARS) return '';
+  const cut = cutAtWordBoundary(content, room);
+  if (cut.length < MIN_CUT_CONTENT_CHARS) return '';
+  return `${cut}${MEMORY_CUT_MARKER}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,10 +215,15 @@ export function memoryTraceLineLength(
 /**
  * Format a single memory trace according to the given style.
  *
- * The content is rendered whole unless `options.maxChars` is smaller than the
- * whole line; then the content is cut at a word boundary so the line fits and
- * ends with {@link MEMORY_CUT_MARKER}, or the result is `''` when the cut
- * would keep fewer than {@link MIN_CUT_CONTENT_CHARS} characters of content.
+ * Without `options.maxChars` the line carries the trace's whole content,
+ * however long. Versions through 0.15.120 cut the content to about 300
+ * characters (350 in the narrative style); a caller that relied on that bound
+ * passes `maxChars`.
+ *
+ * With `options.maxChars` smaller than the whole line, the content is cut at
+ * a word boundary (never inside a surrogate pair) so the line fits and ends
+ * with {@link MEMORY_CUT_MARKER}, or the result is `''` when the cut would
+ * keep fewer than {@link MIN_CUT_CONTENT_CHARS} characters of content.
  */
 export function formatMemoryTrace(
   trace: FormatTrace,
@@ -201,15 +237,17 @@ export function formatMemoryTrace(
   const bare = render(trace, style, '', now).length;
   if (bare + trace.content.length <= maxChars) return render(trace, style, trace.content, now);
 
-  const room = Math.floor(maxChars) - bare - MEMORY_CUT_MARKER.length;
-  if (room < MIN_CUT_CONTENT_CHARS) return '';
-  const cut = cutAtWordBoundary(trace.content, room);
-  if (cut.length < MIN_CUT_CONTENT_CHARS) return '';
-  return render(trace, style, `${cut}${MEMORY_CUT_MARKER}`, now);
+  const cut = cutMemoryContent(trace.content, Math.floor(maxChars) - bare);
+  if (!cut) return '';
+  return render(trace, style, cut, now);
 }
 
 /**
- * Format multiple traces with a separator appropriate for the style.
+ * Format multiple traces, one line each, joined with newlines.
+ *
+ * Each line carries its trace's whole content, however long. Versions through
+ * 0.15.120 cut each to about 300 characters (350 in the narrative style); a
+ * caller that needs a bound calls {@link formatMemoryTrace} with `maxChars`.
  */
 export function formatMemoryTraces(
   traces: FormatTrace[],
