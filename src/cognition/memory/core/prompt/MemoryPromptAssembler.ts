@@ -28,7 +28,7 @@ import type {
 } from '../types.js';
 import type { HexacoTraits } from '../config.js';
 import { DEFAULT_BUDGET_ALLOCATION } from '../config.js';
-import { formatMemoryTrace, type FormattingStyle } from './MemoryFormatters.js';
+import { formatMemoryTrace, memoryTraceLineLength, type FormattingStyle } from './MemoryFormatters.js';
 
 // ---------------------------------------------------------------------------
 // Token estimation
@@ -238,11 +238,11 @@ function renderTraces(
   const kept: string[] = [];
   const ids: string[] = [];
   for (const trace of traces) {
-    const whole = formatMemoryTrace(trace, style, { now });
-    if (chars + 1 + whole.length <= maxChars) {
-      kept.push(whole);
+    const wholeLength = memoryTraceLineLength(trace, style, { now });
+    if (chars + 1 + wholeLength <= maxChars) {
+      kept.push(formatMemoryTrace(trace, style, { now }));
       ids.push(trace.id);
-      chars += 1 + whole.length;
+      chars += 1 + wholeLength;
       continue;
     }
     const cut = formatMemoryTrace(trace, style, { now, maxChars: maxChars - chars - 1 });
@@ -262,18 +262,33 @@ function renderTraces(
 // ---------------------------------------------------------------------------
 
 /**
+ * The most of the budget (after the preamble) an involuntary memory may take.
+ * It is set aside before the sections are granted theirs, so a block full of
+ * recalled traces still has room for one.
+ */
+const INVOLUNTARY_MAX_SHARE = 0.1;
+
+/** Characters the involuntary section takes besides its trace line: separator, header, newline and prefix. */
+const INVOLUNTARY_OVERHEAD_CHARS = SECTION_SEPARATOR_CHARS + INVOLUNTARY_HEADER.length + 1 + INVOLUNTARY_PREFIX.length;
+
+/**
  * Assemble memory context into a single formatted string within the given
  * token budget.
  *
- * The preamble's tokens come off the budget first. Each section is then
- * granted its share of the rest (`allocation`, shares scaled down when they
- * add up to more than 1), capped at what its content needs. What the grants
- * leave (the shares of empty or under-filled sections, the rounding, and any
- * share left unallocated) flows to the sections in
- * {@link MEMORY_BUDGET_SPILL_ORDER}: each in turn renders with its grant plus
- * whatever the sections before it left unspent, so the block can fill the
- * whole budget. `tokensUsed` counts the headers and separators too and never
- * exceeds `totalTokenBudget`.
+ * The preamble's tokens come off the budget first, then an involuntary
+ * memory's (at most {@link INVOLUNTARY_MAX_SHARE} of the rest) when a host
+ * passes the mechanisms engine. Each section is then granted its share of
+ * what remains (`allocation`; shares that are not finite positive numbers
+ * count as 0, and shares adding up to more than 1 are scaled down), capped at
+ * what its content needs. What the grants leave (the shares of empty or
+ * under-filled sections, the rounding, and any share left unallocated) flows
+ * to the sections in {@link MEMORY_BUDGET_SPILL_ORDER}: each in turn renders
+ * with its grant plus whatever the sections before it left unspent. A second
+ * pass in the same order gives what is still unspent (a section that could
+ * not use its grant, such as working memory too long for it) to the sections
+ * that still have content left out, so the block can fill the whole budget.
+ * `tokensUsed` counts the headers and separators too and never exceeds
+ * `totalTokenBudget`.
  */
 export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMemoryContext {
   const alloc: MemoryBudgetAllocation = {
@@ -285,7 +300,6 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
   const style = selectFormattingStyle(input.traits);
   const now = Date.now();
 
-  const includedIds: string[] = [];
   let totalTokens = 0;
 
   // --- Memory Usage Preamble ---
@@ -296,7 +310,7 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
   const preambleTokens = estimateTokens(preamble);
   const includePreamble = budget >= preambleTokens + 100;
   if (includePreamble) totalTokens += preambleTokens;
-  const available = budget - totalTokens;
+  const afterPreamble = budget - totalTokens;
 
   // --- Candidates per section ---
   const episodicTraces: ScoredMemoryTrace[] = [];
@@ -308,69 +322,104 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
       semanticTraces.push(trace);
     }
   }
+
+  // --- Involuntary Recall (Cognitive Mechanisms) ---
+  // Chosen from the traces this turn did not retrieve, and set aside first.
+  let involuntary: { text: string; tokens: number; id: string } | null = null;
+  if (input.mechanismsEngine && input.allTraces) {
+    const retrievedSet = new Set((input.retrievedTraces ?? []).map((trace) => trace.id));
+    const { involuntaryMemory } = input.mechanismsEngine.onPromptAssembly(input.allTraces, retrievedSet);
+    if (involuntaryMemory) {
+      const roomChars = Math.floor(afterPreamble * INVOLUNTARY_MAX_SHARE) * 4 - INVOLUNTARY_OVERHEAD_CHARS;
+      const line = roomChars > 0
+        ? formatMemoryTrace(involuntaryMemory, style, { now, maxChars: roomChars })
+        : '';
+      if (line) {
+        const text = `${INVOLUNTARY_HEADER}\n${INVOLUNTARY_PREFIX}${line}`;
+        involuntary = { text, tokens: Math.ceil((SECTION_SEPARATOR_CHARS + text.length) / 4), id: involuntaryMemory.id };
+      }
+    }
+  }
+  const available = afterPreamble - (involuntary?.tokens ?? 0);
+
   const bullets = (items: string[] | undefined): string[] => (items ?? []).map((item) => `- ${item}`);
   const prospectiveLines = bullets(input.prospectiveAlerts);
   const graphLines = bullets(input.graphContext);
   const observationLines = bullets(input.observationNotes);
   const pmText = input.persistentMemoryText ?? '';
-  const wmText = input.workingMemoryText ?? '';
-  const traceLines = (traces: ScoredMemoryTrace[]) => traces.map((t) => formatMemoryTrace(t, style, { now }));
+  const wmLines = input.workingMemoryText ? input.workingMemoryText.split('\n') : [];
+  const traceChars = (header: string, traces: ScoredMemoryTrace[]): number =>
+    traces.length === 0
+      ? 0
+      : traces.reduce(
+          (n, trace) => n + 1 + memoryTraceLineLength(trace, style, { now }),
+          SECTION_SEPARATOR_CHARS + header.length,
+        );
 
   /** Tokens each section takes with all of its content whole. */
   const demand: Record<SectionKey, number> = {
     persistentMemory: pmText ? Math.ceil(sectionChars(HEADERS.persistentMemory, [pmText]) / 4) : 0,
-    workingMemory: wmText ? Math.ceil(sectionChars(HEADERS.workingMemory, [wmText]) / 4) : 0,
-    semanticRecall: Math.ceil(sectionChars(HEADERS.semanticRecall, traceLines(semanticTraces)) / 4),
-    recentEpisodic: Math.ceil(sectionChars(HEADERS.recentEpisodic, traceLines(episodicTraces)) / 4),
+    workingMemory: Math.ceil(sectionChars(HEADERS.workingMemory, wmLines) / 4),
+    semanticRecall: Math.ceil(traceChars(HEADERS.semanticRecall, semanticTraces) / 4),
+    recentEpisodic: Math.ceil(traceChars(HEADERS.recentEpisodic, episodicTraces) / 4),
     prospectiveAlerts: Math.ceil(sectionChars(HEADERS.prospectiveAlerts, prospectiveLines) / 4),
     graphAssociations: Math.ceil(sectionChars(HEADERS.graphAssociations, graphLines) / 4),
     observationNotes: Math.ceil(sectionChars(HEADERS.observationNotes, observationLines) / 4),
   };
 
   // --- Grants: each section's share, capped at its demand ---
-  const shareSum = BLOCK_ORDER.reduce((sum, key) => sum + Math.max(0, alloc[key] || 0), 0);
+  const shareOf = (key: SectionKey): number => {
+    const share = alloc[key];
+    return Number.isFinite(share) && share > 0 ? share : 0;
+  };
+  const shareSum = BLOCK_ORDER.reduce((sum, key) => sum + shareOf(key), 0);
   const scale = shareSum > 1 ? 1 / shareSum : 1;
   const grant = {} as Record<SectionKey, number>;
   let granted = 0;
   for (const key of BLOCK_ORDER) {
-    const share = Math.floor(available * Math.max(0, alloc[key] || 0) * scale);
-    grant[key] = Math.min(demand[key], share);
+    grant[key] = Math.min(demand[key], Math.floor(available * shareOf(key) * scale));
     granted += grant[key];
   }
 
-  // --- Render in spill order: grant + whatever is unspent so far ---
+  const renderSection = (key: SectionKey, sectionBudget: number): RenderedSection => {
+    switch (key) {
+      case 'persistentMemory':
+        return renderPersistent(pmText, sectionBudget);
+      case 'workingMemory':
+        return renderLines(HEADERS.workingMemory, wmLines, sectionBudget);
+      case 'semanticRecall':
+        return renderTraces(HEADERS.semanticRecall, semanticTraces, style, now, sectionBudget);
+      case 'recentEpisodic':
+        return renderTraces(HEADERS.recentEpisodic, episodicTraces, style, now, sectionBudget);
+      case 'prospectiveAlerts':
+        return renderLines(HEADERS.prospectiveAlerts, prospectiveLines, sectionBudget);
+      case 'graphAssociations':
+        return renderLines(HEADERS.graphAssociations, graphLines, sectionBudget);
+      case 'observationNotes':
+        return renderLines(HEADERS.observationNotes, observationLines, sectionBudget);
+      default:
+        return EMPTY_SECTION;
+    }
+  };
+
+  // --- Pass 1, in spill order: grant + whatever is unspent so far ---
   const rendered = {} as Record<SectionKey, RenderedSection>;
   let spare = Math.max(0, available - granted);
   for (const key of MEMORY_BUDGET_SPILL_ORDER) {
     const sectionBudget = grant[key] + spare;
-    let section: RenderedSection;
-    switch (key) {
-      case 'persistentMemory':
-        section = renderPersistent(pmText, sectionBudget);
-        break;
-      case 'workingMemory':
-        section = renderLines(HEADERS.workingMemory, wmText ? [wmText] : [], sectionBudget);
-        break;
-      case 'semanticRecall':
-        section = renderTraces(HEADERS.semanticRecall, semanticTraces, style, now, sectionBudget);
-        break;
-      case 'recentEpisodic':
-        section = renderTraces(HEADERS.recentEpisodic, episodicTraces, style, now, sectionBudget);
-        break;
-      case 'prospectiveAlerts':
-        section = renderLines(HEADERS.prospectiveAlerts, prospectiveLines, sectionBudget);
-        break;
-      case 'graphAssociations':
-        section = renderLines(HEADERS.graphAssociations, graphLines, sectionBudget);
-        break;
-      case 'observationNotes':
-        section = renderLines(HEADERS.observationNotes, observationLines, sectionBudget);
-        break;
-      default:
-        section = EMPTY_SECTION;
-    }
-    rendered[key] = section;
-    spare = sectionBudget - section.tokens;
+    rendered[key] = renderSection(key, sectionBudget);
+    spare = sectionBudget - rendered[key].tokens;
+  }
+
+  // --- Pass 2, same order: what is still unspent goes to sections with content left out ---
+  for (const key of MEMORY_BUDGET_SPILL_ORDER) {
+    if (spare <= 0) break;
+    if (rendered[key].tokens >= demand[key]) continue;
+    const sectionBudget = rendered[key].tokens + spare;
+    const again = renderSection(key, sectionBudget);
+    if (again.tokens <= rendered[key].tokens) continue;
+    rendered[key] = again;
+    spare = sectionBudget - again.tokens;
   }
 
   const sections: string[] = includePreamble ? [preamble] : [];
@@ -381,26 +430,11 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
     totalTokens += section.tokens;
   }
   // Ids in the order the sections that hold them appear.
-  includedIds.push(...rendered.semanticRecall.includedIds, ...rendered.recentEpisodic.includedIds);
-
-  // --- Involuntary Recall (Cognitive Mechanisms) ---
-  // Takes the budget the sections leave.
-  if (input.mechanismsEngine && input.allTraces) {
-    const retrievedSet = new Set(includedIds);
-    const { involuntaryMemory } = input.mechanismsEngine.onPromptAssembly(input.allTraces, retrievedSet);
-    if (involuntaryMemory) {
-      const roomChars = (budget - totalTokens) * 4
-        - SECTION_SEPARATOR_CHARS - INVOLUNTARY_HEADER.length - 1 - INVOLUNTARY_PREFIX.length;
-      const line = roomChars > 0
-        ? formatMemoryTrace(involuntaryMemory, style, { now, maxChars: roomChars })
-        : '';
-      if (line) {
-        const text = `${INVOLUNTARY_HEADER}\n${INVOLUNTARY_PREFIX}${line}`;
-        sections.push(text);
-        totalTokens += Math.ceil((SECTION_SEPARATOR_CHARS + text.length) / 4);
-        includedIds.push(involuntaryMemory.id);
-      }
-    }
+  const includedIds = [...rendered.semanticRecall.includedIds, ...rendered.recentEpisodic.includedIds];
+  if (involuntary) {
+    sections.push(involuntary.text);
+    totalTokens += involuntary.tokens;
+    includedIds.push(involuntary.id);
   }
 
   return {

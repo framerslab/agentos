@@ -224,8 +224,9 @@ export interface CognitiveMemoryPersonaConfig {
   workingMemoryCapacity?: number;
   /**
    * Token budget share overrides (fractions of the block's budget; shares
-   * adding up to more than 1 are scaled down). Unused budget flows to the
-   * sections that still have content.
+   * adding up to more than 1 are scaled down, and a share that is not a
+   * finite positive number counts as 0). Unused budget flows to the sections
+   * that still have content.
    */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
   /** Encoding config overrides. */

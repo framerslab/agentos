@@ -5,7 +5,13 @@
 
 import { describe, it, expect } from 'vitest';
 import { assembleMemoryContext, type MemoryAssemblerInput } from '../../src/cognition/memory/core/prompt/MemoryPromptAssembler.js';
-import { formatMemoryTrace, MEMORY_CUT_MARKER } from '../../src/cognition/memory/core/prompt/MemoryFormatters.js';
+import {
+  formatMemoryTrace,
+  memoryTraceLineLength,
+  MEMORY_CUT_MARKER,
+  MIN_CUT_CONTENT_CHARS,
+} from '../../src/cognition/memory/core/prompt/MemoryFormatters.js';
+import { CognitiveMechanismsEngine } from '../../src/cognition/memory/mechanisms/CognitiveMechanismsEngine.js';
 import type { ScoredMemoryTrace } from '../../src/cognition/memory/core/types.js';
 
 const DAY_MS = 86_400_000;
@@ -235,6 +241,18 @@ describe('MemoryPromptAssembler', () => {
       expect(cut).toContain(MEMORY_CUT_MARKER);
       expect(formatMemoryTrace(trace, 'structured', { now, maxChars: 60 })).toBe('');
     });
+
+    it('formatMemoryTrace leaves a trace out when the word boundary would keep fewer than the minimum characters', () => {
+      const now = Date.now();
+      // Room for exactly the minimum, with the only word boundary after character 21.
+      const trace = makeScoredTrace({ content: `${'a'.repeat(21)} ${'b'.repeat(100)}` });
+      const bare = memoryTraceLineLength(makeScoredTrace({ ...trace, content: '' }), 'structured', { now });
+      const maxChars = bare + MEMORY_CUT_MARKER.length + MIN_CUT_CONTENT_CHARS;
+      expect(formatMemoryTrace(trace, 'structured', { now, maxChars })).toBe('');
+      // With a boundary late enough, the same room keeps a cut.
+      const later = makeScoredTrace({ content: `${'a'.repeat(40)} ${'b'.repeat(100)}` });
+      expect(formatMemoryTrace(later, 'structured', { now, maxChars })).toContain(`${'a'.repeat(40)}${MEMORY_CUT_MARKER}`);
+    });
   });
 
   describe('ages', () => {
@@ -293,6 +311,77 @@ describe('MemoryPromptAssembler', () => {
       // Semantic gets its 40% plus every share no other section used.
       expect(tokensOf(semantic)).toBeGreaterThan(Math.floor(available * 0.7) - 60);
       expect(result.tokensUsed).toBeLessThanOrEqual(budget);
+    });
+
+    it('gives the grant of a working memory too long for it back to the recalled traces', () => {
+      const result = assembleMemoryContext({
+        totalTokenBudget: 600,
+        traits: { conscientiousness: 0.9 },
+        workingMemoryText: wordsText(301),
+        retrievedTraces: many('semantic', 20, 400),
+      });
+      // The whole budget less what the cut trace's word boundary and minimum can leave.
+      expect(result.tokensUsed).toBeGreaterThan(560);
+      expect(result.tokensUsed).toBeLessThanOrEqual(600);
+      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(600);
+    });
+
+    it('keeps the leading working-memory slots when the whole list does not fit', () => {
+      const slots = Array.from({ length: 40 }, (_, i) => `- [ACTIVE] mt_${String(i).padStart(4, '0')} (activation: 0.90)`);
+      const result = assembleMemoryContext({
+        totalTokenBudget: 250,
+        traits: { conscientiousness: 0.9 },
+        workingMemoryText: slots.join('\n'),
+      });
+      const kept = sectionLines(result.contextText, '## Active Context');
+      expect(kept.length).toBeGreaterThan(0);
+      expect(kept.length).toBeLessThan(slots.length);
+      expect(kept).toEqual(slots.slice(0, kept.length));
+    });
+
+    it('keeps room for an involuntary memory when recalled traces would fill the block', () => {
+      const engine = new CognitiveMechanismsEngine({ involuntaryRecall: { probability: 1 } });
+      const old = makeScoredTrace({
+        id: 'old-vivid',
+        type: 'episodic',
+        createdAt: Date.now() - 30 * DAY_MS,
+        content: 'The night the whole team stayed up to fix the outage.',
+        emotionalContext: { valence: 0.8, arousal: 0.9, dominance: 0.5, intensity: 0.72, gmiMood: 'FOCUSED' },
+      });
+      const result = assembleMemoryContext({
+        totalTokenBudget: 1600,
+        traits: { conscientiousness: 0.9 },
+        retrievedTraces: [...many('semantic', 20, 400), ...many('episodic', 20, 400)],
+        mechanismsEngine: engine,
+        allTraces: [old],
+      });
+      expect(result.contextText).toContain('## Something This Reminds Me Of');
+      expect(result.contextText).toContain('The night the whole team stayed up to fix the outage.');
+      expect(result.includedMemoryIds).toContain('old-vivid');
+      expect(result.tokensUsed).toBeLessThanOrEqual(1600);
+      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(1600);
+    });
+
+    it('counts a share that is not a finite positive number as 0', () => {
+      for (const bad of [Infinity, -Infinity, Number.NaN, -1]) {
+        const empty = assembleMemoryContext({
+          totalTokenBudget: 0,
+          allocation: { prospectiveAlerts: bad },
+          traits: {},
+          prospectiveAlerts: ['Remember to follow up on the report'],
+        });
+        expect(empty.tokensUsed, String(bad)).toBe(0);
+        expect(empty.contextText, String(bad)).toBe('');
+        const small = assembleMemoryContext({
+          totalTokenBudget: 120,
+          allocation: { prospectiveAlerts: bad, graphAssociations: bad },
+          traits: {},
+          prospectiveAlerts: Array.from({ length: 20 }, (_, i) => wordsText(120, i)),
+          graphContext: Array.from({ length: 20 }, (_, i) => wordsText(120, i)),
+        });
+        expect(small.tokensUsed, String(bad)).toBeLessThanOrEqual(120);
+        expect(tokensOf(small.contextText), String(bad)).toBeLessThanOrEqual(120);
+      }
     });
 
     it('never exceeds the budget with every section full, at any size, even when the shares add up to more than 1', () => {

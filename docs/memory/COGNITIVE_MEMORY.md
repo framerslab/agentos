@@ -592,7 +592,7 @@ Assembles memory context into a single formatted string within a token budget, s
 
 ### Default Budget Allocation
 
-A share is the least a section with content gets, not a cap (see [Overflow Redistribution](#overflow-redistribution)). Shares set through `tokenBudget` that add up to more than 1 are scaled down.
+A share is the least a section with content gets, not a cap (see [Overflow Redistribution](#overflow-redistribution)). Shares set through `tokenBudget` that add up to more than 1 are scaled down, and a share that is not a finite positive number counts as 0.
 
 | Section | Budget % | Content |
 |---------|---------|---------|
@@ -606,11 +606,11 @@ A share is the least a section with content gets, not a cap (see [Overflow Redis
 
 ### Overflow Redistribution
 
-Budget a section leaves unused (it is empty, or its content is shorter than its share) flows to the sections that still have content, in `MEMORY_BUDGET_SPILL_ORDER`: Semantic Recall, Recent Episodic, Persistent Memory, Working Memory, Prospective Alerts, Graph Associations, Observation Notes. Each section in that order renders with its own share plus whatever the sections before it left unspent, so the block can fill the whole budget. A store that holds only episodic traces, assembled with the 1600 tokens the GMI's memory bridge asks for, fills the block with episodic traces rather than stopping at their 25%. Sections still appear in the block in the order shown under [Output Sections](#output-sections). The involuntary-recall section, when a host asks for one, takes the budget the sections leave, its trace cut to fit like any other.
+Budget a section leaves unused (it is empty, or its content is shorter than its share) flows to the sections that still have content, in `MEMORY_BUDGET_SPILL_ORDER`: Semantic Recall, Recent Episodic, Persistent Memory, Working Memory, Prospective Alerts, Graph Associations, Observation Notes. Each section in that order renders with its own share plus whatever the sections before it left unspent. A second pass in the same order gives what is still unspent (for example the share of a working memory too long for it) to the sections that still have content left out, so the block can fill the whole budget. A store that holds only episodic traces, assembled with the 1600 tokens the GMI's memory bridge asks for, fills the block with episodic traces rather than stopping at their 25%. Sections still appear in the block in the order shown under [Output Sections](#output-sections). When a host passes the mechanisms engine, the involuntary memory is chosen first, from the traces the turn did not retrieve, and takes at most a tenth of the budget after the preamble (its trace cut to fit like any other) before the sections are granted theirs.
 
 ### Trace Lines
 
-A trace's content is rendered whole. When the next trace does not fit what is left of its section, it is cut to fit that space, at a word boundary, and its content ends with `…[cut]`; the section ends there. A trace that cannot keep 40 characters of content is left out.
+A trace's content is rendered whole. When the next trace does not fit what is left of its section, it is cut to fit that space, at a word boundary, and its content ends with `…[cut]`; the section ends there. A trace whose cut would keep fewer than 40 characters of content is left out. Working memory keeps its leading slots when the whole list does not fit.
 
 Every line carries the trace's age and the UTC date it was stored (`createdAt`): `just now`, `Nm ago`, `Nh ago` and `Nd ago` under a week, `N days ago` from a week on, then `, YYYY-MM-DD`. A trace stored 26 days before the turn reads:
 

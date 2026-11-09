@@ -165,12 +165,24 @@ function render(trace: FormatTrace, style: FormattingStyle, content: string, now
 // ---------------------------------------------------------------------------
 
 /**
+ * The length, in characters, of the line {@link formatMemoryTrace} renders for
+ * a trace whole, without building it.
+ */
+export function memoryTraceLineLength(
+  trace: FormatTrace,
+  style: FormattingStyle,
+  options: Pick<FormatMemoryTraceOptions, 'now'> = {},
+): number {
+  return render(trace, style, '', options.now ?? Date.now()).length + trace.content.length;
+}
+
+/**
  * Format a single memory trace according to the given style.
  *
  * The content is rendered whole unless `options.maxChars` is smaller than the
  * whole line; then the content is cut at a word boundary so the line fits and
- * ends with {@link MEMORY_CUT_MARKER}, or the result is `''` when fewer than
- * {@link MIN_CUT_CONTENT_CHARS} characters of content would fit.
+ * ends with {@link MEMORY_CUT_MARKER}, or the result is `''` when the cut
+ * would keep fewer than {@link MIN_CUT_CONTENT_CHARS} characters of content.
  */
 export function formatMemoryTrace(
   trace: FormatTrace,
@@ -178,14 +190,16 @@ export function formatMemoryTrace(
   options: FormatMemoryTraceOptions = {},
 ): string {
   const now = options.now ?? Date.now();
-  const whole = render(trace, style, trace.content, now);
   const { maxChars } = options;
-  if (maxChars === undefined || whole.length <= maxChars) return whole;
+  if (maxChars === undefined) return render(trace, style, trace.content, now);
 
-  const overhead = render(trace, style, '', now).length + MEMORY_CUT_MARKER.length;
-  const room = Math.floor(maxChars) - overhead;
+  const bare = render(trace, style, '', now).length;
+  if (bare + trace.content.length <= maxChars) return render(trace, style, trace.content, now);
+
+  const room = Math.floor(maxChars) - bare - MEMORY_CUT_MARKER.length;
   if (room < MIN_CUT_CONTENT_CHARS) return '';
   const cut = cutAtWordBoundary(trace.content, room);
+  if (cut.length < MIN_CUT_CONTENT_CHARS) return '';
   return render(trace, style, `${cut}${MEMORY_CUT_MARKER}`, now);
 }
 
