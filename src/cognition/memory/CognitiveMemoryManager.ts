@@ -1194,9 +1194,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
             recallableIds.has(node.memoryId) &&
             !this.store.isDeleted(node.memoryId)
           ) {
-            graphContext.push(
-              `[associated, activation=${node.activation.toFixed(2)}] ${trace.content.substring(0, 150)}`
-            );
+            // Whole: the assembler cuts an association to fit what is left of its section.
+            graphContext.push(`[associated, activation=${node.activation.toFixed(2)}] ${trace.content}`);
           }
         }
       } catch {
