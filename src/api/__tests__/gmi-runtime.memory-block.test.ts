@@ -11,9 +11,10 @@
  * Each case clears the session's history before the turn it reads, so what it
  * finds in the block reached the prompt through recall, not through history.
  *
- * agent() builds the persona from its options, which carry no
+ * agent() builds the persona from its options, which set no
  * `cognitiveMemoryConfig`; a case that needs one sets `personaMemory.config`,
- * and the persona agent() builds carries it as a persona loaded with one would.
+ * and the persona agent() builds carries it, so the case reads what
+ * createAgentCognitiveMemory makes of a persona's section shares on this path.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CognitiveMemoryPersonaConfig } from '../../cognition/memory/core/config';
