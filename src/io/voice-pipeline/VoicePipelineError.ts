@@ -14,7 +14,9 @@ const QUOTA_STATUS_PATTERN = new RegExp(`\\b(?:${[...QUOTA_STATUS_CODES].join('|
 
 /**
  * The class of a provider failure, as {@link VoicePipelineError.classifyError}
- * reads it:
+ * reads it. A status is read from the message, where it stands as its own
+ * number (`HTTP 402`, `failed: 402 {...}`), and from the error's numeric
+ * `status`, as an SDK's error carries it.
  *
  * - `auth`: a 401 or 403, "unauthorized", "invalid api key" or "forbidden".
  *   Not retryable.
@@ -80,17 +82,26 @@ export class VoicePipelineError extends Error {
     const raw = isError(err) ? err : new Error(describeReason(err));
     const msg = raw.message ?? '';
     const code = errorCode(err);
+    const status = errorStatus(err);
 
     let errorClass: HealthErrorClass = 'unknown';
     let retryable = true;
 
-    if (/\b401\b|unauthori[sz]ed|invalid api key|forbidden|\b403\b/i.test(msg)) {
+    if (status === 401 || status === 403 || /\b401\b|unauthori[sz]ed|invalid api key|forbidden|\b403\b/i.test(msg)) {
       errorClass = 'auth';
       retryable = false;
-    } else if (QUOTA_STATUS_PATTERN.test(msg) || /rate.?limit|too many/i.test(msg) || hasQuotaBodySignal(msg)) {
+    } else if (
+      (status !== undefined && QUOTA_STATUS_CODES.has(status)) ||
+      QUOTA_STATUS_PATTERN.test(msg) ||
+      /rate.?limit|too many/i.test(msg) ||
+      hasQuotaBodySignal(msg)
+    ) {
       errorClass = 'quota';
       retryable = true;
-    } else if (/\b5\d\d\b|internal server|bad gateway|gateway timeout|service unavailable/i.test(msg)) {
+    } else if (
+      (status !== undefined && status >= 500 && status <= 599) ||
+      /\b5\d\d\b|internal server|bad gateway|gateway timeout|service unavailable/i.test(msg)
+    ) {
       errorClass = 'service';
       retryable = true;
     } else if (
@@ -112,6 +123,23 @@ export class VoicePipelineError extends Error {
       cause: err,
       retryable,
     });
+  }
+}
+
+/**
+ * A failure value's numeric `status`, the HTTP status an SDK's or a host
+ * provider's error carries, or `undefined` when it has none, holds no whole
+ * number, or refuses the read.
+ *
+ * @param err - What a provider threw or rejected with.
+ * @returns The value's `status`, or `undefined`.
+ */
+function errorStatus(err: unknown): number | undefined {
+  try {
+    const status = (err as { status?: unknown } | null | undefined)?.status;
+    return typeof status === 'number' && Number.isInteger(status) ? status : undefined;
+  } catch {
+    return undefined;
   }
 }
 
