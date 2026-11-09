@@ -33,4 +33,22 @@ describe('normalizePersonaDefinition', () => {
     expect(ids).toContain('gmi_frustration_recovery');
     expect(ids).toContain('gmi_engagement_boost');
   });
+
+  it('drops the nulls inside cognitiveMemoryConfig without mutating the input', () => {
+    const input = {
+      ...base,
+      cognitiveMemoryConfig: { decay: null, tokenBudget: { semanticRecall: null, recentEpisodic: 0.3 }, workingMemoryCapacity: 5 },
+    } as unknown as IPersonaDefinition;
+    const before = JSON.stringify(input);
+    const out = normalizePersonaDefinition(input);
+    expect(out).not.toBe(input);
+    expect(out.cognitiveMemoryConfig).toEqual({ tokenBudget: { recentEpisodic: 0.3 }, workingMemoryCapacity: 5 });
+    expect(JSON.stringify(input)).toBe(before);
+
+    const unset = normalizePersonaDefinition({ ...base, cognitiveMemoryConfig: null } as unknown as IPersonaDefinition);
+    expect('cognitiveMemoryConfig' in unset).toBe(false);
+
+    const clean = { ...base, cognitiveMemoryConfig: { decay: { pruningThreshold: 0.1 } } } as IPersonaDefinition;
+    expect(normalizePersonaDefinition(clean)).toBe(clean);
+  });
 });
