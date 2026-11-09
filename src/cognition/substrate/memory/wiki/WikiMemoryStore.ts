@@ -1,7 +1,8 @@
 /** @fileoverview Markdown-first wiki store: owns memory/, indexes pages into the memory store. */
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileOutsideLinks } from '../../../../core/utils/linkFreeWrite.js';
 import { parsePage, serializePage, renderCatalog } from './WikiPageCodec.js';
 import { isWikiPageId, resolveWikiPagePath } from './WikiPageId.js';
 import { migratedBlockOf } from './migrateMemoryMd.js';
@@ -76,6 +77,41 @@ const CATALOG_HEADING = '# Memory Index\n';
 function withMigratedText(catalog: string, migrated: string): string {
   const sections = (catalog.startsWith(CATALOG_HEADING) ? catalog.slice(CATALOG_HEADING.length) : catalog).replace(/^\n+/, '');
   return `${CATALOG_HEADING}\n${migrated}\n${sections ? `\n${sections}` : ''}`;
+}
+
+/**
+ * The codes a platform refuses a new file beside `index.md`, or a rename over it, with where a write in place may
+ * still go through: a folder that takes no new file while the file in it is writable, or, on Windows, a file another
+ * program holds open.
+ */
+const WRITE_IN_PLACE_CODES: ReadonlySet<string> = new Set(['EACCES', 'EPERM', 'EBUSY']);
+
+/**
+ * Replace `file` with `text` through a new file beside it and a rename, so a reader, in this process or another,
+ * finds the old text or the new and never a file emptied for the write: a catalog refresh that read an emptied
+ * index.md would drop the text migrated from `MEMORY.md` for good. The new file is named with a leading dot, so no
+ * listing of pages takes it, and is made by its own open (`wx`), so nothing already in its place is opened. The rename
+ * replaces a symbolic link at `file` rather than writing through it, and the file keeps the permission bits it had.
+ * A file this process may not write, or a refusal of the new file or the rename (see {@link WRITE_IN_PLACE_CODES}),
+ * falls back to a write of `file` in place, as before, which succeeds or fails as such a write always has.
+ *
+ * @param file - Absolute path of the file, in a folder already made.
+ * @param text - What the file holds, written as UTF-8.
+ */
+async function replaceFile(file: string, text: string): Promise<void> {
+  const prior = await fs.lstat(file).catch(() => null);
+  const mode = prior?.isFile() ? prior.mode & 0o777 : 0o666;
+  const temp = path.join(path.dirname(file), `.${path.basename(file)}.${randomUUID()}.tmp`);
+  try {
+    // A file this process may not write is not replaced: the rename would go through where a write would not.
+    if (prior?.isFile()) await fs.access(file, fs.constants.W_OK);
+    await fs.writeFile(temp, text, { flag: 'wx', mode });
+    await fs.rename(temp, file);
+  } catch (err) {
+    await fs.rm(temp, { force: true }).catch(() => undefined);
+    if (!WRITE_IN_PLACE_CODES.has(String((err as NodeJS.ErrnoException).code))) throw err;
+    await fs.writeFile(file, text);
+  }
 }
 
 /** The slice of the Memory facade the store depends on (injected for testability). */
@@ -159,17 +195,23 @@ export class WikiMemoryStore {
     }
   }
 
+  /**
+   * Write index.md from the full page set, after the migrated block the index holds. The index is read never through
+   * a symbolic link, as the soul loader reads it, and replaced whole (see `replaceFile`), so a refresh running at the
+   * same time in another store over the same folder never reads it half written.
+   *
+   * @throws Any error reading the index meets other than a missing file, so an index that cannot be read is never
+   *   replaced by a catalog without its migrated text.
+   */
   private async refreshCatalog(): Promise<void> {
     const pages = await this.load();
     const indexPath = path.join(this.memoryDir, 'index.md');
-    let migrated: string | null = null;
-    try {
-      migrated = migratedBlockOf(await fs.readFile(indexPath, 'utf8'));
-    } catch {
-      // No index yet, or one that cannot be read: the catalog alone.
-    }
+    const read = await readFileOutsideLinks(this.memoryDir, 'index.md');
+    // No index yet, or a link or something other than a regular file in its place, which the soul loader does not
+    // read either: the catalog alone.
+    const migrated = read !== null && typeof read === 'object' ? migratedBlockOf(read.text) : null;
     const catalog = renderCatalog(pages);
-    await fs.writeFile(indexPath, migrated === null ? catalog : withMigratedText(catalog, migrated));
+    await replaceFile(indexPath, migrated === null ? catalog : withMigratedText(catalog, migrated));
   }
 
   /** The page ids under memory/ (see `listWikiPageIds`). */

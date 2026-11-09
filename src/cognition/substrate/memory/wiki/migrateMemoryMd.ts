@@ -19,30 +19,52 @@ export const MIGRATED_START_MARKER = '<!-- migrated from MEMORY.md -->';
 export const MIGRATED_END_MARKER = '<!-- end of MEMORY.md -->';
 
 /**
- * The text migrated from `MEMORY.md` that an `index.md` holds: everything from {@link MIGRATED_START_MARKER} through
- * {@link MIGRATED_END_MARKER}. An index written before the end marker existed (a start marker and no end marker) is
- * read as a block that runs to the end of the file, returned with its end marker added.
+ * The opening of an `index.md` that holds text migrated from `MEMORY.md`: the catalog's heading and the blank lines
+ * under it. `ensureMemoryDir` and the wiki store put {@link MIGRATED_START_MARKER} right after them, and nowhere else.
+ */
+const MIGRATED_BLOCK_OPENING = /^# Memory Index[ \t]*\r?\n(?:[ \t]*\r?\n)*/;
+
+/**
+ * Where the migrated block of `index` starts and where its end marker is. The block starts only at
+ * {@link MIGRATED_START_MARKER} right under the index's heading, where migration writes it: a start marker anywhere
+ * else is text of the catalog, such as a page's summary taken from what a user said, and opens no block.
  *
  * @param index - The text of `memory/index.md`.
- * @returns The block, both markers included, or null when the index holds no start marker.
+ * @returns The block's start and the index of its end marker (-1 when it has none), or null when it has no block.
  */
-export function migratedBlockOf(index: string): string | null {
-  const start = index.indexOf(MIGRATED_START_MARKER);
-  if (start < 0) return null;
-  const end = index.indexOf(MIGRATED_END_MARKER, start + MIGRATED_START_MARKER.length);
-  if (end >= 0) return index.slice(start, end + MIGRATED_END_MARKER.length);
-  return `${index.slice(start).trimEnd()}\n\n${MIGRATED_END_MARKER}`;
+function migratedBlockRange(index: string): { start: number; end: number } | null {
+  const opening = MIGRATED_BLOCK_OPENING.exec(index);
+  if (!opening || !index.startsWith(MIGRATED_START_MARKER, opening[0].length)) return null;
+  const start = opening[0].length;
+  return { start, end: index.indexOf(MIGRATED_END_MARKER, start + MIGRATED_START_MARKER.length) };
 }
 
 /**
- * `index` without its {@link MIGRATED_END_MARKER} line, for the system prompt: the marker is the wiki's own
- * bookkeeping, and an index the wiki has not yet written a catalog into reads as it did before the marker existed.
+ * The text migrated from `MEMORY.md` that an `index.md` holds: everything from {@link MIGRATED_START_MARKER}, right
+ * under the index's heading, through the first {@link MIGRATED_END_MARKER} after it. An index written before the end
+ * marker existed (a start marker and no end marker) is read as a block that runs to the end of the file, returned
+ * with its end marker added. A start marker anywhere else opens no block.
  *
  * @param index - The text of `memory/index.md`.
- * @returns The text with the first end marker and the blank lines around it replaced by one blank line, trimmed.
+ * @returns The block, both markers included, or null when no start marker sits right under the index's heading.
+ */
+export function migratedBlockOf(index: string): string | null {
+  const range = migratedBlockRange(index);
+  if (!range) return null;
+  if (range.end >= 0) return index.slice(range.start, range.end + MIGRATED_END_MARKER.length);
+  return `${index.slice(range.start).trimEnd()}\n\n${MIGRATED_END_MARKER}`;
+}
+
+/**
+ * `index` without the {@link MIGRATED_END_MARKER} that closes its migrated block, for the system prompt: the marker
+ * is the wiki's own bookkeeping, and an index the wiki has not yet written a catalog into reads as it did before the
+ * marker existed. An index with no migrated block (see {@link migratedBlockOf}) is returned as it is, trimmed.
+ *
+ * @param index - The text of `memory/index.md`.
+ * @returns The text with that end marker and the blank lines around it replaced by one blank line, trimmed.
  */
 export function withoutMigratedEndMarker(index: string): string {
-  const at = index.indexOf(MIGRATED_END_MARKER);
+  const at = migratedBlockRange(index)?.end ?? -1;
   if (at < 0) return index.trim();
   const before = index.slice(0, at).trimEnd();
   const after = index.slice(at + MIGRATED_END_MARKER.length).trimStart();

@@ -22,9 +22,20 @@ function isLoggedFailure(count: number): boolean {
   return logged === count;
 }
 
-/** The error's message, or the value as text when it is not an Error. */
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/**
+ * The error's message, or the value as text when it is not an Error. Never throws: a value `String()` cannot turn
+ * into text, such as an object with no prototype, is named as such, since a throw here would reject the handler of
+ * a promise no one waits for, or fail the turn the failure was to leave as it is.
+ *
+ * @param error - What a call threw or rejected with.
+ * @returns Text that names it.
+ */
+export function messageOf(error: unknown): string {
+  try {
+    return error instanceof Error ? String(error.message) : String(error);
+  } catch {
+    return 'a value that cannot be shown as text';
+  }
 }
 
 /**

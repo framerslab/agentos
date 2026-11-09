@@ -110,13 +110,22 @@ into the system prompt and starts the folder, follows no link: see
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
 and is left untouched on disk. The copied text sits between the markers
-`<!-- migrated from MEMORY.md -->` and `<!-- end of MEMORY.md -->`. When the wiki
-writes its catalog into `index.md`, it keeps that block and writes the catalog
-after it, so the text stays in the system prompt. An `index.md` with the start
-marker and no end marker (as earlier versions wrote it) is read as a block that
-runs to the end of the file, and gets its end marker on the first catalog write.
-An `index.md` with no start marker is replaced by the catalog. The end marker
-itself stays out of the system prompt.
+`<!-- migrated from MEMORY.md -->` and `<!-- end of MEMORY.md -->`, right under
+the index's `# Memory Index` heading. When the wiki writes its catalog into
+`index.md`, it keeps that block and writes the catalog after it, so the text
+stays in the system prompt. An `index.md` with the start marker and no end marker
+(as earlier versions wrote it) is read as a block that runs to the end of the
+file, and gets its end marker on the first catalog write. A start marker anywhere
+else, such as in a page summary taken from a conversation, opens no block, and an
+`index.md` with no block is replaced by the catalog. The end marker itself stays
+out of the system prompt.
+
+The wiki reads `index.md` never through a symbolic link and writes it whole,
+through a new file beside it and a rename, so a catalog written by another agent
+on the same workspace at the same moment never finds it half written. An
+`index.md` the wiki cannot read is left as it is: the page write that would
+refresh it fails, and so does the compile, which takes the same traces up again
+the next time.
 
 ## SOUL.md Format
 

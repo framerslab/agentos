@@ -30,6 +30,7 @@ import { attachMemoryWiki } from '../cognition/memory/io/attachMemoryWiki.js';
 import { SemanticChunker } from '../cognition/rag/chunking/SemanticChunker.js';
 import { estimateTokens } from '../core/utils/text-utils.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET } from './runtime/memoryProviderHooks.js';
+import { messageOf } from './runtime/memoryObserveFailures.js';
 
 /** Characters a token is estimated at, as `estimateTokens` counts them. */
 const CHARS_PER_TOKEN = 4;
@@ -168,7 +169,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     } catch (err) {
       // The watermark moves only past compiled traces, so the next compile takes these up again.
       console.warn(
-        `[agentos] souledAgent: the memory wiki compile on close failed (${err instanceof Error ? err.message : String(err)}); ` +
+        `[agentos] souledAgent: the memory wiki compile on close failed (${messageOf(err)}); ` +
           'the conversation traces stay in the store for the next compile.',
         err,
       );
