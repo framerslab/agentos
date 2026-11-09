@@ -372,6 +372,37 @@ describe('MemoryPromptAssembler', () => {
       expect(tokensOf(result.contextText)).toBeLessThanOrEqual(1600);
     });
 
+    it('gives an involuntary memory what the sections leave unspent when its tenth is too small for it', () => {
+      const vivid = (content: string) =>
+        makeScoredTrace({
+          id: 'old-vivid',
+          type: 'episodic',
+          createdAt: Date.now() - 30 * DAY_MS,
+          content,
+          emotionalContext: { valence: 0.8, arousal: 0.9, dominance: 0.5, intensity: 0.72, gmiMood: 'FOCUSED' },
+        });
+      const cases = [
+        // A tenth of 500 tokens after the preamble has no room for the line; the rest of the block is empty.
+        { budget: 500, content: 'The night the whole team stayed up to fix the outage.' },
+        // A tenth of 1600 tokens would cut this trace; the rest of the block is empty.
+        { budget: 1600, content: wordsText(1500) },
+      ];
+      for (const { budget, content } of cases) {
+        const result = assembleMemoryContext({
+          totalTokenBudget: budget,
+          traits: { conscientiousness: 0.9 },
+          mechanismsEngine: new CognitiveMechanismsEngine({ involuntaryRecall: { probability: 1 } }),
+          allTraces: [vivid(content)],
+        });
+        expect(result.contextText, `budget ${budget}`).toContain('## Something This Reminds Me Of');
+        expect(result.contextText, `budget ${budget}`).toContain(content);
+        expect(result.contextText, `budget ${budget}`).not.toContain(MEMORY_CUT_MARKER);
+        expect(result.includedMemoryIds, `budget ${budget}`).toEqual(['old-vivid']);
+        expect(result.tokensUsed, `budget ${budget}`).toBeLessThanOrEqual(budget);
+        expect(tokensOf(result.contextText), `budget ${budget}`).toBeLessThanOrEqual(budget);
+      }
+    });
+
     it('counts a share that is not a finite positive number as 0', () => {
       for (const bad of [Infinity, -Infinity, Number.NaN, -1]) {
         const empty = assembleMemoryContext({
