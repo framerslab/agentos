@@ -18,7 +18,11 @@
  * section off. Traces and graph associations are rendered whole; one that
  * does not fit what is left of its section is cut to fit, at a word boundary,
  * with a visible marker, and an item that does not fit at all is skipped for
- * the later ones. Working memory keeps a run of its leading slots.
+ * the later ones. Working memory keeps a run of its leading slots. A graph
+ * association that leads to a trace the block already holds (in Relevant
+ * Memories, Recent Experiences or the involuntary memory) is left out of
+ * Related Context, so the trace appears once and its room goes to the next
+ * association.
  *
  * @module agentos/memory/prompt/MemoryPromptAssembler
  */
@@ -117,6 +121,14 @@ ${styleGuidance}`;
 // Assembler
 // ---------------------------------------------------------------------------
 
+/** A graph association with the id of the trace it leads to. */
+export interface MemoryGraphAssociation {
+  /** The id of the associated trace. */
+  traceId: string;
+  /** The association's line, as it appears after the bullet in Related Context. */
+  text: string;
+}
+
 export interface MemoryAssemblerInput {
   /** Token budget for all memory context. */
   totalTokenBudget: number;
@@ -138,8 +150,14 @@ export interface MemoryAssemblerInput {
   retrievedTraces?: ScoredMemoryTrace[];
   /** Prospective memory alerts (Batch 2). */
   prospectiveAlerts?: string[];
-  /** Graph association context (Batch 2). */
-  graphContext?: string[];
+  /**
+   * Graph association context (Batch 2): lines of text, or associations that
+   * carry the id of the trace they lead to. An association whose trace the
+   * block already holds (a retrieved trace rendered in Relevant Memories or
+   * Recent Experiences, or the involuntary memory) is left out of Related
+   * Context; a plain line is never left out for that.
+   */
+  graphContext?: (string | MemoryGraphAssociation)[];
   /** Observation notes (Batch 2). */
   observationNotes?: string[];
   /** Persistent markdown memory (MEMORY.md contents). */
@@ -221,6 +239,8 @@ const EMPTY_SECTION: RenderedSection = { text: '', tokens: 0, includedIds: [] };
 
 /** How {@link renderLines} treats a line that does not fit whole. */
 interface RenderLinesOptions {
+  /** The trace id of each line, by index; the ids of the kept lines become the section's `includedIds`. */
+  ids?: readonly (string | undefined)[];
   /** Shortens a line to fit `maxChars`, or returns `''` when it cannot. */
   cut?: (line: string, maxChars: number) => string;
   /**
@@ -246,7 +266,8 @@ function renderLines(
   const maxChars = budgetTokens * 4;
   let chars = SECTION_SEPARATOR_CHARS + header.length;
   const kept: string[] = [];
-  for (const line of lines) {
+  const ids: string[] = [];
+  for (const [index, line] of lines.entries()) {
     const room = maxChars - chars - 1;
     if (room <= 0) break;
     // A blank line fits whole like any other; only a line too long for the room is cut or passed over.
@@ -257,10 +278,12 @@ function renderLines(
       continue;
     }
     kept.push(fitted);
+    const id = options.ids?.[index];
+    if (id !== undefined) ids.push(id);
     chars += 1 + fitted.length;
   }
   if (kept.length === 0) return EMPTY_SECTION;
-  return { text: `${header}\n${kept.join('\n')}`, tokens: Math.ceil(chars / 4), includedIds: [] };
+  return { text: `${header}\n${kept.join('\n')}`, tokens: Math.ceil(chars / 4), includedIds: ids };
 }
 
 /** A leading `[tag] ` on a graph association, kept whole when the association is cut. */
@@ -363,9 +386,15 @@ function renderInvoluntary(
  * not use its grant, such as working memory too long for it) to the sections
  * that still have content left out, so the block can fill the whole budget.
  * An involuntary memory that did not fit its tenth whole then takes what is
- * still unspent. `tokensUsed` counts the headers and separators too and never
- * exceeds `totalTokenBudget`. The returned `allocation` holds the shares the
- * sections were granted from, after the defaults, the zeroing and the scaling.
+ * still unspent. A graph association that carries the id of a trace the block
+ * already holds (rendered in Relevant Memories or Recent Experiences, or the
+ * involuntary memory) is left out of Related Context, and the room goes to the
+ * associations after it; should a trace section take such a trace in the
+ * second pass, Related Context is rendered again without it, and an
+ * involuntary memory Related Context shows is not added. `tokensUsed` counts
+ * the headers and separators too and never exceeds `totalTokenBudget`. The
+ * returned `allocation` holds the shares the sections were granted from, after
+ * the defaults, the zeroing and the scaling.
  */
 export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMemoryContext {
   const alloc: MemoryBudgetAllocation = { ...DEFAULT_BUDGET_ALLOCATION };
@@ -418,7 +447,11 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
 
   const bullets = (items: string[] | undefined): string[] => (items ?? []).map((item) => `- ${item}`);
   const prospectiveLines = bullets(input.prospectiveAlerts);
-  const graphLines = bullets(input.graphContext);
+  const graphItems = (input.graphContext ?? []).map((item) =>
+    typeof item === 'string' ? { traceId: undefined, text: item } : { traceId: item.traceId, text: item.text },
+  );
+  // The demand counts every association; one whose trace the block holds is left out when the section renders.
+  const graphLines = graphItems.map((item) => `- ${item.text}`);
   const observationLines = bullets(input.observationNotes);
   const pmText = input.persistentMemoryText ?? '';
   const wmLines = input.workingMemoryText ? input.workingMemoryText.split('\n') : [];
@@ -458,6 +491,26 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
     granted += grant[key];
   }
 
+  const rendered = {} as Record<SectionKey, RenderedSection>;
+  /** Ids of the traces the block holds outside Related Context, as rendered so far. */
+  const idsOutsideGraph = (): Set<string> =>
+    new Set([
+      ...(rendered.semanticRecall?.includedIds ?? []),
+      ...(rendered.recentEpisodic?.includedIds ?? []),
+      ...(involuntary ? [involuntary.id] : []),
+    ]);
+  /** Related Context, leaving out the associations that lead to a trace the block already holds. */
+  const renderGraph = (sectionBudget: number): RenderedSection => {
+    const held = idsOutsideGraph();
+    const items = graphItems.filter((item) => item.traceId === undefined || !held.has(item.traceId));
+    return renderLines(
+      HEADERS.graphAssociations,
+      items.map((item) => `- ${item.text}`),
+      sectionBudget,
+      { cut: cutAssociationLine, ids: items.map((item) => item.traceId) },
+    );
+  };
+
   const renderSection = (key: SectionKey, sectionBudget: number): RenderedSection => {
     if (off(key)) return EMPTY_SECTION;
     switch (key) {
@@ -472,7 +525,7 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
       case 'prospectiveAlerts':
         return renderLines(HEADERS.prospectiveAlerts, prospectiveLines, sectionBudget);
       case 'graphAssociations':
-        return renderLines(HEADERS.graphAssociations, graphLines, sectionBudget, { cut: cutAssociationLine });
+        return renderGraph(sectionBudget);
       case 'observationNotes':
         return renderLines(HEADERS.observationNotes, observationLines, sectionBudget);
       default:
@@ -481,7 +534,6 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
   };
 
   // --- Pass 1, in spill order: grant + whatever is unspent so far ---
-  const rendered = {} as Record<SectionKey, RenderedSection>;
   let spare = Math.max(0, available - granted);
   for (const key of MEMORY_BUDGET_SPILL_ORDER) {
     const sectionBudget = grant[key] + spare;
@@ -500,9 +552,18 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
     spare = sectionBudget - again.tokens;
   }
 
+  // --- A trace section that grew in pass 2 may now hold a trace Related Context shows: the association goes ---
+  const heldOutside = idsOutsideGraph();
+  if (rendered.graphAssociations.includedIds.some((id) => heldOutside.has(id))) {
+    const sectionBudget = rendered.graphAssociations.tokens + spare;
+    rendered.graphAssociations = renderGraph(sectionBudget);
+    spare = sectionBudget - rendered.graphAssociations.tokens;
+  }
+
   // --- An involuntary memory left out of its tenth, or cut to it, takes what is still unspent ---
   // The sections hold `available - spare` tokens, so the memory may grow to its own tokens plus `spare`.
-  if (involuntaryTrace && spare > 0) {
+  // One that Related Context already shows stays out, so the trace appears once.
+  if (involuntaryTrace && spare > 0 && !rendered.graphAssociations.includedIds.includes(involuntaryTrace.id)) {
     const held = involuntary?.tokens ?? 0;
     const wider = renderInvoluntary(involuntaryTrace, style, now, held + spare);
     if (wider && wider.tokens > held) involuntary = wider;
