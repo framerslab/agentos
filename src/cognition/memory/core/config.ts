@@ -222,7 +222,10 @@ export interface ConsolidationConfig {
  * each field but `featureDetectionStrategy` to the manager it builds, under
  * the same name in {@link CognitiveMemoryConfig}; a field or key left out, or
  * set to `undefined` or `null` (as a persona read from JSON writes an unset
- * key), keeps the default. A host that builds its manager from a
+ * key), keeps the default. The type lists no `null`: it is what a TypeScript
+ * author writes and what a host reading `persona.cognitiveMemoryConfig` gets,
+ * while a persona parsed from JSON reaches `createAgentCognitiveMemory`
+ * untyped. A host that builds its manager from a
  * persona itself (`gmiManagerConfig.cognitiveMemoryFactory`) passes them the
  * same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from
  * their options, which set no `cognitiveMemoryConfig`.
