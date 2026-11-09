@@ -57,6 +57,21 @@ describe('a memoryProvider whose observe() fails', () => {
     expect(observeWarnings(warn)[1]).toContain('10');
   });
 
+  it('is logged, and the turn answered, when observe() fails with a value that cannot be turned into text', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    script('openai', k, { whole: true, replies: [reply.text('First.'), reply.text('Second.')] });
+    // An object with no prototype has no toString: String() of it throws.
+    const rejecting: AgentMemoryProvider = { observe: async () => { throw Object.create(null); } };
+    const throwing = { observe: () => { throw Object.create(null); } } as unknown as AgentMemoryProvider;
+
+    expect((await agent(stubbed(k, { memoryProvider: rejecting })).generate('hi')).text).toBe('First.');
+    expect((await agent(stubbed(k, { memoryProvider: throwing })).generate('hi again')).text).toBe('Second.');
+    // One line for each provider's first failure. The arguments are read as given: String() of the reason throws.
+    const lines = () => warn.mock.calls.filter((call) => typeof call[0] === 'string' && call[0].includes('failed to record'));
+    await vi.waitFor(() => expect(lines()).toHaveLength(2));
+  });
+
   it("is logged on runtime: 'gmi', and the turn is answered as before", async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const k = key();

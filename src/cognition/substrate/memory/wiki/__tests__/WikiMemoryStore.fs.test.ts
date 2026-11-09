@@ -39,6 +39,24 @@ describe('WikiMemoryStore index.md and the text migrated from MEMORY.md', () => 
         '## Concepts\n\n- [billing](concepts/billing.md): How billing works.\n- [tone](concepts/tone.md): How to talk.\n',
     );
   });
+
+  // A file its owner may write and not read; the superuser reads it all the same, and Windows has no such mode.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'leaves an index.md it cannot read as it is, and fails the write',
+    async () => {
+      const index = path.join(memoryDir, 'index.md');
+      fs.writeFileSync(index, '# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\nThe user prefers concise answers.\n\n<!-- end of MEMORY.md -->\n');
+      const before = fs.readFileSync(index, 'utf8');
+      const store = new WikiMemoryStore({ memoryDir, port: noopPort, agentId: 'a1' });
+      fs.chmodSync(index, 0o200);
+      try {
+        await expect(store.writePage(page('concepts/billing', 'How billing works.'))).rejects.toThrow();
+      } finally {
+        fs.chmodSync(index, 0o644);
+      }
+      expect(fs.readFileSync(index, 'utf8')).toBe(before);
+    },
+  );
 });
 
 describe('WikiMemoryStore filesystem', () => {

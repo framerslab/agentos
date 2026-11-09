@@ -93,6 +93,31 @@ describe('souledAgent', () => {
     }
   });
 
+  it('warns and still closes when the compile on close fails with a value that cannot be turned into text', async () => {
+    const agentClose = vi.fn(async () => {});
+    agentSpy.mockImplementationOnce((o: unknown) => ({ __agentOpts: o, generate: async () => ({ text: '' }), close: agentClose }));
+    // An object with no prototype has no toString: String() of it throws.
+    const compile = vi.spyOn(Memory.prototype, 'compileWiki').mockRejectedValue(Object.create(null));
+    const storeClose = vi.spyOn(Memory.prototype, 'close');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const a = (await souledAgent({ provider: 'openai', model: 'gpt-4o', soul: dir } as any)) as any;
+      warn.mockClear();
+      await expect(a.close()).resolves.toBeUndefined();
+
+      // The arguments are read as given: String() of the reason throws.
+      const lines = warn.mock.calls.filter((call) => typeof call[0] === 'string' && call[0].includes('compile on close failed'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0][0]).toMatch(/traces stay in the store/);
+      expect(agentClose).toHaveBeenCalledTimes(1);
+      expect(storeClose).toHaveBeenCalled();
+    } finally {
+      compile.mockRestore();
+      storeClose.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
   it('starts with pages named after members every object has, and finds their index entries on the next start', async () => {
     const memoryDir = path.join(dir, 'memory');
     fs.mkdirSync(memoryDir);
