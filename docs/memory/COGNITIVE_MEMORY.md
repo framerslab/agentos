@@ -672,11 +672,12 @@ Token estimation uses ~4 chars per token heuristic.
 
 What callers see differently in the memory block and its formatters:
 
+- `assembleForPrompt()` renders each recalled trace whole. A trace that does not fit what is left of its section is cut at a word boundary and ends with `…[cut]`, and budget a section leaves unused flows to the sections with content (see [Overflow Redistribution](#overflow-redistribution)), so a section can hold more than its share. Through 0.15.120 each trace was cut to about 300 characters (350 in the narrative style), and only Semantic Recall took budget other sections left unused.
 - `formatMemoryTrace` and `formatMemoryTraces` (exported from `@framers/agentos/cognition/memory`) return the whole content of a trace when called without `maxChars`. Through 0.15.120 they cut it to about 300 characters (350 in the narrative style). A caller that needs a bound passes `formatMemoryTrace(trace, style, { maxChars })`.
 - `assembleForPrompt()` puts a graph association's whole content in Related Context, cut to fit only when it does not fit what is left of the section. Through 0.15.120 every association was cut to 150 characters.
 - The involuntary memory is chosen from the traces the turn did not retrieve: every retrieved trace is left out of its pool, including one that did not fit the block. Through 0.15.120 only the traces that made it into the block were left out.
 - A `tokenBudget` share of exactly 0 turns its section off. With the budget other sections leave unused flowing to the sections with content, a 0 share would otherwise still render its section. The default allocation has no zero share, so a host that sets none sees no change.
-- Ages of a day or more count UTC calendar days between the stored date and the turn's date, so the age and the date beside it agree. An age counted in whole 24-hour periods could read one day less than the dates (`26 days ago, 2026-10-12` on 2026-11-08).
+- Each line carries the UTC date the trace was stored after its age, and an age from a week on reads `N days ago`. Through 0.15.120 a line carried no date and an age from a week on read `Nw ago`. Ages of a day or more count UTC calendar days between the stored date and the turn's date, so the age and the date agree: a trace stored at 23:00 UTC on 2026-10-12 reads `27 days ago, 2026-10-12` at 00:30 UTC on 2026-11-08, one more than the whole 24-hour periods between them.
 - The returned `allocation` holds the shares the assembly used, not the configured ones.
 
 ---
