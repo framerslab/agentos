@@ -254,6 +254,33 @@ describe('createAgentCognitiveMemory', () => {
       }
       expect(none.graph).toEqual({ backend: 'knowledge-graph' });
     });
+
+    it('keeps the default for a field or key a JSON persona sets to null', async () => {
+      // JSON has no undefined: a persona read from a file writes an unset field as null.
+      const fields = await configFor({
+        encoding: null,
+        decay: null,
+        workingMemoryCapacity: null,
+        observer: null,
+        reflector: null,
+        graph: null,
+        infiniteContext: null,
+        tokenBudget: null,
+      } as unknown as CognitiveMemoryPersonaConfig);
+      for (const field of ['encoding', 'decay', 'workingMemoryCapacity', 'observer', 'reflector', 'infiniteContext', 'tokenBudget'] as const) {
+        expect(field in fields, field).toBe(false);
+      }
+      expect(fields.graph).toEqual({ backend: 'knowledge-graph' });
+
+      const keys = await configFor({
+        decay: { pruningThreshold: null, recencyHalfLifeMs: 3_600_000 },
+        graph: { backend: null, maxDepth: 2 },
+        tokenBudget: { semanticRecall: null, recentEpisodic: 0 },
+      } as unknown as CognitiveMemoryPersonaConfig);
+      expect(keys.decay).toEqual({ recencyHalfLifeMs: 3_600_000 });
+      expect(keys.graph).toEqual({ backend: 'knowledge-graph', maxDepth: 2 });
+      expect(keys.tokenBudget).toEqual({ recentEpisodic: 0 });
+    });
   });
 
   it('close shuts the manager down once and leaves an embedding manager it was given running', async () => {

@@ -6,7 +6,8 @@
  * prompt engine, memory bridge and cognitive memory manager run; only the
  * provider classes are stubbed (helpers/stubProviders.ts), and the OpenAI
  * stub embeds with a deterministic word hash, so texts that share words
- * recall each other.
+ * recall each other. The memory assembler runs unchanged; a wrapper records
+ * its first pass on the same input beside the block it returns.
  *
  * Each case clears the session's history before the turn it reads, so what it
  * finds in the block reached the prompt through recall, not through history.
@@ -30,6 +31,22 @@ vi.mock('../runtime/gmiPersona', async (importOriginal) => {
     },
   };
 });
+// Each assembly also renders its first pass on the same input, so a case can check the block the model receives
+// against it. The returned block is the real one: the wrapper hands back what assembleMemoryContext returns.
+const assemblies = vi.hoisted(() => [] as { firstPass: string; block: string }[]);
+vi.mock('../../cognition/memory/core/prompt/MemoryPromptAssembler', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../cognition/memory/core/prompt/MemoryPromptAssembler')>();
+  return {
+    ...actual,
+    assembleMemoryContext: (input: Parameters<typeof actual.assembleMemoryContext>[0]) => {
+      const firstPass = actual.assembleMemoryContextFirstPass(input);
+      const result = actual.assembleMemoryContext(input);
+      assemblies.push({ firstPass: firstPass.contextText, block: result.contextText });
+      return result;
+    },
+  };
+});
+import { MEMORY_CUT_MARKER } from '../../cognition/memory/core/prompt/MemoryFormatters';
 import { agent, type AgentOptions } from '../agent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -106,6 +123,34 @@ const GRAPH_HEADER = '## Related Context';
 const DAY_MS = 86_400_000;
 /** Tokens of a text by the assembler's estimate (about four characters a token). */
 const tokensOf = (text: string) => Math.ceil(text.length / 4);
+
+const SECTION_HEADERS = [
+  '## Persistent Memory',
+  '## Active Context',
+  '## Relevant Memories',
+  '## Recent Experiences',
+  '## Reminders',
+  '## Related Context',
+  '## Observations',
+  '## Something This Reminds Me Of',
+] as const;
+
+/** The lines of each section of a block, by header, in the block's order. */
+function blockSections(block: string): Map<string, string[]> {
+  const sections = new Map<string, string[]>();
+  for (const part of block.split(/\n\n(?=## )/)) {
+    const header = SECTION_HEADERS.find((name) => part.startsWith(name));
+    if (header) sections.set(header, part.slice(part.indexOf('\n') + 1).split('\n'));
+  }
+  return sections;
+}
+
+/** Whether `later` is `line`, or `line` lengthened: a cut line's text before its marker starts `later`. */
+function keepsLine(line: string, later: string): boolean {
+  if (later === line) return true;
+  const at = line.lastIndexOf(MEMORY_CUT_MARKER);
+  return at > 0 && later.length > line.length - MEMORY_CUT_MARKER.length && later.startsWith(line.slice(0, at));
+}
 
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
@@ -205,6 +250,85 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
       await a.close();
     }
   });
+
+  it('a turn whose block the second pass fills still sends every memory line the first pass placed, in its section and its order', async () => {
+    // Fourteen long hiking notes are more than the block holds, so the trace sections leave some out in the first pass.
+    // A large Related Context share grants that section all its associations need; an association whose trace a trace
+    // section already shows is left out, and the room it leaves reaches the second pass, which gives it to the traces.
+    const places = ['north ridge', 'cedar lake', 'river bend', 'pine hollow', 'stone bridge', 'fern valley', 'quarry pond', 'old mill', 'red cliffs', 'birch grove', 'salt marsh', 'echo canyon', 'willow creek', 'granite peak'];
+    const configs: (CognitiveMemoryPersonaConfig | undefined)[] = [
+      undefined,
+      { tokenBudget: { graphAssociations: 1 } },
+      { tokenBudget: { graphAssociations: 1, recentEpisodic: 0.1 } },
+      { tokenBudget: { workingMemory: 0.05 } },
+    ];
+    const filled: string[] = [];
+    for (const config of configs) {
+      const label = JSON.stringify(config?.tokenBudget ?? 'default shares');
+      personaMemory.config = config;
+      const k = key(); const emb = key();
+      const s = script('openai', k, { replies: [...places.map(() => reply.text('Noted.')), reply.text('The views.')] });
+      script('openai', emb, { replies: [] });
+      vi.stubEnv('OPENAI_API_KEY', emb);
+      const a = withMemory(k);
+      try {
+        const session = a.session('s');
+        for (const [i, place] of places.entries()) {
+          await session.send(
+            `Hiking day ${i + 1} at ${place}: we started the trail at dawn, packed water and a map, ` +
+              `talked about the camping plan and the gear list, stopped at the overlook for lunch, ` +
+              `counted the switchbacks on the way down, and wrote in the trail journal that ${place} ` +
+              `had the best view of the season and that the hike took most of the day with two long breaks.`,
+          );
+        }
+        session.clear();
+        assemblies.length = 0;
+        await session.send('What did we write in the trail journal about the hiking day and the view?');
+
+        expect(assemblies.length, `${label}: assemblies on the last turn`).toBeGreaterThan(0);
+        const { firstPass, block: assembled } = assemblies[assemblies.length - 1];
+        const block = memoryBlockOf(s, places.length);
+        // The request carries the block the assembler returned.
+        expect(block.startsWith(assembled.trimEnd()), `${label}: the request's block is the assembled one`).toBe(true);
+
+        const sent = blockSections(block);
+        const firstSections = blockSections(firstPass);
+        expect(firstSections.size, `${label}: sections in the first pass`).toBeGreaterThan(0);
+        for (const [header, lines] of firstSections) {
+          const later = sent.get(header) ?? [];
+          let at = 0;
+          for (const line of lines) {
+            while (at < later.length && !keepsLine(line, later[at])) at++;
+            expect(
+              at < later.length,
+              `${label} ${header}: the first pass's line ${JSON.stringify(line.slice(0, 100))} is not in the request\n` +
+                `first pass:\n${firstPass}\n\nrequest block:\n${block}`,
+            ).toBe(true);
+            at++;
+          }
+        }
+        expect(tokensOf(assembled), label).toBeLessThanOrEqual(1600);
+        if (assembled !== firstPass) {
+          // The second pass placed something the first pass did not, and it reached the model too.
+          const placed = new Set([...firstSections.values()].flat());
+          const added = [...blockSections(assembled).entries()].flatMap(([header, lines]) =>
+            lines.filter((line) => !placed.has(line)).map((line) => ({ header, line })),
+          );
+          expect(added.length, `${label}: lines the second pass added or lengthened`).toBeGreaterThan(0);
+          for (const { header, line } of added) {
+            expect(sent.get(header) ?? [], `${label} ${header}: a line the second pass placed, in the request`).toContain(line);
+          }
+          expect(assembled.length, label).toBeGreaterThan(firstPass.length);
+          filled.push(label);
+        }
+      } finally {
+        await a.close();
+      }
+    }
+    // At least one of the turns spent room in the second pass, so the check above read a block the second pass filled.
+    expect(filled, 'configurations whose block the second pass filled').not.toHaveLength(0);
+  });
+
   it("a persona's tokenBudget share of 0 keeps its section out of the request, where the default share renders it", async () => {
     for (const zeroed of [false, true]) {
       personaMemory.config = zeroed ? { tokenBudget: { recentEpisodic: 0 } } : undefined;

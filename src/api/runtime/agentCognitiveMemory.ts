@@ -333,9 +333,14 @@ export interface AgentCognitiveMemory {
   close(): Promise<void>;
 }
 
-/** A copy of `value` without the keys set to `undefined`, so a default under such a key is kept. */
-function definedEntries<T extends object>(value: T): Partial<T> {
-  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as Partial<T>;
+/**
+ * A copy of `value` without the keys set to `undefined` or `null`, so a default under such a key is kept; `{}` for a
+ * `value` that is itself `undefined` or `null`. JSON has no `undefined`, so a persona read from a file writes an
+ * unset key as `null`.
+ */
+function definedEntries<T extends object>(value: T | null | undefined): Partial<T> {
+  if (value == null) return {};
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry != null)) as Partial<T>;
 }
 
 /** The text the build embeds once to check the embedding model. */
@@ -462,16 +467,16 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     );
   }
 
-  // The persona's memory settings. A field or key the persona leaves undefined keeps the default. The section shares
-  // (tokenBudget): a 0 share turns its section off.
+  // The persona's memory settings. A field or key the persona leaves undefined, or sets to null as a JSON persona does,
+  // keeps the default. The section shares (tokenBudget): a 0 share turns its section off.
   const personaMemory: CognitiveMemoryPersonaConfig = opts.persona.cognitiveMemoryConfig ?? {};
   const personaBudget = personaMemory.tokenBudget;
   const personaTuning: Partial<CognitiveMemoryConfig> = {};
   for (const key of ['encoding', 'decay', 'observer', 'reflector', 'infiniteContext'] as const) {
     const value = personaMemory[key];
-    if (value !== undefined) (personaTuning as Record<string, unknown>)[key] = definedEntries(value);
+    if (value != null) (personaTuning as Record<string, unknown>)[key] = definedEntries(value);
   }
-  if (personaMemory.workingMemoryCapacity !== undefined) personaTuning.workingMemoryCapacity = personaMemory.workingMemoryCapacity;
+  if (personaMemory.workingMemoryCapacity != null) personaTuning.workingMemoryCapacity = personaMemory.workingMemoryCapacity;
 
   const config: CognitiveMemoryConfig = {
     workingMemory,
@@ -483,8 +488,8 @@ export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptio
     moodProvider: () => ({ ...NEUTRAL_PAD }),
     featureDetectionStrategy: 'keyword',
     ...personaTuning,
-    graph: { backend: 'knowledge-graph', ...definedEntries(personaMemory.graph ?? {}) },
-    ...(personaBudget ? { tokenBudget: { ...personaBudget } } : {}),
+    graph: { backend: 'knowledge-graph', ...definedEntries(personaMemory.graph) },
+    ...(personaBudget ? { tokenBudget: definedEntries(personaBudget) } : {}),
     ...(opts.mechanisms ? { cognitiveMechanisms: opts.mechanisms } : {}),
     consolidation: { enabled: consolidationEnabled },
     ...(opts.brain ? { brain: opts.brain, archive } : {}),

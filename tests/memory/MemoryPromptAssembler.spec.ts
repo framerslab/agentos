@@ -4,8 +4,13 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { assembleMemoryContext, type MemoryAssemblerInput } from '../../src/cognition/memory/core/prompt/MemoryPromptAssembler.js';
 import {
+  assembleMemoryContext,
+  assembleMemoryContextFirstPass,
+  type MemoryAssemblerInput,
+} from '../../src/cognition/memory/core/prompt/MemoryPromptAssembler.js';
+import {
+  cutMemoryContent,
   formatMemoryTrace,
   memoryTraceLineLength,
   MEMORY_CUT_MARKER,
@@ -33,6 +38,73 @@ function wordsText(chars: number, seed = 0): string {
 function sectionLines(contextText: string, header: string): string[] {
   const section = contextText.split('\n\n').find((part) => part.startsWith(header));
   return section ? section.split('\n').slice(1) : [];
+}
+
+const SECTION_HEADERS = [
+  '## Persistent Memory',
+  '## Active Context',
+  '## Relevant Memories',
+  '## Recent Experiences',
+  '## Reminders',
+  '## Related Context',
+  '## Observations',
+  '## Something This Reminds Me Of',
+] as const;
+const PERSISTENT_TRUNCATED = '\n<!-- truncated -->';
+
+/** The lines of each section of a block, by header; persistent memory's text counts as one line. */
+function blockSections(contextText: string): Map<string, string[]> {
+  const sections = new Map<string, string[]>();
+  for (const part of contextText.split(/\n\n(?=## )/)) {
+    const header = SECTION_HEADERS.find((name) => part.startsWith(name));
+    if (!header) continue;
+    const body = part.slice(part.indexOf('\n') + 1);
+    sections.set(header, header === '## Persistent Memory' ? [body.replace(/^\n/, '')] : body.split('\n'));
+  }
+  return sections;
+}
+
+/** Whether `later` is `line`, or `line` lengthened: a cut line's text before its marker starts `later`. */
+function keepsLine(line: string, later: string): boolean {
+  if (later === line) return true;
+  const marker = line.endsWith(PERSISTENT_TRUNCATED) ? PERSISTENT_TRUNCATED : MEMORY_CUT_MARKER;
+  const at = line.lastIndexOf(marker);
+  return at > 0 && later.length > line.length - marker.length && later.startsWith(line.slice(0, at));
+}
+
+/**
+ * Asserts that the block `input` assembles holds every line its first pass rendered, in its section and its order,
+ * whole if it was whole, and stays within the budget.
+ */
+function expectKeepsFirstPass(input: MemoryAssemblerInput, label = ''): void {
+  const first = assembleMemoryContextFirstPass(input);
+  const result = assembleMemoryContext(input);
+  const finalSections = blockSections(result.contextText);
+  for (const [header, lines] of blockSections(first.contextText)) {
+    const later = finalSections.get(header) ?? [];
+    let at = 0;
+    for (const line of lines) {
+      while (at < later.length && !keepsLine(line, later[at])) at++;
+      expect(at < later.length, `${label} ${header}: the first pass's line ${JSON.stringify(line.slice(0, 80))} is gone`).toBe(true);
+      at++;
+    }
+  }
+  for (const id of first.includedMemoryIds) expect(result.includedMemoryIds, `${label} id ${id}`).toContain(id);
+  expect(result.tokensUsed, label).toBeGreaterThanOrEqual(first.tokensUsed);
+  expect(result.tokensUsed, label).toBeLessThanOrEqual(input.totalTokenBudget);
+  expect(tokensOf(result.contextText), label).toBeLessThanOrEqual(input.totalTokenBudget);
+}
+
+/** A seeded pseudo-random number generator (mulberry32): the same seed gives the same cases on every run. */
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
 }
 
 function makeScoredTrace(overrides: Partial<ScoredMemoryTrace> = {}): ScoredMemoryTrace {
@@ -587,9 +659,10 @@ describe('MemoryPromptAssembler', () => {
       expect(sectionLines(plain.contextText, '## Related Context').join('\n')).toContain(fact);
     });
 
-    it('gives the room of an association dropped after the second pass back to the sections with content left out', () => {
-      // The second episodic trace first fits in the second pass, after Related Context took its association; once the
-      // association goes, its room must reach the trace sections, not stay unspent.
+    it('shows a trace once when the second pass has room for it: Related Context keeps the association the first pass showed, and the room still goes to the block', () => {
+      // The first pass shows the second episodic trace only through its association, cut to fit Related Context. The
+      // second pass has room for the trace in Recent Experiences, which leaves it out, as the block already shows it;
+      // the room goes to the association's cut instead of staying unspent.
       const budget = 820;
       const fact = makeScoredTrace({ id: 'sem', type: 'semantic', content: `Harbor notes: ${wordsText(950)}` });
       const first = makeScoredTrace({ id: 'epi-1', type: 'episodic', content: `Lantern walk: ${wordsText(950, 1)}` });
@@ -601,10 +674,12 @@ describe('MemoryPromptAssembler', () => {
         graphContext: [{ traceId: 'epi-2', text: `[associated, activation=0.70] ${second.content}` }],
         observationNotes: [wordsText(4000, 5)],
       });
-      expect(result.contextText.split('Ferry log:').length).toBeLessThanOrEqual(2);
-      expect(sectionLines(result.contextText, '## Related Context').join('\n')).not.toContain('Ferry log:');
-      // Something is left out (the second episodic trace is cut, the note does not fit), so the block fills the budget
-      // but for the few characters a cut at a word boundary leaves.
+      expect(result.contextText.split('Ferry log:')).toHaveLength(2);
+      expect(sectionLines(result.contextText, '## Related Context').join('\n')).toContain('Ferry log:');
+      expect(sectionLines(result.contextText, '## Recent Experiences').join('\n')).not.toContain('Ferry log:');
+      expect(result.includedMemoryIds).toEqual(['sem', 'epi-1']);
+      // Something is left out (the association is cut, the note does not fit), so the block fills the budget but for
+      // the few characters a cut at a word boundary leaves.
       expect(result.tokensUsed).toBeLessThanOrEqual(budget);
       expect(result.tokensUsed).toBeGreaterThanOrEqual(budget - 5);
     });
@@ -714,7 +789,7 @@ describe('MemoryPromptAssembler', () => {
       expect(line(Date.UTC(2026, 10, 7, 0, 31, 0))).toContain('(23h ago, 2026-11-07 |');
     });
 
-    describe('a trace the second pass moves out of its section', () => {
+    describe('a trace the first pass shows in its section', () => {
       // Narrative lines: the age, then the content, then the entities (`(involves: ...)`) when the trace has any.
       const traits = { openness: 0.9 };
       const style = 'narrative' as const;
@@ -786,7 +861,7 @@ describe('MemoryPromptAssembler', () => {
         expect(tokensOf(result.contextText)).toBeLessThanOrEqual(total);
       });
 
-      it('shows the trace through its association once it leaves its section and Related Context has room for it', () => {
+      it('keeps the trace in its section though a render from scratch would give its room to an earlier trace and Related Context has room for its association', () => {
         vi.useFakeTimers({ toFake: ['Date'] });
         const now = Date.UTC(2026, 10, 9, 12, 0, 0);
         vi.setSystemTime(now);
@@ -829,10 +904,12 @@ describe('MemoryPromptAssembler', () => {
         expect(alone(total, [long, short])).toEqual(['long']);
 
         const result = assemble(total, total - first, [long, short], association);
-        expect(sectionLines(result.contextText, '## Recent Experiences')).toHaveLength(1);
-        expect(result.includedMemoryIds).toEqual(['long']);
-        expect(sectionLines(result.contextText, '## Related Context')).toEqual([`- ${association.text}`]);
-        expect(result.contextText).not.toContain(fact);
+        // The second pass only adds to the block: the short trace stays, the long one has no room beside it, and the
+        // association stays out of Related Context, as the block already shows its trace.
+        expect(sectionLines(result.contextText, '## Recent Experiences')).toEqual([formatMemoryTrace(short, style, { now })]);
+        expect(result.includedMemoryIds).toEqual(['short']);
+        expect(result.contextText).not.toContain('## Related Context');
+        expect(result.contextText.split(fact)).toHaveLength(2);
         expect(result.tokensUsed).toBeLessThanOrEqual(total);
         expect(tokensOf(result.contextText)).toBeLessThanOrEqual(total);
       });
@@ -933,6 +1010,217 @@ describe('MemoryPromptAssembler', () => {
       expect(late.contextText.split(content)).toHaveLength(2);
       expect(late.contextText).not.toContain('## Something This Reminds Me Of');
       expect(late.includedMemoryIds).toEqual([]);
+    });
+  });
+
+  describe('the second pass only adds to the block', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const RELATED_HEADER = '## Related Context (connected memories — use for depth)';
+    /** The least `maxChars` for which `fits` holds. */
+    const leastRoom = (fits: (maxChars: number) => boolean): number => {
+      for (let maxChars = 0; maxChars <= 2000; maxChars++) if (fits(maxChars)) return maxChars;
+      throw new Error('nothing up to 2000 characters fits');
+    };
+
+    it('keeps a Related Context line the first pass showed when the room left over would fit a cut of a long line before it (R2)', () => {
+      const long = wordsText(2000);
+      const short = 'Call Ana at noon';
+      const overhead = 2 + RELATED_HEADER.length; // the separator and the header
+      const total = 40;
+      // The first pass renders Related Context on its 20 tokens: the line room holds the short line whole, not the
+      // least cut of the long one. The note is too long for any room, so its 20 tokens go unspent.
+      const firstRoom = 4 * 20 - overhead - 1;
+      expect(firstRoom).toBeGreaterThanOrEqual(2 + short.length);
+      expect(cutMemoryContent(long, firstRoom - 2)).toBe('');
+      // On all 40 tokens, a cut of the long line fits the room the short line would take.
+      expect(cutMemoryContent(long, 4 * total - overhead - 1 - 2)).not.toBe('');
+      const input: MemoryAssemblerInput = {
+        totalTokenBudget: total,
+        allocation: {
+          persistentMemory: 0,
+          workingMemory: 0,
+          semanticRecall: 0,
+          recentEpisodic: 0,
+          prospectiveAlerts: 0,
+          graphAssociations: 0.5,
+          observationNotes: 0.5,
+        },
+        traits: {},
+        graphContext: [long, short],
+        observationNotes: [wordsText(4000, 5)],
+      };
+
+      const result = assembleMemoryContext(input);
+      const lines = sectionLines(result.contextText, '## Related Context');
+      expect(lines.at(-1)).toBe(`- ${short}`);
+      expect(lines).toHaveLength(2);
+      expect(lines[0].startsWith(`- ${long.slice(0, 40)}`)).toBe(true);
+      expect(lines[0].endsWith(MEMORY_CUT_MARKER)).toBe(true);
+      expect(result.tokensUsed).toBeLessThanOrEqual(total);
+      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(total);
+
+      expect(sectionLines(assembleMemoryContextFirstPass(input).contextText, '## Related Context')).toEqual([`- ${short}`]);
+      expectKeepsFirstPass(input, 'R2');
+    });
+
+    it('keeps a recalled trace the first pass showed when a longer one would take its room and a later Related Context line would push out the association that showed it (R1)', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const now = Date.UTC(2026, 10, 9, 12, 0, 0);
+      vi.setSystemTime(now);
+      const traits = { openness: 0.9 };
+      const style = 'narrative' as const;
+      const entities = ['the harbor master of the north landing', 'the ferry captain of the evening crossing', 'the night watch at the east gate'];
+      // Short content beside long entity lists: X and S are shown whole or not at all, never cut.
+      const x = makeScoredTrace({ id: 'x', type: 'semantic', content: 'The gate code is 4417.', entities, createdAt: now });
+      const s = makeScoredTrace({
+        id: 's',
+        type: 'semantic',
+        content: 'The ferry leaves pier 3 at 7:40 sharp.',
+        entities: [entities[0], entities[1], `${entities[2]} and the pier`],
+        createdAt: now,
+      });
+      const e = makeScoredTrace({ id: 'e', type: 'episodic', content: 'We walked to the harbor.', createdAt: now });
+      const y = makeScoredTrace({ id: 'y', type: 'episodic', content: wordsText(400), createdAt: now });
+      const toY = { traceId: 'y', text: '[associated, activation=0.70] Ferry log for the evening crossing, kept by the harbor master at 9pm' };
+      const tag = '[associated through the harbor ledger and a ferry timetable] ';
+      const plainLong = `${tag}${wordsText(2000)}`;
+      const toX = { traceId: 'x', text: 'Gate code 4417.' };
+
+      const lineLength = (trace: ScoredMemoryTrace) => memoryTraceLineLength(trace, style, { now });
+      expect([lineLength(x), lineLength(s), lineLength(e)]).toEqual([172, 201, 46]);
+      // The least room a cut of Y needs, and a cut of the long Related Context line (its tag kept whole).
+      expect(leastRoom((maxChars) => formatMemoryTrace(y, style, { now, maxChars }) !== '')).toBe(73);
+      expect(2 + tag.length + leastRoom((maxChars) => cutMemoryContent(wordsText(2000), maxChars) !== '')).toBe(114);
+      expect(2 + toY.text.length).toBe(100);
+      // On its own, Relevant Memories holds X on the 62 tokens the first pass gives it, and S alone, X pushed out, when
+      // rendered from scratch on the 94 the second pass offers.
+      const alone = (budget: number) => assembleMemoryContext({ totalTokenBudget: budget, traits, retrievedTraces: [s, x] }).includedMemoryIds;
+      expect(alone(62)).toEqual(['x']);
+      expect(alone(94)).toEqual(['s']);
+
+      const total = 162; // under the preamble's threshold
+      const input: MemoryAssemblerInput = {
+        totalTokenBudget: total,
+        allocation: {
+          persistentMemory: 0,
+          workingMemory: 0,
+          prospectiveAlerts: 0,
+          semanticRecall: 0.25, // 40 tokens, then the 22 no share takes: 62
+          recentEpisodic: 30.25 / total, // 30
+          graphAssociations: 40.25 / total, // 40
+          observationNotes: 30.25 / total, // 30, unspent: the note is too long for any room
+        },
+        traits,
+        retrievedTraces: [s, x, e, y],
+        graphContext: [toY, plainLong, toX],
+        observationNotes: [wordsText(4000, 5)],
+      };
+
+      const result = assembleMemoryContext(input);
+      // X stays where the first pass put it, once.
+      expect(sectionLines(result.contextText, '## Relevant Memories')).toEqual([formatMemoryTrace(x, style, { now })]);
+      expect(result.contextText.split('The gate code is 4417.')).toHaveLength(2);
+      expect(result.contextText).not.toContain(toX.text);
+      // Y stays shown once, through its association; Recent Experiences does not take it again.
+      expect(sectionLines(result.contextText, '## Recent Experiences')).toEqual([formatMemoryTrace(e, style, { now })]);
+      const related = sectionLines(result.contextText, '## Related Context');
+      expect(related).toHaveLength(2);
+      expect(related[0]).toBe(`- ${toY.text}`);
+      expect(related[1].startsWith(`- ${tag}harbor`)).toBe(true);
+      expect(related[1].endsWith(MEMORY_CUT_MARKER)).toBe(true);
+      expect(result.includedMemoryIds).toEqual(['x', 'e']);
+      expect(result.tokensUsed).toBeLessThanOrEqual(total);
+      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(total);
+
+      // The first pass: X in Relevant Memories, E in Recent Experiences, and Y through its association in Related
+      // Context, where the long line does not fit after it and X's association is left out as a duplicate.
+      const first = assembleMemoryContextFirstPass(input);
+      expect(sectionLines(first.contextText, '## Relevant Memories')).toEqual([formatMemoryTrace(x, style, { now })]);
+      expect(sectionLines(first.contextText, '## Recent Experiences')).toEqual([formatMemoryTrace(e, style, { now })]);
+      expect(sectionLines(first.contextText, '## Related Context')).toEqual([`- ${toY.text}`]);
+      expectKeepsFirstPass(input, 'R1');
+    });
+
+    it('keeps every line the first pass renders, shows each trace once and stays within the budget, over generated blocks', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const now = Date.UTC(2026, 10, 9, 12, 0, 0);
+      vi.setSystemTime(now);
+      const random = seededRandom(20_261_109);
+      const int = (lo: number, hi: number) => lo + Math.floor(random() * (hi - lo + 1));
+      /** Text that starts with `id`, so no two items share a prefix. */
+      const text = (id: string, chars: number) => `${id}: ${wordsText(chars, int(0, 7))}`;
+      const keys = Object.keys(DEFAULT_BUDGET_ALLOCATION) as (keyof typeof DEFAULT_BUDGET_ALLOCATION)[];
+      const styles = [{ conscientiousness: 0.9 }, { openness: 0.9 }, { emotionality: 0.9 }];
+
+      for (let c = 0; c < 300; c++) {
+        const label = `case ${c}`;
+        const traces = Array.from({ length: int(0, 6) }, (_, i) => {
+          const id = `t${c}x${i}`;
+          return makeScoredTrace({
+            id,
+            type: random() < 0.5 ? 'semantic' : 'episodic',
+            // Short content is shown whole or not at all; long content can be cut.
+            content: text(id, random() < 0.4 ? int(1, 40) : int(41, 900)),
+            entities: random() < 0.3 ? ['the harbor master', 'the ferry captain of the evening crossing'] : [],
+            createdAt: now - int(0, 40) * DAY_MS,
+          });
+        });
+        const vivid =
+          random() < 0.3
+            ? makeScoredTrace({
+                id: `v${c}`,
+                type: 'episodic',
+                content: text(`v${c}`, int(10, 600)),
+                createdAt: now - 30 * DAY_MS,
+                emotionalContext: { valence: 0.8, arousal: 0.9, dominance: 0.5, intensity: 0.72, gmiMood: 'FOCUSED' },
+              })
+            : undefined;
+        const targets = [...traces.map((trace) => trace.id), ...(vivid ? [vivid.id] : []), `elsewhere-${c}`];
+        const graphContext = Array.from({ length: int(0, 6) }, (_, j) => {
+          const body = text(`g${c}x${j}`, int(5, 700));
+          if (random() < 0.35) return random() < 0.5 ? body : `[associated, activation=0.40] ${body}`;
+          const traceId = targets[int(0, targets.length - 1)];
+          return { traceId, text: `[associated, activation=0.60] ref:${traceId} ${body}` };
+        });
+        const lines = (prefix: string, maxChars: number) =>
+          Array.from({ length: int(0, 3) }, (_, j) => text(`${prefix}${c}x${j}`, int(5, maxChars)));
+        const allocation =
+          random() < 0.4
+            ? undefined
+            : Object.fromEntries(
+                keys.map((key) => {
+                  const roll = random();
+                  return [key, roll < 0.2 ? 0 : roll < 0.5 ? undefined : random() * 0.6];
+                }),
+              );
+        const input: MemoryAssemblerInput = {
+          totalTokenBudget: int(0, 900),
+          allocation,
+          traits: styles[int(0, 2)],
+          persistentMemoryText: random() < 0.4 ? text(`p${c}`, int(10, 1500)) : undefined,
+          workingMemoryText:
+            random() < 0.5
+              ? Array.from({ length: int(1, 5) }, (_, j) => `- [ACTIVE] mt_${c}_${j} ${wordsText(int(0, 120), j)}`).join('\n')
+              : undefined,
+          retrievedTraces: traces,
+          prospectiveAlerts: lines('r', 200),
+          graphContext,
+          observationNotes: lines('o', 600),
+          ...(vivid
+            ? { mechanismsEngine: new CognitiveMechanismsEngine({ involuntaryRecall: { probability: 1 } }), allTraces: [vivid] }
+            : {}),
+        };
+
+        expectKeepsFirstPass(input, label);
+        // A trace appears once: Related Context shows no association to a trace the block holds elsewhere.
+        const result = assembleMemoryContext(input);
+        const referenced = sectionLines(result.contextText, '## Related Context').flatMap((line) => /ref:(\S+)/.exec(line)?.[1] ?? []);
+        for (const id of referenced) expect(result.includedMemoryIds, `${label} ${id}`).not.toContain(id);
+        expect(new Set(result.includedMemoryIds).size, label).toBe(result.includedMemoryIds.length);
+      }
     });
   });
 });
