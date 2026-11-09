@@ -60,7 +60,7 @@ import { LAUNCH_AGENCY_TOOL_NAME, MIN_LAUNCH_TOKENS, resolveLaunchLimits, type A
 import { createGmiLaunchTool } from './runtime/agencyLaunch/gmiLaunchTool.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions, stablePersonaIdOf } from './runtime/gmiPersona.js';
-import { withOneSoulWarning } from './runtime/soulLoadWarning.js';
+import { warnSoulBesideSystemBlocks, withOneSoulWarning } from './runtime/soulLoadWarning.js';
 import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import {
   assertEmbeddingConfig,
@@ -535,6 +535,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
   if (deferred.length > 0) {
     console.warn(`[AgentOS] gmi() accepted config it does not enforce yet: ${deferred.join(', ')}.`);
   }
+  warnSoulBesideSystemBlocks(opts);
   const cognition = resolveCognition(opts);
   // generate() and stream() run the light profile, under the agent's own learning option.
   const lightCognition = resolveCognition({ cognition: 'light', learning: opts.learning });
