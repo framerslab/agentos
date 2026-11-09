@@ -18,7 +18,7 @@
  * section off. Traces and graph associations are rendered whole; one that
  * does not fit what is left of its section is cut to fit, at a word boundary,
  * with a visible marker, and an item that does not fit at all is skipped for
- * the later ones.
+ * the later ones. Working memory keeps a run of its leading slots.
  *
  * @module agentos/memory/prompt/MemoryPromptAssembler
  */
@@ -219,16 +219,29 @@ interface RenderedSection {
 
 const EMPTY_SECTION: RenderedSection = { text: '', tokens: 0, includedIds: [] };
 
+/** How {@link renderLines} treats a line that does not fit whole. */
+interface RenderLinesOptions {
+  /** Shortens a line to fit `maxChars`, or returns `''` when it cannot. */
+  cut?: (line: string, maxChars: number) => string;
+  /**
+   * End the section at the first line that does not fit, so it holds a run of
+   * leading lines (working memory's slots, sorted by activation, highest
+   * first). Otherwise such a line is skipped for the later ones.
+   */
+  leadingOnly?: boolean;
+}
+
 /**
  * A section of lines, in order: each whole when it fits what is left of
  * `budgetTokens`; otherwise `cut` (when given) shortens it to fit, and a line
- * that still does not fit is skipped for the later ones.
+ * that still does not fit is skipped for the later ones, or ends the section
+ * with `leadingOnly`.
  */
 function renderLines(
   header: string,
   lines: readonly string[],
   budgetTokens: number,
-  cut?: (line: string, maxChars: number) => string,
+  options: RenderLinesOptions = {},
 ): RenderedSection {
   const maxChars = budgetTokens * 4;
   let chars = SECTION_SEPARATOR_CHARS + header.length;
@@ -236,8 +249,11 @@ function renderLines(
   for (const line of lines) {
     const room = maxChars - chars - 1;
     if (room <= 0) break;
-    const fitted = line.length <= room ? line : cut ? cut(line, room) : '';
-    if (!fitted) continue;
+    const fitted = line.length <= room ? line : options.cut ? options.cut(line, room) : '';
+    if (!fitted) {
+      if (options.leadingOnly) break;
+      continue;
+    }
     kept.push(fitted);
     chars += 1 + fitted.length;
   }
@@ -446,7 +462,7 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
       case 'persistentMemory':
         return renderPersistent(pmText, sectionBudget);
       case 'workingMemory':
-        return renderLines(HEADERS.workingMemory, wmLines, sectionBudget);
+        return renderLines(HEADERS.workingMemory, wmLines, sectionBudget, { leadingOnly: true });
       case 'semanticRecall':
         return renderTraces(HEADERS.semanticRecall, semanticTraces, style, now, sectionBudget);
       case 'recentEpisodic':
@@ -454,7 +470,7 @@ export function assembleMemoryContext(input: MemoryAssemblerInput): AssembledMem
       case 'prospectiveAlerts':
         return renderLines(HEADERS.prospectiveAlerts, prospectiveLines, sectionBudget);
       case 'graphAssociations':
-        return renderLines(HEADERS.graphAssociations, graphLines, sectionBudget, cutAssociationLine);
+        return renderLines(HEADERS.graphAssociations, graphLines, sectionBudget, { cut: cutAssociationLine });
       case 'observationNotes':
         return renderLines(HEADERS.observationNotes, observationLines, sectionBudget);
       default:
