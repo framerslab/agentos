@@ -9,6 +9,11 @@
  *  - Surface softer warnings (overly long system prompt, voice config without audio modality).
  *  - Offer proactive suggestions that improve quality (e.g., recommend cost strategy if omitted).
  *  - Remain side-effect free and pure: callers can run in CI, authoring tools, or runtime gates.
+ *
+ * Limit: `invalid_metaprompts` for a `metaPrompts` the sentiment presets replaced at load is read from a module
+ * record keyed by the normalized definition's object identity (`replacedMetaPromptsShape`). A normalized persona
+ * that went through a JSON round trip or a spread before `validatePersona` is a new object without that record, so
+ * it is not reported. Validate the raw input in that case, or copy definitions with `clonePersonaDefinition`.
  */
 import { REASONING_TRACE_MAX_ENTRIES_CEILING, REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING, REASONING_TRACE_MIN_ENTRIES, toJsonSafe } from '../reasoningTraceLimits';
 import { IPersonaDefinition } from './IPersonaDefinition';

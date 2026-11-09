@@ -78,7 +78,7 @@ export type { IPersonaLoader, PersonaLoaderConfig } from './cognition/substrate/
 export { PersonaLoader } from './cognition/substrate/personas/PersonaLoader';
 export type { FileSystemPersonaLoaderConfig } from './cognition/substrate/personas/PersonaLoader';
 export { InMemoryPersonaLoader, assertInlinePersonaDefinitions, INLINE_PERSONA_LOADER_CONFIG } from './cognition/substrate/personas/InMemoryPersonaLoader';
-export { normalizePersonaDefinition } from './cognition/substrate/personas/personaNormalization';
+export { clonePersonaDefinition, normalizePersonaDefinition } from './cognition/substrate/personas/personaNormalization';
 export * from './cognition/substrate/persona_overlays/PersonaOverlayTypes';
 export { PersonaOverlayManager } from './cognition/substrate/persona_overlays/PersonaOverlayManager';
 // Guardrails

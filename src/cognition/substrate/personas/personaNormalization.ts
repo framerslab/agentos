@@ -27,6 +27,10 @@ const replacedMetaPromptsShapes = new WeakMap<IPersonaDefinition, string>();
  * supplied with, when that value was not an array and the sentiment presets replaced it during normalization;
  * `undefined` otherwise. The mark follows the definition through a second normalization and through
  * `clonePersonaDefinition`.
+ *
+ * The mark is keyed by object identity. A copy made any other way (a spread, a JSON round trip) is a new object
+ * without it, so `validatePersona` on that copy does not report `invalid_metaprompts`; validate the raw input
+ * instead, before normalization, where the non-array `metaPrompts` is still on the definition.
  */
 export function replacedMetaPromptsShape(definition: IPersonaDefinition): string | undefined {
   return replacedMetaPromptsShapes.get(definition);
