@@ -222,7 +222,11 @@ export interface CognitiveMemoryPersonaConfig {
   featureDetectionStrategy?: 'keyword' | 'llm' | 'hybrid';
   /** Working memory slot capacity override. */
   workingMemoryCapacity?: number;
-  /** Token budget allocation percentages override. */
+  /**
+   * Token budget share overrides (fractions of the block's budget; shares
+   * adding up to more than 1 are scaled down). Unused budget flows to the
+   * sections that still have content.
+   */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
   /** Encoding config overrides. */
   encoding?: Partial<EncodingConfig>;
@@ -444,6 +448,14 @@ export const DEFAULT_DECAY_CONFIG: DecayConfig = {
   interferenceThreshold: 0.7,
 };
 
+/**
+ * Each section's default share of the memory block's budget (after the
+ * preamble). A share is the least a section with content gets: what an empty
+ * or under-filled section leaves flows to the sections that still have
+ * content, in `MEMORY_BUDGET_SPILL_ORDER` (Semantic Recall, Recent Episodic,
+ * then the block's order), so a store holding only episodic traces can fill
+ * the whole budget with them.
+ */
 export const DEFAULT_BUDGET_ALLOCATION: MemoryBudgetAllocation = {
   workingMemory: 0.15,
   semanticRecall: 0.40,

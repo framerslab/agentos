@@ -107,10 +107,10 @@ export { CognitiveWorkingMemory } from './core/working/CognitiveWorkingMemory.js
 export type { CognitiveWorkingMemoryConfig } from './core/working/CognitiveWorkingMemory.js';
 
 // --- Prompt Assembly ---
-export { assembleMemoryContext } from './core/prompt/MemoryPromptAssembler.js';
+export { assembleMemoryContext, MEMORY_BUDGET_SPILL_ORDER } from './core/prompt/MemoryPromptAssembler.js';
 export type { MemoryAssemblerInput } from './core/prompt/MemoryPromptAssembler.js';
-export { formatMemoryTrace, formatMemoryTraces } from './core/prompt/MemoryFormatters.js';
-export type { FormattingStyle } from './core/prompt/MemoryFormatters.js';
+export { formatMemoryTrace, formatMemoryTraces, MEMORY_CUT_MARKER } from './core/prompt/MemoryFormatters.js';
+export type { FormattingStyle, FormatMemoryTraceOptions } from './core/prompt/MemoryFormatters.js';
 
 // --- Persistent Markdown Working Memory ---
 export { MarkdownWorkingMemory } from './core/working/MarkdownWorkingMemory.js';

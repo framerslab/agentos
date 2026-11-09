@@ -588,9 +588,11 @@ interface ConsolidationResult {
 
 Source: `src/cognition/memory/core/prompt/MemoryPromptAssembler.ts`
 
-Assembles memory context into a single formatted string within a token budget, split across seven sections with overflow redistribution.
+Assembles memory context into a single formatted string within a token budget, split across seven sections with overflow redistribution. The preamble's tokens come off the budget first; each section is granted its share of the rest. `tokensUsed` counts the headers and blank lines too, and never exceeds the budget.
 
 ### Default Budget Allocation
+
+A share is the least a section with content gets, not a cap (see [Overflow Redistribution](#overflow-redistribution)). Shares set through `tokenBudget` that add up to more than 1 are scaled down.
 
 | Section | Budget % | Content |
 |---------|---------|---------|
@@ -604,7 +606,17 @@ Assembles memory context into a single formatted string within a token budget, s
 
 ### Overflow Redistribution
 
-The budget working memory leaves unused flows to Semantic Recall, and so do the budgets of empty Batch 2 sections (no prospective alerts, no graph context, no observation notes).
+Budget a section leaves unused (it is empty, or its content is shorter than its share) flows to the sections that still have content, in `MEMORY_BUDGET_SPILL_ORDER`: Semantic Recall, Recent Episodic, Persistent Memory, Working Memory, Prospective Alerts, Graph Associations, Observation Notes. Each section in that order renders with its own share plus whatever the sections before it left unspent, so the block can fill the whole budget. A store that holds only episodic traces, assembled with the 1600 tokens the GMI's memory bridge asks for, fills the block with episodic traces rather than stopping at their 25%. Sections still appear in the block in the order shown under [Output Sections](#output-sections). The involuntary-recall section, when a host asks for one, takes the budget the sections leave, its trace cut to fit like any other.
+
+### Trace Lines
+
+A trace's content is rendered whole. When the next trace does not fit what is left of its section, it is cut to fit that space, at a word boundary, and its content ends with `…[cut]`; the section ends there. A trace that cannot keep 40 characters of content is left out.
+
+Every line carries the trace's age and the UTC date it was stored (`createdAt`): `just now`, `Nm ago`, `Nh ago` and `Nd ago` under a week, `N days ago` from a week on, then `, YYYY-MM-DD`. A trace stored 26 days before the turn reads:
+
+```
+- [episodic] user: which locker did we pick? ... (26 days ago, 2026-10-13 | moderate confidence | relevance: 0.62)
+```
 
 ### Personality -> Formatting Style
 
@@ -647,7 +659,7 @@ The assembler selects a formatting style by comparing conscientiousness, opennes
 [spontaneous memory] ...
 ```
 
-The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to Semantic Recall), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
+The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to the sections with content), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
 
 Token estimation uses ~4 chars per token heuristic.
 
