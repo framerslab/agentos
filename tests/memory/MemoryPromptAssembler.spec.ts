@@ -836,6 +836,68 @@ describe('MemoryPromptAssembler', () => {
         expect(result.tokensUsed).toBeLessThanOrEqual(total);
         expect(tokensOf(result.contextText)).toBeLessThanOrEqual(total);
       });
+
+      it('keeps the trace in its section when its association would push a plain line Related Context showed out of it', () => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const now = Date.UTC(2026, 10, 9, 12, 0, 0);
+        vi.setSystemTime(now);
+        const long = makeScoredTrace({
+          id: 'long',
+          type: 'episodic',
+          content: wordsText(50),
+          entities: ['the harbor master of the north landing', 'the ferry captain of the evening crossing', 'the night watch at the east gate'],
+          createdAt: now,
+        });
+        const short = makeScoredTrace({
+          id: 'short',
+          type: 'episodic',
+          content: fact,
+          entities: ['the harbor master', 'the ferry captain', 'the night watch'],
+          createdAt: now,
+        });
+        const longLine = memoryTraceLineLength(long, style, { now });
+        const shortLine = memoryTraceLineLength(short, style, { now });
+        const overhead = sectionOverhead(now);
+        const association = { traceId: 'short', text: '[associated, activation=0.70] Ferry at 7:40.' };
+        const plain = 'Bring the red map.';
+        const graphOverhead = 2 + '## Related Context (connected memories — use for depth)'.length + 1;
+
+        // First pass: Recent Experiences holds the short line only; Related Context, on its grant, the plain line only.
+        const first = Math.ceil((overhead + shortLine) / 4);
+        const graphTokens = Math.ceil((graphOverhead + 2 + plain.length) / 4);
+        // Second pass: Recent Experiences takes the long line on its tokens and the note's grant, leaving 8 tokens.
+        const longTokens = Math.ceil((overhead + longLine) / 4);
+        const second = longTokens + 8;
+        const total = second + graphTokens;
+        expect(alone(first, [long, short])).toEqual(['short']);
+        expect(alone(second, [long, short])).toEqual(['long']);
+        // Related Context on its tokens and those 8 holds the association, then too little room for the plain line.
+        const graphRoom = 4 * (graphTokens + 8);
+        expect(graphRoom).toBeGreaterThanOrEqual(graphOverhead + 2 + association.text.length);
+        expect(graphRoom - graphOverhead - 2 - association.text.length - 1).toBeLessThan(2 + plain.length);
+
+        const result = assembleMemoryContext({
+          totalTokenBudget: total,
+          allocation: {
+            persistentMemory: 0,
+            workingMemory: 0,
+            semanticRecall: 0,
+            prospectiveAlerts: 0,
+            recentEpisodic: 0.5,
+            graphAssociations: (graphTokens + 0.5) / total,
+            observationNotes: (total - first - graphTokens + 0.5) / total,
+          },
+          traits,
+          retrievedTraces: [long, short],
+          graphContext: [association, plain],
+          observationNotes: [wordsText(4000, 5)],
+        });
+        expect(sectionLines(result.contextText, '## Related Context')).toEqual([`- ${plain}`]);
+        expect(result.contextText.split(fact)).toHaveLength(2);
+        expect(result.includedMemoryIds).toEqual(['short']);
+        expect(result.tokensUsed).toBeLessThanOrEqual(total);
+        expect(tokensOf(result.contextText)).toBeLessThanOrEqual(total);
+      });
     });
 
     it('shows an involuntary memory once: Related Context leaves out its association, and a late one stays out when Related Context shows it', () => {
