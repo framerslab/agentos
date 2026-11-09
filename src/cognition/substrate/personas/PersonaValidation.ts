@@ -262,6 +262,12 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
     add('warning', 'invalid_sentiment_presets', `Field 'sentimentTracking.presets' is ${shown}; it must be an array of preset names, so no preset metaprompts are merged.`, 'sentimentTracking.presets');
   }
 
+  if (persona.metaPrompts !== undefined && !Array.isArray(persona.metaPrompts)) {
+    const value = persona.metaPrompts as unknown;
+    const shown = value === null ? 'null' : typeof value;
+    add('warning', 'invalid_metaprompts', `Field 'metaPrompts' is ${shown}; it must be an array of metaprompt definitions.`, 'metaPrompts');
+  }
+
   // Metaprompt triggers. Persona JSON is cast rather than type-checked, so a
   // trigger the executor can never fire would otherwise load without notice.
   if (Array.isArray(persona.metaPrompts)) {

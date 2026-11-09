@@ -55,8 +55,9 @@ function withoutMemoryNulls(
  *   `null`, a key set to `null` inside a field, or the whole config set to `null`), so a loaded persona matches
  *   `CognitiveMemoryPersonaConfig`, which lists no `null`.
  * - When `sentimentTracking.enabled` is true and `presets` is an array naming at least one preset, the preset
- *   metaprompts are merged into `metaPrompts`. A `presets` that is not an array (`null` included), or a `metaPrompts` that is set and
- *   not an array, merges nothing (`validatePersona` reports the first as `invalid_sentiment_presets`).
+ *   metaprompts are merged into `metaPrompts`; a `metaPrompts` that is not an array is treated as empty there. A
+ *   `presets` that is not an array (`null` included) merges nothing (`validatePersona` reports it as
+ *   `invalid_sentiment_presets`).
  *
  * Returns the input object untouched when nothing applies, and a new object (the input is never mutated) when
  * either step does.
@@ -77,16 +78,14 @@ export function normalizePersonaDefinition(definition: IPersonaDefinition): IPer
   if (!sentiment?.enabled || !Array.isArray(sentiment.presets) || sentiment.presets.length === 0) {
     return result;
   }
-  if (result.metaPrompts !== undefined && !Array.isArray(result.metaPrompts)) {
-    return result;
-  }
   const requestedIds = sentiment.presets.includes('all')
     ? undefined // undefined = every preset
     : sentiment.presets
         .filter((preset): preset is Exclude<typeof preset, 'all'> => preset !== 'all')
         .map((preset) => SENTIMENT_PRESET_IDS[preset])
         .filter(Boolean);
-  return { ...result, metaPrompts: mergeMetapromptPresets(result.metaPrompts, requestedIds) };
+  const ownMetaPrompts = Array.isArray(result.metaPrompts) ? result.metaPrompts : undefined;
+  return { ...result, metaPrompts: mergeMetapromptPresets(ownMetaPrompts, requestedIds) };
 }
 
 /**
