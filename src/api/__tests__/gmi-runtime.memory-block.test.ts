@@ -10,15 +10,29 @@
  *
  * Each case clears the session's history before the turn it reads, so what it
  * finds in the block reached the prompt through recall, not through history.
+ *
+ * agent() builds the persona from its options, which carry no
+ * `cognitiveMemoryConfig`; a case that needs one sets `personaMemory.config`,
+ * and the persona agent() builds carries it as a persona loaded with one would.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CognitiveMemoryPersonaConfig } from '../../cognition/memory/core/config';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+const personaMemory = vi.hoisted(() => ({ config: undefined as CognitiveMemoryPersonaConfig | undefined }));
+vi.mock('../runtime/gmiPersona', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../runtime/gmiPersona')>();
+  return {
+    ...actual,
+    personaFromAgentOptions: (...args: Parameters<typeof actual.personaFromAgentOptions>) => {
+      const persona = actual.personaFromAgentOptions(...args);
+      return personaMemory.config ? { ...persona, cognitiveMemoryConfig: personaMemory.config } : persona;
+    },
+  };
+});
 import { agent, type AgentOptions } from '../agent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import type { ChatMessage } from '../../core/llm/providers/IProvider';
-import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
-import type { CognitiveMemoryConfig } from '../../cognition/memory/core/config';
 
 let n = 0;
 const key = () => `k-memory-block-${++n}`;
@@ -85,24 +99,9 @@ const DAY_MS = 86_400_000;
 /** Tokens of a text by the assembler's estimate (about four characters a token). */
 const tokensOf = (text: string) => Math.ceil(text.length / 4);
 
-/** The manager's own initialize, for a case that hands it a config with section shares. */
-const initializeManager = CognitiveMemoryManager.prototype.initialize;
-
-/**
- * Has the next cognitive memory manager start with `tokenBudget` as its
- * section shares: agent() builds the manager's config and sets none, so a case
- * that needs shares adds them where the manager receives its config.
- */
-function withSectionShares(tokenBudget: CognitiveMemoryConfig['tokenBudget']) {
-  return vi
-    .spyOn(CognitiveMemoryManager.prototype, 'initialize')
-    .mockImplementation(function (this: CognitiveMemoryManager, config: CognitiveMemoryConfig) {
-      return initializeManager.call(this, { ...config, tokenBudget });
-    });
-}
-
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
+  personaMemory.config = undefined;
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -198,9 +197,9 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
       await a.close();
     }
   });
-  it('a section whose share is set to 0 stays out of the request, where the default share renders it', async () => {
+  it("a persona's tokenBudget share of 0 keeps its section out of the request, where the default share renders it", async () => {
     for (const zeroed of [false, true]) {
-      const shares = zeroed ? withSectionShares({ recentEpisodic: 0 }) : undefined;
+      personaMemory.config = zeroed ? { tokenBudget: { recentEpisodic: 0 } } : undefined;
       const k = key(); const emb = key();
       const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('Locker 14.')] });
       script('openai', emb, { replies: [] });
@@ -213,8 +212,6 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         await session.send('Which parcel locker code did we set for the camping stove?');
         const block = memoryBlockOf(s, 1);
         if (zeroed) {
-          expect(shares, 'the manager received the shares').toBeDefined();
-          expect(shares!.mock.calls.length).toBeGreaterThan(0);
           expect(block, 'share 0').not.toContain(EPISODIC_HEADER);
         } else {
           expect(block, 'default share').toContain(EPISODIC_HEADER);
@@ -222,7 +219,6 @@ describe("agent({ runtime: 'gmi' }) memory block in the model request", () => {
         }
       } finally {
         await a.close();
-        shares?.mockRestore();
       }
     }
   });
