@@ -39,6 +39,7 @@ import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
 import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
+import { withoutMigratedEndMarker } from '../cognition/substrate/memory/wiki/migrateMemoryMd.js';
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
 import type { ForgetReport, ImportReport, LearnedStateDocument, LearningConfig, LedgerEntry, LoopManifest } from '../cognition/learning/types.js';
 import type { HexacoTraitValues } from '../cognition/substrate/personas/hexaco.js';
@@ -62,6 +63,8 @@ import {
   type ExportAgentConfigOptions,
 } from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
+import { observeWithoutWaiting } from './runtime/memoryObserveFailures.js';
+import { warnSoulLoadFailed } from './runtime/soulLoadWarning.js';
 import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import type { LlmUsageAccountResolver } from './observers.js';
 import {
@@ -109,8 +112,10 @@ export interface AgentMemoryProvider {
    * Record an observation of a turn exchange.
    *
    * Invoked twice per turn (`role: 'user'` with the input, then
-   * `role: 'assistant'` with the reply) as fire-and-forget. Rejections
-   * are swallowed so memory-backend errors do not break generation.
+   * `role: 'assistant'` with the reply) as fire-and-forget: the turn never
+   * waits for it, and a throw or a rejection never changes the turn's result.
+   * A failure is logged with `console.warn` on the provider's first failure
+   * and then at its 10th, 100th, 1000th and so on.
    *
    * @param role - Whether the content came from the user or assistant.
    * @param text - Plain text content of the turn.
@@ -329,11 +334,14 @@ export interface AgentOptions extends BaseAgentConfig {
    *   agent({ provider: 'anthropic', soul: { content: SOUL_MARKDOWN_STRING } });
    *   ```
    *
-   * Loading semantics: at agent boot the runtime reads SOUL.md, parses YAML
-   * frontmatter into an `IPersonaDefinition` (HEXACO traits, voice, mood,
-   * hardLimits), and injects the markdown body as the FIRST system message —
-   * before `instructions`, `chainOfThought`, `personality`, or `skills`. STYLE.md
-   * is appended as a second system message when present.
+   * Loading semantics: when the agent is built, `agent()` reads the soul and
+   * joins its prose into one system prompt, first the SOUL.md body, then a
+   * `## Style` section from STYLE.md, then the `memory/index.md` catalog, before
+   * `instructions`, `name`, `personality` and `skills`. The front matter's
+   * structured fields (HEXACO traits, voice, mood, hard limits) are not applied
+   * here: they live on the persona (`personaDefinition`) that `loadSoul()`
+   * returns, which the full runtime takes. A soul that fails to load logs a
+   * warning, and the agent is built without it.
    *
    * @see `loadSoul` in `@framers/agentos/cognition/substrate/personas/SoulLoader`
    * for the loader implementation and full SOUL.md format spec.
@@ -686,12 +694,14 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
     // remembers, then pulls full pages via the read_memory_page tool. Skip the
     // empty catalog (a bare "# Memory Index") so agents with no memory yet keep
     // a clean prompt.
-    if (loaded?.wikiIndex?.trim() && loaded.wikiIndex.trim() !== '# Memory Index') {
+    // The end marker of text migrated from a legacy MEMORY.md is the wiki's bookkeeping and stays out.
+    const wikiIndex = loaded?.wikiIndex ? withoutMigratedEndMarker(loaded.wikiIndex) : '';
+    if (wikiIndex && wikiIndex !== '# Memory Index') {
       sections.push(
         '## Long-Term Memory (index)\n\n' +
           'You maintain a memory wiki. This is its index. ' +
           'Use the `read_memory_page` tool to open any page by id.\n\n' +
-          loaded.wikiIndex.trim(),
+          wikiIndex,
       );
     }
   }
@@ -768,7 +778,9 @@ function maskStreamResult(result: StreamTextResult, mask: (error: unknown) => un
 /**
  * Resolve an `AgentOptions.soul` value (string path | { content } | { path })
  * into a `LoadedSoul`. Returns null on failure so the agent can still boot
- * (the soul is additive, not load-blocking).
+ * (the soul is additive, not load-blocking), and warns with `console.warn` in
+ * every environment that the agent boots without it; the loads of one agent
+ * build warn once (`withOneSoulWarning`).
  */
 export function loadSoulFromOption(
   soul: NonNullable<AgentOptions['soul']>,
@@ -785,12 +797,8 @@ export function loadSoulFromOption(
     }
     return null;
   } catch (err) {
-    // Non-fatal: missing soul file logs once and the agent boots without it.
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn(
-        `[@framers/agentos] Failed to load soul: ${(err as Error).message}. Agent will boot without SOUL.md identity.`,
-      );
-    }
+    // Non-fatal: the agent boots without the soul, and says so in every environment.
+    warnSoulLoadFailed(typeof soul === 'string' ? soul : 'path' in soul ? String(soul.path) : 'inline soul', err);
     return null;
   }
 }
@@ -815,7 +823,11 @@ function pickSendGenerationOverrides(
   return out;
 }
 
-/** Observe a validated exchange without letting memory failures reject it. */
+/**
+ * Observe a validated exchange without waiting for the provider. A failure to
+ * record it never rejects the exchange, and is logged sparsely
+ * (`observeWithoutWaiting`).
+ */
 function observeValidatedExchange(
   provider: AgentMemoryProvider | undefined,
   userText: string,
@@ -824,11 +836,7 @@ function observeValidatedExchange(
   if (!provider?.observe) return;
   for (const [role, text] of [['user', userText], ['assistant', replyText]] as const) {
     if (role === 'assistant' && !text) continue;
-    try {
-      void provider.observe(role, text).catch(() => { /* fire-and-forget */ });
-    } catch {
-      // A synchronous observation failure is also non-fatal.
-    }
+    observeWithoutWaiting(provider, role, text);
   }
 }
 

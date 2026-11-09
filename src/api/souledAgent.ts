@@ -28,6 +28,39 @@ import { generateText } from './generateText.js';
 import { Memory } from '../cognition/memory/io/facade/Memory.js';
 import { attachMemoryWiki } from '../cognition/memory/io/attachMemoryWiki.js';
 import { SemanticChunker } from '../cognition/rag/chunking/SemanticChunker.js';
+import { estimateTokens } from '../core/utils/text-utils.js';
+import { DEFAULT_MEMORY_TOKEN_BUDGET } from './runtime/memoryProviderHooks.js';
+
+/** Characters a token is estimated at, as `estimateTokens` counts them. */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Join recalled traces, in rank order, into a recall block that fits `tokenBudget` (estimated with
+ * `estimateTokens`). Whole traces are added while they fit; when the first alone is larger, it is cut at the last
+ * word boundary that fits (mid-word only when it has none), so a matched trace never yields an empty block. A
+ * budget that is not a positive number is the hooks' default.
+ *
+ * @param contents - The traces' text, best first.
+ * @param tokenBudget - The block's token ceiling.
+ * @returns The block, or '' when nothing was recalled.
+ */
+function recallWithinBudget(contents: readonly string[], tokenBudget: number): string {
+  const budget = Number.isFinite(tokenBudget) && tokenBudget > 0 ? Math.floor(tokenBudget) : DEFAULT_MEMORY_TOKEN_BUDGET;
+  const texts = contents.filter((c) => c.length > 0);
+  if (texts.length === 0) return '';
+  let block = '';
+  for (const text of texts) {
+    const next = block ? `${block}\n${text}` : text;
+    if (estimateTokens(next) > budget) break;
+    block = next;
+  }
+  if (block) return block;
+  const maxChars = Math.max(1, budget * CHARS_PER_TOKEN);
+  const head = texts[0].slice(0, maxChars);
+  // Cut back to the last whitespace when the cut falls inside a word.
+  const cut = /\s/.test(texts[0].charAt(maxChars)) ? head : head.replace(/\s+\S*$/, '');
+  return cut.trimEnd() || head;
+}
 
 /** Options for {@link souledAgent}. Identical to {@link AgentOptions}, but `soul` is required. */
 export interface SouledAgentOptions extends AgentOptions {
@@ -56,8 +89,13 @@ export type SouledAgent = Agent & { memory?: Memory };
  */
 export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent> {
   const loaded = loadSoulFromOption(opts.soul);
-  if (!loaded?.memoryDir) {
-    // Inline soul or failed load: no workspace dir → no wiki. Plain agent.
+  if (!loaded) {
+    // The soul failed to load, and loadSoulFromOption has warned: a plain agent without it, which loads it no
+    // second time and so does not warn again.
+    return agent({ ...opts, soul: undefined });
+  }
+  if (!loaded.memoryDir) {
+    // Inline soul: no workspace dir → no wiki. Plain agent.
     return agent(opts);
   }
 
@@ -78,9 +116,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     observe: async (_role, text) => {
       await memory.remember(text, { type: 'episodic', scope: 'persona', scopeId: agentId });
     },
-    getContext: async (text) => {
+    getContext: async (text, options) => {
       const scored = await memory.recall(text, { limit: 8 });
-      const contextText = scored.map((s) => s.trace.content).join('\n');
+      const contextText = recallWithinBudget(
+        scored.map((s) => s.trace.content),
+        options?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET,
+      );
       return contextText ? { contextText } : null;
     },
   };
@@ -118,13 +159,19 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   // On teardown: fold the session's conversation into the wiki, then close the
   // backing store. The compile is best-effort (a failed LLM merge must never
-  // block teardown); closing prevents leaked SQLite handles in long-lived hosts.
+  // block teardown) and a failure is logged; closing prevents leaked SQLite
+  // handles in long-lived hosts.
   const originalClose = built.close.bind(built);
   built.close = async () => {
     try {
       await memory.compileWiki({ reason: 'session-end' });
-    } catch {
-      // best-effort: never block teardown on a compile failure
+    } catch (err) {
+      // The watermark moves only past compiled traces, so the next compile takes these up again.
+      console.warn(
+        `[agentos] souledAgent: the memory wiki compile on close failed (${err instanceof Error ? err.message : String(err)}); ` +
+          'the conversation traces stay in the store for the next compile.',
+        err,
+      );
     }
     try {
       await originalClose();

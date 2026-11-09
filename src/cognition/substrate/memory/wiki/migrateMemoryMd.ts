@@ -12,6 +12,43 @@ import {
   type OpenRefusal,
 } from '../../../../core/utils/linkFreeWrite.js';
 
+/** The line that opens the text `ensureMemoryDir` copies from a legacy `MEMORY.md` into `memory/index.md`. */
+export const MIGRATED_START_MARKER = '<!-- migrated from MEMORY.md -->';
+
+/** The line that closes that text. The catalog the wiki writes into `memory/index.md` follows it. */
+export const MIGRATED_END_MARKER = '<!-- end of MEMORY.md -->';
+
+/**
+ * The text migrated from `MEMORY.md` that an `index.md` holds: everything from {@link MIGRATED_START_MARKER} through
+ * {@link MIGRATED_END_MARKER}. An index written before the end marker existed (a start marker and no end marker) is
+ * read as a block that runs to the end of the file, returned with its end marker added.
+ *
+ * @param index - The text of `memory/index.md`.
+ * @returns The block, both markers included, or null when the index holds no start marker.
+ */
+export function migratedBlockOf(index: string): string | null {
+  const start = index.indexOf(MIGRATED_START_MARKER);
+  if (start < 0) return null;
+  const end = index.indexOf(MIGRATED_END_MARKER, start + MIGRATED_START_MARKER.length);
+  if (end >= 0) return index.slice(start, end + MIGRATED_END_MARKER.length);
+  return `${index.slice(start).trimEnd()}\n\n${MIGRATED_END_MARKER}`;
+}
+
+/**
+ * `index` without its {@link MIGRATED_END_MARKER} line, for the system prompt: the marker is the wiki's own
+ * bookkeeping, and an index the wiki has not yet written a catalog into reads as it did before the marker existed.
+ *
+ * @param index - The text of `memory/index.md`.
+ * @returns The text with the first end marker and the blank lines around it replaced by one blank line, trimmed.
+ */
+export function withoutMigratedEndMarker(index: string): string {
+  const at = index.indexOf(MIGRATED_END_MARKER);
+  if (at < 0) return index.trim();
+  const before = index.slice(0, at).trimEnd();
+  const after = index.slice(at + MIGRATED_END_MARKER.length).trimStart();
+  return (after ? `${before}\n\n${after}` : before).trim();
+}
+
 /** What a new `.meta/index.json` holds. */
 const META_INDEX = JSON.stringify({ lastCompiledAt: null, pages: {} }, null, 2);
 
@@ -27,7 +64,8 @@ const PLACE_REFUSED: Record<OpenRefusal, string> = {
  *
  * - `memory/` and `memory/.meta/` are made when missing.
  * - A missing `memory/index.md` is seeded from `MEMORY.md` when the workspace holds one, and is otherwise a stub.
- *   `MEMORY.md` is left on disk as a fallback.
+ *   The copied text sits between {@link MIGRATED_START_MARKER} and {@link MIGRATED_END_MARKER}, which the wiki store
+ *   keeps when it rewrites the catalog. `MEMORY.md` is left on disk as a fallback.
  * - A missing `memory/.meta/index.json` starts an empty page index.
  *
  * Never modifies or deletes `MEMORY.md`.
@@ -68,7 +106,7 @@ export function ensureMemoryDir(workspaceDir: string): string {
       );
       return null;
     }
-    return `# Memory Index\n\n<!-- migrated from MEMORY.md -->\n\n${legacy.text}\n`;
+    return `# Memory Index\n\n${MIGRATED_START_MARKER}\n\n${legacy.text.trimEnd()}\n\n${MIGRATED_END_MARKER}\n`;
   });
   makeMissingFile(path.join(soulDir, 'memory', '.meta', 'index.json'), () => META_INDEX);
 

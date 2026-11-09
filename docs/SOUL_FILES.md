@@ -65,7 +65,13 @@ Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
 The LLM folds new conversation into pages when memory consolidates: a
 [`souledAgent`](getting-started/HIGH_LEVEL_API.md) runs this on the agent's `close()`,
 and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new facts
-rather than clobbering human edits. The runtime does not version the pages.
+rather than clobbering human edits, and each page written is dated with the time
+of the compile. The runtime does not version the pages.
+
+The traces a `souledAgent`'s own observer stores carry no entities, so the default
+clusterer merges them into the page `concepts/notes`. Entity pages come from traces
+stored with entities through `agent.memory.remember()`, or from a clusterer passed
+to `attachMemoryWiki()`.
 
 A page's id is its path under `memory/` without `.md`, with `/` between folders:
 `entities/johnny` is `memory/entities/johnny.md`. An id is one or more names joined
@@ -103,7 +109,14 @@ into the system prompt and starts the folder, follows no link: see
 [Loading a Soul](#loading-a-soul).
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
-and is left untouched on disk.
+and is left untouched on disk. The copied text sits between the markers
+`<!-- migrated from MEMORY.md -->` and `<!-- end of MEMORY.md -->`. When the wiki
+writes its catalog into `index.md`, it keeps that block and writes the catalog
+after it, so the text stays in the system prompt. An `index.md` with the start
+marker and no end marker (as earlier versions wrote it) is read as a block that
+runs to the end of the file, and gets its end marker on the first catalog write.
+An `index.md` with no start marker is replaced by the catalog. The end marker
+itself stays out of the system prompt.
 
 ## SOUL.md Format
 
@@ -212,7 +225,7 @@ The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, ME
 
 The `hexaco:` block in SOUL.md frontmatter maps directly to AgentOS's existing
 [HEXACO personality model](./memory/HEXACO_PERSONALITY.md). The scores land in
-`personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits:
+`personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits; their trait paragraph reaches the prompt only with a learning layer ([GMI.md](./GMI.md#learning)):
 
 - [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): with `emergentConfig.selfImprovement.enabled`, changes a trait for the session's GMI within a per-session budget
 - [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts): records those changes when a storage adapter is configured

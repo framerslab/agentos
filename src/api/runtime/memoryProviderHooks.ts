@@ -5,7 +5,9 @@
  *
  * Used by all four agent call paths (`Agent.generate`, `Agent.stream`,
  * `AgentSession.send`, `AgentSession.stream`) to consistently invoke
- * `memory.getContext` before the LLM call and `memory.observe` after.
+ * `memory.getContext` before the LLM call and `memory.observe` after. The
+ * turn never waits for `observe`, and a failure to record the turn is logged
+ * sparsely (see `observeWithoutWaiting`).
  * Pure function: returns a new options object without mutating inputs.
  *
  * @module api/runtime/memoryProviderHooks
@@ -16,6 +18,7 @@ import type {
   GenerationHookResult,
 } from '../generateText.js';
 import type { AgentMemoryProvider } from '../agent.js';
+import { observeWithoutWaiting } from './memoryObserveFailures.js';
 
 /** Timeout applied to memory.getContext calls to prevent hangs. */
 export const MEMORY_TIMEOUT_MS = 5000;
@@ -144,13 +147,10 @@ export function applyMemoryProvider(
     result: GenerationHookResult,
   ): Promise<GenerationHookResult | void> => {
     if (hasObserve) {
-      void provider!.observe!('user', userText).catch(() => {
-        /* fire-and-forget */
-      });
+      // The turn is answered: it never waits for the provider, and a failure to record it is logged sparsely.
+      observeWithoutWaiting(provider!, 'user', userText);
       if (result.text) {
-        void provider!.observe!('assistant', result.text).catch(() => {
-          /* fire-and-forget */
-        });
+        observeWithoutWaiting(provider!, 'assistant', result.text);
       }
     }
     if (userOnAfter) {

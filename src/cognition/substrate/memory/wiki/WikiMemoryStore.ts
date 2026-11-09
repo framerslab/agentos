@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { parsePage, serializePage, renderCatalog } from './WikiPageCodec.js';
 import { isWikiPageId, resolveWikiPagePath } from './WikiPageId.js';
+import { migratedBlockOf } from './migrateMemoryMd.js';
 import type { WikiPage, MetaIndex, IndexResult } from './types.js';
 
 /** One entry of a folder's listing: its name, and whether it is a folder. `fs.Dirent` has this shape. */
@@ -68,6 +69,15 @@ function pageEntries(pages: unknown): MetaIndex['pages'] {
   return entries;
 }
 
+/** The heading `renderCatalog` opens index.md with. */
+const CATALOG_HEADING = '# Memory Index\n';
+
+/** index.md with the migrated `MEMORY.md` block under its heading and the catalog's sections after it. */
+function withMigratedText(catalog: string, migrated: string): string {
+  const sections = (catalog.startsWith(CATALOG_HEADING) ? catalog.slice(CATALOG_HEADING.length) : catalog).replace(/^\n+/, '');
+  return `${CATALOG_HEADING}\n${migrated}\n${sections ? `\n${sections}` : ''}`;
+}
+
 /** The slice of the Memory facade the store depends on (injected for testability). */
 export interface MemoryIndexPort {
   remember(content: string, options?: Record<string, unknown>): Promise<{ id: string }>;
@@ -129,7 +139,8 @@ export class WikiMemoryStore {
   }
 
   /**
-   * Write a page, then refresh index.md from the full page set.
+   * Write a page, then refresh index.md from the full page set. Text migrated from a legacy `MEMORY.md` that
+   * index.md holds (see `migratedBlockOf`) is kept, and the catalog is written after it.
    *
    * @throws InvalidWikiPageIdError when the page's id is refused (see `isWikiPageId`); nothing is written.
    */
@@ -150,7 +161,15 @@ export class WikiMemoryStore {
 
   private async refreshCatalog(): Promise<void> {
     const pages = await this.load();
-    await fs.writeFile(path.join(this.memoryDir, 'index.md'), renderCatalog(pages));
+    const indexPath = path.join(this.memoryDir, 'index.md');
+    let migrated: string | null = null;
+    try {
+      migrated = migratedBlockOf(await fs.readFile(indexPath, 'utf8'));
+    } catch {
+      // No index yet, or one that cannot be read: the catalog alone.
+    }
+    const catalog = renderCatalog(pages);
+    await fs.writeFile(indexPath, migrated === null ? catalog : withMigratedText(catalog, migrated));
   }
 
   /** The page ids under memory/ (see `listWikiPageIds`). */

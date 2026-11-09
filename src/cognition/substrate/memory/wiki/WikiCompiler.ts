@@ -27,7 +27,10 @@ export interface WikiCompilerOptions {
   llm: (prompt: string) => Promise<string>;
   /** Group traces into target pages. Injected (LLM- or heuristic-backed). */
   cluster: (traces: TraceLike[]) => Promise<ClusterAssignment[]>;
-  /** Current ISO timestamp provider (injected for determinism in tests). */
+  /**
+   * The clock that dates each written page's `updated` field, as an ISO 8601 timestamp. Defaults to the current
+   * time; pass one for a fixed date, as tests do.
+   */
   now?: () => string;
 }
 
@@ -75,7 +78,7 @@ export class WikiCompiler {
 
     const assignments = await this.opts.cluster(traces);
     const byId = new Map(traces.map((t) => [t.id, t]));
-    const now = this.opts.now ?? (() => new Date(0).toISOString());
+    const now = this.opts.now ?? (() => new Date().toISOString());
 
     for (const a of assignments) {
       const facts = a.traceIds.map((id) => byId.get(id)?.content).filter((c): c is string => !!c);
