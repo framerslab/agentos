@@ -23,8 +23,10 @@ import {
   type AgentOptions,
   type Agent,
   type AgentMemoryProvider,
+  type AgentSession,
 } from './agent.js';
 import { generateText } from './generateText.js';
+import type { StreamTextResult } from './streamText.js';
 import { Memory } from '../cognition/memory/io/facade/Memory.js';
 import { attachMemoryWiki } from '../cognition/memory/io/attachMemoryWiki.js';
 import { SemanticChunker } from '../cognition/rag/chunking/SemanticChunker.js';
@@ -39,7 +41,10 @@ import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 /** Characters a token is estimated at, as `estimateTokens` counts them. */
 const CHARS_PER_TOKEN = 4;
 
-/** How long `close()` waits for the memory writes of the agent's turns before it compiles, unless an option sets it. */
+/**
+ * How long `close()` waits for the agent's turns still running and for the memory writes of its turns before it
+ * compiles, unless an option sets it.
+ */
 export const DEFAULT_PENDING_WRITES_TIMEOUT_MS = 5_000;
 
 /** The longest delay a timer takes (2^31 - 1 ms, about 24.8 days); a longer one fires at once. */
@@ -140,9 +145,10 @@ function recallWithinBudget(lines: readonly RecallLine[], tokenBudget: number): 
 }
 
 /**
- * Wait for `pending` to empty, up to `timeoutMs`; a write added while waiting is waited for too.
+ * Wait for `pending` to empty, up to `timeoutMs`; a promise added while waiting (a turn's memory write, which its
+ * observe hook adds before the turn settles) is waited for too.
  *
- * @returns How many writes are still pending when the wait ends.
+ * @returns How many promises are still pending when the wait ends.
  */
 async function waitForWrites(pending: Set<Promise<unknown>>, timeoutMs: number): Promise<number> {
   if (pending.size === 0 || timeoutMs <= 0) return pending.size;
@@ -177,10 +183,11 @@ function codePointPrefix(text: string, maxUnits: number): string {
 export interface SouledAgentOptions extends AgentOptions {
   soul: NonNullable<AgentOptions['soul']>;
   /**
-   * How long `close()` waits, in milliseconds, for the memory writes of the agent's turns before it compiles the wiki.
-   * Default {@link DEFAULT_PENDING_WRITES_TIMEOUT_MS} (5 seconds); 0 waits for none, and `Infinity` (or any wait past
-   * the longest timer, about 24.8 days) waits for them all. When the wait ends with writes still pending, the compile
-   * takes what is stored and one `console.warn` line gives their number.
+   * How long `close()` waits, in milliseconds, for the agent's turns still running and then for the memory writes of
+   * its turns, one deadline for both, before it compiles the wiki. Default {@link DEFAULT_PENDING_WRITES_TIMEOUT_MS}
+   * (5 seconds); 0 waits for none, and `Infinity` (or any wait past the longest timer, about 24.8 days) waits for them
+   * all. When the wait ends with turns or writes still pending, the compile takes what is stored and one `console.warn`
+   * line gives their number.
    */
   pendingWritesTimeoutMs?: number;
 }
@@ -208,11 +215,12 @@ export type SouledAgent = Agent & { memory?: Memory };
  * settings, are checked against and charged to its spend budget, and are written to its usage ledger under the source
  * {@link SOULED_AGENT_COMPILE_SOURCE}.
  *
- * `close()` first closes the agent, then waits for the memory writes of its turns (see
- * {@link SouledAgentOptions.pendingWritesTimeoutMs}), then compiles the wiki, then closes the store. It does not wait
- * for a turn still running: with `runtime: 'gmi'` the agent's close stops it, and on the default runtime it goes on and
- * its memory writes come after the store is closed, so neither is folded into the wiki. Await each turn before
- * `close()`.
+ * `close()` first closes the agent (with `runtime: 'gmi'` that stops its session turns), then waits, within one
+ * deadline (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), for the turns still running (a `generate()`, a
+ * `stream()`, a session's `send()` or `stream()`, on either runtime; a stream nobody reads keeps the wait until the
+ * deadline) and for the memory writes of its turns, then compiles the wiki, then closes the store. A turn or a write
+ * still pending when the deadline passes is left out of the compile, and a write that reaches the store after it is
+ * closed is not stored.
  *
  * @param opts - Agent options with a required `soul`.
  * @returns A fully-wired {@link Agent}.
@@ -253,9 +261,23 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     selfImprove: true,
   });
 
-  // The writes the observer has started and that have not settled: close() waits for them before it compiles. The
-  // turn itself never waits for them.
-  const pendingWrites = new Set<Promise<unknown>>();
+  // The turns still running and the memory writes the observer has started, until each settles: close() waits for
+  // them before it compiles. A turn never waits for its writes.
+  const pending = new Set<Promise<unknown>>();
+  /** Adds `work` to what close() waits for, until it settles; returns it unchanged. */
+  const awaitedOnClose = <T>(work: Promise<T>): Promise<T> => {
+    pending.add(work);
+    const settle = () => {
+      pending.delete(work);
+    };
+    void work.then(settle, settle);
+    return work;
+  };
+  /** A stream is settled once its usage is known, which is after its observe hook has run. */
+  const awaitStreamOnClose = (result: StreamTextResult): StreamTextResult => {
+    awaitedOnClose(result.usage.then(() => undefined, () => undefined));
+    return result;
+  };
 
   // Adapt the Memory facade directly to the provider contract. AgentMemory's own
   // getContext/observe signatures don't match AgentMemoryProvider, so wrap the
@@ -263,17 +285,14 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const provider: AgentMemoryProvider = {
     observe: (role, text) => {
       // Who spoke goes in the trace's metadata: outside its text and its tags, which full-text search reads.
-      const write = memory.remember(text, {
-        type: 'episodic',
-        scope: 'persona',
-        scopeId: agentId,
-        metadata: { [SPEAKER_METADATA_KEY]: role },
-      });
-      pendingWrites.add(write);
-      const settle = () => {
-        pendingWrites.delete(write);
-      };
-      void write.then(settle, settle);
+      const write = awaitedOnClose(
+        memory.remember(text, {
+          type: 'episodic',
+          scope: 'persona',
+          scopeId: agentId,
+          metadata: { [SPEAKER_METADATA_KEY]: role },
+        }),
+      );
       return write.then(() => undefined);
     },
     getContext: async (text, options) => {
@@ -292,14 +311,16 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     },
   };
 
-  // The compile's model calls: the agent's route and fallback settings, its budget (checked before each call and
-  // charged after it; a refusal fails the compile, and the watermark stays where it was), and its usage ledger.
+  // The compile's model calls: the agent's route and fallback settings, its completion cap (the budget's check
+  // estimates a call without one at 4,096 output tokens), its budget (checked before each call and charged after it; a
+  // refusal fails the compile, and the watermark stays where it was), and its usage ledger.
   const llm = async (prompt: string): Promise<string> =>
     (
       await generateText({
         provider: rest.provider,
         model: rest.model,
         prompt,
+        maxTokens: rest.maxTokens ?? rest.controls?.maxTotalTokens,
         apiKey: rest.apiKey,
         baseUrl: rest.baseUrl,
         fallbackProviders: rest.fallbackProviders,
@@ -334,9 +355,30 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   const built = agent({ ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools }) as SouledAgent;
 
-  // On teardown: close the agent (with runtime: 'gmi' that stops its running turns and shuts its sessions down; the
-  // default runtime's close does not wait for a running turn); wait for the memory writes of its turns; fold the
-  // conversation into the wiki; then close the backing store. The compile is best-effort (a failed LLM merge must
+  // Every turn joins what close() waits for: its promise, or a stream's settled usage. The default runtime's own close
+  // does not wait for a running turn, and the GMI runtime's does not wait for a one-shot call.
+  const generateTurn = built.generate.bind(built);
+  built.generate = (prompt, extra) => awaitedOnClose(generateTurn(prompt, extra));
+  const streamTurn = built.stream.bind(built);
+  built.stream = (prompt, extra) => awaitStreamOnClose(streamTurn(prompt, extra));
+  const openSession = built.session.bind(built);
+  const trackedSessions = new WeakSet<AgentSession>();
+  built.session = (id, sessionOptions) => {
+    const session = openSession(id, sessionOptions);
+    // A runtime that hands the same session object back is wrapped once.
+    if (!trackedSessions.has(session)) {
+      trackedSessions.add(session);
+      const send = session.send.bind(session) as (...args: unknown[]) => Promise<unknown>;
+      session.send = ((...args: unknown[]) => awaitedOnClose(send(...args))) as AgentSession['send'];
+      const streamSession = session.stream.bind(session);
+      session.stream = (input, streamOpts) => awaitStreamOnClose(streamSession(input, streamOpts));
+    }
+    return session;
+  };
+
+  // On teardown: close the agent (with runtime: 'gmi' that stops its running session turns and shuts its sessions
+  // down); wait, within one deadline, for the turns still running and then for the memory writes of its turns; fold
+  // the conversation into the wiki; then close the backing store. The compile is best-effort (a failed LLM merge must
   // never block teardown) and a failure is logged; closing prevents leaked SQLite handles in long-lived hosts. An
   // error from the agent's own close is thrown once the store is closed.
   const originalClose = built.close.bind(built);
@@ -350,12 +392,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       closeError = err;
     }
     try {
-      const stillPending = await waitForWrites(pendingWrites, waitMs);
+      const stillPending = await waitForWrites(pending, waitMs);
       if (stillPending > 0) {
         console.warn(
-          `[agentos] souledAgent: close() waited ${waitMs} ms for the memory writes of its turns; ` +
-            `writes still pending: ${stillPending}. The wiki compile takes what is stored, and the pending writes may ` +
-            'not be stored once the store closes.',
+          `[agentos] souledAgent: close() waited ${waitMs} ms for its turns still running and the memory writes of ` +
+            `its turns; still pending: ${stillPending}. The wiki compile takes what is stored, and a write that ` +
+            'reaches the store once it is closed is not stored.',
         );
       }
       try {

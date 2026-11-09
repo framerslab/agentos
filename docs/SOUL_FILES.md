@@ -99,19 +99,23 @@ for the notes page), set its `summary:` front matter to the line you want, and t
 next compile writes that line into the catalog; or edit the line in `index.md`
 directly, which the next catalog write replaces with the page's summary.
 
-`souledAgent()`'s `close()` runs in this order: the agent's own close; a wait for the
-memory writes of its turns, up to 5 seconds (`pendingWritesTimeoutMs` sets it, 0
-waits for none, `Infinity` for all of them); the compile; then the store's close. A
-turn never waits for its memory writes; only `close()` does. When the wait ends with
-writes still pending, the compile takes what is stored and one `console.warn` line
-gives the number still pending. `close()` does not wait for a turn still running when
-it is called: with `runtime: 'gmi'` the agent's close stops the turn, and on the
-default runtime the turn goes on and its memory writes come after the store is
-closed, so neither turn is folded into the wiki. Await each turn before `close()`.
+`souledAgent()`'s `close()` runs in this order: the agent's own close (with
+`runtime: 'gmi'` it stops the session turns still running; the default runtime's
+lets them run on); one wait, up to 5 seconds (`pendingWritesTimeoutMs` sets it, 0
+waits for none, `Infinity` for all of them), first for the turns still running (a
+`generate()`, a `stream()`, a session's `send()` or `stream()`, on either runtime),
+then for the memory writes of its turns; the compile; then the store's close. A turn
+never waits for its memory writes; only `close()` does. When the wait ends with turns
+or writes still pending, the compile takes what is stored and one `console.warn`
+line gives the number still pending; a turn or a write that ends after that is not
+folded into the wiki, and a write that reaches the store once it is closed is not
+stored. A stream nobody reads keeps the wait until the deadline, so read or abort
+each stream before `close()`.
 The compile's model calls go on the agent's route with its fallback settings (`fallbackProviders`,
-`onFallback`, `router`, `policyTier`), are checked against and charged to the
-agent's `budget` like its own calls, and are written to its usage ledger under the
-source `souledAgent.compileWiki`. A call the budget refuses fails the compile, which
+`onFallback`, `router`, `policyTier`), carry the agent's completion cap (`maxTokens`,
+or `controls.maxTotalTokens`; the budget's check estimates a call without one at 4,096
+output tokens), are checked against and charged to the agent's `budget` like its own
+calls, and are written to its usage ledger under the source `souledAgent.compileWiki`. A call the budget refuses fails the compile, which
 `close()` logs as any failed compile; the watermark stays where it was, so the next
 compile takes the same traces up again.
 
