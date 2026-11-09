@@ -575,6 +575,15 @@ describe('MemoryPromptAssembler', () => {
       expect(graph.tokensUsed).toBeLessThanOrEqual(30);
     });
 
+    it('keeps a blank line in working memory text and the slots after it when they fit', () => {
+      // A host that calls assembleMemoryContext itself may separate its working memory with blank lines.
+      const text = '- [ACTIVE] mt_first (activation: 0.95)\n\n- [ACTIVE] mt_second (activation: 0.90)';
+      const result = assembleMemoryContext({ totalTokenBudget: 200, traits: {}, workingMemoryText: text });
+      expect(result.contextText).toContain(`## Active Context (in focus — reference directly)\n${text}`);
+      expect(result.tokensUsed).toBeLessThanOrEqual(200);
+      expect(tokensOf(result.contextText)).toBeLessThanOrEqual(200);
+    });
+
     it('never ends a cut inside a surrogate pair', () => {
       const emoji = '\u{1F600}'.repeat(2000);
       const now = Date.UTC(2026, 10, 8, 12, 0, 0);
