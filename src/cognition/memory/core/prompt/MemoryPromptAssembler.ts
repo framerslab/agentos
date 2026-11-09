@@ -143,7 +143,7 @@ export interface MemoryAssemblerInput {
    * more than 1). A share is a floor for a section with content: budget left
    * unused flows on in {@link MEMORY_BUDGET_SPILL_ORDER}. A share set to
    * exactly 0 turns its section off (no grant and no spill); a key left out,
-   * or set to `undefined`, keeps its default share.
+   * or set to `undefined` or `null`, keeps its default share.
    */
   allocation?: Partial<MemoryBudgetAllocation>;
   /** HEXACO traits for formatting style selection. */
@@ -433,7 +433,7 @@ function renderInvoluntary(
  * memory's (at most {@link INVOLUNTARY_MAX_SHARE} of the rest) when a host
  * passes the mechanisms engine. Each section is then granted its share of
  * what remains (`allocation` over {@link DEFAULT_BUDGET_ALLOCATION}, where a
- * key set to `undefined` keeps its default; shares that are not finite
+ * key set to `undefined` or `null` keeps its default; shares that are not finite
  * positive numbers count as 0, and shares adding up to more than 1 are scaled
  * down), capped at what its content needs. A section whose share is set to
  * exactly 0 is off: it gets no grant, takes no spill and is left out.
@@ -486,7 +486,7 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
   const alloc: MemoryBudgetAllocation = { ...DEFAULT_BUDGET_ALLOCATION };
   for (const key of BLOCK_ORDER) {
     const share = input.allocation?.[key];
-    if (share !== undefined) alloc[key] = share;
+    if (share != null) alloc[key] = share;
   }
   /** A section the caller turned off by setting its share to exactly 0. */
   const off = (key: SectionKey): boolean => alloc[key] === 0;

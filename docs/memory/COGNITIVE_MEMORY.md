@@ -592,7 +592,7 @@ Assembles memory context into a single formatted string within a token budget, s
 
 ### Default Budget Allocation
 
-A share is the least a section with content gets, not a cap (see [Overflow Redistribution](#overflow-redistribution)). Shares set through `tokenBudget` that add up to more than 1 are scaled down, and a share that is not a finite positive number counts as 0. A share set to exactly 0 turns its section off: it gets no grant, takes none of the budget other sections leave unused, and is left out of the block. A key left out of `tokenBudget`, or set to `undefined`, keeps its default share. The `allocation` the assembly returns holds the shares it used: the defaults with the configured shares over them, 0 for the ones that count as 0, scaled down when they add up to more than 1.
+A share is the least a section with content gets, not a cap (see [Overflow Redistribution](#overflow-redistribution)). Shares set through `tokenBudget` that add up to more than 1 are scaled down, and a share that is not a finite positive number counts as 0. A share set to exactly 0 turns its section off: it gets no grant, takes none of the budget other sections leave unused, and is left out of the block. A key left out of `tokenBudget`, or set to `undefined` or `null`, keeps its default share. The `allocation` the assembly returns holds the shares it used: the defaults with the configured shares over them, 0 for the ones that count as 0, scaled down when they add up to more than 1.
 
 ```typescript
 // Never show recent episodic memories; every other section keeps its default share.
@@ -688,7 +688,7 @@ Token estimation uses ~4 chars per token heuristic.
   const lines = (input.graphContext ?? []).map((item) => (typeof item === 'string' ? item : item.text));
   ```
 
-- `createAgentCognitiveMemory` passes the `cognitiveMemoryConfig` of the persona it is given to the manager it builds: `tokenBudget`, `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` (laid over its `{ backend: 'knowledge-graph' }`) and `infiniteContext`, a field or key set to `undefined` or `null` keeping the default. Through 0.15.121 the fields were declared and nothing read them, so the manager ran on the default shares and settings. `featureDetectionStrategy` is still not read: `createAgentCognitiveMemory` runs `'keyword'`. `infiniteContext` takes effect only with `maxContextTokens`, which `createAgentCognitiveMemory` does not set.
+- `createAgentCognitiveMemory` passes the `cognitiveMemoryConfig` of the persona it is given to the manager it builds: `tokenBudget`, `encoding`, `decay`, `workingMemoryCapacity`, `observer`, `reflector`, `graph` (laid over its `{ backend: 'knowledge-graph' }`) and `infiniteContext`, a field or key set to `undefined` or `null` keeping the default. The persona loaders drop the `null` values a persona read from JSON holds inside `cognitiveMemoryConfig` (a field, a key inside a field, or the whole config set to `null`), so a host's `cognitiveMemoryFactory` gets a persona that matches `CognitiveMemoryPersonaConfig`. Through 0.15.121 the fields were declared and nothing read them, so the manager ran on the default shares and settings. `featureDetectionStrategy` is still not read: `createAgentCognitiveMemory` runs `'keyword'`. `infiniteContext` takes effect only with `maxContextTokens`, which `createAgentCognitiveMemory` does not set.
 
 ### Upgrading from 0.15.120 or earlier
 

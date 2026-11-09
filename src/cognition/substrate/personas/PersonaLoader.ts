@@ -197,7 +197,7 @@ export class PersonaLoader implements IPersonaLoader {
         }
 
         const normalized = normalizePersonaDefinition(personaDefinition);
-        if (normalized !== personaDefinition) {
+        if (normalized.metaPrompts !== personaDefinition.metaPrompts) {
           console.log(`PersonaLoader (ID: ${this.loaderId}): Merged ${normalized.metaPrompts?.length ?? 0} metaprompts for persona '${normalized.id}' from sentimentTracking.presets.`);
         }
 

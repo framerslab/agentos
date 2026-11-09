@@ -221,13 +221,14 @@ export interface ConsolidationConfig {
  * A persona's cognitive memory settings. `createAgentCognitiveMemory` passes
  * each field but `featureDetectionStrategy` to the manager it builds, under
  * the same name in {@link CognitiveMemoryConfig}; a field or key left out, or
- * set to `undefined` or `null` (as a persona read from JSON writes an unset
- * key), keeps the default. The type lists no `null`: it is what a TypeScript
- * author writes and what a host reading `persona.cognitiveMemoryConfig` gets,
- * while a persona parsed from JSON reaches `createAgentCognitiveMemory`
- * untyped. A host that builds its manager from a
- * persona itself (`gmiManagerConfig.cognitiveMemoryFactory`) passes them the
- * same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from
+ * set to `undefined`, keeps the default. The type lists no `null`, and a
+ * loaded persona holds none: the persona loaders (the file-system
+ * `PersonaLoader`, `InMemoryPersonaLoader` and `normalizePersonaDefinition`,
+ * which both run) drop a field set to `null`, a key set to `null` inside a
+ * field, and a `cognitiveMemoryConfig` set to `null`, as a persona read from
+ * JSON writes an unset key. A host that builds its manager from a persona
+ * itself (`gmiManagerConfig.cognitiveMemoryFactory`) gets the persona so
+ * normalized, and passes the fields the same way. `agent({ runtime: 'gmi' })` and `gmi()` build their persona from
  * their options, which set no `cognitiveMemoryConfig`.
  */
 export interface CognitiveMemoryPersonaConfig {
@@ -247,8 +248,8 @@ export interface CognitiveMemoryPersonaConfig {
    * finite positive number counts as 0). Unused budget flows to the sections
    * that still have content. A share of exactly 0 turns its section off: it
    * gets no grant and no unused budget. A key left out or set to `undefined`
-   * keeps its default share, and so does one set to `null` on the way
-   * through `createAgentCognitiveMemory`, which passes it to the
+   * keeps its default share (a persona loader drops a key a JSON file sets to
+   * `null`). `createAgentCognitiveMemory` passes it to the
    * manager it builds as {@link CognitiveMemoryConfig.tokenBudget}; a host that
    * builds its manager from a persona itself
    * (`gmiManagerConfig.cognitiveMemoryFactory`) passes it the same way.
@@ -317,7 +318,7 @@ export interface CognitiveMemoryConfig {
   /**
    * Section shares of the memory block's budget, over
    * {@link DEFAULT_BUDGET_ALLOCATION}. A share of exactly 0 turns its section
-   * off; a key left out or set to `undefined` keeps its default.
+   * off; a key left out or set to `undefined` or `null` keeps its default.
    */
   tokenBudget?: Partial<MemoryBudgetAllocation>;
 
