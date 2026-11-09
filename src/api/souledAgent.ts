@@ -30,6 +30,7 @@ import { attachMemoryWiki } from '../cognition/memory/io/attachMemoryWiki.js';
 import { SemanticChunker } from '../cognition/rag/chunking/SemanticChunker.js';
 import { estimateTokens } from '../core/utils/text-utils.js';
 import { formatMemoryAge } from '../cognition/memory/core/prompt/MemoryFormatters.js';
+import { parseTraceMetadata } from '../cognition/memory/retrieval/store/tracePersistence.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET } from './runtime/memoryProviderHooks.js';
 import { messageOf } from './runtime/memoryObserveFailures.js';
 import { asSpendBudget } from './runtime/spendBudget.js';
@@ -41,11 +42,21 @@ const CHARS_PER_TOKEN = 4;
 /** How long `close()` waits for the memory writes of the agent's turns before it compiles, unless an option sets it. */
 export const DEFAULT_PENDING_WRITES_TIMEOUT_MS = 5_000;
 
+/** The longest delay a timer takes (2^31 - 1 ms, about 24.8 days); a longer one fires at once. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /** The usage ledger's source for the model calls of the wiki compile a souled agent runs. */
 export const SOULED_AGENT_COMPILE_SOURCE = 'souledAgent.compileWiki';
 
-/** The tag a trace the observer stores carries for who spoke it: `speaker:user` or `speaker:assistant`. */
-const SPEAKER_TAG = 'speaker:';
+/**
+ * The key of the trace metadata in which the observer records who spoke a trace: `'user'` or `'assistant'`. It is
+ * kept out of the trace's text and its tags, which the store's full-text search reads, so a search never matches a
+ * trace by who spoke it.
+ */
+export const SPEAKER_METADATA_KEY = 'speaker';
+
+/** Who spoke a trace, as the observer records it. */
+type Speaker = 'user' | 'assistant';
 
 /** The tag a wiki page chunk carries for its page: `page:<id>`. */
 const PAGE_TAG = 'page:';
@@ -57,18 +68,39 @@ interface RecallLine {
   content: string;
 }
 
+/** The page id of a chunk of a wiki page, from the tags the wiki gives it (`wiki` and `page:<id>`); else undefined. */
+function wikiPageOf(trace: { tags: readonly string[] }): string | undefined {
+  if (!trace.tags.includes('wiki')) return undefined;
+  return trace.tags.find((tag) => tag.startsWith(PAGE_TAG))?.slice(PAGE_TAG.length);
+}
+
+/** The speaker recorded in a trace's metadata (`'user'` or `'assistant'`); undefined for any other value or none. */
+function speakerIn(metadata: string | undefined): Speaker | undefined {
+  const speaker = parseTraceMetadata(metadata)[SPEAKER_METADATA_KEY];
+  return speaker === 'user' || speaker === 'assistant' ? speaker : undefined;
+}
+
 /**
- * The label a recalled trace's line opens with: who spoke it (`user` or `assistant`, from the tag the observer gave it,
- * or `note` and the page id for a chunk of a wiki page) and when it was stored, in the memory block's wording
+ * The label a recalled trace's line opens with: who spoke it (`user` or `assistant`, as the observer recorded it, or
+ * `note` and the page id for a chunk of a wiki page) and when it was stored, in the memory block's wording
  * (`26 days ago, 2026-10-14`). A trace with no speaker, such as one stored before speakers were recorded, has the date
  * alone.
  */
-function recallPrefix(trace: { tags: readonly string[]; createdAt: number }, now: number): string {
+function recallPrefix(trace: { createdAt: number }, speaker: string | undefined, now: number): string {
   const when = formatMemoryAge(trace.createdAt, now);
-  const pageTag = trace.tags.includes('wiki') ? trace.tags.find((tag) => tag.startsWith(PAGE_TAG)) : undefined;
-  const speakerTag = trace.tags.find((tag) => tag.startsWith(SPEAKER_TAG));
-  const speaker = pageTag ? `note ${pageTag.slice(PAGE_TAG.length)}` : speakerTag?.slice(SPEAKER_TAG.length);
   return speaker ? `[${speaker}, ${when}] ` : `[${when}] `;
+}
+
+/**
+ * A trace's text on one line: its lines, each trimmed, joined by one space, blank ones left out. The text of a trace
+ * can then never open a line of the recall block, where only a label opens one. Linear in the text's length.
+ */
+function onOneLine(text: string): string {
+  return text
+    .split(/[\n\r\v\f\u0085\u2028\u2029]/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(' ');
 }
 
 /**
@@ -101,8 +133,9 @@ function recallWithinBudget(lines: readonly RecallLine[], tokenBudget: number): 
   const prefix = room >= 1 ? recalled[0].prefix : '';
   const maxChars = Math.max(1, room >= 1 ? room : budget * CHARS_PER_TOKEN);
   const head = codePointPrefix(content, maxChars);
-  // Cut back to the last whitespace when the cut falls inside a word.
-  const cut = /\s/.test(content.charAt(maxChars)) ? head : head.replace(/\s+\S*$/, '');
+  // Cut back to the last whitespace when the cut falls inside a word; text that fits whole is not cut.
+  const whole = head.length >= content.length;
+  const cut = whole || /\s/.test(content.charAt(maxChars)) ? head : head.replace(/\s+\S*$/, '');
   return prefix + (cut.trimEnd() || head);
 }
 
@@ -115,7 +148,8 @@ async function waitForWrites(pending: Set<Promise<unknown>>, timeoutMs: number):
   if (pending.size === 0 || timeoutMs <= 0) return pending.size;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<'deadline'>((resolve) => {
-    timer = setTimeout(() => resolve('deadline'), timeoutMs);
+    // A timer longer than the longest one fires at once, so a longer wait is held to the longest.
+    timer = setTimeout(() => resolve('deadline'), Math.min(timeoutMs, MAX_TIMER_DELAY_MS));
     (timer as { unref?: () => void }).unref?.();
   });
   try {
@@ -144,8 +178,9 @@ export interface SouledAgentOptions extends AgentOptions {
   soul: NonNullable<AgentOptions['soul']>;
   /**
    * How long `close()` waits, in milliseconds, for the memory writes of the agent's turns before it compiles the wiki.
-   * Default {@link DEFAULT_PENDING_WRITES_TIMEOUT_MS} (5 seconds); 0 waits for none. When the wait ends with writes
-   * still pending, the compile takes what is stored and one `console.warn` line gives their number.
+   * Default {@link DEFAULT_PENDING_WRITES_TIMEOUT_MS} (5 seconds); 0 waits for none, and `Infinity` (or any wait past
+   * the longest timer, about 24.8 days) waits for them all. When the wait ends with writes still pending, the compile
+   * takes what is stored and one `console.warn` line gives their number.
    */
   pendingWritesTimeoutMs?: number;
 }
@@ -167,13 +202,17 @@ export type SouledAgent = Agent & { memory?: Memory };
  * souls (`{ content }`) there is no workspace, so this falls back to a plain
  * {@link agent} and says so in one `console.warn` line.
  *
- * Each stored turn carries who spoke it, as a `speaker:user` or `speaker:assistant` tag, and each recalled trace is
- * rendered with its speaker and its date. The wiki compile's model calls go on the agent's route with its fallback
+ * Each stored turn records who spoke it in the trace's metadata ({@link SPEAKER_METADATA_KEY}), outside its text and
+ * its tags, so recall never matches a trace by its speaker; each recalled trace is rendered on one line with its
+ * speaker and its date. The wiki compile's model calls go on the agent's route with its fallback
  * settings, are checked against and charged to its spend budget, and are written to its usage ledger under the source
  * {@link SOULED_AGENT_COMPILE_SOURCE}.
  *
- * `close()` first closes the agent (running turns end and sessions shut down), then waits for the memory writes of
- * its turns (see {@link SouledAgentOptions.pendingWritesTimeoutMs}), then compiles the wiki, then closes the store.
+ * `close()` first closes the agent, then waits for the memory writes of its turns (see
+ * {@link SouledAgentOptions.pendingWritesTimeoutMs}), then compiles the wiki, then closes the store. It does not wait
+ * for a turn still running: with `runtime: 'gmi'` the agent's close stops it, and on the default runtime it goes on and
+ * its memory writes come after the store is closed, so neither is folded into the wiki. Await each turn before
+ * `close()`.
  *
  * @param opts - Agent options with a required `soul`.
  * @returns A fully-wired {@link Agent}.
@@ -195,6 +234,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     );
     return agent(rest);
   }
+  // NaN, a negative number or none is the default; Infinity is held to the longest timer when the wait starts.
   const waitMs =
     typeof pendingWritesTimeoutMs === 'number' && pendingWritesTimeoutMs >= 0
       ? pendingWritesTimeoutMs
@@ -222,12 +262,12 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   // facade's remember/recall here.
   const provider: AgentMemoryProvider = {
     observe: (role, text) => {
-      // Who spoke goes on the trace as a tag, outside its text.
+      // Who spoke goes in the trace's metadata: outside its text and its tags, which full-text search reads.
       const write = memory.remember(text, {
         type: 'episodic',
         scope: 'persona',
         scopeId: agentId,
-        tags: [`${SPEAKER_TAG}${role}`],
+        metadata: { [SPEAKER_METADATA_KEY]: role },
       });
       pendingWrites.add(write);
       const settle = () => {
@@ -239,10 +279,15 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     getContext: async (text, options) => {
       const scored = await memory.recall(text, { limit: 8 });
       const now = Date.now();
-      const contextText = recallWithinBudget(
-        scored.map((s) => ({ prefix: recallPrefix(s.trace, now), content: s.trace.content })),
-        options?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET,
+      // A recalled trace carries no metadata, so each one's speaker is read from its stored record.
+      const lines = await Promise.all(
+        scored.map(async ({ trace }) => {
+          const page = wikiPageOf(trace);
+          const speaker = page ? `note ${page}` : speakerIn((await memory.readTrace(trace.id))?.metadata);
+          return { prefix: recallPrefix(trace, speaker, now), content: onOneLine(trace.content) };
+        }),
       );
+      const contextText = recallWithinBudget(lines, options?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET);
       return contextText ? { contextText } : null;
     },
   };
@@ -289,10 +334,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
 
   const built = agent({ ...rest, ...(budget ? { budget } : {}), memoryProvider: provider, tools }) as SouledAgent;
 
-  // On teardown: close the agent, so its running turns end and their sessions shut down; wait for the memory writes
-  // of those turns; fold the conversation into the wiki; then close the backing store. The compile is best-effort (a
-  // failed LLM merge must never block teardown) and a failure is logged; closing prevents leaked SQLite handles in
-  // long-lived hosts. An error from the agent's own close is thrown once the store is closed.
+  // On teardown: close the agent (with runtime: 'gmi' that stops its running turns and shuts its sessions down; the
+  // default runtime's close does not wait for a running turn); wait for the memory writes of its turns; fold the
+  // conversation into the wiki; then close the backing store. The compile is best-effort (a failed LLM merge must
+  // never block teardown) and a failure is logged; closing prevents leaked SQLite handles in long-lived hosts. An
+  // error from the agent's own close is thrown once the store is closed.
   const originalClose = built.close.bind(built);
   built.close = async () => {
     let closeFailed = false;

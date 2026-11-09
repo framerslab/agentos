@@ -73,13 +73,18 @@ clusterer merges them into the page `concepts/notes`. Entity pages come from tra
 stored with entities through `agent.memory.remember()`, or from a clusterer passed
 to `attachMemoryWiki()`.
 
-Each trace the observer stores carries who spoke it as a tag (`speaker:user` or
-`speaker:assistant`), outside its text. The recall block a souled agent adds to a turn
-opens each trace's line with its speaker and the date it was stored, in the wording
-the memory block uses: `[user, 26 days ago, 2026-10-14] I moved to Lisbon`. A chunk of
-a wiki page is labelled `note` and its page id (`[note concepts/notes, 2d ago,
-2026-11-07]`), and a trace stored before speakers were recorded carries the date
-alone. The block keeps to the turn's memory token budget, whole lines first.
+Each trace the observer stores records who spoke it in the trace's metadata
+(`speaker: 'user'` or `speaker: 'assistant'`), outside its text and its tags, which
+the store's full-text search reads, so recall never matches a trace by who spoke it.
+The recall block a souled agent adds to a turn gives each trace one line that opens
+with its speaker and the date it was stored, in the wording the memory block uses:
+`[user, 26 days ago, 2026-10-14] I moved to Lisbon`. A chunk of a wiki page is
+labelled `note` and its page id (`[note concepts/notes, 2d ago, 2026-11-07]`), and a
+trace stored before speakers were recorded carries the date alone. A line break in a
+trace's text is rendered as a space, so what someone said can never open a line of
+the block with a label of its own. The block keeps to the turn's memory token budget,
+whole lines first; when even the first line's label is larger than the budget, the
+line is the trace's text alone.
 
 A page the compiler creates gets a summary named from its page id alone, never from
 the conversation folded into it: `concepts/notes` is `Notes compiled from
@@ -94,13 +99,16 @@ for the notes page), set its `summary:` front matter to the line you want, and t
 next compile writes that line into the catalog; or edit the line in `index.md`
 directly, which the next catalog write replaces with the page's summary.
 
-`souledAgent()`'s `close()` runs in this order: the agent's own close, so turns still
-running end and their sessions shut down; a wait for the memory writes of its turns,
-up to 5 seconds (`pendingWritesTimeoutMs` sets it, 0 waits for none); the compile;
-then the store's close. A turn never waits for its memory writes; only `close()`
-does. When the wait ends with writes still pending, the compile takes what is stored
-and one `console.warn` line gives the number still pending. The compile's model
-calls go on the agent's route with its fallback settings (`fallbackProviders`,
+`souledAgent()`'s `close()` runs in this order: the agent's own close; a wait for the
+memory writes of its turns, up to 5 seconds (`pendingWritesTimeoutMs` sets it, 0
+waits for none, `Infinity` for all of them); the compile; then the store's close. A
+turn never waits for its memory writes; only `close()` does. When the wait ends with
+writes still pending, the compile takes what is stored and one `console.warn` line
+gives the number still pending. `close()` does not wait for a turn still running when
+it is called: with `runtime: 'gmi'` the agent's close stops the turn, and on the
+default runtime the turn goes on and its memory writes come after the store is
+closed, so neither turn is folded into the wiki. Await each turn before `close()`.
+The compile's model calls go on the agent's route with its fallback settings (`fallbackProviders`,
 `onFallback`, `router`, `policyTier`), are checked against and charged to the
 agent's `budget` like its own calls, and are written to its usage ledger under the
 source `souledAgent.compileWiki`. A call the budget refuses fails the compile, which
@@ -270,7 +278,7 @@ What a soul gives an agent depends on how it is loaded:
 |---|---|---|---|---|---|---|
 | `agent({ soul })` | Yes | Yes | No | No (only from a `memoryProvider` you pass) | No | No |
 | `souledAgent()` | Yes | Yes | `agentId` only, which scopes the wiki's traces | Yes, from the wiki's store | Yes | Yes, on `close()` and by `agent.memory.compileWiki()` |
-| `agent({ runtime: 'gmi', soul })`, `gmi({ soul })` | Yes | Yes | No | Only with cognitive memory on, from cognitive memory | No | No |
+| `agent({ runtime: 'gmi', soul })`, `gmi({ soul })` | Yes | Yes | No | With cognitive memory on, from cognitive memory; off, only from a `memoryProvider` you pass | No | No |
 | `souledAgent({ runtime: 'gmi' })`, cognitive memory off | Yes | Yes | `agentId` only | Yes, from the wiki's store | Yes | Yes |
 | `souledAgent({ runtime: 'gmi' })`, cognitive memory on | Yes | Yes | `agentId` only | From cognitive memory; the wiki store's recall is skipped, with a warning, and its turns are still stored | Yes | Yes |
 | The full runtime given `loadSoul().personaDefinition` | Yes (the persona's `baseSystemPrompt`) | No | Yes | From the runtime's own memory, when configured; not from the wiki | No | No |
