@@ -12183,9 +12183,11 @@ describe('the docs a host reads about it', () => {
       "A `gmi()` agent with `memory.store` runs it on the adapter of that store's Brain, opened with the agent's memory or at the first call that needs it (in process when the adapter has no transactions).",
     );
     expect(gmiDoc).toContain(
-      "On a `gmi()` agent, `agent.learning` carries the same calls with the agent's key (`learning.agentKey`, else a named agent's persona id) and namespace (`learning.namespace`, else `''`) filled in",
+      "On a `gmi()` agent, `agent.learning` carries the same calls with the agent's key (`learning.agentKey`, else the key its learners are filed under: `learning.learnerKey`, the soul's id, or a named agent's persona id) and namespace (`learning.namespace`, else `''`) filled in",
     );
-    expect(gmiDoc).toContain('A call that names a learner on an agent with neither `learning.agentKey` nor a name rejects, naming `learning.agentKey`.');
+    expect(gmiDoc).toContain(
+      'A call that names a learner on an agent with no key (no `learning.agentKey`, `learning.learnerKey`, soul id or name) rejects, naming `learning.agentKey`.',
+    );
     expect(gmiDoc).toContain('a memory that does not open fails the call before the tombstone is written');
     const guide = doc('docs/getting-started/HIGH_LEVEL_API.md');
     expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding`, `consolidation`, `persistAccessState` and `store`');

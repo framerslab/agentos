@@ -85,7 +85,13 @@ import type { AgentOSUsageAggregate, AgentOSUsageLedgerOptions } from './runtime
 import { exportAgentConfig, exportAgentConfigJSON } from './agentExportCore.js';
 import { getDeferredCapabilities, isMeaningfullyConfigured } from './runtime/lightweightAgentDiagnostics.js';
 import { resolveTurnMode } from '../cognition/learning/config.js';
-import { adoptLearningMemory, createLearningLayer, releaseLearningMemory, releaseLearningStore } from '../cognition/learning/LearningLayer.js';
+import {
+  adoptLearningMemory,
+  createLearningLayer,
+  learningAgentHasLearners,
+  releaseLearningMemory,
+  releaseLearningStore,
+} from '../cognition/learning/LearningLayer.js';
 import { deferLearnerSession } from '../cognition/learning/LearnerSession.js';
 import { InMemoryLearningStore } from '../cognition/learning/store/InMemoryLearningStore.js';
 import type { LearningStore } from '../cognition/learning/store/LearningStore.js';
@@ -460,35 +466,42 @@ function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName,
  * agent with none, everything its layer serves, since such an agent has no durable store and its store is its own.
  * Each member is `async`, so a key it lacks rejects the call rather than throwing at it.
  *
+ * @param agent - The agent's key, resolved at each call as the agent's sessions resolve their learners' key, and its
+ *   namespace.
  * @param beforeForget - Runs before `forgetUser`: with `memory.store`, it hands the layer the agent's memory.
  * @param running - Holds each call until it settles: `agent.close()` lets the calls already running finish before it
  *   closes the memory and the Brain they run on.
  */
 function learningHostCalls(
   layer: LearningLayerHandle,
-  agent: { agentKey: string | undefined; namespace: string },
+  agent: { agentKey: () => Promise<string | undefined>; namespace: string },
   beforeForget?: () => Promise<void>,
   running?: Set<Promise<unknown>>,
 ): AgentLearning {
-  const learnerOf = (userId: string, call: string): LearnerKey => {
-    if (!agent.agentKey) {
+  const learnerOf = async (userId: string, call: string): Promise<LearnerKey> => {
+    const agentKey = await agent.agentKey();
+    if (!agentKey) {
       throw new Error(`gmi(): agent.learning.${call} names a learner, and this agent has no stable key: set learning.agentKey or give the agent a name.`);
     }
-    return { namespace: agent.namespace, agentKey: agent.agentKey, userId };
+    return { namespace: agent.namespace, agentKey, userId };
   };
-  const scopeOf = (target: { userId?: string } | undefined, call: string): FreezeScope =>
-    target?.userId !== undefined ? { learner: learnerOf(target.userId, call) } : agent.agentKey ? { agentKey: agent.agentKey } : { scope: 'all' };
+  const scopeOf = async (target: { userId?: string } | undefined, call: string): Promise<FreezeScope> => {
+    if (target?.userId !== undefined) return { learner: await learnerOf(target.userId, call) };
+    const agentKey = await agent.agentKey();
+    return agentKey ? { agentKey } : { scope: 'all' };
+  };
   const calls: AgentLearning = {
     manifest: () => layer.manifest(),
-    freeze: async (target, by) => layer.freeze(scopeOf(target, 'freeze'), by),
-    unfreeze: async (target) => layer.unfreeze(scopeOf(target, 'unfreeze')),
-    suspend: async (target, by) => layer.suspend(scopeOf(target, 'suspend'), by),
-    unsuspend: async (target) => layer.unsuspend(scopeOf(target, 'unsuspend')),
+    freeze: async (target, by) => layer.freeze(await scopeOf(target, 'freeze'), by),
+    unfreeze: async (target) => layer.unfreeze(await scopeOf(target, 'unfreeze')),
+    suspend: async (target, by) => layer.suspend(await scopeOf(target, 'suspend'), by),
+    unsuspend: async (target) => layer.unsuspend(await scopeOf(target, 'unsuspend')),
     operatorSet: async ({ userId, traits, by, note }) =>
-      layer.operatorSet({ learner: learnerOf(userId, 'operatorSet'), traits, by, ...(note !== undefined ? { note } : {}) }),
+      layer.operatorSet({ learner: await learnerOf(userId, 'operatorSet'), traits, by, ...(note !== undefined ? { note } : {}) }),
     revert: async (ledgerId, by) => layer.revert(ledgerId, by),
-    exportLearnedState: async (userId) => layer.exportLearnedState(learnerOf(userId, 'exportLearnedState')),
-    importLearnedState: async (doc, target) => layer.importLearnedState(doc, target ? learnerOf(target.userId, 'importLearnedState') : undefined),
+    exportLearnedState: async (userId) => layer.exportLearnedState(await learnerOf(userId, 'exportLearnedState')),
+    importLearnedState: async (doc, target) =>
+      layer.importLearnedState(doc, target ? await learnerOf(target.userId, 'importLearnedState') : undefined),
     forgetUser: async (userId) => {
       await beforeForget?.();
       return layer.forgetUser(userId, { namespace: agent.namespace });
@@ -555,8 +568,6 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const soulId = soul ? soulAgentIdOf(soul.frontmatter, opts.name) : undefined;
   /** The key of the brain behind memory.store: `learning.agentKey`, else the soul's id. */
   const brainKey = learningConfig?.agentKey?.trim() || soulId;
-  /** The agent's key: `learning.agentKey`, else the soul's id, else a named agent's persona id; none for an unnamed agent with neither. */
-  const agentKey = brainKey || stablePersonaIdOf(opts);
   const memoryStore = cognition.memory ? cognition.memory.store : undefined;
   // A durable store needs the learning flag and a key that names its brain: learning.agentKey, or the soul's id.
   if (memoryStore !== undefined) assertMemoryStore(memoryStore, cognition.learning !== undefined, brainKey, soul !== null);
@@ -598,6 +609,27 @@ export function gmi(opts: GmiOptions): GmiHandle {
           : {}),
       })
     : undefined;
+  /**
+   * The key the agent's learners are filed under when `learning.agentKey` is unset (the layer lets that one win):
+   * `learning.learnerKey`; else the soul's id, unless the learning store holds learner rows under the slug of the
+   * agent's name and none under the soul's id, which keeps the slug and says so once; else the slug of the name, or
+   * none for an agent with no name. Resolved at first use, since the store opens then.
+   */
+  const learnersKey = retryingOnce<string>(async () => {
+    const chosen = learningConfig?.learnerKey?.trim();
+    if (chosen) return chosen;
+    const oldSlug = stablePersonaIdOf(opts);
+    if (!soulId) return oldSlug ?? '';
+    if (!layer || !oldSlug || oldSlug === soulId) return soulId;
+    const namespace = learningConfig?.namespace ?? '';
+    const [underSlug, underSoulId] = await Promise.all([
+      learningAgentHasLearners(layer, namespace, oldSlug),
+      learningAgentHasLearners(layer, namespace, soulId),
+    ]);
+    if (!underSlug || underSoulId) return soulId;
+    soulLog.warn('soul.id_fallback', { reason: 'old_slug_learner' });
+    return oldSlug;
+  });
   /** The traits the agent was given, by option or by its soul, as the layer and a GMI's own render read them. */
   const authoredTraits = normalizeHexacoTraits(opts.personality ?? soul?.frontmatter.hexaco);
   const hasTraits = Object.keys(authoredTraits).length > 0;
@@ -740,9 +772,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
       ...(noLearner ? { noLearnerReason: 'workflow_seat' as const } : {}),
       ...(manager ? { memory: manager } : {}),
     };
-    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone.
-    const learnerKey = userId === undefined || noLearner ? null : { namespace: '', agentKey: opts.name?.trim() ? personaId : '', userId };
-    const open = (): Promise<ILearnerSession> => active.forLearner(learnerKey, context);
+    // The learners' key: see `learnersKey`. It is read inside the open, so a store that cannot answer yet fails the open
+    // as any other open fails, and the turn asks again.
+    const open = async (): Promise<ILearnerSession> => {
+      const learnerKey = userId === undefined || noLearner ? null : { namespace: '', agentKey: await learnersKey.get(), userId };
+      return active.forLearner(learnerKey, context);
+    };
     try {
       return await open();
     } catch (error) {
@@ -1390,7 +1425,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
     // With learning on: the layer as the agent's host reads it and the operator's calls, with the agent's key and
     // namespace filled in. agent.close() ends every session's learner session as it closes the session, without ending
     // the session id's memory, and leaves the layer open, because the agent serves sessions opened after close().
-    ...(layer ? { learning: learningHostCalls(layer, { agentKey, namespace: learningConfig?.namespace ?? '' }, memoryForForget, runningHostCalls) } : {}),
+    ...(layer ? { learning: learningHostCalls(
+          layer,
+          { agentKey: async () => learningConfig?.agentKey?.trim() || (await learnersKey.get()) || undefined, namespace: learningConfig?.namespace ?? '' },
+          memoryForForget,
+          runningHostCalls,
+        ) } : {}),
   };
   Object.defineProperty(handle, '__config', { value: opts, enumerable: false, configurable: true });
   // The mark sessionSeat() and agencies.members read: this handle is a gmi() agent.
