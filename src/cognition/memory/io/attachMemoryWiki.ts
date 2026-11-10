@@ -1,9 +1,10 @@
 /** @fileoverview Wire a markdown memory wiki onto a Memory facade + soul workspace. */
 import { messageOf } from '../../../api/runtime/memoryObserveFailures.js';
-import { WikiMemoryStore, WikiCompiler } from '../../substrate/memory/wiki/index.js';
-import type { CompileResult } from '../../substrate/memory/wiki/index.js';
+import { WikiMemoryStore, WikiCompiler, UserWikiStore, originOfPage } from '../../substrate/memory/wiki/index.js';
+import type { CompileResult, UserWikiPagesPort } from '../../substrate/memory/wiki/index.js';
+import { conversationScopeKey } from '../retrieval/store/conversationScopeKey.js';
 import { memoryLog } from './memoryLog.js';
-import { ReadMemoryPageTool } from './tools/ReadMemoryPageTool.js';
+import { ReadMemoryPageTool, type ReadMemoryPagePort } from './tools/ReadMemoryPageTool.js';
 
 interface TraceLike {
   id: string;
@@ -17,8 +18,16 @@ interface ClusterAssignment {
   traceIds: string[];
 }
 
-/** Minimal Memory-facade surface this helper needs (structural, no hard import). */
-export interface WikiAttachableMemory {
+/**
+ * Minimal Memory-facade surface this helper needs (structural, no hard import): the trace calls the operator's
+ * pages are indexed with, and the page rows a subject's own pages are kept in (`UserWikiPagesPort`).
+ */
+export interface WikiAttachableMemory extends UserWikiPagesPort {
+  /**
+   * Whether a subject other than `scopeId` holds a page of that id, or, with null, whether any subject does. It
+   * tells a refusal's log line why a page was not found; no caller's result depends on it.
+   */
+  pageExistsOutside(scopeId: string | null, pageId: string): Promise<boolean>;
   remember(content: string, options?: Record<string, unknown>): Promise<{ id: string }>;
   forget(traceId: string): Promise<void>;
   /** Deletes traces for good: the chunks of an operator page that was edited, removed or deleted. */
@@ -99,9 +108,19 @@ async function defaultCluster(traces: TraceLike[]): Promise<ClusterAssignment[]>
  * agent factory consumes an AgentMemoryProvider hook, not the facade itself, so
  * the wiring lives one level up.
  *
+ * The `read_memory_page` tool it adds answers by who asks (see {@link ReadMemoryPageTool}): a subject reads its own
+ * pages, kept as rows of the store under its conversation key, and the operator's pages; another subject's page, and
+ * a page an earlier version compiled into the folder, answer a subject as a page that does not exist. A call with no
+ * user reads the folder's pages alone. The keys are built here from the agent's id and the turn's subject; nothing a
+ * tool call passes reaches them.
+ *
  * @returns The store (for direct reads) and the augmented tools array.
+ * @throws TypeError when `agentId` is not a non-empty string: no key could tell this agent's pages from another's.
  */
 export async function attachMemoryWiki(opts: AttachMemoryWikiOptions): Promise<AttachMemoryWikiResult> {
+  if (typeof opts.agentId !== 'string' || opts.agentId === '') {
+    throw new TypeError('attachMemoryWiki: agentId must be a non-empty string');
+  }
   const store = new WikiMemoryStore({
     memoryDir: opts.memoryDir,
     agentId: opts.agentId,
@@ -147,6 +166,58 @@ export async function attachMemoryWiki(opts: AttachMemoryWikiOptions): Promise<A
   const withheld = await store.withheldPages();
   if (withheld.length > 0) memoryLog.warn('memory.legacy_pages', { count: withheld.length });
 
-  const tools = [...(opts.tools ?? []), new ReadMemoryPageTool({ readPage: (id) => store.readPage(id) })];
+  const tools = [...(opts.tools ?? []), new ReadMemoryPageTool(pagePortOf(opts, store))];
   return { store, tools };
+}
+
+/**
+ * What `read_memory_page` reads through: the asker's own pages (rows of the store under the asker's conversation
+ * key), then the operator's folder. Every refusal answers null, as a page that does not exist does, and writes one
+ * `memory.page_read_refused` line with its reason.
+ */
+function pagePortOf(opts: AttachMemoryWikiOptions, operatorStore: WikiMemoryStore): ReadMemoryPagePort {
+  const refused = (reason: 'other_user' | 'no_user' | 'legacy'): null => {
+    memoryLog.warn('memory.page_read_refused', { reason });
+    return null;
+  };
+  /** The store of one subject's own pages, and the key they are filed under. */
+  const ownPages = (subject: { kind: 'user' | 'session'; id: string }) => {
+    const key = conversationScopeKey(opts.agentId, subject);
+    return { key, own: new UserWikiStore({ scopeId: key, pages: opts.memory, chunk: opts.chunk }) };
+  };
+  return {
+    readPage: async (id, asker) => {
+      const shared = await operatorStore.readPage(id);
+      if (!asker.subject) {
+        // Nobody: the operator's folder as it is, the pages an earlier version compiled among them.
+        if (shared) return shared;
+        // A file that cannot be parsed reads as no page, with no line.
+        if ((await operatorStore.pageOrigin(id)) !== null) return null;
+        return (await opts.memory.pageExistsOutside(null, id)) ? refused('no_user') : null;
+      }
+      const { key, own } = ownPages(asker.subject);
+      const page = await own.readPage(id);
+      if (page) return page;
+      // The folder's page is served only when the text just read is an operator page's.
+      if (shared && originOfPage(shared) === 'operator') return shared;
+      // A page an earlier version compiled, or one that cannot be told from one, may hold what someone else said:
+      // no user is served it.
+      const origin = shared ? originOfPage(shared) : await operatorStore.pageOrigin(id);
+      if (origin === 'compiled' || origin === 'uncertain') return refused('legacy');
+      return (await opts.memory.pageExistsOutside(key, id)) ? refused('other_user') : null;
+    },
+    listPages: async (asker) => {
+      const shared = await operatorStore.load();
+      if (!asker.subject) {
+        return shared.map((page) => ({ id: page.id, summary: page.summary, owner: 'operator' as const }));
+      }
+      const { own } = ownPages(asker.subject);
+      return [
+        ...(await own.listPages()).map((page) => ({ id: page.id, summary: page.summary, owner: 'own' as const })),
+        ...shared
+          .filter((page) => originOfPage(page) === 'operator')
+          .map((page) => ({ id: page.id, summary: page.summary, owner: 'operator' as const })),
+      ];
+    },
+  };
 }

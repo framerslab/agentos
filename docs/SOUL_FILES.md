@@ -68,6 +68,22 @@ and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new f
 rather than clobbering human edits, and each page written is dated with the time
 of the compile. The runtime does not version the pages.
 
+`read_memory_page` takes `{ "id": "<page id>" }` or `{ "list": true }`. Whose pages
+it reads is decided by the turn the call runs in, never by the call: the asker is the
+user in the tool context the runtime built (`context.userContext.userId`, with the
+subject in `context.userContext.memorySubject` when the runtime names one). The tool
+reads the asker's own pages, which are kept as rows of the store under the asker's
+key (`UserWikiStore`), and the operator's pages; `{ "list": true }` lists both, each
+marked `own` or `operator`. Another user's page answers exactly as a page that does
+not exist, and so does a page an earlier version compiled into the folder when a user
+asks for it. A call that carries `scope`, `scopeId`, `userId`, `turnUserId` or
+`subject` is refused with an invalid-arguments result (`details.code` is
+`INVALID_ARGS`) and reads nothing. With no user (no id, or one of `system`,
+`anonymous`, `anonymous_user` and `guest`), the tool reads the pages of the folder
+alone: the operator's, and the pages an earlier version compiled. Each refusal writes
+one `memory.page_read_refused` log line that carries its reason (`other_user`,
+`no_user`, `legacy` or `caller_filter`) and no id.
+
 The traces a `souledAgent`'s own observer stores carry no entities, so the default
 clusterer merges them into the page `concepts/notes`. Entity pages come from traces
 stored with entities through `agent.memory.remember()`, or from a clusterer passed

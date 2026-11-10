@@ -1267,6 +1267,30 @@ export class Memory {
   }
 
   /**
+   * Whether a conversation scope other than `scopeId` holds a wiki page row of that id; with null, whether any
+   * conversation scope does. The answer says why a page was not found for one asker, for a log line: nothing a
+   * caller is served depends on it, and it names no scope.
+   *
+   * @param scopeId - The asker's own key, left out of the search; null to search every scope.
+   * @throws InvalidWikiPageIdError for a refused page id; nothing is read.
+   */
+  async pageExistsOutside(scopeId: string | null, pageId: string): Promise<boolean> {
+    assertWikiPageId(pageId);
+    await this._initPromise;
+    const conditions = ['brain_id = ?', 'scope = ?', 'page_id = ?'];
+    const params: unknown[] = [this._brain.brainId, CONVERSATION_SCOPE, pageId];
+    if (scopeId !== null) {
+      conditions.push('scope_id <> ?');
+      params.push(scopeId);
+    }
+    const row = await this._brain.get<{ found: number | string }>(
+      `SELECT 1 AS found FROM memory_pages WHERE ${conditions.join(' AND ')} LIMIT 1`,
+      params,
+    );
+    return row !== undefined && row !== null;
+  }
+
+  /**
    * List traces created strictly after `sinceMs` (Unix-ms). Newest-first by
    * default; pass `order: 'asc'` for oldest-first (used by the wiki compiler to
    * drain the window in chronological batches).

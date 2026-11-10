@@ -198,7 +198,12 @@ export type {
   AttachMemoryWikiResult,
   WikiAttachableMemory,
 } from './cognition/memory/io/attachMemoryWiki.js';
-export { ReadMemoryPageTool } from './cognition/memory/io/tools/ReadMemoryPageTool.js';
+export { ReadMemoryPageTool, memoryAskerOf } from './cognition/memory/io/tools/ReadMemoryPageTool.js';
+export type {
+  ReadMemoryPageAsker,
+  ReadMemoryPageListing,
+  ReadMemoryPagePort,
+} from './cognition/memory/io/tools/ReadMemoryPageTool.js';
 // Query Router (classification, retrieval dispatch, grounded answer generation)
 export {
   QueryClassifier,
