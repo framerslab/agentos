@@ -569,6 +569,83 @@ describe.skipIf(!URL)('LibraryIndex.searchGroups over PostgresVectorStore on Pos
     expect(ids(next)).toEqual(['document:d03', 'document:d04', 'document:d05']);
   });
 
+  it('refuses, before any statement, a date that names no real instant or is finer than a microsecond, and a source id holding NUL, in a cursor under every order and in an item', async () => {
+    const sessions = groupOf('sessions', SESSIONS, SESSION_DATES);
+    const cursorRefused = async (query: Parameters<typeof run>[0], what: string): Promise<void> => {
+      seen.length = 0;
+      await expect(run(query), what).rejects.toMatchObject({ name: 'LibraryCursorError' });
+      expect(seen, what).toEqual([]);
+    };
+    const firstOf = async (query: Parameters<typeof run>[0]): Promise<Record<string, unknown>> => {
+      const [page] = await run(query);
+      expect(page.cursor).not.toBeNull();
+      return decode(page.cursor as string);
+    };
+    // Each in the instant form, none an instant Postgres keeps as written: a month, a day, an hour, a minute or a
+    // second past its last, a leap day of a year with none, the year 0, a zone past fourteen hours, a seventh digit of
+    // a second (Postgres keeps microseconds, so two such instants would stand level).
+    const unreal = [
+      '2026-13-01T00:00:00.000Z',
+      '2026-00-10T00:00:00.000Z',
+      '2026-02-30T00:00:00.000Z',
+      '2026-04-31T00:00:00.000Z',
+      '2025-02-29T00:00:00Z',
+      '0000-01-01T00:00:00Z',
+      '2026-03-01T24:00:00Z',
+      '2026-03-01T09:60Z',
+      '2026-03-01T09:30:60Z',
+      '2026-03-01T09:30:00+15:00',
+      '2026-03-01T09:30:00-09:60',
+      '2026-03-01T09:30:00.0000001Z',
+    ];
+    // A date-ordered search and a listing with no word carry a date in their key.
+    for (const query of [
+      { text: 'budget', groups: [sessions], order: 'date' as const, pageSize: 1 },
+      { text: '', groups: [sessions], pageSize: 4 },
+    ]) {
+      const carried = await firstOf(query);
+      const key = carried.key as Array<string | null>;
+      expect(key).toHaveLength(3);
+      expect(typeof key[0]).toBe('string');
+      for (const date of unreal) await cursorRefused({ ...query, cursor: encode({ ...carried, key: [date, key[1], key[2]] }) }, `${query.text}: ${date}`);
+      await cursorRefused({ ...query, cursor: encode({ ...carried, key: [key[0], key[1], `${key[2]}\u0000`] }) }, `${query.text}: NUL`);
+      // A real leap day, a zone fourteen hours off and a microsecond are instants: the page follows them.
+      for (const date of ['2024-02-29T23:59:59.999999Z', '2026-03-01T09:30:00+14:00', '2026-03-01T09:30:00.000001-12:00']) {
+        const [page] = await run({ ...query, cursor: encode({ ...carried, key: [date, key[1], key[2]] }) });
+        expect(page.state, date).toBe('ok');
+      }
+    }
+    // A search by rank carries no date; its source id is held the same way.
+    const ranked = { text: 'budget', groups: [sessions], pageSize: 1 };
+    const carried = await firstOf(ranked);
+    const key = carried.key as string[];
+    expect(key).toHaveLength(2);
+    await cursorRefused({ ...ranked, cursor: encode({ ...carried, key: [key[0], `${key[1]}\u0000`] }) }, 'rank: NUL');
+    // An item handed with such a date, or with NUL in its source id, is refused before the store is asked.
+    for (const date of unreal) {
+      seen.length = 0;
+      await expect(run({ text: 'budget', groups: [groupOf('sessions', SESSIONS, { ...SESSION_DATES, 'session:s09': date })] }), date).rejects.toThrow(
+        'the date of the item session:s09 must be',
+      );
+      expect(seen, date).toEqual([]);
+    }
+    seen.length = 0;
+    await expect(run({ text: 'budget', groups: [{ ...sessions, items: [...sessions.items, { sourceId: 'session:s99\u0000', date: null }] }] })).rejects.toThrow(
+      /sourceId/,
+    );
+    expect(seen).toEqual([]);
+    // Dates a microsecond apart stand apart: the later first under order date.
+    const close = { ...SESSION_DATES, 'session:s01': '2026-03-01T09:30:00.000002Z', 'session:s09': '2026-03-01T09:30:00.000001Z' };
+    const [dated] = await run({ text: 'budget', groups: [groupOf('sessions', SESSIONS, close)], order: 'date' });
+    expect(ids(dated)).toEqual(['session:s01', 'session:s09', 'session:s00', 'session:s02']);
+    expect(await allPages({ text: 'budget', groups: [groupOf('sessions', SESSIONS, close)], order: 'date', pageSize: 1 })).toEqual([
+      ['session:s01'],
+      ['session:s09'],
+      ['session:s00'],
+      ['session:s02'],
+    ]);
+  });
+
   it("ranks an item's title read from its passages' metadata where the profile takes the title from there, the title above the text, and widens a word of the title too", async () => {
     const threads = groupOf('threads', THREADS);
     const shown = (result: LibraryGroupResult) => result.hits.map((hit) => [hit.sourceId, hit.passage.score, hit.field, hit.matchKind]);
