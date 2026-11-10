@@ -470,5 +470,6 @@ describe('what the docs say about the limits closing the prompt', () => {
     expect(doc('docs/SOUL_FILES.md')).toContain(exception);
     expect(doc('docs/safety/GUARDRAILS_USAGE.md')).toContain(exception);
     expect(doc('README.md')).not.toContain('Identity, voice, hard limits, and HEXACO scores');
+    expect(doc('README.md')).toContain("With `systemBlocks`, the soul's prose and style are left out and its hard limits still close the prompt.");
   });
 });

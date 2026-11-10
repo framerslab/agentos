@@ -106,10 +106,15 @@ describe('validateSoulFrontmatter', () => {
   it.each([
     ['maxEntries', 'many'],
     ['maxMessageLength', '300'],
-  ])('refuses reasoningTrace.%s that is not a number, naming the field', (member, value) => {
+    ['maxEntries', Number.NaN],
+    ['maxMessageLength', Number.POSITIVE_INFINITY],
+  ])('refuses reasoningTrace.%s that is not a finite number (%s), naming the field', (member, value) => {
     expect(() => validateSoulFrontmatter({ reasoningTrace: { [member]: value } }, '/souls/aria')).toThrow(
-      new SoulLoadError('/souls/aria', `front matter field 'reasoningTrace.${member}' must be a number`),
+      new SoulLoadError('/souls/aria', `front matter field 'reasoningTrace.${member}' must be a finite number`),
     );
+  });
+  it('reads a reasoningTrace member set to null (an empty YAML value) as unset', () => {
+    expect(validateSoulFrontmatter({ reasoningTrace: { maxEntries: null, maxMessageLength: 40 } }).reasoningTrace).toEqual({ maxMessageLength: 40 });
   });
   it('is what parseSoul runs, with the inline source', () => {
     expect(() => parseSoul("---\nhardLimits: never\n---\nYou are Aria.")).toThrow("The soul failed to load (inline soul): front matter field 'hardLimits' must be a list of strings");
