@@ -41,6 +41,15 @@ const recordingProvider = (seen: number[]) => ({
   },
 });
 
+/**
+ * Reads a stream to its end, then its text. The default runtime's stream starts only when a consumer reads it
+ * (streamText), so its `text` alone never settles.
+ */
+async function drained(stream: { textStream: AsyncIterable<string>; text: Promise<string> }): Promise<string> {
+  for await (const chunk of stream.textStream) void chunk;
+  return stream.text;
+}
+
 /** Enough replies for a few calls, answered streamed or whole. */
 const replies = () => Array.from({ length: 8 }, () => reply.text('ok'));
 
@@ -53,7 +62,7 @@ describe('agent() on the default runtime: generate() and stream()', () => {
       memoryProvider: recordingProvider(seen), memory: { recall: { budget: { totalTokens: 900 } } },
     } as unknown as AgentOptions);
     await a.generate('hi');
-    await a.stream('hi again').text;
+    await drained(a.stream('hi again'));
     expect(seen).toEqual([900, 900]);
     expect(events('memory.recall.option_ignored')).toEqual([]);
   });
@@ -65,7 +74,7 @@ describe('agent() on the default runtime: generate() and stream()', () => {
       provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [],
       memoryProvider: recordingProvider(seen), memory: { recall: { budget: { totalTokens: 900 } } },
     } as unknown as AgentOptions);
-    await a.session('s').stream('hi').text;
+    await drained(a.session('s').stream('hi'));
     expect(seen).toEqual([900]);
   });
 });
