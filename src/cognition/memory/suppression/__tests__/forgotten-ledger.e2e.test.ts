@@ -7,21 +7,29 @@
  * key wrote it; such a store does not open without every key it has used. A store whose copy is gone does not open.
  * The copy's file is opened with `secure_delete` on, so a row deleted from it is overwritten in the file.
  *
+ * The learning layer keeps a tombstone row of its own in its learning store and reaches the ledger through one route:
+ * with no shared ledger the route makes the store calls the layer made without it; with one, a user either side
+ * forgot is forgotten for both, the shared tombstone is written first, and a keyed ledger leaves no unkeyed row
+ * behind. The route's cases run on a SQL learning store over a SQLite file and on the in-process store.
+ *
  * Every case runs on SQLite files in a folder of its own. The first case also runs with the store on Postgres and the
  * copy on a SQLite file when `AGENTOS_TEST_POSTGRES_URL` names a database (CI's Test & Lint job sets it); its tables go
  * in a schema of the run's own, dropped once the cases have run.
  */
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createPostgresAdapter, resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
+import { createLearningLayer, InMemoryLearningStore } from '../../../learning/index.js';
 import { canonicalJson } from '../../../learning/ledger/canonical.js';
 import { tombstoneHash } from '../../../learning/ledger/Ledger.js';
+import { SqlLearningStore } from '../../../learning/store/SqlLearningStore.js';
 import * as root from '../../../../index.js';
 import { ForgottenLedger, ForgottenLedgerError, type SuppressionSubject } from '../ForgottenLedger.js';
 import { openForgottenCopy } from '../forgottenCopy.js';
+import { learnerTombstones, shareForgottenLedger, sharedForgottenLedgerOf, type NamespacedUser } from '../learnerTombstones.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 /** This run's own mark, in the names of the schemas its Postgres cases make and drop. */
@@ -30,6 +38,7 @@ const RUN = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}
 const segments: string[] = [];
 
 const EARLIER = '2026-10-12T11:00:00.000Z';
+const NOW = '2026-10-12T12:00:00.000Z';
 const TABLE_DDL = `CREATE TABLE IF NOT EXISTS agentos_learning_forgotten (
   hash TEXT PRIMARY KEY,
   namespace TEXT NOT NULL DEFAULT '',
@@ -43,6 +52,7 @@ const dirs: string[] = [];
 const adapters: StorageAdapter[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   while (adapters.length) await adapters.pop()!.close().catch(() => undefined);
   while (dirs.length) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
 });
@@ -404,6 +414,167 @@ describe("the tombstone copy's file", () => {
     expect(await tombstonesOf(second.adapter)).toEqual([{ hash: await ForgottenLedger.hash('', ALICE), namespace: '' }]);
     // A closed copy is one file: no write-ahead log beside it.
     expect(fs.existsSync(`${file}-wal`)).toBe(false);
+  });
+});
+
+describe("the learning layer's route", () => {
+  const ANA: NamespacedUser = { namespace: 'A', userId: 'ana' };
+
+  /** A SQL learning store over a SQLite file of its own, with the adapter the case reads its rows through. */
+  async function learningStoreIn(dir: string): Promise<{ store: SqlLearningStore; adapter: StorageAdapter }> {
+    const adapter = await sqliteAt(path.join(dir, 'learning.sqlite'));
+    const store = new SqlLearningStore({ adapter });
+    // The first read makes the store's tables.
+    await store.isForgotten('0'.repeat(64));
+    return { store, adapter };
+  }
+
+  /** The ledger an agent's memory store uses: its table and its copy on two more files, reading namespace A. */
+  async function sharedLedgerIn(dir: string, key?: string): Promise<Pair & { ledger: ForgottenLedger }> {
+    const pair = await openPair(dir);
+    const ledger = await ForgottenLedger.open({ ...pair, namespaces: ['A'], ...(key === undefined ? {} : { key: { current: key } }) });
+    return { ...pair, ledger };
+  }
+
+  /** The hashes a learning store's own tombstone table holds. */
+  const ownRowsOf = async (adapter: StorageAdapter): Promise<string[]> => (await rowsOf(adapter)).map((row) => row.hash);
+
+  it("with no shared ledger, writes and reads the layer's own row and nothing else", async () => {
+    const { store, adapter } = await learningStoreIn(folder());
+    const route = learnerTombstones();
+    const own = await tombstoneHash('A', 'ana');
+    expect(await route.hashOf(ANA)).toBe(own);
+    expect(await route.has(store, ANA)).toBe(false);
+
+    await route.mark(store, ANA, NOW);
+
+    expect(await adapter.all('SELECT hash, forgotten_at FROM agentos_learning_forgotten')).toEqual([{ hash: own, forgotten_at: NOW }]);
+    expect(await route.sharedHas(ANA)).toBe(false);
+    // One read of the route is one read of the store, of the layer's own hash.
+    const read = vi.spyOn(store, 'isForgotten');
+    expect(await route.has(store, ANA)).toBe(true);
+    expect(read.mock.calls).toEqual([[own]]);
+    // One write of the route is one write of the store.
+    const write = vi.spyOn(store, 'insertForgotten');
+    await route.mark(store, { namespace: 'A', userId: 'bo' }, NOW);
+    expect(write.mock.calls).toEqual([[await tombstoneHash('A', 'bo'), NOW]]);
+
+    // The same on the in-process store.
+    const inProcess = new InMemoryLearningStore();
+    await route.mark(inProcess, ANA, NOW);
+    expect(await inProcess.isForgotten(own)).toBe(true);
+    expect(await route.has(inProcess, ANA)).toBe(true);
+    expect(await route.has(inProcess, { namespace: 'B', userId: 'ana' })).toBe(false);
+  });
+
+  it("with a shared ledger, writes the shared tombstone first and the layer's own row second", async () => {
+    const dir = folder();
+    const { store, adapter } = await learningStoreIn(dir);
+    const shared = await sharedLedgerIn(dir);
+    const route = learnerTombstones(shared.ledger);
+    const sharedHash = await ForgottenLedger.hash('', { kind: 'user', id: 'ana' });
+    // What the shared ledger held at the moment the layer's own row was written.
+    let heldWhenOwnRowWritten: LedgerRow[] | undefined;
+    const rows = {
+      insertForgotten: async (hash: string, forgottenAt: string): Promise<void> => {
+        heldWhenOwnRowWritten = await tombstonesOf(shared.primary);
+        await store.insertForgotten(hash, forgottenAt);
+      },
+    };
+
+    await route.mark(rows, ANA, NOW);
+
+    expect(heldWhenOwnRowWritten).toEqual([{ hash: sharedHash, namespace: '' }]);
+    expect(await tombstonesOf(shared.primary)).toEqual([{ hash: sharedHash, namespace: '' }]);
+    expect(await tombstonesOf(shared.copy)).toEqual([{ hash: sharedHash, namespace: '' }]);
+    expect(await ownRowsOf(adapter)).toEqual([await tombstoneHash('A', 'ana')]);
+
+    // The shared write fails: the call rejects, and the layer's own store holds nothing of the user.
+    await shared.copy.close();
+    await expect(route.mark(store, { namespace: 'A', userId: 'bo' }, NOW)).rejects.toThrow();
+    expect(await ownRowsOf(adapter)).toEqual([await tombstoneHash('A', 'ana')]);
+    expect(await tombstonesOf(shared.primary)).toEqual([{ hash: sharedHash, namespace: '' }]);
+  });
+
+  it("reads the shared ledger when the layer's own row is missing", async () => {
+    const dir = folder();
+    const { store } = await learningStoreIn(dir);
+    const shared = await sharedLedgerIn(dir);
+    const route = learnerTombstones(shared.ledger);
+
+    await shared.ledger.markForgotten({ kind: 'user', id: 'ana' });
+
+    expect(await store.isForgotten(await tombstoneHash('A', 'ana'))).toBe(false);
+    expect(await route.has(store, ANA)).toBe(true);
+    expect(await route.sharedHas(ANA)).toBe(true);
+
+    // The shared ledger does not read namespace B: it is neither asked nor written for a user there.
+    const elsewhere: NamespacedUser = { namespace: 'B', userId: 'ana' };
+    const asked = vi.spyOn(shared.ledger, 'isForgotten');
+    expect(await route.has(store, elsewhere)).toBe(false);
+    expect(await route.sharedHas(elsewhere)).toBe(false);
+    expect(asked).not.toHaveBeenCalled();
+    await route.mark(store, { namespace: 'B', userId: 'bo' }, NOW);
+    expect(await shared.ledger.isForgotten({ kind: 'user', id: 'bo' })).toBe(false);
+    expect(await store.isForgotten(await tombstoneHash('B', 'bo'))).toBe(true);
+  });
+
+  it('with a keyed shared ledger, leaves no unkeyed row in the learning store', async () => {
+    const dir = folder();
+    const { store, adapter } = await learningStoreIn(dir);
+    const shared = await sharedLedgerIn(dir, 'k');
+    const route = learnerTombstones(shared.ledger);
+
+    await route.mark(store, ANA, NOW);
+
+    expect(await ownRowsOf(adapter)).toEqual([]);
+    expect((await tombstonesOf(shared.primary)).map((row) => row.hash)).toEqual([await ForgottenLedger.hash('', { kind: 'user', id: 'ana' }, 'k')]);
+    expect(await route.has(store, ANA)).toBe(true);
+
+    // A namespace the keyed ledger does not read has the layer's own row alone, so that row is written.
+    await route.mark(store, { namespace: 'B', userId: 'bo' }, NOW);
+    expect(await ownRowsOf(adapter)).toEqual([await tombstoneHash('B', 'bo')]);
+  });
+
+  it('a layer given a shared ledger refuses a learner the souled side forgot, and its forgetUser reaches the shared ledger', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const dir = folder();
+    const { store } = await learningStoreIn(dir);
+    const shared = await sharedLedgerIn(dir);
+    const layer = createLearningLayer({ store, agentKey: 'tutor', namespace: 'A', forgotten: shared.ledger });
+
+    await shared.ledger.markForgotten({ kind: 'user', id: '42' });
+    await expect(
+      layer.operatorSet({ learner: { namespace: 'A', agentKey: 'tutor', userId: '42' }, traits: { openness: 0.7 }, by: 'ops' }),
+    ).rejects.toThrow(/forgotten in this namespace/);
+
+    await layer.forgetUser('7', { namespace: 'A' });
+
+    expect(await shared.ledger.isForgotten({ kind: 'user', id: '7' })).toBe(true);
+    expect(await store.isForgotten(await tombstoneHash('A', '7'))).toBe(true);
+    await expect(
+      layer.operatorSet({ learner: { namespace: 'A', agentKey: 'tutor', userId: '7' }, traits: { openness: 0.7 }, by: 'ops' }),
+    ).rejects.toThrow(/forgotten in this namespace/);
+
+    // A layer with no shared ledger on the same learning store does not know the user the shared ledger alone holds:
+    // the call gets past the tombstone and stops at the learner having no trait row yet.
+    const alone = createLearningLayer({ store, agentKey: 'tutor', namespace: 'A' });
+    await expect(
+      alone.operatorSet({ learner: { namespace: 'A', agentKey: 'tutor', userId: '42' }, traits: { openness: 0.7 }, by: 'ops' }),
+    ).rejects.toThrow(/has no trait row/);
+  });
+
+  it('shares a ledger by the options object, weakly', async () => {
+    const shared = await sharedLedgerIn(folder());
+    const options = { runtime: 'gmi' };
+    expect(sharedForgottenLedgerOf(options)).toBeUndefined();
+
+    shareForgottenLedger(options, shared.ledger);
+
+    expect(sharedForgottenLedgerOf(options)).toBe(shared.ledger);
+    // A copy of the options is another object: it finds nothing.
+    expect(sharedForgottenLedgerOf({ ...options })).toBeUndefined();
   });
 });
 
