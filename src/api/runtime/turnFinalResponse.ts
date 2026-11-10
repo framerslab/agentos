@@ -9,6 +9,7 @@ import { MessageRole } from '../../core/conversation/ConversationMessage';
 import type { GMIOutput } from '../../cognition/substrate/IGMI';
 import { normalizeUsage } from '../../orchestration/turn-planner/helpers';
 import type { AgentOSFinalResponseChunk } from '../types/AgentOSResponse';
+import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture.js';
 
 /**
  * The plain text of a Markdown reply, for voice output and logs: fenced and inline code keep their text, links and
@@ -86,6 +87,24 @@ export function finalResponseFieldsOf(output: GMIOutput): FinalResponseOutputFie
     ragSources: output.ragSources,
     ...(output.structuredOutput ? { structured: output.structuredOutput } : {}),
   };
+}
+
+/**
+ * The `FINAL_RESPONSE`'s `memoryRecall`, set only when the stream announced its turn's recall capture (a
+ * `METADATA_UPDATE` with `memorySources`, sent only when the memory manager's `recall.capture` is
+ * `'metadata+stream'`): the output's capture, else the one the stream announced, so a continuation, whose GMI
+ * retrieves nothing, ends with the capture of the turn it continues. A host that did not ask for the capture on the
+ * stream finds it on neither.
+ *
+ * @param output - The GMI's output that ends the turn or the continuation.
+ * @param stream - The turn's stream, which holds the capture it announced.
+ */
+export function memoryRecallFieldOf(
+  output: GMIOutput,
+  stream: { streamedMemoryRecall?: MemoryRecallCapture },
+): Pick<AgentOSFinalResponseChunk, 'memoryRecall'> {
+  const announced = stream.streamedMemoryRecall;
+  return announced ? { memoryRecall: output.memoryRecall ?? announced } : {};
 }
 
 /**

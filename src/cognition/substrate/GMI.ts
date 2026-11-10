@@ -69,6 +69,7 @@ import { ConversationMessage } from '../../core/conversation/ConversationMessage
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/utils/errors.js';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
+import type { MemoryRecallCapture } from '../memory/retrieval/recall/capture.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';
 import { CognitiveMemoryBridge, type CognitiveMemoryTurnLearning, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
@@ -1668,6 +1669,8 @@ export class GMI implements IGMI {
           : (this.activePersona.defaultModelCompletionOptions as Record<string, unknown> | undefined)?.cacheDiagnostics,
       );
       let lastRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
+      // The recall capture of the turn's memory assembly, for the turn's output.
+      let turnMemoryRecall: MemoryRecallCapture | undefined;
       // A structured turn (ProcessingOptions.structuredReply): the schema the reply must match, resolved once. Its
       // instruction joins the system prompt, its Zod schema reaches the gateway, no delta streams before the check
       // unless asked, and a reply that does not match is asked for again inside the turn.
@@ -1737,6 +1740,18 @@ export class GMI implements IGMI {
             ...this.memoryTurnScope(turnInput),
             ...(turnLearning.memory ? { learning: turnLearning.memory } : {}),
           }) ?? null;
+          const capture = assembledMemoryContext?.capture;
+          if (capture) {
+            turnMemoryRecall = capture;
+            // Only on the host's ask: the capture names memories by id, and existing stream consumers expect no such chunk.
+            if (this.memoryBridge?.captureMode() === 'metadata+stream') {
+              yield this.createOutputChunk(
+                turnInput.interactionId,
+                GMIOutputChunkType.MEMORY_SOURCES_AVAILABLE,
+                { memorySources: capture },
+              );
+            }
+          }
         }
 
         const promptExecContext = this.buildPromptExecutionContext();
@@ -2431,6 +2446,7 @@ export class GMI implements IGMI {
         // a continuation retrieves nothing of its own: its reply carries the sources of the turn it continues, which
         // its calls are judged with too
         ragSources: lastRagSources ?? continuedTurnSources,
+        ...(turnMemoryRecall ? { memoryRecall: turnMemoryRecall } : {}),
         ...(structuredResult ? { structuredOutput: structuredResult } : {}),
       };
       return finalTurnOutput; // Return the aggregated output

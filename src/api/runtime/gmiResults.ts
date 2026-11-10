@@ -14,6 +14,7 @@
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import {
   GMIOutputChunkType,
+  type GMIOutput,
   type GMIOutputChunk,
   type StepFinishedChunkPayload,
   type ToolCallRequest,
@@ -22,6 +23,7 @@ import {
 import { addModelUsage, type GenerateTextResult, type TokenUsage, type ToolCallRecord } from '../generateText.js';
 import { normalizeStreamFinishReason, type StreamPart, type StreamTextResult } from '../streamText.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
+import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture.js';
 
 /** The error a turn ended with, as the GMI reported it. */
 export interface GmiTurnError {
@@ -94,6 +96,8 @@ export class GmiTurnFolder {
   private callsBeforeLastStep = 0;
   /** Whether the latest finished step requested tools (the GMI then runs them and goes on, unless the step limit ran out). */
   private lastStepCalledTools = false;
+  /** The recall capture of the turn's memory assembly, from the GMI's output that ended the turn. */
+  private memoryRecall: MemoryRecallCapture | undefined;
 
   push(chunk: GMIOutputChunk): void {
     switch (chunk.type) {
@@ -139,6 +143,11 @@ export class GmiTurnFolder {
       default:
         break;
     }
+  }
+
+  /** Records the GMI's output that ended the turn: its recall capture reaches the result. */
+  finish(output: GMIOutput | undefined): void {
+    this.memoryRecall = output?.memoryRecall;
   }
 
   /** Marks the turn failed by a thrown error (the turn's generator itself threw). An ERROR chunk already seen wins. */
@@ -279,6 +288,7 @@ export class GmiTurnFolder {
       toolCalls: this.toolCalls(),
       finishReason: this.finishReason(),
       ...(transcriptDelta ? { transcriptDelta } : {}),
+      ...(this.memoryRecall ? { memoryRecall: this.memoryRecall } : {}),
     };
   }
 }
