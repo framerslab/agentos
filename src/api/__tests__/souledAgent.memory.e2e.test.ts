@@ -362,6 +362,37 @@ describe("souledAgent()'s close() wait", () => {
     expect(JSON.stringify(merges[0].messages)).toContain('My favourite tea is jasmine.');
     expect(linesOf(warn).filter((line) => /pending/.test(line))).toEqual([]);
   });
+
+  it('does not wait for a session stream whose signal aborted before anything was read from it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    const s = script('openai', k, { whole: true });
+    const a = await souledAgent({ ...stubbed(k), soul: dir, pendingWritesTimeoutMs: 1500 } as never);
+    const turn = new AbortController();
+    a.session('s').stream('My favourite tea is jasmine.', { abortSignal: turn.signal });
+    turn.abort();
+    const started = Date.now();
+    await a.close();
+    // A stream runs only once it is read: one aborted before that never starts, so close() has nothing to wait for.
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(mergeCalls(s)).toHaveLength(0);
+    expect(linesOf(warn).filter((line) => /pending/.test(line))).toEqual([]);
+  });
+
+  it('does not wait for a stream() whose signal aborted before anything was read from it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const k = key();
+    const s = script('openai', k, { whole: true });
+    const a = await souledAgent({ ...stubbed(k), soul: dir, pendingWritesTimeoutMs: 1500 } as never);
+    const turn = new AbortController();
+    a.stream('My favourite tea is jasmine.', { abortSignal: turn.signal });
+    turn.abort();
+    const started = Date.now();
+    await a.close();
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(mergeCalls(s)).toHaveLength(0);
+    expect(linesOf(warn).filter((line) => /pending/.test(line))).toEqual([]);
+  });
 });
 
 describe('a soul the agent cannot use in full', () => {
