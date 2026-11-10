@@ -6,6 +6,11 @@
  * `recentTraces` read one scope by equality on the `scope_id` column (never by the metadata), `deleteScope` takes the
  * scope's registry row with its traces, a scope another writer filed without a row is registered at the next open,
  * and no other scope gets a registry row.
+ *
+ * Per-user wiki pages on the same stores: a subject's page is one row of `memory_pages` with its chunks filed under the
+ * subject's key, two subjects' pages of one id stay apart, a rewritten page's old chunks are deleted for good, an
+ * unchanged body keeps its chunks, ids are kept as given (case, Unicode form, dots, length), a refused page id or a
+ * key that names no user or session is refused, a page outlives a close, and a page write that fails changes nothing.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
@@ -15,6 +20,10 @@ import { Memory } from '../Memory.js';
 import type { Brain } from '../../../retrieval/store/Brain.js';
 import { PORTABLE_TABLES } from '../../../retrieval/store/portable-tables.js';
 import { conversationScopeKey } from '../../../retrieval/store/conversationScopeKey.js';
+import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
+import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import { InvalidWikiPageIdError } from '../../../../substrate/memory/wiki/index.js';
+import type { WikiPage } from '../../../../substrate/memory/wiki/index.js';
 
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 
@@ -231,6 +240,267 @@ describe.each(STORES)('conversation scopes on %s', (store) => {
       expect(listed).toEqual([
         { scopeId: carol, kind: 'user', agentId: 'aria-1', createdAt: 1_700_000_000_000, compiledAt: null },
       ]);
+    });
+  }
+});
+
+/** The per-user page store this change adds, loaded by path until the module exists. */
+interface PageStore {
+  readPage(id: string): Promise<WikiPage | null>;
+  writePage(page: WikiPage): Promise<void>;
+  listPages(): Promise<WikiPage[]>;
+  index(opts?: { force?: boolean }): Promise<{ indexed: string[]; skipped: string[]; removed: string[] }>;
+  deletePage(id: string): Promise<boolean>;
+  deleteAll(): Promise<{ pages: number; chunks: number }>;
+}
+type PageStoreClass = new (opts: {
+  scopeId: string;
+  pages: unknown;
+  chunk: (text: string) => Array<{ text: string }>;
+}) => PageStore;
+const loadUserWikiStore = async (): Promise<PageStoreClass> =>
+  ((await import('../../../../substrate/memory/wiki/UserWikiStore.js' as string)) as { UserWikiStore: PageStoreClass })
+    .UserWikiStore;
+
+const chunk = (text: string): Array<{ text: string }> => text.split('\n\n').map((part) => ({ text: part }));
+const P = (body: string, sources: string[] = []): WikiPage => ({
+  id: 'concepts/notes',
+  type: 'concept',
+  summary: 'Notes compiled from conversations',
+  updated: '2026-01-01T00:00:00.000Z',
+  sources,
+  body,
+  links: [],
+});
+
+interface PageRow {
+  scope_id: string;
+  page_id: string;
+  content: string;
+  chunk_ids: string;
+}
+const pageRows = async (brain: Brain): Promise<PageRow[]> =>
+  brain.all<PageRow>('SELECT scope_id, page_id, content, chunk_ids FROM memory_pages WHERE brain_id = ?', [brain.brainId]);
+const traceIdsUnder = async (brain: Brain, scopeId: string): Promise<string[]> =>
+  (
+    await brain.all<{ id: string }>(
+      `SELECT id FROM memory_traces WHERE brain_id = ? AND scope = 'conversation' AND scope_id = ?`,
+      [brain.brainId, scopeId],
+    )
+  )
+    .map((row) => row.id)
+    .sort();
+const chunkIdsOf = (row: PageRow): string[] => (JSON.parse(row.chunk_ids) as string[]).slice().sort();
+const bodyOf = (page: WikiPage | null): string | undefined => page?.body.trim();
+
+describe.each(STORES)('per-user pages on %s', (store) => {
+  it("writes a subject's page as one row with its chunks under the subject's key", async () => {
+    const { memory, brain } = await open(store);
+    const UserWikiStore = await loadUserWikiStore();
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+
+    await pages.writePage(P('Alice likes tea.\n\nAlice has a cat.', ['t1']));
+
+    const rows = await pageRows(brain);
+    expect(rows.map((row) => [row.scope_id, row.page_id])).toEqual([[A, 'concepts/notes']]);
+    const chunks = await brain.all<{ id: string; tags: string; content: string }>(
+      `SELECT id, tags, content FROM memory_traces WHERE brain_id = ? AND scope = 'conversation' AND scope_id = ?`,
+      [brain.brainId, A],
+    );
+    expect(chunks.map((row) => row.content).sort()).toEqual(['Alice has a cat.', 'Alice likes tea.']);
+    expect(chunkIdsOf(rows[0]!)).toEqual(chunks.map((row) => row.id).sort());
+    for (const row of chunks) expect(JSON.parse(row.tags)).toEqual(['wiki', 'page:concepts/notes']);
+
+    const read = await pages.readPage('concepts/notes');
+    expect(bodyOf(read)).toBe('Alice likes tea.\n\nAlice has a cat.');
+    expect(read?.sources).toEqual(['t1']);
+    expect(read?.summary).toBe('Notes compiled from conversations');
+    expect((await pages.listPages()).map((page) => page.id)).toEqual(['concepts/notes']);
+    expect((await scopeRows(brain)).map((row) => row.scope_id)).toEqual([A]);
+    expect(await pages.index()).toEqual({ indexed: [], skipped: ['concepts/notes'], removed: [] });
+  });
+
+  it("keeps two subjects' pages of one id apart", async () => {
+    const { memory, brain } = await open(store);
+    const UserWikiStore = await loadUserWikiStore();
+    const alice = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    const bob = new UserWikiStore({ scopeId: B, pages: memory, chunk });
+    const carol = new UserWikiStore({
+      scopeId: conversationScopeKey('aria-1', { kind: 'user', id: 'carol' }),
+      pages: memory,
+      chunk,
+    });
+    await alice.writePage(P('Alice likes tea.\n\nAlice has a cat.'));
+    await bob.writePage(P('Bob plays cello.\n\nBob has a dog.'));
+
+    expect(bodyOf(await alice.readPage('concepts/notes'))).toBe('Alice likes tea.\n\nAlice has a cat.');
+    expect(bodyOf(await bob.readPage('concepts/notes'))).toBe('Bob plays cello.\n\nBob has a dog.');
+    expect(await carol.readPage('concepts/notes')).toBeNull();
+    expect(await carol.listPages()).toEqual([]);
+
+    expect(await alice.deleteAll()).toEqual({ pages: 1, chunks: 2 });
+
+    expect(await alice.readPage('concepts/notes')).toBeNull();
+    expect(await traceIdsUnder(brain, A)).toEqual([]);
+    expect((await pageRows(brain)).map((row) => row.scope_id)).toEqual([B]);
+    expect((await traceIdsUnder(brain, B)).length).toBe(2);
+    expect(bodyOf(await bob.readPage('concepts/notes'))).toBe('Bob plays cello.\n\nBob has a dog.');
+    expect(await bob.deletePage('concepts/nope')).toBe(false);
+    expect(await bob.deletePage('concepts/notes')).toBe(true);
+    expect(await pageRows(brain)).toEqual([]);
+    expect(await traceIdsUnder(brain, B)).toEqual([]);
+  });
+
+  it('rewriting a page deletes its old chunks for good', async () => {
+    const { memory, brain } = await open(store);
+    const UserWikiStore = await loadUserWikiStore();
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage(P('Alice likes oolong.\n\nAlice has a parrot.'));
+    const old = await traceIdsUnder(brain, A);
+    expect(old.length).toBe(2);
+
+    await pages.writePage(P('Alice drinks espresso.\n\nAlice keeps a ferret.'));
+
+    expect(await count(brain, 'SELECT count(*) AS n FROM memory_traces WHERE brain_id = ? AND deleted = 1')).toBe(0);
+    const now = await traceIdsUnder(brain, A);
+    expect(now.length).toBe(2);
+    for (const id of old) expect(now).not.toContain(id);
+    expect(chunkIdsOf((await pageRows(brain))[0]!)).toEqual(now);
+    expect(await memory.recall('oolong', { scope: 'conversation', scopeId: A })).toEqual([]);
+    expect(
+      (await memory.recall('espresso', { scope: 'conversation', scopeId: A })).map((result) => result.trace.content),
+    ).toEqual(['Alice drinks espresso.']);
+  });
+
+  it('leaves the chunks of a page whose body did not change', async () => {
+    const { memory, brain } = await open(store);
+    const UserWikiStore = await loadUserWikiStore();
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+    await pages.writePage(P('Alice likes tea.\n\nAlice has a cat.', ['t1']));
+    const first = chunkIdsOf((await pageRows(brain))[0]!);
+
+    await pages.writePage(P('Alice likes tea.\n\nAlice has a cat.', ['t1', 't2']));
+
+    const row = (await pageRows(brain))[0]!;
+    expect(chunkIdsOf(row)).toEqual(first);
+    expect(await traceIdsUnder(brain, A)).toEqual(first);
+    expect(row.content).toContain('t2');
+    expect((await pages.readPage('concepts/notes'))?.sources).toEqual(['t1', 't2']);
+
+    // A forced index writes the chunks again from the body, and the old ones go for good.
+    const forced = await pages.index({ force: true });
+    expect(forced.indexed).toEqual(['concepts/notes']);
+    expect(forced.removed.slice().sort()).toEqual(first);
+    const after = await traceIdsUnder(brain, A);
+    expect(after.length).toBe(2);
+    for (const id of first) expect(after).not.toContain(id);
+  });
+
+  it('keeps ids as given', async () => {
+    const { memory, brain } = await open(store);
+    const UserWikiStore = await loadUserWikiStore();
+    // Two cases of one name, the two Unicode forms of one letter, a dotted id and a long one.
+    const ids = ['Alice', 'alice', '\u00e9', 'e\u0301', '..', 'x'.repeat(300)];
+    const stores = ids.map(
+      (id) => new UserWikiStore({ scopeId: conversationScopeKey('aria-1', { kind: 'user', id }), pages: memory, chunk }),
+    );
+    for (const [n, pages] of stores.entries()) await pages.writePage(P(`Body number ${n}.`));
+
+    for (const [n, pages] of stores.entries()) {
+      expect(bodyOf(await pages.readPage('concepts/notes'))).toBe(`Body number ${n}.`);
+      expect((await pages.listPages()).length).toBe(1);
+    }
+    expect(new Set((await pageRows(brain)).map((row) => row.scope_id)).size).toBe(ids.length);
+  });
+
+  it("refuses a refused page id and a key that is no subject's", async () => {
+    const { memory, brain } = await open(store);
+    const UserWikiStore = await loadUserWikiStore();
+    const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+
+    await expect(pages.writePage({ ...P('x'), id: '../x' })).rejects.toThrow(InvalidWikiPageIdError);
+    await expect(pages.readPage('../x')).rejects.toThrow(InvalidWikiPageIdError);
+    expect(await pageRows(brain)).toEqual([]);
+    expect(await traceIdsUnder(brain, A)).toEqual([]);
+
+    const operator = conversationScopeKey('aria-1', { kind: 'operator' });
+    expect(() => new UserWikiStore({ scopeId: operator, pages: memory, chunk })).toThrow(TypeError);
+    expect(() => new UserWikiStore({ scopeId: 'aria-1', pages: memory, chunk })).toThrow(TypeError);
+  });
+
+  // These two reopen or wrap the store's own SQLite file, which the Postgres leg does not have.
+  if (store === 'sqlite') {
+    it('a page is there after the store closes and reopens', async () => {
+      const first = await open(store);
+      const UserWikiStore = await loadUserWikiStore();
+      await new UserWikiStore({ scopeId: A, pages: first.memory, chunk }).writePage(
+        P('Alice likes tea.\n\nAlice has a cat.', ['t1']),
+      );
+      await closeNow(first.memory);
+
+      const second = await open(store, first.file);
+      const pages = new UserWikiStore({ scopeId: A, pages: second.memory, chunk });
+
+      expect(bodyOf(await pages.readPage('concepts/notes'))).toBe('Alice likes tea.\n\nAlice has a cat.');
+      expect(
+        (await second.memory.recall('cat', { scope: 'conversation', scopeId: A })).map((result) => result.trace.content),
+      ).toEqual(['Alice has a cat.']);
+    });
+
+    it('a page write that fails changes nothing', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conversation-scope-'));
+      dirs.push(dir);
+      const adapter = await resolveStorageAdapter({
+        filePath: path.join(dir, 'brain.sqlite'),
+        priority: ['better-sqlite3', 'sqljs'],
+        quiet: true,
+      });
+      // Once armed, the page row's insert is refused inside the write's transaction.
+      let armed = false;
+      const through = <T extends object>(target: T, overrides: Partial<Record<keyof T, unknown>>): T =>
+        new Proxy(target, {
+          get(inner, prop) {
+            if (prop in overrides) return overrides[prop as keyof T];
+            const value = Reflect.get(inner, prop, inner);
+            return typeof value === 'function' ? value.bind(inner) : value;
+          },
+        });
+      const wrapped = through(adapter, {
+        transaction: <T>(fn: (trx: StorageAdapter) => Promise<T>): Promise<T> =>
+          adapter.transaction((trx) =>
+            fn(
+              through(trx, {
+                run: (sql: string, params?: unknown[]) => {
+                  if (armed && sql.trimStart().startsWith('INSERT INTO memory_pages')) {
+                    return Promise.reject(new Error('the page row could not be written'));
+                  }
+                  return trx.run(sql, params);
+                },
+              }),
+            ),
+          ),
+      });
+      const memory = await Memory.createWithAdapter(wrapped, { graph: false, selfImprove: false });
+      memories.push(memory);
+      const brain = brainOf(memory);
+      const UserWikiStore = await loadUserWikiStore();
+      const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+      await pages.writePage(P('Alice likes tea.\n\nAlice has a cat.'));
+      const first = chunkIdsOf((await pageRows(brain))[0]!);
+      expect(first.length).toBe(2);
+
+      armed = true;
+      await expect(pages.writePage(P('Alice drinks espresso.\n\nAlice keeps a ferret.'))).rejects.toThrow(
+        'the page row could not be written',
+      );
+      armed = false;
+
+      const row = (await pageRows(brain))[0]!;
+      expect(row.content).toContain('Alice likes tea.');
+      expect(row.content).not.toContain('espresso');
+      expect(chunkIdsOf(row)).toEqual(first);
+      expect(await traceIdsUnder(brain, A)).toEqual(first);
+      expect(bodyOf(await pages.readPage('concepts/notes'))).toBe('Alice likes tea.\n\nAlice has a cat.');
     });
   }
 });
