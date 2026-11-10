@@ -263,7 +263,8 @@ function splitIntoPieces(text: string, maxChars: number): string[] {
       }
       flush();
       const parts = cutWord(word, maxChars);
-      pieces.push(...parts.slice(0, -1));
+      // A loop, not a spread: a very long word can be more parts than a call takes arguments.
+      for (let k = 0; k < parts.length - 1; k++) pieces.push(parts[k]);
       current = parts[parts.length - 1];
     }
   }
