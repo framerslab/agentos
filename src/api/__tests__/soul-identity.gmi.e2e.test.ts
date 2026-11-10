@@ -416,7 +416,7 @@ describe('what the docs say about the id of a soul that gives none', () => {
     expect(gmiDoc).toContain(
       "else `learning.agentKey`, else an id derived from the soul's text, which changes when that text changes, so an agent that keeps memory gives its soul an `agentId` or sets `learning.agentKey`",
     );
-    expect(gmiDoc).toContain("under the persona's id, which with a soul is the soul's id, else `learning.agentKey`");
+    expect(gmiDoc).toContain("under the persona's id: the soul's id, else a slug of the agent's `name`, else `learning.agentKey`");
   });
 });
 
