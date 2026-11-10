@@ -156,8 +156,9 @@ export interface RunOwner {
    * waits for their locks, then lists the records again for a run another tab started meanwhile, and waits for this
    * owner's starts in flight; the whole stop answers within ten seconds. Answers `{ complete: true }` once the store
    * listed the records and every record of the account was deleted or marked, and `{ complete: false }` when the store
-   * refused a listing, a read, a deletion or a mark, or had not answered by the ten seconds, or a write or a start was
-   * still in flight then (that record is deleted or marked once the write returns): call it again.
+   * refused a listing, a read, a deletion or a mark, or a listing had not answered by the ten seconds, or a write or a
+   * start was still in flight then (that record is deleted or marked once the write returns): call it again. The last
+   * read of the rows after a sign-out or a session's end redraws them and leaves the answer as it is.
    */
   stopAccount(cut: 'removal' | 'signout' | 'session'): Promise<{ complete: boolean }>;
   /**
@@ -576,6 +577,8 @@ class BrowserRunOwner implements RunOwner {
   private readonly runningStops: AccountStop[] = [];
   /** The starts in flight, each settling once its record is written and fenced where a stop reached it. */
   private readonly starting = new Set<Promise<boolean>>();
+  /** How many of this owner's fences of a start's record, or of its own records on a heard stop, the store refused. */
+  private fenceFailures = 0;
   private readonly onPageHide = (): void => this.flush();
   private readonly onVisibility = (): void => {
     if (page().document?.visibilityState === 'hidden') this.flush();
@@ -698,8 +701,16 @@ class BrowserRunOwner implements RunOwner {
       release();
     } else {
       const seen = this.seen.get(id);
-      if (!seen || seen.read.status !== 'failed' || seen.local || !(await this.lockFree(seen.read.record.key))) return;
-      await this.deleteRecord(id);
+      if (!seen || seen.read.status !== 'failed' || seen.local) return;
+      // Held while the record is deleted, as a dismissal holds it, so no tab finishes the run between the check and the
+      // deletion.
+      const release = await this.hold(seen.read.record.key);
+      if (!release) return;
+      try {
+        await this.deleteRecord(id);
+      } finally {
+        release();
+      }
       seen.local = true;
     }
     this.ensureTimers();
@@ -733,6 +744,8 @@ class BrowserRunOwner implements RunOwner {
   private async stopEverything(cut: AccountStop): Promise<{ complete: boolean }> {
     // The listings, the waits for the records' and the runs' locks, the starts in flight and the last read share the stop's ten seconds.
     const deadline = Date.now() + STOP_WAIT;
+    // A start's fence that the store refuses while the stop runs leaves a record, whenever that start settles.
+    const failuresBefore = this.fenceFailures;
     const names = new Set<string>();
     const first = await this.fenceListed(cut, deadline, names, new Set());
     for (const held of this.held.values()) if (held.release !== null) names.add(this.runName(held.job.key));
@@ -749,10 +762,12 @@ class BrowserRunOwner implements RunOwner {
     // once it is written; the stop waits for it in what is left of the ten seconds.
     const starts = [...this.starting];
     const started = starts.length === 0 ? [] : await within(Promise.all(starts), deadline - Date.now());
-    // The rows are read again for the marks, inside the ten seconds as well; a read past them goes on alone.
+    // The rows are read again for the marks, inside the ten seconds as well; a read past them goes on alone. This read
+    // redraws the rows and deletes or marks nothing, so it leaves the answer as it is.
     if (cut !== 'removal') await within(this.records(), deadline - Date.now());
     this.touch();
-    return { complete: first.complete && second.complete && started !== null && !started.includes(false) };
+    const settled = started !== null && !started.includes(false) && this.fenceFailures === failuresBefore;
+    return { complete: first.complete && second.complete && settled };
   }
 
   /**
@@ -1024,6 +1039,7 @@ class BrowserRunOwner implements RunOwner {
       if (held.stopCut !== null && !held.memoryOnly) {
         await this.fenceRecord(key, held.stopCut).catch(() => {
           fenced = false;
+          this.fenceFailures += 1;
         });
       }
       if (held.stopCut === null) this.post(held);
@@ -1434,7 +1450,13 @@ class BrowserRunOwner implements RunOwner {
       this.stopCuts.push(message.stop);
       // A run started here after the other tab listed the records has a record that listing missed: this owner deletes
       // or marks its own runs' records under their locks, as the stopping tab does.
-      for (const held of this.held.values()) if (!held.memoryOnly) void this.fenceRecord(this.keyPrefix + held.record.id, message.stop).catch(() => undefined);
+      for (const held of this.held.values()) {
+        if (!held.memoryOnly) {
+          void this.fenceRecord(this.keyPrefix + held.record.id, message.stop).catch(() => {
+            this.fenceFailures += 1;
+          });
+        }
+      }
       this.stopHeld(message.stop);
       return;
     }
