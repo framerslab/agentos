@@ -876,7 +876,7 @@ With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/m
 
 ### Per-agent identity via SOUL.md
 
-Pass a `soul:` option to give an agent its identity from a SOUL.md workspace. `agent()` builds its system prompt from the SOUL.md body first, then a `## Style` section from STYLE.md, then the `memory/index.md` catalog, then `instructions`, `name`, `personality` and skills. A soul that fails to load logs a warning, and the agent starts without it.
+Pass a `soul:` option to give an agent its identity from a SOUL.md workspace. `agent()` builds its system prompt from the SOUL.md body first, then a `## Style` section from STYLE.md, then the `memory/index.md` catalog, then `instructions`, `name`, `personality` and skills. A soul that fails to load throws `SoulLoadError` when the agent is built; pass `soul: { path, optional: true }` to run without it.
 
 ```ts
 // Workspace path: SOUL.md, STYLE.md and memory/index.md shape the prompt
@@ -889,7 +889,7 @@ agent({ provider: 'openai', soul: './personas/aria.soul.md' });
 agent({ provider: 'openai', soul: { content: SOUL_MARKDOWN_STRING } });
 ```
 
-`agent({ soul })` uses the prose only. The frontmatter's structured fields (HEXACO scores, voice, mood, hard limits) land on the `personaDefinition` that `loadSoul()` returns, which the full runtime takes as a persona; give an `agent()` a trait paragraph with `personality`. See [SOUL_FILES.md](../SOUL_FILES.md) for the workspace files.
+`agent({ soul })` applies the front matter it has a renderer for: the `hardLimits` close the system prompt as a "Hard limits" block, after `systemBlocks` too, the `hexaco` scores render as the trait paragraph when no `personality` is set, and the soul's `name` is the name line when no `name` is set. An option set in code wins over the file. Mood, voice, avatar and the reasoning-trace limits have no renderer on this path. See [SOUL_FILES.md](../SOUL_FILES.md) for the workspace files.
 
 ### `souledAgent()`: soul plus a `memory/` wiki
 

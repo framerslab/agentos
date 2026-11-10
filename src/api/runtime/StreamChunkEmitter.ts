@@ -144,6 +144,8 @@ export class StreamChunkEmitter {
           updatedConversationContext: data.updatedConversationContext,
           activePersonaDetails: data.activePersonaDetails,
           ragSources: data.ragSources,
+          // Set by the runtime only when the stream announced the turn's recall capture ('metadata+stream').
+          ...(data.memoryRecall !== undefined ? { memoryRecall: data.memoryRecall } : {}),
           structured: data.structured,
         } as AgentOSFinalResponseChunk;
         break;

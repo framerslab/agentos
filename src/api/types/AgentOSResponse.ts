@@ -148,6 +148,14 @@ export interface AgentOSFinalResponseChunk extends AgentOSResponseChunk {
    */
   ragSources?: import('../../cognition/rag').RagRetrievedChunk[];
 
+  /**
+   * The recall capture of the turn's memory assembly, present only when the
+   * memory manager's `recall.capture` is `'metadata+stream'` (the stream then
+   * also carried it as a `METADATA_UPDATE` with `memorySources`). Ids, ranks,
+   * scores, counts and timings; never a memory's text or the query's.
+   */
+  memoryRecall?: import('../../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
+
   /** On a structured turn (`ProcessingOptions.structuredReply`): the parsed value and how it was checked. */
   structured?: import('../runtime/structuredReply').StructuredReplyOutput;
 }

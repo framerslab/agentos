@@ -12,7 +12,8 @@
  */
 
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
-import type { PADState } from '../memory/core/config.js';
+import type { ManagerRecallConfig, PADState } from '../memory/core/config.js';
+import type { RecallCaptureMode } from '../memory/retrieval/recall/capture.js';
 import type {
   AssembledMemoryContext,
   MemoryScope,
@@ -288,6 +289,24 @@ export class CognitiveMemoryBridge {
     }
   }
 
+  /** The memory manager's recall settings, or undefined when it has none or cannot be read. */
+  private recallConfig(): ManagerRecallConfig | undefined {
+    try {
+      return this.cognitiveMemory.getConfig?.()?.recall;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * How much of each memory assembly the manager records: its `recall.capture`,
+   * `'metadata'` when unset. Under `'metadata+stream'` the GMI also sends the
+   * assembly's capture on its stream.
+   */
+  public captureMode(): RecallCaptureMode {
+    return this.recallConfig()?.capture ?? 'metadata';
+  }
+
   /**
    * Assembles a cognitive memory context suitable for injection into the LLM prompt.
    *
@@ -324,9 +343,21 @@ export class CognitiveMemoryBridge {
         { scopes },
       );
       if (context.contextText.trim()) {
+        // Counts, the retrieval, the reranker and the absent legs; the ids only on the host's ask, the text never.
+        // With the capture off, the counts come from the assembler's line report, one entry a trace.
+        const capture = context.capture;
+        const counted: ReadonlyArray<{ outcome: 'included' | 'left_out' }> | undefined = capture?.candidates ?? context.lineOutcomes;
+        const included = counted ? counted.filter((c) => c.outcome === 'included').length : context.includedMemoryIds.length;
+        const candidates = counted ? counted.length : included;
         this.addTraceEntry('DEBUG', 'Cognitive memory context assembled.', {
           tokensUsed: context.tokensUsed,
-          includedMemoryIds: context.includedMemoryIds,
+          candidates,
+          included,
+          leftOut: candidates - included,
+          retrieval: capture?.retrieval ?? 'dense',
+          reranker: capture?.reranker.provider ?? 'none',
+          legsAbsent: capture ? capture.legs.filter((leg) => !leg.ran).map((leg) => ({ leg: leg.leg, ...(leg.reason ? { reason: leg.reason } : {}) })) : [],
+          ...(this.recallConfig()?.traceIds === true ? { includedMemoryIds: context.includedMemoryIds } : {}),
         });
       }
       return context;

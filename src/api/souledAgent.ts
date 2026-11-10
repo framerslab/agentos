@@ -28,6 +28,7 @@ import {
 import { generateText } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { Memory } from '../cognition/memory/io/facade/Memory.js';
+import { soulAgentIdOf } from '../cognition/substrate/personas/SoulLoader.js';
 import { attachMemoryWiki } from '../cognition/memory/io/attachMemoryWiki.js';
 import { SemanticChunker } from '../cognition/rag/chunking/SemanticChunker.js';
 import { estimateTokens } from '../core/utils/text-utils.js';
@@ -252,7 +253,13 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   const budget = asSpendBudget(rest.budget);
   const ledger = (rest.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? rest.usageLedger;
 
-  const agentId = loaded.frontmatter.agentId ?? opts.name ?? 'agent';
+  // The soul's one id: the wiki files under it, and nothing files under a shared fallback id.
+  const agentId = soulAgentIdOf(loaded.frontmatter, opts.name);
+  if (!agentId) {
+    throw new Error(
+      "souledAgent: the soul has no agentId and no name, and the agent has no name; set agentId in SOUL.md's front matter so the agent's memory has one stable id",
+    );
+  }
 
   // The markdown memory/ is source of truth; the sqlite is the rebuildable index.
   const storeDir = path.join(loaded.memoryDir, '.store');
