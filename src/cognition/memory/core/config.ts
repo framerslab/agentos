@@ -405,7 +405,9 @@ export interface CognitiveMemoryConfig {
    * relevant results.
    *
    * The manager calls `rerankerService.rerank()` without a provider id, so
-   * the service's `defaultProviderId` picks the provider. Any registered
+   * the service's `defaultProviderId` picks the provider; without one the
+   * call throws and retrieval keeps the cognitive scores, with no log line.
+   * Any registered
    * provider works: `local` (a cross-encoder run in process through
    * Transformers.js), `cohere` (Cohere's rerank API) or `llm-judge` (a
    * model you call through `llmCallFn`). A remote provider receives the

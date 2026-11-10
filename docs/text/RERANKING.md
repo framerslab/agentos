@@ -70,7 +70,7 @@ new LocalCrossEncoderReranker({
 - `LOCAL_RERANKER_MODELS` lists five Hugging Face model ids: `cross-encoder/ms-marco-MiniLM-L-6-v2`, `cross-encoder/ms-marco-MiniLM-L-12-v2`, `BAAI/bge-reranker-base`, `BAAI/bge-reranker-large` and `sentence-transformers/ce-ms-marco-TinyBERT-L-4`.
 - The model loads on the first `rerank()` (or `initialize(modelId)`), quantized, as a `text-classification` pipeline, and serves every later request. A request's `modelId` picks the model only on that first load; `initialize(otherModelId)` loads another. `dispose()` unloads it.
 - Each passage is scored as `"<query> [SEP] <passage>"`, truncated to `maxSequenceLength`. The score is the `LABEL_1`, `POSITIVE` or `1` label's score, else the first label's. A passage whose scoring throws scores 0 and logs a warning.
-- `device: 'gpu'` sets Transformers.js's ONNX WASM backend to one thread; the pipeline is created without a device option. `'cpu'` and `'auto'` change nothing.
+- No `device` value selects a GPU: the pipeline is created without a device option, so Transformers.js picks the backend. `'gpu'` sets Transformers.js's ONNX WASM backend to one thread, a process-wide setting every Transformers.js pipeline in the process shares; `'cpu'` and `'auto'` change nothing.
 - It reads no `timeoutMs` and no `params`.
 
 ### `cohere`: Cohere's rerank API
@@ -96,14 +96,16 @@ new CohereReranker({
 ```typescript
 import { generateText, PROVIDER_DEFAULTS } from '@framers/agentos';
 
+const provider = 'ollama'; // any provider generateText serves: 'openai', 'anthropic', 'gemini', 'ollama', ...
+
 new LlmJudgeReranker({
   // Your function: (system, user, model?) => the model's text. It picks the provider.
-  // fallbackProviders: [] keeps every call on Gemini; without it generateText falls back to the other
+  // fallbackProviders: [] keeps every call on `provider`; without it generateText falls back to the other
   // providers whose keys are in the environment, and they receive the passages too.
   llmCallFn: async (system, prompt, model) =>
-    (await generateText({ provider: 'gemini', model, system, prompt, fallbackProviders: [] })).text,
-  scoringModel: PROVIDER_DEFAULTS.gemini.cheap, // 'gemini-2.5-flash-lite'; passed to llmCallFn as `model`
-  rankingModel: PROVIDER_DEFAULTS.gemini.cheap, // passed to llmCallFn as `model` for the ranking call
+    (await generateText({ provider, model, system, prompt, fallbackProviders: [] })).text,
+  scoringModel: PROVIDER_DEFAULTS[provider].cheap, // passed to llmCallFn as `model` on each scoring call
+  rankingModel: PROVIDER_DEFAULTS[provider].cheap, // passed to llmCallFn as `model` on the ranking call
   maxPointwiseDocuments: 100,                   // the default
   pointwiseTopK: 20,                            // the default
   batchSize: 10,                                // the default
@@ -111,7 +113,7 @@ new LlmJudgeReranker({
 });
 ```
 
-- The judge names no model and calls no provider. It hands `scoringModel` to `llmCallFn` on each scoring call and `rankingModel` on the ranking call, and `undefined` when one is not set, so `llmCallFn` decides. Any provider `generateText` serves fits: `PROVIDER_DEFAULTS` holds a `cheap` model for each (`gemini-2.5-flash-lite` for `gemini`, `gpt-4o-mini` for `openai`, `claude-haiku-4-5-20251001` for `anthropic`, `llama3.2` for `ollama`, among others). The request's `modelId` and `params` are not read, so a chain stage's `model` does not reach the judge.
+- The judge names no model and calls no provider. It hands `scoringModel` to `llmCallFn` on each scoring call and `rankingModel` on the ranking call, and `undefined` when one is not set, so `llmCallFn` decides. Any provider `generateText` serves fits: `PROVIDER_DEFAULTS` holds a `cheap` model for each (`gpt-4o-mini` for `openai`, `claude-haiku-4-5-20251001` for `anthropic`, `gemini-2.5-flash-lite` for `gemini`, `llama3.2` for `ollama`, among others). The request's `modelId` and `params` are not read, so a chain stage's `model` does not reach the judge.
 - `isAvailable()` answers whether `llmCallFn` is a function. It is not built from a config entry: register it with `registerProvider()`.
 - The answer carries no `diagnostics`.
 
@@ -178,13 +180,13 @@ const { results } = await service.rerank(
 | `LlmJudgeReranker` | Does not throw for a model's failure: a failed scoring batch scores 0, a failed ranking call leaves the order to the scores |
 | `rerankChain()` | Skips the stage and keeps the order it was given |
 | `RetrievalAugmentor` | Returns the chunks without reranking and adds the error to `diagnostics.messages` |
-| `CognitiveMemoryManager`, `HybridRetriever`, `SessionRetriever` | Keep the scores they had before reranking |
+| `CognitiveMemoryManager`, `HybridRetriever`, `SessionRetriever` | Keep the scores they had before reranking and write no log line of their own; the service logs a provider's error to its `logger`. They call the service's default provider, so a service without `defaultProviderId` fails every call this way, logged nowhere |
 | `WebSearchService` | Keeps the fused order |
 
 ## Where a reranker plugs in
 
 - `RetrievalAugmentor` builds a `RerankerService` from `rerankerServiceConfig`. It registers the `cohere` provider (when its entry has an `apiKey`) and the `local` one for the entries that config names; register `llm-judge` and providers of your own with `registerRerankerProvider()`. It reranks a request that sets `rerankerConfig.enabled`, with `rerankerConfig.providerId` (else `defaultRerankerProviderId`) picking the provider, or one with no `rerankerConfig` whose retrieval `policy` sets `reranker: 'always'` ([RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md#reranker-chain)).
-- `CognitiveMemoryManager` takes a `rerankerService`, calls it with no provider id, so the service's `defaultProviderId` picks one, and blends 0.7 of each trace's cognitive score with 0.3 of the rerank score ([Memory retrieval reranking](../memory/RAG_MEMORY_CONFIGURATION.md#memory-retrieval-reranking)).
+- `CognitiveMemoryManager` takes a `rerankerService` and calls it with no provider id, so the service's `defaultProviderId` picks one; without a `defaultProviderId` every call throws and retrieval runs without reranking, with no log line. It blends 0.7 of each trace's cognitive score with 0.3 of the rerank score ([Memory retrieval reranking](../memory/RAG_MEMORY_CONFIGURATION.md#memory-retrieval-reranking)).
 - `HybridRetriever` and `SessionRetriever` take a `rerankerService`, call its default provider over their pool and blend the scores the same way ([Hybrid BM25 + Dense Retriever](../architecture/hybrid-retriever.md), [Session Retriever](../architecture/session-retriever.md)).
 - `WebSearchService` takes `reranker` and `rerankChain` and runs the chain over its fused results, unless a search passes `rerank: false`.
 

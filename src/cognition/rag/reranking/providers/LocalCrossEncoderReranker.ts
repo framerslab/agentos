@@ -24,10 +24,12 @@ export interface LocalCrossEncoderConfig extends RerankerProviderConfig {
    */
   defaultModelId?: string;
   /**
-   * Device hint, reported in the diagnostics. Default 'cpu'.
+   * Device hint, reported in the diagnostics. Default 'cpu'. No value
+   * selects a GPU: the pipeline is created without a device option, so
+   * Transformers.js picks the backend.
    * - 'gpu' sets Transformers.js's ONNX WASM backend to one thread
-   *   (`env.backends.onnx.wasm.numThreads = 1`); the pipeline is created
-   *   without a device option, so Transformers.js picks the backend.
+   *   (`env.backends.onnx.wasm.numThreads = 1`), a process-wide setting
+   *   that every Transformers.js pipeline in the process shares.
    * - 'cpu' and 'auto' change nothing.
    */
   device?: 'cpu' | 'gpu' | 'auto';
