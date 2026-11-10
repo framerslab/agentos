@@ -20,6 +20,7 @@ import { CognitiveMemoryManager } from '../../src/cognition/memory/CognitiveMemo
 import type { CognitiveMemoryConfig, PADState } from '../../src/cognition/memory/core/config.js';
 import { InMemoryVectorStore } from '../../src/cognition/rag/vector_stores/InMemoryVectorStore.js';
 import { RerankerService } from '../../src/cognition/rag/reranking/RerankerService.js';
+import { LlmJudgeReranker } from '../../src/cognition/rag/reranking/providers/LlmJudgeReranker.js';
 import type { IRerankerProvider, RerankerInput, RerankerOutput } from '../../src/cognition/rag/reranking/IRerankerService.js';
 
 const NEUTRAL: PADState = { valence: 0, arousal: 0, dominance: 0 };
@@ -100,6 +101,33 @@ function stubReranker(providerId: string, fails = false): IRerankerProvider {
       };
     },
   };
+}
+
+/**
+ * A reranker provider under `providerId` that gives the last document it was sent a score of 1 and every other 0, so
+ * the blend moves the dense leg's last candidate to the top; it answers after `delayMs`, or throws.
+ */
+function lastFirstReranker(providerId: string, options: { delayMs?: number; fails?: boolean } = {}): IRerankerProvider {
+  return {
+    providerId,
+    isAvailable: async () => true,
+    rerank: async (input: RerankerInput): Promise<RerankerOutput> => {
+      if (options.delayMs) await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+      if (options.fails) throw new Error('reranker down');
+      const last = input.documents.length - 1;
+      return {
+        results: input.documents.map((doc, i) => ({ id: doc.id, content: doc.content, relevanceScore: i === last ? 1 : 0 })),
+        diagnostics: { modelId: `${providerId}-model`, providerId, latencyMs: 1, documentsProcessed: input.documents.length },
+      };
+    },
+  };
+}
+
+/** A RerankerService whose default provider is `provider`. */
+function serviceOf(provider: IRerankerProvider): RerankerService {
+  const service = new RerankerService({ config: { providers: [{ providerId: provider.providerId }], defaultProviderId: provider.providerId } });
+  service.registerProvider(provider);
+  return service;
 }
 
 /** A manager with ids from `id-0001`, the 25 statements encoded (semantic and episodic in turn) under user `u1`. */
@@ -230,5 +258,51 @@ describe('the recall capture of a memory assembly', () => {
       expect(c.reranker, `${providerId}${fails ? ' failing' : ''}`).toEqual({ ...expected, candidates: expect.any(Number), ms: expect.any(Number) });
       expect(c.reranker.candidates).toBeGreaterThan(0);
     }
+  });
+
+  it("a rerank that reorders the candidates leaves each one's dense rank as the dense leg gave it, with the reranker's own score beside it", async () => {
+    const manager = await managerWith({ rerankerService: serviceOf(lastFirstReranker('cohere')) } as Partial<CognitiveMemoryConfig>);
+    const c = (await manager.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES })).capture!;
+    const n = c.candidates.length;
+    expect(n).toBeGreaterThan(2);
+    // The dense leg's last candidate leads after the blend; the rest keep their dense order behind it.
+    expect(c.candidates.map((x) => x.ranks.dense)).toEqual([n, ...Array.from({ length: n - 1 }, (_, i) => i + 1)]);
+    expect(c.candidates.map((x) => x.rerankScore)).toEqual([1, ...Array.from({ length: n - 1 }, () => 0)]);
+    for (let i = 1; i < n; i += 1) expect(c.candidates[i - 1].fusedScore).toBeGreaterThanOrEqual(c.candidates[i].fusedScore);
+  });
+
+  it("a recall of no rerank keeps rerankScore off every candidate", async () => {
+    const manager = await managerWith();
+    const c = (await manager.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES })).capture!;
+    for (const cand of c.candidates) expect('rerankScore' in cand).toBe(false);
+  });
+
+  it("the dense leg's time is its own recall's, not the rerank's", async () => {
+    vi.useRealTimers();
+    const manager = await managerWith({ rerankerService: serviceOf(lastFirstReranker('cohere', { delayMs: 250 })) } as Partial<CognitiveMemoryConfig>);
+    const c = (await manager.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES })).capture!;
+    expect(c.reranker.ms).toBeGreaterThanOrEqual(240);
+    expect(c.timings.rerankMs).toBe(c.reranker.ms);
+    expect(c.legs[0].ms).toBeLessThan(200);
+    expect(c.timings.totalMs).toBeGreaterThanOrEqual(c.reranker.ms!);
+  });
+
+  it('a recall larger than the reranker service sends counts the candidates it sent (100), whether the rerank answered or failed', async () => {
+    for (const fails of [false, true]) {
+      const manager = await managerWith({ rerankerService: serviceOf(lastFirstReranker('cohere', { fails })) } as Partial<CognitiveMemoryConfig>);
+      for (let i = 0; i < 100; i += 1) {
+        await manager.encode(`Extra ${i}: a trail note about the lake and its view, number ${i}.`, NEUTRAL, 'neutral', { type: 'episodic', scope: 'user', scopeId: 'u1' });
+      }
+      const c = (await manager.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES, topK: 150 })).capture!;
+      expect(c.legs[0].candidates, fails ? 'failing' : 'answered').toBeGreaterThan(100);
+      expect(c.reranker.candidates, fails ? 'failing' : 'answered').toBe(100);
+    }
+  });
+
+  it('a RerankerService over the LLM judge is recorded as llm, with the ranking model', async () => {
+    const judge = new LlmJudgeReranker({ llmCallFn: async () => '[]', scoringModel: 'judge-scorer', rankingModel: 'judge-ranker' });
+    const manager = await managerWith({ rerankerService: serviceOf(judge) } as Partial<CognitiveMemoryConfig>);
+    const c = (await manager.assembleForPrompt(QUERY, 1600, NEUTRAL, { scopes: SCOPES })).capture!;
+    expect(c.reranker).toEqual({ provider: 'llm', model: 'judge-ranker', candidates: c.candidates.length, ms: expect.any(Number) });
   });
 });
