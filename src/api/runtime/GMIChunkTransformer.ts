@@ -62,10 +62,10 @@ export interface TransformerStreamContext {
   /** The sources the stream announced last, which the transformer records as it streams them. */
   ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
   /**
-   * True once the stream announced a turn's recall capture (the memory manager's `recall.capture` is
-   * `'metadata+stream'`): the turn's `FINAL_RESPONSE` then carries `memoryRecall` too.
+   * The recall capture the stream announced for its turn (the memory manager's `recall.capture` is
+   * `'metadata+stream'`): the turn's `FINAL_RESPONSE`, or its continuation's, then carries it as `memoryRecall`.
    */
-  memorySourcesStreamed?: boolean;
+  streamedMemoryRecall?: MemoryRecallCapture;
 }
 
 /**
@@ -410,7 +410,7 @@ export class GMIChunkTransformer {
         // METADATA_UPDATE before the reply's text, and the turn's FINAL_RESPONSE carries it as `memoryRecall`.
         const memorySources = (gmiChunk.content as { memorySources?: MemoryRecallCapture } | undefined)?.memorySources;
         if (memorySources) {
-          streamContext.memorySourcesStreamed = true;
+          streamContext.streamedMemoryRecall = memorySources;
           await this.chunks.pushChunk(
             agentOSStreamId,
             AgentOSResponseChunkType.METADATA_UPDATE,

@@ -224,8 +224,8 @@ interface ActiveStreamContext {
   languageNegotiation?: any; // multilingual negotiation metadata
   /** The sources the stream's turn retrieved, as the stream announced them; a continuation of the turn reads them. */
   ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
-  /** True once the stream announced the turn's recall capture; its FINAL_RESPONSE then carries `memoryRecall`. */
-  memorySourcesStreamed?: boolean;
+  /** The recall capture the stream announced for its turn; the turn's FINAL_RESPONSE (or its continuation's) carries it. */
+  streamedMemoryRecall?: import('../../cognition/memory/retrieval/recall/capture.js').MemoryRecallCapture;
   // Iterator is managed within the orchestrateTurn method directly
 }
 

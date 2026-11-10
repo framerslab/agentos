@@ -50,8 +50,9 @@ export type {
   MemoryRecallReranker,
   MemoryRecallCapture,
   RankedRecallCandidate,
+  RetrievalRecallReport,
 } from './retrieval/recall/index.js';
-export { MEMORY_RECALL_CAPTURE_VERSION, candidatesFrom, rerankerRecordOf } from './retrieval/recall/index.js';
+export { MEMORY_RECALL_CAPTURE_VERSION, MEMORY_RERANK_MAX_DOCUMENTS, candidatesFrom, rerankerRecordOf } from './retrieval/recall/index.js';
 
 // --- Configuration ---
 export type {

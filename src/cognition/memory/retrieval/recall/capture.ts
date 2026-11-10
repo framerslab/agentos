@@ -44,7 +44,7 @@ export interface MemoryRecallCandidate {
   ranks: Partial<Record<RecallLeg, number>>;
   /** The score the candidates were ordered by before assembly (under dense retrieval, the trace's retrieval score). */
   fusedScore: number;
-  /** The rerank score, when a rerank scored this candidate. */
+  /** The score the reranker gave it, before the blend; absent when no rerank scored it. */
   rerankScore?: number;
   /** Whether the memory block shows it. */
   outcome: 'included' | 'left_out';
@@ -81,7 +81,7 @@ export interface MemoryRecallReranker {
   revision?: string;
   /** With `provider: 'none'`: why no rerank scores were applied. */
   reason?: RerankSkipReason;
-  /** How many candidates were sent to the reranker. */
+  /** How many candidates the reranker was sent (as the provider reports it, else at most `MEMORY_RERANK_MAX_DOCUMENTS`). */
   candidates?: number;
   /** How long the rerank took, in milliseconds. */
   ms?: number;
@@ -127,6 +127,33 @@ export interface MemoryRecallCapture {
     otherContext?: { ragTokens: number; longTermMemoryTokens: number; deliveredTokens: number; cutBy?: 'prompt_engine_truncate' | 'prompt_engine_summarize' };
     issueCodes?: string[];
   };
+}
+
+/**
+ * The most candidates a manager's memory recall sends its `rerankerService` (`maxDocuments` on the call): the
+ * ones the dense leg ranks first. The rest keep their cognitive scores.
+ */
+export const MEMORY_RERANK_MAX_DOCUMENTS = 100;
+
+/**
+ * What a `CognitiveMemoryManager` retrieval reports for the recall capture, on
+ * `CognitiveRetrievalResult.diagnostics.recall`: trace ids, ranks, scores and
+ * a time, never a memory's text.
+ */
+export interface RetrievalRecallReport {
+  /**
+   * Each returned trace's 1-based rank in the dense leg: the order the vector
+   * recall's cognitive scores (and the graph's activation) gave the traces,
+   * before any rerank.
+   */
+  denseRanks: Record<string, number>;
+  /**
+   * Milliseconds of the dense leg: the query's embedding (and its HyDE
+   * hypothesis, when one is asked for), the vector search and the scoring.
+   */
+  denseMs: number;
+  /** Each trace the reranker scored, with the score it gave before the blend. Absent when no rerank answered. */
+  rerankScores?: Record<string, number>;
 }
 
 /** A ranked candidate before assembly. */

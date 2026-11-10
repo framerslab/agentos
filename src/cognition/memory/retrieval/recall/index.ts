@@ -5,6 +5,7 @@
 
 export {
   MEMORY_RECALL_CAPTURE_VERSION,
+  MEMORY_RERANK_MAX_DOCUMENTS,
   candidatesFrom,
   rerankerRecordOf,
 } from './capture.js';
@@ -17,4 +18,5 @@ export type {
   MemoryRecallReranker,
   MemoryRecallCapture,
   RankedRecallCandidate,
+  RetrievalRecallReport,
 } from './capture.js';

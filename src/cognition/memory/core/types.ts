@@ -552,6 +552,12 @@ export interface CognitiveRetrievalResult {
      * applied. Absent when the manager holds no reranker.
      */
     reranker?: import('../retrieval/recall/capture.js').MemoryRecallReranker;
+    /**
+     * Set by `CognitiveMemoryManager`: each returned trace's dense rank from
+     * before any rerank, the dense leg's time, and the reranker's own scores,
+     * which the recall capture reports.
+     */
+    recall?: import('../retrieval/recall/capture.js').RetrievalRecallReport;
   };
 }
 
