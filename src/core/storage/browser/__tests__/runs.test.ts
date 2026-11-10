@@ -106,6 +106,20 @@ function countingJob(items: number, gate: Array<() => Promise<void>>): RunJob {
   };
 }
 
+/** A job that writes nothing and returns once its signal is aborted. */
+function untilStopped(): RunJob {
+  return {
+    ...countingJob(1, []),
+    async run(context) {
+      await new Promise<void>((resolve) => {
+        if (context.signal.aborted) resolve();
+        else context.signal.addEventListener('abort', () => resolve());
+      });
+      return { ended: 'stopped', counts: context.record().counts };
+    },
+  };
+}
+
 /** An export that makes its file and waits for the save. */
 function unsavedExport(onAbort?: () => void): RunJob {
   return {
@@ -617,6 +631,92 @@ describe('the run owner', () => {
       stopper.close();
     }
   }, 15_000);
+
+  it.each(['removal', 'signout'] as const)('leaves no live record of a run another owner started after the %s listed the records and before its message', async (cut) => {
+    const locks = memoryLocks();
+    const store = new MemoryKeyValueStore();
+    const channels = bus();
+    const holder = owner(store, locks, channels);
+    const stopper = owner(store, locks, channels);
+    const realKeys = store.keys.bind(store);
+    try {
+      let armed = false;
+      let id = '';
+      // The stop's first listing reads the records, then the other owner's start writes its record before the listing answers.
+      store.keys = async (prefix) => {
+        const first = armed;
+        armed = false;
+        const listed = await realKeys(prefix);
+        if (first) {
+          const started = await holder.start(untilStopped());
+          id = 'id' in started ? started.id : '';
+        }
+        return listed;
+      };
+      armed = true;
+      const answer = await stopper.stopAccount(cut);
+      store.keys = realKeys;
+      expect(id).not.toBe('');
+      expect(answer).toEqual({ complete: true });
+      const check = async () => {
+        if (cut === 'removal') expect(await store.keys('lib/j/')).toEqual([]);
+        else expect((await store.get<RunRecord>(`lib/j/${id}`))?.cut).toBe('signout');
+      };
+      await check();
+      expect((await holder.whenIdle()).get(id)?.ended).toBe('fenced');
+      await check(); // the run's end brought nothing back
+    } finally {
+      store.keys = realKeys;
+      holder.close();
+      stopper.close();
+    }
+  });
+
+  it.each(['removal', 'signout'] as const)("deletes or marks its own run's record when it hears another tab's %s", async (cut) => {
+    const store = new MemoryKeyValueStore();
+    const channels = bus();
+    const holder = owner(store, memoryLocks(), channels);
+    const tab = channels('runs');
+    tab.listen(() => undefined);
+    try {
+      const started = await holder.start(untilStopped());
+      const id = 'id' in started ? started.id : '';
+      expect(await store.keys('lib/j/')).toEqual([`lib/j/${id}`]);
+      tab.post({ account: ACCOUNT, stop: cut });
+      expect((await holder.whenIdle()).get(id)?.ended).toBe('fenced');
+      await vi.waitFor(async () => {
+        if (cut === 'removal') expect(await store.keys('lib/j/')).toEqual([]);
+        else expect((await store.get<RunRecord>(`lib/j/${id}`))?.cut).toBe('signout');
+      });
+    } finally {
+      holder.close();
+      tab.close();
+    }
+  });
+
+  it("draws an item's new state or name that another tab wrote while the counts stayed the same", async () => {
+    const store = new MemoryKeyValueStore();
+    const record: RunRecord = {
+      id: 'r7', key: KEY, account: ACCOUNT, kind: 'library', way: null, unit: 'sessions', chosen: null, counts: { total: 2, pending: 1, applied: 0, skipped: 0, failed: 1 },
+      items: [{ index: 0, state: 'failed', name: 'a.txt' }, { index: 1, state: 'waiting' }], state: 'running', cut: null, phase: null, began: 1, progressed: 2,
+    };
+    await store.set('lib/j/r7', record);
+    const watcher = owner(store, memoryLocks(), () => null);
+    try {
+      await watcher.records();
+      expect(watcher.snapshot().runs[0]?.record.items).toEqual(record.items);
+      const reading: RunRecord = { ...record, items: [{ index: 0, state: 'failed', name: 'a.txt' }, { index: 1, state: 'reading' }], progressed: 3 };
+      await store.set('lib/j/r7', reading);
+      await watcher.records();
+      expect(watcher.snapshot().runs[0]?.record.items).toEqual(reading.items);
+      const renamed: RunRecord = { ...reading, items: [{ index: 0, state: 'failed', name: 'b.txt' }, { index: 1, state: 'reading' }], progressed: 4 };
+      await store.set('lib/j/r7', renamed);
+      await watcher.records();
+      expect(watcher.snapshot().runs[0]?.record.items).toEqual(renamed.items);
+    } finally {
+      watcher.close();
+    }
+  });
 
   it('finds a run another owner starts later when no channel reaches it', async () => {
     const locks = memoryLocks();
