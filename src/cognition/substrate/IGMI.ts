@@ -427,6 +427,13 @@ export enum GMIOutputChunkType {
    */
   RAG_SOURCES_AVAILABLE = 'rag_sources_available',
   /**
+   * Emitted once a user turn's memory block is assembled, only when the
+   * memory manager's `recall.capture` is `'metadata+stream'`. The chunk
+   * content is `{ memorySources: MemoryRecallCapture }`: ids, ranks, scores,
+   * counts and timings, never a memory's text or the query's.
+   */
+  MEMORY_SOURCES_AVAILABLE = 'memory_sources_available',
+  /**
    * One per model step that completes: the step's text, finish reason, provider, model, hop and usage.
    * A step that fails emits none: a USAGE_UPDATE with `metadata.attemptFailed: true` reports what it was
    * billed, when the provider reported that, and the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
@@ -573,6 +580,12 @@ export interface GMIOutput {
      * the same sources the model saw.
      */
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
+    /**
+     * The recall capture of the turn's memory assembly, when the GMI assembled
+     * a memory block and the memory manager's `recall.capture` is not `'off'`.
+     * A tool continuation assembles none and carries none.
+     */
+    memoryRecall?: import('../memory/retrieval/recall/capture.js').MemoryRecallCapture;
     /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */
     structuredOutput?: import('../../api/runtime/structuredReply.js').StructuredReplyOutput;
 }

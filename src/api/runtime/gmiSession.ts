@@ -46,6 +46,14 @@ function abortReasonError(signal: AbortSignal): Error {
   return reason instanceof Error ? reason : new Error(String(reason));
 }
 
+/**
+ * `source`'s chunks, then `keep` called with its return value once it ends. A consumer that stops early stops
+ * `source` too (`yield*` hands `return()` and `throw()` on), and `keep` is not called.
+ */
+async function* withReturn<T, R>(source: AsyncGenerator<T, R, undefined>, keep: (value: R) => void): AsyncGenerator<T, void, undefined> {
+  keep(yield* source);
+}
+
 /** Serialises turns: `acquire()` resolves with a release function once every earlier holder released. */
 export class TurnLock {
   private tail: Promise<void> = Promise.resolve();
@@ -437,7 +445,8 @@ export async function* runGmiTurn(
     };
 
     let stepCalls: ToolCallRequest[] = [];
-    for await (const chunk of gmi.processTurnStream(turnInput)) {
+    // The GMI's output, the generator's return value, carries the turn's recall capture to the result.
+    for await (const chunk of withReturn(gmi.processTurnStream(turnInput), (output) => folder.finish(output))) {
       folder.push(chunk);
       switch (chunk.type) {
         case GMIOutputChunkType.TOOL_CALL_REQUEST:
