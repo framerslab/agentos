@@ -408,7 +408,7 @@ describe.each(STORES)('per-user pages on %s', (store) => {
   if (store === 'sqlite') {
     it('a page is there after the store closes and reopens', async () => {
       const first = await open(store);
-        await new UserWikiStore({ scopeId: A, pages: first.memory, chunk }).writePage(
+      await new UserWikiStore({ scopeId: A, pages: first.memory, chunk }).writePage(
         P('Alice likes tea.\n\nAlice has a cat.', ['t1']),
       );
       await closeNow(first.memory);
@@ -458,7 +458,7 @@ describe.each(STORES)('per-user pages on %s', (store) => {
       const memory = await Memory.createWithAdapter(wrapped, { graph: false, selfImprove: false });
       memories.push(memory);
       const brain = brainOf(memory);
-        const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
+      const pages = new UserWikiStore({ scopeId: A, pages: memory, chunk });
       await pages.writePage(P('Alice likes tea.\n\nAlice has a cat.'));
       const first = chunkIdsOf((await pageRows(brain))[0]!);
       expect(first.length).toBe(2);
