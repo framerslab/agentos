@@ -159,6 +159,25 @@ describe('DeepgramAuraStreamingTTS', () => {
     expect(url).not.toContain('encoding=mp3');
   });
 
+  it('leaves the Model Improvement Program opt-out off by default', async () => {
+    const session = await tts.startSession();
+    const params = new URL(socketOf(session).url).searchParams;
+    expect(params.has('mip_opt_out')).toBe(false);
+  });
+
+  it('sends mip_opt_out when the provider or a single session opts out', async () => {
+    const optedOut = new DeepgramAuraStreamingTTS({ apiKey: 'dg-key', mipOptOut: true });
+    const providerSession = await optedOut.startSession();
+    expect(new URL(socketOf(providerSession).url).searchParams.get('mip_opt_out')).toBe('true');
+
+    const sessionOnly = await tts.startSession({ providerOptions: { mip_opt_out: true } });
+    expect(new URL(socketOf(sessionOnly).url).searchParams.get('mip_opt_out')).toBe('true');
+
+    // A session's `false` does not undo the provider's opt-out.
+    const notUndone = await optedOut.startSession({ providerOptions: { mip_opt_out: false } });
+    expect(new URL(socketOf(notUndone).url).searchParams.get('mip_opt_out')).toBe('true');
+  });
+
   it('WAV-wraps binary chunks for compressed-format callers so per-chunk decodeAudioData works', async () => {
     const session = await tts.startSession(); // default format 'mp3' → wav container
     const listener = vi.fn();
