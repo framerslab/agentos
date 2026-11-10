@@ -404,6 +404,30 @@ describe.each(STORES)('per-user pages on %s', (store) => {
     expect(() => new UserWikiStore({ scopeId: 'aria-1', pages: memory, chunk })).toThrow(TypeError);
   });
 
+  it('gives an id with a lone surrogate no key, so it never reaches the pages of the id the store would write', async () => {
+    const { memory, brain } = await open(store);
+    // The store writes text as UTF-8, where a lone surrogate becomes U+FFFD: a key holding 'm\uD800' is stored, and
+    // matched, as the key holding 'm�'.
+    const stored = conversationScopeKey('aria-1', { kind: 'user', id: 'm�' });
+    await new UserWikiStore({ scopeId: stored, pages: memory, chunk }).writePage(P('Mallory keeps a ledger.'));
+    const lone = 'c1:u:6:aria-1:2:m\uD800;';
+
+    let read: string | undefined = 'refused';
+    try {
+      read = bodyOf(await new UserWikiStore({ scopeId: lone, pages: memory, chunk }).readPage('concepts/notes'));
+    } catch (err) {
+      expect(err).toBeInstanceOf(TypeError);
+    }
+    expect(read).toBe('refused');
+    expect(() => conversationScopeKey('aria-1', { kind: 'user', id: 'm\uD800' })).toThrow(TypeError);
+    await expect(
+      memory.remember('A note filed under the lone key.', { scope: 'conversation', scopeId: lone }),
+    ).rejects.toThrow(TypeError);
+    expect((await scopeRows(brain)).map((row) => row.scope_id)).toEqual([stored]);
+    expect((await traceIdsUnder(brain, stored)).length).toBe(1);
+    expect((await pageRows(brain)).map((row) => row.scope_id)).toEqual([stored]);
+  });
+
   // These two reopen or wrap the store's own SQLite file, which the Postgres leg does not have.
   if (store === 'sqlite') {
     it('a page is there after the store closes and reopens', async () => {

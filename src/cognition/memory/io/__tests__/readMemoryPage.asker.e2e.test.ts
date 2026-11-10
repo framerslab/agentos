@@ -199,6 +199,20 @@ describe('read_memory_page and who asks', () => {
     }
   });
 
+  it('never serves a subject whose id holds a lone surrogate the pages of the id the store would write', async () => {
+    // The store writes text as UTF-8, where a lone surrogate becomes U+FFFD: 'm\uD800' would be read as 'm�'.
+    await new UserWikiStore({ scopeId: keyOf({ kind: 'user', id: 'm�' }), pages: memory, chunk }).writePage(
+      P('Mallory keeps a ledger.', ['t9']),
+    );
+    const lone: Subject = { kind: 'user', id: 'm\uD800' };
+    const answered = async (args: Record<string, unknown>, context: unknown): Promise<string> =>
+      JSON.stringify(await call(args, context).catch((err: unknown) => ({ thrown: String(err) })));
+
+    expect(await answered({ id: 'concepts/notes' }, ctx('m\uD800', lone))).not.toContain('Mallory');
+    expect(await answered({ id: 'concepts/notes' }, ctx('m\uD800'))).not.toContain('Mallory');
+    expect(await answered({ list: true }, ctx('m\uD800', lone))).not.toContain('"owner":"own"');
+  });
+
   it('refuses a call that carries a scope or user argument, and reads nothing', async () => {
     const calls: Array<Record<string, unknown>> = [
       { id: 'concepts/notes', scopeId: keyOf(ALICE) },

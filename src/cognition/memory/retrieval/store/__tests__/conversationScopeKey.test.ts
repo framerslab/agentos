@@ -95,6 +95,10 @@ describe('conversationScopeKey', () => {
       'c2:u:4:aria:3:bob;',
       'c1:u:9:aria:3:bob;',
       'c1:u:0::3:bob;',
+      // A lone surrogate, which no key the encoder writes holds.
+      'c1:u:4:aria:1:\uD800;',
+      'c1:s:4:aria:2:b\uDC00;',
+      'c1:o:5:ari\uD800a:0:;',
     ];
     for (const text of notKeys) {
       expect(parseConversationScopeKey(text), JSON.stringify(text)).toBeUndefined();
@@ -105,5 +109,18 @@ describe('conversationScopeKey', () => {
     expect(() => conversationScopeKey('', { kind: 'user', id: 'bob' })).toThrow(TypeError);
     expect(() => conversationScopeKey('aria', { kind: 'user', id: '' })).toThrow(TypeError);
     expect(() => conversationScopeKey('aria', { kind: 'session', id: '' })).toThrow(TypeError);
+  });
+
+  it('refuses an id that holds a lone surrogate', () => {
+    // A database writes text as UTF-8, where a lone surrogate becomes U+FFFD: 'a\uD800' would be stored as 'a�',
+    // another subject's id, so such an id gets no key.
+    expect(() => conversationScopeKey('aria', { kind: 'user', id: 'a\uD800' })).toThrow(TypeError);
+    expect(() => conversationScopeKey('aria', { kind: 'session', id: '\uDC00b' })).toThrow(TypeError);
+    expect(() => conversationScopeKey('aria', { kind: 'user', id: 'x\uDE00\uD83D' })).toThrow(TypeError);
+    expect(() => conversationScopeKey('ari\uD800', { kind: 'operator' })).toThrow(TypeError);
+    expect(() => conversationScopeKey('ari\uD800', { kind: 'user', id: 'bob' })).toThrow(TypeError);
+    // A surrogate pair is one character, and U+FFFD itself is an id like any other.
+    expect(conversationScopeKey('aria', { kind: 'user', id: 'a😀' })).toBe('c1:u:4:aria:3:a😀;');
+    expect(conversationScopeKey('aria', { kind: 'user', id: 'a�' })).toBe('c1:u:4:aria:2:a�;');
   });
 });
